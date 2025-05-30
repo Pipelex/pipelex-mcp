@@ -1,0 +1,322 @@
+domain = "mascot_generation"
+definition = "Pipeline for generating company mascots through iterative design and refinement"
+
+[concept]
+CompanyContext = "Context and description of a company including its purpose and values"
+MascotConcept = "A conceptual description of a mascot character including animal type and personality"
+MascotPersonality = "Personality traits and characteristics of a mascot"
+MascotVisualConcept = "Visual description of how a mascot should look"
+MascotImagePrompt = "Detailed prompt for generating a mascot image"
+MascotVariation = "Alternative version or variation of a mascot concept"
+MascotEvaluation = "Evaluation and feedback on a mascot concept"
+RefinedMascotConcept = "Improved version of a mascot concept based on feedback"
+FinalMascotDesign = "Final approved mascot design with all specifications"
+CompanyMascot = "Complete mascot package including concept, personality, and visual design"
+
+[pipe]
+
+# Step 1: Analyze company context and generate initial mascot concepts
+[pipe.analyze_company_for_mascot]
+PipeLLM = "Analyze company context to determine suitable mascot characteristics"
+input = "CompanyContext"
+output = "MascotConcept"
+llm = "llm_for_creative_writing"
+system_prompt = """
+You are a creative brand designer with expertise in mascot design and brand identity.
+Your task is to analyze company information and suggest appropriate mascot concepts.
+Draw inspiration from successful tech company mascots and understand what makes them effective.
+"""
+prompt_template = """
+Analyze this company context and suggest mascot concepts that would represent the brand well:
+
+@company_context
+
+Consider the following when creating mascot concepts:
+1. What animal or character type would best represent the company's values?
+2. What personality traits should the mascot have?
+3. How can the mascot embody the company's mission and culture?
+4. What makes this mascot memorable and relatable?
+
+Generate 3 different mascot concepts, each with:
+- Animal/character type
+- Key personality traits
+- Connection to company values
+- Unique characteristics
+
+Draw inspiration from successful tech company mascots and analyze what makes them effective:
+
+**Developer Tools & Infrastructure:**
+- GitHub: Octocat (playful, technical, community-focused) - combines cat appeal with octopus tentacles for multitasking
+- Docker: Whale (reliable, carries containers) - represents the containerization concept perfectly
+- Redis: Cube (structured, fast, geometric) - represents data structure and speed
+- Kubernetes: Ship's wheel/helm (navigation, orchestration) - represents guiding complex systems
+
+**Monitoring & Observability:**
+- Datadog: Purple dog (loyal, watchful, alert) - perfect for monitoring/watching over systems
+- Snyk: Chameleon (adaptable, security-focused, changes colors for different threats)
+
+**Data & Integration:**
+- Airbyte: Octopus (connectivity, intelligence, adaptability) - tentacles represent multiple data connections
+- MongoDB: Leaf (organic growth, branching data structures) - represents natural, flexible data storage
+
+**Communication & Collaboration:**
+- Slack: Hashtag/emoji characters (communication, expression, modern)
+- Discord: Wumpus (gaming-friendly, community-oriented, approachable)
+- MailChimp: Chimp (friendly, smart, approachable) - clever wordplay with "mail"
+
+**Key Success Patterns:**
+- Animals that naturally embody the company's core function (dog for watching, octopus for connecting)
+- Clever wordplay or metaphorical connections to the product
+- Balance of professional capability with approachable personality
+- Distinctive visual elements that work at small and large scales
+- Characters that can express emotion and personality
+
+Focus on animals or characters that naturally embody the qualities your company represents, especially around:
+- Pipeline/flow concepts (rivers, networks, conductors)
+- Language/communication (parrots, dolphins, interpreters) 
+- Reliability/structure (builders, architects, engineers)
+- AI/intelligence (owls, dolphins, clever animals)
+- Modularity/building (ants, bees, architects)
+
+Consider how your mascot can be as memorable and fitting as these examples while being unique to your brand.
+"""
+multiple_output = true
+
+# Step 2: Develop personality for each concept
+[pipe.develop_mascot_personality]
+PipeLLM = "Develop detailed personality profile for a mascot concept"
+input = "MascotConcept"
+output = "MascotPersonality"
+llm = "llm_for_creative_writing"
+system_prompt = """
+You are a character development expert specializing in brand mascots.
+Your task is to create detailed personality profiles that make mascots relatable and memorable.
+"""
+prompt_template = """
+Based on this mascot concept, develop a comprehensive personality profile:
+
+@_batch_item
+
+Create a detailed personality that includes:
+1. Core personality traits (5-7 key characteristics)
+2. How the mascot behaves in different situations
+3. What the mascot values and believes in
+4. How the mascot communicates and interacts
+5. Quirks and unique characteristics that make it memorable
+6. How the personality aligns with the company's brand voice
+
+Make the personality authentic, relatable, and distinctive while staying true to the animal/character type and company values.
+"""
+
+# Step 3: Create visual concept descriptions
+[pipe.create_visual_concept]
+PipeLLM = "Create detailed visual concept for the mascot"
+input = "MascotPersonality"
+output = "MascotVisualConcept"
+llm = "llm_for_creative_writing"
+system_prompt = """
+You are a visual designer specializing in character design and brand mascots.
+Your task is to translate personality traits into compelling visual concepts with clean, minimal design.
+"""
+prompt_template = """
+Based on this mascot personality profile, create a detailed visual concept:
+
+@_batch_item
+
+Develop a visual concept that includes:
+1. Overall appearance and body type
+2. Color palette that reflects the brand
+3. Minimal clothing or distinctive features (avoid excessive accessories)
+4. Facial expressions and poses that convey personality
+5. Style direction (cartoonish, realistic, minimalist, etc.)
+6. How the design scales from logo to large format
+7. Key visual elements that make it instantly recognizable
+
+Ensure the visual concept:
+- Translates the personality into visual form
+- Works across different media and sizes
+- Is distinctive and memorable
+- Aligns with modern design trends
+- Reflects the company's brand identity
+- Focuses on the character itself with minimal distracting elements
+- Uses clean, simple design principles with limited accessories
+
+IMPORTANT: Keep accessories and decorative elements to a minimum. The mascot's appeal should come from its form, color, and expression rather than complex details or numerous accessories.
+"""
+
+# Step 4: Generate detailed image prompts
+[pipe.create_image_prompt]
+PipeLLM = "Generate detailed image generation prompt for the mascot"
+input = "MascotVisualConcept"
+output = "MascotImagePrompt"
+llm = "llm_for_creative_writing"
+system_prompt = """
+You are an expert at creating detailed prompts for AI image generation.
+Your task is to translate visual concepts into precise, detailed prompts that will generate high-quality mascot images with clean, focused composition.
+"""
+prompt_template = """
+Based on this visual concept, create a detailed image generation prompt:
+
+@_batch_item
+
+Create a comprehensive prompt that includes:
+1. Character description with specific details
+2. Art style and rendering approach
+3. Color specifications
+4. Pose and expression
+5. Clean, minimal background (solid color, gradient, or transparent)
+6. Technical specifications (resolution, style, etc.)
+7. Quality modifiers
+
+The prompt should be:
+- Detailed enough to generate consistent results
+- Specific about style and technical requirements
+- Clear about the character's appearance and personality
+- Optimized for modern AI image generation models
+- Emphasizing clean composition with minimal background distractions
+
+CRITICAL REQUIREMENTS:
+- Specify clean, minimal, or solid color background (no detailed environments or scenes)
+- Focus entirely on the mascot character
+- Avoid complex accessories or decorative elements
+- Ensure the mascot is the sole focus of the image
+
+Format as a single, well-structured prompt suitable for image generation AI that will produce a clean, focused mascot image.
+"""
+
+# Step 5: Generate mascot variations
+[pipe.create_mascot_variations]
+PipeLLM = "Create variations of the mascot concept"
+input = "MascotImagePrompt"
+output = "MascotVariation"
+llm = "llm_for_creative_writing"
+system_prompt = """
+You are a creative designer who specializes in creating character variations and alternatives.
+Your task is to generate different versions of a mascot while maintaining core brand identity.
+"""
+prompt_template = """
+Based on this mascot image prompt, create several variations:
+
+@mascot_image_prompt
+
+Generate variations that explore:
+1. Different poses and expressions
+2. Alternative color schemes
+3. Seasonal or themed versions
+4. Different emotion states (happy, focused, excited, etc.)
+5. Various use cases (logo version, full character, icon version)
+
+For each variation, provide:
+- Modified image prompt
+- Rationale for the changes
+- Best use cases for this variation
+- How it maintains brand consistency
+
+Create 3-4 distinct variations that expand the mascot's versatility.
+"""
+multiple_output = true
+
+# Step 6: Evaluate mascot concepts
+[pipe.evaluate_mascot_concept]
+PipeLLM = "Evaluate and provide feedback on mascot concepts"
+input = "MascotVariation"
+output = "MascotEvaluation"
+llm = "llm_to_reason"
+system_prompt = """
+You are a brand strategy expert with experience in mascot design and brand identity.
+Your task is to critically evaluate mascot concepts for effectiveness and brand alignment.
+"""
+prompt_template = """
+Evaluate this mascot variation against key criteria:
+
+@mascot_variation
+
+Evaluate based on:
+1. Brand alignment and representation
+2. Memorability and distinctiveness
+3. Versatility across different media
+4. Appeal to target audience
+5. Technical feasibility for implementation
+6. Uniqueness in the competitive landscape
+7. Emotional connection potential
+
+For each criterion, provide:
+- Score (1-10)
+- Detailed reasoning
+- Specific strengths
+- Areas for improvement
+- Recommendations for refinement
+
+Conclude with an overall assessment and priority recommendations.
+"""
+
+# Step 7: Refine concepts based on evaluation
+[pipe.refine_mascot_concept]
+PipeLLM = "Refine mascot concept based on evaluation feedback"
+input = "MascotEvaluation"
+output = "RefinedMascotConcept"
+llm = "llm_for_creative_writing"
+system_prompt = """
+You are a design iteration specialist who excels at incorporating feedback to improve creative concepts.
+Your task is to refine mascot concepts based on evaluation feedback.
+"""
+prompt_template = """
+Based on this evaluation feedback, refine the mascot concept:
+
+@mascot_evaluation
+
+Create an improved version that addresses:
+1. Key weaknesses identified in the evaluation
+2. Opportunities for enhancement
+3. Better brand alignment where needed
+4. Improved technical implementation
+5. Enhanced emotional appeal
+
+The refined concept should include:
+- Updated concept description
+- Improved visual specifications
+- Enhanced personality traits
+- Better brand integration
+- Clearer implementation guidelines
+
+Maintain the strong elements while significantly improving the weak areas.
+"""
+
+# Step 8: Generate final images
+[pipe.generate_mascot_image]
+PipeImgGen = "Generate the final mascot image"
+input = "MascotImagePrompt"
+output = "native.Image"
+nb_steps = 8
+
+# Orchestration Pipes - Main Workflows
+
+# Process each concept using batch processing
+[pipe.process_all_concepts]
+PipeBatch = "Process all mascot concepts in parallel"
+input = "MascotConcept"
+output = "native.Image"
+branch_pipe_code = "develop_single_concept_to_image"
+
+# Single concept processing chain
+[pipe.develop_single_concept_to_image]
+PipeSequence = "Develop a single concept into an image"
+input = "MascotConcept"
+output = "native.Image"
+steps = [
+    { pipe = "develop_mascot_personality", result = "personality" },
+    { pipe = "create_visual_concept", result = "visual" },
+    { pipe = "create_image_prompt", result = "imgg_prompt" },
+    { pipe = "generate_mascot_image", result = "image" }
+]
+
+# Main workflow - simplified
+[pipe.generate_mascot_options]
+PipeSequence = "Generate multiple mascot options and process them"
+input = "CompanyContext"
+output = "native.Image"
+steps = [
+    { pipe = "analyze_company_for_mascot", result = "concepts" },
+    { pipe = "process_all_concepts", result = "final_images" }
+]
+
