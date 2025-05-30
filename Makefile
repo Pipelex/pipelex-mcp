@@ -57,7 +57,7 @@ make merge-check-pyright	  - Run pyright merge check without updating files
 make rl                       - Shorthand -> reinitlibraries
 make s                        - Shorthand -> run-setup
 make init                     - Run pipelex init
-make runtests		          - Run tests for github actions (exit on first failure) (no inference)
+make gha-tests		          - Run tests for github actions (exit on first failure) (no inference, no gha_disabled)
 make test                     - Run unit tests (no inference)
 make test-with-prints         - Run tests with prints (no inference)
 make t                        - Shorthand -> test-with-prints
@@ -78,7 +78,7 @@ make fix-unused-imports       - Fix unused imports with ruff
 endef
 export HELP
 
-.PHONY: all help env lock install update format lint pyright mypy build cleanderived cleanenv run-setup s runtests test test-with-prints t test-inference ti test-imgg tg test-ocr to check cc li merge-check-ruff-lint merge-check-ruff-format merge-check-mypy check-unused-imports fix-unused-imports test-name bump-version check-uv get-uv-version
+.PHONY: all help env lock install update format lint pyright mypy build cleanderived cleanenv run-setup s gha-tests test test-with-prints t test-inference ti test-imgg tg test-ocr to check cc li merge-check-ruff-lint merge-check-ruff-format merge-check-mypy check-unused-imports fix-unused-imports test-name bump-version check-uv get-uv-version
 
 all help:
 	@echo "$$HELP"
@@ -193,7 +193,7 @@ cleanall: cleanderived cleanenv cleanlibraries
 ### TESTING
 ##########################################################################################
 
-runtests: env
+gha-tests: env
 	$(call PRINT_TITLE,"Unit testing for github actions")
 	@echo "• Running unit tests (excluding inference, and gha_disabled)"
 	$(LOCAL_PYTEST) --exitfirst --quiet -m "not inference and not gha_disabled" || [ $$? = 5 ]
