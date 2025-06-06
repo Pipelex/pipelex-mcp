@@ -56,7 +56,7 @@ make merge-check-pyright	  - Run pyright merge check without updating files
 
 make rl                       - Shorthand -> reinitlibraries
 make s                        - Shorthand -> run-setup
-make init                     - Run pipelex init
+make init                     - Run pipelex init-libraries and pipelex init-config
 make gha-tests		          - Run tests for github actions (exit on first failure) (no inference, no gha_disabled)
 make test                     - Run unit tests (no inference)
 make test-with-prints         - Run tests with prints (no inference)
@@ -117,13 +117,15 @@ env: check-uv
 
 init: env
 	$(call PRINT_TITLE,"Running `pipelex init` with overwrite")
-	pipelex init
+	pipelex init-libraries && \
+	pipelex init-config
 
 install: env
 	$(call PRINT_TITLE,"Installing dependencies")
 	@. $(VIRTUAL_ENV)/bin/activate && \
 	uv pip install -e ".[dev]" && \
-	pipelex init && \
+	pipelex init-libraries && \
+	pipelex init-config && \
 	echo "Installed Pipelex dependencies in ${VIRTUAL_ENV} with all extras and initialized Pipelex";
 	
 

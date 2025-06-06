@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.3] - 2025-06-06
+
+- Bumped pipelex to v0.2.14: generalized the new `execute_pipeline` method, enabling to track pipelines from beginning to end with inference cost reporting
+
 ## [v0.0.2] - 2025-05-30
 
 - Added tests folder and GHA and fixed makefile (runtests -> gha-tests)
