@@ -427,7 +427,7 @@ wheels = [
 
 [[package]]
 name = "instructor"
-version = "1.7.2"
+version = "1.8.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -442,9 +442,9 @@ dependencies = [
     { name = "tenacity" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/63/ba/692739c76959191aa7e5f0fccda871b36548355f4a09c8733687e64e62b0/instructor-1.7.2.tar.gz", hash = "sha256:6c01b2b159766df24865dc81f7bf8457cbda88a3c0bbc810da3467d19b185ed2", size = 66200177, upload-time = "2024-12-26T09:04:57.209Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a9/54/927c2093dc5e532195baf849f7ff1376ad673222b5d37be19e4e73af618e/instructor-1.8.3.tar.gz", hash = "sha256:04d64ebc0d6e5eee104f4715b18fac1a02c21757ae6ce76efa65d38cbd536b0b", size = 69265823, upload-time = "2025-05-22T16:44:02.409Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c5/82/fd319382c1a33d7021cf151007b4cbd5daddf09d9ca5fb670e476668f9fc/instructor-1.7.2-py3-none-any.whl", hash = "sha256:cb43d27f6d7631c31762b936b2fcb44d2a3f9d8a020430a0f4d3484604ffb95b", size = 71353, upload-time = "2024-12-26T09:04:51.023Z" },
+    { url = "https://files.pythonhosted.org/packages/07/76/0e198373f182020559b0886d0d61dd2ddca109ab7a9eddf5458ff759d51a/instructor-1.8.3-py3-none-any.whl", hash = "sha256:a2c5066458132dc50ec6faa87cab9a2dd6b11b3f45c0e563a2ef704892286945", size = 94619, upload-time = "2025-05-22T16:43:58.529Z" },
 ]
 
 [[package]]
@@ -505,15 +505,14 @@ wheels = [
 
 [[package]]
 name = "kajson"
-version = "0.1.4"
+version = "0.1.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
-    { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0b/1e/7eb1a10f04b67efbac1026a629a22bf55d68f915ecb58aeae7e6453de729/kajson-0.1.4.tar.gz", hash = "sha256:61f11fb3452afad9cf9c53febe1f2f28af3d2fe8744fb7cc17fd0732e46fccb0", size = 14533, upload-time = "2025-05-25T15:53:51.204Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/51/38/300e06d9e5c98d2bcb922e3d2813836f74754a117bcf5c9ff019a20eea0b/kajson-0.1.5.tar.gz", hash = "sha256:cf166e417642127e4a4bca3d31788b64fcd1969f6bc103df2fa59e069c27b8a8", size = 15061, upload-time = "2025-06-02T15:28:52.403Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d2/ea/6417590de6edcaff1a7520b4305bfca66183090c1e46a21951abfd883798/kajson-0.1.4-py3-none-any.whl", hash = "sha256:fbea1ae670744f91ccd8754adf9fa98315aa2b9bd20d76be753cb86771eaa131", size = 18587, upload-time = "2025-05-25T15:53:49.6Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/7c/12f2167e1b1056e73224b7c4f8062807af47f0bc6a26ef773e3f8219c773/kajson-0.1.5-py3-none-any.whl", hash = "sha256:5fbc4065fa85f56dccf93d644a9d3ee1bccb504d7f27f030a1beacc6ba21e1d6", size = 21090, upload-time = "2025-06-02T15:28:50.765Z" },
 ]
 
 [[package]]
@@ -795,7 +794,7 @@ wheels = [
 
 [[package]]
 name = "pipelex"
-version = "0.2.9"
+version = "0.2.14"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -822,9 +821,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "yattag" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4a/b4/0da2089e36e7284bbde7da6234f0dc8576b78f0fa51747df925f3de443be/pipelex-0.2.9.tar.gz", hash = "sha256:197a0b765d457f903f528f51b3d567e71503d51c8f50b2aea1e1eef4d9f0fde2", size = 157571, upload-time = "2025-05-30T14:24:16.026Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/58/73/a753b613053b4158f8fa0cbd34ea42fc096811b3662b7b9b05d2254febc9/pipelex-0.2.14.tar.gz", hash = "sha256:65545ed6bf98faa6dd1aab9aa72ae967566c385a215e43752dcfc78ca1790e10", size = 161820, upload-time = "2025-06-06T15:40:47.032Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d5/75/173306a501fe1fc6e64b1b0f2a7f0e974cce391c9fe21792db022d48a307/pipelex-0.2.9-py3-none-any.whl", hash = "sha256:3c224f4235c6c5fc29b4c3c5a8c2113981f9c48cb617ef5ae3ae0a411aebf7d0", size = 265961, upload-time = "2025-05-30T14:24:14.028Z" },
+    { url = "https://files.pythonhosted.org/packages/49/dd/17c318d6ae95c2518b02dcba56864188640a0f8e5e572d1568a8d5400b8b/pipelex-0.2.14-py3-none-any.whl", hash = "sha256:2b6f8e43bbf786361fae123f2a3949b7794661570b3f2fe6499c3f3664f26319", size = 272260, upload-time = "2025-06-06T15:40:45.433Z" },
 ]
 
 [package.optional-dependencies]
@@ -847,7 +846,7 @@ mistralai = [
 
 [[package]]
 name = "pipelex-mcp"
-version = "0.0.1"
+version = "0.0.3"
 source = { virtual = "." }
 dependencies = [
     { name = "mcp", extra = ["cli"] },
@@ -868,7 +867,7 @@ dev = [
 requires-dist = [
     { name = "mcp", extras = ["cli"], specifier = ">=1.6.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11.2" },
-    { name = "pipelex", extras = ["mistralai", "anthropic", "google", "bedrock", "fal"], specifier = ">=0.2.9" },
+    { name = "pipelex", extras = ["mistralai", "anthropic", "google", "bedrock", "fal"], specifier = "==0.2.14" },
     { name = "pyright", marker = "extra == 'dev'", specifier = "==1.1.381" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.3" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
