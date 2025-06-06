@@ -8,7 +8,7 @@ from pipelex.core.stuff_content import ImageContent, ListContent
 from pipelex.core.working_memory_factory import WorkingMemoryFactory
 from pipelex.hub import get_pipe_provider
 from pipelex.pipelex import Pipelex
-from pipelex.run import run_pipe_code
+from pipelex.pipeline.execute import execute_pipeline
 
 LOG_DIR = Path("./logs")
 LOG_DIR.mkdir(exist_ok=True)
@@ -78,7 +78,7 @@ async def generate_company_mascott(company_context: str) -> ListContent[ImageCon
         text=company_context, concept_code="mascot_generation.CompanyContext", name="company_context"
     )
 
-    pipe_output = await run_pipe_code(pipe_code="generate_mascot_options", working_memory=working_memory)
+    pipe_output, _ = await execute_pipeline(pipe_code="generate_mascot_options", working_memory=working_memory)
 
     # Example of using mcp_print for MCP communication
     mcp_print("Output the links of the images, and a one line description of the image")
