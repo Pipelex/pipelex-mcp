@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.5] - 2025-07-09
+
+- Bumped pipelex to v0.5.1
+
 ## [v0.0.4] - 2025-07-09
 
 - Bumped pipelex to v0.5.0
