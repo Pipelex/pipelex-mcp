@@ -287,6 +287,18 @@ wheels = [
 ]
 
 [[package]]
+name = "faker"
+version = "37.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tzdata" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/65/f9/66af4019ee952fc84b8fe5b523fceb7f9e631ed8484417b6f1e3092f8290/faker-37.4.0.tar.gz", hash = "sha256:7f69d579588c23d5ce671f3fa872654ede0e67047820255f43a4aa1925b89780", size = 1901976, upload-time = "2025-06-11T17:59:30.818Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/78/5e/c8c3c5ea0896ab747db2e2889bf5a6f618ed291606de6513df56ad8670a8/faker-37.4.0-py3-none-any.whl", hash = "sha256:cb81c09ebe06c32a10971d1bbdb264bb0e22b59af59548f011ac4809556ce533", size = 1942992, upload-time = "2025-06-11T17:59:28.698Z" },
+]
+
+[[package]]
 name = "fal-client"
 version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -505,14 +517,14 @@ wheels = [
 
 [[package]]
 name = "kajson"
-version = "0.1.5"
+version = "0.2.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/51/38/300e06d9e5c98d2bcb922e3d2813836f74754a117bcf5c9ff019a20eea0b/kajson-0.1.5.tar.gz", hash = "sha256:cf166e417642127e4a4bca3d31788b64fcd1969f6bc103df2fa59e069c27b8a8", size = 15061, upload-time = "2025-06-02T15:28:52.403Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/70/8f/72a203f9aabb272091ce078e52a127d064ed89c7b5aba098f3210d4f6ffc/kajson-0.2.3.tar.gz", hash = "sha256:45a18d298d3b193dc904a53493a20069aefba68fe93432455a01cdd92c8dcaf4", size = 20134, upload-time = "2025-06-26T13:52:05.208Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b5/7c/12f2167e1b1056e73224b7c4f8062807af47f0bc6a26ef773e3f8219c773/kajson-0.1.5-py3-none-any.whl", hash = "sha256:5fbc4065fa85f56dccf93d644a9d3ee1bccb504d7f27f030a1beacc6ba21e1d6", size = 21090, upload-time = "2025-06-02T15:28:50.765Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/8e/798196dd104b3d02779cdb1627f10c704780f6b279124cf2e4633cc69da5/kajson-0.2.3-py3-none-any.whl", hash = "sha256:4df631383e898f30c8f13f49b1c58cc2d69e2629bb828728817c3edb675da065", size = 26240, upload-time = "2025-06-26T13:52:03.962Z" },
 ]
 
 [[package]]
@@ -794,7 +806,7 @@ wheels = [
 
 [[package]]
 name = "pipelex"
-version = "0.2.14"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -810,6 +822,7 @@ dependencies = [
     { name = "openpyxl" },
     { name = "pandas" },
     { name = "pillow" },
+    { name = "polyfactory" },
     { name = "pydantic" },
     { name = "pypdfium2" },
     { name = "python-dotenv" },
@@ -821,9 +834,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "yattag" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/58/73/a753b613053b4158f8fa0cbd34ea42fc096811b3662b7b9b05d2254febc9/pipelex-0.2.14.tar.gz", hash = "sha256:65545ed6bf98faa6dd1aab9aa72ae967566c385a215e43752dcfc78ca1790e10", size = 161820, upload-time = "2025-06-06T15:40:47.032Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ba/2e/31414851794a15098c236f11952637064e262f3778352c079cd7b2ae45cb/pipelex-0.5.0.tar.gz", hash = "sha256:bc338c1db680e114c055a28ef04e94d54f9f43725c9b0ec377d3e8b2dab86f0e", size = 184511, upload-time = "2025-07-07T13:44:29.74Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/49/dd/17c318d6ae95c2518b02dcba56864188640a0f8e5e572d1568a8d5400b8b/pipelex-0.2.14-py3-none-any.whl", hash = "sha256:2b6f8e43bbf786361fae123f2a3949b7794661570b3f2fe6499c3f3664f26319", size = 272260, upload-time = "2025-06-06T15:40:45.433Z" },
+    { url = "https://files.pythonhosted.org/packages/d0/f6/b5076fee3b5b77d49c3e5156c58ac3959ced204c516be9c4660f05968234/pipelex-0.5.0-py3-none-any.whl", hash = "sha256:0d95e51b046fecba5af4f8e95538795b513b9622cd1d0901a6ca3cba29bd2c4e", size = 303624, upload-time = "2025-07-07T13:44:28.312Z" },
 ]
 
 [package.optional-dependencies]
@@ -846,7 +859,7 @@ mistralai = [
 
 [[package]]
 name = "pipelex-mcp"
-version = "0.0.3"
+version = "0.0.4"
 source = { virtual = "." }
 dependencies = [
     { name = "mcp", extra = ["cli"] },
@@ -867,7 +880,7 @@ dev = [
 requires-dist = [
     { name = "mcp", extras = ["cli"], specifier = ">=1.6.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11.2" },
-    { name = "pipelex", extras = ["mistralai", "anthropic", "google", "bedrock", "fal"], specifier = "==0.2.14" },
+    { name = "pipelex", extras = ["mistralai", "anthropic", "google", "bedrock", "fal"], specifier = "==0.5.0" },
     { name = "pyright", marker = "extra == 'dev'", specifier = "==1.1.381" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.3" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
@@ -883,6 +896,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
+name = "polyfactory"
+version = "2.22.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "faker" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d1/c7/cc5a646fe3c87f84b5ea68aa8b5d51c7f5f7c9f7c88445fd0c1f3e8ac584/polyfactory-2.22.0.tar.gz", hash = "sha256:02f78f5ff34669e795984604ffc16d31ccd752512c7314fcf8608a5d4393f36f", size = 252368, upload-time = "2025-07-01T18:42:06.451Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/47/86/6fc6e5a3da4e11819eaa5ce335e64fc42f8c3ebad1e7d260caf36dd1c398/polyfactory-2.22.0-py3-none-any.whl", hash = "sha256:d278e705d8551e84a79f5628f848faa8661d7389981ca74a0f7e5f087060f953", size = 63348, upload-time = "2025-07-01T18:42:05.199Z" },
 ]
 
 [[package]]

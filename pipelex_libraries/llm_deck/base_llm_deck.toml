@@ -1,16 +1,21 @@
 
-
-####################################################################################################
 # LLM Deck base
+
+####################################################################################################
+# LLM Handles
 ####################################################################################################
 
-# Match a llm_handle with a complete blueprint (llm_name, llm_version and llm_platform_choice).
+llm_external_handles = []
+
+# Match a llm_handle with either just and llm_name
+# or a complete blueprint including llm_version (defaulting to "latest") and llm_platform_choice (defaulting to "default").
 [llm_handles]
 gpt-4o-2024-08-06 = { llm_name = "gpt-4o", llm_version = "2024-08-06" }
 best-claude = "claude-4-opus"
 best-gemini = "gemini-2.5-pro"
 best-mistral = "mistral-large"
 best-grok = "grok-3"
+
 
 ####################################################################################################
 # LLM Presets
@@ -21,6 +26,7 @@ best-grok = "grok-3"
 ####################################################################################################
 # LLM Presets — General purpose
 
+cheap_llm_for_text = { llm_handle = "gpt-4o-mini", temperature = 0.5 }
 cheap_llm_for_short_text = { llm_handle = "gpt-4o-mini", temperature = 0.5, max_tokens = 50 }
 cheap_llm_for_object = { llm_handle = "gpt-4o-mini", temperature = 0.5 }
 cheap_llm_to_structure = { llm_handle = "gpt-4o-mini", temperature = 0.1 }
@@ -69,8 +75,6 @@ llm_to_extract_tables = { llm_handle = "best-claude", temperature = 0.1 }
 ####################################################################################################
 
 [llm_choice_defaults]
-for_text = "cheap_llm_for_short_text"
+for_text = "cheap_llm_for_text"
 for_object = "cheap_llm_for_object"
-for_object_direct = "cheap_llm_for_object"
-for_object_list = "cheap_llm_for_object"
-for_object_list_direct = "cheap_llm_for_object"
+

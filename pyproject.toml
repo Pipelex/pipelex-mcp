@@ -1,6 +1,6 @@
 [project]
 name = "pipelex-mcp"
-version = "0.0.3"
+version = "0.0.4"
 description = "Pipelex MCP Server: Pipelex is an open-source dev tool based on a simple declarative language that lets you define replicable, structured, composable LLM pipelines."
 authors = [{ name = "Evotis S.A.S.", email = "evotis@pipelex.com" }]
 maintainers = [{ name = "Pipelex staff", email = "oss@pipelex.com" }]
@@ -14,7 +14,7 @@ classifiers = [
 
 dependencies = [
     "mcp[cli]>=1.6.0",
-    "pipelex[mistralai,anthropic,google,bedrock,fal]==0.2.14",
+    "pipelex[mistralai,anthropic,google,bedrock,fal]==0.5.0",
 ]
 [project.urls]
 Homepage = "https://pipelex.com"

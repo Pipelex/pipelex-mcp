@@ -297,11 +297,11 @@ mypy: env
 
 merge-check-ruff-format: env
 	$(call PRINT_TITLE,"Formatting with ruff")
-	uv run ruff format --check -v .
+	uv run ruff format --check .
 
 merge-check-ruff-lint: env check-unused-imports
 	$(call PRINT_TITLE,"Linting with ruff without fixing files")
-	uv run ruff check -v .
+	uv run ruff check .
 
 merge-check-pyright: env
 	$(call PRINT_TITLE,"Typechecking with pyright")
@@ -337,11 +337,11 @@ li: lock install
 
 check-TODOs: env
 	$(call PRINT_TITLE,"Checking for TODOs")
-	uv run ruff check --select=TD -v .
+	uv run ruff check --select=TD .
 
 fix-unused-imports: env
 	$(call PRINT_TITLE,"Fixing unused imports")
-	uv run ruff check --select=F401 --fix -v .
+	uv run ruff check --select=F401 --fix .
 
 CURRENT_VERSION := $(shell grep '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
 NEXT_VERSION := $(shell echo $(CURRENT_VERSION) | awk -F. '{$$NF = $$NF + 1;} 1' | sed 's/ /./g')

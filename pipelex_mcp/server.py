@@ -53,7 +53,7 @@ async def list_pipes() -> Dict[str, Dict[str, Dict[str, str]]]:
 
         result[pipe.domain][pipe.code] = {
             "definition": pipe.definition or "",
-            "input_concept_code": pipe.input_concept_code or "",
+            "input_concept_code": ", ".join([ipt for ipt in pipe.inputs.concepts]) or "",
             "output_concept_code": pipe.output_concept_code or "",
         }
 
@@ -74,11 +74,9 @@ async def generate_company_mascott(company_context: str) -> ListContent[ImageCon
             - Accessible via a URL
             - Accompanied by a one-line description
     """
-    working_memory = WorkingMemoryFactory.make_from_text(
-        text=company_context, concept_code="mascot_generation.CompanyContext", name="company_context"
-    )
+    working_memory = WorkingMemoryFactory.make_from_text(text=company_context, concept_str="mascot_generation.CompanyContext", name="company_context")
 
-    pipe_output, _ = await execute_pipeline(pipe_code="generate_mascot_options", working_memory=working_memory)
+    pipe_output = await execute_pipeline(pipe_code="generate_mascot_options", working_memory=working_memory)
 
     # Example of using mcp_print for MCP communication
     mcp_print("Output the links of the images, and a one line description of the image")
