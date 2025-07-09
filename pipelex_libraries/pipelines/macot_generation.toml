@@ -18,7 +18,7 @@ CompanyMascot = "Complete mascot package including concept, personality, and vis
 # Step 1: Analyze company context and generate initial mascot concepts
 [pipe.analyze_company_for_mascot]
 PipeLLM = "Analyze company context to determine suitable mascot characteristics"
-input = "CompanyContext"
+inputs = { company_context = "CompanyContext" }
 output = "MascotConcept"
 llm = "llm_for_creative_writing"
 system_prompt = """
@@ -73,7 +73,7 @@ Draw inspiration from successful tech company mascots and analyze what makes the
 
 Focus on animals or characters that naturally embody the qualities your company represents, especially around:
 - Pipeline/flow concepts (rivers, networks, conductors)
-- Language/communication (parrots, dolphins, interpreters) 
+- Language/communication (parrots, dolphins, interpreters)
 - Reliability/structure (builders, architects, engineers)
 - AI/intelligence (owls, dolphins, clever animals)
 - Modularity/building (ants, bees, architects)
@@ -85,7 +85,7 @@ multiple_output = true
 # Step 2: Develop personality for each concept
 [pipe.develop_mascot_personality]
 PipeLLM = "Develop detailed personality profile for a mascot concept"
-input = "MascotConcept"
+inputs = { mascot_concept = "MascotConcept" }
 output = "MascotPersonality"
 llm = "llm_for_creative_writing"
 system_prompt = """
@@ -111,7 +111,7 @@ Make the personality authentic, relatable, and distinctive while staying true to
 # Step 3: Create visual concept descriptions
 [pipe.create_visual_concept]
 PipeLLM = "Create detailed visual concept for the mascot"
-input = "MascotPersonality"
+inputs = { mascot_personality = "MascotPersonality" }
 output = "MascotVisualConcept"
 llm = "llm_for_creative_writing"
 system_prompt = """
@@ -147,7 +147,7 @@ IMPORTANT: Keep accessories and decorative elements to a minimum. The mascot's a
 # Step 4: Generate detailed image prompts
 [pipe.create_image_prompt]
 PipeLLM = "Generate detailed image generation prompt for the mascot"
-input = "MascotVisualConcept"
+inputs = { mascot_visual_concept = "MascotVisualConcept" }
 output = "MascotImagePrompt"
 llm = "llm_for_creative_writing"
 system_prompt = """
@@ -187,7 +187,7 @@ Format as a single, well-structured prompt suitable for image generation AI that
 # Step 5: Generate mascot variations
 [pipe.create_mascot_variations]
 PipeLLM = "Create variations of the mascot concept"
-input = "MascotImagePrompt"
+inputs = { mascot_image_prompt = "MascotImagePrompt" }
 output = "MascotVariation"
 llm = "llm_for_creative_writing"
 system_prompt = """
@@ -219,7 +219,7 @@ multiple_output = true
 # Step 6: Evaluate mascot concepts
 [pipe.evaluate_mascot_concept]
 PipeLLM = "Evaluate and provide feedback on mascot concepts"
-input = "MascotVariation"
+inputs = { mascot_variation = "MascotVariation" }
 output = "MascotEvaluation"
 llm = "llm_to_reason"
 system_prompt = """
@@ -253,7 +253,7 @@ Conclude with an overall assessment and priority recommendations.
 # Step 7: Refine concepts based on evaluation
 [pipe.refine_mascot_concept]
 PipeLLM = "Refine mascot concept based on evaluation feedback"
-input = "MascotEvaluation"
+inputs = { mascot_evaluation = "MascotEvaluation" }
 output = "RefinedMascotConcept"
 llm = "llm_for_creative_writing"
 system_prompt = """
@@ -285,7 +285,7 @@ Maintain the strong elements while significantly improving the weak areas.
 # Step 8: Generate final images
 [pipe.generate_mascot_image]
 PipeImgGen = "Generate the final mascot image"
-input = "MascotImagePrompt"
+inputs = { mascot_image_prompt = "MascotImagePrompt" }
 output = "native.Image"
 nb_steps = 8
 
@@ -294,14 +294,14 @@ nb_steps = 8
 # Process each concept using batch processing
 [pipe.process_all_concepts]
 PipeBatch = "Process all mascot concepts in parallel"
-input = "MascotConcept"
+inputs = { mascot_concept = "MascotConcept" }
 output = "native.Image"
 branch_pipe_code = "develop_single_concept_to_image"
 
 # Single concept processing chain
 [pipe.develop_single_concept_to_image]
 PipeSequence = "Develop a single concept into an image"
-input = "MascotConcept"
+inputs = { mascot_concept = "MascotConcept" }
 output = "native.Image"
 steps = [
     { pipe = "develop_mascot_personality", result = "personality" },
@@ -313,7 +313,7 @@ steps = [
 # Main workflow - simplified
 [pipe.generate_mascot_options]
 PipeSequence = "Generate multiple mascot options and process them"
-input = "CompanyContext"
+inputs = { company_context = "CompanyContext" }
 output = "native.Image"
 steps = [
     { pipe = "analyze_company_for_mascot", result = "concepts" },
