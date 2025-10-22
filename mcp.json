@@ -1,8 +1,0 @@
-{
-    "mcpServers": {
-      "pipelex": {
-        "command": "uv",
-        "args": ["--directory", "./pipelex_mcp", "run", "server.py"]
-      }
-    }
-  }

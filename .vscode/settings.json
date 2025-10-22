@@ -8,14 +8,14 @@
     "search.exclude": {
         ".mypy_cache/*": true,
         "**/dev_context": true,
-        "**/pipelex_mcp.egg-info": true
+        "**/server.egg-info": true
     },
     "files.exclude": {
         "**/__pycache__": true,
         ".mypy_cache": true,
         ".pytest_cache": true,
         ".ruff_cache": true,
-        "**/pipelex_mcp.egg-info": true
+        "**/server.egg-info": true
     },
     "python.testing.pytestArgs": [
         "tests"

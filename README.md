@@ -66,8 +66,8 @@ make install
 
 3. Set up your environment:
 ```bash
-cp pipelex_mcp/.env.example pipelex_mcp/.env
-# Edit pipelex_mcp/.env with your configuration
+cp server/.env.example server/.env
+# Edit server/.env with your configuration
 ```
 
 4. Add your API keys:
@@ -123,7 +123,7 @@ We are actively working on improving these aspects of the repository:
 ## Library Duplication
 Currently, the `pipelex_libraries` folder needs to exist in two locations:
 - At the root of the project
-- Inside the `pipelex_mcp` folder
+- Inside the `server` folder
 
 This duplication is not ideal and we're working on a better solution for managing shared libraries.
 
