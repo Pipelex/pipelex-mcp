@@ -109,9 +109,6 @@ ENV/
 
 config_super.toml
 
-# secrets
-encrypted_credentials.txt
-
 /results/*
 /logs/*
 /reports/*

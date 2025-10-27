@@ -219,31 +219,6 @@ cleanall: cleanderived cleanenv cleanconfig
 ### TESTING
 ##########################################################################################
 
-codex-tests: env
-	$(call PRINT_TITLE,"Unit testing for Codex")
-	@echo "• Running unit tests for Codex (excluding inference and codex_disabled)"
-	$(VENV_PYTEST) --exitfirst -m "(dry_runnable or not inference) and not (needs_output or pipelex_api or codex_disabled)" || [ $$? = 5 ]
-
-gha-tests: env
-	$(call PRINT_TITLE,"Unit testing for github actions")
-	@echo "• Running unit tests for github actions (excluding inference and gha_disabled)"
-	$(VENV_PYTEST) --exitfirst --quiet -m "(dry_runnable or not inference) and not (gha_disabled or pipelex_api)" || [ $$? = 5 ]
-
-run-all-tests: env
-	$(call PRINT_TITLE,"Running all unit tests")
-	@echo "• Running all unit tests"
-	$(VENV_PYTEST) -n auto --exitfirst --quiet
-
-run-manual-trigger-gha-tests: env
-	$(call PRINT_TITLE,"Running GHA tests")
-	@echo "• Running GHA unit tests for inference, llm, and not gha_disabled"
-	$(VENV_PYTEST) --exitfirst --quiet -m "not (gha_disabled or pipelex_api) and (inference or llm)" || [ $$? = 5 ]
-
-run-gha_disabled-tests: env
-	$(call PRINT_TITLE,"Running GHA disabled tests")
-	@echo "• Running GHA disabled unit tests"
-	$(VENV_PYTEST) --exitfirst --quiet -m "gha_disabled" || [ $$? = 5 ]
-
 test: env
 	$(call PRINT_TITLE,"Unit testing without prints but displaying logs via pytest for WARNING level and above")
 	@echo "• Running unit tests"
@@ -288,106 +263,6 @@ test-with-prints: env
 
 tp: test-with-prints
 	@echo "> done: tp = test-with-prints"
-
-tb: env
-	$(call PRINT_TITLE,"Unit testing a simple boot")
-	@echo "• Running unit test test_boot"
-	$(VENV_PYTEST) -s -m $(USUAL_PYTEST_MARKERS) -k "test_boot" $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,)));
-
-test-inference-with-prints: env
-	$(call PRINT_TITLE,"Unit testing")
-	@if [ -n "$(TEST)" ]; then \
-		$(VENV_PYTEST) --pipe-run-mode live -m "inference" -s -k "$(TEST)" $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,))); \
-	else \
-		$(VENV_PYTEST) --pipe-run-mode live -m "inference" -s $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,))); \
-	fi
-
-test-inference-fast: env
-	$(call PRINT_TITLE,"Unit testing")
-	@if [ -n "$(TEST)" ]; then \
-		$(VENV_PYTEST) -n auto --pipe-run-mode live -m "inference" -s -k "$(TEST)" $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,))); \
-	else \
-		$(VENV_PYTEST) -n auto --pipe-run-mode live -m "inference" -s $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,))); \
-	fi
-
-tip: test-inference-with-prints
-	@echo "> done: tip = test-inference-with-prints"
-
-ti: test-inference-fast
-	@echo "> done: ti-fast = test-inference-fast"
-
-ti-dry: env
-	$(call PRINT_TITLE,"Unit testing")
-	@if [ -n "$(TEST)" ]; then \
-		$(VENV_PYTEST) --pipe-run-mode dry --exitfirst -m "inference" -s -k "$(TEST)" $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,))); \
-	else \
-		$(VENV_PYTEST) --pipe-run-mode dry --exitfirst -m "inference" -s $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,))); \
-	fi
-
-test-llm: env
-	$(call PRINT_TITLE,"Unit testing LLM")
-	@if [ -n "$(TEST)" ]; then \
-		$(VENV_PYTEST) --pipe-run-mode live --exitfirst -m "llm" -s -k "$(TEST)" $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,))); \
-	else \
-		$(VENV_PYTEST) --pipe-run-mode live --exitfirst -m "llm" -s $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,))); \
-	fi
-
-tl: test-llm
-	@echo "> done: tl = test-llm"
-
-test-extract: env
-	$(call PRINT_TITLE,"Unit testing Extract")
-	@if [ -n "$(TEST)" ]; then \
-		$(VENV_PYTEST) --pipe-run-mode live --exitfirst -m "extract" -s -k "$(TEST)" $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,))); \
-	else \
-		$(VENV_PYTEST) --pipe-run-mode live --exitfirst -m "extract" -s $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,))); \
-	fi
-
-te: test-extract
-	@echo "> done: te = test-extract"
-
-test-img-gen: env
-	$(call PRINT_TITLE,"Unit testing Image Generation")
-	@if [ -n "$(TEST)" ]; then \
-		$(VENV_PYTEST) --pipe-run-mode live --exitfirst -m "img_gen" -s -k "$(TEST)" $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,))); \
-	else \
-		$(VENV_PYTEST) --pipe-run-mode live --exitfirst -m "img_gen" -s $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,))); \
-	fi
-
-tg: test-img-gen
-	@echo "> done: tg = test-img-gen"
-
-test-pipelex-api: env
-	$(call PRINT_TITLE,"Unit testing")
-	@if [ -n "$(TEST)" ]; then \
-		$(VENV_PYTEST) --exitfirst -m "pipelex_api" -s -k "$(TEST)" $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,))); \
-	else \
-		$(VENV_PYTEST) --exitfirst -m "pipelex_api" -s $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,))); \
-	fi
-
-ta: test-pipelex-api
-	@echo "> done: ta = test-pipelex-api"
-
-cov: env
-	$(call PRINT_TITLE,"Unit testing with coverage")
-	@echo "• Running unit tests with coverage"
-	@if [ -n "$(TEST)" ]; then \
-		$(VENV_PYTEST) --cov=$(if $(PKG),$(PKG),pipelex) -k "$(TEST)" $(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,-v)); \
-	else \
-		$(VENV_PYTEST) --cov=$(if $(PKG),$(PKG),pipelex) $(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,-v)); \
-	fi
-
-cov-missing: env
-	$(call PRINT_TITLE,"Unit testing with coverage and missing lines")
-	@echo "• Running unit tests with coverage and missing lines"
-	@if [ -n "$(TEST)" ]; then \
-		$(VENV_PYTEST) --cov=$(if $(PKG),$(PKG),pipelex) --cov-report=term-missing -k "$(TEST)" $(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,-v)); \
-	else \
-		$(VENV_PYTEST) --cov=$(if $(PKG),$(PKG),pipelex) --cov-report=term-missing $(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,-v)); \
-	fi
-
-cm: cov-missing
-	@echo "> done: cm = cov-missing"
 
 ############################################################################################
 ############################               Linting              ############################
@@ -458,22 +333,6 @@ check-TODOs: env
 	@$(VENV_RUFF) check --select=TD -v .
 
 ##########################################################################################
-### DOCUMENTATION
-##########################################################################################
-
-docs: env
-	$(call PRINT_TITLE,"Serving documentation with mkdocs")
-	$(VENV_MKDOCS) serve --watch docs
-
-docs-check: env
-	$(call PRINT_TITLE,"Checking documentation build with mkdocs")
-	$(VENV_MKDOCS) build --strict
-
-docs-deploy: env
-	$(call PRINT_TITLE,"Deploying documentation with mkdocs")
-	$(VENV_MKDOCS) gh-deploy --force --clean
-
-##########################################################################################
 ### SHORTHANDS
 ##########################################################################################
 
@@ -491,27 +350,6 @@ v: validate
 
 li: lock install
 	@echo "> done: lock install"
-
-
-##########################################################################################
-### TEST BADGE
-##########################################################################################
-
-## Print the number of collected pytest tests (just the integer)
-test-count: env
-	@COUNT=$$($(VENV_PYTEST) --collect-only --disable-warnings -q | awk 'NF' | wc -l | tr -d ' '); \
-	echo $$COUNT
-
-## Compare current test count vs .badges/tests.json -> .message; fail if mismatch
-check-test-badge: env
-	@EXPECTED=$$($(VENV_PYTHON) -c 'import json;print(int(json.load(open(".badges/tests.json"))["message"]))'); \
-	ACTUAL=$$($(VENV_PYTEST) --collect-only --disable-warnings -q | awk 'NF' | wc -l | tr -d ' '); \
-	if [ "$$EXPECTED" != "$$ACTUAL" ]; then \
-		echo "❌ Test count mismatch: badge=$$EXPECTED, actual=$$ACTUAL"; \
-		exit 1; \
-	else \
-		echo "✅ Test count matches: $$ACTUAL"; \
-	fi
 
 ##########################################################################################
 ### MCP SERVER TESTING
