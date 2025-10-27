@@ -133,7 +133,8 @@ async def pipe_runner(
                     await ctx.info("Converted string inputs to JSON", extra={"input_length": len(inputs_json)})
                 except json.JSONDecodeError as e:
                     await ctx.error(f"Failed to parse inputs_json string as JSON: {e}")
-                    raise ValueError(f"inputs_json must be valid JSON string or dict, got invalid JSON string: {e}") from e
+                    msg = f"inputs_json must be valid JSON string or dict, got invalid JSON string: {e}"
+                    raise ValueError(msg) from e
             else:
                 # inputs_json is already a dict
                 parsed_inputs = inputs_json
