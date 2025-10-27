@@ -79,7 +79,9 @@ The agent will construct the pipeline definition and execute it with your inputs
 ## Prerequisites
 
 - **Python** >=3.11,<3.12
-- **[uv](https://github.com/astral-sh/uv)** package manager
+- **[uv](https://github.com/astral-sh/uv)** package manager (**required**)
+
+> **⚠️ Important:** The Pipelex MCP Server requires `uv` to be installed on your system. Make sure to install it before proceeding.
 
 ### Installing uv
 
@@ -156,25 +158,23 @@ Edit `.cursor/mcp.json` (create it if it doesn't exist):
 {
   "mcpServers": {
     "pipelex": {
-      "command": "/path/to/uv",
+      "command": "uv",
       "args": [
         "--directory",
         "/absolute/path/to/pipelex-mcp",
         "run",
-        "pipelex-mcp"
-      ],
-      "env": {
-        "PIPELEX_INFERENCE_API_KEY": "your-api-key-here"
-      }
+        "python",
+        "-m",
+        "server.main"
+      ]
     }
   }
 }
 ```
 
 **Important:**
-- Replace `/path/to/uv` with the result of `which uv`
 - Replace `/absolute/path/to/pipelex-mcp` with the full path to your cloned repository
-- Replace `your-api-key-here` with your Pipelex Inference API key
+- Make sure `uv` is in your system PATH (verify with `which uv`)
 
 **Example:**
 
@@ -182,16 +182,15 @@ Edit `.cursor/mcp.json` (create it if it doesn't exist):
 {
   "mcpServers": {
     "pipelex": {
-      "command": "/Users/yourname/.local/bin/uv",
+      "command": "uv",
       "args": [
         "--directory",
         "/Users/yourname/projects/pipelex-mcp",
         "run",
-        "pipelex-mcp"
-      ],
-      "env": {
-        "PIPELEX_INFERENCE_API_KEY": "plx_abc123..."
-      }
+        "python",
+        "-m",
+        "server.main"
+      ]
     }
   }
 }
@@ -228,29 +227,43 @@ Claude Desktop also supports MCP through its configuration file.
 {
   "mcpServers": {
     "pipelex": {
-      "command": "/path/to/uv",
+      "command": "uv",
       "args": [
-        "--directory", "/absolute/path/to/pipelex-mcp",
+        "--directory",
+        "/absolute/path/to/pipelex-mcp",
         "run",
         "python",
         "-m",
-        "server.main", 
-        "--transport",
-        "stdio"
-      ],
-      "env": {
-        "PYTHONUNBUFFERED": "1"
-      }
+        "server.main"
+      ]
     }
   }
 }
-
 ```
 
 **Important:**
-- Replace `/path/to/uv` with the result of `which uv`
 - Replace `/absolute/path/to/pipelex-mcp` with the full path to your cloned repository
-- Replace `your-api-key-here` with your Pipelex Inference API key
+- Make sure `uv` is in your system PATH (verify with `which uv`)
+
+**Example:**
+
+```json
+{
+  "mcpServers": {
+    "pipelex": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/Users/yourname/projects/pipelex-mcp",
+        "run",
+        "python",
+        "-m",
+        "server.main"
+      ]
+    }
+  }
+}
+```
 
 3. **Restart Claude Desktop** completely
 
@@ -311,6 +324,10 @@ We are actively working on improving these aspects:
 ## Instability
 
 It is not stable yet. The inputs are not always correctly parsed.
+
+## UV Package Manager Dependency
+
+Currently, the MCP server requires `uv` to be installed and configured. While you can modify the configuration to use alternative Python package managers, the default setup relies on `uv`. We're working on providing more flexible installation options in future releases.
 
 ## Logging Configuration
 
