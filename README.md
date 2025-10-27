@@ -308,6 +308,10 @@ The agent will:
 
 We are actively working on improving these aspects:
 
+## Instability
+
+It is not stable yet. The inputs are not always correctly parsed.
+
 ## Logging Configuration
 
 The current logging system has some limitations:
@@ -325,10 +329,6 @@ For pipelines that take longer than the MCP client timeout to complete, we need 
 - Status tracking for long-running operations
 
 This feature is planned for future releases to better support extended pipeline operations.
-
-## Instability
-
-It is not stable yet. The inputs are not always correctly parsed.
 
 # 🤝 Contributing
 

@@ -94,15 +94,17 @@ async def pipe_builder(untouched_user_request: str, ctx: Context) -> PipeBuilder
 
 
 @mcp.tool(description="Run a Pipelex pipeline (optionally with PLX content)")
-async def pipe_runner(plx_content: str, pipe_code: str | None, inputs: dict[str, Any] | None, ctx: Context) -> dict[str, Any] | None:
+async def pipe_runner(
+    plx_content: str, specific_pipe_code_if_plx_content_has_no_main_pipe: str | None, inputs_json: dict[str, Any] | None, ctx: Context
+) -> dict[str, Any] | None:
     """Run a Pipelex pipeline with optional PLX content.
 
     Args:
         plx_content: The Pipelex PLX code defining the pipeline(s) and concepts.
-        pipe_code: The specific pipe to execute. Optional if plx_content defines a
+        specific_pipe_code_if_plx_content_has_no_main_pipe: The specific pipe to execute. Optional if plx_content defines a
                    "main_pipe" (will use that by default). Required if plx_content
                    does NOT specify a main_pipe.
-        inputs: Dictionary of input parameters for the pipeline in JSON format.
+        inputs_json: Dictionary of input parameters for the pipeline in JSON format.
                 Must match the expected input structure of the pipe being executed.
                 "inputs_format_to_run" shows how it should be formatted.
         ctx: The context of the pipeline execution.
@@ -115,26 +117,26 @@ async def pipe_runner(plx_content: str, pipe_code: str | None, inputs: dict[str,
         await ctx.info(
             "Starting pipeline execution",
             extra={
-                "pipe_code": pipe_code,
-                "has_inputs": inputs is not None,
+                "specific_pipe_code_if_plx_content_has_no_main_pipe": specific_pipe_code_if_plx_content_has_no_main_pipe,
+                "has_inputs": inputs_json is not None,
             },
         )
 
-        working_memory = WorkingMemoryFactory.make_from_pipeline_inputs(pipeline_inputs=inputs or {})
+        working_memory = WorkingMemoryFactory.make_from_pipeline_inputs(pipeline_inputs=inputs_json or {})
 
         if plx_content:
             library_manager = get_library_manager()
             blueprint, _ = await validate_plx(plx_content, remove_after_validation=False)
             try:
                 pipe_output = await execute_pipeline(
-                    pipe_code=blueprint.main_pipe or pipe_code,
+                    pipe_code=blueprint.main_pipe or specific_pipe_code_if_plx_content_has_no_main_pipe,
                     inputs=working_memory,
                 )
             finally:
                 library_manager.remove_from_blueprint(blueprint=blueprint)
         else:
             pipe_output = await execute_pipeline(
-                pipe_code=pipe_code,
+                pipe_code=specific_pipe_code_if_plx_content_has_no_main_pipe,
                 inputs=working_memory,
             )
 
@@ -145,7 +147,10 @@ async def pipe_runner(plx_content: str, pipe_code: str | None, inputs: dict[str,
         output_data = pipe_output.model_dump(serialize_as_any=True)
         output_file.write_text(json.dumps(output_data, indent=2, ensure_ascii=False), encoding="utf-8")
 
-        await ctx.info("Pipeline execution completed", extra={"pipe_code": pipe_code})
+        await ctx.info(
+            "Pipeline execution completed",
+            extra={"specific_pipe_code_if_plx_content_has_no_main_pipe": specific_pipe_code_if_plx_content_has_no_main_pipe},
+        )
         return output_data
 
 
