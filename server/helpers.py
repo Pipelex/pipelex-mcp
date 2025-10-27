@@ -1,3 +1,4 @@
+import json
 import traceback
 from typing import Any
 
@@ -12,6 +13,23 @@ from pipelex.hub import get_class_registry, get_library_manager
 from pipelex.pipe_run.dry_run import dry_run_pipes
 
 from server.exceptions import UnexpectedError
+
+
+def jsonify(obj: Any) -> Any:
+    """Best-effort JSON conversion (avoids leaking complex classes through MCP)."""
+    try:
+        # pydantic / dataclass / objects with model_dump
+        if hasattr(obj, "model_dump"):
+            return obj.model_dump()
+        if hasattr(obj, "dict"):
+            return obj.dict()
+    except Exception as e:
+        log.debug("Failed to convert object using model_dump/dict: %s", str(e))
+    try:
+        json.dumps(obj)
+        return obj
+    except Exception:
+        return str(obj)
 
 
 def get_concept_structure(concept: Concept) -> dict[str, Any]:
@@ -153,7 +171,7 @@ async def validate_and_load_pipes(plx_content: str) -> tuple[PipelexBundleBluepr
         except Exception as cleanup_error:
             log.error(f"Error during cleanup: {cleanup_error}")
 
-        raise DryRunError(str(exc)) from exc
+        raise DryRunError(str(exc), pipe_type="") from exc
 
     except Exception as exc:
         log.error("Unexpected validation error details:")

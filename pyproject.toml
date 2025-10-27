@@ -13,8 +13,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp[cli]>=1.18.0",
-    "pipelex[mistralai,anthropic,google,google-genai,bedrock,fal]==0.13.1",
+    "fastmcp>=2.13.0.1",
+    "pipelex[mistralai,anthropic,google,google-genai,bedrock,fal]==0.13.2",
 ]
 
 [project.urls]
@@ -34,8 +34,12 @@ dev = [
     "ruff>=0.6.8",
 ]
 
-[tool.setuptools]
-packages = ["server"]
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+pipelex_mcp = "server.main:main"
 
 [tool.uv]
 required-version = ">=0.7.2"
@@ -114,7 +118,6 @@ reportPropertyTypeMismatch = true
 reportRedeclaration = "error"
 reportReturnType = "error"
 reportSelfClsParameterName = "error"
-reportShadowedImports = true
 reportTypeCommentUsage = "error"
 reportTypedDictNotRequiredAccess = "error"
 reportUnboundVariable = "error"
@@ -144,7 +147,6 @@ reportUnusedFunction = "error"
 reportUnusedImport = "none"
 reportUnusedVariable = "error"
 reportWildcardImportFromLibrary = "error"
-reportUnusedParameter = "information"
 strictDictionaryInference = true
 strictListInference = true
 strictParameterNoneValue = true

@@ -50,7 +50,7 @@ make build                    - Build the wheels
 
 make mcp-check                - Check if MCP server can start successfully
 make mcp-test                 - Test MCP server initialization
-make mcp-run                  - Run MCP server manually (for debugging)
+make run                      - Run MCP server manually (for debugging)
 
 make format                   - format with ruff format
 make lint                     - lint with ruff check
@@ -122,7 +122,7 @@ export HELP
 	li check-unused-imports fix-unused-imports check-uv check-TODOs docs docs-check docs-deploy \
 	config-template cft \
 	test-count check-test-badge \
-	mcp-check mcp-test mcp-run
+	mcp-check mcp-test run
 
 all help:
 	@echo "$$HELP"
@@ -536,7 +536,7 @@ mcp-check: env
 	}
 	@echo ""
 	@echo "Testing if MCP server can import..."
-	@$(VENV_PYTHON) -c "from server.server import mcp; print('✅ MCP server imports successfully')" 2>&1 || { \
+	@$(VENV_PYTHON) -c "from server.main import mcp; print('✅ MCP server imports successfully')" 2>&1 || { \
 		echo "❌ MCP server import failed!"; \
 		exit 1; \
 	}
@@ -551,11 +551,11 @@ mcp-check: env
 mcp-test: mcp-check
 	@echo "> done: mcp-test = mcp-check"
 
-mcp-run: env
-	$(call PRINT_TITLE,"Running MCP server manually (Ctrl+C to stop)")
+run: env
+	$(call PRINT_TITLE,Running MCP server manually)
 	@echo "Starting MCP server..."
 	@echo "This will wait for stdin (MCP protocol messages)"
 	@echo "Press Ctrl+C to stop"
 	@echo ""
-	uv run python -m server/server.py
+	uv run python -m server.main
 	

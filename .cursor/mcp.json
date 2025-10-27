@@ -8,7 +8,7 @@
           "run",
           "python",
           "-m",
-          "server.server"
+          "server.main"
         ]
       }
     }
