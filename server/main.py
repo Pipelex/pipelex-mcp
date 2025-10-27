@@ -95,7 +95,7 @@ async def pipe_builder(untouched_user_request: str, ctx: Context) -> PipeBuilder
 
 @mcp.tool(description="Run a Pipelex pipeline (optionally with PLX content)")
 async def pipe_runner(
-    plx_content: str, specific_pipe_code_if_plx_content_has_no_main_pipe: str | None, inputs_json: dict[str, Any] | None, ctx: Context
+    plx_content: str, specific_pipe_code_if_plx_content_has_no_main_pipe: str | None, inputs_json: dict[str, Any] | str | None, ctx: Context
 ) -> dict[str, Any] | None:
     """Run a Pipelex pipeline with optional PLX content.
 
@@ -104,7 +104,9 @@ async def pipe_runner(
         specific_pipe_code_if_plx_content_has_no_main_pipe: The specific pipe to execute. Optional if plx_content defines a
                    "main_pipe" (will use that by default). Required if plx_content
                    does NOT specify a main_pipe.
-        inputs_json: Dictionary of input parameters for the pipeline in JSON format.
+        inputs_json: Input parameters for the pipeline. Can be either:
+                - A dictionary of input parameters in JSON format
+                - A JSON string that will be automatically parsed
                 Must match the expected input structure of the pipe being executed.
                 "inputs_format_to_run" shows how it should be formatted.
         ctx: The context of the pipeline execution.
@@ -122,7 +124,21 @@ async def pipe_runner(
             },
         )
 
-        working_memory = WorkingMemoryFactory.make_from_pipeline_inputs(pipeline_inputs=inputs_json or {})
+        # Handle case where MCP client sends inputs_json as a string instead of dict
+        parsed_inputs: dict[str, Any] | None = None
+        if inputs_json is not None:
+            if isinstance(inputs_json, str):
+                try:
+                    parsed_inputs = json.loads(inputs_json)
+                    await ctx.info("Converted string inputs to JSON", extra={"input_length": len(inputs_json)})
+                except json.JSONDecodeError as e:
+                    await ctx.error(f"Failed to parse inputs_json string as JSON: {e}")
+                    raise ValueError(f"inputs_json must be valid JSON string or dict, got invalid JSON string: {e}") from e
+            else:
+                # inputs_json is already a dict
+                parsed_inputs = inputs_json
+
+        working_memory = WorkingMemoryFactory.make_from_pipeline_inputs(pipeline_inputs=parsed_inputs or {})
 
         if plx_content:
             library_manager = get_library_manager()
