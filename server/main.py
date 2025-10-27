@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import os
 from contextlib import redirect_stdout
+from pathlib import Path
 from typing import Any
 
 import fastmcp.settings
@@ -52,18 +54,15 @@ class PipeBuilderResponse(TypedDict):
 # ------------------------------------------------------------
 # Tools
 # ------------------------------------------------------------
-@mcp.tool(description="Build a Pipelex pipeline from a natural language brief")
-async def pipe_builder(brief: str, ctx: Context) -> PipeBuilderResponse:
-    """Build a Pipelex pipeline from a natural language brief.
-
-    It will return the PLX content of the pipeline and the inputs format to run the pipeline.
-    """
+@mcp.tool(description="Build a Pipelex pipeline from a natural language request, do not modify it")
+async def pipe_builder(untouched_user_request: str, ctx: Context) -> PipeBuilderResponse:
+    """Build a Pipelex pipeline from a natural language request."""
     with _silence_stdout():
-        await ctx.info("Starting pipeline build", extra={"brief_length": len(brief)})
+        await ctx.info("Starting pipeline build", extra={"brief_length": len(untouched_user_request)})
 
         pipe_output = await execute_pipeline(
             pipe_code="pipe_builder",
-            inputs={"brief": brief},
+            inputs={"brief": untouched_user_request},
         )
 
         pipelex_bundle_spec = pipe_output.working_memory.get_stuff_as(
@@ -84,6 +83,12 @@ async def pipe_builder(brief: str, ctx: Context) -> PipeBuilderResponse:
             raise ValueError(msg)
         inputs_json = generate_input_memory_json_string(main_pipe.inputs)
 
+        # Save PLX content to file
+        results_dir = Path("results/mcp")
+        results_dir.mkdir(parents=True, exist_ok=True)
+        plx_file = results_dir / "plx_content.plx"
+        plx_file.write_text(plx_content, encoding="utf-8")
+
         await ctx.info("Pipeline built successfully", extra={"plx_content_length": len(plx_content)})
         return {"plx_content": plx_content, "inputs_format_to_run": inputs_json}
 
@@ -100,6 +105,7 @@ async def pipe_runner(plx_content: str, pipe_code: str | None, inputs: dict[str,
         inputs: Dictionary of input parameters for the pipeline in JSON format.
                 Must match the expected input structure of the pipe being executed.
                 "inputs_format_to_run" shows how it should be formatted.
+        ctx: The context of the pipeline execution.
 
     Returns:
         The output of the pipeline execution as a dictionary containing the working
@@ -132,8 +138,15 @@ async def pipe_runner(plx_content: str, pipe_code: str | None, inputs: dict[str,
                 inputs=working_memory,
             )
 
+        # Save pipe output to file
+        results_dir = Path("results/mcp")
+        results_dir.mkdir(parents=True, exist_ok=True)
+        output_file = results_dir / "pipe_output.json"
+        output_data = pipe_output.model_dump(serialize_as_any=True)
+        output_file.write_text(json.dumps(output_data, indent=2, ensure_ascii=False), encoding="utf-8")
+
         await ctx.info("Pipeline execution completed", extra={"pipe_code": pipe_code})
-        return pipe_output.model_dump(serialize_as_any=True)
+        return output_data
 
 
 @mcp.tool(description="Simple health check")
