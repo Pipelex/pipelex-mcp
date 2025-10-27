@@ -17,6 +17,9 @@ dependencies = [
     "pipelex[mistralai,anthropic,google,google-genai,bedrock,fal]==0.13.2",
 ]
 
+[tool.uv.sources]
+pipelex = { path = "../pipelex", editable = true }
+
 [project.urls]
 Homepage = "https://pipelex.com"
 Repository = "https://github.com/Pipelex/pipelex-mcp"

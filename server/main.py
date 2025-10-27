@@ -2,55 +2,25 @@ from __future__ import annotations
 
 import argparse
 import io
-import logging
 import os
-import sys
 from contextlib import redirect_stdout
-from logging.handlers import RotatingFileHandler
 from typing import Any
 
 import fastmcp.settings
 from fastmcp import Context, FastMCP
-from fastmcp.utilities.logging import get_logger
+from pipelex import log
 from pipelex.builder.bundle_spec import PipelexBundleSpec
+from pipelex.builder.runner_code import generate_input_memory_json_string
 from pipelex.core.memory.working_memory_factory import WorkingMemoryFactory
 from pipelex.hub import get_library_manager
 from pipelex.language.plx_factory import PlxFactory
 from pipelex.pipelex import Pipelex
 from pipelex.pipeline.execute import execute_pipeline
-
-from server.helpers import jsonify, validate_and_load_pipes
-
-
-# ------------------------------------------------------------
-# Logging (stderr or file) — absolutely nothing to stdout
-# ------------------------------------------------------------
-def configure_logging(level: str = "INFO", log_file: str | None = None) -> None:
-    root = logging.getLogger()
-    root.setLevel(level.upper())
-
-    # Remove existing handlers (esp. ones that might default to stdout)
-    for h in list(root.handlers):
-        root.removeHandler(h)
-
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S")
-
-    if log_file:
-        fh = RotatingFileHandler(log_file, maxBytes=5_000_000, backupCount=3)
-        fh.setLevel(level.upper())
-        fh.setFormatter(formatter)
-        root.addHandler(fh)
-    else:
-        sh = logging.StreamHandler(sys.stderr)  # <- stderr, not stdout
-        sh.setLevel(level.upper())
-        sh.setFormatter(formatter)
-        root.addHandler(sh)
-
-
-log = get_logger(__name__)
+from pipelex.pipeline.validate_plx import validate_plx
+from typing_extensions import TypedDict
 
 # Disable the FastMCP CLI banner (prevents ASCII art on stdout)
-fastmcp.settings.show_cli_banner = False  # type: ignore[attr-defined]
+fastmcp.settings.show_cli_banner = False  # pyright: ignore[reportAttributeAccessIssue]
 
 mcp = FastMCP(
     name="pipelex",
@@ -74,38 +44,54 @@ def _silence_stdout():
     return redirect_stdout(_Sink())
 
 
+class PipeBuilderResponse(TypedDict):
+    plx_content: str
+    inputs_format_to_run: str
+
+
 # ------------------------------------------------------------
 # Tools
 # ------------------------------------------------------------
 @mcp.tool(description="Build a Pipelex pipeline from a natural language brief")
-async def pipe_builder(brief: str, ctx: Context) -> str:
+async def pipe_builder(brief: str, ctx: Context) -> PipeBuilderResponse:
+    """Build a Pipelex pipeline from a natural language brief.
+    
+    It will return the PLX content of the pipeline and the inputs format to run the pipeline."""
     with _silence_stdout():
-        try:
-            await ctx.info("Starting pipeline build", extra={"brief_length": len(brief)})
+        await ctx.info("Starting pipeline build", extra={"brief_length": len(brief)})
 
-            pipe_output = await execute_pipeline(
-                pipe_code="pipe_builder",
-                inputs={"brief": brief},
-            )
+        pipe_output = await execute_pipeline(
+            pipe_code="pipe_builder",
+            inputs={"brief": brief},
+        )
 
-            pipelex_bundle_spec = pipe_output.working_memory.get_stuff_as(
-                name="pipelex_bundle_spec",
-                content_type=PipelexBundleSpec,
-            )
-            blueprint = pipelex_bundle_spec.to_blueprint()
-            plx_content = PlxFactory.make_plx_content(blueprint=blueprint)
+        pipelex_bundle_spec = pipe_output.working_memory.get_stuff_as(
+            name="pipelex_bundle_spec",
+            content_type=PipelexBundleSpec,
+        )
+        blueprint = pipelex_bundle_spec.to_blueprint()
+        plx_content = PlxFactory.make_plx_content(blueprint=blueprint)
+        (
+            _,
+            pipes,
+        ) = await validate_plx(plx_content, remove_after_validation=True)
+        # in the pipes, get the one that has the code "blueprint.main_pipe".
+        main_pipe = next((pipe for pipe in pipes if pipe.code == blueprint.main_pipe), None)
+        if main_pipe is None:
+            msg = "Main pipe not found"
+            log.error(msg)
+            raise ValueError(msg)
+        inputs_json = generate_input_memory_json_string(main_pipe.inputs)
 
-            await ctx.info("Pipeline built successfully", extra={"plx_content_length": len(plx_content)})
-            return plx_content
-
-        except Exception as e:
-            log.exception("Error building pipeline")
-            await ctx.error(f"Failed to build pipeline: {e!s}")
-            return f"Failed to build pipeline: {e!s}"
+        await ctx.info("Pipeline built successfully", extra={"plx_content_length": len(plx_content)})
+        return {"plx_content": plx_content, "inputs_format_to_run": inputs_json}
 
 
 @mcp.tool(description="Run a Pipelex pipeline (optionally with PLX content)")
 async def pipe_runner(pipe_code: str, plx_content: str | None, inputs: dict[str, Any] | None, ctx: Context) -> dict[str, Any] | None:
+    """Run a Pipelex pipeline (optionally with PLX content).
+    The inputs have to be a JSON.
+    It will return the output of the pipeline."""
     with _silence_stdout():
         await ctx.info(
             "Starting pipeline execution",
@@ -120,7 +106,7 @@ async def pipe_runner(pipe_code: str, plx_content: str | None, inputs: dict[str,
 
         if plx_content:
             library_manager = get_library_manager()
-            blueprint, _, _ = await validate_and_load_pipes(plx_content)
+            blueprint, _ = await validate_plx(plx_content, remove_after_validation=False)
             try:
                 pipe_output = await execute_pipeline(
                     pipe_code=blueprint.main_pipe or pipe_code,
@@ -134,21 +120,13 @@ async def pipe_runner(pipe_code: str, plx_content: str | None, inputs: dict[str,
                 inputs=working_memory,
             )
 
-        # JSON-safe summary
-        wm_json = None
-        try:
-            wm_json = jsonify(getattr(pipe_output, "working_memory", None))
-        except Exception as ser_e:
-            await ctx.warning(f"Could not serialize working memory: {ser_e!s}")
-            wm_json = None
-
         await ctx.info("Pipeline execution completed", extra={"pipe_code": pipe_code})
-        return wm_json
+        return pipe_output.model_dump(serialize_as_any=True)
 
 
 @mcp.tool(description="Simple health check")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "server": "pipelex", "version": "2.0.0"}
+    return {"status": "ok", "server": "pipelex"}
 
 
 # ------------------------------------------------------------
@@ -163,20 +141,13 @@ def main() -> None:
     parser.add_argument("--log-file", default=os.getenv("PIPELEX_MCP_LOG_FILE"), help="If set, logs go to this file (rotating). Otherwise stderr.")
     args = parser.parse_args()
 
-    # Logging (stderr/file only)
-    configure_logging(args.log_level, args.log_file)
-
     # Initialize Pipelex before starting transport (silence any stray prints)
-    log.info("Initializing Pipelex…")
     with _silence_stdout():
         Pipelex.make()
-    log.info("Pipelex initialized")
 
     if args.transport == "http":
-        log.info("Starting Pipelex MCP Server on HTTP at %s:%s", args.host, args.port)
         mcp.run(transport="http", host=args.host, port=args.port)
     else:
-        log.info("Starting Pipelex MCP Server on stdio")
         mcp.run()
 
 
