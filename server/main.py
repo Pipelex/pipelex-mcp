@@ -55,8 +55,9 @@ class PipeBuilderResponse(TypedDict):
 @mcp.tool(description="Build a Pipelex pipeline from a natural language brief")
 async def pipe_builder(brief: str, ctx: Context) -> PipeBuilderResponse:
     """Build a Pipelex pipeline from a natural language brief.
-    
-    It will return the PLX content of the pipeline and the inputs format to run the pipeline."""
+
+    It will return the PLX content of the pipeline and the inputs format to run the pipeline.
+    """
     with _silence_stdout():
         await ctx.info("Starting pipeline build", extra={"brief_length": len(brief)})
 
@@ -88,16 +89,27 @@ async def pipe_builder(brief: str, ctx: Context) -> PipeBuilderResponse:
 
 
 @mcp.tool(description="Run a Pipelex pipeline (optionally with PLX content)")
-async def pipe_runner(pipe_code: str, plx_content: str | None, inputs: dict[str, Any] | None, ctx: Context) -> dict[str, Any] | None:
-    """Run a Pipelex pipeline (optionally with PLX content).
-    The inputs have to be a JSON.
-    It will return the output of the pipeline."""
+async def pipe_runner(plx_content: str, pipe_code: str | None, inputs: dict[str, Any] | None, ctx: Context) -> dict[str, Any] | None:
+    """Run a Pipelex pipeline with optional PLX content.
+
+    Args:
+        plx_content: The Pipelex PLX code defining the pipeline(s) and concepts.
+        pipe_code: The specific pipe to execute. Optional if plx_content defines a
+                   "main_pipe" (will use that by default). Required if plx_content
+                   does NOT specify a main_pipe.
+        inputs: Dictionary of input parameters for the pipeline in JSON format.
+                Must match the expected input structure of the pipe being executed.
+                "inputs_format_to_run" shows how it should be formatted.
+
+    Returns:
+        The output of the pipeline execution as a dictionary containing the working
+        memory with all generated stuffs and results.
+    """
     with _silence_stdout():
         await ctx.info(
             "Starting pipeline execution",
             extra={
                 "pipe_code": pipe_code,
-                "has_plx_content": plx_content is not None,
                 "has_inputs": inputs is not None,
             },
         )
