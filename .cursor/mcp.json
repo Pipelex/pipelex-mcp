@@ -2,7 +2,14 @@
     "mcpServers": {
       "pipelex": {
         "command": "uv",
-        "args": ["--directory", "./pipelex_mcp", "run", "server.py"]
+        "args": [
+          "--directory",
+          "/Users/thomashebrardevotis/dev/pipelex/pipelex-mcp",
+          "run",
+          "python",
+          "-m",
+          "server.main"
+        ]
       }
     }
   }
