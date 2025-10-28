@@ -1,0 +1,9 @@
+{
+    "mcpServers": {
+      "pipelex": {
+        "command": "/Users/thomashebrardevotis/.local/bin/uv",
+        "args": ["run", "pipelex_mcp"],
+        "cwd": "/Users/thomashebrardevotis/dev/pipelex/pipelex-mcp"
+      }
+    }
+  }
