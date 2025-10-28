@@ -1,5 +1,18 @@
 # Changelog
 
+## [v0.1.1] - 2025-10-27
+
+### Added
+
+- Added the pipe builder in the MCP server.
+- Added a tool to run a pipelex pipeline.
+- Added GHA for CLA, and other.
+
+### Changed
+
+- Bumped pipelex to v0.14.0
+
+
 ## [v0.0.5] - 2025-07-09
 
 - Bumped pipelex to v0.5.1
