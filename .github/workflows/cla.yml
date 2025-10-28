@@ -24,7 +24,7 @@ jobs:
           owner: Pipelex
           repositories: |
             cla-signatures
-            pipelex
+            pipelex-mcp
 
       - name: "CLA Assistant"
         if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
@@ -34,7 +34,7 @@ jobs:
           PERSONAL_ACCESS_TOKEN: ${{ steps.app-token.outputs.token }}
         with:
           path-to-signatures: "signatures/version1/cla.json"
-          path-to-document: "https://github.com/Pipelex/pipelex/blob/main/CLA.md"
+          path-to-document: "https://github.com/Pipelex/pipelex-mcp/blob/main/CLA.md"
           branch: main
           allowlist: lchoquel,thomashebrard,bot*
           remote-organization-name: Pipelex
