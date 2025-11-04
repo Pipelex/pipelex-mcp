@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.1.2] - 2025-11-04
+
+### Added
+
+- Added documentation for the MCP server.
+
 ## [v0.1.1] - 2025-10-27
 
 ### Added
