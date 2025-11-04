@@ -96,8 +96,6 @@ make fui                      - Shorthand -> fix-unused-imports
 make check-TODOs              - Check for TODOs
 
 make docs                     - Serve documentation locally with mkdocs (production URLs)
-make docs-local               - Serve documentation with local development URLs
-make docs-prod                - Serve documentation with production URLs (alias for docs)
 make docs-check               - Check documentation build with mkdocs
 make docs-deploy              - Deploy documentation with mkdocs
 
