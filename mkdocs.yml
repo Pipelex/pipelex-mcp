@@ -87,14 +87,14 @@ markdown_extensions:
 
 nav:
   - Home: https://docs.pipelex.com/
-  - API Reference: https://pipelex.github.io/pipelex-api/
-  - MCP Server:
+  - API: https://pipelex.github.io/pipelex-api/
+  - MCP:
     - Overview: index.md
     - Contribute:
       - Contributing: contributing.md
       - Code of Conduct: CODE_OF_CONDUCT.md
       - License: license.md
     - Changelog: changelog.md
-  - n8n Node: https://pipelex.github.io/n8n-nodes-pipelex/
+  - n8n: https://pipelex.github.io/n8n-nodes-pipelex/
   - Contribute: https://docs.pipelex.com/pages/contributing/
   - Changelog: https://docs.pipelex.com/pages/changelog/
