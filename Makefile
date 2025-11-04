@@ -95,7 +95,9 @@ make fix-unused-imports       - Fix unused imports with ruff
 make fui                      - Shorthand -> fix-unused-imports
 make check-TODOs              - Check for TODOs
 
-make docs                     - Serve documentation locally with mkdocs
+make docs                     - Serve documentation locally with mkdocs (production URLs)
+make docs-local               - Serve documentation with local development URLs
+make docs-prod                - Serve documentation with production URLs (alias for docs)
 make docs-check               - Check documentation build with mkdocs
 make docs-deploy              - Deploy documentation with mkdocs
 
@@ -119,7 +121,7 @@ export HELP
 	run-all-tests run-manual-trigger-gha-tests run-gha_disabled-tests \
 	validate v check c cc \
 	merge-check-ruff-lint merge-check-ruff-format merge-check-mypy merge-check-pyright \
-	li check-unused-imports fix-unused-imports check-uv check-TODOs docs docs-check docs-deploy \
+	li check-unused-imports fix-unused-imports check-uv check-TODOs docs docs-local docs-prod docs-check docs-deploy \
 	config-template cft \
 	test-count check-test-badge \
 	mcp-check mcp-test run
@@ -397,3 +399,20 @@ run: env
 	@echo ""
 	uv run python -m server.main
 	
+##########################################################################################
+### DOCUMENTATION
+##########################################################################################
+
+docs: env
+	$(call PRINT_TITLE,"Serving documentation locally")
+	@$(VENV_MKDOCS) serve -a 127.0.0.1:8003 --watch docs
+
+docs-check: env
+	$(call PRINT_TITLE,"Checking documentation build")
+	@$(VENV_MKDOCS) build --strict
+	@echo "$(GREEN)✓ Documentation build successful$(NC)"
+
+docs-deploy: env
+	$(call PRINT_TITLE,"Deploying documentation to GitHub Pages")
+	@$(VENV_MKDOCS) gh-deploy --force --clean
+	@echo "$(GREEN)✓ Documentation deployed to GitHub Pages$(NC)"

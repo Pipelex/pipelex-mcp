@@ -80,6 +80,8 @@ markdown_extensions:
   - pymdownx.emoji:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.snippets:
+      base_path: .
   - admonition
   - pymdownx.details
 
@@ -89,10 +91,11 @@ nav:
   - Integrations:
     - MCP Server:
       - Overview: index.md
+      - Contribute:
+        - Contributing: contributing.md
+        - Code of Conduct: CODE_OF_CONDUCT.md
+        - License: license.md
+      - Changelog: changelog.md
     - n8n Node: https://pipelex.github.io/n8n-nodes-pipelex/
   - Contribute: https://docs.pipelex.com/pages/contributing/
   - Changelog: https://docs.pipelex.com/pages/changelog/
-
-extra_css:
-  - stylesheets/general.css
-
