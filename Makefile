@@ -264,6 +264,11 @@ test-with-prints: env
 tp: test-with-prints
 	@echo "> done: tp = test-with-prints"
 
+tb: env
+	$(call PRINT_TITLE,"Unit testing a simple boot")
+	@echo "• Running unit test test_boot"
+	$(VENV_PYTEST) -s -m $(USUAL_PYTEST_MARKERS) -k "test_boot" $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,)));
+
 ############################################################################################
 ############################               Linting              ############################
 ############################################################################################
