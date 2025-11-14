@@ -11,6 +11,9 @@
 # - Headers with dots must be quoted (e.g., ["ministral-3b"])
 # - Model costs are in USD per million tokens (input/output)
 #
+# Documentation: https://docs.pipelex.com
+# Support: https://go.pipelex.com/discord
+#
 ################################################################################
 
 ################################################################################
@@ -126,7 +129,7 @@ outputs = ["text", "structured"]
 costs = { input = 0.4, output = 2.0 }
 
 ################################################################################
-# OCR MODELS
+# EXTRACTION MODELS
 ################################################################################
 
 # --- OCR Models ---------------------------------------------------------------
@@ -137,4 +140,3 @@ max_tokens = 131072
 inputs = ["pdf", "image"]
 outputs = ["pages"]
 costs = { input = 0.4, output = 2.0 }
-
