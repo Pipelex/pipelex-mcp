@@ -70,6 +70,7 @@ make merge-check-mypy         - Run mypy merge check without updating files
 make merge-check-pyright	  - Run pyright merge check without updating files
 
 make v                        - Shorthand -> validate
+make gha-tests		          - Run tests for github actions (exit on first failure) (no inference, no gha_disabled)
 make test                     - Run unit tests (no inference)
 make test-xdist               - Run unit tests with xdist (no inference)
 make t                        - Shorthand -> test-xdist
@@ -101,6 +102,7 @@ export HELP
 	format lint pyright mypy pylint \
 	cleanderived cleanenv cleanall \
 	test test-xdist t test-quiet tq test-with-prints tp \
+	gha-tests \
 	validate v check c cc \
 	merge-check-ruff-lint merge-check-ruff-format merge-check-mypy merge-check-pyright \
 	li check-unused-imports fix-unused-imports check-uv check-TODOs docs docs-check docs-deploy \
@@ -201,6 +203,11 @@ cleanall: cleanderived cleanenv cleanconfig
 ##########################################################################################
 ### TESTING
 ##########################################################################################
+
+gha-tests: env
+	$(call PRINT_TITLE,"Unit testing for github actions")
+	@echo "• Running unit tests for github actions (excluding inference and gha_disabled)"
+	$(VENV_PYTEST) -n auto --exitfirst --quiet -m "(dry_runnable or not inference) and not (gha_disabled or pipelex_api)" || [ $$? = 5 ]
 
 test: env
 	$(call PRINT_TITLE,"Unit testing without prints but displaying logs via pytest for WARNING level and above")
