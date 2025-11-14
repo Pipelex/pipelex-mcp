@@ -50,10 +50,10 @@ excluded_dirs = [
 # default_directory_base_name = "pipeline"
 
 [pipelex.log_config]
-default_log_level = "INFO"
+default_log_level = "OFF"
 
 [pipelex.log_config.package_log_levels]
-pipelex = "INFO"
+pipelex = "OFF"
 
 [cogt]
 [cogt.model_deck_config]
