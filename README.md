@@ -327,7 +327,7 @@ It is not stable yet. The inputs are not always correctly parsed.
 You might encounter errors like this:
 
 ```
-"Pipe 'generate_inversion_prompt' already exists in the library".
+"Pipe 'name_of_pipe' already exists in the library".
 ```
 
 This will be fixed in the coming releases.
