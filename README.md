@@ -185,7 +185,7 @@ Edit `.cursor/mcp.json` (create it if it doesn't exist):
       "command": "uv",
       "args": [
         "--directory",
-        "/Users/yourname/projects/pipelex-mcp",
+        "../pipelex-mcp",
         "run",
         "python",
         "-m",

@@ -1,3 +1,15 @@
 {
-  "mcpServers": {}
+  "mcpServers": {
+    "pipelex": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "../pipelex-mcp",
+        "run",
+        "python",
+        "-m",
+        "server.main"
+      ]
+    }
+  }
 }
