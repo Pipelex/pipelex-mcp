@@ -324,6 +324,13 @@ We are actively working on improving these aspects:
 ## Instability
 
 It is not stable yet. The inputs are not always correctly parsed.
+You might encounter errors like this:
+
+```
+"Pipe 'generate_inversion_prompt' already exists in the library".
+```
+
+This will be fixed in the coming releases.
 
 ## UV Package Manager Dependency
 
