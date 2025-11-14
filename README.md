@@ -185,7 +185,7 @@ Edit `.cursor/mcp.json` (create it if it doesn't exist):
       "command": "uv",
       "args": [
         "--directory",
-        "/Users/yourname/projects/pipelex-mcp",
+        "../pipelex-mcp",
         "run",
         "python",
         "-m",
@@ -324,6 +324,13 @@ We are actively working on improving these aspects:
 ## Instability
 
 It is not stable yet. The inputs are not always correctly parsed.
+You might encounter errors like this:
+
+```
+"Pipe 'name_of_pipe' already exists in the library".
+```
+
+This will be fixed in the coming releases.
 
 ## UV Package Manager Dependency
 
