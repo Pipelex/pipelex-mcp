@@ -70,7 +70,6 @@ make merge-check-mypy         - Run mypy merge check without updating files
 make merge-check-pyright	  - Run pyright merge check without updating files
 
 make v                        - Shorthand -> validate
-make codex-tests              - Run tests for Codex (exit on first failure) (no inference, no codex_disabled)
 make gha-tests		          - Run tests for github actions (exit on first failure) (no inference, no gha_disabled)
 make test                     - Run unit tests (no inference)
 make test-xdist               - Run unit tests with xdist (no inference)
@@ -80,15 +79,6 @@ make tq                       - Shorthand -> test-quiet
 make test-with-prints         - Run tests with prints (no inference)
 make tp                       - Shorthand -> test-with-prints
 make tb                       - Shorthand -> `make test-with-prints TEST=test_boot`
-make test-inference           - Run unit tests only for inference (with prints)
-make ti                       - Shorthand -> test-inference
-make tip                      - Shorthand -> test-inference-with-prints (parallelized inference tests)
-make test-llm			      - Run unit tests only for llm (with prints)
-make tl                       - Shorthand -> test-llm
-make test-extract             - Run unit tests only for extract (with prints)
-make te                       - Shorthand -> test-extract
-make test-img-gen             - Run unit tests only for img_gen (with prints)
-make test-g					  - Shorthand -> test-img-gen
 
 make check-unused-imports     - Check for unused imports without fixing
 make fix-unused-imports       - Fix unused imports with ruff
@@ -104,9 +94,6 @@ make c                        - Shorthand -> check
 make cc                       - Shorthand -> cleanderived check
 make li                       - Shorthand -> lock install
 
-make test-count              - Count the number of tests
-make check-test-badge        - Check if the test count matches the badge value
-
 endef
 export HELP
 
@@ -114,14 +101,12 @@ export HELP
 	all help env lock install update build \
 	format lint pyright mypy pylint \
 	cleanderived cleanenv cleanall \
-	test test-xdist t test-quiet tq test-with-prints tp test-inference ti \
-	test-llm tl test-img-gen tg test-extract te codex-tests gha-tests \
-	run-all-tests run-manual-trigger-gha-tests run-gha_disabled-tests \
+	test test-xdist t test-quiet tq test-with-prints tp \
+	gha-tests \
 	validate v check c cc \
 	merge-check-ruff-lint merge-check-ruff-format merge-check-mypy merge-check-pyright \
-	li check-unused-imports fix-unused-imports check-uv check-TODOs docs docs-local docs-prod docs-check docs-deploy \
+	li check-unused-imports fix-unused-imports check-uv check-TODOs docs docs-check docs-deploy \
 	config-template cft \
-	test-count check-test-badge \
 	mcp-check mcp-test run
 
 all help:
@@ -219,6 +204,11 @@ cleanall: cleanderived cleanenv cleanconfig
 ### TESTING
 ##########################################################################################
 
+gha-tests: env
+	$(call PRINT_TITLE,"Unit testing for github actions")
+	@echo "• Running unit tests for github actions (excluding inference and gha_disabled)"
+	$(VENV_PYTEST) -n auto --exitfirst --quiet -m "(dry_runnable or not inference) and not (gha_disabled or pipelex_api)" || [ $$? = 5 ]
+
 test: env
 	$(call PRINT_TITLE,"Unit testing without prints but displaying logs via pytest for WARNING level and above")
 	@echo "• Running unit tests"
@@ -263,6 +253,11 @@ test-with-prints: env
 
 tp: test-with-prints
 	@echo "> done: tp = test-with-prints"
+
+tb: env
+	$(call PRINT_TITLE,"Unit testing a simple boot")
+	@echo "• Running unit test test_boot"
+	$(VENV_PYTEST) -s -m $(USUAL_PYTEST_MARKERS) -k "test_boot" $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,)));
 
 ############################################################################################
 ############################               Linting              ############################

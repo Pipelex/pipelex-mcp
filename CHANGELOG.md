@@ -1,5 +1,12 @@
 # Changelog
 
+## [v0.1.3] - 2025-11-14
+
+### Changed
+
+- Bumped pipelex to v0.15.4
+- Changed the `.cursor/mcp.json` file to use relative path to the pipelex-mcp project.
+
 ## [v0.1.2] - 2025-11-04
 
 ### Added
