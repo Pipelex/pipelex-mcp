@@ -50,10 +50,14 @@ excluded_dirs = [
 # default_directory_base_name = "pipeline"
 
 [pipelex.log_config]
-default_log_level = "OFF"
+default_log_level = "INFO"
+
+# Bind Pipelex logs and prints to stderr to avoid conflicting with MCP transport on stdout
+console_log_target = "stderr"
+console_print_target = "stderr"
 
 [pipelex.log_config.package_log_levels]
-pipelex = "OFF"
+pipelex = "INFO"
 
 [cogt]
 [cogt.model_deck_config]
