@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.1.5] - 2025-11-18
+
+### Feature
+
+- Added a tool to list available pipes.
+
 ## [v0.1.4] - 2025-11-18
 
 ### Changed
