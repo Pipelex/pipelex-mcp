@@ -1,5 +1,17 @@
 # Changelog
 
+## [v0.1.4] - 2025-11-18
+
+### Changed
+
+- Output of pipe builder can now be changed from the pipelex config: `builder_config`. Defaults to `pipeline_{number}/` based on the number of use of the pipe builder tool.
+- Bumped pipelex to `v0.15.7`
+
+### Added
+
+- Properly handle logs to stderr to avoid conflicting with MCP transport on stdout.
+- Added a pipeline to handle inputs of pipes.
+
 ## [v0.1.3] - 2025-11-14
 
 ### Changed
