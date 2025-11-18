@@ -11,14 +11,20 @@ from typing import Any
 import fastmcp.settings
 from fastmcp import Context, FastMCP
 from pipelex import log
-from pipelex.builder.bundle_spec import PipelexBundleSpec
+from pipelex.builder.builder_loop import BuilderLoop
 from pipelex.builder.runner_code import generate_input_memory_json_string
+from pipelex.config import get_config
 from pipelex.core.memory.working_memory_factory import WorkingMemoryFactory
 from pipelex.hub import get_library_manager
 from pipelex.language.plx_factory import PlxFactory
 from pipelex.pipelex import Pipelex
 from pipelex.pipeline.execute import execute_pipeline
 from pipelex.pipeline.validate_plx import validate_plx
+from pipelex.tools.misc.file_utils import (
+    ensure_directory_for_file_path,
+    get_incremental_directory_path,
+    save_text_to_path,
+)
 from typing_extensions import TypedDict
 
 # Disable the FastMCP CLI banner (prevents ASCII art on stdout)
@@ -60,15 +66,10 @@ async def pipe_builder(untouched_user_request: str, ctx: Context) -> PipeBuilder
     with _silence_stdout():
         await ctx.info("Starting pipeline build", extra={"brief_length": len(untouched_user_request)})
 
-        pipe_output = await execute_pipeline(
-            pipe_code="pipe_builder",
-            inputs={"brief": untouched_user_request},
-        )
+        builder_loop = BuilderLoop()
+        pipelex_bundle_spec = await builder_loop.build_and_fix(pipe_code="pipe_builder", inputs={"brief": untouched_user_request})
+        get_library_manager().remove_from_blueprint(blueprint=pipelex_bundle_spec.to_blueprint())
 
-        pipelex_bundle_spec = pipe_output.working_memory.get_stuff_as(
-            name="pipelex_bundle_spec",
-            content_type=PipelexBundleSpec,
-        )
         blueprint = pipelex_bundle_spec.to_blueprint()
         plx_content = PlxFactory.make_plx_content(blueprint=blueprint)
         (
@@ -84,10 +85,24 @@ async def pipe_builder(untouched_user_request: str, ctx: Context) -> PipeBuilder
         inputs_json = generate_input_memory_json_string(main_pipe.inputs)
 
         # Save PLX content to file
-        results_dir = Path("results/mcp")
-        results_dir.mkdir(parents=True, exist_ok=True)
-        plx_file = results_dir / "plx_content.plx"
-        plx_file.write_text(plx_content, encoding="utf-8")
+        builder_config = get_config().pipelex.builder_config
+        bundle_file_name = f"{builder_config.default_bundle_file_name}.plx"
+
+        # Generate single file: {base_dir}/{name}_01.plx
+        dir_name = builder_config.default_directory_base_name
+        extras_output_dir = get_incremental_directory_path(
+            base_path=builder_config.default_output_dir,
+            base_name=dir_name,
+        )
+        plx_file_path = os.path.join(extras_output_dir, bundle_file_name)
+
+        # Save the PLX file
+        ensure_directory_for_file_path(file_path=plx_file_path)
+        plx_content = PlxFactory.make_plx_content(blueprint=pipelex_bundle_spec.to_blueprint())
+        save_text_to_path(text=plx_content, path=plx_file_path)
+
+        inputs_json_path = os.path.join(extras_output_dir, "inputs.json")
+        save_text_to_path(text=inputs_json, path=inputs_json_path)
 
         await ctx.info("Pipeline built successfully", extra={"plx_content_length": len(plx_content)})
         return {"plx_content": plx_content, "inputs_format_to_run": inputs_json}
