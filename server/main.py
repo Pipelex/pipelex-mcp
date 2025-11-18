@@ -5,8 +5,9 @@ import io
 import json
 import os
 from contextlib import redirect_stdout
+from itertools import groupby
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import fastmcp.settings
 from fastmcp import Context, FastMCP
@@ -15,7 +16,7 @@ from pipelex.builder.builder_loop import BuilderLoop
 from pipelex.builder.runner_code import generate_input_memory_json_string
 from pipelex.config import get_config
 from pipelex.core.memory.working_memory_factory import WorkingMemoryFactory
-from pipelex.hub import get_library_manager
+from pipelex.hub import get_library_manager, get_pipe_library
 from pipelex.language.plx_factory import PlxFactory
 from pipelex.pipelex import Pipelex
 from pipelex.pipeline.execute import execute_pipeline
@@ -26,6 +27,9 @@ from pipelex.tools.misc.file_utils import (
     save_text_to_path,
 )
 from typing_extensions import TypedDict
+
+if TYPE_CHECKING:
+    from pipelex.core.bundles.pipelex_bundle_blueprint import PipelexBundleBlueprint
 
 # Disable the FastMCP CLI banner (prevents ASCII art on stdout)
 fastmcp.settings.show_cli_banner = False  # pyright: ignore[reportAttributeAccessIssue]
@@ -63,49 +67,55 @@ class PipeBuilderResponse(TypedDict):
 @mcp.tool(description="Build a Pipelex pipeline from a natural language request, do not modify it")
 async def pipe_builder(untouched_user_request: str, ctx: Context) -> PipeBuilderResponse:
     """Build a Pipelex pipeline from a natural language request."""
-    with _silence_stdout():
-        await ctx.info("Starting pipeline build", extra={"brief_length": len(untouched_user_request)})
+    blueprint: PipelexBundleBlueprint | None = None
+    try:
+        with _silence_stdout():
+            await ctx.info("Starting pipeline build", extra={"brief_length": len(untouched_user_request)})
 
-        builder_loop = BuilderLoop()
-        pipelex_bundle_spec = await builder_loop.build_and_fix(pipe_code="pipe_builder", inputs={"brief": untouched_user_request})
-        get_library_manager().remove_from_blueprint(blueprint=pipelex_bundle_spec.to_blueprint())
+            builder_loop = BuilderLoop()
+            pipelex_bundle_spec = await builder_loop.build_and_fix(pipe_code="pipe_builder", inputs={"brief": untouched_user_request})
+            get_library_manager().remove_from_blueprint(blueprint=pipelex_bundle_spec.to_blueprint())
 
-        blueprint = pipelex_bundle_spec.to_blueprint()
-        plx_content = PlxFactory.make_plx_content(blueprint=blueprint)
-        (
-            _,
-            pipes,
-        ) = await validate_plx(plx_content, remove_after_validation=True)
-        # in the pipes, get the one that has the code "blueprint.main_pipe".
-        main_pipe = next((pipe for pipe in pipes if pipe.code == blueprint.main_pipe), None)
-        if main_pipe is None:
-            msg = "Main pipe not found"
-            log.error(msg)
-            raise ValueError(msg)
-        inputs_json = generate_input_memory_json_string(main_pipe.inputs)
+            blueprint = pipelex_bundle_spec.to_blueprint()
+            plx_content = PlxFactory.make_plx_content(blueprint=blueprint)
+            (
+                _,
+                pipes,
+            ) = await validate_plx(plx_content, remove_after_validation=False)
+            # in the pipes, get the one that has the code "blueprint.main_pipe".
+            main_pipe = next((pipe for pipe in pipes if pipe.code == blueprint.main_pipe), None)
+            if main_pipe is None:
+                msg = "Main pipe not found"
+                log.error(msg)
+                raise ValueError(msg)
+            inputs_json = generate_input_memory_json_string(main_pipe.inputs)
 
-        # Save PLX content to file
-        builder_config = get_config().pipelex.builder_config
-        bundle_file_name = f"{builder_config.default_bundle_file_name}.plx"
+            # Save PLX content to file
+            builder_config = get_config().pipelex.builder_config
+            bundle_file_name = f"{builder_config.default_bundle_file_name}.plx"
 
-        # Generate single file: {base_dir}/{name}_01.plx
-        dir_name = builder_config.default_directory_base_name
-        extras_output_dir = get_incremental_directory_path(
-            base_path=builder_config.default_output_dir,
-            base_name=dir_name,
-        )
-        plx_file_path = os.path.join(extras_output_dir, bundle_file_name)
+            # Generate single file: {base_dir}/{name}_01.plx
+            dir_name = builder_config.default_directory_base_name
+            extras_output_dir = get_incremental_directory_path(
+                base_path=builder_config.default_output_dir,
+                base_name=dir_name,
+            )
+            plx_file_path = os.path.join(extras_output_dir, bundle_file_name)
 
-        # Save the PLX file
-        ensure_directory_for_file_path(file_path=plx_file_path)
-        plx_content = PlxFactory.make_plx_content(blueprint=pipelex_bundle_spec.to_blueprint())
-        save_text_to_path(text=plx_content, path=plx_file_path)
+            # Save the PLX file
+            ensure_directory_for_file_path(file_path=plx_file_path)
+            plx_content = PlxFactory.make_plx_content(blueprint=pipelex_bundle_spec.to_blueprint())
+            save_text_to_path(text=plx_content, path=plx_file_path)
 
-        inputs_json_path = os.path.join(extras_output_dir, "inputs.json")
-        save_text_to_path(text=inputs_json, path=inputs_json_path)
+            inputs_json_path = os.path.join(extras_output_dir, "inputs.json")
+            save_text_to_path(text=inputs_json, path=inputs_json_path)
 
-        await ctx.info("Pipeline built successfully", extra={"plx_content_length": len(plx_content)})
-        return {"plx_content": plx_content, "inputs_format_to_run": inputs_json}
+            await ctx.info("Pipeline built successfully", extra={"plx_content_length": len(plx_content)})
+            return {"plx_content": plx_content, "inputs_format_to_run": inputs_json}
+    except Exception:
+        if blueprint is not None:
+            get_library_manager().remove_from_blueprint(blueprint=blueprint)
+        raise
 
 
 @mcp.tool(description="Run a Pipelex pipeline (optionally with PLX content)")
@@ -189,6 +199,50 @@ async def pipe_runner(
 @mcp.tool(description="Simple health check")
 async def health() -> dict[str, str]:
     return {"status": "ok", "server": "pipelex"}
+
+
+@mcp.tool(description="List all available pipes in the Pipelex library")
+async def list_available_pipes() -> dict[str, Any]:
+    """List all available pipes in the Pipelex library.
+
+    Returns:
+        A formatted string listing all available pipes with their descriptions.
+    """
+    pipe_library = get_pipe_library()
+
+    def _format_concept_code(concept_code: str | None, current_domain: str) -> str:
+        """Format concept code by removing domain prefix if it matches current domain."""
+        if not concept_code:
+            return ""
+        parts = concept_code.split(".")
+        if len(parts) == 2 and parts[0] == current_domain:
+            return parts[1]
+        return concept_code
+
+    pipes = pipe_library.get_pipes()
+
+    # Sort pipes by domain and code
+    ordered_items = sorted(pipes, key=lambda pipe: (pipe.domain or "", pipe.code or ""))
+
+    # Create dictionary for return value
+    pipes_dict: dict[str, dict[str, dict[str, str]]] = {}
+
+    # Group by domain and create separate tables
+    for domain, domain_pipes in groupby(ordered_items, key=lambda pipe: pipe.domain):
+        if domain not in ["builder", "pipe_design", "concept", "inputs_handler"]:
+            pipes_dict[domain] = {}
+
+            for pipe in domain_pipes:
+                inputs = pipe.inputs
+                formatted_inputs = [f"{name}: {_format_concept_code(requirement.concept.code, domain)}" for name, requirement in inputs.items]
+
+                pipes_dict[domain][pipe.code] = {
+                    "description": pipe.description or "",
+                    "inputs": ", ".join(formatted_inputs),
+                    "output": _format_concept_code(pipe.output.code, domain),
+                }
+
+    return pipes_dict
 
 
 # ------------------------------------------------------------
