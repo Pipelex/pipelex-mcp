@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Output of pipe builder can now be changed from the pipelex config: `builder_config`. Defaults to `pipeline_{number}/` based on the number of use of the pipe builder tool.
+
 ## [v0.1.3] - 2025-11-14
 
 ### Changed
