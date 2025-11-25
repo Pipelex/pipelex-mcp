@@ -172,13 +172,13 @@ async def pipe_runner(
         if plx_content:
             validate_bundle_result = await validate_bundle(plx_content=plx_content)
             pipe_output = await execute_pipeline(
-                library_path=str(Path.cwd()),
+                library_dirs=[str(Path.cwd())],
                 pipe_code=validate_bundle_result.blueprints[0].main_pipe or specific_pipe_code_if_plx_content_has_no_main_pipe,
                 inputs=working_memory,
             )
         else:
             pipe_output = await execute_pipeline(
-                library_path=str(Path.cwd()),
+                library_dirs=[str(Path.cwd())],
                 pipe_code=specific_pipe_code_if_plx_content_has_no_main_pipe,
                 inputs=working_memory,
             )
