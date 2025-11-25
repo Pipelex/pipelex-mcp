@@ -118,6 +118,7 @@ async def pipe_runner(
     plx_content: str, specific_pipe_code_if_plx_content_has_no_main_pipe: str | None, inputs_json: dict[str, Any] | str | None, ctx: Context
 ) -> dict[str, Any] | None:
     """Run a Pipelex pipeline with optional PLX content.
+    NEVER RECREATE THE PLX FILE. Do not save it, its already handled.
 
     Args:
         plx_content: The Pipelex PLX code defining the pipeline(s) and concepts.
@@ -170,22 +171,14 @@ async def pipe_runner(
 
         if plx_content:
             validate_bundle_result = await validate_bundle(plx_content=plx_content)
-            library_manager = get_library_manager()
-            library_id, _ = library_manager.open_library()
-            set_current_library(library_id)
-            library_manager.load_libraries(library_id=library_id, library_dirs=[Path.cwd()])
             pipe_output = await execute_pipeline(
-                library_id=library_id,
+                library_path=str(Path.cwd()),
                 pipe_code=validate_bundle_result.blueprints[0].main_pipe or specific_pipe_code_if_plx_content_has_no_main_pipe,
                 inputs=working_memory,
             )
         else:
-            library_manager = get_library_manager()
-            library_id, _ = library_manager.open_library()
-            set_current_library(library_id)
-            library_manager.load_libraries(library_id=library_id, library_dirs=[Path.cwd()])
             pipe_output = await execute_pipeline(
-                library_id=library_id,
+                library_path=str(Path.cwd()),
                 pipe_code=specific_pipe_code_if_plx_content_has_no_main_pipe,
                 inputs=working_memory,
             )
