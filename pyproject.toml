@@ -18,6 +18,8 @@ dependencies = [
     "fastmcp>=2.13.0.1",
     "pipelex[mistralai,anthropic,google,google-genai,bedrock,fal]==0.15.7",
 ]
+[tool.uv.sources]
+pipelex = { path = "../pipelex" , editable = true }
 
 [project.urls]
 Homepage = "https://pipelex.com"
