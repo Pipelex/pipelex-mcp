@@ -81,8 +81,9 @@ async def pipe_builder(untouched_user_request: str, ctx: Context) -> PipeBuilder
         pipelex_bundle_spec = await builder_loop.build_and_fix(builder_pipe="pipe_builder", inputs={"brief": untouched_user_request})
         blueprint = pipelex_bundle_spec.to_blueprint()
         library.teardown()
-
         teardown_current_library()
+
+        # TODO: This requires a better implementation from pipelex. Have 1 function that, just like validate_bundle, handles the library
         library_manager = get_library_manager()
         library_id, library = library_manager.open_library()
         set_current_library(library_id)
