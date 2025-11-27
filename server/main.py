@@ -11,16 +11,15 @@ from typing import TYPE_CHECKING, Any
 
 import fastmcp.settings
 from fastmcp import Context, FastMCP
-from pipelex import log
 from pipelex.builder.builder_loop import BuilderLoop
 from pipelex.builder.runner_code import generate_input_memory_json_string
 from pipelex.config import get_config
 from pipelex.core.memory.working_memory_factory import WorkingMemoryFactory
-from pipelex.hub import get_library_manager, get_pipe_library
+from pipelex.hub import get_library_manager, get_pipe_library, set_current_library, teardown_current_library
 from pipelex.language.plx_factory import PlxFactory
 from pipelex.pipelex import Pipelex
 from pipelex.pipeline.execute import execute_pipeline
-from pipelex.pipeline.validate_plx import validate_plx
+from pipelex.pipeline.validate_bundle import validate_bundle
 from pipelex.tools.misc.file_utils import (
     ensure_directory_for_file_path,
     get_incremental_directory_path,
@@ -66,56 +65,53 @@ class PipeBuilderResponse(TypedDict):
 # ------------------------------------------------------------
 @mcp.tool(description="Build a Pipelex pipeline from a natural language request, do not modify it")
 async def pipe_builder(untouched_user_request: str, ctx: Context) -> PipeBuilderResponse:
-    """Build a Pipelex pipeline from a natural language request."""
+    """Build a Pipelex pipeline from a natural language request.
+
+    DO NOT save the file at the end.
+    """
     blueprint: PipelexBundleBlueprint | None = None
-    try:
-        with _silence_stdout():
-            await ctx.info("Starting pipeline build", extra={"brief_length": len(untouched_user_request)})
+    with _silence_stdout():
+        await ctx.info("Starting pipeline build", extra={"brief_length": len(untouched_user_request)})
 
-            builder_loop = BuilderLoop()
-            pipelex_bundle_spec = await builder_loop.build_and_fix(pipe_code="pipe_builder", inputs={"brief": untouched_user_request})
-            get_library_manager().remove_from_blueprint(blueprint=pipelex_bundle_spec.to_blueprint())
+        library_manager = get_library_manager()
+        library_id, library = library_manager.open_library()
+        set_current_library(library_id)
 
-            blueprint = pipelex_bundle_spec.to_blueprint()
-            plx_content = PlxFactory.make_plx_content(blueprint=blueprint)
-            (
-                _,
-                pipes,
-            ) = await validate_plx(plx_content, remove_after_validation=False)
-            # in the pipes, get the one that has the code "blueprint.main_pipe".
-            main_pipe = next((pipe for pipe in pipes if pipe.code == blueprint.main_pipe), None)
-            if main_pipe is None:
-                msg = "Main pipe not found"
-                log.error(msg)
-                raise ValueError(msg)
-            inputs_json = generate_input_memory_json_string(main_pipe.inputs)
+        builder_loop = BuilderLoop()
+        pipelex_bundle_spec = await builder_loop.build_and_fix(builder_pipe="pipe_builder", inputs={"brief": untouched_user_request})
+        blueprint = pipelex_bundle_spec.to_blueprint()
+        library.teardown()
+        teardown_current_library()
 
-            # Save PLX content to file
-            builder_config = get_config().pipelex.builder_config
-            bundle_file_name = f"{builder_config.default_bundle_file_name}.plx"
+        # TODO: This requires a better implementation from pipelex. Have 1 function that, just like validate_bundle, handles the library
+        library_manager = get_library_manager()
+        library_id, library = library_manager.open_library()
+        set_current_library(library_id)
+        pipes = library_manager.load_from_blueprints(library_id=library_id, blueprints=[blueprint])
+        inputs_json = generate_input_memory_json_string(pipes[0].inputs)
 
-            # Generate single file: {base_dir}/{name}_01.plx
-            dir_name = builder_config.default_directory_base_name
-            extras_output_dir = get_incremental_directory_path(
-                base_path=builder_config.default_output_dir,
-                base_name=dir_name,
-            )
-            plx_file_path = os.path.join(extras_output_dir, bundle_file_name)
+        # Save PLX content to file
+        builder_config = get_config().pipelex.builder_config
+        bundle_file_name = f"{builder_config.default_bundle_file_name}.plx"
 
-            # Save the PLX file
-            ensure_directory_for_file_path(file_path=plx_file_path)
-            plx_content = PlxFactory.make_plx_content(blueprint=pipelex_bundle_spec.to_blueprint())
-            save_text_to_path(text=plx_content, path=plx_file_path)
+        # Generate single file: {base_dir}/{name}_01.plx
+        dir_name = builder_config.default_directory_base_name
+        extras_output_dir = get_incremental_directory_path(
+            base_path=builder_config.default_output_dir,
+            base_name=dir_name,
+        )
+        plx_file_path = os.path.join(extras_output_dir, bundle_file_name)
 
-            inputs_json_path = os.path.join(extras_output_dir, "inputs.json")
-            save_text_to_path(text=inputs_json, path=inputs_json_path)
+        # Save the PLX file
+        ensure_directory_for_file_path(file_path=plx_file_path)
+        plx_content = PlxFactory.make_plx_content(blueprint=blueprint)
+        save_text_to_path(text=plx_content, path=plx_file_path)
 
-            await ctx.info("Pipeline built successfully", extra={"plx_content_length": len(plx_content)})
-            return {"plx_content": plx_content, "inputs_format_to_run": inputs_json}
-    except Exception:
-        if blueprint is not None:
-            get_library_manager().remove_from_blueprint(blueprint=blueprint)
-        raise
+        inputs_json_path = os.path.join(extras_output_dir, "inputs.json")
+        save_text_to_path(text=inputs_json, path=inputs_json_path)
+
+        await ctx.info("Pipeline built successfully. DO NOT save the file.", extra={"plx_content_length": len(plx_content)})
+        return {"plx_content": plx_content, "inputs_format_to_run": inputs_json}
 
 
 @mcp.tool(description="Run a Pipelex pipeline (optionally with PLX content)")
@@ -123,6 +119,7 @@ async def pipe_runner(
     plx_content: str, specific_pipe_code_if_plx_content_has_no_main_pipe: str | None, inputs_json: dict[str, Any] | str | None, ctx: Context
 ) -> dict[str, Any] | None:
     """Run a Pipelex pipeline with optional PLX content.
+    NEVER RECREATE THE PLX FILE. Do not save it, its already handled.
 
     Args:
         plx_content: The Pipelex PLX code defining the pipeline(s) and concepts.
@@ -164,20 +161,25 @@ async def pipe_runner(
                 # inputs_json is already a dict
                 parsed_inputs = inputs_json
 
+        library_manager = get_library_manager()
+        library_id, library = library_manager.open_library()
+        set_current_library(library_id)
+        library_manager.load_libraries(library_id=library_id, library_dirs=[Path.cwd()])
+
         working_memory = WorkingMemoryFactory.make_from_pipeline_inputs(pipeline_inputs=parsed_inputs or {})
+        library.teardown()
+        teardown_current_library()
 
         if plx_content:
-            library_manager = get_library_manager()
-            blueprint, _ = await validate_plx(plx_content, remove_after_validation=False)
-            try:
-                pipe_output = await execute_pipeline(
-                    pipe_code=blueprint.main_pipe or specific_pipe_code_if_plx_content_has_no_main_pipe,
-                    inputs=working_memory,
-                )
-            finally:
-                library_manager.remove_from_blueprint(blueprint=blueprint)
+            validate_bundle_result = await validate_bundle(plx_content=plx_content)
+            pipe_output = await execute_pipeline(
+                library_dirs=[str(Path.cwd())],
+                pipe_code=validate_bundle_result.blueprints[0].main_pipe or specific_pipe_code_if_plx_content_has_no_main_pipe,
+                inputs=working_memory,
+            )
         else:
             pipe_output = await execute_pipeline(
+                library_dirs=[str(Path.cwd())],
                 pipe_code=specific_pipe_code_if_plx_content_has_no_main_pipe,
                 inputs=working_memory,
             )
@@ -208,6 +210,11 @@ async def list_available_pipes() -> dict[str, Any]:
     Returns:
         A formatted string listing all available pipes with their descriptions.
     """
+    library_manager = get_library_manager()
+    library_id, _ = library_manager.open_library()
+    set_current_library(library_id)
+    library_manager.load_libraries(library_id=library_id, library_dirs=[Path.cwd()])
+
     pipe_library = get_pipe_library()
 
     def _format_concept_code(concept_code: str | None, current_domain: str) -> str:
