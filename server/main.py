@@ -89,7 +89,7 @@ async def pipe_builder(untouched_user_request: str, ctx: Context) -> PipeBuilder
         set_current_library(library_id)
         pipes = library_manager.load_from_blueprints(library_id=library_id, blueprints=[blueprint])
         # TODO: The first pipe should be the main one. The blueprint does not necessarily have a main pipe. We need to refactor this.
-        inputs_json = generate_input_memory_json_string(pipes[0].inputs) 
+        inputs_json = generate_input_memory_json_string(pipes[0].inputs)
 
         # Save PLX content to file
         builder_config = get_config().pipelex.builder_config
