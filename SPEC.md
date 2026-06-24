@@ -105,3 +105,22 @@ The v0.1 output envelope is:
 v0.1 must not add hosted deployment behavior, bearer-token extraction, run execution, status polling, resources, logs, linting, formatting, package publishing, MCP-side filesystem reads, subprocess fallbacks, or a production validation UI.
 
 The prototype should call only the local API through `mthds-js`; it should not expose API internals such as `mthds_contents` or `mthds_sources` in the MCP schema.
+
+## UX Flows
+
+Validate MTHDS files:
+
+1. The user asks the assistant to validate one or more `.mthds` files.
+2. The assistant submits the file contents and optional provenance URIs to `mthds_validate`.
+3. The tool returns a stable validation envelope that the assistant can summarize and use to repair the files.
+4. The assistant may repeat the same flow after editing the submitted source content.
+
+## Tools and Views
+
+**Tool: `mthds_validate`**
+
+- **Input**: `{ files, bundle_uri?, allow_signatures?, include_graph?, render_markdown? }`
+- **Output**: `{ status, summary, data?, errors? }`
+- **Behavior**: Validates request provenance, calls `mthds-js` against `MTHDS_API_URL` or `http://localhost:8081`, and maps produced validation verdicts into the v0.1 envelope.
+- **Annotations**: Read-only, non-destructive, no open-world publishing.
+- **View**: None for v0.1.
