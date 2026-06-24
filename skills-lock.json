@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "skybridge": {
+      "source": "alpic-ai/skybridge",
+      "sourceType": "github",
+      "skillPath": "skills/skybridge/SKILL.md",
+      "computedHash": "be6aaae5b5aaed6ec64440e3c53faa34d64705fe7450e63283fbd6fba06da3a1"
+    }
+  }
+}
