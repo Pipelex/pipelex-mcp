@@ -64,6 +64,14 @@ npm install
 Start the local API separately, then run the Skybridge dev server:
 
 ```bash
+cd ../pipelex-api
+make run
+```
+
+The local API should answer at `http://localhost:8081`. In another terminal,
+start the MCP server:
+
+```bash
 MTHDS_API_URL=http://localhost:8081 npm run dev
 ```
 
