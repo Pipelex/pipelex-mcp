@@ -129,7 +129,7 @@ export async function validateMthds(
 
     return validationResult(report, input.include_graph !== false);
   } catch (err) {
-    return errorResult("Validation did not produce a verdict.", [classifyError(err)]);
+    return errorResult("Validation could not start: the MTHDS API is unreachable.", [classifyError(err)]);
   }
 }
 
