@@ -94,23 +94,20 @@ describe("validationEnvelope", () => {
 });
 
 describe("validateRequest", () => {
-  it("rejects empty files, empty URIs, and bundle_uri mismatches", () => {
-    const errors = validateRequest(
-      [
-        { content: "domain = \"demo\"", uri: "" },
-        { content: "domain = \"demo\"", uri: "bundle.mthds" },
-      ],
-      "missing.mthds",
-    );
+  it("rejects empty file URIs", () => {
+    const errors = validateRequest([
+      { content: "domain = \"demo\"", uri: "" },
+      { content: "main_pipe = \"main\"", uri: "bundle.mthds" },
+    ]);
 
     assert.deepEqual(
       errors.map((error) => error.location),
-      ["files[0].uri", "bundle_uri"],
+      ["files[0].uri"],
     );
   });
 
   it("rejects an empty file list", () => {
-    const errors = validateRequest([], undefined);
+    const errors = validateRequest([]);
 
     assert.equal(errors.length, 1);
     assert.equal(errors[0]?.class, "input_domain");
@@ -202,10 +199,7 @@ describe("validateMthds", () => {
           { content: "domain = \"demo\"", uri: "bundle.mthds" },
           { content: "main_pipe = \"main\"", uri: null },
         ],
-        bundle_uri: "bundle.mthds",
-        allow_signatures: true,
         include_graph: false,
-        render_markdown: true,
       },
       {
         apiUrl: "http://localhost:8081",

@@ -16,10 +16,7 @@ Input:
 ```ts
 {
   files: Array<{ content: string; uri?: string | null }>;
-  bundle_uri?: string | null;
-  allow_signatures?: boolean;
   include_graph?: boolean;
-  render_markdown?: boolean;
 }
 ```
 

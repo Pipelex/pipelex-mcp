@@ -27,27 +27,10 @@ export const mthdsValidateInputSchema = {
       }),
     )
     .describe("One or more submitted MTHDS files to validate."),
-  bundle_uri: z
-    .string()
-    .nullable()
-    .optional()
-    .describe(
-      "Optional provenance URI for the intended bundle entry. Must match a submitted file uri.",
-    ),
-  allow_signatures: z
-    .boolean()
-    .optional()
-    .describe(
-      "Whether unresolved pipe signatures are accepted as pending instead of invalid.",
-    ),
   include_graph: z
     .boolean()
     .optional()
     .describe("Whether to include graph_spec in successful responses. Defaults to true."),
-  render_markdown: z
-    .boolean()
-    .optional()
-    .describe("Whether to request rendered markdown from the local API."),
 };
 
 const errorClassSchema = z.enum(["input_domain", "config", "runtime"]);
@@ -78,10 +61,7 @@ export const mthdsValidateOutputSchema = {
 
 export interface MthdsValidateInput {
   files: Array<{ content: string; uri?: string | null }>;
-  bundle_uri?: string | null;
-  allow_signatures?: boolean;
   include_graph?: boolean;
-  render_markdown?: boolean;
 }
 
 type ErrorClass = z.infer<typeof errorClassSchema>;
@@ -139,7 +119,7 @@ export async function validateMthds(
   input: MthdsValidateInput,
   context: ValidationContext = buildValidationContext(),
 ): Promise<ValidationEnvelope> {
-  const inputErrors = validateRequest(input.files, input.bundle_uri);
+  const inputErrors = validateRequest(input.files);
   if (inputErrors.length > 0) {
     return errorEnvelope(
       "Validation was not run: request input is invalid.",
@@ -155,8 +135,8 @@ export async function validateMthds(
         apiToken: context.apiKey,
       });
     const report = await client.validateFiles(toMthdsFiles(input.files), {
-      allowSignatures: input.allow_signatures ?? false,
-      render: input.render_markdown ? ["markdown"] : undefined,
+      allowSignatures: true,
+      render: ["markdown"],
     });
 
     return validationEnvelope(report, input.include_graph !== false);
@@ -177,7 +157,6 @@ export function toolResult(envelope: ValidationEnvelope) {
 
 export function validateRequest(
   files: Array<{ content: string; uri?: string | null }>,
-  bundleUri?: string | null,
 ): ToolError[] {
   const errors: ToolError[] = [];
 
@@ -198,31 +177,6 @@ export function validateRequest(
         message: "File uri must not be empty when supplied.",
         hint: "Omit uri for inline content or provide a stable path or URI.",
       });
-    }
-  }
-
-  if (bundleUri !== undefined && bundleUri !== null) {
-    if (bundleUri.trim() === "") {
-      errors.push({
-        class: "input_domain",
-        location: "bundle_uri",
-        message: "bundle_uri must not be empty when supplied.",
-        hint: "Omit bundle_uri or set it to one submitted file uri.",
-      });
-    } else {
-      const submittedUris = new Set(
-        files
-          .map((file) => file.uri)
-          .filter((uri): uri is string => uri !== undefined && uri !== null),
-      );
-      if (!submittedUris.has(bundleUri)) {
-        errors.push({
-          class: "input_domain",
-          location: "bundle_uri",
-          message: "bundle_uri must match one submitted file uri.",
-          hint: "bundle_uri is provenance-only in v0.1 and does not select an entry file.",
-        });
-      }
     }
   }
 

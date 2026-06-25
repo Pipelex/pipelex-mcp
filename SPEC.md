@@ -63,18 +63,13 @@ The public MCP input shape is:
     content: string;
     uri?: string | null;
   }>;
-  bundle_uri?: string | null;
-  allow_signatures?: boolean;
   include_graph?: boolean;
-  render_markdown?: boolean;
 }
 ```
 
-`bundle_uri` is provenance only in v0.1. If supplied, it must match one submitted file `uri`; the local `/v1/validate` endpoint does not select an entry file.
-
 `include_graph` defaults to true. When false, omit `graph_spec` from returned `data`.
 
-`render_markdown` maps to API render option `["markdown"]`.
+The capability always permits pending signatures and always requests rendered markdown from the local API.
 
 The v0.1 output envelope is:
 
@@ -119,8 +114,8 @@ Validate MTHDS files:
 
 **Tool: `mthds_validate`**
 
-- **Input**: `{ files, bundle_uri?, allow_signatures?, include_graph?, render_markdown? }`
+- **Input**: `{ files, include_graph? }`
 - **Output**: `{ status, summary, data?, errors? }`
-- **Behavior**: Validates request provenance, calls `mthds-js` against `MTHDS_API_URL` or `http://localhost:8081`, and maps produced validation verdicts into the v0.1 envelope.
+- **Behavior**: Validates request shape, calls `mthds-js` against `MTHDS_API_URL` or `http://localhost:8081` with signatures and markdown enabled, and maps produced validation verdicts into the v0.1 envelope.
 - **Annotations**: Read-only, non-destructive, no open-world publishing.
 - **View**: None for v0.1.
