@@ -94,7 +94,9 @@ The MCP `content` text contains the human-readable summary. The summary is not d
 
 ## Non-Goals
 
-v0.1 must not add hosted deployment behavior, bearer-token extraction, run execution, status polling, resources, logs, linting, formatting, package publishing, MCP-side filesystem reads, subprocess fallbacks, or a production validation UI.
+v0.1 must not add hosted deployment behavior, bearer-token extraction, run execution, status polling, resources, logs, package publishing, MCP-side filesystem reads, subprocess fallbacks, or a production validation UI.
+
+Repository quality gates are in scope for v0.1 development: ESLint, Prettier, TypeScript type checking, Vitest unit tests, and a combined `npm run check` command should remain available locally.
 
 The prototype should call only the local API through `mthds-js`; it should not expose API internals such as `mthds_contents` or `mthds_sources` in the MCP schema.
 

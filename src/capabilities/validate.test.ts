@@ -1,11 +1,6 @@
-import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, expect, it } from "vitest";
 
-import {
-  ApiResponseError,
-  ApiUnreachableError,
-  PipelineRequestError,
-} from "mthds";
+import { ApiResponseError, ApiUnreachableError, PipelineRequestError } from "mthds";
 import type {
   MthdsFile,
   PipelexInvalidReport,
@@ -13,12 +8,7 @@ import type {
   ValidateFilesOptions,
 } from "mthds";
 
-import {
-  classifyError,
-  validateMthds,
-  validateRequest,
-  validationResult,
-} from "./validate.js";
+import { classifyError, validateMthds, validateRequest, validationResult } from "./validate.js";
 
 const validReport: PipelexValidationReport = {
   is_valid: true,
@@ -57,42 +47,39 @@ describe("validationResult", () => {
   it("projects runnable valid reports and includes graph by default", () => {
     const result = validationResult(validReport, true);
 
-    assert.equal(result.structuredContent.status, "ok");
-    assert.equal(result.summary, "# Valid");
-    assert.deepEqual(result.structuredContent.graph_spec, validReport.graph_spec);
-    assert.ok(!Object.hasOwn(result.structuredContent, "pipe_io_contracts"));
-    assert.ok(!Object.hasOwn(result.structuredContent, "rendered_markdown"));
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.summary).toBe("# Valid");
+    expect(result.structuredContent.graph_spec).toEqual(validReport.graph_spec);
+    expect(result.structuredContent).not.toHaveProperty("pipe_io_contracts");
+    expect(result.structuredContent).not.toHaveProperty("rendered_markdown");
   });
 
   it("omits graph when requested", () => {
     const result = validationResult(validReport, false);
 
-    assert.equal(result.structuredContent.status, "ok");
-    assert.ok(!Object.hasOwn(result.structuredContent, "graph_spec"));
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent).not.toHaveProperty("graph_spec");
   });
 
   it("projects pending signatures as valid but not runnable", () => {
     const result = validationResult(pendingReport, true);
 
-    assert.equal(result.structuredContent.status, "ok");
-    assert.equal(result.structuredContent.is_valid, true);
-    assert.equal(result.structuredContent.is_runnable, false);
-    assert.deepEqual(result.structuredContent.pending_signatures, ["demo.todo"]);
-    assert.equal(result.summary, "# Valid");
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.is_valid).toBe(true);
+    expect(result.structuredContent.is_runnable).toBe(false);
+    expect(result.structuredContent.pending_signatures).toEqual(["demo.todo"]);
+    expect(result.summary).toBe("# Valid");
   });
 
   it("projects invalid produced verdicts as ok with validation errors", () => {
     const result = validationResult(invalidReport, true);
 
-    assert.equal(result.structuredContent.status, "ok");
-    assert.equal(result.structuredContent.is_valid, false);
-    assert.equal(result.structuredContent.is_runnable, false);
-    assert.deepEqual(
-      result.structuredContent.validation_errors,
-      invalidReport.validation_errors,
-    );
-    assert.ok(!Object.hasOwn(result.structuredContent, "rendered_markdown"));
-    assert.equal(result.summary, "# Invalid");
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.is_valid).toBe(false);
+    expect(result.structuredContent.is_runnable).toBe(false);
+    expect(result.structuredContent.validation_errors).toEqual(invalidReport.validation_errors);
+    expect(result.structuredContent).not.toHaveProperty("rendered_markdown");
+    expect(result.summary).toBe("# Invalid");
   });
 
   it("throws when rendered markdown is missing", () => {
@@ -101,32 +88,26 @@ describe("validationResult", () => {
       rendered_markdown: null,
     } as unknown as PipelexValidationReport;
 
-    assert.throws(
-      () => validationResult(report, true),
-      /did not include rendered markdown/,
-    );
+    expect(() => validationResult(report, true)).toThrow(/did not include rendered markdown/);
   });
 });
 
 describe("validateRequest", () => {
   it("rejects empty file URIs", () => {
     const errors = validateRequest([
-      { content: "domain = \"demo\"", uri: "" },
-      { content: "main_pipe = \"main\"", uri: "bundle.mthds" },
+      { content: 'domain = "demo"', uri: "" },
+      { content: 'main_pipe = "main"', uri: "bundle.mthds" },
     ]);
 
-    assert.deepEqual(
-      errors.map((error) => error.location),
-      ["files[0].uri"],
-    );
+    expect(errors.map((error) => error.location)).toEqual(["files[0].uri"]);
   });
 
   it("rejects an empty file list", () => {
     const errors = validateRequest([]);
 
-    assert.equal(errors.length, 1);
-    assert.equal(errors[0]?.class, "input_domain");
-    assert.equal(errors[0]?.location, "files");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.class).toBe("input_domain");
+    expect(errors[0]?.location).toBe("files");
   });
 });
 
@@ -136,8 +117,8 @@ describe("classifyError", () => {
       new ApiUnreachableError("connection refused", "http://localhost:8081", "ECONNREFUSED"),
     );
 
-    assert.equal(error.class, "config");
-    assert.equal(error.location, "MTHDS_API_URL");
+    expect(error.class).toBe("config");
+    expect(error.location).toBe("MTHDS_API_URL");
   });
 
   it("classifies API request-shape responses as input_domain", () => {
@@ -154,9 +135,9 @@ describe("classifyError", () => {
       ),
     );
 
-    assert.equal(error.class, "input_domain");
-    assert.equal(error.location, "files");
-    assert.equal(error.message, "Bad request body");
+    expect(error.class).toBe("input_domain");
+    expect(error.location).toBe("files");
+    expect(error.message).toBe("Bad request body");
   });
 
   it("classifies auth responses as config", () => {
@@ -173,8 +154,8 @@ describe("classifyError", () => {
       ),
     );
 
-    assert.equal(error.class, "config");
-    assert.equal(error.location, "MTHDS_API_KEY");
+    expect(error.class).toBe("config");
+    expect(error.location).toBe("MTHDS_API_KEY");
   });
 
   it("classifies API server failures as runtime", () => {
@@ -191,15 +172,15 @@ describe("classifyError", () => {
       ),
     );
 
-    assert.equal(error.class, "runtime");
-    assert.equal(error.message, "Server fault");
+    expect(error.class).toBe("runtime");
+    expect(error.message).toBe("Server fault");
   });
 
   it("classifies client request construction failures as config", () => {
     const error = classifyError(new PipelineRequestError("Invalid API base URL"));
 
-    assert.equal(error.class, "config");
-    assert.equal(error.location, "MTHDS_API_URL");
+    expect(error.class).toBe("config");
+    expect(error.location).toBe("MTHDS_API_URL");
   });
 });
 
@@ -211,8 +192,8 @@ describe("validateMthds", () => {
     const result = await validateMthds(
       {
         files: [
-          { content: "domain = \"demo\"", uri: "bundle.mthds" },
-          { content: "main_pipe = \"main\"", uri: null },
+          { content: 'domain = "demo"', uri: "bundle.mthds" },
+          { content: 'main_pipe = "main"', uri: null },
         ],
         include_graph: false,
       },
@@ -228,16 +209,16 @@ describe("validateMthds", () => {
       },
     );
 
-    assert.deepEqual(capturedFiles, [
-      { content: "domain = \"demo\"", uri: "bundle.mthds" },
-      { content: "main_pipe = \"main\"" },
+    expect(capturedFiles).toEqual([
+      { content: 'domain = "demo"', uri: "bundle.mthds" },
+      { content: 'main_pipe = "main"' },
     ]);
-    assert.deepEqual(capturedOptions, {
+    expect(capturedOptions).toEqual({
       allowSignatures: true,
       render: ["markdown"],
     });
-    assert.equal(result.structuredContent.status, "ok");
-    assert.ok(!Object.hasOwn(result.structuredContent, "graph_spec"));
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent).not.toHaveProperty("graph_spec");
   });
 
   it("does not call the client when request validation fails", async () => {
@@ -258,9 +239,9 @@ describe("validateMthds", () => {
       },
     );
 
-    assert.equal(called, false);
-    assert.equal(result.structuredContent.status, "error");
-    assert.equal(result.structuredContent.errors?.[0]?.location, "files");
-    assert.equal(result.summary, "Validation was not run: request input is invalid.");
+    expect(called).toBe(false);
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("files");
+    expect(result.summary).toBe("Validation was not run: request input is invalid.");
   });
 });

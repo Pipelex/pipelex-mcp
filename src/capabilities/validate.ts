@@ -21,11 +21,7 @@ export const mthdsValidateInputSchema = {
     .array(
       z.object({
         content: z.string().describe("The full .mthds file contents."),
-        uri: z
-          .string()
-          .nullable()
-          .optional()
-          .describe("Optional provenance URI for diagnostics."),
+        uri: z.string().nullable().optional().describe("Optional provenance URI for diagnostics."),
       }),
     )
     .describe("One or more submitted MTHDS files to validate."),
@@ -103,9 +99,7 @@ interface ValidationEnv {
   MTHDS_API_KEY?: string;
 }
 
-export function buildValidationContext(
-  env: ValidationEnv = process.env,
-): ValidationContext {
+export function buildValidationContext(env: ValidationEnv = process.env): ValidationContext {
   return {
     apiUrl: env.MTHDS_API_URL ?? DEFAULT_LOCAL_API_URL,
     apiKey: env.MTHDS_API_KEY || undefined,
@@ -118,10 +112,7 @@ export async function validateMthds(
 ): Promise<ValidationResult> {
   const inputErrors = validateRequest(input.files);
   if (inputErrors.length > 0) {
-    return errorResult(
-      "Validation was not run: request input is invalid.",
-      inputErrors,
-    );
+    return errorResult("Validation was not run: request input is invalid.", inputErrors);
   }
 
   try {
@@ -138,16 +129,11 @@ export async function validateMthds(
 
     return validationResult(report, input.include_graph !== false);
   } catch (err) {
-    return errorResult("Validation did not produce a verdict.", [
-      classifyError(err),
-    ]);
+    return errorResult("Validation did not produce a verdict.", [classifyError(err)]);
   }
 }
 
-export function toolResult(
-  structuredContent: ValidationStructuredContent,
-  summary: string,
-) {
+export function toolResult(structuredContent: ValidationStructuredContent, summary: string) {
   return {
     structuredContent,
     content: [{ type: "text" as const, text: summary }],
@@ -199,8 +185,7 @@ export function validationResult(
     if (includeGraph) {
       structuredContent.graph_spec = validReport.graph_spec;
     }
-  }
-  else {
+  } else {
     const invalidReport = report as PipelexInvalidReport;
     structuredContent.validation_errors = invalidReport.validation_errors;
   }
@@ -262,9 +247,7 @@ export function classifyError(err: unknown): ToolError {
   };
 }
 
-function toMthdsFiles(
-  files: Array<{ content: string; uri?: string | null }>,
-): MthdsFile[] {
+function toMthdsFiles(files: Array<{ content: string; uri?: string | null }>): MthdsFile[] {
   return files.map((file) => {
     if (file.uri === undefined || file.uri === null) {
       return { content: file.content };
@@ -273,10 +256,7 @@ function toMthdsFiles(
   });
 }
 
-function errorResult(
-  summary: string,
-  errors: ToolError[],
-): ValidationResult {
+function errorResult(summary: string, errors: ToolError[]): ValidationResult {
   return {
     structuredContent: {
       status: "error",
@@ -289,9 +269,7 @@ function errorResult(
   };
 }
 
-function classifyApiResponseError(
-  err: ApiResponseError,
-): ToolError {
+function classifyApiResponseError(err: ApiResponseError): ToolError {
   const message = err.serverMessage ?? err.message;
 
   if (err.status === 400 || err.status === 422) {
@@ -335,4 +313,3 @@ function classifyApiResponseError(
     hint: `The MTHDS API returned HTTP ${err.status}.`,
   };
 }
-

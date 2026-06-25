@@ -16,8 +16,7 @@ const server = new McpServer(
 ).registerTool(
   {
     name: "mthds_validate",
-    description:
-      "Validate submitted MTHDS file contents with the local Pipelex API.",
+    description: "Validate submitted MTHDS file contents with the local Pipelex API.",
     inputSchema: mthdsValidateInputSchema,
     outputSchema: mthdsValidateOutputSchema,
     annotations: {
@@ -32,10 +31,7 @@ const server = new McpServer(
     },
   },
   async (input) => {
-    const { structuredContent, summary } = await validateMthds(
-      input,
-      buildValidationContext(),
-    );
+    const { structuredContent, summary } = await validateMthds(input, buildValidationContext());
     return toolResult(structuredContent, summary);
   },
 );
