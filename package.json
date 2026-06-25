@@ -14,7 +14,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
-    "check": "npm run lint && npm run format:check && npm run typecheck && npm run build && npm run test",
+    "check": "npm run lint && npm run format:check && npm run typecheck && npm run build",
     "build": "skybridge build",
     "start": "skybridge start",
     "deploy": "alpic deploy"

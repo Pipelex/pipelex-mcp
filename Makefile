@@ -23,8 +23,8 @@ make test-coverage  - Run tests with coverage
 make t              - Shorthand -> test
 
 make build          - Build the Skybridge app
-make check          - Run lint, format check, typecheck, build, and tests
-make all            - Clean, check, and build
+make check          - Run lint, format check, typecheck, and build
+make all            - Clean, check, and test
 make clean          - Remove generated artifacts
 make c              - Shorthand -> check
 
@@ -64,7 +64,7 @@ check:
 build:
 	npm run build
 
-all: clean check build
+all: clean check test
 
 clean:
 	rm -rf dist coverage *.tsbuildinfo
