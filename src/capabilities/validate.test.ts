@@ -17,7 +17,7 @@ import {
   classifyError,
   validateMthds,
   validateRequest,
-  validationEnvelope,
+  validationResult,
 } from "./validate.js";
 
 const validReport: PipelexValidationReport = {
@@ -53,43 +53,58 @@ const invalidReport: PipelexInvalidReport = {
   rendered_markdown: "# Invalid",
 };
 
-describe("validationEnvelope", () => {
+describe("validationResult", () => {
   it("projects runnable valid reports and includes graph by default", () => {
-    const envelope = validationEnvelope(validReport, true);
+    const result = validationResult(validReport, true);
 
-    assert.equal(envelope.status, "ok");
-    assert.equal(envelope.summary, "Validation passed; the bundle is runnable.");
-    assert.deepEqual(envelope.data?.graph_spec, validReport.graph_spec);
-    assert.deepEqual(envelope.data?.pipe_io_contracts, validReport.pipe_io_contracts);
-    assert.equal(envelope.data?.rendered_markdown, "# Valid");
+    assert.equal(result.structuredContent.status, "ok");
+    assert.equal(result.summary, "# Valid");
+    assert.deepEqual(result.structuredContent.graph_spec, validReport.graph_spec);
+    assert.ok(!Object.hasOwn(result.structuredContent, "pipe_io_contracts"));
+    assert.ok(!Object.hasOwn(result.structuredContent, "rendered_markdown"));
   });
 
   it("omits graph when requested", () => {
-    const envelope = validationEnvelope(validReport, false);
+    const result = validationResult(validReport, false);
 
-    assert.equal(envelope.status, "ok");
-    assert.ok(!Object.hasOwn(envelope.data ?? {}, "graph_spec"));
+    assert.equal(result.structuredContent.status, "ok");
+    assert.ok(!Object.hasOwn(result.structuredContent, "graph_spec"));
   });
 
   it("projects pending signatures as valid but not runnable", () => {
-    const envelope = validationEnvelope(pendingReport, true);
+    const result = validationResult(pendingReport, true);
 
-    assert.equal(envelope.status, "ok");
-    assert.equal(envelope.data?.is_valid, true);
-    assert.equal(envelope.data?.is_runnable, false);
-    assert.deepEqual(envelope.data?.pending_signatures, ["demo.todo"]);
-    assert.match(envelope.summary, /1 pending signature/);
+    assert.equal(result.structuredContent.status, "ok");
+    assert.equal(result.structuredContent.is_valid, true);
+    assert.equal(result.structuredContent.is_runnable, false);
+    assert.deepEqual(result.structuredContent.pending_signatures, ["demo.todo"]);
+    assert.equal(result.summary, "# Valid");
   });
 
   it("projects invalid produced verdicts as ok with validation errors", () => {
-    const envelope = validationEnvelope(invalidReport, true);
+    const result = validationResult(invalidReport, true);
 
-    assert.equal(envelope.status, "ok");
-    assert.equal(envelope.data?.is_valid, false);
-    assert.equal(envelope.data?.is_runnable, false);
-    assert.deepEqual(envelope.data?.validation_errors, invalidReport.validation_errors);
-    assert.equal(envelope.data?.rendered_markdown, "# Invalid");
-    assert.match(envelope.summary, /found 1 error/);
+    assert.equal(result.structuredContent.status, "ok");
+    assert.equal(result.structuredContent.is_valid, false);
+    assert.equal(result.structuredContent.is_runnable, false);
+    assert.deepEqual(
+      result.structuredContent.validation_errors,
+      invalidReport.validation_errors,
+    );
+    assert.ok(!Object.hasOwn(result.structuredContent, "rendered_markdown"));
+    assert.equal(result.summary, "# Invalid");
+  });
+
+  it("throws when rendered markdown is missing", () => {
+    const report = {
+      ...validReport,
+      rendered_markdown: null,
+    } as unknown as PipelexValidationReport;
+
+    assert.throws(
+      () => validationResult(report, true),
+      /did not include rendered markdown/,
+    );
   });
 });
 
@@ -193,7 +208,7 @@ describe("validateMthds", () => {
     let capturedFiles: MthdsFile[] | undefined;
     let capturedOptions: ValidateFilesOptions | undefined;
 
-    const envelope = await validateMthds(
+    const result = await validateMthds(
       {
         files: [
           { content: "domain = \"demo\"", uri: "bundle.mthds" },
@@ -221,14 +236,14 @@ describe("validateMthds", () => {
       allowSignatures: true,
       render: ["markdown"],
     });
-    assert.equal(envelope.status, "ok");
-    assert.ok(!Object.hasOwn(envelope.data ?? {}, "graph_spec"));
+    assert.equal(result.structuredContent.status, "ok");
+    assert.ok(!Object.hasOwn(result.structuredContent, "graph_spec"));
   });
 
   it("does not call the client when request validation fails", async () => {
     let called = false;
 
-    const envelope = await validateMthds(
+    const result = await validateMthds(
       {
         files: [],
       },
@@ -244,7 +259,8 @@ describe("validateMthds", () => {
     );
 
     assert.equal(called, false);
-    assert.equal(envelope.status, "error");
-    assert.equal(envelope.errors?.[0]?.location, "files");
+    assert.equal(result.structuredContent.status, "error");
+    assert.equal(result.structuredContent.errors?.[0]?.location, "files");
+    assert.equal(result.summary, "Validation was not run: request input is invalid.");
   });
 });

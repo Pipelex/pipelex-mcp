@@ -5,7 +5,7 @@ server.
 
 v0.1 is intentionally tool-only. It registers one MCP tool, `mthds_validate`,
 which accepts submitted `.mthds` file contents and returns a stable validation
-envelope the assistant can use to explain and repair diagnostics.
+result the assistant can use to explain and repair diagnostics.
 
 ## Tool
 
@@ -25,16 +25,11 @@ Output:
 ```ts
 {
   status: "ok" | "error";
-  summary: string;
-  data?: {
-    is_valid: boolean;
-    is_runnable: boolean;
-    pending_signatures: string[];
-    validation_errors?: unknown[];
-    pipe_io_contracts?: Record<string, unknown>;
-    graph_spec?: unknown;
-    rendered_markdown?: string;
-  };
+  is_valid: boolean;
+  is_runnable: boolean;
+  pending_signatures: string[];
+  validation_errors?: unknown[];
+  graph_spec?: unknown;
   errors?: Array<{
     class: "input_domain" | "config" | "runtime";
     location?: string;
@@ -43,6 +38,9 @@ Output:
   }>;
 }
 ```
+
+The MCP `content` text contains the human-readable summary; it is not duplicated
+inside `structuredContent`.
 
 ## Local Development
 

@@ -9,8 +9,8 @@ Target users are Pipelex/MTHDS developers working with an AI assistant in a loca
 Core actions for v0.1:
 
 - Validate one or more submitted MTHDS files.
-- Return valid, invalid, pending-signature, and no-verdict failure states in a stable envelope.
-- Return optional graph and markdown artifacts when the local API provides them.
+- Return valid, invalid, pending-signature, and no-verdict failure states in a stable structured result.
+- Return optional graph data when requested and available.
 
 ## Why LLM?
 
@@ -18,7 +18,7 @@ Core actions for v0.1:
 
 **LLM adds**: The assistant can choose the files to submit, explain validation results, modify source content, and repeat validation until the bundle is usable.
 
-**What LLM lacks**: The assistant does not have Pipelex validation semantics, access to the local `pipelex-api`, or structured verdicts such as pending signatures, pipe IO contracts, validation errors, graph specs, or rendered markdown.
+**What LLM lacks**: The assistant does not have Pipelex validation semantics, access to the local `pipelex-api`, or structured verdicts such as pending signatures, validation errors, and graph specs.
 
 ## UI Overview
 
@@ -31,11 +31,11 @@ v0.1 is a tool-only MCP experience with no custom Skybridge view. The shared sur
 1. The assistant submits `files: [{ content, uri? }]` to `mthds_validate`.
 2. The MCP server validates request shape and provenance.
 3. The capability calls `mthds-js` and the local `pipelex-api`.
-4. The result is projected into a stable MCP envelope.
+4. The result is projected into stable MCP `structuredContent` plus a text summary.
 
 **End states**:
 
-- Valid runnable bundle: `is_valid=true`, `is_runnable=true`, pipe IO contracts, optional graph spec, optional rendered markdown.
+- Valid runnable bundle: `is_valid=true`, `is_runnable=true`, optional graph spec.
 - Valid pending-signature bundle: `is_valid=true`, `is_runnable=false`, populated pending signatures.
 - Invalid produced verdict: `status="ok"`, `is_valid=false`, populated validation errors.
 - No-verdict failure: `status="error"` with an error class of `input_domain`, `config`, or `runtime`.
@@ -67,25 +67,20 @@ The public MCP input shape is:
 }
 ```
 
-`include_graph` defaults to true. When false, omit `graph_spec` from returned `data`.
+`include_graph` defaults to true. When false, omit `graph_spec` from returned `structuredContent`.
 
 The capability always permits pending signatures and always requests rendered markdown from the local API.
 
-The v0.1 output envelope is:
+The v0.1 structured output is:
 
 ```ts
 {
   status: "ok" | "error";
-  summary: string;
-  data?: {
-    is_valid: boolean;
-    is_runnable: boolean;
-    pending_signatures: string[];
-    validation_errors?: unknown[];
-    pipe_io_contracts?: Record<string, unknown>;
-    graph_spec?: unknown;
-    rendered_markdown?: string;
-  };
+  is_valid: boolean;
+  is_runnable: boolean;
+  pending_signatures: string[];
+  validation_errors?: unknown[];
+  graph_spec?: unknown;
   errors?: Array<{
     class: "input_domain" | "config" | "runtime";
     location?: string;
@@ -94,6 +89,8 @@ The v0.1 output envelope is:
   }>;
 }
 ```
+
+The MCP `content` text contains the human-readable summary. The summary is not duplicated in structured output.
 
 ## Non-Goals
 
@@ -107,7 +104,7 @@ Validate MTHDS files:
 
 1. The user asks the assistant to validate one or more `.mthds` files.
 2. The assistant submits the file contents and optional provenance URIs to `mthds_validate`.
-3. The tool returns a stable validation envelope that the assistant can summarize and use to repair the files.
+3. The tool returns structured validation facts plus a text summary that the assistant can use to repair the files.
 4. The assistant may repeat the same flow after editing the submitted source content.
 
 ## Tools and Views
@@ -115,7 +112,7 @@ Validate MTHDS files:
 **Tool: `mthds_validate`**
 
 - **Input**: `{ files, include_graph? }`
-- **Output**: `{ status, summary, data?, errors? }`
-- **Behavior**: Validates request shape, calls `mthds-js` against `MTHDS_API_URL` or `http://localhost:8081` with signatures and markdown enabled, and maps produced validation verdicts into the v0.1 envelope.
+- **Output**: `{ status, is_valid, is_runnable, pending_signatures, validation_errors?, graph_spec?, errors? }` in `structuredContent`, plus a text summary in MCP `content`.
+- **Behavior**: Validates request shape, calls `mthds-js` against `MTHDS_API_URL` or `http://localhost:8081` with signatures and markdown enabled, and maps produced validation verdicts into flattened v0.1 structured content.
 - **Annotations**: Read-only, non-destructive, no open-world publishing.
 - **View**: None for v0.1.

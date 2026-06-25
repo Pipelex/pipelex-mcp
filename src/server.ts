@@ -32,8 +32,11 @@ const server = new McpServer(
     },
   },
   async (input) => {
-    const envelope = await validateMthds(input, buildValidationContext());
-    return toolResult(envelope);
+    const { structuredContent, summary } = await validateMthds(
+      input,
+      buildValidationContext(),
+    );
+    return toolResult(structuredContent, summary);
   },
 );
 

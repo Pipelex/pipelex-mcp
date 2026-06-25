@@ -8,6 +8,8 @@ import {
 import type {
   MthdsFile,
   PipelexValidationResult,
+  PipelexValidationReport,
+  PipelexInvalidReport,
   ValidateFilesOptions,
 } from "mthds";
 import { z } from "zod";
@@ -42,22 +44,17 @@ const validationErrorSchema = z.object({
   hint: z.string().optional(),
 });
 
-const validationDataSchema = z.object({
+const validationStructuredContentSchema = z.object({
+  status: z.enum(["ok", "error"]),
   is_valid: z.boolean(),
   is_runnable: z.boolean(),
   pending_signatures: z.array(z.string()),
   validation_errors: z.array(z.unknown()).optional(),
-  pipe_io_contracts: z.record(z.string(), z.unknown()).optional(),
   graph_spec: z.unknown().optional(),
-  rendered_markdown: z.string().optional(),
+  errors: z.array(validationErrorSchema).optional(),
 });
 
-export const mthdsValidateOutputSchema = {
-  status: z.enum(["ok", "error"]),
-  summary: z.string(),
-  data: validationDataSchema.optional(),
-  errors: z.array(validationErrorSchema).optional(),
-};
+export const mthdsValidateOutputSchema = validationStructuredContentSchema;
 
 export interface MthdsValidateInput {
   files: Array<{ content: string; uri?: string | null }>;
@@ -73,19 +70,19 @@ export interface ToolError {
   hint?: string;
 }
 
-export interface ValidationEnvelope {
+export interface ValidationStructuredContent {
   status: "ok" | "error";
-  summary: string;
-  data?: {
-    is_valid: boolean;
-    is_runnable: boolean;
-    pending_signatures: string[];
-    validation_errors?: unknown[];
-    pipe_io_contracts?: Record<string, unknown>;
-    graph_spec?: unknown;
-    rendered_markdown?: string;
-  };
+  is_valid: boolean;
+  is_runnable: boolean;
+  pending_signatures: string[];
+  validation_errors?: unknown[];
+  graph_spec?: unknown;
   errors?: ToolError[];
+}
+
+export interface ValidationResult {
+  structuredContent: ValidationStructuredContent;
+  summary: string;
 }
 
 interface ValidationClient {
@@ -118,10 +115,10 @@ export function buildValidationContext(
 export async function validateMthds(
   input: MthdsValidateInput,
   context: ValidationContext = buildValidationContext(),
-): Promise<ValidationEnvelope> {
+): Promise<ValidationResult> {
   const inputErrors = validateRequest(input.files);
   if (inputErrors.length > 0) {
-    return errorEnvelope(
+    return errorResult(
       "Validation was not run: request input is invalid.",
       inputErrors,
     );
@@ -139,19 +136,22 @@ export async function validateMthds(
       render: ["markdown"],
     });
 
-    return validationEnvelope(report, input.include_graph !== false);
+    return validationResult(report, input.include_graph !== false);
   } catch (err) {
-    return errorEnvelope("Validation did not produce a verdict.", [
+    return errorResult("Validation did not produce a verdict.", [
       classifyError(err),
     ]);
   }
 }
 
-export function toolResult(envelope: ValidationEnvelope) {
+export function toolResult(
+  structuredContent: ValidationStructuredContent,
+  summary: string,
+) {
   return {
-    structuredContent: envelope,
-    content: [{ type: "text" as const, text: envelope.summary }],
-    isError: envelope.status === "error",
+    structuredContent,
+    content: [{ type: "text" as const, text: summary }],
+    isError: structuredContent.status === "error",
   };
 }
 
@@ -183,61 +183,35 @@ export function validateRequest(
   return errors;
 }
 
-export function validationEnvelope(
+export function validationResult(
   report: PipelexValidationResult,
   includeGraph: boolean,
-): ValidationEnvelope {
-  if (!report.is_valid) {
-    const errorCount = report.validation_errors.length;
-    const data: NonNullable<ValidationEnvelope["data"]> = {
-      is_valid: false,
-      is_runnable: false,
-      pending_signatures: [],
-      validation_errors: report.validation_errors,
-    };
-    if (typeof report.rendered_markdown === "string") {
-      data.rendered_markdown = report.rendered_markdown;
-    }
-    return {
-      status: "ok",
-      summary: `Validation completed and found ${errorCount} ${plural(
-        errorCount,
-        "error",
-      )}.`,
-      data,
-    };
-  }
-
-  const pendingCount = report.pending_signatures.length;
-  const data: NonNullable<ValidationEnvelope["data"]> = {
-    is_valid: true,
+): ValidationResult {
+  const structuredContent: ValidationStructuredContent = {
+    status: "ok",
+    is_valid: report.is_valid,
     is_runnable: report.is_runnable,
     pending_signatures: report.pending_signatures,
-    pipe_io_contracts: report.pipe_io_contracts,
   };
 
-  if (includeGraph) {
-    data.graph_spec = report.graph_spec;
+  if (report.is_valid) {
+    const validReport = report as PipelexValidationReport;
+    if (includeGraph) {
+      structuredContent.graph_spec = validReport.graph_spec;
+    }
   }
-  if (typeof report.rendered_markdown === "string") {
-    data.rendered_markdown = report.rendered_markdown;
+  else {
+    const invalidReport = report as PipelexInvalidReport;
+    structuredContent.validation_errors = invalidReport.validation_errors;
   }
 
-  if (!report.is_runnable) {
-    return {
-      status: "ok",
-      summary: `Validation passed with ${pendingCount} pending ${plural(
-        pendingCount,
-        "signature",
-      )}; the bundle is not runnable yet.`,
-      data,
-    };
+  if (report.rendered_markdown == null) {
+    throw new Error("Validation report did not include rendered markdown.");
   }
 
   return {
-    status: "ok",
-    summary: "Validation passed; the bundle is runnable.",
-    data,
+    structuredContent,
+    summary: report.rendered_markdown,
   };
 }
 
@@ -299,14 +273,19 @@ function toMthdsFiles(
   });
 }
 
-function errorEnvelope(
+function errorResult(
   summary: string,
   errors: ToolError[],
-): ValidationEnvelope {
+): ValidationResult {
   return {
-    status: "error",
+    structuredContent: {
+      status: "error",
+      is_valid: false,
+      is_runnable: false,
+      pending_signatures: [],
+      errors,
+    },
     summary,
-    errors,
   };
 }
 
@@ -357,6 +336,3 @@ function classifyApiResponseError(
   };
 }
 
-function plural(count: number, noun: string): string {
-  return count === 1 ? noun : `${noun}s`;
-}
