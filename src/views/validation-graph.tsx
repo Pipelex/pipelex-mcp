@@ -1,10 +1,17 @@
 import "@/index.css";
 
 import { GraphViewer } from "@pipelex/mthds-ui/graph/react";
-import type { GraphSpec } from "@pipelex/mthds-ui";
+import { TOOLBAR_POSITION } from "@pipelex/mthds-ui";
+import type { GraphSpec, ToolbarPosition } from "@pipelex/mthds-ui";
 import { useDisplayMode, useLayout } from "skybridge/web";
 
 import { useToolInfo } from "../helpers.js";
+
+/**
+ * The graph toolbar's anchor is ours to control — mthds-ui defaults to
+ * `top-right`, but this view owns the choice. Pinned to `top-left` for now.
+ */
+const TOOLBAR_POSITION_FOR_VIEW: ToolbarPosition = TOOLBAR_POSITION.TOP_LEFT;
 
 /**
  * The Skybridge view for `mthds_validate`. A view is a tool with a UI, so this
@@ -73,6 +80,7 @@ export default function ValidationGraph() {
           initialShowControllers={true}
           theme={theme}
           showThemeToggle={false}
+          toolbarPosition={TOOLBAR_POSITION_FOR_VIEW}
         />
       </div>
     </div>

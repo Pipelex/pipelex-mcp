@@ -79,6 +79,7 @@ The v0.1 structured output is:
   is_valid: boolean;
   is_runnable: boolean;
   pending_signatures: string[];
+  available_view_specs: Array<"dry_run_graph">;
   validation_errors?: unknown[];
   errors?: Array<{
     class: "input_domain" | "config" | "runtime";
@@ -89,7 +90,7 @@ The v0.1 structured output is:
 }
 ```
 
-The graph (`graph_spec`) is not part of `structuredContent`; on a positive verdict it rides the tool result's view-only `_meta` channel (`_meta.graph_spec`) for the `validation-graph` view, so the model never pays its tokens.
+The graph (`graph_spec`) is not part of `structuredContent`; on a positive verdict it rides the tool result's view-only `_meta` channel (`_meta.graph_spec`) for the `validation-graph` view, so the model never pays its tokens. Because the model never sees `_meta`, `available_view_specs` is its signal that a view exists to surface: it lists the renderable view kinds for this result. The only kind for now is `"dry_run_graph"` — the method graph from the validation dry run, whose spec rides `_meta.graph_spec`. It contains `"dry_run_graph"` exactly when that spec was produced (valid verdict with `include_graph` not false), and is empty otherwise. On those same verdicts a short `## Views` note is appended to the `content` summary so agents that read the prose more reliably than the structured fields also learn the view exists.
 
 The MCP `content` text contains the human-readable summary. The summary is not duplicated in structured output.
 
@@ -115,7 +116,7 @@ Validate MTHDS files:
 **Tool: `mthds_validate`**
 
 - **Input**: `{ files, include_graph? }`
-- **Output**: `{ status, is_valid, is_runnable, pending_signatures, validation_errors?, errors? }` in `structuredContent`, plus a text summary in MCP `content`. On a positive verdict the graph rides the view-only `_meta` channel (`_meta.graph_spec`), never `structuredContent`.
+- **Output**: `{ status, is_valid, is_runnable, pending_signatures, available_view_specs, validation_errors?, errors? }` in `structuredContent`, plus a text summary in MCP `content`. On a positive verdict the graph rides the view-only `_meta` channel (`_meta.graph_spec`), never `structuredContent`; `available_view_specs` tells the model the `"dry_run_graph"` view is available to surface.
 - **Behavior**: Validates request shape, calls the Pipelex API against `MTHDS_API_URL` or `http://localhost:8081` with signatures and markdown enabled, and maps produced validation verdicts into flattened structured content.
 - **Annotations**: Read-only, non-destructive, no open-world publishing.
 - **View**: `validation-graph` — renders `_meta.graph_spec` with `@pipelex/mthds-ui`'s `GraphViewer` (inline preview plus a user-triggered fullscreen toggle); compact empty state when there is no graph.

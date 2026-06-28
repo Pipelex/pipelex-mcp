@@ -30,6 +30,7 @@ Output:
   is_valid: boolean;
   is_runnable: boolean;
   pending_signatures: string[];
+  available_view_specs: Array<"dry_run_graph">;
   validation_errors?: unknown[];
   errors?: Array<{
     class: "input_domain" | "config" | "runtime";
@@ -44,7 +45,12 @@ The MCP `content` text contains the human-readable summary; it is not duplicated
 inside `structuredContent`. The graph (`graph_spec`) is delivered on the tool
 result's view-only `_meta` channel (`_meta.graph_spec`) for the
 `validation-graph` view — never in `structuredContent`, so the model never pays
-its tokens.
+its tokens. Since the model never sees `_meta`, `available_view_specs` is how it
+learns a view exists to surface: it lists the renderable view kinds for this
+result. The only kind for now is `"dry_run_graph"` (the method graph from the
+validation dry run, whose spec rides `_meta.graph_spec`), present exactly when
+that spec was produced and empty otherwise. On those verdicts a short `## Views`
+note is also appended to the summary as a prose signal of the same.
 
 ## Local Development
 

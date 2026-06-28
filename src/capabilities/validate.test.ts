@@ -34,6 +34,11 @@ const pendingReport: PipelexValidationReport = {
   is_runnable: false,
 };
 
+// Appended to the API's rendered markdown whenever a dry-run graph view is
+// available. Kept in sync with `validationResult` in validate.ts.
+const VIEWS_NOTE =
+  "\n\n## Views\n\nThe validation result includes a graph view of the method (dry run).";
+
 const invalidReport: PipelexInvalidReport = {
   is_valid: false,
   is_runnable: false,
@@ -54,10 +59,13 @@ describe("validationResult", () => {
     const result = validationResult(validReport, true);
 
     expect(result.structuredContent.status).toBe("ok");
-    expect(result.summary).toBe("# Valid");
+    // The summary is the API markdown plus the appended Views note.
+    expect(result.summary).toBe("# Valid" + VIEWS_NOTE);
     // The graph rides the view-only `graphSpec` field (delivered on `_meta`),
     // never `structuredContent` — the model reads the lean verdict only.
     expect(result.graphSpec).toEqual(validReport.graph_spec);
+    // ...but the model still learns the graph view is available via this list.
+    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
     expect(result.structuredContent).not.toHaveProperty("pipe_io_contracts");
     expect(result.structuredContent).not.toHaveProperty("rendered_markdown");
@@ -68,6 +76,8 @@ describe("validationResult", () => {
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.graphSpec).toBeUndefined();
+    // No graph produced → no view advertised.
+    expect(result.structuredContent.available_view_specs).toEqual([]);
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
   });
 
@@ -78,7 +88,9 @@ describe("validationResult", () => {
     expect(result.structuredContent.is_valid).toBe(true);
     expect(result.structuredContent.is_runnable).toBe(false);
     expect(result.structuredContent.pending_signatures).toEqual(["demo.todo"]);
-    expect(result.summary).toBe("# Valid");
+    // A pending-signature bundle is still valid and carries a graph.
+    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
+    expect(result.summary).toBe("# Valid" + VIEWS_NOTE);
   });
 
   it("projects invalid produced verdicts as ok with validation errors", () => {
@@ -88,6 +100,7 @@ describe("validationResult", () => {
     expect(result.structuredContent.is_valid).toBe(false);
     expect(result.structuredContent.is_runnable).toBe(false);
     expect(result.structuredContent.validation_errors).toEqual(invalidReport.validation_errors);
+    expect(result.structuredContent.available_view_specs).toEqual([]);
     expect(result.graphSpec).toBeUndefined();
     expect(result.structuredContent).not.toHaveProperty("rendered_markdown");
     expect(result.summary).toBe("# Invalid");
@@ -110,7 +123,7 @@ describe("toolResult", () => {
     expect(result._meta.graph_spec).toEqual(validReport.graph_spec);
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
     expect(result.isError).toBe(false);
-    expect(result.content).toEqual([{ type: "text", text: "# Valid" }]);
+    expect(result.content).toEqual([{ type: "text", text: "# Valid" + VIEWS_NOTE }]);
   });
 
   it("carries an undefined graph on _meta for verdicts without one", () => {
@@ -261,6 +274,7 @@ describe("validateMthds", () => {
       render: ["markdown"],
     });
     expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.available_view_specs).toEqual([]);
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
     expect(result.graphSpec).toBeUndefined();
   });
@@ -285,6 +299,7 @@ describe("validateMthds", () => {
 
     expect(called).toBe(false);
     expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.available_view_specs).toEqual([]);
     expect(result.structuredContent.errors?.[0]?.location).toBe("files");
     expect(result.summary).toBe("Validation was not run: request input is invalid.");
   });

@@ -59,8 +59,8 @@ The whole server is four small files under `src/`:
 This mirrors the workspace's "format follows consumer" rule — read `../CLAUDE.md` → "Surface output conventions". Every tool result carries three independent streams:
 
 - **`structuredContent`** — the machine contract the model reads. A machine consumer branches on these fields, never on transport.
-- **`content` text** — the human/LLM-readable Markdown summary, taken verbatim from the API's `rendered_markdown`. It is deliberately **not duplicated** into `structuredContent`.
-- **`_meta`** — large, view-only data that **never reaches the model's context**. The graph (`_meta.graph_spec`) rides here so the agent acts on the verdict + Markdown summary, never the raw spec; the `validation-graph` view reads it back via `responseMetadata.graph_spec`. `_meta` still travels on the raw MCP result, so a non-LLM programmatic consumer can read it off the wire — it is withheld from the model, not from the transport.
+- **`content` text** — the human/LLM-readable Markdown summary, taken from the API's `rendered_markdown` (with a short `## Views` note appended when a renderable view is available — see below). It is deliberately **not duplicated** into `structuredContent`.
+- **`_meta`** — large, view-only data that **never reaches the model's context**. The graph (`_meta.graph_spec`) rides here so the agent acts on the verdict + Markdown summary, never the raw spec; the `validation-graph` view reads it back via `responseMetadata.graph_spec`. `_meta` still travels on the raw MCP result, so a non-LLM programmatic consumer can read it off the wire — it is withheld from the model, not from the transport. Because the model never sees `_meta`, `structuredContent.available_view_specs` is its structured signal a view exists to surface: it lists the renderable view kinds. The only kind for now is `"dry_run_graph"` — the method graph from the validation dry run, whose spec is the one riding `_meta.graph_spec`. (The view-kind identifier and the `_meta` key are intentionally distinct: the key mirrors the API's `graph_spec` field and the view's `responseMetadata.graph_spec` reader, while the identifier names what kind of view it drives.)
 
 ### Verdict vs no-verdict (the `status` discriminator)
 
@@ -78,6 +78,7 @@ A *produced* validation verdict is always `status: "ok"`, regardless of whether 
 - Valid + pending signatures → `is_valid=true`, `is_runnable=false`, `pending_signatures` populated.
 - Invalid produced verdict → `status="ok"`, `is_valid=false`, `validation_errors` populated.
 - `include_graph` defaults to **true**; pass `false` to omit the graph from a valid report (`graphSpec` stays undefined).
+- `available_view_specs` is populated from the produced graph: it holds `["dry_run_graph"]` exactly when `graphSpec != null` (valid verdict + `include_graph`), and `[]` otherwise (invalid, no graph, `include_graph: false`, error). On that same condition a `## Views` note is appended to the Markdown summary. Add a new view kind to the `viewSpecSchema` enum and set it here when its spec is produced.
 - The capability always calls the API with `allowSignatures: true` and `render: ["markdown"]`. A report missing `rendered_markdown` is a hard error.
 
 ## Testing conventions
