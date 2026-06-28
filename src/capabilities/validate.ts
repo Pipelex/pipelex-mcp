@@ -2,16 +2,16 @@ import {
   ApiResponseError,
   ApiUnreachableError,
   ClientAuthenticationError,
-  MthdsApiClient,
+  PipelexApiClient,
   PipelineRequestError,
-} from "mthds";
+} from "@pipelex/sdk";
 import type {
   MthdsFile,
   PipelexValidationResult,
   PipelexValidationReport,
   PipelexInvalidReport,
   ValidateFilesOptions,
-} from "mthds";
+} from "@pipelex/sdk";
 import { z } from "zod";
 
 const DEFAULT_LOCAL_API_URL = "http://localhost:8081";
@@ -119,7 +119,7 @@ export async function validateMthds(
   try {
     const client =
       context.client ??
-      new MthdsApiClient({
+      new PipelexApiClient({
         baseUrl: context.apiUrl,
         apiToken: context.apiKey,
       });

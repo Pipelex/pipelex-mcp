@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `pipelex-mcp` is a **Skybridge MCP server** that exposes local MTHDS validation to MCP hosts (ChatGPT, Claude, etc.). v0.1 is intentionally **tool-only**: it registers a single MCP tool, `mthds_validate`, and ships no custom Skybridge view yet. An assistant that already holds `.mthds` file contents calls the tool to get a stable, structured validation verdict it can use to explain and repair diagnostics.
 
-It is a thin MCP front-end over the existing Pipelex validation stack — it does no validation itself. It forwards file contents to a **Pipelex API** (`POST /v1/validate`) through the `MthdsApiClient` from the `mthds` npm package (published from `../mthds-js`), then projects the API's report into MCP output.
+It is a thin MCP front-end over the existing Pipelex validation stack — it does no validation itself. It forwards file contents to a **Pipelex API** (`POST /v1/validate`) through the `PipelexApiClient` from the `@pipelex/sdk` npm package (published from `../pipelex-sdk-js`), then projects the API's report into MCP output. `@pipelex/sdk` is the Pipelex hosted-platform SDK — the same one `pipelex-app` uses, and the only one carrying the durable run lifecycle the later run-backed tools need; it re-exports the open `mthds/protocol` surface, so the MCP imports one SDK.
 
 `SPEC.md` is the source of truth for product requirements and design decisions — read and update it when changing behavior. `AGENTS.md` mandates using the **`skybridge` skill** when planning or updating this codebase; do so.
 
@@ -69,7 +69,7 @@ A *produced* validation verdict is always `status: "ok"`, regardless of whether 
 - `config` — environment/auth is wrong (`MTHDS_API_URL`/`MTHDS_API_KEY`, API unreachable, 401/403/404).
 - `runtime` — unexpected server-side fault (API 5xx, unknown errors).
 
-`classifyError` maps `mthds-js` error types (`ApiUnreachableError`, `ClientAuthenticationError`, `ApiResponseError`, `PipelineRequestError`) and HTTP statuses onto these classes. When you add a new failure mode, classify it here rather than letting it fall through to a generic `runtime` message.
+`classifyError` maps `@pipelex/sdk` error types (`ApiUnreachableError`, `ClientAuthenticationError`, `ApiResponseError`, `PipelineRequestError`) and HTTP statuses onto these classes. When you add a new failure mode, classify it here rather than letting it fall through to a generic `runtime` message.
 
 ### State projection rules (in `validationResult`)
 
@@ -81,12 +81,12 @@ A *produced* validation verdict is always `status: "ok"`, regardless of whether 
 
 ## Testing conventions
 
-Tests are colocated (`*.test.ts`, Node environment). The capability is tested by **injecting a fake client** via `ValidationContext.client` — `validateMthds` uses `context.client` when present and only constructs a real `MthdsApiClient` otherwise. Use this seam to test API behavior without a live `pipelex-api`. Pure projection/classification functions (`validationResult`, `classifyError`, `validateRequest`) are exported specifically so they can be tested in isolation.
+Tests are colocated (`*.test.ts`, Node environment). The capability is tested by **injecting a fake client** via `ValidationContext.client` — `validateMthds` uses `context.client` when present and only constructs a real `PipelexApiClient` otherwise. Use this seam to test API behavior without a live `pipelex-api`. Pure projection/classification functions (`validationResult`, `classifyError`, `validateRequest`) are exported specifically so they can be tested in isolation.
 
 ## Conventions & gotchas
 
 - **No backward-compatibility burden** (workspace rule) — change shapes directly; note breaking changes in `SPEC.md`.
 - **Branding:** keep MTHDS-standard concepts neutrally named inside the Pipelex-branded envelope (`bundle_blueprint`, `graph_spec`, `pipe_io_contracts`) — see `../CLAUDE.md` "Brand boundaries".
 - `no-console` is an **error** in ESLint — don't leave `console.*` calls.
-- The `mthds` dependency is the **published npm package** (`mthds`, public on npm), not a `file:../mthds-js` link. CI just runs `npm ci` — there is no sibling repo to check out. To develop against local `../mthds-js` changes, `npm link ../mthds-js` (or a local override) without committing the link, then bump the `^x.y.z` range once the change is published.
+- The SDK dependency is the **published `@pipelex/sdk` npm package** (public on npm), not a `file:../pipelex-sdk-js` link. CI just runs `npm ci` — there is no sibling repo to check out. To develop against local `../pipelex-sdk-js` changes, `npm link ../pipelex-sdk-js` (or a local override) without committing the link, then bump the `^x.y.z` range once the change is published. `mthds` is no longer a direct dependency — it rides along transitively through `@pipelex/sdk`.
 - Keep `SPEC.md`'s declared input/output shape, the Zod schemas in `validate.ts`, and `README.md` in sync when the tool contract changes.

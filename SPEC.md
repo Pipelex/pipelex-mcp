@@ -47,7 +47,7 @@ v0.2 may add a Skybridge validation view that groups diagnostics and renders `gr
 - **Existing products**: Pipelex, MTHDS, `mthds-js`, and local OSS `pipelex-api`.
 - **App shell**: `pipelex-mcp`, a Skybridge MCP app scaffold.
 - **Runtime API**: local OSS `pipelex-api`, defaulting to `http://localhost:8081`.
-- **SDK dependency**: the `mthds` npm package (published from `../mthds-js`).
+- **SDK dependency**: the `@pipelex/sdk` npm package (`PipelexApiClient`, published from `../pipelex-sdk-js`). It re-exports the `mthds/protocol` surface, so the MCP imports one SDK and still reaches the open protocol routes; `mthds` rides along as a transitive dependency.
 - **Auth**: optional `MTHDS_API_KEY`; local development normally runs without hosted auth.
 - **Primary environment variable**: `MTHDS_API_URL`, defaulting to `http://localhost:8081`.
 

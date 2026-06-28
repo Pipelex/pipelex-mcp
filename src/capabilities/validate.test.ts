@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { ApiResponseError, ApiUnreachableError, PipelineRequestError } from "mthds";
+import { ApiResponseError, ApiUnreachableError, PipelineRequestError } from "@pipelex/sdk";
 import type {
   MthdsFile,
   PipelexInvalidReport,
   PipelexValidationReport,
   ValidateFilesOptions,
-} from "mthds";
+} from "@pipelex/sdk";
 
 import { classifyError, validateMthds, validateRequest, validationResult } from "./validate.js";
 
@@ -142,7 +142,8 @@ describe("classifyError", () => {
         "{}",
         "validation_error",
         "Bad request body",
-        undefined,
+        undefined, // validationErrors
+        undefined, // code
       ),
     );
 
@@ -161,7 +162,8 @@ describe("classifyError", () => {
         "{}",
         "unauthorized",
         "Missing key",
-        undefined,
+        undefined, // validationErrors
+        undefined, // code
       ),
     );
 
@@ -179,7 +181,8 @@ describe("classifyError", () => {
         "{}",
         "internal",
         "Server fault",
-        undefined,
+        undefined, // validationErrors
+        undefined, // code
       ),
     );
 
@@ -317,7 +320,8 @@ describe("validateMthds", () => {
               "{}",
               "unauthorized",
               "Missing key",
-              undefined,
+              undefined, // validationErrors
+              undefined, // code
             );
           },
         },
