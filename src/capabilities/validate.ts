@@ -129,7 +129,7 @@ export async function validateMthds(
 
     return validationResult(report, input.include_graph !== false);
   } catch (err) {
-    return errorResult("Validation could not start: the MTHDS API is unreachable.", [classifyError(err)]);
+    return errorResult("Validation could not start: the Pipelex API is unreachable.", [classifyError(err)]);
   }
 }
 
@@ -215,7 +215,7 @@ export function classifyError(err: unknown): ToolError {
       class: "config",
       location: "MTHDS_API_KEY",
       message: err.message,
-      hint: "Check the API key for the configured MTHDS API.",
+      hint: "Check the API key for the configured Pipelex API.",
     };
   }
 
@@ -303,13 +303,13 @@ function classifyApiResponseError(err: ApiResponseError): ToolError {
     return {
       class: "runtime",
       message,
-      hint: "The MTHDS API returned a server error; inspect pipelex-api logs.",
+      hint: "The Pipelex API returned a server error; inspect pipelex-api logs.",
     };
   }
 
   return {
     class: "runtime",
     message,
-    hint: `The MTHDS API returned HTTP ${err.status}.`,
+    hint: `The Pipelex API returned HTTP ${err.status}.`,
   };
 }

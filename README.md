@@ -44,11 +44,16 @@ inside `structuredContent`.
 
 ## Local Development
 
+During early development, this repo supports the local OSS `pipelex-api` runner
+so the MCP can be exercised before the Pipelex Hosted API path is fully wired.
+That local runner support is temporary: the intended production target is the
+Pipelex Hosted API only.
+
 Prerequisites:
 
 - Node.js 24+
 - The sibling `../mthds-js` package
-- A local `pipelex-api` serving `POST /v1/validate`
+- A local OSS `pipelex-api` serving `POST /v1/validate`
 
 Install dependencies:
 
@@ -56,14 +61,14 @@ Install dependencies:
 npm install
 ```
 
-Start the local API separately, then run the Skybridge dev server:
+Start local OSS `pipelex-api` separately, then run the Skybridge dev server:
 
 ```bash
 cd ../pipelex-api
 make run
 ```
 
-The local API should answer at `http://localhost:8081`. In another terminal,
+Local OSS `pipelex-api` should answer at `http://localhost:8081`. In another terminal,
 start the MCP server:
 
 ```bash
