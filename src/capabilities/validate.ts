@@ -115,6 +115,7 @@ export async function validateMthds(
     return errorResult("Validation was not run: request input is invalid.", inputErrors);
   }
 
+  let report: PipelexValidationResult;
   try {
     const client =
       context.client ??
@@ -122,16 +123,45 @@ export async function validateMthds(
         baseUrl: context.apiUrl,
         apiToken: context.apiKey,
       });
-    const report = await client.validateFiles(toMthdsFiles(input.files), {
+    report = await client.validateFiles(toMthdsFiles(input.files), {
       allowSignatures: true,
       render: ["markdown"],
     });
+  } catch (err) {
+    const error = classifyError(err);
+    return errorResult(summaryForError(error), [error]);
+  }
 
+  // The API responded; projecting it must not be reported as an unreachable
+  // API. A malformed report (e.g. missing rendered_markdown) is a reachable
+  // contract violation, surfaced as a runtime no-verdict error.
+  try {
     return validationResult(report, input.include_graph !== false);
   } catch (err) {
-    return errorResult("Validation could not start: the Pipelex API is unreachable.", [
-      classifyError(err),
-    ]);
+    return errorResult(
+      "Validation produced no verdict: the Pipelex API returned a malformed report.",
+      [
+        {
+          class: "runtime",
+          message:
+            err instanceof Error
+              ? err.message
+              : "The Pipelex API returned a malformed validation report.",
+          hint: "The API responded but its report was missing required fields; inspect pipelex-api logs.",
+        },
+      ],
+    );
+  }
+}
+
+function summaryForError(error: ToolError): string {
+  switch (error.class) {
+    case "config":
+      return "Validation could not start: the Pipelex API is unreachable or misconfigured.";
+    case "input_domain":
+      return "Validation was not run: the Pipelex API rejected the request.";
+    case "runtime":
+      return "Validation could not be completed: the Pipelex API returned an error.";
   }
 }
 
@@ -158,6 +188,15 @@ export function validateRequest(
   }
 
   for (const [index, file] of files.entries()) {
+    if (file.content.trim() === "") {
+      errors.push({
+        class: "input_domain",
+        location: `files[${index}].content`,
+        message: "File content must not be empty.",
+        hint: "Submit the full .mthds file contents.",
+      });
+    }
+
     if (file.uri !== undefined && file.uri !== null && file.uri.trim() === "") {
       errors.push({
         class: "input_domain",

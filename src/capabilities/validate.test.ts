@@ -109,6 +109,17 @@ describe("validateRequest", () => {
     expect(errors[0]?.class).toBe("input_domain");
     expect(errors[0]?.location).toBe("files");
   });
+
+  it("rejects empty and whitespace-only file content", () => {
+    const errors = validateRequest([
+      { content: "" },
+      { content: "  \n\t " },
+      { content: 'domain = "demo"' },
+    ]);
+
+    expect(errors.map((error) => error.location)).toEqual(["files[0].content", "files[1].content"]);
+    expect(errors.every((error) => error.class === "input_domain")).toBe(true);
+  });
 });
 
 describe("classifyError", () => {
@@ -243,5 +254,78 @@ describe("validateMthds", () => {
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.location).toBe("files");
     expect(result.summary).toBe("Validation was not run: request input is invalid.");
+  });
+
+  it("treats a reachable but malformed report as runtime, not unreachable", async () => {
+    const malformedReport = {
+      ...validReport,
+      rendered_markdown: null,
+    } as unknown as PipelexValidationReport;
+
+    const result = await validateMthds(
+      { files: [{ content: 'domain = "demo"' }] },
+      {
+        apiUrl: "http://localhost:8081",
+        client: {
+          async validateFiles() {
+            return malformedReport;
+          },
+        },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
+    expect(result.summary).toMatch(/malformed/i);
+    expect(result.summary).not.toMatch(/unreachable/i);
+  });
+
+  it("surfaces an unreachable API as config", async () => {
+    const result = await validateMthds(
+      { files: [{ content: 'domain = "demo"' }] },
+      {
+        apiUrl: "http://localhost:8081",
+        client: {
+          async validateFiles() {
+            throw new ApiUnreachableError(
+              "connection refused",
+              "http://localhost:8081",
+              "ECONNREFUSED",
+            );
+          },
+        },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.summary).toMatch(/unreachable|misconfigured/i);
+  });
+
+  it("does not claim unreachable for an auth failure", async () => {
+    const result = await validateMthds(
+      { files: [{ content: 'domain = "demo"' }] },
+      {
+        apiUrl: "http://localhost:8081",
+        client: {
+          async validateFiles() {
+            throw new ApiResponseError(
+              "HTTP 401",
+              "http://localhost:8081/v1/validate",
+              401,
+              "Unauthorized",
+              "{}",
+              "unauthorized",
+              "Missing key",
+              undefined,
+            );
+          },
+        },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.summary).toMatch(/misconfigured/i);
   });
 });
