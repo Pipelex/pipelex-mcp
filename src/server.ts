@@ -26,8 +26,8 @@ const server = new McpServer(
       openWorldHint: false,
     },
     view: {
-      component: "validation-graph",
-      description: "Interactive graph of the validated method.",
+      component: "run-graph",
+      description: "Interactive run graph of the method (the dry-run graph from validation).",
     },
     _meta: {
       "openai/toolInvocation/invoking": "Validating MTHDS files...",

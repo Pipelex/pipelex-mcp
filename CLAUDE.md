@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-`pipelex-mcp` is a **Skybridge MCP server** that exposes local MTHDS validation to MCP hosts (ChatGPT, Claude, etc.). It registers a single MCP tool, `mthds_validate`, which an assistant that already holds `.mthds` file contents calls to get a stable, structured validation verdict it can use to explain and repair diagnostics. On a positive verdict the tool ships a Skybridge view, `validation-graph`, that renders the method graph interactively with `@pipelex/mthds-ui`'s `GraphViewer`.
+`pipelex-mcp` is a **Skybridge MCP server** that exposes local MTHDS validation to MCP hosts (ChatGPT, Claude, etc.). It registers a single MCP tool, `mthds_validate`, which an assistant that already holds `.mthds` file contents calls to get a stable, structured validation verdict it can use to explain and repair diagnostics. On a positive verdict the tool ships a Skybridge view, `run-graph`, that renders the method graph interactively with `@pipelex/mthds-ui`'s `GraphViewer`.
 
 It is a thin MCP front-end over the existing Pipelex validation stack — it does no validation itself. It forwards file contents to a **Pipelex API** (`POST /v1/validate`) through the `PipelexApiClient` from the `@pipelex/sdk` npm package (published from `../pipelex-sdk-js`), then projects the API's report into MCP output. `@pipelex/sdk` is the Pipelex hosted-platform SDK — the same one `pipelex-app` uses, and the only one carrying the durable run lifecycle the later run-backed tools need; it re-exports the open `mthds/protocol` surface, so the MCP imports one SDK.
 
@@ -49,10 +49,10 @@ Deployment stays out of CI — it goes through `make deploy` (`alpic deploy`) / 
 
 The whole server is four small files under `src/`:
 
-- `server.ts` — constructs the `McpServer`, registers the one `mthds_validate` tool (schemas + annotations + the `validation-graph` view + OpenAI invocation labels), and wires the handler to `validateMthds`. `export default await server.run()` is the entrypoint; `AppType` is the typed server handle.
+- `server.ts` — constructs the `McpServer`, registers the one `mthds_validate` tool (schemas + annotations + the `run-graph` view + OpenAI invocation labels), and wires the handler to `validateMthds`. `export default await server.run()` is the entrypoint; `AppType` is the typed server handle.
 - `capabilities/validate.ts` — **all the logic.** Zod input/output schemas, request-shape validation, the API call, error classification, and projection of the API report into MCP `structuredContent` + the view-only `_meta` graph payload (`toolResult`).
 - `helpers.ts` — `generateHelpers<AppType>()` exposes `useToolInfo`/`useCallTool` for the views.
-- `views/validation-graph.tsx` — the Skybridge view registered on `mthds_validate`. It reads the verdict from `useToolInfo` (`output`) and the graph from `responseMetadata.graph_spec` (the view-only `_meta` channel), then renders it with `@pipelex/mthds-ui`'s `GraphViewer` (inline preview + a `useDisplayMode` fullscreen toggle, sized from `useLayout`). It falls back to a compact empty state for invalid / no-graph / `include_graph: false` results. Being a registered view, it also satisfies Skybridge's "≥1 view entry" production-build requirement (the old `build-placeholder.tsx` is gone).
+- `views/run-graph.tsx` — the **run-graph** Skybridge view, registered on `mthds_validate`. It is the generic renderer for a method's run graph, deliberately **not** named after the validation trigger: today it shows the **dry-run graph** (`mthds_validate` feeds it the method structure from the validation dry run); a future `mthds_run` can register the same component for a **live-run graph** (with execution status). It reads the verdict from `useToolInfo` (`output`) and the graph from `responseMetadata.graph_spec` (the view-only `_meta` channel), then renders it with `@pipelex/mthds-ui`'s `GraphViewer` (inline preview + a `useDisplayMode` fullscreen toggle, sized from `useLayout`). It falls back to a compact empty state for invalid / no-graph / `include_graph: false` results. Being a registered view, it also satisfies Skybridge's "≥1 view entry" production-build requirement (the old `build-placeholder.tsx` is gone). The renderer name (`run-graph`) is the durable family; the `available_view_specs` kinds (`dry_run_graph`, later `live_run_graph`) name the content variant it's fed.
 
 ### The output streams (contract vs presentation vs view)
 
@@ -60,7 +60,7 @@ This mirrors the workspace's "format follows consumer" rule — read `../CLAUDE.
 
 - **`structuredContent`** — the machine contract the model reads. A machine consumer branches on these fields, never on transport.
 - **`content` text** — the human/LLM-readable Markdown summary, taken from the API's `rendered_markdown` (with a short `## Views` note appended when a renderable view is available — see below). It is deliberately **not duplicated** into `structuredContent`.
-- **`_meta`** — large, view-only data that **never reaches the model's context**. The graph (`_meta.graph_spec`) rides here so the agent acts on the verdict + Markdown summary, never the raw spec; the `validation-graph` view reads it back via `responseMetadata.graph_spec`. `_meta` still travels on the raw MCP result, so a non-LLM programmatic consumer can read it off the wire — it is withheld from the model, not from the transport. Because the model never sees `_meta`, `structuredContent.available_view_specs` is its structured signal a view exists to surface: it lists the renderable view kinds. The only kind for now is `"dry_run_graph"` — the method graph from the validation dry run, whose spec is the one riding `_meta.graph_spec`. (The view-kind identifier and the `_meta` key are intentionally distinct: the key mirrors the API's `graph_spec` field and the view's `responseMetadata.graph_spec` reader, while the identifier names what kind of view it drives.)
+- **`_meta`** — large, view-only data that **never reaches the model's context**. The graph (`_meta.graph_spec`) rides here so the agent acts on the verdict + Markdown summary, never the raw spec; the `run-graph` view reads it back via `responseMetadata.graph_spec`. `_meta` still travels on the raw MCP result, so a non-LLM programmatic consumer can read it off the wire — it is withheld from the model, not from the transport. Because the model never sees `_meta`, `structuredContent.available_view_specs` is its structured signal a view exists to surface: it lists the renderable view kinds. The only kind for now is `"dry_run_graph"` — the method graph from the validation dry run, whose spec is the one riding `_meta.graph_spec`. (The view-kind identifier and the `_meta` key are intentionally distinct: the key mirrors the API's `graph_spec` field and the view's `responseMetadata.graph_spec` reader, while the identifier names what kind of view it drives.)
 
 ### Verdict vs no-verdict (the `status` discriminator)
 
@@ -87,8 +87,15 @@ Tests are colocated (`*.test.ts`, Node environment). The capability is tested by
 
 ## Conventions & gotchas
 
-- **No backward-compatibility burden** (workspace rule) — change shapes directly; note breaking changes in `SPEC.md`.
+- **No backward-compatibility burden** (workspace rule) — change shapes directly; record breaking changes in `CHANGELOG.md` (and reflect the new shape in `SPEC.md`).
 - **Branding:** keep MTHDS-standard concepts neutrally named inside the Pipelex-branded envelope (`bundle_blueprint`, `graph_spec`, `pipe_io_contracts`) — see `../CLAUDE.md` "Brand boundaries".
 - `no-console` is an **error** in ESLint — don't leave `console.*` calls.
 - The SDK dependency is the **published `@pipelex/sdk` npm package** (public on npm), not a `file:../pipelex-sdk-js` link. CI just runs `npm ci` — there is no sibling repo to check out. To develop against local `../pipelex-sdk-js` changes, `npm link ../pipelex-sdk-js` (or a local override) without committing the link, then bump the `^x.y.z` range once the change is published. `mthds` is no longer a direct dependency — it rides along transitively through `@pipelex/sdk`.
 - Keep `SPEC.md`'s declared input/output shape, the Zod schemas in `validate.ts`, and `README.md` in sync when the tool contract changes.
+
+## Versioning & changelog
+
+`pipelex-mcp` follows [Semantic Versioning](https://semver.org). `version` in `package.json` is the source of truth and is git-tagged (`vX.Y.Z`) on release. All notable changes are recorded in [`CHANGELOG.md`](CHANGELOG.md) using the [Keep a Changelog](https://keepachangelog.com) format.
+
+- Work in progress accumulates under `## [Unreleased]` — don't mint a new `## [x.y.z]` heading per commit. Mint it (and the `vX.Y.Z` tag) only when you actually release that version; the newest versioned heading must then match `package.json`'s `version`.
+- `0.1.0` is the first tagged release. It **retires the `v0.x` prototype-increment track** (`../docs/mcp/02-delivery/v0.x-prototype-plan.md`): the milestones once called v0.1 / v0.2 / v0.3 were build increments, not package versions, and all shipped together as `0.1.0`. Use the changelog + semver from here on, not the v0.x numbering. `../docs/mcp/cold-start.md` remains the cold-start brief for resuming work; `CHANGELOG.md` is the source of truth for what has shipped.

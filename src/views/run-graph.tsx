@@ -14,14 +14,17 @@ import { useToolInfo } from "../helpers.js";
 const TOOLBAR_POSITION_FOR_VIEW: ToolbarPosition = TOOLBAR_POSITION.TOP_LEFT;
 
 /**
- * The Skybridge view for `mthds_validate`. A view is a tool with a UI, so this
- * renders the verdict's `graph_spec` (delivered view-only on `_meta`, read here
- * as `responseMetadata.graph_spec`) with mthds-ui's `GraphViewer`, the same
- * component `pipelex-app` ships. Invalid verdicts, pending-signature verdicts
- * with no graph, and `include_graph: false` calls fall back to a compact,
- * non-crashing empty state.
+ * The run-graph Skybridge view. A view is a tool with a UI, so this renders a
+ * method's run graph (delivered view-only on `_meta`, read here as
+ * `responseMetadata.graph_spec`) with mthds-ui's `GraphViewer`, the same
+ * component `pipelex-app` ships. It is the generic renderer for any run graph:
+ * today `mthds_validate` feeds it the **dry-run graph** (the method structure
+ * from the validation dry run); a future `mthds_run` can register the same
+ * component to surface a **live-run graph** (with execution status). Invalid
+ * verdicts, pending-signature verdicts with no graph, and `include_graph: false`
+ * calls fall back to a compact, non-crashing empty state.
  */
-export default function ValidationGraph() {
+export default function RunGraphView() {
   // Hooks run unconditionally before any early return.
   const toolInfo = useToolInfo<"mthds_validate">();
   const { theme, maxHeight, safeArea } = useLayout();
@@ -57,7 +60,7 @@ export default function ValidationGraph() {
 
   return (
     <div
-      data-llm={`Showing the execution graph of the validated method: ${graphSpec.nodes.length} nodes, runnable=${output.is_runnable}.`}
+      data-llm={`Showing the dry-run graph of the method: ${graphSpec.nodes.length} nodes, runnable=${output.is_runnable}.`}
       className="relative w-full overflow-hidden"
       style={{ paddingTop: top, paddingRight: right, paddingBottom: bottom, paddingLeft: left }}
     >

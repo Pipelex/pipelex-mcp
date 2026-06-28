@@ -6,7 +6,7 @@ server.
 It registers one MCP tool, `mthds_validate`, which accepts submitted `.mthds`
 file contents and returns a stable validation result the assistant can use to
 explain and repair diagnostics. On a positive verdict, the tool's
-`validation-graph` Skybridge view renders the method graph interactively with
+`run-graph` Skybridge view renders the method graph interactively with
 `@pipelex/mthds-ui`'s `GraphViewer`.
 
 ## Tool
@@ -44,7 +44,7 @@ Output:
 The MCP `content` text contains the human-readable summary; it is not duplicated
 inside `structuredContent`. The graph (`graph_spec`) is delivered on the tool
 result's view-only `_meta` channel (`_meta.graph_spec`) for the
-`validation-graph` view — never in `structuredContent`, so the model never pays
+`run-graph` view — never in `structuredContent`, so the model never pays
 its tokens. Since the model never sees `_meta`, `available_view_specs` is how it
 learns a view exists to surface: it lists the renderable view kinds for this
 result. The only kind for now is `"dry_run_graph"` (the method graph from the
@@ -96,7 +96,7 @@ DevTools at `http://localhost:3000`.
 npm run build
 ```
 
-`mthds_validate` registers the `validation-graph` view (`src/views/validation-graph.tsx`),
+`mthds_validate` registers the `run-graph` view (`src/views/run-graph.tsx`),
 which satisfies Skybridge's "≥1 view entry" production-build requirement. Build
 scans `src/views/` and regenerates `.skybridge/views.d.ts` (the view-name
 registry) as its first step, so `npm run check` runs `build` before the
