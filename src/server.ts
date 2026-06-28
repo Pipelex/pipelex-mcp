@@ -12,7 +12,16 @@ const server = new McpServer(
     name: "pipelex-mcp",
     version: "0.1.0",
   },
-  { capabilities: {} },
+  {
+    capabilities: {},
+    instructions: [
+      "pipelex-mcp helps you work with executable AI Methods written in the MTHDS language (.mthds).",
+      "Call `mthds_validate` with the file contents you hold to get a stable, structured verdict",
+      "(is_valid / is_runnable, validation errors, pending signatures).",
+      "When the method is valid, the tool also returns an interactive dry-run graph of the method,",
+      "rendered through the run-graph view.",
+    ].join(" "),
+  },
 ).registerTool(
   {
     name: "mthds_validate",

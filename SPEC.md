@@ -113,6 +113,8 @@ Validate MTHDS files:
 
 ## Tools and Views
 
+**Server instructions**: The server sets a short MCP `instructions` string (server-wide, on the `McpServer` constructor options) that hosts surface to the model. It states that the server validates `.mthds` method files and, on a valid verdict, returns an interactive dry-run graph. It is a server-level hint only — argument-level detail stays in the tool `description`.
+
 **Tool: `mthds_validate`**
 
 - **Input**: `{ files, include_graph? }`

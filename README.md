@@ -102,3 +102,9 @@ scans `src/views/` and regenerates `.skybridge/views.d.ts` (the view-name
 registry) as its first step, so `npm run check` runs `build` before the
 standalone `typecheck` — the registry must exist for `tsc` to know the view
 name.
+
+## Versioning
+
+`pipelex-mcp` follows [Semantic Versioning](https://semver.org); `version` in
+`package.json` is tagged (`vX.Y.Z`) on release. See [`CHANGELOG.md`](CHANGELOG.md)
+for what has shipped. `0.1.0` is the first tagged release.
