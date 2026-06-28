@@ -52,7 +52,6 @@ Pipelex Hosted API only.
 Prerequisites:
 
 - Node.js 24+
-- The sibling `../mthds-js` package
 - A local OSS `pipelex-api` serving `POST /v1/validate`
 
 Install dependencies:

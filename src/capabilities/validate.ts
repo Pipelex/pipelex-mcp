@@ -129,7 +129,9 @@ export async function validateMthds(
 
     return validationResult(report, input.include_graph !== false);
   } catch (err) {
-    return errorResult("Validation could not start: the Pipelex API is unreachable.", [classifyError(err)]);
+    return errorResult("Validation could not start: the Pipelex API is unreachable.", [
+      classifyError(err),
+    ]);
   }
 }
 

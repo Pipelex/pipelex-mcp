@@ -1,0 +1,58 @@
+# Enforces the branch flow: work-branch → dev → main.
+# Catches wrong-target PRs early. This is convention enforcement, not security —
+# real protection comes from the branch-protection ruleset on main.
+#
+# Adapted from the sibling TS repos, which add a release/vX.Y.Z promotion tier
+# for their npm releases. pipelex-mcp is a private, Alpic-deployed app with no
+# npm publish, so it uses the simpler two-tier flow without release branches.
+#
+# All PR refs flow through env: (never interpolated into the shell) so an
+# attacker-controlled branch name can't inject commands.
+name: Guard branch flow
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # main  ←  dev   (promotion to the deployable branch)
+  # ─────────────────────────────────────────────────────────────
+  gate-main:
+    if: github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Only dev from this repo may target main
+        env:
+          HEAD: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "PR → main from $HEAD ($HEAD_REPO)"
+          if [[ "$HEAD_REPO" != "$REPO" ]]; then
+            echo "::error::PRs to main must come from the dev branch in this repository, not a fork."
+            exit 1
+          fi
+          if [[ "$HEAD" != "dev" ]]; then
+            echo "::error::Only the dev branch may merge into main."
+            exit 1
+          fi
+
+  # ─────────────────────────────────────────────────────────────
+  # dev  ←  work branches   (everyday development)
+  # ─────────────────────────────────────────────────────────────
+  gate-dev:
+    if: github.event.pull_request.base.ref == 'dev'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Only work branches may target dev
+        env:
+          HEAD: ${{ github.event.pull_request.head.ref }}
+        run: |
+          echo "PR → dev from $HEAD"
+          if [[ ! "$HEAD" =~ ^(fix|feature|refactor|chore|docs|ci-cd|changelog|codex)/[A-Za-z0-9._/=-]+$ ]]; then
+            echo "::error::Branch must start with fix/, feature/, refactor/, chore/, docs/, ci-cd/, changelog/, or codex/."
+            exit 1
+          fi
