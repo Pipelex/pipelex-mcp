@@ -22,7 +22,7 @@ Core actions for v0.1:
 
 ## UI Overview
 
-v0.1 is a tool-only MCP experience with no custom Skybridge view. The shared surface is the assistant conversation plus the structured tool result.
+`mthds_validate` ships a Skybridge view, `validation-graph`: on a positive verdict that carries a `graph_spec`, a Skybridge-capable host renders an interactive method graph (via `@pipelex/mthds-ui`'s `GraphViewer`) inline above the model response, with a user-triggered fullscreen toggle for exploration. Invalid verdicts, pending-signature verdicts with no graph, and `include_graph: false` calls fall back to a compact, non-crashing empty state. The shared surface is the assistant conversation, the structured tool result, and this view.
 
 **First view**: The MCP host lists a single useful Pipelex tool, `mthds_validate`.
 
@@ -40,7 +40,7 @@ v0.1 is a tool-only MCP experience with no custom Skybridge view. The shared sur
 - Invalid produced verdict: `status="ok"`, `is_valid=false`, populated validation errors.
 - No-verdict failure: `status="error"` with an error class of `input_domain`, `config`, or `runtime`.
 
-v0.2 may add a Skybridge validation view that groups diagnostics and renders `graph_spec`, but v0.1 should not block on visual graph rendering.
+The richer error-grouping validation view (diagnostics grouped by class, clickable file/line locations, pending-signatures backlog) is a later increment; the `validation-graph` view ships graph rendering only.
 
 ## Product Context
 
@@ -67,7 +67,7 @@ The public MCP input shape is:
 }
 ```
 
-`include_graph` defaults to true. When false, omit `graph_spec` from returned `structuredContent`.
+`include_graph` defaults to true. The graph rides the tool result's view-only `_meta` channel (`_meta.graph_spec`, consumed by the `validation-graph` view), never `structuredContent`. When false, omit it entirely.
 
 The capability always permits pending signatures and always requests rendered markdown from local OSS `pipelex-api`.
 
@@ -80,7 +80,6 @@ The v0.1 structured output is:
   is_runnable: boolean;
   pending_signatures: string[];
   validation_errors?: unknown[];
-  graph_spec?: unknown;
   errors?: Array<{
     class: "input_domain" | "config" | "runtime";
     location?: string;
@@ -89,6 +88,8 @@ The v0.1 structured output is:
   }>;
 }
 ```
+
+The graph (`graph_spec`) is not part of `structuredContent`; on a positive verdict it rides the tool result's view-only `_meta` channel (`_meta.graph_spec`) for the `validation-graph` view, so the model never pays its tokens.
 
 The MCP `content` text contains the human-readable summary. The summary is not duplicated in structured output.
 
@@ -114,7 +115,7 @@ Validate MTHDS files:
 **Tool: `mthds_validate`**
 
 - **Input**: `{ files, include_graph? }`
-- **Output**: `{ status, is_valid, is_runnable, pending_signatures, validation_errors?, graph_spec?, errors? }` in `structuredContent`, plus a text summary in MCP `content`.
-- **Behavior**: Validates request shape, calls `mthds-js` against `MTHDS_API_URL` or `http://localhost:8081` with signatures and markdown enabled, and maps produced validation verdicts into flattened v0.1 structured content.
+- **Output**: `{ status, is_valid, is_runnable, pending_signatures, validation_errors?, errors? }` in `structuredContent`, plus a text summary in MCP `content`. On a positive verdict the graph rides the view-only `_meta` channel (`_meta.graph_spec`), never `structuredContent`.
+- **Behavior**: Validates request shape, calls the Pipelex API against `MTHDS_API_URL` or `http://localhost:8081` with signatures and markdown enabled, and maps produced validation verdicts into flattened structured content.
 - **Annotations**: Read-only, non-destructive, no open-world publishing.
-- **View**: None for v0.1.
+- **View**: `validation-graph` — renders `_meta.graph_spec` with `@pipelex/mthds-ui`'s `GraphViewer` (inline preview plus a user-triggered fullscreen toggle); compact empty state when there is no graph.

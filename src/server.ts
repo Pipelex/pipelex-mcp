@@ -25,14 +25,18 @@ const server = new McpServer(
       destructiveHint: false,
       openWorldHint: false,
     },
+    view: {
+      component: "validation-graph",
+      description: "Interactive graph of the validated method.",
+    },
     _meta: {
       "openai/toolInvocation/invoking": "Validating MTHDS files...",
       "openai/toolInvocation/invoked": "MTHDS validation finished.",
     },
   },
   async (input) => {
-    const { structuredContent, summary } = await validateMthds(input, buildValidationContext());
-    return toolResult(structuredContent, summary);
+    const result = await validateMthds(input, buildValidationContext());
+    return toolResult(result);
   },
 );
 

@@ -3,9 +3,11 @@
 Pipelex MCP exposes local MTHDS validation to MCP hosts through a Skybridge
 server.
 
-v0.1 is intentionally tool-only. It registers one MCP tool, `mthds_validate`,
-which accepts submitted `.mthds` file contents and returns a stable validation
-result the assistant can use to explain and repair diagnostics.
+It registers one MCP tool, `mthds_validate`, which accepts submitted `.mthds`
+file contents and returns a stable validation result the assistant can use to
+explain and repair diagnostics. On a positive verdict, the tool's
+`validation-graph` Skybridge view renders the method graph interactively with
+`@pipelex/mthds-ui`'s `GraphViewer`.
 
 ## Tool
 
@@ -29,7 +31,6 @@ Output:
   is_runnable: boolean;
   pending_signatures: string[];
   validation_errors?: unknown[];
-  graph_spec?: unknown;
   errors?: Array<{
     class: "input_domain" | "config" | "runtime";
     location?: string;
@@ -40,7 +41,10 @@ Output:
 ```
 
 The MCP `content` text contains the human-readable summary; it is not duplicated
-inside `structuredContent`.
+inside `structuredContent`. The graph (`graph_spec`) is delivered on the tool
+result's view-only `_meta` channel (`_meta.graph_spec`) for the
+`validation-graph` view — never in `structuredContent`, so the model never pays
+its tokens.
 
 ## Local Development
 
@@ -86,6 +90,9 @@ DevTools at `http://localhost:3000`.
 npm run build
 ```
 
-Skybridge currently needs at least one view entry during production builds, so
-`src/views/build-placeholder.tsx` is intentionally present but not registered by
-any tool.
+`mthds_validate` registers the `validation-graph` view (`src/views/validation-graph.tsx`),
+which satisfies Skybridge's "≥1 view entry" production-build requirement. Build
+scans `src/views/` and regenerates `.skybridge/views.d.ts` (the view-name
+registry) as its first step, so `npm run check` runs `build` before the
+standalone `typecheck` — the registry must exist for `tsc` to know the view
+name.

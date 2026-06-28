@@ -8,7 +8,13 @@ import type {
   ValidateFilesOptions,
 } from "@pipelex/sdk";
 
-import { classifyError, validateMthds, validateRequest, validationResult } from "./validate.js";
+import {
+  classifyError,
+  toolResult,
+  validateMthds,
+  validateRequest,
+  validationResult,
+} from "./validate.js";
 
 const validReport: PipelexValidationReport = {
   is_valid: true,
@@ -44,12 +50,15 @@ const invalidReport: PipelexInvalidReport = {
 };
 
 describe("validationResult", () => {
-  it("projects runnable valid reports and includes graph by default", () => {
+  it("projects runnable valid reports and carries the graph off structuredContent", () => {
     const result = validationResult(validReport, true);
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.summary).toBe("# Valid");
-    expect(result.structuredContent.graph_spec).toEqual(validReport.graph_spec);
+    // The graph rides the view-only `graphSpec` field (delivered on `_meta`),
+    // never `structuredContent` — the model reads the lean verdict only.
+    expect(result.graphSpec).toEqual(validReport.graph_spec);
+    expect(result.structuredContent).not.toHaveProperty("graph_spec");
     expect(result.structuredContent).not.toHaveProperty("pipe_io_contracts");
     expect(result.structuredContent).not.toHaveProperty("rendered_markdown");
   });
@@ -58,6 +67,7 @@ describe("validationResult", () => {
     const result = validationResult(validReport, false);
 
     expect(result.structuredContent.status).toBe("ok");
+    expect(result.graphSpec).toBeUndefined();
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
   });
 
@@ -78,6 +88,7 @@ describe("validationResult", () => {
     expect(result.structuredContent.is_valid).toBe(false);
     expect(result.structuredContent.is_runnable).toBe(false);
     expect(result.structuredContent.validation_errors).toEqual(invalidReport.validation_errors);
+    expect(result.graphSpec).toBeUndefined();
     expect(result.structuredContent).not.toHaveProperty("rendered_markdown");
     expect(result.summary).toBe("# Invalid");
   });
@@ -89,6 +100,24 @@ describe("validationResult", () => {
     } as unknown as PipelexValidationReport;
 
     expect(() => validationResult(report, true)).toThrow(/did not include rendered markdown/);
+  });
+});
+
+describe("toolResult", () => {
+  it("delivers the graph on _meta, never on structuredContent", () => {
+    const result = toolResult(validationResult(validReport, true));
+
+    expect(result._meta.graph_spec).toEqual(validReport.graph_spec);
+    expect(result.structuredContent).not.toHaveProperty("graph_spec");
+    expect(result.isError).toBe(false);
+    expect(result.content).toEqual([{ type: "text", text: "# Valid" }]);
+  });
+
+  it("carries an undefined graph on _meta for verdicts without one", () => {
+    const result = toolResult(validationResult(invalidReport, true));
+
+    expect(result._meta.graph_spec).toBeUndefined();
+    expect(result.isError).toBe(false);
   });
 });
 
@@ -233,6 +262,7 @@ describe("validateMthds", () => {
     });
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
+    expect(result.graphSpec).toBeUndefined();
   });
 
   it("does not call the client when request validation fails", async () => {

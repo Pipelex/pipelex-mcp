@@ -46,7 +46,6 @@ const validationStructuredContentSchema = z.object({
   is_runnable: z.boolean(),
   pending_signatures: z.array(z.string()),
   validation_errors: z.array(z.unknown()).optional(),
-  graph_spec: z.unknown().optional(),
   errors: z.array(validationErrorSchema).optional(),
 });
 
@@ -72,13 +71,21 @@ export interface ValidationStructuredContent {
   is_runnable: boolean;
   pending_signatures: string[];
   validation_errors?: unknown[];
-  graph_spec?: unknown;
   errors?: ToolError[];
 }
 
 export interface ValidationResult {
   structuredContent: ValidationStructuredContent;
   summary: string;
+  /**
+   * Graph payload for the Skybridge view only. It rides the tool result's
+   * `_meta` (never `structuredContent`), so the model never pays its tokens —
+   * the agent acts on the verdict in `structuredContent` and the Markdown
+   * summary, never the raw graph. Opaque (`unknown`) here; the view casts it to
+   * `@pipelex/mthds-ui`'s `GraphSpec`. Populated only on a valid verdict when
+   * `include_graph !== false`.
+   */
+  graphSpec?: unknown;
 }
 
 interface ValidationClient {
@@ -165,11 +172,17 @@ function summaryForError(error: ToolError): string {
   }
 }
 
-export function toolResult(structuredContent: ValidationStructuredContent, summary: string) {
+export function toolResult(result: ValidationResult) {
   return {
-    structuredContent,
-    content: [{ type: "text" as const, text: summary }],
-    isError: structuredContent.status === "error",
+    structuredContent: result.structuredContent,
+    content: [{ type: "text" as const, text: result.summary }],
+    isError: result.structuredContent.status === "error",
+    // View-only channel: the graph rides `_meta`, never `structuredContent`, so
+    // the model never pays its tokens. `_meta` still travels on the raw MCP
+    // result, so a non-LLM programmatic consumer can read it off the wire —
+    // `_meta` only withholds it from the model's context. The Skybridge view
+    // reads it back as `useToolInfo().responseMetadata.graph_spec`.
+    _meta: { graph_spec: result.graphSpec },
   };
 }
 
@@ -221,10 +234,11 @@ export function validationResult(
     pending_signatures: report.pending_signatures,
   };
 
+  let graphSpec: unknown;
   if (report.is_valid) {
     const validReport = report as PipelexValidationReport;
     if (includeGraph) {
-      structuredContent.graph_spec = validReport.graph_spec;
+      graphSpec = validReport.graph_spec;
     }
   } else {
     const invalidReport = report as PipelexInvalidReport;
@@ -238,6 +252,7 @@ export function validationResult(
   return {
     structuredContent,
     summary: report.rendered_markdown,
+    graphSpec,
   };
 }
 

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-`pipelex-mcp` is a **Skybridge MCP server** that exposes local MTHDS validation to MCP hosts (ChatGPT, Claude, etc.). v0.1 is intentionally **tool-only**: it registers a single MCP tool, `mthds_validate`, and ships no custom Skybridge view yet. An assistant that already holds `.mthds` file contents calls the tool to get a stable, structured validation verdict it can use to explain and repair diagnostics.
+`pipelex-mcp` is a **Skybridge MCP server** that exposes local MTHDS validation to MCP hosts (ChatGPT, Claude, etc.). It registers a single MCP tool, `mthds_validate`, which an assistant that already holds `.mthds` file contents calls to get a stable, structured validation verdict it can use to explain and repair diagnostics. On a positive verdict the tool ships a Skybridge view, `validation-graph`, that renders the method graph interactively with `@pipelex/mthds-ui`'s `GraphViewer`.
 
 It is a thin MCP front-end over the existing Pipelex validation stack — it does no validation itself. It forwards file contents to a **Pipelex API** (`POST /v1/validate`) through the `PipelexApiClient` from the `@pipelex/sdk` npm package (published from `../pipelex-sdk-js`), then projects the API's report into MCP output. `@pipelex/sdk` is the Pipelex hosted-platform SDK — the same one `pipelex-app` uses, and the only one carrying the durable run lifecycle the later run-backed tools need; it re-exports the open `mthds/protocol` surface, so the MCP imports one SDK.
 
@@ -16,7 +16,7 @@ It is a thin MCP front-end over the existing Pipelex validation stack — it doe
 
 Use the `Makefile` (wraps the npm scripts):
 
-- `make check` (= `npm run check`) — lint + format:check + typecheck + build. The pre-flight gate; run before declaring work done.
+- `make check` (= `npm run check`) — lint + format:check + build + typecheck. The pre-flight gate; run before declaring work done. **`build` runs before the standalone `typecheck`** on purpose: Skybridge regenerates the view-name registry (`.skybridge/views.d.ts`, gitignored) as `build`'s first step, and `tsc` needs it to resolve `mthds_validate`'s `view.component`. A cold `typecheck` with no prior `build`/`dev` won't know the view name.
 - `make test` / `make t` — Vitest run.
 - `make all` — clean + check + test.
 - `make dev` — Skybridge dev server. MCP endpoint at `http://localhost:3000/mcp`, DevTools UI at `http://localhost:3000`.
@@ -49,17 +49,18 @@ Deployment stays out of CI — it goes through `make deploy` (`alpic deploy`) / 
 
 The whole server is four small files under `src/`:
 
-- `server.ts` — constructs the `McpServer`, registers the one `mthds_validate` tool (schemas + annotations + OpenAI invocation labels), and wires the handler to `validateMthds`. `export default await server.run()` is the entrypoint; `AppType` is the typed server handle.
-- `capabilities/validate.ts` — **all the logic.** Zod input/output schemas, request-shape validation, the API call, error classification, and projection of the API report into MCP `structuredContent`.
-- `helpers.ts` — `generateHelpers<AppType>()` exposes `useToolInfo`/`useCallTool` for any future views.
-- `views/build-placeholder.tsx` — a `null`-rendering view that exists only because Skybridge production builds require ≥1 view entry. It is **not registered to any tool**; don't remove it without addressing the build constraint.
+- `server.ts` — constructs the `McpServer`, registers the one `mthds_validate` tool (schemas + annotations + the `validation-graph` view + OpenAI invocation labels), and wires the handler to `validateMthds`. `export default await server.run()` is the entrypoint; `AppType` is the typed server handle.
+- `capabilities/validate.ts` — **all the logic.** Zod input/output schemas, request-shape validation, the API call, error classification, and projection of the API report into MCP `structuredContent` + the view-only `_meta` graph payload (`toolResult`).
+- `helpers.ts` — `generateHelpers<AppType>()` exposes `useToolInfo`/`useCallTool` for the views.
+- `views/validation-graph.tsx` — the Skybridge view registered on `mthds_validate`. It reads the verdict from `useToolInfo` (`output`) and the graph from `responseMetadata.graph_spec` (the view-only `_meta` channel), then renders it with `@pipelex/mthds-ui`'s `GraphViewer` (inline preview + a `useDisplayMode` fullscreen toggle, sized from `useLayout`). It falls back to a compact empty state for invalid / no-graph / `include_graph: false` results. Being a registered view, it also satisfies Skybridge's "≥1 view entry" production-build requirement (the old `build-placeholder.tsx` is gone).
 
-### The two output streams (contract vs presentation)
+### The output streams (contract vs presentation vs view)
 
-This mirrors the workspace's "format follows consumer" rule — read `../CLAUDE.md` → "Surface output conventions". Every tool result carries two independent things:
+This mirrors the workspace's "format follows consumer" rule — read `../CLAUDE.md` → "Surface output conventions". Every tool result carries three independent streams:
 
-- **`structuredContent`** — the machine contract. A machine consumer branches on these fields, never on transport.
+- **`structuredContent`** — the machine contract the model reads. A machine consumer branches on these fields, never on transport.
 - **`content` text** — the human/LLM-readable Markdown summary, taken verbatim from the API's `rendered_markdown`. It is deliberately **not duplicated** into `structuredContent`.
+- **`_meta`** — large, view-only data that **never reaches the model's context**. The graph (`_meta.graph_spec`) rides here so the agent acts on the verdict + Markdown summary, never the raw spec; the `validation-graph` view reads it back via `responseMetadata.graph_spec`. `_meta` still travels on the raw MCP result, so a non-LLM programmatic consumer can read it off the wire — it is withheld from the model, not from the transport.
 
 ### Verdict vs no-verdict (the `status` discriminator)
 
@@ -73,10 +74,10 @@ A *produced* validation verdict is always `status: "ok"`, regardless of whether 
 
 ### State projection rules (in `validationResult`)
 
-- Valid + runnable → `is_valid=true`, `is_runnable=true`, `graph_spec` included.
+- Valid + runnable → `is_valid=true`, `is_runnable=true`; the graph is returned on `ValidationResult.graphSpec` (projected onto the tool result's `_meta.graph_spec` by `toolResult`), never in `structuredContent`.
 - Valid + pending signatures → `is_valid=true`, `is_runnable=false`, `pending_signatures` populated.
 - Invalid produced verdict → `status="ok"`, `is_valid=false`, `validation_errors` populated.
-- `include_graph` defaults to **true**; pass `false` to omit `graph_spec` from a valid report.
+- `include_graph` defaults to **true**; pass `false` to omit the graph from a valid report (`graphSpec` stays undefined).
 - The capability always calls the API with `allowSignatures: true` and `render: ["markdown"]`. A report missing `rendered_markdown` is a hard error.
 
 ## Testing conventions
