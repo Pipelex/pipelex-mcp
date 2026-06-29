@@ -2,16 +2,16 @@ import {
   ApiResponseError,
   ApiUnreachableError,
   ClientAuthenticationError,
-  MthdsApiClient,
+  PipelexApiClient,
   PipelineRequestError,
-} from "mthds";
+} from "@pipelex/sdk";
 import type {
   MthdsFile,
   PipelexValidationResult,
   PipelexValidationReport,
   PipelexInvalidReport,
   ValidateFilesOptions,
-} from "mthds";
+} from "@pipelex/sdk";
 import { z } from "zod";
 
 const DEFAULT_LOCAL_API_URL = "http://localhost:8081";
@@ -33,6 +33,15 @@ export const mthdsValidateInputSchema = {
 
 const errorClassSchema = z.enum(["input_domain", "config", "runtime"]);
 
+/**
+ * Identifiers of the renderable views this result can drive. The model never
+ * sees `_meta`, so this list is how it learns a view is available to surface.
+ * For now the only kind is `"dry_run_graph"` — the method graph produced by a
+ * `/validate` dry run, whose spec rides the tool result's `_meta.graph_spec`.
+ * Extend the enum when a new view kind ships.
+ */
+const viewSpecSchema = z.enum(["dry_run_graph"]);
+
 const validationErrorSchema = z.object({
   class: errorClassSchema,
   location: z.string().optional(),
@@ -45,8 +54,12 @@ const validationStructuredContentSchema = z.object({
   is_valid: z.boolean(),
   is_runnable: z.boolean(),
   pending_signatures: z.array(z.string()),
+  available_view_specs: z
+    .array(viewSpecSchema)
+    .describe(
+      'Renderable views available for this result. Contains "dry_run_graph" when an interactive method graph (from the validation dry run) is available to display; empty otherwise.',
+    ),
   validation_errors: z.array(z.unknown()).optional(),
-  graph_spec: z.unknown().optional(),
   errors: z.array(validationErrorSchema).optional(),
 });
 
@@ -58,6 +71,8 @@ export interface MthdsValidateInput {
 }
 
 type ErrorClass = z.infer<typeof errorClassSchema>;
+
+export type ViewSpec = z.infer<typeof viewSpecSchema>;
 
 export interface ToolError {
   class: ErrorClass;
@@ -71,14 +86,23 @@ export interface ValidationStructuredContent {
   is_valid: boolean;
   is_runnable: boolean;
   pending_signatures: string[];
+  available_view_specs: ViewSpec[];
   validation_errors?: unknown[];
-  graph_spec?: unknown;
   errors?: ToolError[];
 }
 
 export interface ValidationResult {
   structuredContent: ValidationStructuredContent;
   summary: string;
+  /**
+   * Graph payload for the Skybridge view only. It rides the tool result's
+   * `_meta` (never `structuredContent`), so the model never pays its tokens —
+   * the agent acts on the verdict in `structuredContent` and the Markdown
+   * summary, never the raw graph. Opaque (`unknown`) here; the view casts it to
+   * `@pipelex/mthds-ui`'s `GraphSpec`. Populated only on a valid verdict when
+   * `include_graph !== false`.
+   */
+  graphSpec?: unknown;
 }
 
 interface ValidationClient {
@@ -119,7 +143,7 @@ export async function validateMthds(
   try {
     const client =
       context.client ??
-      new MthdsApiClient({
+      new PipelexApiClient({
         baseUrl: context.apiUrl,
         apiToken: context.apiKey,
       });
@@ -165,11 +189,17 @@ function summaryForError(error: ToolError): string {
   }
 }
 
-export function toolResult(structuredContent: ValidationStructuredContent, summary: string) {
+export function toolResult(result: ValidationResult) {
   return {
-    structuredContent,
-    content: [{ type: "text" as const, text: summary }],
-    isError: structuredContent.status === "error",
+    structuredContent: result.structuredContent,
+    content: [{ type: "text" as const, text: result.summary }],
+    isError: result.structuredContent.status === "error",
+    // View-only channel: the graph rides `_meta`, never `structuredContent`, so
+    // the model never pays its tokens. `_meta` still travels on the raw MCP
+    // result, so a non-LLM programmatic consumer can read it off the wire —
+    // `_meta` only withholds it from the model's context. The Skybridge view
+    // reads it back as `useToolInfo().responseMetadata.graph_spec`.
+    _meta: { graph_spec: result.graphSpec },
   };
 }
 
@@ -219,12 +249,14 @@ export function validationResult(
     is_valid: report.is_valid,
     is_runnable: report.is_runnable,
     pending_signatures: report.pending_signatures,
+    available_view_specs: [],
   };
 
+  let graphSpec: unknown;
   if (report.is_valid) {
     const validReport = report as PipelexValidationReport;
     if (includeGraph) {
-      structuredContent.graph_spec = validReport.graph_spec;
+      graphSpec = validReport.graph_spec;
     }
   } else {
     const invalidReport = report as PipelexInvalidReport;
@@ -235,9 +267,23 @@ export function validationResult(
     throw new Error("Validation report did not include rendered markdown.");
   }
 
+  let summary = report.rendered_markdown;
+
+  // Advertise the dry-run graph view to the model only when a graph spec was
+  // actually produced (valid verdict + include_graph). The spec itself rides
+  // `_meta`, which the model never sees — `available_view_specs` is the
+  // structured signal, and the Markdown note is the prose one for agents that
+  // read the summary more reliably than the structured fields.
+  if (graphSpec != null) {
+    structuredContent.available_view_specs = ["dry_run_graph"];
+    summary +=
+      "\n\n## Views\n\nThe validation result includes a graph view of the method (dry run).";
+  }
+
   return {
     structuredContent,
-    summary: report.rendered_markdown,
+    summary,
+    graphSpec,
   };
 }
 
@@ -304,6 +350,7 @@ function errorResult(summary: string, errors: ToolError[]): ValidationResult {
       is_valid: false,
       is_runnable: false,
       pending_signatures: [],
+      available_view_specs: [],
       errors,
     },
     summary,
