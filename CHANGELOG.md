@@ -13,5 +13,5 @@
 
 ### Notes
 
-- `@pipelex/mthds-ui` is linked via `file:../mthds-ui` for now; swap it for a published `@pipelex/mthds-ui` npm range when the server moves to the hosted build.
+- `@pipelex/mthds-ui` is consumed as the published `^0.10.0` npm package (same model as `@pipelex/sdk`).
 - `npm run check` runs `build` before the standalone `typecheck` because Skybridge regenerates the view-name registry (`.skybridge/views.d.ts`, gitignored) as `build`'s first step, and `tsc` needs it to resolve the registered view name.
