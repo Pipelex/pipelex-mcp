@@ -1,0 +1,44 @@
+# On a release PR (release/vX.Y.Z → main), require a matching CHANGELOG entry.
+#
+# Adapted from the sibling TS repos, with one deliberate difference: pipelex-mcp
+# changelog headings have NO `v` prefix — `## [X.Y.Z] - YYYY-MM-DD`. The `v` lives
+# on the branch name and the git tag only (see CLAUDE.md / the /release skill).
+# The branch ref is read into env: and never interpolated into the shell.
+name: Changelog Version Check
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  check-changelog:
+    runs-on: ubuntu-latest
+    if: startsWith(github.head_ref, 'release/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check changelog entry exists
+        env:
+          HEAD: ${{ github.head_ref }}
+        run: |
+          if [[ ! "$HEAD" =~ ^release/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::Branch name '$HEAD' does not match the expected format 'release/vX.Y.Z'."
+            exit 1
+          fi
+          VERSION="${BASH_REMATCH[1]}"
+          echo "Checking CHANGELOG.md for version $VERSION (no 'v' prefix in the heading)..."
+
+          # Match a `## [X.Y.Z]` heading exactly — escape the dots and brackets.
+          if ! grep -qE "^## \[${VERSION//./\\.}\]" CHANGELOG.md; then
+            echo "::error::No changelog entry found for version $VERSION (expected a '## [$VERSION]' heading)."
+            echo "Versions currently in the changelog:"
+            grep -E "^## \[[0-9]+\.[0-9]+\.[0-9]+\]" CHANGELOG.md || true
+            echo "Add a '## [$VERSION] - YYYY-MM-DD' entry before merging this release to main."
+            exit 1
+          fi
+          echo "Changelog entry found for version $VERSION."

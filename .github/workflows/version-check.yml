@@ -1,0 +1,66 @@
+# Verifies package.json's version is consistent with the release branch and is a
+# real bump. Runs on PRs into main (release/vX.Y.Z → main) and on PRs into a
+# release branch (dev/work → release/vX.Y.Z) — the two places the version matters.
+#
+# Adapted from the sibling TS repos. Branch refs are read into env: and never
+# interpolated into the shell, matching guard-branches.yml's injection-safe style.
+# The version string has NO `v` prefix in package.json (the `v` lives on the
+# branch name and the git tag only).
+name: Version check
+
+on:
+  pull_request:
+    branches:
+      - main
+      - 'release/v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
+
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify version consistency
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+          HEAD: ${{ github.event.pull_request.head.ref }}
+        run: |
+          PR_VERSION=$(jq -r .version package.json)
+          echo "package.json version: $PR_VERSION"
+          echo "Base: $BASE   Head: $HEAD"
+
+          fail=0
+
+          # If the head OR the base is a release branch, package.json must match it.
+          for ref in "$HEAD" "$BASE"; do
+            if [[ "$ref" =~ ^release/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+              REL_VERSION="${BASH_REMATCH[1]}"
+              if [[ "$PR_VERSION" != "$REL_VERSION" ]]; then
+                echo "::error::package.json version ($PR_VERSION) does not match release branch version ($REL_VERSION) from '$ref'."
+                fail=1
+              else
+                echo "package.json version matches release branch '$ref'."
+              fi
+            fi
+          done
+
+          # Targeting main: the version must be strictly greater than main's.
+          if [[ "$BASE" == "main" ]]; then
+            MAIN_VERSION=$(git show origin/main:package.json | jq -r .version)
+            echo "main version: $MAIN_VERSION"
+            GREATER=$(printf '%s\n%s\n' "$MAIN_VERSION" "$PR_VERSION" | sort -V | tail -n1)
+            if [[ "$PR_VERSION" == "$MAIN_VERSION" || "$GREATER" != "$PR_VERSION" ]]; then
+              echo "::error::PR version ($PR_VERSION) must be strictly greater than main version ($MAIN_VERSION). Bump it."
+              fail=1
+            else
+              echo "Version properly bumped from $MAIN_VERSION to $PR_VERSION."
+            fi
+          fi
+
+          exit $fail

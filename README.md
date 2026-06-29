@@ -1,95 +1,110 @@
 # Pipelex MCP
 
-A Pipelex-branded MCP server and Skybridge app scaffold for exposing MTHDS/Pipelex capabilities inside MCP hosts.
+Pipelex MCP exposes local MTHDS validation to MCP hosts through a Skybridge
+server.
 
-## Getting Started
+It registers one MCP tool, `mthds_validate`, which accepts submitted `.mthds`
+file contents and returns a stable validation result the assistant can use to
+explain and repair diagnostics. On a positive verdict, the tool's
+`run-graph` Skybridge view renders the method graph interactively with
+`@pipelex/mthds-ui`'s `GraphViewer`.
 
-### Prerequisites
+## Tool
+
+`mthds_validate`
+
+Input:
+
+```ts
+{
+  files: Array<{ content: string; uri?: string | null }>;
+  include_graph?: boolean;
+}
+```
+
+Output:
+
+```ts
+{
+  status: "ok" | "error";
+  is_valid: boolean;
+  is_runnable: boolean;
+  pending_signatures: string[];
+  available_view_specs: Array<"dry_run_graph">;
+  validation_errors?: unknown[];
+  errors?: Array<{
+    class: "input_domain" | "config" | "runtime";
+    location?: string;
+    message: string;
+    hint?: string;
+  }>;
+}
+```
+
+The MCP `content` text contains the human-readable summary; it is not duplicated
+inside `structuredContent`. The graph (`graph_spec`) is delivered on the tool
+result's view-only `_meta` channel (`_meta.graph_spec`) for the
+`run-graph` view — never in `structuredContent`, so the model never pays
+its tokens. Since the model never sees `_meta`, `available_view_specs` is how it
+learns a view exists to surface: it lists the renderable view kinds for this
+result. The only kind for now is `"dry_run_graph"` (the method graph from the
+validation dry run, whose spec rides `_meta.graph_spec`), present exactly when
+that spec was produced and empty otherwise. On those verdicts a short `## Views`
+note is also appended to the summary as a prose signal of the same.
+
+## Local Development
+
+During early development, this repo supports the local OSS `pipelex-api` runner
+so the MCP can be exercised before the Pipelex Hosted API path is fully wired.
+That local runner support is temporary: the intended production target is the
+Pipelex Hosted API only.
+
+Prerequisites:
 
 - Node.js 24+
+- A local OSS `pipelex-api` serving `POST /v1/validate`
 
-### Local Development
-
-#### 1. Install
+Install dependencies:
 
 ```bash
 npm install
-# or
-pnpm install
-# or
-bun install
-# or
-deno install
-# or
-yarn install
 ```
 
-#### 2. Start your local server
-
-Run the development server from the root directory:
+Start local OSS `pipelex-api` separately, then run the Skybridge dev server:
 
 ```bash
-npm run dev
-# or
-pnpm dev
-# or
-bun dev
-# or
-deno task dev
-# or
-yarn dev
+cd ../pipelex-api
+make run
 ```
 
-This command starts:
-- Your MCP server at `http://localhost:3000/mcp`.
-- Skybridge DevTools UI at `http://localhost:3000`.
+Local OSS `pipelex-api` should answer at `http://localhost:8081`. In another terminal,
+start the MCP server:
 
-#### 3. Project structure
-
-```
-├── src/
-│   ├── server.ts         # Server entry point
-│   ├── views/            # React components (one per view)
-│   ├── components/       # Shared UI components
-│   ├── helpers.ts        # Shared utilities
-│   └── index.css         # Global styles
-├── vite.config.ts
-├── alpic.json            # Deployment config
-└── package.json
+```bash
+MTHDS_API_URL=http://localhost:8081 npm run dev
 ```
 
-### Create your first view
+`MTHDS_API_URL` defaults to `http://localhost:8081` when unset. Set
+`MTHDS_API_KEY` only when the configured API requires it.
 
-#### 1. Add a new view
+The MCP endpoint is available at `http://localhost:3000/mcp`, with Skybridge
+DevTools at `http://localhost:3000`.
 
-- Register a tool in `src/server.ts` with a unique name (e.g., `my-view`) using [`registerTool`](https://docs.skybridge.tech/api-reference/register-tool) and a `view` config.
-- Create a matching React component at `src/views/my-view.tsx`. **The file name must match the view name exactly**.
+## Build
 
-#### 2. Edit views with Hot Module Replacement (HMR)
+```bash
+npm run build
+```
 
-Edit and save components in `src/views/` — changes will appear instantly inside your App.
+`mthds_validate` registers the `run-graph` view (`src/views/run-graph.tsx`),
+which satisfies Skybridge's "≥1 view entry" production-build requirement. Build
+scans `src/views/` and regenerates `.skybridge/views.d.ts` (the view-name
+registry) as its first step, so `npm run check` runs `build` before the
+standalone `typecheck` — the registry must exist for `tsc` to know the view
+name.
 
-#### 3. Edit server code
+## Versioning
 
-Modify files in `src/` and refresh the tool list with your MCP Client to see the changes.
-
-### Testing your App
-
-You can test your app locally by using our DevTools UI on `http://localhost:3000` while running the `dev` command.
-
-To connect your app with web clients like ChatGPT or Claude, expose your server on the internet by adding the `--tunnel` flag.
-By enabling the tunnel, you'll also be able to access a playground to chat with your app and a real LLM. Learn more by reading the [test guide](https://docs.skybridge.tech/quickstart/test-your-app).
-
-
-## Deploy to Production
-
-Skybridge is infrastructure vendor agnostic, and your app can be deployed on any cloud platform supporting MCP.
-
-The simplest way to deploy your app is by running the `deploy` command, which will push your MCP server to the [Alpic](https://alpic.ai/) cloud for free.
-
-## Resources
-- [Skybridge Documentation](https://docs.skybridge.tech/)
-- [Apps SDK Documentation](https://developers.openai.com/apps-sdk)
-- [MCP Apps Documentation](https://github.com/modelcontextprotocol/ext-apps/tree/main)
-- [Model Context Protocol Documentation](https://modelcontextprotocol.io/)
-- [Alpic Documentation](https://docs.alpic.ai/)
+`pipelex-mcp` follows [Semantic Versioning](https://semver.org); `version` in
+`package.json` is tagged (`vX.Y.Z`) on release. See [`CHANGELOG.md`](CHANGELOG.md)
+for what has shipped. `0.1.0` is the first tagged release.
