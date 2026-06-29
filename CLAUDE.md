@@ -41,9 +41,11 @@ MTHDS_API_URL=http://localhost:8081 npm run dev
 GitHub Actions under `.github/workflows/` (ported from the sibling TS repos, minus the npm-publish and CLA pieces that don't apply here):
 
 - `quality-checks.yml` — on every PR, runs `npm ci` then `make all` (the same gate as local). Meant to be a required status check on `main`.
-- `guard-branches.yml` — enforces the `work-branch → dev → main` flow: only `dev` may target `main`, and work branches must be prefixed (`fix/`, `feature/`, `refactor/`, `chore/`, `docs/`, `ci-cd/`, `changelog/`, `codex/`).
+- `guard-branches.yml` — enforces the `work-branch → dev → release/vX.Y.Z → main` flow: **only a `release/vX.Y.Z` branch may target `main`** (`dev` no longer can — it's promoted *into* the release branch instead), and work branches must be prefixed (`fix/`, `feature/`, `refactor/`, `chore/`, `docs/`, `ci-cd/`, `changelog/`, `codex/`).
+- `version-check.yml` — on PRs into `main` or a `release/vX.Y.Z` branch: asserts `package.json`'s `version` equals the `X.Y.Z` in the release branch name and (for `main`) is strictly greater than `main`'s current version.
+- `changelog-check.yml` — on a release PR into `main`: asserts `CHANGELOG.md` has a `## [X.Y.Z]` entry (no `v` prefix in the heading — the `v` lives on the branch name and the git tag only).
 
-Deployment stays out of CI — it goes through `make deploy` (`alpic deploy`) / Alpic's own git integration.
+The `release/vX.Y.Z` branch, the version bump, the changelog finalization, and the PR are produced by the **`/release` skill** (`.claude/skills/release/`) — run it to cut a release rather than hand-assembling these. Deployment stays out of CI — it goes through `make deploy` (`alpic deploy`) / Alpic's own git integration.
 
 ## Architecture
 
@@ -97,5 +99,5 @@ Tests are colocated (`*.test.ts`, Node environment). The capability is tested by
 
 `pipelex-mcp` follows [Semantic Versioning](https://semver.org). `version` in `package.json` is the source of truth and is git-tagged (`vX.Y.Z`) on release. All notable changes are recorded in [`CHANGELOG.md`](CHANGELOG.md) using the [Keep a Changelog](https://keepachangelog.com) format.
 
-- Work in progress accumulates under `## [Unreleased]` — don't mint a new `## [x.y.z]` heading per commit. Mint it (and the `vX.Y.Z` tag) only when you actually release that version; the newest versioned heading must then match `package.json`'s `version`.
+- Work in progress accumulates under `## [Unreleased]` — don't mint a new `## [x.y.z]` heading per commit. Mint it (and the `vX.Y.Z` tag) only when you actually release that version; the newest versioned heading must then match `package.json`'s `version`. To cut a release, use the **`/release` skill** (`.claude/skills/release/`): it promotes `## [Unreleased]` to `## [x.y.z]`, bumps `package.json`, regenerates `package-lock.json`, and opens the `release/vX.Y.Z → main` PR that the CI gates expect. Note the version-string split: the `v` prefix is on the branch name, git tag, and PR title only — never in `package.json` or the `## [x.y.z]` changelog heading.
 - `0.1.0` is the first tagged release. It **retires the `v0.x` prototype-increment track** (`../docs/mcp/02-delivery/v0.x-prototype-plan.md`): the milestones once called v0.1 / v0.2 / v0.3 were build increments, not package versions, and all shipped together as `0.1.0`. Use the changelog + semver from here on, not the v0.x numbering. `../docs/mcp/cold-start.md` remains the cold-start brief for resuming work; `CHANGELOG.md` is the source of truth for what has shipped.
