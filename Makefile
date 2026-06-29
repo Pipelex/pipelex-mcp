@@ -1,6 +1,9 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint format format-check typecheck test test-watch test-coverage check build all clean dev dev-tunnel start deploy c t
+.PHONY: help install lint format format-check typecheck test test-watch test-coverage check check-no-local-deps build all clean dev dev-tunnel start deploy c t use-local use-npm ul un
+
+# Sibling repo for live @pipelex/mthds-ui development (see use-local / use-npm).
+MTHDS_UI_DIR := ../mthds-ui
 
 define HELP
 Manage pipelex-mcp located in $(CURDIR).
@@ -27,6 +30,11 @@ make check          - Run lint, format check, typecheck, and build
 make all            - Clean, check, and test
 make clean          - Remove generated artifacts
 make c              - Shorthand -> check
+
+make use-local      - Switch @pipelex/mthds-ui to sibling ../mthds-ui (file link)
+make use-npm        - Switch @pipelex/mthds-ui back to npm [VERSION=x.y.z]
+make ul             - Shorthand -> use-local
+make un             - Shorthand -> use-npm
 
 endef
 export HELP
@@ -58,8 +66,13 @@ test-watch:
 test-coverage:
 	npm run test:coverage
 
-check:
+check: check-no-local-deps
 	npm run check
+
+check-no-local-deps:
+	@if grep -qE '"@pipelex/mthds-ui":[[:space:]]*"(file:|link:|portal:)' package.json; then \
+		echo "ERROR: @pipelex/mthds-ui in package.json is a local link. Run 'make use-npm' first."; exit 1; \
+	fi
 
 build:
 	npm run build
@@ -83,3 +96,22 @@ deploy:
 
 c: check
 t: test
+
+# --- Switch @pipelex/mthds-ui source ---
+# use-local:  file link to sibling ../mthds-ui for live development
+# use-npm:    install from the npm registry (latest by default, or VERSION=x.y.z)
+
+use-local:
+	@if [ ! -d $(MTHDS_UI_DIR) ]; then echo "ERROR: $(MTHDS_UI_DIR) not found. Clone it next to pipelex-mcp."; exit 1; fi
+	cd $(MTHDS_UI_DIR) && npm install && npm run build
+	npm install @pipelex/mthds-ui@file:$(MTHDS_UI_DIR)
+	@echo "Switched to local mthds-ui (file link). Run 'make use-npm' to switch back."
+
+use-npm:
+	@VERSION="$${VERSION:-latest}" && \
+	echo "Installing @pipelex/mthds-ui@$$VERSION from npm" && \
+	npm install @pipelex/mthds-ui@$$VERSION && \
+	echo "Switched to npm @pipelex/mthds-ui@$$VERSION. Review the diff, then commit package.json + package-lock.json."
+
+ul: use-local
+un: use-npm
