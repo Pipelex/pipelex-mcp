@@ -10,6 +10,7 @@ import type {
 
 import {
   classifyError,
+  DEFAULT_API_URL,
   toolResult,
   validateMthds,
   validateRequest,
@@ -167,18 +168,18 @@ describe("validateRequest", () => {
 describe("classifyError", () => {
   it("classifies unreachable API failures as config", () => {
     const error = classifyError(
-      new ApiUnreachableError("connection refused", "http://localhost:8081", "ECONNREFUSED"),
+      new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED"),
     );
 
     expect(error.class).toBe("config");
-    expect(error.location).toBe("MTHDS_API_URL");
+    expect(error.location).toBe("MTHDS_BASE_URL");
   });
 
   it("classifies API request-shape responses as input_domain", () => {
     const error = classifyError(
       new ApiResponseError(
         "HTTP 422",
-        "http://localhost:8081/v1/validate",
+        `${DEFAULT_API_URL}/v1/validate`,
         422,
         "Unprocessable Entity",
         "{}",
@@ -198,7 +199,7 @@ describe("classifyError", () => {
     const error = classifyError(
       new ApiResponseError(
         "HTTP 401",
-        "http://localhost:8081/v1/validate",
+        `${DEFAULT_API_URL}/v1/validate`,
         401,
         "Unauthorized",
         "{}",
@@ -217,7 +218,7 @@ describe("classifyError", () => {
     const error = classifyError(
       new ApiResponseError(
         "HTTP 500",
-        "http://localhost:8081/v1/validate",
+        `${DEFAULT_API_URL}/v1/validate`,
         500,
         "Internal Server Error",
         "{}",
@@ -236,7 +237,7 @@ describe("classifyError", () => {
     const error = classifyError(new PipelineRequestError("Invalid API base URL"));
 
     expect(error.class).toBe("config");
-    expect(error.location).toBe("MTHDS_API_URL");
+    expect(error.location).toBe("MTHDS_BASE_URL");
   });
 });
 
@@ -254,7 +255,7 @@ describe("validateMthds", () => {
         include_graph: false,
       },
       {
-        apiUrl: "http://localhost:8081",
+        baseUrl: DEFAULT_API_URL,
         client: {
           async validateFiles(files, options) {
             capturedFiles = files;
@@ -287,7 +288,7 @@ describe("validateMthds", () => {
         files: [],
       },
       {
-        apiUrl: "http://localhost:8081",
+        baseUrl: DEFAULT_API_URL,
         client: {
           async validateFiles() {
             called = true;
@@ -313,7 +314,7 @@ describe("validateMthds", () => {
     const result = await validateMthds(
       { files: [{ content: 'domain = "demo"' }] },
       {
-        apiUrl: "http://localhost:8081",
+        baseUrl: DEFAULT_API_URL,
         client: {
           async validateFiles() {
             return malformedReport;
@@ -332,14 +333,10 @@ describe("validateMthds", () => {
     const result = await validateMthds(
       { files: [{ content: 'domain = "demo"' }] },
       {
-        apiUrl: "http://localhost:8081",
+        baseUrl: DEFAULT_API_URL,
         client: {
           async validateFiles() {
-            throw new ApiUnreachableError(
-              "connection refused",
-              "http://localhost:8081",
-              "ECONNREFUSED",
-            );
+            throw new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED");
           },
         },
       },
@@ -354,12 +351,12 @@ describe("validateMthds", () => {
     const result = await validateMthds(
       { files: [{ content: 'domain = "demo"' }] },
       {
-        apiUrl: "http://localhost:8081",
+        baseUrl: DEFAULT_API_URL,
         client: {
           async validateFiles() {
             throw new ApiResponseError(
               "HTTP 401",
-              "http://localhost:8081/v1/validate",
+              `${DEFAULT_API_URL}/v1/validate`,
               401,
               "Unauthorized",
               "{}",

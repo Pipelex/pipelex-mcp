@@ -14,7 +14,7 @@ import type {
 } from "@pipelex/sdk";
 import { z } from "zod";
 
-const DEFAULT_LOCAL_API_URL = "http://localhost:8081";
+export const DEFAULT_API_URL = "https://api.pipelex.com";
 
 export const mthdsValidateInputSchema = {
   files: z
@@ -113,19 +113,19 @@ interface ValidationClient {
 }
 
 export interface ValidationContext {
-  apiUrl: string;
+  baseUrl: string;
   apiKey?: string;
   client?: ValidationClient;
 }
 
 interface ValidationEnv {
-  MTHDS_API_URL?: string;
+  MTHDS_BASE_URL?: string;
   MTHDS_API_KEY?: string;
 }
 
 export function buildValidationContext(env: ValidationEnv = process.env): ValidationContext {
   return {
-    apiUrl: env.MTHDS_API_URL ?? DEFAULT_LOCAL_API_URL,
+    baseUrl: env.MTHDS_BASE_URL ?? DEFAULT_API_URL,
     apiKey: env.MTHDS_API_KEY || undefined,
   };
 }
@@ -144,7 +144,7 @@ export async function validateMthds(
     const client =
       context.client ??
       new PipelexApiClient({
-        baseUrl: context.apiUrl,
+        baseUrl: context.baseUrl,
         apiToken: context.apiKey,
       });
     report = await client.validateFiles(toMthdsFiles(input.files), {
@@ -291,9 +291,9 @@ export function classifyError(err: unknown): ToolError {
   if (err instanceof ApiUnreachableError) {
     return {
       class: "config",
-      location: "MTHDS_API_URL",
+      location: "MTHDS_BASE_URL",
       message: err.message,
-      hint: "Start pipelex-api locally or set MTHDS_API_URL to a reachable host-only API base URL.",
+      hint: "Start pipelex-api locally or set MTHDS_BASE_URL to a reachable host-only API base URL.",
     };
   }
 
@@ -313,9 +313,9 @@ export function classifyError(err: unknown): ToolError {
   if (err instanceof PipelineRequestError) {
     return {
       class: "config",
-      location: "MTHDS_API_URL",
+      location: "MTHDS_BASE_URL",
       message: err.message,
-      hint: "Check MTHDS_API_URL and the submitted validation request.",
+      hint: "Check MTHDS_BASE_URL and the submitted validation request.",
     };
   }
 
@@ -381,9 +381,9 @@ function classifyApiResponseError(err: ApiResponseError): ToolError {
   if (err.status === 404) {
     return {
       class: "config",
-      location: "MTHDS_API_URL",
+      location: "MTHDS_BASE_URL",
       message,
-      hint: "Check that MTHDS_API_URL points to a host serving /v1/validate.",
+      hint: "Check that MTHDS_BASE_URL points to a host serving /v1/validate.",
     };
   }
 

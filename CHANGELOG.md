@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **Breaking: follows the `MTHDS_API_URL` → `MTHDS_BASE_URL` wire-key rename.** The env var read for the API base URL (and the `location`/`hint` strings in validate errors) is now `MTHDS_BASE_URL`, matching the coordinated rename in the `mthds` Python and npm clients (no read alias).
+- **Breaking:** `MTHDS_BASE_URL` now defaults to the hosted Pipelex API (`https://api.pipelex.com`) instead of the local OSS `pipelex-api` (`http://localhost:8081`). Set `MTHDS_BASE_URL=http://localhost:8081` to develop against a local runner.
+
 ## [0.1.0] - 2026-06-29
 
 ### Added

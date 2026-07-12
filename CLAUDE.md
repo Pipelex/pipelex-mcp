@@ -30,10 +30,10 @@ The tool needs a reachable Pipelex API serving `POST /v1/validate`. During early
 
 ```bash
 cd ../pipelex-api && make run      # serves http://localhost:8081
-MTHDS_API_URL=http://localhost:8081 npm run dev
+MTHDS_BASE_URL=http://localhost:8081 npm run dev
 ```
 
-- `MTHDS_API_URL` defaults to `http://localhost:8081` when unset.
+- `MTHDS_BASE_URL` defaults to the hosted Pipelex API (`https://api.pipelex.com`) when unset; set it to `http://localhost:8081` to develop against the local OSS runner.
 - `MTHDS_API_KEY` is optional — set it only when the configured API requires auth. Local dev normally runs without it.
 
 ### CI
@@ -69,7 +69,7 @@ This mirrors the workspace's "format follows consumer" rule — read `../CLAUDE.
 A *produced* validation verdict is always `status: "ok"`, regardless of whether the bundle passed — discriminate on `is_valid` (and `is_runnable`). `status: "error"` is reserved for **"no verdict could be produced"**: bad request shape, unreachable/misconfigured API, or a runtime fault. Those carry an `errors[]` array, each tagged with an `ErrorClass`:
 
 - `input_domain` — the submitted request/files are wrong (empty `files`, blank `uri`, API 400/422).
-- `config` — environment/auth is wrong (`MTHDS_API_URL`/`MTHDS_API_KEY`, API unreachable, 401/403/404).
+- `config` — environment/auth is wrong (`MTHDS_BASE_URL`/`MTHDS_API_KEY`, API unreachable, 401/403/404).
 - `runtime` — unexpected server-side fault (API 5xx, unknown errors).
 
 `classifyError` maps `@pipelex/sdk` error types (`ApiUnreachableError`, `ClientAuthenticationError`, `ApiResponseError`, `PipelineRequestError`) and HTTP statuses onto these classes. When you add a new failure mode, classify it here rather than letting it fall through to a generic `runtime` message.

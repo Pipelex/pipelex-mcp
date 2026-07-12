@@ -81,11 +81,12 @@ Local OSS `pipelex-api` should answer at `http://localhost:8081`. In another ter
 start the MCP server:
 
 ```bash
-MTHDS_API_URL=http://localhost:8081 npm run dev
+MTHDS_BASE_URL=http://localhost:8081 npm run dev
 ```
 
-`MTHDS_API_URL` defaults to `http://localhost:8081` when unset. Set
-`MTHDS_API_KEY` only when the configured API requires it.
+`MTHDS_BASE_URL` defaults to the hosted Pipelex API (`https://api.pipelex.com`)
+when unset — set it to `http://localhost:8081` (as above) to develop against a
+local OSS runner. Set `MTHDS_API_KEY` only when the configured API requires it.
 
 The MCP endpoint is available at `http://localhost:3000/mcp`, with Skybridge
 DevTools at `http://localhost:3000`.

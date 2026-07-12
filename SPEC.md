@@ -46,10 +46,10 @@ The richer error-grouping validation view (diagnostics grouped by class, clickab
 
 - **Existing products**: Pipelex, MTHDS, `@pipelex/sdk`, and the Pipelex API (local OSS `pipelex-api` during development).
 - **App shell**: `pipelex-mcp`, a Skybridge MCP app scaffold.
-- **Runtime API**: local OSS `pipelex-api`, defaulting to `http://localhost:8081`.
+- **Runtime API**: the hosted Pipelex API, defaulting to `https://api.pipelex.com` (point `MTHDS_BASE_URL` at a local OSS `pipelex-api` on `http://localhost:8081` during development).
 - **SDK dependency**: the `@pipelex/sdk` npm package (`PipelexApiClient`, published from `../pipelex-sdk-js`). It re-exports the `mthds/protocol` surface, so the MCP imports one SDK and still reaches the open protocol routes; `mthds` rides along as a transitive dependency.
 - **Auth**: optional `MTHDS_API_KEY`; local development normally runs without hosted auth.
-- **Primary environment variable**: `MTHDS_API_URL`, defaulting to `http://localhost:8081`.
+- **Primary environment variable**: `MTHDS_BASE_URL`, defaulting to `https://api.pipelex.com`.
 
 ## v0.1 Scope
 
@@ -119,6 +119,6 @@ Validate MTHDS files:
 
 - **Input**: `{ files, include_graph? }`
 - **Output**: `{ status, is_valid, is_runnable, pending_signatures, available_view_specs, validation_errors?, errors? }` in `structuredContent`, plus a text summary in MCP `content`. On a positive verdict the graph rides the view-only `_meta` channel (`_meta.graph_spec`), never `structuredContent`; `available_view_specs` tells the model the `"dry_run_graph"` view is available to surface.
-- **Behavior**: Validates request shape, calls the Pipelex API against `MTHDS_API_URL` or `http://localhost:8081` with signatures and markdown enabled, and maps produced validation verdicts into flattened structured content.
+- **Behavior**: Validates request shape, calls the Pipelex API against `MTHDS_BASE_URL` or `https://api.pipelex.com` with signatures and markdown enabled, and maps produced validation verdicts into flattened structured content.
 - **Annotations**: Read-only, non-destructive, no open-world publishing.
 - **View**: `run-graph` — renders `_meta.graph_spec` with `@pipelex/mthds-ui`'s `GraphViewer` (inline preview plus a user-triggered fullscreen toggle); compact empty state when there is no graph.
