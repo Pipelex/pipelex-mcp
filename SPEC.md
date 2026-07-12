@@ -30,7 +30,7 @@ Core actions for v0.1:
 
 1. The assistant submits `files: [{ content, uri? }]` to `mthds_validate`.
 2. The MCP server validates request shape and provenance.
-3. The capability calls `mthds-js` and local OSS `pipelex-api`.
+3. The capability calls the Pipelex API (`POST /v1/validate`) through `@pipelex/sdk`'s `PipelexApiClient`.
 4. The result is projected into stable MCP `structuredContent` plus a text summary.
 
 **End states**:
@@ -44,7 +44,7 @@ The richer error-grouping validation view (diagnostics grouped by class, clickab
 
 ## Product Context
 
-- **Existing products**: Pipelex, MTHDS, `mthds-js`, and local OSS `pipelex-api`.
+- **Existing products**: Pipelex, MTHDS, `@pipelex/sdk`, and the Pipelex API (local OSS `pipelex-api` during development).
 - **App shell**: `pipelex-mcp`, a Skybridge MCP app scaffold.
 - **Runtime API**: local OSS `pipelex-api`, defaulting to `http://localhost:8081`.
 - **SDK dependency**: the `@pipelex/sdk` npm package (`PipelexApiClient`, published from `../pipelex-sdk-js`). It re-exports the `mthds/protocol` surface, so the MCP imports one SDK and still reaches the open protocol routes; `mthds` rides along as a transitive dependency.
@@ -100,7 +100,7 @@ v0.1 must not add Pipelex Hosted API deployment behavior, bearer-token extractio
 
 Repository quality gates are in scope for v0.1 development: ESLint, Prettier, TypeScript type checking, Vitest unit tests, and a combined `npm run check` command should remain available locally.
 
-The prototype should call only local OSS `pipelex-api` through `mthds-js`; it should not expose API internals such as `mthds_contents` or `mthds_sources` in the MCP schema.
+The prototype should call the Pipelex API (local OSS `pipelex-api` during development) only through `@pipelex/sdk`'s `PipelexApiClient`; it should not expose API internals such as `mthds_contents` or `mthds_sources` in the MCP schema.
 
 ## UX Flows
 
