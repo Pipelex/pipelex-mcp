@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `.env` support for the dev server — `nodemon.json` overrides Skybridge's default dev exec with `tsx --env-file-if-exists=.env src/server.ts`, so `MTHDS_BASE_URL`/`MTHDS_API_KEY` can live in a gitignored `.env` instead of prefixing `npm run dev`.
+
 ### Changed
 
 - **Breaking: follows the `MTHDS_API_URL` → `MTHDS_BASE_URL` wire-key rename.** The env var read for the API base URL (and the `location`/`hint` strings in validate errors) is now `MTHDS_BASE_URL`, matching the coordinated rename in the `mthds` Python and npm clients (no read alias).

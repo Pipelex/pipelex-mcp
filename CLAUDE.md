@@ -35,6 +35,7 @@ MTHDS_BASE_URL=http://localhost:8081 npm run dev
 
 - `MTHDS_BASE_URL` defaults to the hosted Pipelex API (`https://api.pipelex.com`) when unset; set it to `http://localhost:8081` to develop against the local OSS runner.
 - `MTHDS_API_KEY` is optional — set it only when the configured API requires auth. Local dev normally runs without it.
+- Both variables can live in a gitignored `.env` at the repo root instead of prefixing the command: `nodemon.json` overrides Skybridge's default dev exec with `tsx --env-file-if-exists=.env src/server.ts` (keep its `watch`/`ext` in sync with Skybridge's defaults — a `nodemon.json` replaces them entirely, not additively). `.env` is dev-only and not watched — restart the dev server after editing it.
 
 ### CI
 

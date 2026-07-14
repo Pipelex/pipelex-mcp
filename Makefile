@@ -1,9 +1,10 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint format format-check typecheck test test-watch test-coverage check check-no-local-deps build all clean dev dev-tunnel start deploy c t use-local use-npm ul un
+.PHONY: help install lint format format-check typecheck test test-watch test-coverage check check-no-local-deps build all clean dev dev-tunnel start deploy c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
 
-# Sibling repo for live @pipelex/mthds-ui development (see use-local / use-npm).
+# Sibling repos for live development of our npm dependencies (see use-local / use-npm).
 MTHDS_UI_DIR := ../mthds-ui
+PIPELEX_SDK_DIR := ../pipelex-sdk-js
 
 define HELP
 Manage pipelex-mcp located in $(CURDIR).
@@ -31,8 +32,12 @@ make all            - Clean, check, and test
 make clean          - Remove generated artifacts
 make c              - Shorthand -> check
 
-make use-local      - Switch @pipelex/mthds-ui to sibling ../mthds-ui (file link)
-make use-npm        - Switch @pipelex/mthds-ui back to npm [VERSION=x.y.z]
+make use-local      - Switch @pipelex/mthds-ui AND @pipelex/sdk to their sibling repos (file links)
+make use-npm        - Switch both back to npm (latest)
+make use-local-ui   - Switch only @pipelex/mthds-ui to sibling ../mthds-ui
+make use-npm-ui     - Switch only @pipelex/mthds-ui back to npm [VERSION=x.y.z]
+make use-local-sdk  - Switch only @pipelex/sdk to sibling ../pipelex-sdk-js
+make use-npm-sdk    - Switch only @pipelex/sdk back to npm [VERSION=x.y.z]
 make ul             - Shorthand -> use-local
 make un             - Shorthand -> use-npm
 
@@ -70,8 +75,8 @@ check: check-no-local-deps
 	npm run check
 
 check-no-local-deps:
-	@if grep -qE '"@pipelex/mthds-ui":[[:space:]]*"(file:|link:|portal:)' package.json; then \
-		echo "ERROR: @pipelex/mthds-ui in package.json is a local link. Run 'make use-npm' first."; exit 1; \
+	@if grep -qE '"@pipelex/(mthds-ui|sdk)":[[:space:]]*"(file:|link:|portal:)' package.json; then \
+		echo "ERROR: a @pipelex dependency in package.json is a local link. Run 'make use-npm' first."; exit 1; \
 	fi
 
 build:
@@ -97,21 +102,37 @@ deploy:
 c: check
 t: test
 
-# --- Switch @pipelex/mthds-ui source ---
-# use-local:  file link to sibling ../mthds-ui for live development
-# use-npm:    install from the npm registry (latest by default, or VERSION=x.y.z)
+# --- Switch the source of our npm dependencies ---
+# use-local / use-npm act on BOTH @pipelex/mthds-ui and @pipelex/sdk.
+# The per-package targets act on one, and take VERSION=x.y.z to pin an npm version.
 
-use-local:
+use-local: use-local-ui use-local-sdk
+
+use-npm: use-npm-ui use-npm-sdk
+
+use-local-ui:
 	@if [ ! -d $(MTHDS_UI_DIR) ]; then echo "ERROR: $(MTHDS_UI_DIR) not found. Clone it next to pipelex-mcp."; exit 1; fi
 	cd $(MTHDS_UI_DIR) && npm install && npm run build
 	npm install @pipelex/mthds-ui@file:$(MTHDS_UI_DIR)
-	@echo "Switched to local mthds-ui (file link). Run 'make use-npm' to switch back."
+	@echo "Switched to local mthds-ui (file link). Run 'make use-npm-ui' to switch back."
 
-use-npm:
+use-npm-ui:
 	@VERSION="$${VERSION:-latest}" && \
 	echo "Installing @pipelex/mthds-ui@$$VERSION from npm" && \
 	npm install @pipelex/mthds-ui@$$VERSION && \
 	echo "Switched to npm @pipelex/mthds-ui@$$VERSION. Review the diff, then commit package.json + package-lock.json."
+
+use-local-sdk:
+	@if [ ! -d $(PIPELEX_SDK_DIR) ]; then echo "ERROR: $(PIPELEX_SDK_DIR) not found. Clone it next to pipelex-mcp."; exit 1; fi
+	cd $(PIPELEX_SDK_DIR) && npm install && npm run build
+	npm install @pipelex/sdk@file:$(PIPELEX_SDK_DIR)
+	@echo "Switched to local pipelex-sdk-js (file link). Run 'make use-npm-sdk' to switch back."
+
+use-npm-sdk:
+	@VERSION="$${VERSION:-latest}" && \
+	echo "Installing @pipelex/sdk@$$VERSION from npm" && \
+	npm install @pipelex/sdk@$$VERSION && \
+	echo "Switched to npm @pipelex/sdk@$$VERSION. Review the diff, then commit package.json + package-lock.json."
 
 ul: use-local
 un: use-npm

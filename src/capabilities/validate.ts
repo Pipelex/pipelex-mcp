@@ -145,7 +145,7 @@ export async function validateMthds(
       context.client ??
       new PipelexApiClient({
         baseUrl: context.baseUrl,
-        apiToken: context.apiKey,
+        apiKey: context.apiKey,
       });
     report = await client.validateFiles(toMthdsFiles(input.files), {
       allowSignatures: true,
