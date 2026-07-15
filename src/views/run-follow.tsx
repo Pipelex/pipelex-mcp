@@ -4,7 +4,7 @@ import { GraphViewer } from "@pipelex/mthds-ui/graph/react";
 import { TOOLBAR_POSITION } from "@pipelex/mthds-ui";
 import type { GraphSpec, ToolbarPosition } from "@pipelex/mthds-ui";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useDisplayMode, useLayout, useViewState } from "skybridge/web";
+import { useDisplayMode, useLayout, useSendFollowUpMessage, useViewState } from "skybridge/web";
 
 import type { RunResultsStructuredContent } from "../capabilities/run.js";
 import type { ToolError } from "../capabilities/shared.js";
@@ -325,6 +325,10 @@ function CompletedCard({
   onToggleFullscreen: () => void;
 }) {
   const { top, right, bottom, left } = insets;
+  // §6.6 — user-triggered handoff back to the conversation. Opt-in only:
+  // auto-firing on completion would create unsolicited model turns.
+  const sendFollowUpMessage = useSendFollowUpMessage();
+  const [summarizeRequested, setSummarizeRequested] = useState(false);
   const hasGraph = results.graphSpec != null && (results.graphSpec.nodes?.length ?? 0) > 0;
   // Same sizing discipline as run-graph: explicit pixel height for ReactFlow,
   // compact inline, filling the host in fullscreen, floored against collapse.
@@ -340,18 +344,38 @@ function CompletedCard({
       className="relative w-full overflow-hidden"
       style={{ paddingTop: top, paddingRight: right, paddingBottom: bottom, paddingLeft: left }}
     >
-      <button
-        type="button"
-        onClick={onToggleFullscreen}
-        className="absolute right-2 top-2 z-10 cursor-pointer rounded-md px-2 py-1 text-xs"
-        style={{
-          background: dark ? "rgba(31,41,55,0.85)" : "rgba(243,244,246,0.9)",
-          color: dark ? "#e5e7eb" : "#111827",
-          border: `1px solid ${dark ? "#374151" : "#d1d5db"}`,
-        }}
-      >
-        {isFullscreen ? "Collapse" : "Fullscreen"}
-      </button>
+      <div className="absolute right-2 top-2 z-10 flex gap-1">
+        <button
+          type="button"
+          disabled={summarizeRequested}
+          onClick={() => {
+            setSummarizeRequested(true);
+            void sendFollowUpMessage("The run completed — report the results.").catch(() =>
+              setSummarizeRequested(false),
+            );
+          }}
+          className="cursor-pointer rounded-md px-2 py-1 text-xs disabled:cursor-default disabled:opacity-60"
+          style={{
+            background: dark ? "rgba(31,41,55,0.85)" : "rgba(243,244,246,0.9)",
+            color: dark ? "#e5e7eb" : "#111827",
+            border: `1px solid ${dark ? "#374151" : "#d1d5db"}`,
+          }}
+        >
+          {summarizeRequested ? "Asked in chat" : "Summarize in chat"}
+        </button>
+        <button
+          type="button"
+          onClick={onToggleFullscreen}
+          className="cursor-pointer rounded-md px-2 py-1 text-xs"
+          style={{
+            background: dark ? "rgba(31,41,55,0.85)" : "rgba(243,244,246,0.9)",
+            color: dark ? "#e5e7eb" : "#111827",
+            border: `1px solid ${dark ? "#374151" : "#d1d5db"}`,
+          }}
+        >
+          {isFullscreen ? "Collapse" : "Fullscreen"}
+        </button>
+      </div>
       <p
         className="px-2 pb-1 pt-2 text-sm font-medium"
         style={{ color: dark ? "#e5e7eb" : "#111827" }}
