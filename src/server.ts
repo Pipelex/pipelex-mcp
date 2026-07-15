@@ -115,6 +115,10 @@ const server = new McpServer(
         destructiveHint: false,
         openWorldHint: false,
       },
+      view: {
+        component: "run-follow",
+        description: "Live-following status card for the durable run.",
+      },
       _meta: {
         "openai/toolInvocation/invoking": "Starting MTHDS run...",
         "openai/toolInvocation/invoked": "MTHDS run started.",

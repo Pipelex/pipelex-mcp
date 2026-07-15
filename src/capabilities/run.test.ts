@@ -196,11 +196,12 @@ describe("startResult", () => {
       run_id: RUN_ID,
       run_status: "STARTED",
       created_at: "2026-07-15T10:00:00Z",
-      available_view_specs: [],
+      available_view_specs: ["live_run_status"],
     });
     expect(result.summary).toContain(RUN_ID);
     expect(result.summary).toContain("mthds_run_status");
     expect(result.summary).toContain("mthds_run_results");
+    expect(result.summary).toContain("## Views");
   });
 
   it("tolerates a bare protocol ack with no extensions", () => {

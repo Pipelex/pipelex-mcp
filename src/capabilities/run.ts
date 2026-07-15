@@ -425,8 +425,9 @@ function narrowString(value: unknown): string | undefined {
 /**
  * Project a start ack. `state` and `created_at` are hosted extension fields on
  * the protocol's `RunResultStart` (typed `unknown`), so they are narrowed
- * defensively rather than trusted. `available_view_specs` stays empty until
- * the run-follow view is registered.
+ * defensively rather than trusted. A produced ack always advertises the
+ * `live_run_status` view — the registered run-follow card that follows the
+ * run without any model turn.
  */
 export function startResult(ack: RunResultStart): RunStartResult {
   const runStatus = narrowRunStatus(ack.state);
@@ -437,13 +438,15 @@ export function startResult(ack: RunResultStart): RunStartResult {
     run_id: ack.pipeline_run_id,
     ...(runStatus === undefined ? {} : { run_status: runStatus }),
     ...(createdAt === undefined ? {} : { created_at: createdAt }),
-    available_view_specs: [],
+    available_view_specs: ["live_run_status"],
   };
 
   const summary = [
     "# Run started",
     `The run was accepted; its durable id is \`${ack.pipeline_run_id}\`.`,
     "Check on it with `mthds_run_status` (one cheap read — honor its retry hint instead of polling in a tight loop), and fetch the outcome with `mthds_run_results` once it is terminal.",
+    "## Views",
+    "A live status card follows this run on its own (polling, then the results); the user is already watching it — no need to poll on their behalf.",
   ].join("\n\n");
 
   return { structuredContent, summary };
