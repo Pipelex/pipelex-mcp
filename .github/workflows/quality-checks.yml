@@ -2,9 +2,9 @@
 # typecheck + build + test) on every PR. Its status check is meant to be
 # required by the branch-protection ruleset before anything can merge.
 #
-# Unlike the sibling TS repos, `mthds` is consumed as a published npm package
-# (not a `file:../mthds-js` link), so CI needs nothing more than `npm ci` —
-# there is no sibling repo to check out and build.
+# Unlike the sibling TS repos, `@pipelex/sdk` is consumed as a published npm
+# package (not a `file:../pipelex-sdk-js` link), so CI needs nothing more than
+# `npm ci` — there is no sibling repo to check out and build.
 name: Quality Checks
 
 on:
