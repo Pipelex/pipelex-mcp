@@ -2,7 +2,9 @@ import {
   ApiResponseError,
   ApiUnreachableError,
   ClientAuthenticationError,
+  MissingMainStuffError,
   PipelineRequestError,
+  RunLifecycleUnavailableError,
 } from "@pipelex/sdk";
 import { z } from "zod";
 
@@ -100,6 +102,21 @@ export function validateRequest(files: SubmittedFile[]): ToolError[] {
   return errors;
 }
 
+/** Request-shape check on a run id (format stays server-owned). */
+export function validateRunIdRequest(runId: string): ToolError[] {
+  if (runId.trim() === "") {
+    return [
+      {
+        class: "input_domain",
+        location: "run_id",
+        message: "run_id must not be empty.",
+        hint: "Pass the durable run id returned by mthds_run.",
+      },
+    ];
+  }
+  return [];
+}
+
 /**
  * Route-specific texture for {@link classifyError}. The classification itself
  * (which HTTP status or SDK error maps to which `ErrorClass`) is shared; only
@@ -111,6 +128,18 @@ export interface ClassifyErrorOptions {
   route?: string;
   /** Locator + hint for a 400/422 no-verdict rejection. */
   badRequest?: {
+    location?: string;
+    hint: string;
+  };
+  /**
+   * Per-route 404 override. By default a 404 means the route itself is
+   * missing (`config` — wrong base URL). Routes keyed by a resource id (the
+   * run routes) set this so a 404 classifies as `input_domain` ("no run with
+   * this id") instead. The SDK separates the missing-route case up front by
+   * throwing `RunLifecycleUnavailableError`, so an `ApiResponseError` 404 on
+   * those routes really is an unknown id.
+   */
+  notFound?: {
     location?: string;
     hint: string;
   };
@@ -142,6 +171,27 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
 
   if (err instanceof ApiResponseError) {
     return classifyApiResponseError(err, options);
+  }
+
+  // The SDK raises this when the configured base URL serves the protocol
+  // routes but not the durable run lifecycle (a bare pipelex-api runner).
+  if (err instanceof RunLifecycleUnavailableError) {
+    return {
+      class: "config",
+      location: "PIPELEX_BASE_URL",
+      message: err.message,
+      hint: "Durable runs need the hosted Pipelex API; point PIPELEX_BASE_URL at a deployment serving /v1/runs/* (a bare pipelex-api runner does not).",
+    };
+  }
+
+  // A completed run that delivers no main output is a reachable contract
+  // violation — the API answered, but its report is malformed.
+  if (err instanceof MissingMainStuffError) {
+    return {
+      class: "runtime",
+      message: err.message,
+      hint: "The API reported the run completed but delivered no main output; inspect the run on the platform.",
+    };
   }
 
   if (err instanceof PipelineRequestError) {
@@ -192,6 +242,14 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
   }
 
   if (err.status === 404) {
+    if (options.notFound) {
+      return {
+        class: "input_domain",
+        ...(options.notFound.location === undefined ? {} : { location: options.notFound.location }),
+        message,
+        hint: options.notFound.hint,
+      };
+    }
     return {
       class: "config",
       location: "PIPELEX_BASE_URL",

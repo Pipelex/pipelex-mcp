@@ -1,8 +1,20 @@
 import { describe, expect, it } from "vitest";
 
-import { ApiResponseError, ApiUnreachableError, PipelineRequestError } from "@pipelex/sdk";
+import {
+  ApiResponseError,
+  ApiUnreachableError,
+  MissingMainStuffError,
+  PipelineRequestError,
+  RunLifecycleUnavailableError,
+} from "@pipelex/sdk";
 
-import { buildApiConfig, classifyError, DEFAULT_API_URL, validateRequest } from "./shared.js";
+import {
+  buildApiConfig,
+  classifyError,
+  DEFAULT_API_URL,
+  validateRequest,
+  validateRunIdRequest,
+} from "./shared.js";
 
 describe("buildApiConfig", () => {
   it("defaults to the hosted API with no key", () => {
@@ -62,6 +74,22 @@ describe("validateRequest", () => {
 
     expect(errors.map((error) => error.location)).toEqual(["files[0].content", "files[1].content"]);
     expect(errors.every((error) => error.class === "input_domain")).toBe(true);
+  });
+});
+
+describe("validateRunIdRequest", () => {
+  it("rejects an empty or whitespace-only run id", () => {
+    for (const runId of ["", "   ", "\n\t"]) {
+      const errors = validateRunIdRequest(runId);
+
+      expect(errors).toHaveLength(1);
+      expect(errors[0]?.class).toBe("input_domain");
+      expect(errors[0]?.location).toBe("run_id");
+    }
+  });
+
+  it("accepts a normal run id", () => {
+    expect(validateRunIdRequest("01JRUN0000000000000000TEST")).toEqual([]);
   });
 });
 
@@ -183,5 +211,48 @@ describe("classifyError", () => {
 
     expect(error.class).toBe("config");
     expect(error.location).toBe("PIPELEX_BASE_URL");
+  });
+
+  it("classifies a missing run lifecycle as config, pointing at the hosted API", () => {
+    const error = classifyError(
+      new RunLifecycleUnavailableError("run lifecycle not served", DEFAULT_API_URL),
+    );
+
+    expect(error.class).toBe("config");
+    expect(error.location).toBe("PIPELEX_BASE_URL");
+    expect(error.hint).toMatch(/hosted/i);
+  });
+
+  it("classifies a completed run missing its main stuff as runtime", () => {
+    const error = classifyError(
+      new MissingMainStuffError("Completed run 'x' returned no main stuff.", "x"),
+    );
+
+    expect(error.class).toBe("runtime");
+    expect(error.message).toMatch(/main stuff/i);
+  });
+
+  it("overrides the 404 arm to input_domain when the route says so", () => {
+    const error = classifyError(
+      new ApiResponseError(
+        "HTTP 404",
+        `${DEFAULT_API_URL}/v1/runs/unknown/status`,
+        404,
+        "Not Found",
+        "{}",
+        "not_found",
+        "Run not found",
+        undefined, // validationErrors
+        undefined, // code
+      ),
+      {
+        route: "/v1/runs/{id}/status",
+        notFound: { location: "run_id", hint: "Check the run id." },
+      },
+    );
+
+    expect(error.class).toBe("input_domain");
+    expect(error.location).toBe("run_id");
+    expect(error.hint).toBe("Check the run id.");
   });
 });

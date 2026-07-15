@@ -2,7 +2,7 @@
 
 ## Value Proposition
 
-Pipelex MCP lets developers and coding agents validate MTHDS content and project a method's declared inputs from inside an MCP host while they are authoring, repairing, or preparing to run `.mthds` files.
+Pipelex MCP lets developers and coding agents validate MTHDS content, project a method's declared inputs, and run methods durably on the hosted Pipelex API from inside an MCP host while they are authoring, repairing, or running `.mthds` files.
 
 Target users are Pipelex/MTHDS developers working with an AI assistant in a local development loop. Today, validation requires leaving the assistant flow, knowing the local OSS `pipelex-api` or SDK details, and manually mapping diagnostics back to file content. The first product slice is intentionally narrow: validate submitted MTHDS file contents and return structured results the assistant can use to fix issues.
 
@@ -12,6 +12,7 @@ Core actions:
 - Return valid, invalid, pending-signature, and no-verdict failure states in a stable structured result.
 - Return optional graph data when requested and available.
 - Project a pipe's declared inputs as a fill-in template (`mthds_inputs`), so an assistant can prepare inputs for a run without leaving the conversation. This unblocks the CLI-free skills in `../pipelex-plugins` (`pipelex-inputs`, `pipelex-design`) that used to shell out to `mthds-agent inputs bundle`.
+- Start a durable run of a method on the hosted Pipelex API (`mthds_run`), then check on it (`mthds_run_status`) and report its results (`mthds_run_results`) by durable run id — the run outlives any single tool call and even the conversation.
 
 ## Why LLM?
 
@@ -25,7 +26,9 @@ Core actions:
 
 `mthds_validate` ships a Skybridge view, `run-graph`: on a positive verdict that carries a `graph_spec`, a Skybridge-capable host renders an interactive method graph (via `@pipelex/mthds-ui`'s `GraphViewer`) inline above the model response, with a user-triggered fullscreen toggle for exploration. Invalid verdicts, pending-signature verdicts with no graph, and `include_graph: false` calls fall back to a compact, non-crashing empty state. The shared surface is the assistant conversation, the structured tool result, and this view.
 
-**First view**: The MCP host lists the Pipelex tools: `mthds_validate` and `mthds_inputs`. Only `mthds_validate` carries a Skybridge view; `mthds_inputs` is a plain tool whose template is small structured data the model reads directly.
+`mthds_run` ships a second Skybridge view, `run-follow`: a self-polling status card that follows a durable run live (friendly status label, elapsed wall-clock, spinner) without any model turns — it polls the read-only `mthds_run_status` on a timer via `useCallTool`. On completion it fetches `mthds_run_results` once and renders the executed graph from the response's view-only metadata plus a compact output preview; on failure it shows the terminal status and failure message (and states plainly that no graph exists for failed runs). On remount it re-resolves the run by id, so reopening the conversation restores the card.
+
+**First view**: The MCP host lists the Pipelex tools: `mthds_validate`, `mthds_inputs`, `mthds_run`, `mthds_run_status`, and `mthds_run_results`. `mthds_validate` and `mthds_run` carry Skybridge views; the others are plain tools whose payloads are small structured data the model reads directly.
 
 **Validation flow**:
 
@@ -62,7 +65,7 @@ The richer error-grouping validation view (diagnostics grouped by class, clickab
 - **App shell**: `pipelex-mcp`, a Skybridge MCP app scaffold.
 - **Runtime API**: the hosted Pipelex API, defaulting to `https://api.pipelex.com` (point `PIPELEX_BASE_URL` at a local OSS `pipelex-api` on `http://localhost:8081` during development).
 - **SDK dependency**: the `@pipelex/sdk` npm package (`PipelexApiClient`, published from `../pipelex-sdk-js`). It re-exports the `mthds/protocol` surface, so the MCP imports one SDK and still reaches the open protocol routes; `mthds` rides along as a transitive dependency.
-- **Auth**: optional `PIPELEX_API_KEY`; local development normally runs without hosted auth.
+- **Auth**: optional `PIPELEX_API_KEY` for the validation and inputs tools; local development normally runs without hosted auth. The run tools execute on the hosted API, so `PIPELEX_API_KEY` is effectively mandatory for them — a missing or invalid key is a `config` no-verdict.
 - **Primary environment variable**: `PIPELEX_BASE_URL`, defaulting to `https://api.pipelex.com`.
 
 ## Validation Scope (`mthds_validate`)
@@ -154,9 +157,101 @@ Verdict discipline is identical to `mthds_validate`: any *produced* verdict is `
 
 The build routes return a plain `message` rather than `rendered_markdown`, so the capability composes its own `content` summary: the resolved pipe, the API message, and the template itself in a fenced code block (` ```json ` or ` ```toml ` to match `format`). Unlike validation, the template is deliberately duplicated between `structuredContent` and the summary — it is the payload the model must read, and some hosts read prose more reliably than structured fields.
 
+## Run Scope (`mthds_run`, `mthds_run_status`, `mthds_run_results`)
+
+The run family adds durable (async) method execution against the hosted Pipelex API, wrapping `@pipelex/sdk`'s run lifecycle (`client.start` → `POST /v1/start`, `client.getRunStatus` → `GET /v1/runs/{id}/status`, `client.getRunResult` → `GET /v1/runs/{id}/results`). The MCP adds no execution logic and stays stateless: all run state lives behind the durable `run_id` on the platform. The server never calls the blocking `POST /v1/execute` or the SDK's blocking wrappers (`waitForResult`, `startAndWaitForResult`), and never surfaces `result_url` or other presigned URLs into model context.
+
+**Run UX flow**:
+
+1. The assistant (usually after `mthds_validate` and `mthds_inputs`) calls `mthds_run` with the file contents, the pipe to run, and the filled inputs.
+2. The tool starts the run and returns the durable `run_id` immediately. The `run-follow` view renders above the response and follows the run on its own — the user watches it without prompting the assistant.
+3. If the user asks how it is going, the assistant calls `mthds_run_status` — one cheap read, with a retry hint in the summary so it doesn't spin-poll.
+4. When the run is terminal, the assistant calls `mthds_run_results` to report: the main output (bounded) on success, or the failure message otherwise.
+5. Because everything is behind the durable id, the flow survives conversation gaps: days later, "what did that run produce?" is a single `mthds_run_results` call, and reopening the conversation remounts the view, which re-resolves the run state by id.
+
+**Tool: `mthds_run`** — start a durable run. *Not* read-only; its description states it executes the method on the hosted API and spends inference credit.
+
+```ts
+// input
+{
+  files: Array<{ content: string; uri?: string | null }>;  // the shared submitted-files shape
+  pipe_code?: string;                // pipe to run; omitted → server resolves the bundle's main pipe
+  inputs?: Record<string, unknown>;  // method inputs, as filled from the mthds_inputs template
+}
+
+// structuredContent
+{
+  status: "ok" | "error";
+  run_id?: string;             // the durable pipeline_run_id — the handle for everything else
+  run_status?: RunStatus;      // initial state from the ack, when the server includes one
+  created_at?: string;
+  available_view_specs: Array<"live_run_status">;
+  errors?: ToolError[];        // no-verdict only
+}
+```
+
+`RunStatus` is the hosted lifecycle set: `PENDING | STARTED | RUNNING | COMPLETED | FAILED | CANCELLED | TERMINATED | TIMED_OUT`. The `content` summary states the run was accepted, gives the id, and spells out follow-up etiquette for the model (check with `mthds_run_status`, fetch with `mthds_run_results` when terminal, don't poll in a tight loop). Deliberately not exposed in v1: `output_name`, `output_multiplicity`, `dynamic_output_concept_ref`, `extra`, webhooks, client-supplied run ids. Binary inputs (PDFs, images) ride reachable https URLs inside `inputs`; a storage upload tool is a later increment.
+
+**Tool: `mthds_run_status`** — check on a run. Read-only, plain tool (no view).
+
+```ts
+// input
+{ run_id: string }
+
+// structuredContent
+{
+  status: "ok" | "error";
+  run_id?: string;
+  run_status?: RunStatus;      // the coarse lifecycle state
+  is_terminal?: boolean;       // convenience so the model needn't know the status set
+  degraded?: boolean;          // true → status is last-known, not freshly derived
+  retry_after_seconds?: number | null;
+  created_at?: string;
+  finished_at?: string | null;
+  errors?: ToolError[];
+}
+```
+
+The `content` summary while non-terminal includes "check again in ~Ns" from the retry hint.
+
+**Tool: `mthds_run_results`** — report the results. Read-only.
+
+```ts
+// input
+{ run_id: string }
+
+// structuredContent
+{
+  status: "ok" | "error";
+  run_id?: string;
+  state?: "running" | "completed" | "failed";   // mirrors the SDK's RunResultState
+  retry_after_seconds?: number | null;          // state=running only
+  run_status?: RunStatus;                       // state=failed only (terminal status)
+  failure_message?: string;                     // state=failed only
+  main_stuff?: unknown;                         // state=completed only — bounded, see below
+  truncated?: boolean;                          // state=completed only; true when main_stuff was bounded down
+  available_view_specs: Array<"run_graph">;     // populated when graph_spec rides _meta
+  errors?: ToolError[];
+}
+```
+
+On `completed`, `content` composes a Markdown summary with the main output in a fenced code block (the `mthds_inputs` duplication pattern: the payload the model must read is deliberately repeated in the prose), bounded by the same cap as `structuredContent`. The executed `graph_spec` and the **full** (unbounded) `main_stuff` ride the view-only `_meta` channel (keys mirror the API field names: `_meta.graph_spec`, `_meta.main_stuff`), never model context. A `state: "running"` result is a produced verdict ("no result *yet*" is an answer): `status: "ok"` with the retry hint. On `failed`, the summary carries the terminal status and failure message and states plainly that no graph exists for failed runs.
+
+**Bounding `main_stuff`**: an output can be huge. The structured copy (and the fenced summary block) is bounded to a serialized cap (~32KB, tunable constant): JSON trees are pruned deterministically (deepest levels and longest collections first, with an ellipsis marker); plain text keeps head+tail. When bounded, `truncated: true` and the summary says the output was cut. The full output always rides `_meta` for views.
+
+**Run verdict discipline**: `status: "ok"` means the API answered the question about the run — including "it failed" and "not done yet". A FAILED/CANCELLED/TIMED_OUT run is a produced verdict (`status: "ok"` with the terminal `run_status`), and so is a `state: "running"` results lookup. `status: "error"` + `errors[]` is reserved for no-verdict conditions:
+
+- `input_domain` — empty/blank `run_id`, blank `pipe_code`, request-shape 400/422 at start (invalid bundle refused at submission), unknown `run_id` (a 404 on the run routes with the server's structured error envelope).
+- `config` — missing/invalid `PIPELEX_API_KEY` (401/403), unreachable API, `RunLifecycleUnavailableError` (the configured base URL points at a bare runner — durable runs need the hosted API).
+- `runtime` — 5xx, malformed report (e.g. a completed result missing `main_stuff`, the SDK's `MissingMainStuffError`).
+
+The unknown-id 404 vs missing-route 404 distinction comes from the SDK: a missing lifecycle route throws `RunLifecycleUnavailableError` (`config`), while an unknown id surfaces as a plain 404 `ApiResponseError` (`input_domain`, via a per-route classification override).
+
+**View: `run-follow`** (registered on `mthds_run`) — described in UI Overview. `available_view_specs` on `mthds_run` lists `"live_run_status"` when the view is registered; `mthds_run_results` lists `"run_graph"` when the executed graph rides its `_meta` (the kind is minted now; a view directly on the results tool is a later increment).
+
 ## Non-Goals
 
-The server must not add Pipelex Hosted API deployment behavior, bearer-token extraction, run execution, status polling, resources, logs, package publishing, MCP-side filesystem reads, subprocess fallbacks, or a production validation UI.
+The server must not add Pipelex Hosted API deployment behavior, bearer-token extraction, blocking execution (`POST /v1/execute` or the SDK's blocking wrappers), run cancellation, resources, logs, package publishing, MCP-side filesystem reads, subprocess fallbacks, or a production validation UI. Also out of scope for this increment: registered-method runs by catalog id, per-user OAuth, and a storage upload tool for binary inputs (binary inputs ride reachable https URLs; upload is a later increment).
 
 Repository quality gates are in scope: ESLint, Prettier, TypeScript type checking, Vitest unit tests, and a combined `npm run check` command should remain available locally.
 
@@ -178,9 +273,16 @@ Prepare inputs for a method:
 3. The tool returns the fill-in template plus the resolved pipe, which the assistant fills with user data, synthetic data, or placeholders.
 4. On an invalid closure, the tool returns the validation errors instead; the assistant can repair via the validation flow and retry.
 
+Run a method durably:
+
+1. The user asks the assistant to run a `.mthds` method (usually after validating it and filling the inputs template).
+2. The assistant submits the file contents, the pipe to run, and the filled inputs to `mthds_run`; the tool returns the durable `run_id` immediately and the `run-follow` view follows the run live.
+3. The assistant checks on the run with `mthds_run_status` when asked (honoring the retry hint rather than spin-polling) and reports the outcome with `mthds_run_results` once terminal.
+4. Days later, the same `run_id` still answers `mthds_run_status` / `mthds_run_results` — the run is durable and the MCP is stateless.
+
 ## Tools and Views
 
-**Server instructions**: The server sets a short MCP `instructions` string (server-wide, on the `McpServer` constructor options) that hosts surface to the model. It states that the server validates `.mthds` method files (returning an interactive dry-run graph on a valid verdict) and projects a method's declared inputs as a fill-in template. It is a server-level hint only — argument-level detail stays in the tool `description`.
+**Server instructions**: The server sets a short MCP `instructions` string (server-wide, on the `McpServer` constructor options) that hosts surface to the model. It states that the server validates `.mthds` method files (returning an interactive dry-run graph on a valid verdict), projects a method's declared inputs as a fill-in template, and runs methods durably on the hosted Pipelex API (start by files+pipe+inputs, then check status and fetch results by durable run id). It is a server-level hint only — argument-level detail stays in the tool `description`.
 
 **Tool: `mthds_validate`**
 
@@ -197,3 +299,27 @@ Prepare inputs for a method:
 - **Behavior**: Validates request shape, calls `POST /v1/build/inputs` against `PIPELEX_BASE_URL` or `https://api.pipelex.com` (adapting `uri` → `source`), and maps the produced verdict into flattened structured content with the same `status`/`is_valid` discipline as `mthds_validate`.
 - **Annotations**: Read-only, non-destructive, no open-world publishing.
 - **View**: none — the template is small structured data the model reads directly.
+
+**Tool: `mthds_run`**
+
+- **Input**: `{ files, pipe_code?, inputs? }`
+- **Output**: `{ status, run_id?, run_status?, created_at?, available_view_specs, errors? }` in `structuredContent`, plus a start-ack text summary in MCP `content` with the run id and follow-up etiquette.
+- **Behavior**: Validates request shape, then starts a durable run via `POST /v1/start` (fire-and-forget 202). Never blocks on the result.
+- **Annotations**: NOT read-only (`readOnlyHint: false`), non-destructive, no open-world publishing. The description states it executes the method on the hosted API and spends inference credit.
+- **View**: `run-follow` — the self-polling live status card described in UI Overview.
+
+**Tool: `mthds_run_status`**
+
+- **Input**: `{ run_id }`
+- **Output**: `{ status, run_id?, run_status?, is_terminal?, degraded?, retry_after_seconds?, created_at?, finished_at?, errors? }` in `structuredContent`, plus a text summary with a check-again hint while non-terminal.
+- **Behavior**: One cheap self-healing status read (`GET /v1/runs/{id}/status`). A terminal non-COMPLETED status is a produced verdict, not an error.
+- **Annotations**: Read-only, non-destructive, no open-world publishing.
+- **View**: none.
+
+**Tool: `mthds_run_results`**
+
+- **Input**: `{ run_id }`
+- **Output**: `{ status, run_id?, state?, retry_after_seconds?, run_status?, failure_message?, main_stuff?, truncated?, available_view_specs, errors? }` in `structuredContent`, plus a text summary that on `completed` repeats the bounded main output in a fenced code block. The executed graph and the full unbounded output ride the view-only `_meta` channel (`_meta.graph_spec`, `_meta.main_stuff`); `available_view_specs` lists `"run_graph"` exactly when the graph rides `_meta`.
+- **Behavior**: One-shot result lookup (`GET /v1/runs/{id}/results`), discriminated on `state`: `running` (with retry hint), `completed` (bounded `main_stuff` + `truncated` flag), `failed` (terminal status + failure message; no graph exists for failed runs).
+- **Annotations**: Read-only, non-destructive, no open-world publishing.
+- **View**: none in this increment (the `"run_graph"` view-spec kind is minted now; a view directly on this tool is a later increment — the `run-follow` view already fetches and renders these results).
