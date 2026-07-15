@@ -65,7 +65,7 @@ Skybridge refs for this phase: `references/architecture.md` (already applied in 
 ### ⛔ CHECKPOINT 2 — tools shipped (design doc "Checkpoint A")
 
 - [x] Protocol steps 1–5 executed (incl. no-context Sonnet-5 `/code-review` fan-out on this phase's diff).
-- [x] Phase SHA range recorded: `<base>..<head>` = `b4c21b4..<phase-2-head>` (see Decision log for the review-triage commits after it)
+- [x] Phase SHA range recorded: `<base>..<head>` = `b4c21b4..b2556d8` (plus the review-triage/tracker commit(s) after it, see Decision log)
 - [x] Design doc updated: §7 Q1/Q3 answers recorded in place; the 503 contract drift folded into SPEC.md (verdict-discipline section) and the tool description.
 - [x] **Phase 3's schema surface is frozen** — the view only *consumes* the tools; no schema or projection change is expected in Phase 3 beyond flipping `mthds_run`'s `available_view_specs` to `["live_run_status"]` and appending its `## Views` note (both already listed as Phase 3 items).
 
@@ -119,6 +119,8 @@ Skybridge refs for this phase: `references/fetch-and-render-data.md`, `reference
 
 Running list — one line per entry, newest first. Includes rejected review findings with reasons.
 
+- (P2 review triage) "Run-id routes lack a `badRequest` override, so a 400/422 would hint at a nonexistent `files` field" → applied: `RUN_STATUS_ERROR_OPTIONS`/`RUN_RESULTS_ERROR_OPTIONS` now point 400/422 at `run_id`, with a classification test covering both routes.
+- (P2 review triage) "Three near-identical `*SummaryForError` switches" → applied: collapsed into per-tool `Record<ErrorClass, string>` tables (TS keeps them exhaustive, same behavior).
 - (P2) `ClassifyErrorOptions` gained a per-route `serverError` hint override, driven by the Q3 live check: the hosted `/v1/start` answers 503 for an invalid bundle, so the start route's 5xx hint points at `mthds_validate`/`mthds_inputs` before blaming the platform.
 - (P2) Platform bug candidate flagged (not an MCP change): `/v1/start` should 422 on an invalid bundle instead of the generic 503 `pipeline_start_unavailable`; until then the MCP classifies it as a `runtime` no-verdict.
 - (P2) A mid-execution terminal FAILED could not be produced live (Temporal retries a failing activity past a 10-minute watch; every status read came back `degraded: true`) — the `failed` results arm is covered by unit tests against the SDK contract; noted for the Phase 3 view (long-RUNNING with degraded reads is a real state the card will show).

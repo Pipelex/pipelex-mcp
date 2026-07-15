@@ -16,6 +16,7 @@ import {
   getMthdsRunStatus,
   MAIN_STUFF_CAP,
   resultsResult,
+  RUN_RESULTS_ERROR_OPTIONS,
   RUN_START_ERROR_OPTIONS,
   RUN_STATUS_ERROR_OPTIONS,
   runResultsToolResult,
@@ -149,6 +150,33 @@ describe("run-route error classification", () => {
     expect(error.class).toBe("input_domain");
     expect(error.location).toBe("files");
     expect(error.hint).toMatch(/mthds_validate/);
+  });
+
+  it("points a 400/422 on the run-id routes at run_id, not files", () => {
+    const routes: Array<[string, typeof RUN_STATUS_ERROR_OPTIONS]> = [
+      ["/v1/runs/not-a-run-id/status", RUN_STATUS_ERROR_OPTIONS],
+      ["/v1/runs/not-a-run-id/results", RUN_RESULTS_ERROR_OPTIONS],
+    ];
+    for (const [route, options] of routes) {
+      const error = classifyError(
+        new ApiResponseError(
+          "HTTP 422",
+          `${DEFAULT_API_URL}${route}`,
+          422,
+          "Unprocessable Entity",
+          "{}",
+          "validation_error",
+          "Invalid run id",
+          undefined, // validationErrors
+          undefined, // code
+        ),
+        options,
+      );
+
+      expect(error.class).toBe("input_domain");
+      expect(error.location).toBe("run_id");
+      expect(error.hint).toMatch(/mthds_run/);
+    }
   });
 });
 

@@ -17,7 +17,7 @@ import {
   validateRequest,
   validateRunIdRequest,
 } from "./shared.js";
-import type { ClassifyErrorOptions, SubmittedFile, ToolError } from "./shared.js";
+import type { ClassifyErrorOptions, ErrorClass, SubmittedFile, ToolError } from "./shared.js";
 
 /**
  * The hosted run lifecycle statuses. The `Record<RunStatus, true>` shape ties
@@ -266,13 +266,17 @@ export const RUN_START_ERROR_OPTIONS: ClassifyErrorOptions = {
 const UNKNOWN_RUN_HINT =
   "No run with this id is known to the configured API. Check the run_id returned by mthds_run, and that PIPELEX_BASE_URL points at the deployment that started it.";
 
+const MALFORMED_RUN_ID_HINT = "Pass the run_id exactly as returned by mthds_run.";
+
 export const RUN_STATUS_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/runs/{id}/status",
+  badRequest: { location: "run_id", hint: MALFORMED_RUN_ID_HINT },
   notFound: { location: "run_id", hint: UNKNOWN_RUN_HINT },
 };
 
 export const RUN_RESULTS_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/runs/{id}/results",
+  badRequest: { location: "run_id", hint: MALFORMED_RUN_ID_HINT },
   notFound: { location: "run_id", hint: UNKNOWN_RUN_HINT },
 };
 
@@ -683,37 +687,34 @@ function toStartOptions(input: MthdsRunInput): StartOptions {
   };
 }
 
+const START_ERROR_SUMMARIES: Record<ErrorClass, string> = {
+  config: "Run could not start: the Pipelex API is unreachable or misconfigured.",
+  input_domain: "Run was not started: the Pipelex API rejected the request.",
+  runtime: "Run could not be started: the Pipelex API returned an error.",
+};
+
+const STATUS_ERROR_SUMMARIES: Record<ErrorClass, string> = {
+  config: "Run status could not be read: the Pipelex API is unreachable or misconfigured.",
+  input_domain: "Run status was not read: the Pipelex API rejected the request.",
+  runtime: "Run status could not be read: the Pipelex API returned an error.",
+};
+
+const RESULTS_ERROR_SUMMARIES: Record<ErrorClass, string> = {
+  config: "Run results could not be read: the Pipelex API is unreachable or misconfigured.",
+  input_domain: "Run results were not read: the Pipelex API rejected the request.",
+  runtime: "Run results could not be read: the Pipelex API returned an error.",
+};
+
 function startSummaryForError(error: ToolError): string {
-  switch (error.class) {
-    case "config":
-      return "Run could not start: the Pipelex API is unreachable or misconfigured.";
-    case "input_domain":
-      return "Run was not started: the Pipelex API rejected the request.";
-    case "runtime":
-      return "Run could not be started: the Pipelex API returned an error.";
-  }
+  return START_ERROR_SUMMARIES[error.class];
 }
 
 function statusSummaryForError(error: ToolError): string {
-  switch (error.class) {
-    case "config":
-      return "Run status could not be read: the Pipelex API is unreachable or misconfigured.";
-    case "input_domain":
-      return "Run status was not read: the Pipelex API rejected the request.";
-    case "runtime":
-      return "Run status could not be read: the Pipelex API returned an error.";
-  }
+  return STATUS_ERROR_SUMMARIES[error.class];
 }
 
 function resultsSummaryForError(error: ToolError): string {
-  switch (error.class) {
-    case "config":
-      return "Run results could not be read: the Pipelex API is unreachable or misconfigured.";
-    case "input_domain":
-      return "Run results were not read: the Pipelex API rejected the request.";
-    case "runtime":
-      return "Run results could not be read: the Pipelex API returned an error.";
-  }
+  return RESULTS_ERROR_SUMMARIES[error.class];
 }
 
 function startErrorResult(summary: string, errors: ToolError[]): RunStartResult {
