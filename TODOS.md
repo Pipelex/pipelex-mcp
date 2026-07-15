@@ -10,7 +10,7 @@ Tracks execution of the durable-runs increment: the `mthds_run` / `mthds_run_sta
 
 ## Current state
 
-**Phase 1 complete (contract locked, Checkpoint 1 passed).** Next action: first unchecked box of Phase 2. The contract surface Phase 2 builds on: `src/capabilities/run.ts` exports the Zod schemas (`mthdsRun*InputSchema` / `mthdsRun*OutputSchema`), `RunContext`/`buildRunContext`, the per-route error options (`RUN_START_ERROR_OPTIONS`, `RUN_STATUS_ERROR_OPTIONS`, `RUN_RESULTS_ERROR_OPTIONS`), `validateRunRequest`, the projections `startResult`/`statusResult`/`resultsResult` (which already compose the `content` summaries), and `boundMainStuff`/`MAIN_STUFF_CAP`. Phase 2 adds the capability functions (`startMthdsRun`/`getMthdsRunStatus`/`getMthdsRunResults`), their toolResult wrappers (`_meta` projection), and server registration.
+**Phase 2 complete (tools shipped + live-verified, Checkpoint 2 passed).** Next action: first unchecked box of Phase 3 (the §7-Q2 host spike gates the rest of that phase). The surface Phase 3 builds on: the registered tool trio in `src/server.ts` (`mthds_run` with `readOnlyHint: false` and no view yet; `mthds_run_status`/`mthds_run_results` read-only), the capability functions `startMthdsRun`/`getMthdsRunStatus`/`getMthdsRunResults` in `src/capabilities/run.ts` with their toolResult wrappers (`runToolResult`/`runStatusToolResult`/`runResultsToolResult` — the last one projects `_meta.graph_spec` + `_meta.main_stuff`), and the fake-client test seam (`RunContext.client`). **Phase 3's schema surface is frozen** — the view only consumes the tools. Live-check answers Q1/Q3 are recorded in the design doc §7 (headline: omitted `pipe_code` resolves `main_pipe`; hosted `/v1/start` rejects bad bundles with an opaque 503, mitigated by a per-route `serverError` hint + validate-first tool description).
 
 ## Cold-start brief (read order for a fresh session)
 
@@ -53,21 +53,21 @@ Skybridge refs for this phase: `references/architecture.md` (already applied in 
 
 ## Phase 2 — capabilities + server registration + live checks
 
-- [ ] Implement `startMthdsRun` / `getMthdsRunStatus` / `getMthdsRunResults` over `client.start` / `client.getRunStatus` / `client.getRunResult`. `mthds_contents` from `files[].content` (`/v1/start` takes no source labels — `uri` feeds only our request-shape errors). Never `waitForResult` / `startAndWaitForResult`; never surface `result_url` or presigned URLs into model context.
-- [ ] Completed results: executed `graph_spec` and the **full** (unbounded) `main_stuff` ride `_meta` (keys mirror the API field names, per the existing `graph_spec` convention); bounded copy + fenced ```json summary block in the model-facing streams (the `mthds_inputs` duplication pattern).
-- [ ] `content` summaries: start-ack with run id + follow-up etiquette ("view follows live; `mthds_run_status` to check, `mthds_run_results` when terminal — don't spin-poll"); status summary with "check again in ~Ns" from the retry hint; failed-results summary with terminal status + failure message (state plainly that no graph exists for failed runs).
-- [ ] Register in `src/server.ts`: `mthds_run` (readOnlyHint: false, destructiveHint: false, openWorldHint: false; description states it executes on the hosted API and **spends inference credit**; OpenAI invocation labels), `mthds_run_status` / `mthds_run_results` (readOnlyHint: true). **No `view` registration yet and `available_view_specs: []` on `mthds_run` in this phase** — the `run-follow` component doesn't exist until Phase 3; registering a missing view name breaks the `.skybridge/views.d.ts` typecheck. `mthds_run_results` populates `available_view_specs: ["run_graph"]` when `graph_spec` rides `_meta` (contract minted now, its own view deferred per §6.5).
-- [ ] Extend the server `instructions` string with one sentence on the run lifecycle.
-- [ ] **Live check §7-Q1**: `pipe_code` omitted at `/v1/start` — main-pipe resolution or rejection? → make `pipe_code` optional/required accordingly (schema + SPEC.md), record the answer in the design doc §7.
-- [ ] **Live check §7-Q3**: invalid bundle at `/v1/start` — 422 at submission or 202-then-FAILED? → tune the "validate first" nudging in the tool description, record in §7.
-- [ ] Smoke-test the trio end-to-end against the hosted API from `make dev` DevTools: start a small method, poll status to terminal, fetch results; also exercise one failing run and one unknown `run_id`.
+- [x] Implement `startMthdsRun` / `getMthdsRunStatus` / `getMthdsRunResults` over `client.start` / `client.getRunStatus` / `client.getRunResult`. `mthds_contents` from `files[].content` (`/v1/start` takes no source labels — `uri` feeds only our request-shape errors). Never `waitForResult` / `startAndWaitForResult`; never surface `result_url` or presigned URLs into model context.
+- [x] Completed results: executed `graph_spec` and the **full** (unbounded) `main_stuff` ride `_meta` (keys mirror the API field names, per the existing `graph_spec` convention); bounded copy + fenced ```json summary block in the model-facing streams (the `mthds_inputs` duplication pattern).
+- [x] `content` summaries: start-ack with run id + follow-up etiquette ("view follows live; `mthds_run_status` to check, `mthds_run_results` when terminal — don't spin-poll"); status summary with "check again in ~Ns" from the retry hint; failed-results summary with terminal status + failure message (state plainly that no graph exists for failed runs). (Verified/refined — the projections composed these in Phase 1.)
+- [x] Register in `src/server.ts`: `mthds_run` (readOnlyHint: false, destructiveHint: false, openWorldHint: false; description states it executes on the hosted API and **spends inference credit**; OpenAI invocation labels), `mthds_run_status` / `mthds_run_results` (readOnlyHint: true). **No `view` registration yet and `available_view_specs: []` on `mthds_run` in this phase** — the `run-follow` component doesn't exist until Phase 3; registering a missing view name breaks the `.skybridge/views.d.ts` typecheck. `mthds_run_results` populates `available_view_specs: ["run_graph"]` when `graph_spec` rides `_meta` (contract minted now, its own view deferred per §6.5).
+- [x] Extend the server `instructions` string with one sentence on the run lifecycle.
+- [x] **Live check §7-Q1**: `pipe_code` omitted at `/v1/start` — main-pipe resolution or rejection? → **resolves the bundle's `main_pipe`** (run accepted and COMPLETED on prod); `pipe_code` stays optional. Recorded in the design doc §7.
+- [x] **Live check §7-Q3**: invalid bundle at `/v1/start` — 422 at submission or 202-then-FAILED? → **neither: a generic 503 `pipeline_start_unavailable` at submission** (same for missing required inputs). Mitigated with a per-route `serverError` hint (`ClassifyErrorOptions` extension) + a validate-first nudge in the tool description; platform bug candidate flagged (should be 422). Recorded in §7 + SPEC.md.
+- [x] Smoke-test the trio end-to-end against the hosted API: start a small method, poll status to terminal, fetch results — done twice, once driving the capability functions directly and once through the real MCP endpoint (`make dev` server, MCP client over streamable HTTP: tools listed with correct annotations, trio green, `_meta` carries `graph_spec` + `main_stuff` across the transport). Unknown `run_id` exercised live on both run routes (→ `input_domain`). Failing-run arm: start-time rejection exercised live (the 503 above); a mid-execution terminal FAILED could not be produced live (Temporal keeps retrying a failing activity well past a 10-minute watch, `degraded: true` on every read) — the `failed` results arm stays covered by unit tests against the SDK contract.
 
 ### ⛔ CHECKPOINT 2 — tools shipped (design doc "Checkpoint A")
 
-- [ ] Protocol steps 1–5 executed (incl. no-context Sonnet-5 `/code-review` fan-out on this phase's diff).
-- [ ] Phase SHA range recorded: `<base>..<head>` = _
-- [ ] Design doc updated: §7 Q1/Q3 answers recorded in place; any contract drift folded into §3/§4 and SPEC.md.
-- [ ] Explicit note here on whether Phase 3's schema surface is frozen (it should be — the view only *consumes* the tools).
+- [x] Protocol steps 1–5 executed (incl. no-context Sonnet-5 `/code-review` fan-out on this phase's diff).
+- [x] Phase SHA range recorded: `<base>..<head>` = `b4c21b4..<phase-2-head>` (see Decision log for the review-triage commits after it)
+- [x] Design doc updated: §7 Q1/Q3 answers recorded in place; the 503 contract drift folded into SPEC.md (verdict-discipline section) and the tool description.
+- [x] **Phase 3's schema surface is frozen** — the view only *consumes* the tools; no schema or projection change is expected in Phase 3 beyond flipping `mthds_run`'s `available_view_specs` to `["live_run_status"]` and appending its `## Views` note (both already listed as Phase 3 items).
 
 ---
 
@@ -110,15 +110,19 @@ Skybridge refs for this phase: `references/fetch-and-render-data.md`, `reference
 
 ## Open questions ledger (mirrors design §7 — answers get recorded in the design doc, status tracked here)
 
-- [ ] Q1 — `pipe_code` omitted at `/v1/start`: resolves main pipe or rejects? (Phase 2 live check) → answer: _
+- [x] Q1 — `pipe_code` omitted at `/v1/start`: resolves main pipe or rejects? (Phase 2 live check) → answer: resolves the bundle's `main_pipe`; `pipe_code` stays optional (design doc §7).
 - [ ] Q2 — widget-initiated tool calls + `meta` passthrough per host (ChatGPT / Claude / DevTools)? (Phase 3 spike, gates the view) → answer: _
-- [ ] Q3 — `/v1/start` on an invalid bundle: 422 at submission or 202-then-FAILED? (Phase 2 live check) → answer: _
+- [x] Q3 — `/v1/start` on an invalid bundle: 422 at submission or 202-then-FAILED? (Phase 2 live check) → answer: neither — opaque 503 at submission; per-route `serverError` hint + validate-first description added; platform 422 bug candidate flagged (design doc §7).
 - [x] Q4 — binary inputs ride https URLs, storage upload tool deferred: declared in SPEC.md (Phase 1) → done (SPEC.md Run Scope + Non-Goals).
 
 ## Decision log / deviations
 
 Running list — one line per entry, newest first. Includes rejected review findings with reasons.
 
+- (P2) `ClassifyErrorOptions` gained a per-route `serverError` hint override, driven by the Q3 live check: the hosted `/v1/start` answers 503 for an invalid bundle, so the start route's 5xx hint points at `mthds_validate`/`mthds_inputs` before blaming the platform.
+- (P2) Platform bug candidate flagged (not an MCP change): `/v1/start` should 422 on an invalid bundle instead of the generic 503 `pipeline_start_unavailable`; until then the MCP classifies it as a `runtime` no-verdict.
+- (P2) A mid-execution terminal FAILED could not be produced live (Temporal retries a failing activity past a 10-minute watch; every status read came back `degraded: true`) — the `failed` results arm is covered by unit tests against the SDK contract; noted for the Phase 3 view (long-RUNNING with degraded reads is a real state the card will show).
+- (P2) MCP-transport smoke ran on port 3001 (3000 was taken by another dev server) — the Skybridge dev server auto-increments; nothing to fix.
 - (P1 review triage) "Missing CHANGELOG entry" → deferred by plan, not an oversight: the changelog entry is a Phase 4 item, minted when the tool family is registered and user-visible; a contract skeleton is not a release-facing change yet.
 - (P1 review triage) "Unused exports `RunContext`/`buildRunContext`/`RUN_RESULTS_ERROR_OPTIONS`" → rejected: intentional Phase-1 groundwork consumed by the Phase 2 capability functions (mirrors `buildValidationContext`); the review saw the phase diff without the plan, as designed.
 - (P1) Projection functions compose their `content` summaries already (they are integral to the `{ structuredContent, summary }` return shape the existing capabilities use) — Phase 2's summary bullets become verify/refine, not build.

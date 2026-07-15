@@ -1,4 +1,4 @@
-import { isTerminalRunStatus } from "@pipelex/sdk";
+import { isTerminalRunStatus, PipelexApiClient } from "@pipelex/sdk";
 import type {
   RunRead,
   RunResults,
@@ -9,7 +9,14 @@ import type {
 } from "@pipelex/sdk";
 import { z } from "zod";
 
-import { buildApiConfig, filesInputSchema, toolErrorSchema, validateRequest } from "./shared.js";
+import {
+  buildApiConfig,
+  classifyError,
+  filesInputSchema,
+  toolErrorSchema,
+  validateRequest,
+  validateRunIdRequest,
+} from "./shared.js";
 import type { ClassifyErrorOptions, SubmittedFile, ToolError } from "./shared.js";
 
 /**
@@ -246,6 +253,13 @@ export const RUN_START_ERROR_OPTIONS: ClassifyErrorOptions = {
   badRequest: {
     location: "files",
     hint: "Check files, pipe_code, and inputs; validate the bundle with mthds_validate and fill the template from mthds_inputs first.",
+  },
+  // Live-checked (2026-07-15): the hosted /v1/start reports start-time
+  // rejections — including an invalid bundle — as a generic 503 "Failed to
+  // start pipeline", indistinguishable from real server trouble. Point the
+  // agent at the recoverable cause first.
+  serverError: {
+    hint: "The hosted API reports start-time rejections (e.g. an invalid bundle or bad inputs) as a generic server error. Validate the bundle with mthds_validate and check the inputs against mthds_inputs; if both pass, the platform itself may be having trouble.",
   },
 };
 
@@ -568,5 +582,187 @@ function failedResult(runId: string, status: RunStatus, message: string): RunRes
       `Run \`${runId}\` ended ${status}: ${message}`,
       "No graph is available for failed runs.",
     ].join("\n\n"),
+  };
+}
+
+// ── capabilities ────────────────────────────────────────────────────
+
+function runClient(context: RunContext): RunClient {
+  return (
+    context.client ??
+    new PipelexApiClient({
+      baseUrl: context.baseUrl,
+      apiKey: context.apiKey,
+    })
+  );
+}
+
+/** Start a durable run — fire-and-forget `POST /v1/start`, never blocking. */
+export async function startMthdsRun(
+  input: MthdsRunInput,
+  context: RunContext = buildRunContext(),
+): Promise<RunStartResult> {
+  const inputErrors = validateRunRequest(input);
+  if (inputErrors.length > 0) {
+    return startErrorResult("Run was not started: request input is invalid.", inputErrors);
+  }
+
+  try {
+    const ack = await runClient(context).start(toStartOptions(input));
+    return startResult(ack);
+  } catch (err) {
+    const error = classifyError(err, RUN_START_ERROR_OPTIONS);
+    return startErrorResult(startSummaryForError(error), [error]);
+  }
+}
+
+/** One cheap self-healing status read — `GET /v1/runs/{id}/status`. */
+export async function getMthdsRunStatus(
+  input: RunIdInput,
+  context: RunContext = buildRunContext(),
+): Promise<RunStatusResult> {
+  const inputErrors = validateRunIdRequest(input.run_id);
+  if (inputErrors.length > 0) {
+    return statusErrorResult("Run status was not read: request input is invalid.", inputErrors);
+  }
+
+  try {
+    const read = await runClient(context).getRunStatus(input.run_id);
+    return statusResult(read);
+  } catch (err) {
+    const error = classifyError(err, RUN_STATUS_ERROR_OPTIONS);
+    return statusErrorResult(statusSummaryForError(error), [error]);
+  }
+}
+
+/** One-shot result lookup — `GET /v1/runs/{id}/results`. */
+export async function getMthdsRunResults(
+  input: RunIdInput,
+  context: RunContext = buildRunContext(),
+): Promise<RunResultsResult> {
+  const inputErrors = validateRunIdRequest(input.run_id);
+  if (inputErrors.length > 0) {
+    return resultsErrorResult("Run results were not read: request input is invalid.", inputErrors);
+  }
+
+  let state: RunResultState;
+  try {
+    state = await runClient(context).getRunResult(input.run_id);
+  } catch (err) {
+    const error = classifyError(err, RUN_RESULTS_ERROR_OPTIONS);
+    return resultsErrorResult(resultsSummaryForError(error), [error]);
+  }
+
+  // The API responded; projecting it must not be reported as an unreachable
+  // API. A malformed report (a completed result missing main_stuff) is a
+  // reachable contract violation, surfaced as a runtime no-verdict error.
+  try {
+    return resultsResult(state);
+  } catch (err) {
+    return resultsErrorResult(
+      "Run results produced no verdict: the Pipelex API returned a malformed report.",
+      [
+        {
+          class: "runtime",
+          message:
+            err instanceof Error ? err.message : "The Pipelex API returned a malformed run result.",
+          hint: "The API responded but its report was missing required fields; inspect the run on the platform.",
+        },
+      ],
+    );
+  }
+}
+
+// `/v1/start` takes no source labels — the MCP surface's `uri` feeds only our
+// own request-shape errors, so only the contents cross the wire.
+function toStartOptions(input: MthdsRunInput): StartOptions {
+  return {
+    mthds_contents: input.files.map((file) => file.content),
+    ...(input.pipe_code === undefined ? {} : { pipe_code: input.pipe_code }),
+    ...(input.inputs === undefined ? {} : { inputs: input.inputs }),
+  };
+}
+
+function startSummaryForError(error: ToolError): string {
+  switch (error.class) {
+    case "config":
+      return "Run could not start: the Pipelex API is unreachable or misconfigured.";
+    case "input_domain":
+      return "Run was not started: the Pipelex API rejected the request.";
+    case "runtime":
+      return "Run could not be started: the Pipelex API returned an error.";
+  }
+}
+
+function statusSummaryForError(error: ToolError): string {
+  switch (error.class) {
+    case "config":
+      return "Run status could not be read: the Pipelex API is unreachable or misconfigured.";
+    case "input_domain":
+      return "Run status was not read: the Pipelex API rejected the request.";
+    case "runtime":
+      return "Run status could not be read: the Pipelex API returned an error.";
+  }
+}
+
+function resultsSummaryForError(error: ToolError): string {
+  switch (error.class) {
+    case "config":
+      return "Run results could not be read: the Pipelex API is unreachable or misconfigured.";
+    case "input_domain":
+      return "Run results were not read: the Pipelex API rejected the request.";
+    case "runtime":
+      return "Run results could not be read: the Pipelex API returned an error.";
+  }
+}
+
+function startErrorResult(summary: string, errors: ToolError[]): RunStartResult {
+  return {
+    structuredContent: { status: "error", available_view_specs: [], errors },
+    summary,
+  };
+}
+
+function statusErrorResult(summary: string, errors: ToolError[]): RunStatusResult {
+  return {
+    structuredContent: { status: "error", errors },
+    summary,
+  };
+}
+
+function resultsErrorResult(summary: string, errors: ToolError[]): RunResultsResult {
+  return {
+    structuredContent: { status: "error", available_view_specs: [], errors },
+    summary,
+  };
+}
+
+// ── tool results ────────────────────────────────────────────────────
+
+export function runToolResult(result: RunStartResult) {
+  return {
+    structuredContent: result.structuredContent,
+    content: [{ type: "text" as const, text: result.summary }],
+    isError: result.structuredContent.status === "error",
+  };
+}
+
+export function runStatusToolResult(result: RunStatusResult) {
+  return {
+    structuredContent: result.structuredContent,
+    content: [{ type: "text" as const, text: result.summary }],
+    isError: result.structuredContent.status === "error",
+  };
+}
+
+export function runResultsToolResult(result: RunResultsResult) {
+  return {
+    structuredContent: result.structuredContent,
+    content: [{ type: "text" as const, text: result.summary }],
+    isError: result.structuredContent.status === "error",
+    // View-only channel (the mthds_validate convention): the executed graph
+    // and the FULL unbounded main output ride `_meta`, never structuredContent,
+    // so the model never pays their tokens. Keys mirror the API field names.
+    _meta: { graph_spec: result.graphSpec, main_stuff: result.mainStuff },
   };
 }

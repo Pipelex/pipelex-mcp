@@ -143,6 +143,15 @@ export interface ClassifyErrorOptions {
     location?: string;
     hint: string;
   };
+  /**
+   * Per-route 5xx hint override. Use it when a route is known to report
+   * request-caused failures as a generic server error (the hosted `/v1/start`
+   * answers 503 "Failed to start pipeline" for an invalid bundle), so the
+   * agent gets a recovery pointer instead of "inspect server logs".
+   */
+  serverError?: {
+    hint: string;
+  };
 }
 
 const DEFAULT_BAD_REQUEST = {
@@ -262,7 +271,9 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     return {
       class: "runtime",
       message,
-      hint: "The Pipelex API returned a server error; inspect pipelex-api logs.",
+      hint:
+        options.serverError?.hint ??
+        "The Pipelex API returned a server error; inspect pipelex-api logs.",
     };
   }
 

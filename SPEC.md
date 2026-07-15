@@ -169,7 +169,7 @@ The run family adds durable (async) method execution against the hosted Pipelex 
 4. When the run is terminal, the assistant calls `mthds_run_results` to report: the main output (bounded) on success, or the failure message otherwise.
 5. Because everything is behind the durable id, the flow survives conversation gaps: days later, "what did that run produce?" is a single `mthds_run_results` call, and reopening the conversation remounts the view, which re-resolves the run state by id.
 
-**Tool: `mthds_run`** — start a durable run. *Not* read-only; its description states it executes the method on the hosted API and spends inference credit.
+**Tool: `mthds_run`** — start a durable run. *Not* read-only; its description states it executes the method on the hosted API and spends inference credit, and nudges validating the bundle first (see the start-time rejection note below).
 
 ```ts
 // input
@@ -241,11 +241,13 @@ On `completed`, `content` composes a Markdown summary with the main output in a 
 
 **Run verdict discipline**: `status: "ok"` means the API answered the question about the run — including "it failed" and "not done yet". A FAILED/CANCELLED/TIMED_OUT run is a produced verdict (`status: "ok"` with the terminal `run_status`), and so is a `state: "running"` results lookup. `status: "error"` + `errors[]` is reserved for no-verdict conditions:
 
-- `input_domain` — empty/blank `run_id`, blank `pipe_code`, request-shape 400/422 at start (invalid bundle refused at submission), unknown `run_id` (a 404 on the run routes with the server's structured error envelope).
+- `input_domain` — empty/blank `run_id`, blank `pipe_code`, request-shape 400/422 at start, unknown `run_id` (a 404 on the run routes with the server's structured error envelope).
 - `config` — missing/invalid `PIPELEX_API_KEY` (401/403), unreachable API, `RunLifecycleUnavailableError` (the configured base URL points at a bare runner — durable runs need the hosted API).
 - `runtime` — 5xx, malformed report (e.g. a completed result missing `main_stuff`, the SDK's `MissingMainStuffError`).
 
 The unknown-id 404 vs missing-route 404 distinction comes from the SDK: a missing lifecycle route throws `RunLifecycleUnavailableError` (`config`), while an unknown id surfaces as a plain 404 `ApiResponseError` (`input_domain`, via a per-route classification override).
+
+**Start-time rejection is opaque on the hosted API** (live-checked): `/v1/start` reports submission-time failures — including an invalid bundle or missing required inputs — as a generic 503 "Failed to start pipeline", not a 422. It classifies as a `runtime` no-verdict, but its hint (a per-route 5xx override) points the agent at `mthds_validate` / `mthds_inputs` before blaming the platform, and the `mthds_run` tool description nudges validating first.
 
 **View: `run-follow`** (registered on `mthds_run`) — described in UI Overview. `available_view_specs` on `mthds_run` lists `"live_run_status"` when the view is registered; `mthds_run_results` lists `"run_graph"` when the executed graph rides its `_meta` (the kind is minted now; a view directly on the results tool is a later increment).
 

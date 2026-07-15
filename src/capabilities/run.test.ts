@@ -1,19 +1,30 @@
 import { describe, expect, it } from "vitest";
 
-import { ApiResponseError } from "@pipelex/sdk";
-import type { RunRead, RunResultStart, RunResultState, RunStatus } from "@pipelex/sdk";
+import { ApiResponseError, ApiUnreachableError, MissingMainStuffError } from "@pipelex/sdk";
+import type {
+  RunRead,
+  RunResultStart,
+  RunResultState,
+  RunStatus,
+  StartOptions,
+} from "@pipelex/sdk";
 
 import {
   boundMainStuff,
   ELLIPSIS_MARKER,
+  getMthdsRunResults,
+  getMthdsRunStatus,
   MAIN_STUFF_CAP,
   resultsResult,
   RUN_START_ERROR_OPTIONS,
   RUN_STATUS_ERROR_OPTIONS,
+  runResultsToolResult,
+  startMthdsRun,
   startResult,
   statusResult,
   validateRunRequest,
 } from "./run.js";
+import type { RunContext } from "./run.js";
 import { classifyError, DEFAULT_API_URL } from "./shared.js";
 
 const RUN_ID = "01JRUN0000000000000000TEST";
@@ -95,6 +106,28 @@ describe("run-route error classification", () => {
     expect(error.class).toBe("config");
     expect(error.location).toBe("PIPELEX_BASE_URL");
     expect(error.hint).toContain("/v1/start");
+  });
+
+  it("points a start-route 5xx at the recoverable causes first", () => {
+    const error = classifyError(
+      new ApiResponseError(
+        "HTTP 503",
+        `${DEFAULT_API_URL}/v1/start`,
+        503,
+        "Service Unavailable",
+        "{}",
+        "pipeline_start_unavailable",
+        "Failed to start pipeline",
+        undefined, // validationErrors
+        undefined, // code
+      ),
+      RUN_START_ERROR_OPTIONS,
+    );
+
+    // The hosted /v1/start answers 503 for an invalid bundle too — the hint
+    // must point at validation before blaming the platform.
+    expect(error.class).toBe("runtime");
+    expect(error.hint).toMatch(/mthds_validate/);
   });
 
   it("points a start-route 422 at the run request fields", () => {
@@ -407,5 +440,235 @@ describe("boundMainStuff", () => {
 
     expect(bounded.truncated).toBe(false);
     expect(bounded.value).toBe(value);
+  });
+});
+
+// ── capability tests (fake client seam) ─────────────────────────────
+
+// Structural mirror of the RunClient seam in run.ts.
+interface FakeRunClient {
+  start(options: StartOptions): Promise<RunResultStart>;
+  getRunStatus(runId: string): Promise<RunRead>;
+  getRunResult(runId: string): Promise<RunResultState>;
+}
+
+const NEVER_CLIENT: FakeRunClient = {
+  start: () => Promise.reject(new Error("start must not be called")),
+  getRunStatus: () => Promise.reject(new Error("getRunStatus must not be called")),
+  getRunResult: () => Promise.reject(new Error("getRunResult must not be called")),
+};
+
+function contextWith(overrides: Partial<FakeRunClient>): RunContext {
+  return {
+    baseUrl: DEFAULT_API_URL,
+    client: { ...NEVER_CLIENT, ...overrides },
+  };
+}
+
+describe("startMthdsRun", () => {
+  it("maps MCP input to StartOptions and projects the ack", async () => {
+    let seen: StartOptions | undefined;
+    const context = contextWith({
+      start: (options: StartOptions) => {
+        seen = options;
+        return Promise.resolve({ pipeline_run_id: RUN_ID, state: "STARTED" });
+      },
+    });
+
+    const result = await startMthdsRun(
+      {
+        files: [{ content: 'domain = "demo"', uri: "file:///demo.mthds" }],
+        pipe_code: "main",
+        inputs: { question: "why?" },
+      },
+      context,
+    );
+
+    // /v1/start takes no source labels — only the contents cross the wire.
+    expect(seen).toEqual({
+      mthds_contents: ['domain = "demo"'],
+      pipe_code: "main",
+      inputs: { question: "why?" },
+    });
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.run_id).toBe(RUN_ID);
+  });
+
+  it("omits pipe_code and inputs from StartOptions when not supplied", async () => {
+    let seen: StartOptions | undefined;
+    const context = contextWith({
+      start: (options: StartOptions) => {
+        seen = options;
+        return Promise.resolve({ pipeline_run_id: RUN_ID });
+      },
+    });
+
+    await startMthdsRun({ files: [{ content: 'domain = "demo"' }] }, context);
+
+    expect(seen).toEqual({ mthds_contents: ['domain = "demo"'] });
+    expect(seen).not.toHaveProperty("pipe_code");
+    expect(seen).not.toHaveProperty("inputs");
+  });
+
+  it("does not call the client when request validation fails", async () => {
+    const result = await startMthdsRun({ files: [] }, contextWith({}));
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.available_view_specs).toEqual([]);
+  });
+
+  it("classifies an unreachable API as config", async () => {
+    const context = contextWith({
+      start: () =>
+        Promise.reject(
+          new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED"),
+        ),
+    });
+
+    const result = await startMthdsRun({ files: [{ content: 'domain = "demo"' }] }, context);
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.summary).toContain("unreachable or misconfigured");
+  });
+});
+
+describe("getMthdsRunStatus", () => {
+  it("reads and projects the status by id", async () => {
+    let seenId: string | undefined;
+    const context = contextWith({
+      getRunStatus: (runId: string) => {
+        seenId = runId;
+        return Promise.resolve(runRead());
+      },
+    });
+
+    const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
+
+    expect(seenId).toBe(RUN_ID);
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.run_status).toBe("RUNNING");
+  });
+
+  it("does not call the client on a blank run_id", async () => {
+    const result = await getMthdsRunStatus({ run_id: "  " }, contextWith({}));
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("run_id");
+  });
+
+  it("classifies an unknown-id 404 as input_domain", async () => {
+    const context = contextWith({
+      getRunStatus: () =>
+        Promise.reject(
+          new ApiResponseError(
+            "HTTP 404",
+            `${DEFAULT_API_URL}/v1/runs/${RUN_ID}/status`,
+            404,
+            "Not Found",
+            "{}",
+            "not_found",
+            "Run not found",
+            undefined, // validationErrors
+            undefined, // code
+          ),
+        ),
+    });
+
+    const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("run_id");
+  });
+});
+
+describe("getMthdsRunResults", () => {
+  it("fetches and projects a completed result by id", async () => {
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: { answer: 42 },
+        graph_spec: { nodes: [] },
+      },
+    };
+    const context = contextWith({ getRunResult: () => Promise.resolve(state) });
+
+    const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.state).toBe("completed");
+    expect(result.graphSpec).toEqual({ nodes: [] });
+  });
+
+  it("does not call the client on a blank run_id", async () => {
+    const result = await getMthdsRunResults({ run_id: "" }, contextWith({}));
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+  });
+
+  it("classifies the SDK's MissingMainStuffError as runtime", async () => {
+    const context = contextWith({
+      getRunResult: () =>
+        Promise.reject(new MissingMainStuffError("completed run has no main stuff", RUN_ID)),
+    });
+
+    const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
+  });
+
+  it("treats a reachable but malformed completed result as runtime, not unreachable", async () => {
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: { pipeline_run_id: RUN_ID, main_stuff: null },
+    };
+    const context = contextWith({ getRunResult: () => Promise.resolve(state) });
+
+    const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
+    expect(result.summary).toContain("malformed report");
+  });
+});
+
+describe("runResultsToolResult", () => {
+  it("delivers the graph and the full output on _meta, never on structuredContent", async () => {
+    const huge = { text: "x".repeat(MAIN_STUFF_CAP * 2) };
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: { pipeline_run_id: RUN_ID, main_stuff: huge, graph_spec: { nodes: [] } },
+    };
+    const context = contextWith({ getRunResult: () => Promise.resolve(state) });
+
+    const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
+
+    expect(toolResult.isError).toBe(false);
+    expect(toolResult._meta.graph_spec).toEqual({ nodes: [] });
+    // _meta carries the FULL output; structuredContent the bounded copy.
+    expect(toolResult._meta.main_stuff).toBe(huge);
+    expect(toolResult.structuredContent.truncated).toBe(true);
+    expect(JSON.stringify(toolResult.structuredContent.main_stuff).length).toBeLessThanOrEqual(
+      MAIN_STUFF_CAP,
+    );
+  });
+
+  it("flags error results as isError with empty _meta", async () => {
+    const toolResult = runResultsToolResult(
+      await getMthdsRunResults({ run_id: "" }, contextWith({})),
+    );
+
+    expect(toolResult.isError).toBe(true);
+    expect(toolResult._meta.graph_spec).toBeUndefined();
+    expect(toolResult._meta.main_stuff).toBeUndefined();
   });
 });

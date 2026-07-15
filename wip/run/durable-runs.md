@@ -1,6 +1,6 @@
 # Durable runs — functional & technical design
 
-Status: **reviewed with Louis (2026-07-15)** — the ⚖️ decisions in §6.1/6.3/6.4 are taken (recorded in place); §6.5/6.6 and the §7 live checks remain open.
+Status: **reviewed with Louis (2026-07-15)** — the ⚖️ decisions in §6.1/6.3/6.4 are taken (recorded in place). §7 Q1/Q3/Q4 are resolved (recorded in place); §6.5/6.6 and the §7 Q2 host spike remain open for Phase 3.
 
 ## 1. Goal
 
@@ -50,7 +50,7 @@ Naming (decided, §6.1): the family `mthds_run` / `mthds_run_status` / `mthds_ru
 // input
 {
   files: Array<{ content: string; uri?: string | null }>;  // the shared submitted-files shape
-  pipe_code?: string;          // pipe to run; omitted → server resolves the bundle's main pipe (to confirm, §7)
+  pipe_code?: string;          // pipe to run; omitted → server resolves the bundle's main pipe (confirmed, §7-Q1)
   inputs?: Record<string, unknown>;  // PipelineInputs, as filled from the mthds_inputs template
 }
 
@@ -190,9 +190,9 @@ When the model calls results directly in a fresh conversation, a registered view
 
 ## 7. Open questions (need your input or a live check)
 
-1. **`pipe_code` omitted at `/v1/start`** — does the hosted runner resolve the bundle's main pipe like the build routes do, or reject? Determines whether `pipe_code` is optional or required in the tool schema. (Live check against dev/prod; I suspect optional works.)
+1. **`pipe_code` omitted at `/v1/start`** — does the hosted runner resolve the bundle's main pipe like the build routes do, or reject? Determines whether `pipe_code` is optional or required in the tool schema. → **RESOLVED (Phase 2 live check, 2026-07-15, prod)**: omitted `pipe_code` resolves the bundle's declared `main_pipe` — the run was accepted and COMPLETED. `pipe_code` stays optional in the tool schema.
 2. **Widget-initiated tool calls per host** — confirm ChatGPT and Claude both allow the view to call read-only tools without user confirmation, and pass `_meta` through `useCallTool`. This gates 6.3-C and the results-fetch-from-view; the status-card core works regardless… only if polling works, so this spike is the first thing to do in the view phase.
-3. **Start-time rejection of invalid bundles** — does `/v1/start` 422 on an unparseable bundle, or 202-then-FAILED? Both arms are handled either way; the answer decides how much "validate first" nudging the tool description needs.
+3. **Start-time rejection of invalid bundles** — does `/v1/start` 422 on an unparseable bundle, or 202-then-FAILED? Both arms are handled either way; the answer decides how much "validate first" nudging the tool description needs. → **RESOLVED (Phase 2 live check, 2026-07-15, prod)**: neither — the hosted `/v1/start` rejects at submission with a generic **503** `pipeline_start_unavailable` ("Failed to start pipeline"), indistinguishable on the wire from real platform trouble (the same 503 covers an invalid bundle and missing required inputs). Consequences taken: (a) `RUN_START_ERROR_OPTIONS` grew a per-route `serverError` hint (a `ClassifyErrorOptions` extension) pointing the agent at `mthds_validate`/`mthds_inputs` before blaming the platform; (b) the `mthds_run` description carries a strong "validate first" nudge. **Platform bug candidate to flag**: an invalid bundle at `/v1/start` should be a 422, not a 503 — until then the MCP cannot classify it as `input_domain`. Also observed: a run that fails *during* execution (unreachable image-URL input) starts fine (202) but stayed RUNNING under Temporal retries (with `degraded: true` on every status read) beyond a 10-minute watch — a terminal FAILED could not be produced live; the `failed` results arm stays covered by unit tests against the SDK contract.
 4. **Inputs with binary content** — the template flow covers text/structured inputs well; PDFs/images would need data-URLs (impractical through model context) or reachable https URLs. OK to declare "files ride URLs; storage upload tool is a later increment" in SPEC.md? (The product surface already has upload routes when we want it.) → **RESOLVED (Phase 1)**: declared in SPEC.md (Run Scope: "Binary inputs ride reachable https URLs inside `inputs`; a storage upload tool is a later increment", mirrored in Non-Goals).
 
 ## 8. Implementation plan
