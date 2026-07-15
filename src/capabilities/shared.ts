@@ -53,14 +53,14 @@ export interface ApiConfig {
 }
 
 interface ApiEnv {
-  MTHDS_BASE_URL?: string;
-  MTHDS_API_KEY?: string;
+  PIPELEX_BASE_URL?: string;
+  PIPELEX_API_KEY?: string;
 }
 
 export function buildApiConfig(env: ApiEnv = process.env): ApiConfig {
   return {
-    baseUrl: env.MTHDS_BASE_URL ?? DEFAULT_API_URL,
-    apiKey: env.MTHDS_API_KEY || undefined,
+    baseUrl: env.PIPELEX_BASE_URL ?? DEFAULT_API_URL,
+    apiKey: env.PIPELEX_API_KEY || undefined,
   };
 }
 
@@ -125,16 +125,16 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
   if (err instanceof ApiUnreachableError) {
     return {
       class: "config",
-      location: "MTHDS_BASE_URL",
+      location: "PIPELEX_BASE_URL",
       message: err.message,
-      hint: "Start pipelex-api locally or set MTHDS_BASE_URL to a reachable host-only API base URL.",
+      hint: "Start pipelex-api locally or set PIPELEX_BASE_URL to a reachable host-only API base URL.",
     };
   }
 
   if (err instanceof ClientAuthenticationError) {
     return {
       class: "config",
-      location: "MTHDS_API_KEY",
+      location: "PIPELEX_API_KEY",
       message: err.message,
       hint: "Check the API key for the configured Pipelex API.",
     };
@@ -147,9 +147,9 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
   if (err instanceof PipelineRequestError) {
     return {
       class: "config",
-      location: "MTHDS_BASE_URL",
+      location: "PIPELEX_BASE_URL",
       message: err.message,
-      hint: "Check MTHDS_BASE_URL and the submitted request.",
+      hint: "Check PIPELEX_BASE_URL and the submitted request.",
     };
   }
 
@@ -185,18 +185,18 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
   if (err.status === 401 || err.status === 403) {
     return {
       class: "config",
-      location: "MTHDS_API_KEY",
+      location: "PIPELEX_API_KEY",
       message,
-      hint: "Check MTHDS_API_KEY for the configured API.",
+      hint: "Check PIPELEX_API_KEY for the configured API.",
     };
   }
 
   if (err.status === 404) {
     return {
       class: "config",
-      location: "MTHDS_BASE_URL",
+      location: "PIPELEX_BASE_URL",
       message,
-      hint: `Check that MTHDS_BASE_URL points to a host serving ${route}.`,
+      hint: `Check that PIPELEX_BASE_URL points to a host serving ${route}.`,
     };
   }
 

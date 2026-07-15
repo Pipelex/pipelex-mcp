@@ -132,18 +132,18 @@ Local OSS `pipelex-api` should answer at `http://localhost:8081`. In another ter
 start the MCP server:
 
 ```bash
-MTHDS_BASE_URL=http://localhost:8081 npm run dev
+PIPELEX_BASE_URL=http://localhost:8081 npm run dev
 ```
 
-`MTHDS_BASE_URL` defaults to the hosted Pipelex API (`https://api.pipelex.com`)
+`PIPELEX_BASE_URL` defaults to the hosted Pipelex API (`https://api.pipelex.com`)
 when unset — set it to `http://localhost:8081` (as above) to develop against a
-local OSS runner. Set `MTHDS_API_KEY` only when the configured API requires it.
+local OSS runner. Set `PIPELEX_API_KEY` only when the configured API requires it.
 
 Instead of prefixing every `npm run dev`, you can put the variables in a `.env`
 file at the repo root (gitignored):
 
 ```bash
-MTHDS_BASE_URL=http://localhost:8081
+PIPELEX_BASE_URL=http://localhost:8081
 ```
 
 The dev server loads it via `nodemon.json` (`tsx --env-file-if-exists=.env`).

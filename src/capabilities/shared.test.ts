@@ -14,8 +14,8 @@ describe("buildApiConfig", () => {
 
   it("reads the base URL and key from the environment", () => {
     const config = buildApiConfig({
-      MTHDS_BASE_URL: "http://localhost:8081",
-      MTHDS_API_KEY: "secret",
+      PIPELEX_BASE_URL: "http://localhost:8081",
+      PIPELEX_API_KEY: "secret",
     });
 
     expect(config.baseUrl).toBe("http://localhost:8081");
@@ -23,7 +23,7 @@ describe("buildApiConfig", () => {
   });
 
   it("treats an empty key as absent", () => {
-    const config = buildApiConfig({ MTHDS_API_KEY: "" });
+    const config = buildApiConfig({ PIPELEX_API_KEY: "" });
 
     expect(config.apiKey).toBeUndefined();
   });
@@ -66,7 +66,7 @@ describe("classifyError", () => {
     );
 
     expect(error.class).toBe("config");
-    expect(error.location).toBe("MTHDS_BASE_URL");
+    expect(error.location).toBe("PIPELEX_BASE_URL");
   });
 
   it("classifies API request-shape responses as input_domain", () => {
@@ -130,7 +130,7 @@ describe("classifyError", () => {
     );
 
     expect(error.class).toBe("config");
-    expect(error.location).toBe("MTHDS_BASE_URL");
+    expect(error.location).toBe("PIPELEX_BASE_URL");
     expect(error.hint).toContain("/v1/build/inputs");
   });
 
@@ -150,7 +150,7 @@ describe("classifyError", () => {
     );
 
     expect(error.class).toBe("config");
-    expect(error.location).toBe("MTHDS_API_KEY");
+    expect(error.location).toBe("PIPELEX_API_KEY");
   });
 
   it("classifies API server failures as runtime", () => {
@@ -176,6 +176,6 @@ describe("classifyError", () => {
     const error = classifyError(new PipelineRequestError("Invalid API base URL"));
 
     expect(error.class).toBe("config");
-    expect(error.location).toBe("MTHDS_BASE_URL");
+    expect(error.location).toBe("PIPELEX_BASE_URL");
   });
 });

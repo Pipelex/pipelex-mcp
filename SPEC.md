@@ -60,10 +60,10 @@ The richer error-grouping validation view (diagnostics grouped by class, clickab
 
 - **Existing products**: Pipelex, MTHDS, `@pipelex/sdk`, and the Pipelex API (local OSS `pipelex-api` during development).
 - **App shell**: `pipelex-mcp`, a Skybridge MCP app scaffold.
-- **Runtime API**: the hosted Pipelex API, defaulting to `https://api.pipelex.com` (point `MTHDS_BASE_URL` at a local OSS `pipelex-api` on `http://localhost:8081` during development).
+- **Runtime API**: the hosted Pipelex API, defaulting to `https://api.pipelex.com` (point `PIPELEX_BASE_URL` at a local OSS `pipelex-api` on `http://localhost:8081` during development).
 - **SDK dependency**: the `@pipelex/sdk` npm package (`PipelexApiClient`, published from `../pipelex-sdk-js`). It re-exports the `mthds/protocol` surface, so the MCP imports one SDK and still reaches the open protocol routes; `mthds` rides along as a transitive dependency.
-- **Auth**: optional `MTHDS_API_KEY`; local development normally runs without hosted auth.
-- **Primary environment variable**: `MTHDS_BASE_URL`, defaulting to `https://api.pipelex.com`.
+- **Auth**: optional `PIPELEX_API_KEY`; local development normally runs without hosted auth.
+- **Primary environment variable**: `PIPELEX_BASE_URL`, defaulting to `https://api.pipelex.com`.
 
 ## Validation Scope (`mthds_validate`)
 
@@ -186,7 +186,7 @@ Prepare inputs for a method:
 
 - **Input**: `{ files, include_graph? }`
 - **Output**: `{ status, is_valid, is_runnable, pending_signatures, available_view_specs, validation_errors?, errors? }` in `structuredContent`, plus a text summary in MCP `content`. On a positive verdict the graph rides the view-only `_meta` channel (`_meta.graph_spec`), never `structuredContent`; `available_view_specs` tells the model the `"dry_run_graph"` view is available to surface.
-- **Behavior**: Validates request shape, calls the Pipelex API against `MTHDS_BASE_URL` or `https://api.pipelex.com` with signatures and markdown enabled, and maps produced validation verdicts into flattened structured content.
+- **Behavior**: Validates request shape, calls the Pipelex API against `PIPELEX_BASE_URL` or `https://api.pipelex.com` with signatures and markdown enabled, and maps produced validation verdicts into flattened structured content.
 - **Annotations**: Read-only, non-destructive, no open-world publishing.
 - **View**: `run-graph` — renders `_meta.graph_spec` with `@pipelex/mthds-ui`'s `GraphViewer` (inline preview plus a user-triggered fullscreen toggle); compact empty state when there is no graph.
 
@@ -194,6 +194,6 @@ Prepare inputs for a method:
 
 - **Input**: `{ files, pipe_ref?, explicit?, format? }`
 - **Output**: `{ status, is_valid, pipe_ref?, format?, explicit?, inputs?, inputs_toml?, validation_errors?, errors? }` in `structuredContent`, plus a text summary in MCP `content` that includes the template in a fenced code block. No `_meta`, no `available_view_specs`.
-- **Behavior**: Validates request shape, calls `POST /v1/build/inputs` against `MTHDS_BASE_URL` or `https://api.pipelex.com` (adapting `uri` → `source`), and maps the produced verdict into flattened structured content with the same `status`/`is_valid` discipline as `mthds_validate`.
+- **Behavior**: Validates request shape, calls `POST /v1/build/inputs` against `PIPELEX_BASE_URL` or `https://api.pipelex.com` (adapting `uri` → `source`), and maps the produced verdict into flattened structured content with the same `status`/`is_valid` discipline as `mthds_validate`.
 - **Annotations**: Read-only, non-destructive, no open-world publishing.
 - **View**: none — the template is small structured data the model reads directly.

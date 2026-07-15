@@ -30,11 +30,11 @@ The tool needs a reachable Pipelex API serving `POST /v1/validate`. During early
 
 ```bash
 cd ../pipelex-api && make run      # serves http://localhost:8081
-MTHDS_BASE_URL=http://localhost:8081 npm run dev
+PIPELEX_BASE_URL=http://localhost:8081 npm run dev
 ```
 
-- `MTHDS_BASE_URL` defaults to the hosted Pipelex API (`https://api.pipelex.com`) when unset; set it to `http://localhost:8081` to develop against the local OSS runner.
-- `MTHDS_API_KEY` is optional — set it only when the configured API requires auth. Local dev normally runs without it.
+- `PIPELEX_BASE_URL` defaults to the hosted Pipelex API (`https://api.pipelex.com`) when unset; set it to `http://localhost:8081` to develop against the local OSS runner.
+- `PIPELEX_API_KEY` is optional — set it only when the configured API requires auth. Local dev normally runs without it.
 - Both variables can live in a gitignored `.env` at the repo root instead of prefixing the command: `nodemon.json` overrides Skybridge's default dev exec with `tsx --env-file-if-exists=.env src/server.ts` (keep its `watch`/`ext` in sync with Skybridge's defaults — a `nodemon.json` replaces them entirely, not additively). `.env` is dev-only and not watched — restart the dev server after editing it.
 
 ### CI
@@ -53,7 +53,7 @@ The `release/vX.Y.Z` branch, the version bump, the changelog finalization, and t
 The whole server is a handful of small files under `src/`:
 
 - `server.ts` — constructs the `McpServer`, registers the tools (schemas + annotations + the `run-graph` view on `mthds_validate` + OpenAI invocation labels), and wires the handlers to `validateMthds` / `buildMthdsInputs`. `export default await server.run()` is the entrypoint; `AppType` is the typed server handle.
-- `capabilities/shared.ts` — the plumbing both capabilities share: the submitted-files input schema (`uri` provenance on the MCP surface), the `ToolError` model, request-shape validation (`validateRequest`), env-derived API config (`buildApiConfig` — `MTHDS_BASE_URL`/`MTHDS_API_KEY`), and `classifyError`. `classifyError` takes per-route `ClassifyErrorOptions` (the 400/422 locator/hint and the route named in the 404 hint) so each capability points the agent at its own knobs.
+- `capabilities/shared.ts` — the plumbing both capabilities share: the submitted-files input schema (`uri` provenance on the MCP surface), the `ToolError` model, request-shape validation (`validateRequest`), env-derived API config (`buildApiConfig` — `PIPELEX_BASE_URL`/`PIPELEX_API_KEY`), and `classifyError`. `classifyError` takes per-route `ClassifyErrorOptions` (the 400/422 locator/hint and the route named in the 404 hint) so each capability points the agent at its own knobs.
 - `capabilities/validate.ts` — the validation logic. Zod input/output schemas, the API call (`validateFiles`), and projection of the API report into MCP `structuredContent` + the view-only `_meta` graph payload (`toolResult`).
 - `capabilities/inputs.ts` — the inputs-template logic. Zod input/output schemas (`pipe_ref?`, `explicit?` default false, `format?` default json), the API call (`buildInputs`, adapting the MCP `uri` provenance label to the build envelope's `source`), and projection of the report into `structuredContent` plus a composed Markdown summary that includes the template in a fenced code block (the build routes return a plain `message`, not `rendered_markdown`). No view, no `_meta`.
 - `helpers.ts` — `generateHelpers<AppType>()` exposes `useToolInfo`/`useCallTool` for the views.
@@ -72,7 +72,7 @@ This mirrors the workspace's "format follows consumer" rule — read `../CLAUDE.
 A *produced* verdict is always `status: "ok"`, regardless of whether the bundle passed — discriminate on `is_valid` (and, for validation, `is_runnable`). This discipline is shared by both tools: an unresolvable closure on `mthds_inputs` is a produced `is_valid: false` verdict with `validation_errors[]`, exactly like an invalid bundle on `mthds_validate`. `status: "error"` is reserved for **"no verdict could be produced"**: bad request shape, unreachable/misconfigured API, or a runtime fault. Those carry an `errors[]` array, each tagged with an `ErrorClass`:
 
 - `input_domain` — the submitted request is wrong (empty `files`, blank `uri`, blank `pipe_ref`, API 400/422 — which on `/v1/build/inputs` includes an unknown `pipe_ref` and an unresolvable `main_pipe` default).
-- `config` — environment/auth is wrong (`MTHDS_BASE_URL`/`MTHDS_API_KEY`, API unreachable, 401/403/404).
+- `config` — environment/auth is wrong (`PIPELEX_BASE_URL`/`PIPELEX_API_KEY`, API unreachable, 401/403/404).
 - `runtime` — unexpected server-side fault (API 5xx, unknown errors, a reachable-but-malformed report).
 
 `classifyError` (in `capabilities/shared.ts`) maps `@pipelex/sdk` error types (`ApiUnreachableError`, `ClientAuthenticationError`, `ApiResponseError`, `PipelineRequestError`) and HTTP statuses onto these classes; each capability passes `ClassifyErrorOptions` for its route-specific 400/422 locator/hint and 404 route name. When you add a new failure mode, classify it here rather than letting it fall through to a generic `runtime` message.
