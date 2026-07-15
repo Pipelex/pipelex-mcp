@@ -6,7 +6,7 @@ import type { GraphSpec, ToolbarPosition } from "@pipelex/mthds-ui";
 import { useDisplayMode, useLayout } from "skybridge/web";
 
 import { useToolInfo } from "../helpers.js";
-import { ToolbarButton } from "./toolbar-button.js";
+import { ToolbarButton } from "./components/toolbar-button.js";
 
 /**
  * The graph toolbar's anchor is ours to control — mthds-ui defaults to

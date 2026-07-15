@@ -10,6 +10,10 @@
 - Shared capability plumbing extracted into `src/capabilities/shared.ts` — the submitted-files input schema, the `ToolError` model, request-shape validation, env-derived API config, and `classifyError` (now taking per-route options for the 400/422 locator/hint and the route named in the 404 hint) are shared between the validate and inputs capabilities.
 - `.env` support for the dev server — `nodemon.json` overrides Skybridge's default dev exec with `tsx --env-file-if-exists=.env src/server.ts`, so `PIPELEX_BASE_URL`/`PIPELEX_API_KEY` can live in a gitignored `.env` instead of prefixing `npm run dev`.
 
+### Fixed
+
+- Moved the shared `ToolbarButton` out of the Skybridge view scanner's glob (`src/views/` → `src/views/components/`) — as a named-export helper sitting in the scanned directory it triggered a spurious "missing a default export" dev warning, drowning out the real signal that warning exists to give.
+
 ### Changed
 
 - **Breaking: renamed the API env vars to the `PIPELEX_` prefix.** The env var read for the API base URL is now `PIPELEX_BASE_URL` (was `MTHDS_BASE_URL`) and the optional auth key is `PIPELEX_API_KEY` (was `MTHDS_API_KEY`); the `location`/`hint` strings in the classified errors follow. No read alias.

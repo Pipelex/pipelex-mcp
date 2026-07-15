@@ -10,7 +10,7 @@ import type { RunResultsStructuredContent } from "../capabilities/run.js";
 import type { ToolError } from "../capabilities/shared.js";
 import { useCallTool, useToolInfo } from "../helpers.js";
 import { isTransientPollError, nextPollDelayMs } from "./run-polling.js";
-import { ToolbarButton } from "./toolbar-button.js";
+import { ToolbarButton } from "./components/toolbar-button.js";
 import { useElapsedSeconds, useRunPolling } from "./use-run-polling.js";
 
 const TOOLBAR_POSITION_FOR_VIEW: ToolbarPosition = TOOLBAR_POSITION.TOP_LEFT;
