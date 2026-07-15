@@ -10,7 +10,7 @@ Tracks execution of the durable-runs increment: the `mthds_run` / `mthds_run_sta
 
 ## Current state
 
-**Phase 1 not started.** Next action: first unchecked box of Phase 1.
+**Phase 1 complete (contract locked, Checkpoint 1 passed).** Next action: first unchecked box of Phase 2. The contract surface Phase 2 builds on: `src/capabilities/run.ts` exports the Zod schemas (`mthdsRun*InputSchema` / `mthdsRun*OutputSchema`), `RunContext`/`buildRunContext`, the per-route error options (`RUN_START_ERROR_OPTIONS`, `RUN_STATUS_ERROR_OPTIONS`, `RUN_RESULTS_ERROR_OPTIONS`), `validateRunRequest`, the projections `startResult`/`statusResult`/`resultsResult` (which already compose the `content` summaries), and `boundMainStuff`/`MAIN_STUFF_CAP`. Phase 2 adds the capability functions (`startMthdsRun`/`getMthdsRunStatus`/`getMthdsRunResults`), their toolResult wrappers (`_meta` projection), and server registration.
 
 ## Cold-start brief (read order for a fresh session)
 
@@ -36,18 +36,18 @@ At each `⛔ CHECKPOINT`, stop feature work and run this sequence:
 
 Skybridge refs for this phase: `references/architecture.md` (already applied in the design), `references/fetch-and-render-data.md` (handler/output-schema patterns).
 
-- [ ] Update `SPEC.md`: run UX flow (§3 of the design), the three tool contracts (input/`structuredContent` shapes as designed), run verdict discipline (terminal-failed and not-done-yet are produced `status: "ok"` verdicts; no-verdict classes incl. unknown-run-id 404 → `input_domain`, `RunLifecycleUnavailableError` → `config`), `available_view_specs` kinds `"live_run_status"` (on `mthds_run`) and `"run_graph"` (on `mthds_run_results`, minted now per §6.5 even though its view is deferred), `main_stuff` bounding + `truncated` flag (§6.4-A), **drop "run execution, status polling" from Non-Goals** (blocking `execute` and cancellation stay non-goals), declare "binary inputs ride https URLs; a storage upload tool is a later increment" (§7-Q4).
-- [ ] `src/capabilities/shared.ts`: extend `ClassifyErrorOptions` with the per-route 404 override (unknown-id → `input_domain` while `RunLifecycleUnavailableError` stays `config`); add `validateRunIdRequest` (non-empty trimmed id, format stays server-owned).
-- [ ] `src/capabilities/run.ts` skeleton: Zod input/output schemas for the trio; `RunContext { config, client? }` (same injected-fake-client seam as `ValidationContext`); pure projection functions `startResult`, `statusResult`, `resultsResult` exported for isolation tests (incl. `is_terminal` derivation from the `RunStatus` set).
-- [ ] `main_stuff` bounding as a pure function: ~32KB serialized cap (constant, tune later); JSON → deterministic deepest/longest-collection pruning with an ellipsis marker; text → head+tail; sets `truncated: true`; full output untouched for `_meta`.
-- [ ] Tests first (colocated `run.test.ts` + `shared.test.ts` additions, fake client seam): start-ack projection; non-terminal / terminal / degraded status (+ `retry_after_seconds` passthrough); running / completed / failed results projection; truncation on/off boundary cases; unknown-id 404 vs `RunLifecycleUnavailableError` classification; completed-result-missing-`main_stuff` → `runtime` hard error; request-shape rejections (empty files, blank `run_id`, blank `pipe_code`).
-- [ ] Exit gate: `make check` green with the skeleton compiled and all tests passing.
+- [x] Update `SPEC.md`: run UX flow (§3 of the design), the three tool contracts (input/`structuredContent` shapes as designed), run verdict discipline (terminal-failed and not-done-yet are produced `status: "ok"` verdicts; no-verdict classes incl. unknown-run-id 404 → `input_domain`, `RunLifecycleUnavailableError` → `config`), `available_view_specs` kinds `"live_run_status"` (on `mthds_run`) and `"run_graph"` (on `mthds_run_results`, minted now per §6.5 even though its view is deferred), `main_stuff` bounding + `truncated` flag (§6.4-A), **drop "run execution, status polling" from Non-Goals** (blocking `execute` and cancellation stay non-goals), declare "binary inputs ride https URLs; a storage upload tool is a later increment" (§7-Q4).
+- [x] `src/capabilities/shared.ts`: extend `ClassifyErrorOptions` with the per-route 404 override (unknown-id → `input_domain` while `RunLifecycleUnavailableError` stays `config`); add `validateRunIdRequest` (non-empty trimmed id, format stays server-owned). Also added explicit `classifyError` arms for `RunLifecycleUnavailableError` (config, hosted-API hint) and `MissingMainStuffError` (runtime) — both would otherwise fall into the generic `PipelineRequestError` arm with a misleading hint.
+- [x] `src/capabilities/run.ts` skeleton: Zod input/output schemas for the trio; `RunContext { baseUrl, apiKey?, client? }` (same injected-fake-client seam as `ValidationContext` — flat shape per the existing convention, not the design sketch's `{ config, client? }`); pure projection functions `startResult`, `statusResult`, `resultsResult` exported for isolation tests (incl. `is_terminal` derivation via the SDK's `isTerminalRunStatus`).
+- [x] `main_stuff` bounding as a pure function: ~32KB serialized cap (constant, tune later); JSON → deterministic deepest/longest-collection pruning with an ellipsis marker; text → head+tail; sets `truncated: true`; full output untouched for `_meta`.
+- [x] Tests first (colocated `run.test.ts` + `shared.test.ts` additions, fake client seam): start-ack projection; non-terminal / terminal / degraded status (+ `retry_after_seconds` passthrough); running / completed / failed results projection; truncation on/off boundary cases; unknown-id 404 vs `RunLifecycleUnavailableError` classification; completed-result-missing-`main_stuff` → `runtime` hard error; request-shape rejections (empty files, blank `run_id`, blank `pipe_code`).
+- [x] Exit gate: `make check` green with the skeleton compiled and all tests passing (`make all` green).
 
 ### ⛔ CHECKPOINT 1 — contract locked
 
-- [ ] Protocol steps 1–5 executed (verify, commit, tracker+docs update incl. cold-start test, no-context Sonnet-5 `/code-review` fan-out on this phase's diff, triage).
-- [ ] Phase SHA range recorded: `<base>..<head>` = _
-- [ ] SPEC.md, Zod schemas, and design doc agree on every field name (spot-check `pipe_code`, `run_status`, `is_terminal`, `available_view_specs` kinds).
+- [x] Protocol steps 1–5 executed (verify, commit, tracker+docs update incl. cold-start test, no-context Sonnet-5 `/code-review` fan-out on this phase's diff, triage).
+- [x] Phase SHA range recorded: `<base>..<head>` = `c83224d..0c2f725` (plus the review-triage/tracker commit(s) after it, see Decision log)
+- [x] SPEC.md, Zod schemas, and design doc agree on every field name (spot-check `pipe_code`, `run_status`, `is_terminal`, `available_view_specs` kinds — all match; note the projections already compose the `content` summaries, so Phase 2's summary items are verify/refine rather than build-from-scratch).
 
 ---
 
@@ -113,10 +113,17 @@ Skybridge refs for this phase: `references/fetch-and-render-data.md`, `reference
 - [ ] Q1 — `pipe_code` omitted at `/v1/start`: resolves main pipe or rejects? (Phase 2 live check) → answer: _
 - [ ] Q2 — widget-initiated tool calls + `meta` passthrough per host (ChatGPT / Claude / DevTools)? (Phase 3 spike, gates the view) → answer: _
 - [ ] Q3 — `/v1/start` on an invalid bundle: 422 at submission or 202-then-FAILED? (Phase 2 live check) → answer: _
-- [ ] Q4 — binary inputs ride https URLs, storage upload tool deferred: declared in SPEC.md (Phase 1) → done when Phase 1 SPEC edit lands.
+- [x] Q4 — binary inputs ride https URLs, storage upload tool deferred: declared in SPEC.md (Phase 1) → done (SPEC.md Run Scope + Non-Goals).
 
 ## Decision log / deviations
 
 Running list — one line per entry, newest first. Includes rejected review findings with reasons.
 
-- (empty)
+- (P1 review triage) "Missing CHANGELOG entry" → deferred by plan, not an oversight: the changelog entry is a Phase 4 item, minted when the tool family is registered and user-visible; a contract skeleton is not a release-facing change yet.
+- (P1 review triage) "Unused exports `RunContext`/`buildRunContext`/`RUN_RESULTS_ERROR_OPTIONS`" → rejected: intentional Phase-1 groundwork consumed by the Phase 2 capability functions (mirrors `buildValidationContext`); the review saw the phase diff without the plan, as designed.
+- (P1) Projection functions compose their `content` summaries already (they are integral to the `{ structuredContent, summary }` return shape the existing capabilities use) — Phase 2's summary bullets become verify/refine, not build.
+- (P1) `completedSummary` fences a string output as a plain ``` block instead of a JSON-escaped string in a ```json fence — presentation only, contract unchanged.
+- (P1) No `## Views` prose note on `mthds_run_results` summaries: no view is registered on that tool in this increment (kind minted in `available_view_specs` only); the note convention stays tied to a registered view (start summary gets one in Phase 3).
+- (P1) `RunContext` uses the flat `{ baseUrl, apiKey?, client? }` shape of `ValidationContext`/`InputsContext` rather than the design sketch's `{ config, client? }` — same test seam, existing convention.
+- (P1) Per-route error options exported as constants (`RUN_START_ERROR_OPTIONS`, `RUN_STATUS_ERROR_OPTIONS`, `RUN_RESULTS_ERROR_OPTIONS`) so tests pin the 404/422 classification now and Phase 2 reuses them.
+- (P1) `classifyError` gained explicit arms for `RunLifecycleUnavailableError` (config) and `MissingMainStuffError` (runtime) — both are `PipelineRequestError` subclasses that would otherwise classify as config with a misleading "check the submitted request" hint.
