@@ -153,6 +153,7 @@ export async function buildMthdsInputs(
               ? err.message
               : "The Pipelex API returned a malformed inputs report.",
           hint: "The API responded but its report was missing required fields; inspect pipelex-api logs.",
+          retryable: false,
         },
       ],
     );
@@ -187,6 +188,7 @@ export function validateInputsRequest(input: MthdsInputsInput): ToolError[] {
       location: "pipe_ref",
       message: "pipe_ref must not be empty when supplied.",
       hint: "Pass a qualified domain.pipe_code, or omit pipe_ref to default to the closure's main_pipe.",
+      retryable: false,
     });
   }
 

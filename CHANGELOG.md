@@ -13,6 +13,8 @@
 ### Fixed
 
 - Moved the shared `ToolbarButton` out of the Skybridge view scanner's glob (`src/views/` → `src/views/components/`) — as a named-export helper sitting in the scanned directory it triggered a spurious "missing a default export" dev warning, drowning out the real signal that warning exists to give.
+- Every `errors[]` entry now carries a `retryable` flag, set in `classifyError` where the concrete SDK error / HTTP status is still known. The `run-follow` view's poll loops branch on it instead of re-deriving transience from `class`+`location` — which conflated an unreachable API (transient) with a permanently missing run lifecycle (`RunLifecycleUnavailableError` on a bare runner), and a 5xx with a permanently malformed result (e.g. a completed run missing `main_stuff`). Permanent errors now stop polling and surface the classified message instead of retrying forever behind a reassuring spinner.
+- The `run-follow` view's results fetch now honors the same pause-while-hidden contract as its status polling: retries (the mid-write `state: "running"` race, transient errors) are not scheduled while the tab is hidden, one immediate fetch fires on return, and at most one fetch is in flight.
 
 ### Changed
 

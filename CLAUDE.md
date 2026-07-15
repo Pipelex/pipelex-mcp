@@ -75,7 +75,7 @@ A *produced* verdict is always `status: "ok"`, regardless of whether the bundle 
 - `config` — environment/auth is wrong (`PIPELEX_BASE_URL`/`PIPELEX_API_KEY`, API unreachable, 401/403/404).
 - `runtime` — unexpected server-side fault (API 5xx, unknown errors, a reachable-but-malformed report).
 
-`classifyError` (in `capabilities/shared.ts`) maps `@pipelex/sdk` error types (`ApiUnreachableError`, `ClientAuthenticationError`, `ApiResponseError`, `PipelineRequestError`) and HTTP statuses onto these classes; each capability passes `ClassifyErrorOptions` for its route-specific 400/422 locator/hint and 404 route name. When you add a new failure mode, classify it here rather than letting it fall through to a generic `runtime` message.
+`classifyError` (in `capabilities/shared.ts`) maps `@pipelex/sdk` error types (`ApiUnreachableError`, `ClientAuthenticationError`, `ApiResponseError`, `PipelineRequestError`) and HTTP statuses onto these classes; each capability passes `ClassifyErrorOptions` for its route-specific 400/422 locator/hint and 404 route name. Every `ToolError` also carries `retryable` — set here, where the concrete SDK error/HTTP status is still known, because the class+locator pair alone can't tell an unreachable API (transient) from a missing run lifecycle (permanent, same `config`@`PIPELEX_BASE_URL`) or a 5xx from a malformed report (both `runtime`); the `run-follow` view's poll loops branch on it via `isTransientPollError`. When you add a new failure mode, classify it here — including its `retryable` verdict — rather than letting it fall through to a generic `runtime` message.
 
 ### State projection rules (in `validationResult`)
 

@@ -290,6 +290,7 @@ export function validateRunRequest(input: MthdsRunInput): ToolError[] {
       location: "pipe_code",
       message: "pipe_code must not be empty when supplied.",
       hint: "Pass the code of a pipe defined in the submitted bundle, or omit pipe_code to run the bundle's main pipe.",
+      retryable: false,
     });
   }
 
@@ -674,6 +675,7 @@ export async function getMthdsRunResults(
           message:
             err instanceof Error ? err.message : "The Pipelex API returned a malformed run result.",
           hint: "The API responded but its report was missing required fields; inspect the run on the platform.",
+          retryable: false,
         },
       ],
     );

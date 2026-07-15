@@ -39,6 +39,9 @@ export const toolErrorSchema = z.object({
   location: z.string().optional(),
   message: z.string(),
   hint: z.string().optional(),
+  retryable: z
+    .boolean()
+    .describe("True when retrying the same call may succeed; false for permanent conditions."),
 });
 
 export interface ToolError {
@@ -46,6 +49,14 @@ export interface ToolError {
   location?: string;
   message: string;
   hint?: string;
+  /**
+   * Whether retrying the same call may succeed. Decided where the concrete
+   * SDK error / HTTP status is still known ({@link classifyError}): the
+   * `class`+`location` pair alone is too coarse — an unreachable API and a
+   * permanently missing run lifecycle both classify as `config` at
+   * `PIPELEX_BASE_URL`, yet only the former is worth retrying.
+   */
+  retryable: boolean;
 }
 
 /** The env-derived API coordinates every capability context starts from. */
@@ -76,6 +87,7 @@ export function validateRequest(files: SubmittedFile[]): ToolError[] {
       location: "files",
       message: "At least one MTHDS file must be submitted.",
       hint: "Pass files as [{ content, uri? }].",
+      retryable: false,
     });
   }
 
@@ -86,6 +98,7 @@ export function validateRequest(files: SubmittedFile[]): ToolError[] {
         location: `files[${index}].content`,
         message: "File content must not be empty.",
         hint: "Submit the full .mthds file contents.",
+        retryable: false,
       });
     }
 
@@ -95,6 +108,7 @@ export function validateRequest(files: SubmittedFile[]): ToolError[] {
         location: `files[${index}].uri`,
         message: "File uri must not be empty when supplied.",
         hint: "Omit uri for inline content or provide a stable path or URI.",
+        retryable: false,
       });
     }
   }
@@ -111,6 +125,7 @@ export function validateRunIdRequest(runId: string): ToolError[] {
         location: "run_id",
         message: "run_id must not be empty.",
         hint: "Pass the durable run id returned by mthds_run.",
+        retryable: false,
       },
     ];
   }
@@ -166,6 +181,7 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
       location: "PIPELEX_BASE_URL",
       message: err.message,
       hint: "Start pipelex-api locally or set PIPELEX_BASE_URL to a reachable host-only API base URL.",
+      retryable: true,
     };
   }
 
@@ -175,6 +191,7 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
       location: "PIPELEX_API_KEY",
       message: err.message,
       hint: "Check the API key for the configured Pipelex API.",
+      retryable: false,
     };
   }
 
@@ -190,6 +207,7 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
       location: "PIPELEX_BASE_URL",
       message: err.message,
       hint: "Durable runs need the hosted Pipelex API; point PIPELEX_BASE_URL at a deployment serving /v1/runs/* (a bare pipelex-api runner does not).",
+      retryable: false,
     };
   }
 
@@ -200,6 +218,7 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
       class: "runtime",
       message: err.message,
       hint: "The API reported the run completed but delivered no main output; inspect the run on the platform.",
+      retryable: false,
     };
   }
 
@@ -209,14 +228,18 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
       location: "PIPELEX_BASE_URL",
       message: err.message,
       hint: "Check PIPELEX_BASE_URL and the submitted request.",
+      retryable: false,
     };
   }
 
+  // Unknown faults stay retryable: for the poll loops, wrongly stopping a
+  // live follow is worse than one more read against a fault we can't name.
   if (err instanceof Error) {
     return {
       class: "runtime",
       message: err.message,
       hint: "Inspect the MCP server logs and local pipelex-api logs.",
+      retryable: true,
     };
   }
 
@@ -224,6 +247,7 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
     class: "runtime",
     message: "Unknown failure.",
     hint: "Inspect the MCP server logs and local pipelex-api logs.",
+    retryable: true,
   };
 }
 
@@ -238,6 +262,7 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
       ...(badRequest.location === undefined ? {} : { location: badRequest.location }),
       message,
       hint: badRequest.hint,
+      retryable: false,
     };
   }
 
@@ -247,6 +272,7 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
       location: "PIPELEX_API_KEY",
       message,
       hint: "Check PIPELEX_API_KEY for the configured API.",
+      retryable: false,
     };
   }
 
@@ -257,6 +283,7 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
         ...(options.notFound.location === undefined ? {} : { location: options.notFound.location }),
         message,
         hint: options.notFound.hint,
+        retryable: false,
       };
     }
     return {
@@ -264,6 +291,7 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
       location: "PIPELEX_BASE_URL",
       message,
       hint: `Check that PIPELEX_BASE_URL points to a host serving ${route}.`,
+      retryable: false,
     };
   }
 
@@ -274,6 +302,7 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
       hint:
         options.serverError?.hint ??
         "The Pipelex API returned a server error; inspect pipelex-api logs.",
+      retryable: true,
     };
   }
 
@@ -281,5 +310,6 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     class: "runtime",
     message,
     hint: `The Pipelex API returned HTTP ${err.status}.`,
+    retryable: false,
   };
 }

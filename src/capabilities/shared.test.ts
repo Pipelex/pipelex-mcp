@@ -63,6 +63,7 @@ describe("validateRequest", () => {
     expect(errors).toHaveLength(1);
     expect(errors[0]?.class).toBe("input_domain");
     expect(errors[0]?.location).toBe("files");
+    expect(errors[0]?.retryable).toBe(false);
   });
 
   it("rejects empty and whitespace-only file content", () => {
@@ -94,13 +95,14 @@ describe("validateRunIdRequest", () => {
 });
 
 describe("classifyError", () => {
-  it("classifies unreachable API failures as config", () => {
+  it("classifies unreachable API failures as config, retryable", () => {
     const error = classifyError(
       new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED"),
     );
 
     expect(error.class).toBe("config");
     expect(error.location).toBe("PIPELEX_BASE_URL");
+    expect(error.retryable).toBe(true);
   });
 
   it("classifies API request-shape responses as input_domain", () => {
@@ -121,6 +123,7 @@ describe("classifyError", () => {
     expect(error.class).toBe("input_domain");
     expect(error.location).toBe("files");
     expect(error.message).toBe("Bad request body");
+    expect(error.retryable).toBe(false);
   });
 
   it("applies route-specific bad-request texture when provided", () => {
@@ -166,6 +169,7 @@ describe("classifyError", () => {
     expect(error.class).toBe("config");
     expect(error.location).toBe("PIPELEX_BASE_URL");
     expect(error.hint).toContain("/v1/build/inputs");
+    expect(error.retryable).toBe(false);
   });
 
   it("classifies auth responses as config", () => {
@@ -185,9 +189,10 @@ describe("classifyError", () => {
 
     expect(error.class).toBe("config");
     expect(error.location).toBe("PIPELEX_API_KEY");
+    expect(error.retryable).toBe(false);
   });
 
-  it("classifies API server failures as runtime", () => {
+  it("classifies API server failures as runtime, retryable", () => {
     const error = classifyError(
       new ApiResponseError(
         "HTTP 500",
@@ -204,13 +209,41 @@ describe("classifyError", () => {
 
     expect(error.class).toBe("runtime");
     expect(error.message).toBe("Server fault");
+    expect(error.retryable).toBe(true);
   });
 
-  it("classifies client request construction failures as config", () => {
+  it("classifies an unexpected non-5xx status as runtime, not retryable", () => {
+    const error = classifyError(
+      new ApiResponseError(
+        "HTTP 418",
+        `${DEFAULT_API_URL}/v1/validate`,
+        418,
+        "I'm a teapot",
+        "{}",
+        "teapot",
+        "Teapot",
+        undefined, // validationErrors
+        undefined, // code
+      ),
+    );
+
+    expect(error.class).toBe("runtime");
+    expect(error.retryable).toBe(false);
+  });
+
+  it("classifies unknown faults as runtime, retryable", () => {
+    const error = classifyError(new Error("boom"));
+
+    expect(error.class).toBe("runtime");
+    expect(error.retryable).toBe(true);
+  });
+
+  it("classifies client request construction failures as config, not retryable", () => {
     const error = classifyError(new PipelineRequestError("Invalid API base URL"));
 
     expect(error.class).toBe("config");
     expect(error.location).toBe("PIPELEX_BASE_URL");
+    expect(error.retryable).toBe(false);
   });
 
   it("classifies a missing run lifecycle as config, pointing at the hosted API", () => {
@@ -221,15 +254,17 @@ describe("classifyError", () => {
     expect(error.class).toBe("config");
     expect(error.location).toBe("PIPELEX_BASE_URL");
     expect(error.hint).toMatch(/hosted/i);
+    expect(error.retryable).toBe(false);
   });
 
-  it("classifies a completed run missing its main stuff as runtime", () => {
+  it("classifies a completed run missing its main stuff as runtime, not retryable", () => {
     const error = classifyError(
       new MissingMainStuffError("Completed run 'x' returned no main stuff.", "x"),
     );
 
     expect(error.class).toBe("runtime");
     expect(error.message).toMatch(/main stuff/i);
+    expect(error.retryable).toBe(false);
   });
 
   it("overrides the 404 arm to input_domain when the route says so", () => {
@@ -254,5 +289,6 @@ describe("classifyError", () => {
     expect(error.class).toBe("input_domain");
     expect(error.location).toBe("run_id");
     expect(error.hint).toBe("Check the run id.");
+    expect(error.retryable).toBe(false);
   });
 });

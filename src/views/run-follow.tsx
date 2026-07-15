@@ -87,23 +87,35 @@ export default function RunFollowView() {
   // written) — retry on the server's hint; transient errors likewise. Retries
   // age along the same elapsed-time ladder as status polls (measured from the
   // first attempt), so a persistent race or hiccup backs off instead of
-  // hammering the endpoint at the ladder's first rung forever.
+  // hammering the endpoint at the ladder's first rung forever. Same
+  // visibility discipline as the status loop: nothing is scheduled while the
+  // tab is hidden, one immediate fetch on return.
   useEffect(() => {
     if (!runId || polling.phase !== "terminal") {
       return;
     }
     const firstAttemptAt = Date.now();
     let cancelled = false;
+    let done = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const retry = (retryAfterSeconds?: number | null) => {
-      if (!cancelled) {
-        timer = setTimeout(
-          () => void fetchResults(),
-          nextPollDelayMs(Date.now() - firstAttemptAt, retryAfterSeconds),
-        );
+      if (cancelled || done || document.visibilityState === "hidden") {
+        return;
       }
+      timer = setTimeout(
+        () => void fetchResults(),
+        nextPollDelayMs(Date.now() - firstAttemptAt, retryAfterSeconds),
+      );
     };
+    // At most one results fetch in flight: a hidden→visible flip during a
+    // fetch must not start a concurrent one (each would schedule its own
+    // retry, orphaning the other's timer).
+    let inFlight = false;
     const fetchResults = async () => {
+      if (cancelled || done || inFlight) {
+        return;
+      }
+      inFlight = true;
       let content: RunResultsStructuredContent;
       let meta: Record<string, unknown> | undefined;
       try {
@@ -111,9 +123,11 @@ export default function RunFollowView() {
         content = res.structuredContent;
         meta = res.meta;
       } catch {
+        inFlight = false;
         retry();
         return;
       }
+      inFlight = false;
       if (cancelled) {
         return;
       }
@@ -121,10 +135,12 @@ export default function RunFollowView() {
         const error = content.errors?.[0] ?? {
           class: "runtime" as const,
           message: "mthds_run_results produced no verdict.",
+          retryable: false,
         };
         if (isTransientPollError(error)) {
           retry();
         } else {
+          done = true;
           setResultsError(error);
         }
         return;
@@ -133,16 +149,33 @@ export default function RunFollowView() {
         retry(content.retry_after_seconds);
         return;
       }
+      done = true;
       setResults({
         content,
         graphSpec: (meta?.graph_spec ?? null) as GraphSpec | null,
         mainStuff: meta?.main_stuff,
       });
     };
-    void fetchResults();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        clearTimeout(timer);
+      } else if (!done) {
+        // Back from a hidden tab: fetch once immediately rather than waiting
+        // out a stale delay.
+        clearTimeout(timer);
+        void fetchResults();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    // Honor the pause-while-hidden contract from the very first fetch: if the
+    // tab is hidden, the visibilitychange listener fires it on return.
+    if (document.visibilityState !== "hidden") {
+      void fetchResults();
+    }
     return () => {
       cancelled = true;
       clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [runId, polling.phase]);
 

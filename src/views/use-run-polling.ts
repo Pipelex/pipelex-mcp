@@ -107,6 +107,7 @@ export function useRunPolling(
         const error = content.errors?.[0] ?? {
           class: "runtime" as const,
           message: "mthds_run_status produced no verdict.",
+          retryable: false,
         };
         if (isTransientPollError(error)) {
           setSnapshot((prev) => ({ ...prev, health: "retrying" }));

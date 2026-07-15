@@ -38,6 +38,7 @@ Output:
     location?: string;
     message: string;
     hint?: string;
+    retryable: boolean;
   }>;
 }
 ```
@@ -90,6 +91,7 @@ Output:
     location?: string;
     message: string;
     hint?: string;
+    retryable: boolean;
   }>;
 }
 ```

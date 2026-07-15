@@ -46,20 +46,15 @@ export function nextPollDelayMs(elapsedMs: number, retryAfterSeconds?: number | 
 }
 
 /**
- * Split a no-verdict `ToolError` from `mthds_run_status` into transient
- * (keep polling — the run is still executing server-side) vs hard (stop and
- * show the classified message), mirroring the starter's
- * `isTransientPollError`:
- *
- * - `runtime` (5xx, unknown faults) → transient.
- * - `config` on `PIPELEX_BASE_URL` (API unreachable) → transient: a network
- *   blip between the MCP server and the API does not affect the run itself.
- * - `config` on `PIPELEX_API_KEY` (auth) and `input_domain` (unknown or
- *   malformed run id) → hard: retrying cannot fix these.
+ * Split a no-verdict `ToolError` from the run tools into transient (keep
+ * polling — the run is still executing server-side) vs hard (stop and show
+ * the classified message). The verdict rides the error itself: `classifyError`
+ * sets `retryable` where the concrete SDK error / HTTP status is still known,
+ * because `class`+`location` alone cannot tell an unreachable API (transient
+ * network blip) from a permanently missing run lifecycle (both `config` at
+ * `PIPELEX_BASE_URL`), nor a 5xx from a malformed report (both `runtime`).
+ * An error without the flag (a defensive fallback) is hard.
  */
 export function isTransientPollError(error: ToolError): boolean {
-  if (error.class === "runtime") {
-    return true;
-  }
-  return error.class === "config" && error.location === "PIPELEX_BASE_URL";
+  return error.retryable === true;
 }

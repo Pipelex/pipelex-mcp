@@ -144,6 +144,7 @@ export async function validateMthds(
               ? err.message
               : "The Pipelex API returned a malformed validation report.",
           hint: "The API responded but its report was missing required fields; inspect pipelex-api logs.",
+          retryable: false,
         },
       ],
     );

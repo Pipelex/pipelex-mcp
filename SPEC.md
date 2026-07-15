@@ -101,6 +101,7 @@ The structured output is:
     location?: string;
     message: string;
     hint?: string;
+    retryable: boolean;
   }>;
 }
 ```
@@ -149,6 +150,7 @@ The structured output is:
     location?: string;
     message: string;
     hint?: string;
+    retryable: boolean;
   }>;
 }
 ```
@@ -246,6 +248,8 @@ On `completed`, `content` composes a Markdown summary with the main output in a 
 - `runtime` — 5xx, malformed report (e.g. a completed result missing `main_stuff`, the SDK's `MissingMainStuffError`).
 
 The unknown-id 404 vs missing-route 404 distinction comes from the SDK: a missing lifecycle route throws `RunLifecycleUnavailableError` (`config`), while an unknown id surfaces as a plain 404 `ApiResponseError` (`input_domain`, via a per-route classification override).
+
+Every `errors[]` entry also carries `retryable` — whether retrying the same call may succeed. It is decided in `classifyError`, where the concrete SDK error / HTTP status is still known, because the class+locator pair alone cannot: an unreachable API (transient) and a missing run lifecycle (permanent) both classify as `config` at `PIPELEX_BASE_URL`, and a 5xx (transient) and a malformed report (permanent) are both `runtime`. The `run-follow` view's poll loops branch on this flag (`isTransientPollError`) — transient errors keep the follow alive with a reassuring note, hard errors stop polling and surface the classified message.
 
 **Start-time rejection is opaque on the hosted API** (live-checked): `/v1/start` reports submission-time failures — including an invalid bundle or missing required inputs — as a generic 503 "Failed to start pipeline", not a 422. It classifies as a `runtime` no-verdict, but its hint (a per-route 5xx override) points the agent at `mthds_validate` / `mthds_inputs` before blaming the platform, and the `mthds_run` tool description nudges validating first.
 
