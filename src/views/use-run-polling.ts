@@ -75,22 +75,30 @@ export function useRunPolling(
       );
     };
 
+    // At most one status read in flight: a hidden→visible flip during a fetch
+    // must not start a concurrent tick (each would schedule its own follow-up,
+    // orphaning the other's timer).
+    let inFlight = false;
+
     const tick = async () => {
-      if (cancelled || stopped) {
+      if (cancelled || stopped || inFlight) {
         return;
       }
+      inFlight = true;
       let content: RunStatusStructuredContent;
       try {
         content = (await fetchRef.current({ run_id: runId })).structuredContent;
       } catch {
         // A transport failure between the view and the MCP server — the run
         // itself is unaffected; keep polling.
+        inFlight = false;
         if (!cancelled) {
           setSnapshot((prev) => ({ ...prev, health: "retrying" }));
           schedule();
         }
         return;
       }
+      inFlight = false;
       if (cancelled) {
         return;
       }
@@ -138,7 +146,12 @@ export function useRunPolling(
     document.addEventListener("visibilitychange", onVisibilityChange);
 
     setSnapshot({ phase: "polling", runStatus: undefined, health: null, hardError: null });
-    void tick();
+    // Honor the pause-while-hidden contract from the very first read: if the
+    // view mounts in a hidden tab, the visibilitychange listener fires the
+    // immediate read on return instead.
+    if (document.visibilityState !== "hidden") {
+      void tick();
+    }
 
     return () => {
       cancelled = true;

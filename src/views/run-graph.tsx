@@ -6,6 +6,7 @@ import type { GraphSpec, ToolbarPosition } from "@pipelex/mthds-ui";
 import { useDisplayMode, useLayout } from "skybridge/web";
 
 import { useToolInfo } from "../helpers.js";
+import { ToolbarButton } from "./toolbar-button.js";
 
 /**
  * The graph toolbar's anchor is ours to control — mthds-ui defaults to
@@ -64,18 +65,13 @@ export default function RunGraphView() {
       className="relative w-full overflow-hidden"
       style={{ paddingTop: top, paddingRight: right, paddingBottom: bottom, paddingLeft: left }}
     >
-      <button
-        type="button"
+      <ToolbarButton
+        dark={dark}
         onClick={() => void setDisplayMode(isFullscreen ? "inline" : "fullscreen")}
-        className="absolute right-2 top-2 z-10 cursor-pointer rounded-md px-2 py-1 text-xs"
-        style={{
-          background: dark ? "rgba(31,41,55,0.85)" : "rgba(243,244,246,0.9)",
-          color: dark ? "#e5e7eb" : "#111827",
-          border: `1px solid ${dark ? "#374151" : "#d1d5db"}`,
-        }}
+        className="absolute right-2 top-2 z-10"
       >
         {isFullscreen ? "Collapse" : "Fullscreen"}
-      </button>
+      </ToolbarButton>
       <div className="relative w-full overflow-hidden" style={{ height: graphHeight }}>
         <GraphViewer
           graphspec={graphSpec}

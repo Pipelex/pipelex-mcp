@@ -122,6 +122,8 @@ Same two-level discipline as validate/inputs, adapted: **`status: "ok"` = the AP
 
 This needs one small extension to `ClassifyErrorOptions`: today a 404 is hard-wired to `config` ("route missing"). The run capabilities pass a per-route override so an `ApiResponseError(404)` classifies as `input_domain` ("no run with this id"), while `RunLifecycleUnavailableError` (which the SDK already separates via the problem-body missing-route marker) keeps the `config` arm.
 
+The run-id routes' 400/422 `badRequest` override (malformed `run_id` → `input_domain`, "Pass the run_id exactly as returned by mthds_run") is **inferred, not live-verified** — it was added at Checkpoint 2 review triage on the assumption that a malformed id is the only 400/422 these GET routes produce, unlike the `/v1/start` 503 mapping above, which was live-checked against the hosted API.
+
 ### The run-follow view
 
 A new Skybridge view component, `run-follow`, registered on `mthds_run`. It is the "basic UI to follow the durable run":
