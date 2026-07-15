@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `mthds_inputs` MCP tool — projects a pipe's declared inputs as a fill-in template through the Pipelex API (`POST /v1/build/inputs`) via `@pipelex/sdk`'s `buildInputs`. Takes the same `files` shape as `mthds_validate` plus optional `pipe_ref` (qualified `domain.pipe_code`, defaulting server-side to the closure's `main_pipe`), `explicit` (default false — the light template shape), and `format` (`"json"` default in `inputs`, `"toml"` raw text in `inputs_toml`). Follows the same verdict discipline: `status: "ok"` discriminated on `is_valid` for produced verdicts (an unresolvable closure returns `validation_errors[]`), `status: "error"` + classified `errors[]` for no-verdict conditions. No Skybridge view — the template is small structured data the model reads, and the `content` summary repeats it in a fenced code block.
+- Shared capability plumbing extracted into `src/capabilities/shared.ts` — the submitted-files input schema, the `ToolError` model, request-shape validation, env-derived API config, and `classifyError` (now taking per-route options for the 400/422 locator/hint and the route named in the 404 hint) are shared between the validate and inputs capabilities.
+- `.env` support for the dev server — `nodemon.json` overrides Skybridge's default dev exec with `tsx --env-file-if-exists=.env src/server.ts`, so `PIPELEX_BASE_URL`/`PIPELEX_API_KEY` can live in a gitignored `.env` instead of prefixing `npm run dev`.
+
+### Changed
+
+- **Breaking: renamed the API env vars to the `PIPELEX_` prefix.** The env var read for the API base URL is now `PIPELEX_BASE_URL` (was `MTHDS_BASE_URL`) and the optional auth key is `PIPELEX_API_KEY` (was `MTHDS_API_KEY`); the `location`/`hint` strings in the classified errors follow. No read alias.
+- **Breaking:** `PIPELEX_BASE_URL` now defaults to the hosted Pipelex API (`https://api.pipelex.com`) instead of the local OSS `pipelex-api` (`http://localhost:8081`). Set `PIPELEX_BASE_URL=http://localhost:8081` to develop against a local runner.
+
 ## [0.1.0] - 2026-06-29
 
 ### Added
