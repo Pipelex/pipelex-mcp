@@ -118,6 +118,17 @@ const server = new McpServer(
       view: {
         component: "run-follow",
         description: "Live-following status card for the durable run.",
+        csp: {
+          // Run-output images are presigned URLs on the hosted platform's
+          // per-env storage buckets — a tight host allowlist, never a
+          // wildcard. Anything else in main_stuff stays CSP-blocked and the
+          // view falls back to the text preview.
+          resourceDomains: [
+            "https://pipelex-app-dev.s3.us-west-2.amazonaws.com",
+            "https://pipelex-app-staging.s3.us-west-2.amazonaws.com",
+            "https://pipelex-app-prod.s3.us-west-2.amazonaws.com",
+          ],
+        },
       },
       _meta: {
         "openai/toolInvocation/invoking": "Starting MTHDS run...",

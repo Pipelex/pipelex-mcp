@@ -370,6 +370,10 @@ function CompletedCard({
   // auto-firing on completion would create unsolicited model turns.
   const sendFollowUpMessage = useSendFollowUpMessage();
   const [summarizeRequested, setSummarizeRequested] = useState(false);
+  // An image can fail to load at runtime (expired presigned URL, a host
+  // outside the view's CSP resourceDomains allowlist) — fall back to the
+  // text preview rather than showing a broken image.
+  const [imageFailed, setImageFailed] = useState(false);
   const hasGraph = results.graphSpec != null && (results.graphSpec.nodes?.length ?? 0) > 0;
   // Same sizing discipline as run-graph: explicit pixel height for ReactFlow,
   // compact inline, filling the host in fullscreen, floored against collapse.
@@ -421,12 +425,13 @@ function CompletedCard({
         </div>
       )}
       <div className="px-2 pb-2">
-        {imageUrl ? (
+        {imageUrl && !imageFailed ? (
           <img
             src={imageUrl}
             alt="Run output"
             className="mt-1 rounded-md"
             style={{ maxWidth: "100%", maxHeight: isFullscreen ? 480 : 220 }}
+            onError={() => setImageFailed(true)}
           />
         ) : (
           <pre
