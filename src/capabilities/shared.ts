@@ -59,7 +59,7 @@ interface ApiEnv {
 
 export function buildApiConfig(env: ApiEnv = process.env): ApiConfig {
   return {
-    baseUrl: env.PIPELEX_BASE_URL ?? DEFAULT_API_URL,
+    baseUrl: env.PIPELEX_BASE_URL || DEFAULT_API_URL,
     apiKey: env.PIPELEX_API_KEY || undefined,
   };
 }

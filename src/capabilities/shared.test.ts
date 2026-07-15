@@ -27,6 +27,12 @@ describe("buildApiConfig", () => {
 
     expect(config.apiKey).toBeUndefined();
   });
+
+  it("falls back to the hosted default when the base URL is blank", () => {
+    const config = buildApiConfig({ PIPELEX_BASE_URL: "" });
+
+    expect(config.baseUrl).toBe(DEFAULT_API_URL);
+  });
 });
 
 describe("validateRequest", () => {
