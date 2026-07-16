@@ -26,7 +26,7 @@ Core actions:
 
 `mthds_validate` ships a Skybridge view, `run-graph`: on a positive verdict that carries a `graph_spec`, a Skybridge-capable host renders an interactive method graph (via `@pipelex/mthds-ui`'s `GraphViewer`) inline above the model response, with a user-triggered fullscreen toggle for exploration. Invalid verdicts, pending-signature verdicts with no graph, and `include_graph: false` calls fall back to a compact, non-crashing empty state. The shared surface is the assistant conversation, the structured tool result, and this view.
 
-`mthds_run` ships a second Skybridge view, `run-follow`: a self-polling status card that follows a durable run live (friendly status label, elapsed wall-clock, spinner) without any model turns — it polls the read-only `mthds_run_status` on a timer via `useCallTool`. On completion it fetches `mthds_run_results` once and renders the executed graph from the response's view-only metadata plus a compact output preview; on failure it shows the terminal status and failure message (and states plainly that no graph exists for failed runs). On remount it re-resolves the run by id, so reopening the conversation restores the card.
+`mthds_run` ships a second Skybridge view, `run-follow`: a self-polling status card that follows a durable run live (friendly status label, elapsed wall-clock, spinner) without any model turns — it polls the read-only `mthds_run_status` on a timer via `useCallTool`. On completion it fetches `mthds_run_results` once and renders the executed graph from the response's view-only metadata plus a compact output preview; on failure it shows the terminal status and failure message (and states plainly that no graph exists for failed runs). Once the terminal outcome is resolved (completed or failed), the view hands the conversation back to the model on its own via `sendFollowUpMessage` — one canned prompt naming the run id — so the assistant reports the outcome without the user prompting (the completion handoff, detailed in Run Scope). On remount it re-resolves the run by id, so reopening the conversation restores the card without re-firing the handoff.
 
 **First view**: The MCP host lists the Pipelex tools: `mthds_validate`, `mthds_inputs`, `mthds_run`, `mthds_run_status`, and `mthds_run_results`. `mthds_validate` and `mthds_run` carry Skybridge views; the others are plain tools whose payloads are small structured data the model reads directly.
 
@@ -168,8 +168,8 @@ The run family adds durable (async) method execution against the hosted Pipelex 
 1. The assistant (usually after `mthds_validate` and `mthds_inputs`) calls `mthds_run` with the file contents, the pipe to run, and the filled inputs.
 2. The tool starts the run and returns the durable `run_id` immediately. The `run-follow` view renders above the response and follows the run on its own — the user watches it without prompting the assistant.
 3. If the user asks how it is going, the assistant calls `mthds_run_status` — one cheap read, with a retry hint in the summary so it doesn't spin-poll.
-4. When the run is terminal, the assistant calls `mthds_run_results` to report: the main output (bounded) on success, or the failure message otherwise.
-5. Because everything is behind the durable id, the flow survives conversation gaps: days later, "what did that run produce?" is a single `mthds_run_results` call, and reopening the conversation remounts the view, which re-resolves the run state by id.
+4. When the run reaches its terminal outcome, the view fires the completion handoff — a `sendFollowUpMessage` naming the run id — and the assistant answers it by calling `mthds_run_results` and reporting: the main output (bounded) on success, or the failure message otherwise. (The handoff fires after the view's own results fetch settled, so the assistant's results call lands past the mid-write race.)
+5. Because everything is behind the durable id, the flow survives conversation gaps: days later, "what did that run produce?" is a single `mthds_run_results` call, and reopening the conversation remounts the view, which re-resolves the run state by id (silently — the handoff fires at most once per run).
 
 **Tool: `mthds_run`** — start a durable run. *Not* read-only; its description states it executes the method on the hosted API and spends inference credit, and nudges validating the bundle first (see the start-time rejection note below).
 
@@ -255,6 +255,13 @@ Every `errors[]` entry also carries `retryable` — whether retrying the same ca
 
 **View: `run-follow`** (registered on `mthds_run`) — described in UI Overview. `available_view_specs` on `mthds_run` lists `"live_run_status"` when the view is registered; `mthds_run_results` lists `"run_graph"` when the executed graph rides its `_meta` (the kind is minted now; a view directly on the results tool is a later increment).
 
+**Completion handoff**: when the view resolves the run's terminal outcome — its results fetch settles on `completed` or `failed` — it fires one `sendFollowUpMessage` with a canned prompt naming the run id ("Run <id> completed — report the results." / "Run <id> failed — report what went wrong."), handing the conversation back to the model so the assistant reports the outcome without the user prompting. This deliberately reverses the earlier opt-in-only stance (design note §6.6): an unsolicited turn that closes the loop on a run the user started is worth more than the silence. Rules:
+
+- **At most one handoff per run.** A `notified` flag rides the host-persisted view state (alongside `run_id`/`last_known`), so a remount of an already-notified run — reopening the conversation — stays silent; an in-mount ref guards the window while the view-state write round-trips.
+- **Best-effort, never retried in-session.** A host that rejects the view-initiated turn gets no in-session retry (a reject → rollback → retry loop otherwise); the persisted flag rolls back so a later remount may attempt once more. The "Summarize in chat" button on the completed card remains as the manual re-trigger/fallback, sending the same run-id-bearing prompt.
+- **Run outcomes only.** Hard poll errors and results-fetch errors never auto-fire — they are failures of the *follow*, not of the run (which may still be executing server-side); those cards keep their `data-llm` text only.
+- **Both outcomes notify.** A failed run hands off too — the failure is precisely when the user wants the assistant to step in and explain.
+
 **Output image trust model**: an image `public_url` in `main_stuff` renders in the completed card only inside two containment layers. First, `narrowImageUrl` accepts nothing but `http(s)` URLs that are image-shaped or carry an `image/*` mime hint — no other scheme reaches the DOM. Second, the view's CSP `resourceDomains` is a tight host allowlist naming exactly the hosted platform's per-env storage buckets (`pipelex-app-{dev,staging,prod}.s3.us-west-2.amazonaws.com`, where run outputs are served as presigned URLs) — never a wildcard; any other host (including a third-party generation-provider URL leaking through `main_stuff`) is refused by the host CSP before a request leaves the browser. These URLs stay view-only: they ride `_meta` and are never surfaced into model context (consistent with the `result_url` rule above). A failed image load — expired presigned URL, CSP-blocked host — falls back to the text preview instead of a broken image.
 
 ## Non-Goals
@@ -285,7 +292,7 @@ Run a method durably:
 
 1. The user asks the assistant to run a `.mthds` method (usually after validating it and filling the inputs template).
 2. The assistant submits the file contents, the pipe to run, and the filled inputs to `mthds_run`; the tool returns the durable `run_id` immediately and the `run-follow` view follows the run live.
-3. The assistant checks on the run with `mthds_run_status` when asked (honoring the retry hint rather than spin-polling) and reports the outcome with `mthds_run_results` once terminal.
+3. The assistant checks on the run with `mthds_run_status` when asked (honoring the retry hint rather than spin-polling); when the run reaches its terminal outcome the view's completion handoff prompts the assistant, which reports via `mthds_run_results`.
 4. Days later, the same `run_id` still answers `mthds_run_status` / `mthds_run_results` — the run is durable and the MCP is stateless.
 
 ## Tools and Views
@@ -314,7 +321,7 @@ Run a method durably:
 - **Output**: `{ status, run_id?, run_status?, created_at?, available_view_specs, errors? }` in `structuredContent`, plus a start-ack text summary in MCP `content` with the run id and follow-up etiquette.
 - **Behavior**: Validates request shape, then starts a durable run via `POST /v1/start` (fire-and-forget 202). Never blocks on the result.
 - **Annotations**: NOT read-only (`readOnlyHint: false`), non-destructive, no open-world publishing. The description states it executes the method on the hosted API and spends inference credit.
-- **View**: `run-follow` — the self-polling live status card described in UI Overview.
+- **View**: `run-follow` — the self-polling live status card described in UI Overview; on the terminal outcome it fires the once-per-run completion handoff (see Run Scope) so the assistant reports unprompted.
 
 **Tool: `mthds_run_status`**
 

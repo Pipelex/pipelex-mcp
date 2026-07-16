@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- The `run-follow` view now hands the conversation back to the model on its own when the run reaches its terminal outcome: once its results fetch settles (completed or failed), it fires one `sendFollowUpMessage` with a canned prompt naming the run id, so the assistant reports the outcome without the user prompting. This reverses the 0.2.0 decision to keep the handoff user-triggered only. The handoff fires at most once per run — a `notified` flag rides host-persisted view state, so reopening the conversation doesn't re-fire it — and is best-effort: a host that declines the turn is not retried in-session, and the "Summarize in chat" button remains as the manual re-trigger/fallback (its prompt now also names the run id). Follow failures (hard poll errors, results-fetch errors) never auto-fire.
+
 ## [0.2.0] - 2026-07-15
 
 ### Added
