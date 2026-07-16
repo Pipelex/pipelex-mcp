@@ -49,7 +49,7 @@ export const mthdsRunInputSchema = {
     .record(z.string(), z.unknown())
     .optional()
     .describe(
-      "Method inputs — fill the template returned by mthds_inputs. Binary inputs ride reachable https URLs.",
+      "Method inputs — fill the template returned by mthds_inputs_template. Binary inputs ride reachable https URLs.",
     ),
 };
 
@@ -252,14 +252,14 @@ export const RUN_START_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/start",
   badRequest: {
     location: "files",
-    hint: "Check files, pipe_code, and inputs; validate the bundle with mthds_validate and fill the template from mthds_inputs first.",
+    hint: "Check files, pipe_code, and inputs; validate the bundle with mthds_validate and fill the template from mthds_inputs_template first.",
   },
   // Live-checked (2026-07-15): the hosted /v1/start reports start-time
   // rejections — including an invalid bundle — as a generic 503 "Failed to
   // start pipeline", indistinguishable from real server trouble. Point the
   // agent at the recoverable cause first.
   serverError: {
-    hint: "The hosted API reports start-time rejections (e.g. an invalid bundle or bad inputs) as a generic server error. Validate the bundle with mthds_validate and check the inputs against mthds_inputs; if both pass, the platform itself may be having trouble.",
+    hint: "The hosted API reports start-time rejections (e.g. an invalid bundle or bad inputs) as a generic server error. Validate the bundle with mthds_validate and check the inputs against mthds_inputs_template; if both pass, the platform itself may be having trouble.",
   },
 };
 
@@ -557,7 +557,7 @@ function completedResult(runId: string, result: RunResults): RunResultsResult {
 }
 
 // The main output is deliberately duplicated into the summary (the
-// mthds_inputs pattern): it is the payload the model must read, and some hosts
+// mthds_inputs_template pattern): it is the payload the model must read, and some hosts
 // read prose more reliably than structured fields. Text outputs get a plain
 // fence; everything else pretty-printed JSON.
 function completedSummary(runId: string, bounded: unknown, truncated: boolean): string {

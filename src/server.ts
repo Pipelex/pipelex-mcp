@@ -42,7 +42,7 @@ const server = new McpServer(
       "(is_valid / is_runnable, validation errors, pending signatures).",
       "When the method is valid, the tool also returns an interactive dry-run graph of the method,",
       "rendered through the run-graph view.",
-      "Call `mthds_inputs` with the same file contents to get a fill-in template of a pipe's",
+      "Call `mthds_inputs_template` with the same file contents to get a fill-in template of a pipe's",
       "declared inputs, ready to populate for a run.",
       "Run a method durably with `mthds_run` (start by files + pipe + inputs, returns a durable run id),",
       "then check on it with `mthds_run_status` and fetch the outcome with `mthds_run_results` by that id.",
@@ -77,7 +77,7 @@ const server = new McpServer(
   )
   .registerTool(
     {
-      name: "mthds_inputs",
+      name: "mthds_inputs_template",
       description:
         "Project a pipe's declared inputs as a fill-in template from submitted MTHDS file contents.",
       inputSchema: mthdsInputsInputSchema,
@@ -104,7 +104,7 @@ const server = new McpServer(
       description:
         "Start a durable run of a MTHDS method from submitted file contents, a pipe to run, and filled inputs. " +
         "Executes the method on the hosted Pipelex API and spends inference credit. " +
-        "Validate the bundle with mthds_validate and fill the inputs template from mthds_inputs first — " +
+        "Validate the bundle with mthds_validate and fill the inputs template from mthds_inputs_template first — " +
         "the hosted API rejects a bad bundle at start with an opaque server error. " +
         "Returns the durable run id immediately (never blocks); follow up with mthds_run_status and mthds_run_results.",
       inputSchema: mthdsRunInputSchema,
