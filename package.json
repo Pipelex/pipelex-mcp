@@ -1,6 +1,6 @@
 {
   "name": "pipelex-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Pipelex MCP server and Skybridge app scaffold",
   "type": "module",
