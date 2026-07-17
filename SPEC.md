@@ -11,7 +11,7 @@ Core actions:
 - Validate one or more submitted MTHDS files.
 - Return valid, invalid, pending-signature, and no-verdict failure states in a stable structured result.
 - Return optional graph data when requested and available.
-- Project a pipe's declared inputs as a fill-in template (`mthds_inputs`), so an assistant can prepare inputs for a run without leaving the conversation. This unblocks the CLI-free skills in `../pipelex-plugins` (`pipelex-inputs`, `pipelex-design`) that used to shell out to `mthds-agent inputs bundle`.
+- Project a pipe's declared inputs as a fill-in template (`mthds_inputs_template`), so an assistant can prepare inputs for a run without leaving the conversation. This unblocks the CLI-free skills in `../pipelex-plugins` (`pipelex-inputs`, `pipelex-design`) that used to shell out to `mthds-agent inputs bundle`.
 - Start a durable run of a method on the hosted Pipelex API (`mthds_run`), then check on it (`mthds_run_status`) and report its results (`mthds_run_results`) by durable run id — the run outlives any single tool call and even the conversation.
 
 ## Why LLM?
@@ -26,9 +26,9 @@ Core actions:
 
 `mthds_validate` ships a Skybridge view, `run-graph`: on a positive verdict that carries a `graph_spec`, a Skybridge-capable host renders an interactive method graph (via `@pipelex/mthds-ui`'s `GraphViewer`) inline above the model response, with a user-triggered fullscreen toggle for exploration. Invalid verdicts, pending-signature verdicts with no graph, and `include_graph: false` calls fall back to a compact, non-crashing empty state. The shared surface is the assistant conversation, the structured tool result, and this view.
 
-`mthds_run` ships a second Skybridge view, `run-follow`: a self-polling status card that follows a durable run live (friendly status label, elapsed wall-clock, spinner) without any model turns — it polls the read-only `mthds_run_status` on a timer via `useCallTool`. On completion it fetches `mthds_run_results` once and renders the executed graph from the response's view-only metadata plus a compact output preview; on failure it shows the terminal status and failure message (and states plainly that no graph exists for failed runs). On remount it re-resolves the run by id, so reopening the conversation restores the card.
+`mthds_run` ships a second Skybridge view, `run-follow`: a self-polling status card that follows a durable run live (friendly status label, elapsed wall-clock, spinner) without any model turns — it polls the read-only `mthds_run_status` on a timer via `useCallTool`. On completion it fetches `mthds_run_results` once and renders the executed graph from the response's view-only metadata plus a compact output preview; on failure it shows the terminal status and failure message (and states plainly that no graph exists for failed runs). Once the terminal outcome is resolved (completed or failed), the view hands the conversation back to the model on its own via `sendFollowUpMessage` — one canned prompt naming the run id — so the assistant reports the outcome without the user prompting (the completion handoff, detailed in Run Scope). On remount it re-resolves the run by id, so reopening the conversation restores the card without re-firing the handoff.
 
-**First view**: The MCP host lists the Pipelex tools: `mthds_validate`, `mthds_inputs`, `mthds_run`, `mthds_run_status`, and `mthds_run_results`. `mthds_validate` and `mthds_run` carry Skybridge views; the others are plain tools whose payloads are small structured data the model reads directly.
+**First view**: The MCP host lists the Pipelex tools: `mthds_validate`, `mthds_inputs_template`, `mthds_run`, `mthds_run_status`, and `mthds_run_results`. `mthds_validate` and `mthds_run` carry Skybridge views; the others are plain tools whose payloads are small structured data the model reads directly.
 
 **Validation flow**:
 
@@ -46,7 +46,7 @@ Core actions:
 
 **Inputs template flow**:
 
-1. The assistant submits `files: [{ content, uri? }]` (and optionally `pipe_ref`, `explicit`, `format`) to `mthds_inputs`.
+1. The assistant submits `files: [{ content, uri? }]` (and optionally `pipe_ref`, `explicit`, `format`) to `mthds_inputs_template`.
 2. The MCP server validates request shape and provenance.
 3. The capability calls the Pipelex API (`POST /v1/build/inputs`) through `@pipelex/sdk`'s `PipelexApiClient`, adapting the `uri` provenance label to the build envelope's `source` field.
 4. The result is projected into stable MCP `structuredContent` plus a text summary that includes the template itself in a fenced code block.
@@ -67,6 +67,16 @@ The richer error-grouping validation view (diagnostics grouped by class, clickab
 - **SDK dependency**: the `@pipelex/sdk` npm package (`PipelexApiClient`, published from `../pipelex-sdk-js`). It re-exports the `mthds/protocol` surface, so the MCP imports one SDK and still reaches the open protocol routes; `mthds` rides along as a transitive dependency.
 - **Auth**: optional `PIPELEX_API_KEY` for the validation and inputs tools; local development normally runs without hosted auth. The run tools execute on the hosted API, so `PIPELEX_API_KEY` is effectively mandatory for them — a missing or invalid key is a `config` no-verdict.
 - **Primary environment variable**: `PIPELEX_BASE_URL`, defaulting to `https://api.pipelex.com`.
+
+## Naming Conventions
+
+Tools are the contract; the `../pipelex-plugins` skills are the manual. The naming follows that split:
+
+- **Server key: `pipelex`** — the product brand (Pipelex is the service; MTHDS is the language). Hosts derive their flattened tool names from it (`mcp__pipelex__mthds_validate` on Codex, `mcp__plugin_pipelex_pipelex__mthds_validate` on Claude Code).
+- **Tool names: `mthds_<stem>`, snake_case** — operations on MTHDS-language artifacts. The `mthds_` prefix stays even though the server prefix could be argued to cover it: some hosts display or match bare tool names, generic verbs (`validate`, `run`) collide across servers in a multi-server session, and a `pipelex_` prefix would stutter against the server key.
+- **Lifecycle families share a stem prefix** — `mthds_run`, `mthds_run_status`, `mthds_run_results` sort and display adjacently, so hosts and models see them as one family.
+- **Names state what you get** — a noun-only name must name the artifact it returns (`mthds_inputs_template`, renamed from the ambiguous `mthds_inputs`); otherwise lead with the operation (`mthds_validate`).
+- **Tools are self-sufficient; the dependency on skills is one-way** — tool names, descriptions, and the server `instructions` never reference the plugin skills, because many consumers (ChatGPT, claude.ai connectors, raw MCP hosts) will never see them. The skills reference tool names verbatim, and where a skill is the manual for one tool the two share a stem (`pipelex-inputs` ↔ `mthds_inputs_template`); that side of the convention is recorded in `../pipelex-plugins/docs/decisions.md`.
 
 ## Validation Scope (`mthds_validate`)
 
@@ -110,9 +120,9 @@ The graph (`graph_spec`) is not part of `structuredContent`; on a positive verdi
 
 The MCP `content` text contains the human-readable summary. The summary is not duplicated in structured output.
 
-## Inputs Template Scope (`mthds_inputs`)
+## Inputs Template Scope (`mthds_inputs_template`)
 
-`mthds_inputs` projects a pipe's declared inputs as a fill-in template, wrapping `POST /v1/build/inputs` through `@pipelex/sdk`'s `buildInputs`. It is a plain tool: no Skybridge view, no `_meta` channel, no `available_view_specs` field — the template is small structured data the model must read, so it belongs in `structuredContent`.
+`mthds_inputs_template` projects a pipe's declared inputs as a fill-in template, wrapping `POST /v1/build/inputs` through `@pipelex/sdk`'s `buildInputs`. It is a plain tool: no Skybridge view, no `_meta` channel, no `available_view_specs` field — the template is small structured data the model must read, so it belongs in `structuredContent`.
 
 The public MCP input shape is:
 
@@ -165,11 +175,11 @@ The run family adds durable (async) method execution against the hosted Pipelex 
 
 **Run UX flow**:
 
-1. The assistant (usually after `mthds_validate` and `mthds_inputs`) calls `mthds_run` with the file contents, the pipe to run, and the filled inputs.
+1. The assistant (usually after `mthds_validate` and `mthds_inputs_template`) calls `mthds_run` with the file contents, the pipe to run, and the filled inputs.
 2. The tool starts the run and returns the durable `run_id` immediately. The `run-follow` view renders above the response and follows the run on its own — the user watches it without prompting the assistant.
 3. If the user asks how it is going, the assistant calls `mthds_run_status` — one cheap read, with a retry hint in the summary so it doesn't spin-poll.
-4. When the run is terminal, the assistant calls `mthds_run_results` to report: the main output (bounded) on success, or the failure message otherwise.
-5. Because everything is behind the durable id, the flow survives conversation gaps: days later, "what did that run produce?" is a single `mthds_run_results` call, and reopening the conversation remounts the view, which re-resolves the run state by id.
+4. When the run reaches its terminal outcome, the view fires the completion handoff — a `sendFollowUpMessage` naming the run id — and the assistant answers it by calling `mthds_run_results` and reporting: the main output (bounded) on success, or the failure message otherwise. (The handoff fires after the view's own results fetch settled, so the assistant's results call lands past the mid-write race.)
+5. Because everything is behind the durable id, the flow survives conversation gaps: days later, "what did that run produce?" is a single `mthds_run_results` call, and reopening the conversation remounts the view, which re-resolves the run state by id (silently — the handoff fires at most once per run).
 
 **Tool: `mthds_run`** — start a durable run. *Not* read-only; its description states it executes the method on the hosted API and spends inference credit, and nudges validating the bundle first (see the start-time rejection note below).
 
@@ -178,7 +188,7 @@ The run family adds durable (async) method execution against the hosted Pipelex 
 {
   files: Array<{ content: string; uri?: string | null }>;  // the shared submitted-files shape
   pipe_code?: string;                // pipe to run; omitted → server resolves the bundle's main pipe
-  inputs?: Record<string, unknown>;  // method inputs, as filled from the mthds_inputs template
+  inputs?: Record<string, unknown>;  // method inputs, as filled from the mthds_inputs_template template
 }
 
 // structuredContent
@@ -237,7 +247,7 @@ The `content` summary while non-terminal includes "check again in ~Ns" from the 
 }
 ```
 
-On `completed`, `content` composes a Markdown summary with the main output in a fenced code block (the `mthds_inputs` duplication pattern: the payload the model must read is deliberately repeated in the prose), bounded by the same cap as `structuredContent`. The executed `graph_spec` and the **full** (unbounded) `main_stuff` ride the view-only `_meta` channel (keys mirror the API field names: `_meta.graph_spec`, `_meta.main_stuff`), never model context. A `state: "running"` result is a produced verdict ("no result *yet*" is an answer): `status: "ok"` with the retry hint. On `failed`, the summary carries the terminal status and failure message and states plainly that no graph exists for failed runs.
+On `completed`, `content` composes a Markdown summary with the main output in a fenced code block (the `mthds_inputs_template` duplication pattern: the payload the model must read is deliberately repeated in the prose), bounded by the same cap as `structuredContent`. The executed `graph_spec` and the **full** (unbounded) `main_stuff` ride the view-only `_meta` channel (keys mirror the API field names: `_meta.graph_spec`, `_meta.main_stuff`), never model context. A `state: "running"` result is a produced verdict ("no result *yet*" is an answer): `status: "ok"` with the retry hint. On `failed`, the summary carries the terminal status and failure message and states plainly that no graph exists for failed runs.
 
 **Bounding `main_stuff`**: an output can be huge. The structured copy (and the fenced summary block) is bounded to a serialized cap (~32KB, tunable constant): JSON trees are pruned deterministically (deepest levels and longest collections first, with an ellipsis marker); plain text keeps head+tail. When bounded, `truncated: true` and the summary says the output was cut. The full output always rides `_meta` for views.
 
@@ -251,9 +261,16 @@ The unknown-id 404 vs missing-route 404 distinction comes from the SDK: a missin
 
 Every `errors[]` entry also carries `retryable` — whether retrying the same call may succeed. It is decided in `classifyError`, where the concrete SDK error / HTTP status is still known, because the class+locator pair alone cannot: an unreachable API (transient) and a missing run lifecycle (permanent) both classify as `config` at `PIPELEX_BASE_URL`, and a 5xx (transient) and a malformed report (permanent) are both `runtime`. The `run-follow` view's poll loops branch on this flag (`isTransientPollError`) — transient errors keep the follow alive with a reassuring note, hard errors stop polling and surface the classified message.
 
-**Start-time rejection is opaque on the hosted API** (live-checked): `/v1/start` reports submission-time failures — including an invalid bundle or missing required inputs — as a generic 503 "Failed to start pipeline", not a 422. It classifies as a `runtime` no-verdict, but its hint (a per-route 5xx override) points the agent at `mthds_validate` / `mthds_inputs` before blaming the platform, and the `mthds_run` tool description nudges validating first.
+**Start-time rejection is opaque on the hosted API** (live-checked): `/v1/start` reports submission-time failures — including an invalid bundle or missing required inputs — as a generic 503 "Failed to start pipeline", not a 422. It classifies as a `runtime` no-verdict, but its hint (a per-route 5xx override) points the agent at `mthds_validate` / `mthds_inputs_template` before blaming the platform, and the `mthds_run` tool description nudges validating first.
 
 **View: `run-follow`** (registered on `mthds_run`) — described in UI Overview. `available_view_specs` on `mthds_run` lists `"live_run_status"` when the view is registered; `mthds_run_results` lists `"run_graph"` when the executed graph rides its `_meta` (the kind is minted now; a view directly on the results tool is a later increment).
+
+**Completion handoff**: when the view resolves the run's terminal outcome — its results fetch settles on `completed` or `failed` — it fires one `sendFollowUpMessage` with a canned prompt naming the run id ("Run <id> completed — report the results." / "Run <id> failed — report what went wrong."), handing the conversation back to the model so the assistant reports the outcome without the user prompting. This deliberately reverses the earlier opt-in-only stance (design note §6.6): an unsolicited turn that closes the loop on a run the user started is worth more than the silence. Rules:
+
+- **At most one handoff per run.** A `notified` flag rides the host-persisted view state (alongside `run_id`/`last_known`), so a remount of an already-notified run — reopening the conversation — stays silent; an in-mount ref guards the window while the view-state write round-trips.
+- **Best-effort, never retried in-session.** A host that rejects the view-initiated turn gets no in-session retry (a reject → rollback → retry loop otherwise); the persisted flag rolls back so a later remount may attempt once more. The "Summarize in chat" button on the completed card remains as the manual re-trigger/fallback, sending the same run-id-bearing prompt.
+- **Run outcomes only.** Hard poll errors and results-fetch errors never auto-fire — they are failures of the *follow*, not of the run (which may still be executing server-side); those cards keep their `data-llm` text only.
+- **Both outcomes notify.** A failed run hands off too — the failure is precisely when the user wants the assistant to step in and explain.
 
 **Output image trust model**: an image `public_url` in `main_stuff` renders in the completed card only inside two containment layers. First, `narrowImageUrl` accepts nothing but `http(s)` URLs that are image-shaped or carry an `image/*` mime hint — no other scheme reaches the DOM. Second, the view's CSP `resourceDomains` is a tight host allowlist naming exactly the hosted platform's per-env storage buckets (`pipelex-app-{dev,staging,prod}.s3.us-west-2.amazonaws.com`, where run outputs are served as presigned URLs) — never a wildcard; any other host (including a third-party generation-provider URL leaking through `main_stuff`) is refused by the host CSP before a request leaves the browser. These URLs stay view-only: they ride `_meta` and are never surfaced into model context (consistent with the `result_url` rule above). A failed image load — expired presigned URL, CSP-blocked host — falls back to the text preview instead of a broken image.
 
@@ -277,7 +294,7 @@ Validate MTHDS files:
 Prepare inputs for a method:
 
 1. The user asks the assistant to prepare inputs for a `.mthds` method (or a skill needs the method's input schema).
-2. The assistant submits the file contents (and optionally a qualified `pipe_ref`) to `mthds_inputs`.
+2. The assistant submits the file contents (and optionally a qualified `pipe_ref`) to `mthds_inputs_template`.
 3. The tool returns the fill-in template plus the resolved pipe, which the assistant fills with user data, synthetic data, or placeholders.
 4. On an invalid closure, the tool returns the validation errors instead; the assistant can repair via the validation flow and retry.
 
@@ -285,7 +302,7 @@ Run a method durably:
 
 1. The user asks the assistant to run a `.mthds` method (usually after validating it and filling the inputs template).
 2. The assistant submits the file contents, the pipe to run, and the filled inputs to `mthds_run`; the tool returns the durable `run_id` immediately and the `run-follow` view follows the run live.
-3. The assistant checks on the run with `mthds_run_status` when asked (honoring the retry hint rather than spin-polling) and reports the outcome with `mthds_run_results` once terminal.
+3. The assistant checks on the run with `mthds_run_status` when asked (honoring the retry hint rather than spin-polling); when the run reaches its terminal outcome the view's completion handoff prompts the assistant, which reports via `mthds_run_results`.
 4. Days later, the same `run_id` still answers `mthds_run_status` / `mthds_run_results` — the run is durable and the MCP is stateless.
 
 ## Tools and Views
@@ -300,7 +317,7 @@ Run a method durably:
 - **Annotations**: Read-only, non-destructive, no open-world publishing.
 - **View**: `run-graph` — renders `_meta.graph_spec` with `@pipelex/mthds-ui`'s `GraphViewer` (inline preview plus a user-triggered fullscreen toggle); compact empty state when there is no graph.
 
-**Tool: `mthds_inputs`**
+**Tool: `mthds_inputs_template`**
 
 - **Input**: `{ files, pipe_ref?, explicit?, format? }`
 - **Output**: `{ status, is_valid, pipe_ref?, format?, explicit?, inputs?, inputs_toml?, validation_errors?, errors? }` in `structuredContent`, plus a text summary in MCP `content` that includes the template in a fenced code block. No `_meta`, no `available_view_specs`.
@@ -314,7 +331,7 @@ Run a method durably:
 - **Output**: `{ status, run_id?, run_status?, created_at?, available_view_specs, errors? }` in `structuredContent`, plus a start-ack text summary in MCP `content` with the run id and follow-up etiquette.
 - **Behavior**: Validates request shape, then starts a durable run via `POST /v1/start` (fire-and-forget 202). Never blocks on the result.
 - **Annotations**: NOT read-only (`readOnlyHint: false`), non-destructive, no open-world publishing. The description states it executes the method on the hosted API and spends inference credit.
-- **View**: `run-follow` — the self-polling live status card described in UI Overview.
+- **View**: `run-follow` — the self-polling live status card described in UI Overview; on the terminal outcome it fires the once-per-run completion handoff (see Run Scope) so the assistant reports unprompted.
 
 **Tool: `mthds_run_status`**
 

@@ -9,6 +9,7 @@ import { useDisplayMode, useLayout, useSendFollowUpMessage, useViewState } from 
 import type { RunResultsStructuredContent } from "../capabilities/run.js";
 import type { ToolError } from "../capabilities/shared.js";
 import { useCallTool, useToolInfo } from "../helpers.js";
+import { terminalFollowUpPrompt } from "./run-notify.js";
 import { isTransientPollError, nextPollDelayMs } from "./run-polling.js";
 import { ToolbarButton } from "./components/toolbar-button.js";
 import { useElapsedSeconds, useRunPolling } from "./use-run-polling.js";
@@ -47,14 +48,28 @@ interface RunResultsView {
 }
 
 /**
+ * Host-persisted view state: the status mirror the assistant reads to answer
+ * "is it done?", plus the once-per-run completion-handoff guard — `notified`
+ * must survive remounts, or reopening the conversation would re-fire the
+ * follow-up turn.
+ */
+type RunFollowViewState = {
+  run_id?: string;
+  last_known?: string;
+  notified?: boolean;
+};
+
+/**
  * The run-follow Skybridge view, registered on `mthds_run`. It follows a
  * durable run on its own — polling the read-only `mthds_run_status` through
  * `useCallTool` (no model turns, no conversation noise), then fetching
  * `mthds_run_results` once the run is terminal: the executed graph (from the
  * response's view-only `meta.graph_spec`) plus a compact output preview on
- * success, the failure message on a failed run. On remount it re-resolves by
- * id — one status poll; if terminal, one results fetch — so the card is as
- * resumable as the run itself.
+ * success, the failure message on a failed run. On resolving the terminal
+ * outcome it hands the conversation back to the model once (the completion
+ * handoff — see the notify effect) so the assistant reports unprompted. On
+ * remount it re-resolves by id — one status poll; if terminal, one results
+ * fetch — so the card is as resumable as the run itself.
  */
 export default function RunFollowView() {
   // Hooks run unconditionally before any early return.
@@ -63,7 +78,8 @@ export default function RunFollowView() {
   const { callToolAsync: resultsAsync } = useCallTool("mthds_run_results");
   const { theme, maxHeight, safeArea } = useLayout();
   const [displayMode, setDisplayMode] = useDisplayMode();
-  const [, setViewState] = useViewState({});
+  const [viewState, setViewState] = useViewState<RunFollowViewState>({});
+  const sendFollowUpMessage = useSendFollowUpMessage();
 
   const output = toolInfo.isSuccess ? toolInfo.output : undefined;
   const runId = output?.status === "ok" ? output.run_id : undefined;
@@ -185,14 +201,39 @@ export default function RunFollowView() {
   );
 
   // Mirror the last-known snapshot into host-persisted view state so the
-  // assistant can answer "is it done?" from what the user is looking at.
+  // assistant can answer "is it done?" from what the user is looking at. A
+  // functional update so the mirror never clobbers the `notified` flag.
   const mirroredStatus = results?.content.state ?? polling.runStatus ?? "starting";
   useEffect(() => {
     if (!runId) {
       return;
     }
-    void setViewState({ run_id: runId, last_known: mirroredStatus });
+    void setViewState((prev) => ({ ...prev, run_id: runId, last_known: mirroredStatus }));
   }, [runId, mirroredStatus, setViewState]);
+
+  // §6.6 (revised) — completion handoff. Once the terminal outcome is resolved
+  // (the results fetch settled on completed or failed), hand the conversation
+  // back to the model so it reports without the user prompting. At most one
+  // handoff per run: `notified` rides host-persisted view state so a remount
+  // of an already-notified run stays silent, and the ref guards this mount
+  // while the view-state write round-trips. Best-effort: a host that declines
+  // the view-initiated turn gets no in-session retry (the ref stays set — a
+  // reject-rollback loop otherwise), but the persisted flag rolls back so a
+  // later remount may try once more; the manual "Summarize in chat" button
+  // remains the fallback. Hard poll errors and results-fetch errors never
+  // auto-fire — they are follow failures, not run outcomes.
+  const notifyAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (!runId || !results || notifyAttemptedRef.current || viewState.notified === true) {
+      return;
+    }
+    notifyAttemptedRef.current = true;
+    void setViewState((prev) => ({ ...prev, notified: true }));
+    const outcome = results.content.state === "failed" ? "failed" : "completed";
+    void sendFollowUpMessage(terminalFollowUpPrompt(runId, outcome)).catch(() => {
+      void setViewState((prev) => ({ ...prev, notified: false }));
+    });
+  }, [runId, results, viewState.notified, sendFollowUpMessage, setViewState]);
 
   if (!toolInfo.isSuccess) {
     return <Card note="Starting run…" maxHeight={maxHeight} dark={theme === "dark"} spinner />;
@@ -366,8 +407,8 @@ function CompletedCard({
   onToggleFullscreen: () => void;
 }) {
   const { top, right, bottom, left } = insets;
-  // §6.6 — user-triggered handoff back to the conversation. Opt-in only:
-  // auto-firing on completion would create unsolicited model turns.
+  // §6.6 (revised) — manual re-trigger/fallback for the automatic completion
+  // handoff: re-asks after the auto turn, or covers a host that declined it.
   const sendFollowUpMessage = useSendFollowUpMessage();
   const [summarizeRequested, setSummarizeRequested] = useState(false);
   // An image can fail to load at runtime (expired presigned URL, a host
@@ -395,7 +436,7 @@ function CompletedCard({
           disabled={summarizeRequested}
           onClick={() => {
             setSummarizeRequested(true);
-            void sendFollowUpMessage("The run completed — report the results.").catch(() =>
+            void sendFollowUpMessage(terminalFollowUpPrompt(runId, "completed")).catch(() =>
               setSummarizeRequested(false),
             );
           }}

@@ -3,11 +3,11 @@
 Pipelex MCP exposes MTHDS validation and inputs projection to MCP hosts through
 a Skybridge server.
 
-It registers the MCP tools `mthds_validate` and `mthds_inputs`. `mthds_validate`
+It registers the MCP tools `mthds_validate` and `mthds_inputs_template`. `mthds_validate`
 accepts submitted `.mthds` file contents and returns a stable validation result
 the assistant can use to explain and repair diagnostics; on a positive verdict,
 the tool's `run-graph` Skybridge view renders the method graph interactively
-with `@pipelex/mthds-ui`'s `GraphViewer`. `mthds_inputs` projects a pipe's
+with `@pipelex/mthds-ui`'s `GraphViewer`. `mthds_inputs_template` projects a pipe's
 declared inputs as a fill-in template the assistant can populate for a run.
 
 ## Tools
@@ -54,7 +54,7 @@ validation dry run, whose spec rides `_meta.graph_spec`), present exactly when
 that spec was produced and empty otherwise. On those verdicts a short `## Views`
 note is also appended to the summary as a prose signal of the same.
 
-### `mthds_inputs`
+### `mthds_inputs_template`
 
 Input:
 

@@ -1,6 +1,6 @@
 # Durable runs — functional & technical design
 
-Status: **reviewed with Louis (2026-07-15)** — the ⚖️ decisions in §6.1/6.3/6.4 are taken (recorded in place). §7 Q1/Q3/Q4 are resolved; §6.6 is resolved (button kept and shipped). §6.5 stays a deferred later increment. The §7-Q2 DevTools arm is fully verified (spike + shipped card); the ChatGPT/Claude arms remain open and need an interactive session with Louis.
+Status: **reviewed with Louis (2026-07-15)** — the ⚖️ decisions in §6.1/6.3/6.4 are taken (recorded in place). §7 Q1/Q3/Q4 are resolved; §6.6 is resolved and then **revised (2026-07-16)**: the handoff now also auto-fires on the terminal outcome, with the button kept as manual fallback. §6.5 stays a deferred later increment. The §7-Q2 DevTools arm is fully verified (spike + shipped card); the ChatGPT/Claude arms remain open and need an interactive session with Louis.
 
 ## 1. Goal
 
@@ -191,6 +191,8 @@ When the model calls results directly in a fresh conversation, a registered view
 `sendFollowUpMessage` lets the view hand the conversation back to the model. Auto-firing on completion would create unsolicited turns (and likely host friction). Recommended: a **user-triggered button** on the terminal card — "Summarize in chat" — that sends a canned prompt ("The run completed — report the results"). Cheap, opt-in, and it closes the loop for a user who walked away from the chat. Can be dropped from v1 without touching contracts.
 
 → **RESOLVED: KEPT (Phase 3, 2026-07-15)**. It was genuinely cheap: one `useSendFollowUpMessage` hook plus a button next to the fullscreen toggle on the completed card, sending the canned prompt and flipping to a disabled "Asked in chat" state (re-enabled if the send rejects). Verified in DevTools: the click emits a `sendFollowUpMessage` event on the host bridge (visible in the DevTools Logs pane). The failed card does not get the button in v1 — the failure message is already fully in model context, so there is nothing extra for the model to fetch.
+
+→ **REVISED (2026-07-16, Louis)**: the no-unsolicited-turns stance is reversed — the view now **auto-fires** the handoff once when it resolves the run's terminal outcome (its results fetch settles on completed *or* failed; the failed path is where the assistant stepping in matters most). Guardrails, recorded in SPEC.md → Run Scope → "Completion handoff": at most one handoff per run (a `notified` flag in host-persisted view state survives remounts, an in-mount ref covers the write round-trip); best-effort with no in-session retry on host rejection (persisted flag rolls back so a later remount may try once); the prompt names the run id to disambiguate multiple runs in one conversation. The button stays as manual re-trigger/fallback, now sending the same run-id-bearing prompt. Follow failures (hard poll errors, results-fetch errors) still never auto-fire — they are not run outcomes.
 
 ## 7. Open questions (need your input or a live check)
 
