@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Upgraded `skybridge` to 1.2.x (with `@skybridge/devtools` to match). Since Skybridge 1.2.0, views emit a single canonical MCP Apps resource regardless of host (the former dual `apps-sdk`/`ext-apps` emission is unified, with legacy URIs still resolved), and OAuth is a first-class `McpServer` field with branded providers (including WorkOS). No code changes were needed; the full check suite and tests pass unchanged.
+
 ## [0.3.0] - 2026-07-16
 
 ### Changed
