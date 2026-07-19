@@ -701,3 +701,42 @@ describe("runResultsToolResult", () => {
     expect(toolResult._meta.main_stuff).toBeUndefined();
   });
 });
+
+describe("startMthdsRun path submissions", () => {
+  it("resolves { path } items through the context resolver before starting", async () => {
+    let seen: StartOptions | undefined;
+    const context: RunContext = {
+      ...contextWith({
+        start: (options: StartOptions) => {
+          seen = options;
+          return Promise.resolve({ pipeline_run_id: RUN_ID });
+        },
+      }),
+      resolver: {
+        async resolve() {
+          return { ok: true, content: 'domain = "demo"' };
+        },
+      },
+    };
+
+    const result = await startMthdsRun({ files: [{ path: "methods/bundle.mthds" }] }, context);
+
+    // /v1/start takes no source labels — only the resolved contents cross.
+    expect(seen).toEqual({ mthds_contents: ['domain = "demo"'] });
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.run_id).toBe(RUN_ID);
+  });
+
+  it("rejects { path } items instructively without a resolver (hosted)", async () => {
+    const result = await startMthdsRun(
+      { files: [{ path: "methods/bundle.mthds" }] },
+      contextWith({}),
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("files[0].path");
+    expect(result.structuredContent.errors?.[0]?.hint).toContain("npx @pipelex/mcp");
+    expect(result.summary).toBe("Run was not started: request input is invalid.");
+  });
+});

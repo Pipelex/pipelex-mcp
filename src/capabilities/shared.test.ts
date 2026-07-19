@@ -12,9 +12,12 @@ import {
   buildApiConfig,
   classifyError,
   DEFAULT_API_URL,
+  filesInputSchema,
+  resolveSubmittedFiles,
   validateRequest,
   validateRunIdRequest,
 } from "./shared.js";
+import type { FileResolver } from "./shared.js";
 
 describe("buildApiConfig", () => {
   it("defaults to the hosted API with no key", () => {
@@ -44,6 +47,126 @@ describe("buildApiConfig", () => {
     const config = buildApiConfig({ PIPELEX_BASE_URL: "" });
 
     expect(config.baseUrl).toBe(DEFAULT_API_URL);
+  });
+});
+
+describe("filesInputSchema", () => {
+  it("accepts the content arm and the path arm", () => {
+    const parsed = filesInputSchema.parse([
+      { content: 'domain = "demo"', uri: "bundle.mthds" },
+      { path: "methods/bundle.mthds" },
+    ]);
+
+    expect(parsed).toEqual([
+      { content: 'domain = "demo"', uri: "bundle.mthds" },
+      { path: "methods/bundle.mthds" },
+    ]);
+  });
+
+  it("parses a pathological both-keys item as the content arm, ignoring path", () => {
+    const parsed = filesInputSchema.parse([
+      { content: 'domain = "demo"', path: "methods/bundle.mthds" },
+    ]);
+
+    expect(parsed).toEqual([{ content: 'domain = "demo"' }]);
+  });
+
+  it("rejects an item matching neither arm", () => {
+    expect(filesInputSchema.safeParse([{ uri: "bundle.mthds" }]).success).toBe(false);
+  });
+});
+
+function fakeResolver(contents: Record<string, string>): FileResolver {
+  return {
+    async resolve(path) {
+      const content = contents[path];
+      if (content === undefined) {
+        return { ok: false, message: `File not found: ${path}`, hint: "Check the path." };
+      }
+      return { ok: true, content };
+    },
+  };
+}
+
+describe("resolveSubmittedFiles", () => {
+  it("passes content items through untouched", async () => {
+    const files = [
+      { content: 'domain = "demo"', uri: "bundle.mthds" },
+      { content: 'main_pipe = "main"' },
+    ];
+
+    const resolution = await resolveSubmittedFiles(files);
+
+    expect(resolution.errors).toEqual([]);
+    expect(resolution.files).toEqual(files);
+  });
+
+  it("rejects path items instructively when no resolver is provided (hosted)", async () => {
+    const resolution = await resolveSubmittedFiles([
+      { content: 'domain = "demo"' },
+      { path: "methods/bundle.mthds" },
+    ]);
+
+    expect(resolution.errors).toHaveLength(1);
+    const error = resolution.errors[0];
+    expect(error?.class).toBe("input_domain");
+    expect(error?.location).toBe("files[1].path");
+    expect(error?.message).toBe(
+      "This deployment cannot read files from disk; submit the file contents instead.",
+    );
+    expect(error?.hint).toContain("{ content, uri? }");
+    expect(error?.hint).toContain("npx @pipelex/mcp");
+    expect(error?.retryable).toBe(false);
+  });
+
+  it("rejects a blank path on both deployments, before the resolver runs", async () => {
+    let resolverCalled = false;
+    const resolver: FileResolver = {
+      async resolve() {
+        resolverCalled = true;
+        return { ok: true, content: "x" };
+      },
+    };
+
+    for (const activeResolver of [undefined, resolver]) {
+      const resolution = await resolveSubmittedFiles([{ path: "  " }], activeResolver);
+
+      expect(resolution.errors).toHaveLength(1);
+      expect(resolution.errors[0]?.class).toBe("input_domain");
+      expect(resolution.errors[0]?.location).toBe("files[0].path");
+      expect(resolution.errors[0]?.message).toMatch(/must not be empty/);
+    }
+    expect(resolverCalled).toBe(false);
+  });
+
+  it("resolves path items through the resolver, carrying the path as uri", async () => {
+    const resolution = await resolveSubmittedFiles(
+      [{ content: 'domain = "demo"', uri: "inline.mthds" }, { path: "methods/bundle.mthds" }],
+      fakeResolver({ "methods/bundle.mthds": 'main_pipe = "main"' }),
+    );
+
+    expect(resolution.errors).toEqual([]);
+    expect(resolution.files).toEqual([
+      { content: 'domain = "demo"', uri: "inline.mthds" },
+      { content: 'main_pipe = "main"', uri: "methods/bundle.mthds" },
+    ]);
+  });
+
+  it("maps resolver failures to input_domain errors at the item's path", async () => {
+    const resolution = await resolveSubmittedFiles(
+      [{ path: "missing.mthds" }, { path: "also-missing.mthds" }],
+      fakeResolver({}),
+    );
+
+    expect(resolution.errors).toHaveLength(2);
+    expect(resolution.errors.map((error) => error.location)).toEqual([
+      "files[0].path",
+      "files[1].path",
+    ]);
+    expect(resolution.errors[0]?.class).toBe("input_domain");
+    expect(resolution.errors[0]?.message).toBe("File not found: missing.mthds");
+    expect(resolution.errors[0]?.hint).toBe("Check the path.");
+    expect(resolution.errors[0]?.retryable).toBe(false);
   });
 });
 

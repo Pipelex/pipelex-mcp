@@ -13,11 +13,19 @@ import {
   buildApiConfig,
   classifyError,
   filesInputSchema,
+  resolveSubmittedFiles,
   toolErrorSchema,
   validateRequest,
   validateRunIdRequest,
 } from "./shared.js";
-import type { ClassifyErrorOptions, ErrorClass, SubmittedFile, ToolError } from "./shared.js";
+import type {
+  ClassifyErrorOptions,
+  ErrorClass,
+  FileResolver,
+  SubmittedFile,
+  SubmittedFileInput,
+  ToolError,
+} from "./shared.js";
 
 /**
  * The hosted run lifecycle statuses. The `Record<RunStatus, true>` shape ties
@@ -159,6 +167,13 @@ const runResultsStructuredContentSchema = z.object({
 export const mthdsRunResultsOutputSchema = runResultsStructuredContentSchema;
 
 export interface MthdsRunInput {
+  files: SubmittedFileInput[];
+  pipe_code?: string;
+  inputs?: Record<string, unknown>;
+}
+
+/** The run request after `{ path }` resolution — what the checks and the API call consume. */
+interface ResolvedRunRequest {
   files: SubmittedFile[];
   pipe_code?: string;
   inputs?: Record<string, unknown>;
@@ -242,6 +257,8 @@ export interface RunContext {
   baseUrl: string;
   apiKey?: string;
   client?: RunClient;
+  /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
+  resolver?: FileResolver;
 }
 
 export function buildRunContext(env = process.env): RunContext {
@@ -280,8 +297,8 @@ export const RUN_RESULTS_ERROR_OPTIONS: ClassifyErrorOptions = {
   notFound: { location: "run_id", hint: UNKNOWN_RUN_HINT },
 };
 
-/** Request-shape checks on the mthds_run input. */
-export function validateRunRequest(input: MthdsRunInput): ToolError[] {
+/** Request-shape checks on the mthds_run input, after `{ path }` resolution. */
+export function validateRunRequest(input: ResolvedRunRequest): ToolError[] {
   const errors = validateRequest(input.files);
 
   if (input.pipe_code !== undefined && input.pipe_code.trim() === "") {
@@ -610,13 +627,19 @@ export async function startMthdsRun(
   input: MthdsRunInput,
   context: RunContext = buildRunContext(),
 ): Promise<RunStartResult> {
-  const inputErrors = validateRunRequest(input);
+  const resolution = await resolveSubmittedFiles(input.files, context.resolver);
+  if (resolution.errors.length > 0) {
+    return startErrorResult("Run was not started: request input is invalid.", resolution.errors);
+  }
+
+  const request: ResolvedRunRequest = { ...input, files: resolution.files };
+  const inputErrors = validateRunRequest(request);
   if (inputErrors.length > 0) {
     return startErrorResult("Run was not started: request input is invalid.", inputErrors);
   }
 
   try {
-    const ack = await runClient(context).start(toStartOptions(input));
+    const ack = await runClient(context).start(toStartOptions(request));
     return startResult(ack);
   } catch (err) {
     const error = classifyError(err, RUN_START_ERROR_OPTIONS);
@@ -684,7 +707,7 @@ export async function getMthdsRunResults(
 
 // `/v1/start` takes no source labels — the MCP surface's `uri` feeds only our
 // own request-shape errors, so only the contents cross the wire.
-function toStartOptions(input: MthdsRunInput): StartOptions {
+function toStartOptions(input: ResolvedRunRequest): StartOptions {
   return {
     mthds_contents: input.files.map((file) => file.content),
     ...(input.pipe_code === undefined ? {} : { pipe_code: input.pipe_code }),

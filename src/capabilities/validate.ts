@@ -12,10 +12,17 @@ import {
   buildApiConfig,
   classifyError,
   filesInputSchema,
+  resolveSubmittedFiles,
   toolErrorSchema,
   validateRequest,
 } from "./shared.js";
-import type { ClassifyErrorOptions, SubmittedFile, ToolError } from "./shared.js";
+import type {
+  ClassifyErrorOptions,
+  FileResolver,
+  SubmittedFile,
+  SubmittedFileInput,
+  ToolError,
+} from "./shared.js";
 
 export const mthdsValidateInputSchema = {
   files: filesInputSchema,
@@ -51,7 +58,7 @@ const validationStructuredContentSchema = z.object({
 export const mthdsValidateOutputSchema = validationStructuredContentSchema;
 
 export interface MthdsValidateInput {
-  files: SubmittedFile[];
+  files: SubmittedFileInput[];
   include_graph?: boolean;
 }
 
@@ -92,6 +99,8 @@ export interface ValidationContext {
   baseUrl: string;
   apiKey?: string;
   client?: ValidationClient;
+  /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
+  resolver?: FileResolver;
 }
 
 export function buildValidationContext(env = process.env): ValidationContext {
@@ -106,7 +115,13 @@ export async function validateMthds(
   input: MthdsValidateInput,
   context: ValidationContext = buildValidationContext(),
 ): Promise<ValidationResult> {
-  const inputErrors = validateRequest(input.files);
+  const resolution = await resolveSubmittedFiles(input.files, context.resolver);
+  if (resolution.errors.length > 0) {
+    return errorResult("Validation was not run: request input is invalid.", resolution.errors);
+  }
+
+  const files = resolution.files;
+  const inputErrors = validateRequest(files);
   if (inputErrors.length > 0) {
     return errorResult("Validation was not run: request input is invalid.", inputErrors);
   }
@@ -119,7 +134,7 @@ export async function validateMthds(
         baseUrl: context.baseUrl,
         apiKey: context.apiKey,
       });
-    report = await client.validateFiles(toMthdsFiles(input.files), {
+    report = await client.validateFiles(toMthdsFiles(files), {
       allowSignatures: true,
       render: ["markdown"],
     });
