@@ -48,7 +48,7 @@ GitHub Actions under `.github/workflows/` (ported from the sibling TS repos, min
 - `version-check.yml` — on PRs into `main` or a `release/vX.Y.Z` branch: asserts `package.json`'s `version` equals the `X.Y.Z` in the release branch name and (for `main`) is strictly greater than `main`'s current version.
 - `changelog-check.yml` — on a release PR into `main`: asserts `CHANGELOG.md` has a `## [X.Y.Z]` entry (no `v` prefix in the heading — the `v` lives on the branch name and the git tag only).
 
-The `release/vX.Y.Z` branch, the version bump, the changelog finalization, and the PR are produced by the **`/release` skill** (`.claude/skills/release/`) — run it to cut a release rather than hand-assembling these. Deployment and npm publishing stay out of CI. After the release PR merges, the skill publishes the public `@pipelex/mcp` package and deploys the hosted server from the same `main` commit, using the same `package.json` version; if either side fails, retry that finishing step at the same version rather than cutting a second release.
+The `release/vX.Y.Z` branch, the version bump, the changelog finalization, and the PR are produced by the **`/release` skill** (`.claude/skills/release/`) — run it to cut a release rather than hand-assembling these. Deployment and npm publishing stay out of CI. After the release PR merges, the skill publishes the public `@pipelex/mcp` package and deploys the hosted server from the same `main` commit, using the same `package.json` version. Retry transient finishing-step failures at that version; if a permanent defect makes the commit unshippable after npm publication, deprecate it and fix forward with one new version for both surfaces.
 
 ## Architecture
 

@@ -24,8 +24,10 @@ commit before tagging it.
 The npm package and Alpic deployment are released in lockstep. They always use
 the same `package.json` version and the same source commit, so "what is live?"
 has one answer. Publishing is deliberately not transactional: if one finishing
-step fails after the other succeeds, retry the failed step at the same version
-and commit; never bump again just to repair a partial release.
+step fails transiently after the other succeeds, retry it at the same version
+and commit. If a permanent code or configuration defect makes that commit
+unshippable, deprecate an already-published npm version, fix forward, and cut a
+new version from the corrective commit for both surfaces.
 
 Every step is interactive — confirm with the user before mutating files, and
 never push or open a PR without explicit approval.
@@ -220,8 +222,9 @@ retried without changing the version:
 - **Never push or open a PR without explicit user approval.**
 - `make check && make test` is a hard gate — help fix failures rather than
   skipping them.
-- Never publish npm and deploy Alpic from different commits or versions. A
-  partial finishing sequence is repaired by retrying the failed side at the
-  same release commit, not by cutting another version.
+- Never publish npm and deploy Alpic from different commits or versions.
+  Retry transient failures at the same release commit. If that commit has a
+  permanent defect after npm publication, deprecate the bad npm version and
+  fix forward with a new release version for both surfaces.
 - Use today's date (`YYYY-MM-DD`) for the changelog entry.
 - If any step fails or the user wants to abort, stop immediately.
