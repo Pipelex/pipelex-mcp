@@ -20,6 +20,8 @@ Use the `Makefile` (wraps the npm scripts):
 - `make test` / `make t` — Vitest run.
 - `make all` — clean + check + test.
 - `make dev` — Skybridge dev server. MCP endpoint at `http://localhost:3000/mcp`, DevTools UI at `http://localhost:3000`.
+- `make dev-local` — local workshop stdio server from TypeScript. `make inspect-local` opens MCP Inspector against that entrypoint.
+- `make build-local` — bundle the npm-distributed `pipelex-mcp` executable to `dist/local/main.js` with tsup. `npm pack` runs this automatically through `prepack`.
 - `make deploy` — deploy via Alpic (`alpic deploy`).
 
 Run a single test with Vitest directly: `npx vitest run src/capabilities/validate.test.ts` or filter by name with `npx vitest run -t "projects pending signatures"`.
@@ -46,13 +48,16 @@ GitHub Actions under `.github/workflows/` (ported from the sibling TS repos, min
 - `version-check.yml` — on PRs into `main` or a `release/vX.Y.Z` branch: asserts `package.json`'s `version` equals the `X.Y.Z` in the release branch name and (for `main`) is strictly greater than `main`'s current version.
 - `changelog-check.yml` — on a release PR into `main`: asserts `CHANGELOG.md` has a `## [X.Y.Z]` entry (no `v` prefix in the heading — the `v` lives on the branch name and the git tag only).
 
-The `release/vX.Y.Z` branch, the version bump, the changelog finalization, and the PR are produced by the **`/release` skill** (`.claude/skills/release/`) — run it to cut a release rather than hand-assembling these. Deployment stays out of CI — it goes through `make deploy` (`alpic deploy`) / Alpic's own git integration.
+The `release/vX.Y.Z` branch, the version bump, the changelog finalization, and the PR are produced by the **`/release` skill** (`.claude/skills/release/`) — run it to cut a release rather than hand-assembling these. Deployment and npm publishing stay out of CI. After the release PR merges, the skill publishes the public `@pipelex/mcp` package and deploys the hosted server from the same `main` commit, using the same `package.json` version; if either side fails, retry that finishing step at the same version rather than cutting a second release.
 
 ## Architecture
 
+The repo ships two thin shells over one capability core: the Skybridge HTTP console for hosted connectors and the plain MCP-SDK stdio workshop for coding agents. Both map over `src/tools.ts`, so tool names, schemas, descriptions, annotations, and handler wiring stay identical; only the hosted shell adds views and host-specific metadata. The workshop injects the cwd-bound file resolver and declares views unavailable.
+
 The whole server is a handful of small files under `src/`:
 
-- `server.ts` — constructs the `McpServer`, registers the tools (schemas + annotations + the `run-graph` view on `mthds_validate` + OpenAI invocation labels), and wires the handlers to `validateMthds` / `buildMthdsInputs`. `export default await server.run()` is the entrypoint; `AppType` is the typed server handle.
+- `server.ts` — thin Skybridge entrypoint; `hosted/server.ts` owns the console shell and its views/host metadata. `tools.ts` is the ordered shared tool-definition table both shells register.
+- `local/server.ts` — constructs the plain MCP SDK server, registers the shared tool table with local contexts, and injects one cwd-bound file resolver. `local/main.ts` owns stdio transport and graceful shutdown; `local/log.ts` keeps diagnostics on stderr so stdout remains protocol-only.
 - `capabilities/shared.ts` — the plumbing both capabilities share: the submitted-files input schema (a per-item union, `{ content, uri? } | { path }` — see "The files union and the resolution seam" below), the `ToolError` model, file resolution (`resolveSubmittedFiles` + the `FileResolver` seam), request-shape validation (`validateRequest`), env-derived API config (`buildApiConfig` — `PIPELEX_BASE_URL`/`PIPELEX_API_KEY`), and `classifyError`. `classifyError` takes per-route `ClassifyErrorOptions` (the 400/422 locator/hint and the route named in the 404 hint) so each capability points the agent at its own knobs.
 - `capabilities/validate.ts` — the validation logic. Zod input/output schemas, the API call (`validateFiles`), and projection of the API report into MCP `structuredContent` + the view-only `_meta` graph payload (`toolResult`).
 - `capabilities/inputs.ts` — the inputs-template logic. Zod input/output schemas (`pipe_ref?`, `explicit?` default false, `format?` default json), the API call (`buildInputs`, adapting the MCP `uri` provenance label to the build envelope's `source`), and projection of the report into `structuredContent` plus a composed Markdown summary that includes the template in a fenced code block (the build routes return a plain `message`, not `rendered_markdown`). No view, no `_meta`.

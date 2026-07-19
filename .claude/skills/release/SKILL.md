@@ -14,10 +14,18 @@ description: >
 
 # pipelex-mcp Release Workflow
 
-This skill handles the full release cycle for the `pipelex-mcp` Skybridge MCP
-server. It is **private and Alpic-deployed — there is no npm publish.** A
-"release" here means: bump the version, finalize the changelog, get it onto
-`main` through a `release/vX.Y.Z` branch, tag it, and (optionally) deploy.
+This skill handles the full release cycle for both distributions of
+`pipelex-mcp`: the public `@pipelex/mcp` npm package (local workshop) and the
+Skybridge server deployed through Alpic (hosted console). A "release" means:
+bump their one shared version, finalize the changelog, get it onto `main`
+through a `release/vX.Y.Z` branch, then publish and deploy the same `main`
+commit before tagging it.
+
+The npm package and Alpic deployment are released in lockstep. They always use
+the same `package.json` version and the same source commit, so "what is live?"
+has one answer. Publishing is deliberately not transactional: if one finishing
+step fails after the other succeeds, retry the failed step at the same version
+and commit; never bump again just to repair a partial release.
 
 Every step is interactive — confirm with the user before mutating files, and
 never push or open a PR without explicit approval.
@@ -180,17 +188,26 @@ Bumps version from `{OLD_VERSION}` to `{TARGET_VERSION}`.
 
 Report the PR URL back.
 
-### 10. After the merge (offer, don't auto-run)
+### 10. After the merge: publish, deploy, and tag (offer, don't auto-run)
 
-Once the PR merges to `main`, remind the user of the finishing steps — list them
-and run each only on request:
+Once the PR merges to `main`, remind the user of the finishing sequence below.
+Run each mutation only on request, and stop on failure so the same step can be
+retried without changing the version:
 
-- **Tag the release:** `git tag v{TARGET_VERSION} <merge-commit>` then
-  `git push origin v{TARGET_VERSION}`. The tag carries the `v` prefix.
-- **Sync `dev`:** bring the release commit back so `dev` and `main` don't diverge
-  (merge `main` into `dev`, or fast-forward `dev`).
-- **Deploy:** `make deploy` (`alpic deploy`), if deployment isn't already wired to
-  Alpic's git integration on `main`.
+1. **Pin the release source:** switch to and update `main`, verify the working
+   tree is clean, `package.json` is `{TARGET_VERSION}`, and capture its commit as
+   `{MERGE_COMMIT}`. Every remaining step must run from that commit.
+2. **Publish the workshop:** run `npm publish`. The package's public
+   `publishConfig` supplies `--access public`, and `prepack` rebuilds
+   `dist/local/main.js`; do not publish from a different branch or commit.
+3. **Deploy the console:** run `make deploy` (`alpic deploy`) from the same
+   `{MERGE_COMMIT}`. If Alpic's git integration already deployed this exact
+   commit, verify that deployment instead of starting a duplicate.
+4. **Tag the completed release:** `git tag v{TARGET_VERSION} {MERGE_COMMIT}` then
+   `git push origin v{TARGET_VERSION}`. The tag carries the `v` prefix and is
+   created only after both release surfaces are live.
+5. **Sync `dev`:** bring the release commit back so `dev` and `main` don't
+   diverge (merge `main` into `dev`, or fast-forward `dev`).
 
 ## Rules
 
@@ -203,5 +220,8 @@ and run each only on request:
 - **Never push or open a PR without explicit user approval.**
 - `make check && make test` is a hard gate — help fix failures rather than
   skipping them.
+- Never publish npm and deploy Alpic from different commits or versions. A
+  partial finishing sequence is repaired by retrying the failed side at the
+  same release commit, not by cutting another version.
 - Use today's date (`YYYY-MM-DD`) for the changelog entry.
 - If any step fails or the user wants to abort, stop immediately.
