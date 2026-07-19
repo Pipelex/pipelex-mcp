@@ -32,8 +32,8 @@ Core actions:
 
 **Validation flow**:
 
-1. The assistant submits `files: [{ content, uri? }]` to `mthds_validate`.
-2. The MCP server validates request shape and provenance.
+1. The assistant submits `files` to `mthds_validate` — inline `{ content, uri? }` items, or `{ path }` items on the local workshop (see Deployments).
+2. The MCP server validates request shape and provenance (the workshop resolves `{ path }` items from disk first; the console rejects them instructively).
 3. The capability calls the Pipelex API (`POST /v1/validate`) through `@pipelex/sdk`'s `PipelexApiClient`.
 4. The result is projected into stable MCP `structuredContent` plus a text summary.
 
@@ -46,8 +46,8 @@ Core actions:
 
 **Inputs template flow**:
 
-1. The assistant submits `files: [{ content, uri? }]` (and optionally `pipe_ref`, `explicit`, `format`) to `mthds_inputs_template`.
-2. The MCP server validates request shape and provenance.
+1. The assistant submits `files` (and optionally `pipe_ref`, `explicit`, `format`) to `mthds_inputs_template` — the same shared shape, `{ path }` items included on the workshop.
+2. The MCP server validates request shape and provenance (same per-deployment `{ path }` behavior as validation).
 3. The capability calls the Pipelex API (`POST /v1/build/inputs`) through `@pipelex/sdk`'s `PipelexApiClient`, adapting the `uri` provenance label to the build envelope's `source` field.
 4. The result is projected into stable MCP `structuredContent` plus a text summary that includes the template itself in a fenced code block.
 
@@ -68,6 +68,30 @@ The richer error-grouping validation view (diagnostics grouped by class, clickab
 - **Auth**: optional `PIPELEX_API_KEY` for the validation and inputs tools; local development normally runs without hosted auth. The run tools execute on the hosted API, so `PIPELEX_API_KEY` is effectively mandatory for them — a missing or invalid key is a `config` no-verdict.
 - **Primary environment variable**: `PIPELEX_BASE_URL`, defaulting to `https://api.pipelex.com`.
 
+## Deployments
+
+The product ships as **two servers from one repo and one capability core**, sharing one logical identity: the same server key (`pipelex`), the same tool names, the same structured contracts, and the same verdict discipline. The capability core (`capabilities/`) knows nothing about which shell invoked it.
+
+- **Hosted console** — the existing Skybridge HTTP server, deployed on Alpic. Serves remote-connector hosts (ChatGPT, claude.ai, Claude Desktop/Cowork as consumers). Registers the Skybridge views (`run-graph`, `run-follow`). Auth is server-held today (per-user OAuth is the console workstream, out of this increment).
+- **Local workshop** — an npm-distributed stdio server (`@pipelex/mcp`, bin `pipelex-mcp`) that coding-agent hosts (Claude Code, Codex, Cursor, Cowork-as-builder) spawn via `npx`. Built on the plain MCP SDK (`McpServer` + `StdioServerTransport`) over the shared capability core. **Tools-first: it registers no views at launch** — the empirically verified V1 posture (view-rendering workshop hosts penalize localhost asset origins; the text summaries carry the flow on their own in text-only hosts). Auth is a per-user `plx_sk_` platform key in `PIPELEX_API_KEY`, supplied through the host's MCP server config env — per-user auth for free, no OAuth machinery.
+
+**The `{ path }` arm and per-deployment behavior.** The shared submitted-files shape accepts two item forms — inline content or a file path:
+
+```ts
+type SubmittedFileInput = { content: string; uri?: string | null } | { path: string };
+```
+
+Both shells register this same union schema (so the tool contract never forks); what differs is behavior:
+
+- The **workshop resolves `{ path }` from disk** before invoking the capability — this is its headline feature: near-constant token cost, byte-accurate reads, and real provenance (the resolved item carries `uri` = the submitted path, so diagnostics locate to files the agent can open and edit). Inline `{ content, uri? }` items stay accepted for parity.
+- The **console rejects `{ path }` items** at request validation with an instructive `input_domain` no-verdict error located at `files[i].path`: this deployment cannot read files from disk; resubmit as `{ content, uri? }`, or use the local workshop server (`npx @pipelex/mcp`), which resolves paths. The rejection makes accidental misrouting diagnose itself on the first call — the failure mode to avoid is silent divergence between two servers carrying the same tool names.
+
+An item is one arm or the other; on a malformed item carrying both keys, `content` wins (first-match union semantics) and `path` is ignored.
+
+**Path trust boundary (workshop).** `{ path }` values resolve relative to the server's working directory — the host spawns the server in the workspace. Containment is enforced by real-path check: the resolved target (symlinks followed) must live inside the working-directory subtree. Escapes, missing files, and non-regular files are `input_domain` errors located at `files[i].path`. MCP client roots are deliberately not consulted in this increment — cwd containment is the simple, correct core; honoring host-declared roots is a possible later widening.
+
+**One host, one server.** A host should be connected to exactly one of the two shells, never both — same tool names on both mean a both-installed host has ambiguous routing. Notably, a claude.ai Pipelex connector syncs into Claude Code; a workshop user disables it there (`/mcp`) in favor of the local server.
+
 ## Naming Conventions
 
 Tools are the contract; the `../pipelex-plugins` skills are the manual. The naming follows that split:
@@ -84,10 +108,7 @@ The public MCP input shape is:
 
 ```ts
 {
-  files: Array<{
-    content: string;
-    uri?: string | null;
-  }>;
+  files: SubmittedFileInput[]; // { content, uri? } | { path } — see Deployments
   include_graph?: boolean;
 }
 ```
@@ -128,10 +149,7 @@ The public MCP input shape is:
 
 ```ts
 {
-  files: Array<{
-    content: string;
-    uri?: string | null;
-  }>;
+  files: SubmittedFileInput[]; // { content, uri? } | { path } — see Deployments
   pipe_ref?: string;
   explicit?: boolean;
   format?: "json" | "toml";
@@ -186,7 +204,7 @@ The run family adds durable (async) method execution against the hosted Pipelex 
 ```ts
 // input
 {
-  files: Array<{ content: string; uri?: string | null }>;  // the shared submitted-files shape
+  files: SubmittedFileInput[];       // the shared submitted-files shape ({ content, uri? } | { path } — see Deployments)
   pipe_code?: string;                // pipe to run; omitted → server resolves the bundle's main pipe
   inputs?: Record<string, unknown>;  // method inputs, as filled from the mthds_inputs_template template
 }
@@ -276,7 +294,7 @@ Every `errors[]` entry also carries `retryable` — whether retrying the same ca
 
 ## Non-Goals
 
-The server must not add Pipelex Hosted API deployment behavior, bearer-token extraction, blocking execution (`POST /v1/execute` or the SDK's blocking wrappers), run cancellation, resources, logs, package publishing, MCP-side filesystem reads, subprocess fallbacks, or a production validation UI. Also out of scope for this increment: registered-method runs by catalog id, per-user OAuth, and a storage upload tool for binary inputs (binary inputs ride reachable https URLs; upload is a later increment).
+The server must not add Pipelex Hosted API deployment behavior, bearer-token extraction, blocking execution (`POST /v1/execute` or the SDK's blocking wrappers), run cancellation, resources, logs, package publishing, subprocess fallbacks, or a production validation UI. Filesystem reads are scoped per deployment: the **hosted console** never reads files (a `{ path }` submission is rejected instructively — see Deployments); the **local workshop** reads exactly the `{ path }` items submitted to it, within its trust boundary. The workshop registers no views at launch (tools-first — see Deployments); local view delivery is a later increment gated on self-contained view bundles. Also out of scope for this increment: registered-method runs by catalog id, per-user OAuth, and a storage upload tool for binary inputs (binary inputs ride reachable https URLs; upload is a later increment).
 
 Repository quality gates are in scope: ESLint, Prettier, TypeScript type checking, Vitest unit tests, and a combined `npm run check` command should remain available locally.
 
