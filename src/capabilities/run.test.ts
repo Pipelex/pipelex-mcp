@@ -213,6 +213,14 @@ describe("startResult", () => {
     expect(result.structuredContent).not.toHaveProperty("created_at");
   });
 
+  it("does not advertise or narrate a live card when the invoking shell has no views", () => {
+    const result = startResult({ pipeline_run_id: RUN_ID }, false);
+
+    expect(result.structuredContent.available_view_specs).toEqual([]);
+    expect(result.summary).not.toContain("## Views");
+    expect(result.summary).not.toContain("live status card");
+  });
+
   it("drops an unrecognized state extension instead of guessing", () => {
     const result = startResult({ pipeline_run_id: RUN_ID, state: "WARMING_UP" });
 
@@ -331,6 +339,25 @@ describe("resultsResult", () => {
     expect(result.mainStuff).toBe(mainStuff);
     expect(result.summary).toContain("```json");
     expect(result.summary).toContain('"answer": 42');
+  });
+
+  it("does not emit view metadata when the invoking shell has no views", () => {
+    const result = resultsResult(
+      {
+        state: "completed",
+        pipeline_run_id: RUN_ID,
+        result: {
+          pipeline_run_id: RUN_ID,
+          main_stuff: { answer: 42 },
+          graph_spec: { nodes: [{ id: "demo.main" }] },
+        },
+      },
+      false,
+    );
+
+    expect(result.structuredContent.available_view_specs).toEqual([]);
+    expect(result.graphSpec).toBeUndefined();
+    expect(result.mainStuff).toBeUndefined();
   });
 
   it("keeps a falsy-but-present main output as a valid completed result", () => {

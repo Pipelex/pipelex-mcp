@@ -6,6 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "skybridge dev",
+    "dev:local": "tsx src/local/main.ts",
+    "inspect:local": "npx @modelcontextprotocol/inspector npx tsx src/local/main.ts",
     "dev:tunnel": "skybridge dev --tunnel",
     "lint": "eslint src/ vite.config.ts vitest.config.ts",
     "format": "prettier --write \"src/**/*.{ts,tsx}\" \"*.{ts,tsx,mjs}\"",

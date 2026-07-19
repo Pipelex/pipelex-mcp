@@ -236,12 +236,14 @@ export interface RunResultsResult {
   /**
    * The executed method graph, for the Skybridge views only. It rides the tool
    * result's `_meta.graph_spec` (never `structuredContent`), so the model never
-   * pays its tokens. Populated only on a completed result that carries one.
+   * pays its tokens. Populated only on a completed result that carries one
+   * and the invoking shell has views.
    */
   graphSpec?: unknown;
   /**
    * The full, unbounded main output, for the views only (rides
    * `_meta.main_stuff`). `structuredContent.main_stuff` is the bounded copy.
+   * Omitted when the invoking shell has no views.
    */
   mainStuff?: unknown;
 }
@@ -259,6 +261,8 @@ export interface RunContext {
   client?: RunClient;
   /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
   resolver?: FileResolver;
+  /** Whether this shell can render run-follow and its view-only result payloads. */
+  viewsAvailable?: boolean;
 }
 
 export function buildRunContext(env = process.env): RunContext {
@@ -443,11 +447,10 @@ function narrowString(value: unknown): string | undefined {
 /**
  * Project a start ack. `state` and `created_at` are hosted extension fields on
  * the protocol's `RunResultStart` (typed `unknown`), so they are narrowed
- * defensively rather than trusted. A produced ack always advertises the
- * `live_run_status` view — the registered run-follow card that follows the
- * run without any model turn.
+ * defensively rather than trusted. A produced ack advertises the
+ * `live_run_status` view only when the invoking shell registered run-follow.
  */
-export function startResult(ack: RunResultStart): RunStartResult {
+export function startResult(ack: RunResultStart, viewsAvailable = true): RunStartResult {
   const runStatus = narrowRunStatus(ack.state);
   const createdAt = narrowString(ack.created_at);
 
@@ -456,18 +459,22 @@ export function startResult(ack: RunResultStart): RunStartResult {
     run_id: ack.pipeline_run_id,
     ...(runStatus === undefined ? {} : { run_status: runStatus }),
     ...(createdAt === undefined ? {} : { created_at: createdAt }),
-    available_view_specs: ["live_run_status"],
+    available_view_specs: viewsAvailable ? ["live_run_status"] : [],
   };
 
-  const summary = [
+  const summaryParts = [
     "# Run started",
     `The run was accepted; its durable id is \`${ack.pipeline_run_id}\`.`,
     "Check on it with `mthds_run_status` (one cheap read — honor its retry hint instead of polling in a tight loop), and fetch the outcome with `mthds_run_results` once it is terminal.",
-    "## Views",
-    "A live status card follows this run on its own (polling, then the results); the user is already watching it — no need to poll on their behalf.",
-  ].join("\n\n");
+  ];
+  if (viewsAvailable) {
+    summaryParts.push(
+      "## Views",
+      "A live status card follows this run on its own (polling, then the results); the user is already watching it — no need to poll on their behalf.",
+    );
+  }
 
-  return { structuredContent, summary };
+  return { structuredContent, summary: summaryParts.join("\n\n") };
 }
 
 /** Project a self-healing status read. A terminal non-COMPLETED status is a produced verdict. */
@@ -519,12 +526,12 @@ function statusSummary(read: RunRead, isTerminal: boolean): string {
  * Project a one-shot result lookup. All three arms are produced verdicts
  * (`status: "ok"`): "no result yet" and "it failed" are answers, not errors.
  */
-export function resultsResult(state: RunResultState): RunResultsResult {
+export function resultsResult(state: RunResultState, viewsAvailable = true): RunResultsResult {
   switch (state.state) {
     case "running":
       return runningResult(state.pipeline_run_id, state.retry_after_seconds);
     case "completed":
-      return completedResult(state.pipeline_run_id, state.result);
+      return completedResult(state.pipeline_run_id, state.result, viewsAvailable);
     case "failed":
       return failedResult(state.pipeline_run_id, state.status, state.message);
   }
@@ -544,7 +551,11 @@ function runningResult(runId: string, retryAfterSeconds: number | null): RunResu
   };
 }
 
-function completedResult(runId: string, result: RunResults): RunResultsResult {
+function completedResult(
+  runId: string,
+  result: RunResults,
+  viewsAvailable: boolean,
+): RunResultsResult {
   // The SDK guarantees a non-null main_stuff on a completed run (it throws
   // MissingMainStuffError otherwise); reaching here without one is a contract
   // violation the caller surfaces as a runtime no-verdict. A falsy-but-present
@@ -554,7 +565,7 @@ function completedResult(runId: string, result: RunResults): RunResultsResult {
   }
 
   const { value: bounded, truncated } = boundMainStuff(result.main_stuff);
-  const graphSpec = result.graph_spec ?? undefined;
+  const graphSpec = viewsAvailable ? (result.graph_spec ?? undefined) : undefined;
 
   const structuredContent: RunResultsStructuredContent = {
     status: "ok",
@@ -567,9 +578,9 @@ function completedResult(runId: string, result: RunResults): RunResultsResult {
 
   return {
     structuredContent,
-    summary: completedSummary(runId, bounded, truncated),
+    summary: completedSummary(runId, bounded, truncated, viewsAvailable),
     graphSpec,
-    mainStuff: result.main_stuff,
+    mainStuff: viewsAvailable ? result.main_stuff : undefined,
   };
 }
 
@@ -577,7 +588,12 @@ function completedResult(runId: string, result: RunResults): RunResultsResult {
 // mthds_inputs_template pattern): it is the payload the model must read, and some hosts
 // read prose more reliably than structured fields. Text outputs get a plain
 // fence; everything else pretty-printed JSON.
-function completedSummary(runId: string, bounded: unknown, truncated: boolean): string {
+function completedSummary(
+  runId: string,
+  bounded: unknown,
+  truncated: boolean,
+  viewsAvailable: boolean,
+): string {
   const fence =
     typeof bounded === "string"
       ? "```\n" + bounded + "\n```"
@@ -586,7 +602,9 @@ function completedSummary(runId: string, bounded: unknown, truncated: boolean): 
   const parts = ["# Run results", `Run \`${runId}\` completed. Main output:`, fence];
   if (truncated) {
     parts.push(
-      "The output shown above was truncated to fit the response; the full output is available to views.",
+      viewsAvailable
+        ? "The output shown above was truncated to fit the response; the full output is available to views."
+        : "The output shown above was truncated to fit the response.",
     );
   }
   return parts.join("\n\n");
@@ -640,7 +658,7 @@ export async function startMthdsRun(
 
   try {
     const ack = await runClient(context).start(toStartOptions(request));
-    return startResult(ack);
+    return startResult(ack, context.viewsAvailable !== false);
   } catch (err) {
     const error = classifyError(err, RUN_START_ERROR_OPTIONS);
     return startErrorResult(startSummaryForError(error), [error]);
@@ -688,7 +706,7 @@ export async function getMthdsRunResults(
   // API. A malformed report (a completed result missing main_stuff) is a
   // reachable contract violation, surfaced as a runtime no-verdict error.
   try {
-    return resultsResult(state);
+    return resultsResult(state, context.viewsAvailable !== false);
   } catch (err) {
     return resultsErrorResult(
       "Run results produced no verdict: the Pipelex API returned a malformed report.",

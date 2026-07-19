@@ -77,6 +77,14 @@ describe("validationResult", () => {
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
   });
 
+  it("does not advertise or emit a graph when the invoking shell has no views", () => {
+    const result = validationResult(validReport, true, false);
+
+    expect(result.structuredContent.available_view_specs).toEqual([]);
+    expect(result.graphSpec).toBeUndefined();
+    expect(result.summary).toBe("# Valid");
+  });
+
   it("projects pending signatures as valid but not runnable", () => {
     const result = validationResult(pendingReport, true);
 

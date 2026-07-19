@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint format format-check typecheck test test-watch test-coverage check check-no-local-deps build all clean dev dev-tunnel start deploy c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
+.PHONY: help install lint format format-check typecheck test test-watch test-coverage check check-no-local-deps build all clean dev dev-local inspect-local dev-tunnel start deploy c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
 
 # Sibling repos for live development of our npm dependencies (see use-local / use-npm).
 MTHDS_UI_DIR := ../mthds-ui
@@ -12,6 +12,8 @@ Usage:
 
 make install        - Install dependencies
 make dev            - Start Skybridge dev server
+make dev-local      - Start the local stdio server from TypeScript
+make inspect-local  - Open MCP Inspector against the local stdio server
 make dev-tunnel     - Start Skybridge dev server with tunnel
 make start          - Start the built app
 make deploy         - Deploy with Alpic
@@ -89,6 +91,12 @@ clean:
 
 dev:
 	npm run dev
+
+dev-local:
+	npm run dev:local
+
+inspect-local:
+	npm run inspect:local
 
 dev-tunnel:
 	npm run dev:tunnel

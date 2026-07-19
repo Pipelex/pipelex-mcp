@@ -83,7 +83,7 @@ export interface ValidationResult {
    * the agent acts on the verdict in `structuredContent` and the Markdown
    * summary, never the raw graph. Opaque (`unknown`) here; the view casts it to
    * `@pipelex/mthds-ui`'s `GraphSpec`. Populated only on a valid verdict when
-   * `include_graph !== false`.
+   * `include_graph !== false` and the invoking shell has a registered view.
    */
   graphSpec?: unknown;
 }
@@ -101,6 +101,8 @@ export interface ValidationContext {
   client?: ValidationClient;
   /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
   resolver?: FileResolver;
+  /** Whether this shell can render the graph carried on the view-only channel. */
+  viewsAvailable?: boolean;
 }
 
 export function buildValidationContext(env = process.env): ValidationContext {
@@ -147,7 +149,11 @@ export async function validateMthds(
   // API. A malformed report (e.g. missing rendered_markdown) is a reachable
   // contract violation, surfaced as a runtime no-verdict error.
   try {
-    return validationResult(report, input.include_graph !== false);
+    return validationResult(
+      report,
+      input.include_graph !== false,
+      context.viewsAvailable !== false,
+    );
   } catch (err) {
     return errorResult(
       "Validation produced no verdict: the Pipelex API returned a malformed report.",
@@ -194,6 +200,7 @@ export function toolResult(result: ValidationResult) {
 export function validationResult(
   report: PipelexValidationResult,
   includeGraph: boolean,
+  viewsAvailable = true,
 ): ValidationResult {
   const structuredContent: ValidationStructuredContent = {
     status: "ok",
@@ -206,7 +213,7 @@ export function validationResult(
   let graphSpec: unknown;
   if (report.is_valid) {
     const validReport = report as PipelexValidationReport;
-    if (includeGraph) {
+    if (includeGraph && viewsAvailable) {
       graphSpec = validReport.graph_spec;
     }
   } else {
