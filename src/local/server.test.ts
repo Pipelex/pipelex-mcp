@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { MthdsFile, PipelexValidationReport } from "@pipelex/sdk";
@@ -86,6 +87,35 @@ describe("local stdio server", () => {
       await close();
     }
   });
+
+  it("handshakes through the actual stdio entry point without diagnostic output", async () => {
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["--import", "tsx", path.join(process.cwd(), "src/local/main.ts")],
+      cwd: process.cwd(),
+      env: { ...process.env, PIPELEX_BASE_URL: "http://127.0.0.1:8081" },
+      stderr: "pipe",
+    });
+    let stderrText = "";
+    transport.stderr?.on("data", (chunk) => {
+      stderrText += chunk.toString();
+    });
+    const client = new Client({ name: "pipelex-mcp-stdio-test", version: "0.0.0" });
+
+    try {
+      await client.connect(transport);
+      const listed = await client.listTools();
+
+      expect(listed.tools.map((tool) => tool.name)).toEqual(
+        toolDefinitions.map((definition) => definition.name),
+      );
+      expect(client.getInstructions()).toContain("Prefer the `{ path: string }` file form");
+    } finally {
+      await client.close();
+    }
+
+    expect(stderrText).toBe("");
+  }, 10_000);
 });
 
 const validReport: PipelexValidationReport = {

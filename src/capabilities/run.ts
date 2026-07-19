@@ -241,9 +241,10 @@ export interface RunResultsResult {
    */
   graphSpec?: unknown;
   /**
-   * The full, unbounded main output, for the views only (rides
+   * The full, unbounded main output on raw MCP response metadata (rides
    * `_meta.main_stuff`). `structuredContent.main_stuff` is the bounded copy.
-   * Omitted when the invoking shell has no views.
+   * It remains on the raw MCP result even when the invoking shell has no views,
+   * so a programmatic consumer never loses the full result.
    */
   mainStuff?: unknown;
 }
@@ -580,7 +581,7 @@ function completedResult(
     structuredContent,
     summary: completedSummary(runId, bounded, truncated, viewsAvailable),
     graphSpec,
-    mainStuff: viewsAvailable ? result.main_stuff : undefined,
+    mainStuff: result.main_stuff,
   };
 }
 
@@ -807,9 +808,11 @@ export function runResultsToolResult(result: RunResultsResult) {
     structuredContent: result.structuredContent,
     content: [{ type: "text" as const, text: result.summary }],
     isError: result.structuredContent.status === "error",
-    // View-only channel (the mthds_validate convention): the executed graph
-    // and the FULL unbounded main output ride `_meta`, never structuredContent,
-    // so the model never pays their tokens. Keys mirror the API field names.
+    // Response-metadata channel (the mthds_validate convention): the executed
+    // graph and the FULL unbounded main output ride `_meta`, never
+    // structuredContent, so the model never pays their tokens. Views consume
+    // it on the hosted shell; raw MCP consumers can still retain it on the
+    // tools-only local shell. Keys mirror the API field names.
     _meta: { graph_spec: result.graphSpec, main_stuff: result.mainStuff },
   };
 }

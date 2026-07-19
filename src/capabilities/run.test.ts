@@ -341,14 +341,15 @@ describe("resultsResult", () => {
     expect(result.summary).toContain('"answer": 42');
   });
 
-  it("does not emit view metadata when the invoking shell has no views", () => {
+  it("does not advertise a view but preserves full result metadata when the shell has no views", () => {
+    const mainStuff = { answer: "x".repeat(MAIN_STUFF_CAP * 2) };
     const result = resultsResult(
       {
         state: "completed",
         pipeline_run_id: RUN_ID,
         result: {
           pipeline_run_id: RUN_ID,
-          main_stuff: { answer: 42 },
+          main_stuff: mainStuff,
           graph_spec: { nodes: [{ id: "demo.main" }] },
         },
       },
@@ -356,8 +357,9 @@ describe("resultsResult", () => {
     );
 
     expect(result.structuredContent.available_view_specs).toEqual([]);
+    expect(result.structuredContent.truncated).toBe(true);
     expect(result.graphSpec).toBeUndefined();
-    expect(result.mainStuff).toBeUndefined();
+    expect(result.mainStuff).toBe(mainStuff);
   });
 
   it("keeps a falsy-but-present main output as a valid completed result", () => {
