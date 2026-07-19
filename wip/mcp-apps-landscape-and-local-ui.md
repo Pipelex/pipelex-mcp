@@ -5,7 +5,7 @@ Status: fourth doc in the dual-deployment series (after `dual-deployment-assessm
 ## 1. The landscape as of July 2026 (researched, not assumed)
 
 - **MCP Apps is an official MCP extension** (launched 2026-01-26, the first official one; spec in `modelcontextprotocol/ext-apps`). A tool declares `_meta.ui.resourceUri` → a `ui://` resource containing HTML; the host renders it in a sandboxed iframe; app↔host communication is postMessage. Crucially, the app↔host channel is independent of the server↔host transport — a stdio-connected server can declare and serve `ui://` resources; the barrier is host rendering support and asset delivery, not transport.
-- **Rendering hosts now include**: claude.ai web, Claude Desktop, Claude mobile, **Claude Cowork** ("interactive connectors" — every Claude surface except Claude Code); **Cursor 2.6+** (March 2026, MCP Apps in agent chats); the merged **ChatGPT desktop app** (Chat/Work/Codex modes since 2026-07-09) — Louis verified first-hand that **Codex mode renders our Skybridge UI**, and Cowork does too; also VS Code GitHub Copilot, Microsoft 365 Copilot, Goose, Postman. **Claude Code is now the exception** — the one target in our host set with no view rendering.
+- **Rendering hosts now include**: claude.ai web, Claude Desktop, Claude mobile, **Claude Cowork** ("interactive connectors" — every Claude surface except Claude Code); **Cursor 2.6+** (March 2026, MCP Apps in agent chats — *but* V1 observed no render of our views over either localhost or https origins: a real gap, see §4 matrix); the merged **ChatGPT desktop app** (Chat/Work/Codex modes since 2026-07-09) — Louis verified first-hand that **Codex mode renders our Skybridge UI**, and Cowork does too; also VS Code GitHub Copilot, Microsoft 365 Copilot, Goose, Postman. **Claude Code is now the exception** — the one target in our host set with no view rendering.
 - **Cowork is the "full combo" host**: local filesystem access (connected folders), MCP support (and Claude Desktop supports local stdio servers via `claude_desktop_config.json`), and view rendering. It blurs the workshop/console persona line — the first host where the one-host-one-server rule is genuinely ambiguous (builder → local, consumer → hosted).
 - **Real-world caveat**: rendering support is uneven in the wild — an open `ext-apps` issue documents Claude Desktop negotiating the UI capability, fetching the resource, and still not rendering when connected through an `mcp-remote` proxy. Any proxy/bridge in our design must forward the UI capability faithfully, and every host claim below gets verified empirically, not assumed.
 
@@ -21,7 +21,7 @@ Verified against the repo's dependency (upgraded 1.1.1 → 1.2.7 on 2026-07-17; 
 
 ## 3. The local-server transport options (revised)
 
-The stdio-vs-HTTP question is no longer a lifecycle-UX preference — it's constrained by view asset delivery:
+The stdio-vs-HTTP question is no longer a lifecycle-UX preference — it's constrained by view asset delivery. *(V1 outcome 2026-07-19: localhost origins are penalized by hosts — Desktop refuses `http://` connectors, Codex strips the view over local HTTP. A is tools-only on those hosts; B's localhost asset origin is the primary risk to verify; see the §4 checkpoint outcome.)*
 
 - **A. Local Skybridge over localhost HTTP.** Works today with no framework changes (`make dev` is literally this; `skybridge start` is the production-mode equivalent). Full views, one server idiom, and the `{ path }` arm gets added to the same server. Cost: hosts don't spawn HTTP servers, so the user manages the process and port.
 - **B. stdio launcher + embedded HTTP (recommended, pending verification).** The npm `bin` the host spawns is a thin stdio bridge that boots the same Skybridge HTTP server on an ephemeral localhost port and proxies MCP between stdio and it. Host-managed lifecycle *and* a real origin for view assets. Risk to verify: the bridge must forward the UI capability negotiation faithfully (the `mcp-remote` rendering bug is the cautionary tale).
@@ -43,18 +43,36 @@ Goal: an empirical render matrix before the SPEC.md increment commits to per-hos
    - **Claude Code**: `claude mcp add --transport http` — expected: tools work, no rendering; confirm the text summaries carry the flow on their own.
 3. Record the matrix; any "capability negotiated but no iframe" outcome gets a minimal repro before we build anything on top.
 
-#### V1 results matrix (fill in as tested)
+#### V1 results matrix (run 2026-07-19; one row per host × registration mode)
 
-| Host (version) | Registration used | Tools list | `run-graph` renders | `run-follow` renders | Polling round-trips | Handoff fires | Notes |
-|---|---|---|---|---|---|---|---|
-| Cursor ( ) | `.cursor/mcp.json` localhost URL | | | | | | |
-| Claude Desktop ( ) | custom connector — localhost or tunnel? | | | | | | |
-| Cowork ( ) | same connector | | | | | | |
-| ChatGPT desktop, Codex mode ( ) | app with tunnel URL | | | | | | |
-| ChatGPT desktop, Work mode ( ) | same app | | | | | | |
-| Claude Code ( ) | `claude mcp add --transport http` | | n/a — text-only expected | n/a | n/a | n/a | do the text summaries carry the flow? |
+| Host | Registration | Tools | View renders | Notes |
+|---|---|---|---|---|
+| Cursor | localhost URL in `.cursor/mcp.json` | ✓ | ✗ — text summary only | Graph confirmed on the wire (DevTools renders the same result). |
+| Cursor | tunnel https URL | ✓ | ✗ — same, no view | Retested 2026-07-19: fails on **both** origins → a genuine rendering gap on this host, not the origin penalty. Contradicts the researched "Cursor 2.6+ renders MCP Apps" claim, at least for our views — cause unknown (profile/dialect support?); track upstream. |
+| Claude Desktop (chat mode) | localhost URL as custom connector | ✗ — blocked at registration | — | Hard constraint: connector URLs must start with `https` — a localhost HTTP server cannot be registered as a connector at all. |
+| Claude Desktop (chat mode) | tunnel https URL | ✓ | ✓ | **New fact**: Desktop *chat* mode renders — previously only Cowork was first-hand verified. |
+| Cowork | tunnel https URL | ✓ | ✓ | Re-confirmed (first verified 2026-07-17). |
+| ChatGPT desktop (Codex mode) | localhost URL (Streamable HTTP tab) | ✓ | ✗ — view stripped | Tools work; the host reports its MCP wrapper removes the view. Non-https origin penalized at view delivery, not at connection. |
+| ChatGPT desktop (Codex mode) | tunnel https URL | ✓ | ✓ | Works as well in Codex as in ChatGPT. |
+| ChatGPT | tunnel https URL | ✓ | ✓ | |
+| Mistral Vibe web (chat.mistral.ai) | tunnel https URL | ✓ | ✗ — **iframe appears but stays empty** | The one "render attempted, no content" cell — exactly the outcome flagged above for a minimal repro before building on it (asset load / CSP / profile mismatch suspected; cf. the `mcp-remote` caution in §1). Bonus host, not in the original plan. |
+| Mistral Vibe TUI | MCP registered in TUI config | ✓ | n/a — text-only host | Same posture as Claude Code: tools work, summaries carry the flow. |
+| Claude Code | `claude mcp add --transport http` localhost | ✓ | n/a — text-only host | Text summaries carry the flow on their own. ✓ Confirms the graceful-degradation story. |
+
+Not exercised this round: the `run-follow` columns (polling round-trips, completion handoff) — the per-host cells above reflect `mthds_validate` → `run-graph`. Fold `run-follow` into the Cursor retest / V2 pass.
+
+The Codex desktop MCP config exposes a native **STDIO tab** alongside Streamable HTTP — the V2 registration path is first-class there, as assumed.
 
 **Checkpoint** — V1 results decide whether B is worth prototyping: if localhost-origin assets render fine, the remaining risk in B is only the capability forwarding; if V1 itself fails on a host, that host's cell is a rendering gap no transport choice fixes. Update this doc with the matrix, decisions, and open questions before starting V2.
+
+**V1 checkpoint outcome (2026-07-19).** The result is a third branch neither anticipated: rendering itself is healthy everywhere it was claimed — *through a public https origin*. The failures all localize to the **localhost origin**: Claude Desktop refuses to register non-https connector URLs outright, and Codex desktop connects fine over local HTTP but strips the view from the result. Consequences:
+
+- **Option A (local Skybridge over localhost HTTP) is a tools-only mode on Desktop and Codex** — dead as a view-bearing local mode there. It remains fully serviceable for Claude Code (text-only anyway) and possibly Cursor (retest pending).
+- **Option B's premise is now specifically at risk.** B assumed the embedded HTTP listener gives "a real origin for view assets" — but V1 shows hosts penalize localhost origins at the MCP-URL level. Whether a **stdio-connected** server whose iframe assets load from a localhost origin renders is now *the* question V2 must answer per host; capability forwarding is the second risk, not the first.
+- **The Fred ask #3 (self-contained view bundles) is elevated from nice-to-have to likely critical path for local views** (`alpic-ask-fred.md`, sent). If assets must come from an https origin even under stdio transport, inlining them into the `ui://` resource is the only shape that makes local views work without a tunnel. His reply gates whether we prototype B at all.
+- **Interim posture for the local workshop: tools-first.** The verified Claude Code cell shows the text summaries carry the flow, so the workshop ships without views if it must; views stay a console strength (and a Codex/Cowork workshop aspiration) pending V2/Fred. This partially rehabilitates option C as a dignified baseline rather than a failure mode.
+
+**Checkpoint addendum (2026-07-19, Cursor retest + Mistral Vibe).** Cursor fails on the https origin too — the first instance of the "rendering gap no transport choice fixes" branch: Cursor is out of the view-rendering set for our views until its MCP Apps support and Skybridge's output meet (cause untracked; worth an upstream question). Bonus host Mistral Vibe splits cleanly along our console/workshop axis: the **web chat is console-shaped** (tools ✓ via tunnel; view iframe opens but stays empty — the designated minimal-repro case, and a Vibe-side rendering bug to chase before any Vibe console claim), the **TUI is a text-only workshop host** exactly like Claude Code. Net effect on the design *(corrected 2026-07-19 — an earlier phrasing wrongly excluded Cowork)*: the workshop host set is Claude Code, Cursor, Codex, Vibe TUI, **and Cowork** — Cowork is a **dual-status host** (console for consumers, workshop for builders), exactly like ChatGPT desktop (Chat/Work modes = console, Codex mode = workshop); §1's "full combo" observation, now counted outright rather than conditionally. Of the workshop set, **the view-rendering hosts are Codex and Cowork**; Claude Code, Cursor, and Vibe TUI are text-only in practice. Both view-rendering workshop hosts penalize localhost origins (Codex strips views over local HTTP; Desktop registers no `http://` connectors at all — Cowork's local route is stdio via `claude_desktop_config.json`), so the tools-first interim posture stands, and Fred's self-contained bundles are the path to local views on both. The console keeps the full visual story (claude.ai, Desktop chat, Cowork, ChatGPT, Codex-via-hosted; Vibe web once its empty-frame bug is understood).
 
 ### Phase V2 — stdio bridge prototype (option B)
 

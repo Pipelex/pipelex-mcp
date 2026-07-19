@@ -54,7 +54,7 @@ A recap discussion surfaced a confusion worth pinning: **the plugin's per-target
 Two clarifications that follow:
 
 - **Artifact default ≠ host intent.** The Claude marketplace artifact bakes the hosted URL, but that is a packaging fallback forced by the weakest installer in its audience (Claude Desktop: no node guarantee, no env-var expansion) — not a statement that Claude Code should use the hosted server. The rule from `dual-deployment-assessment.md` §6 stands: Claude Code's intended operating mode is the **local workshop**; the baked hosted default is only what a Claude Code install falls back to before the builder opt-in (§4 option 1).
-- **The Desktop/Cowork = console classification is a persona assumption, not a host property.** They sit in the console column because the *consumer* flow runs published methods by reference (`mt_<id>` — content never crosses the LLM, so hosted costs a consumer nothing in latency) and node isn't guaranteed on a consumer's machine. But Cowork is the "full combo" host (`mcp-apps-landscape-and-local-ui.md` §1): filesystem access, stdio support via `claude_desktop_config.json`, view rendering — a Cowork user doing builder-shaped work (authoring `.mthds` files locally) would want the workshop. If Cowork usage proves builder-shaped, the classification flips toward §4 option 3; that test rides with the V1/V2 render verification (§6 first open question).
+- **The Desktop/Cowork = console classification is a persona assumption, not a host property.** They sit in the console column because the *consumer* flow runs published methods by reference (`mt_<id>` — content never crosses the LLM, so hosted costs a consumer nothing in latency) and node isn't guaranteed on a consumer's machine. But Cowork is the "full combo" host (`mcp-apps-landscape-and-local-ui.md` §1): filesystem access, stdio support via `claude_desktop_config.json`, view rendering — a Cowork user doing builder-shaped work (authoring `.mthds` files locally) would want the workshop. *Resolution 2026-07-19:* Cowork is counted as a **dual-status host** — console for consumers, workshop for builders — like ChatGPT desktop (Chat/Work modes = console, Codex mode = workshop). This changes nothing about the artifact (the hosted default remains right for the weakest installer); it widens the builder opt-in's audience: Claude Code builders opt in via `claude mcp add`, Cowork builders via a stdio entry in `claude_desktop_config.json` (Desktop registers no `http://` URLs — V1, doc 4 §4).
 
 The host→server matrix as currently agreed (drafted here; final homes per `dual-deployment-assessment.md` §6 are the repo README and this plugin's README when implemented):
 
@@ -62,8 +62,10 @@ The host→server matrix as currently agreed (drafted here; final homes per `dua
 |---|---|---|
 | ChatGPT (web) | Hosted console | Apps directory — no plugin |
 | claude.ai (web + mobile) | Hosted console | Connector — no plugin |
-| Claude Desktop / Cowork | Hosted console (consumer-persona assumption, see above) | Claude marketplace plugin, hosted URL baked |
+| Claude Desktop (chat mode) | Hosted console | Claude marketplace plugin, hosted URL baked |
+| Cowork | **Dual-status** — hosted console for consumers (default); local workshop for builders (renders views; local route = stdio in `claude_desktop_config.json`, view delivery under local transport pending V2) | Same plugin hosted default → builder opt-in |
 | Claude Code | **Local workshop** (text-only host — no views) | Same plugin installs the hosted default → builder opts in to the local launcher |
-| ChatGPT desktop (Codex mode) | Local workshop | Codex plugin channel, launcher baked |
-| Cursor | Local workshop | Docs-only `.cursor/mcp.json` snippet or a future target (open, §6) |
-| Mistral Vibe | Pending — expected local | `pipelex-vibe` plugin, pending Vibe's MCP mechanics (§6) |
+| ChatGPT desktop (Codex mode) | Local workshop (the one view-rendering workshop host — V1, doc 4 §4) | Codex plugin channel, launcher baked |
+| Cursor | Local workshop (text-only in practice — V1 found no view rendering on either origin, doc 4 §4) | Docs-only `.cursor/mcp.json` snippet or a future target (open, §6) |
+| Mistral Vibe TUI | Local workshop (text-only host — V1) | `pipelex-vibe` plugin, pending Vibe's MCP mechanics (§6) |
+| Mistral Vibe web (chat.mistral.ai) | Hosted console (view rendering currently broken there — empty iframe, doc 4 §4) | Connector/config — no plugin |
