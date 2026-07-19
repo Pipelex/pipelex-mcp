@@ -62,7 +62,7 @@ The richer error-grouping validation view (diagnostics grouped by class, clickab
 ## Product Context
 
 - **Existing products**: Pipelex, MTHDS, `@pipelex/sdk`, and the Pipelex API (local OSS `pipelex-api` during development).
-- **App shell**: `pipelex-mcp`, a Skybridge MCP app scaffold.
+- **App shell**: `pipelex-mcp`, a Skybridge MCP app scaffold — the hosted console. A second shell, the local workshop stdio server, shares its capability core (see Deployments).
 - **Runtime API**: the hosted Pipelex API, defaulting to `https://api.pipelex.com` (point `PIPELEX_BASE_URL` at a local OSS `pipelex-api` on `http://localhost:8081` during development).
 - **SDK dependency**: the `@pipelex/sdk` npm package (`PipelexApiClient`, published from `../pipelex-sdk-js`). It re-exports the `mthds/protocol` surface, so the MCP imports one SDK and still reaches the open protocol routes; `mthds` rides along as a transitive dependency.
 - **Auth**: optional `PIPELEX_API_KEY` for the validation and inputs tools; local development normally runs without hosted auth. The run tools execute on the hosted API, so `PIPELEX_API_KEY` is effectively mandatory for them — a missing or invalid key is a `config` no-verdict.
@@ -193,7 +193,7 @@ The run family adds durable (async) method execution against the hosted Pipelex 
 
 **Run UX flow**:
 
-1. The assistant (usually after `mthds_validate` and `mthds_inputs_template`) calls `mthds_run` with the file contents, the pipe to run, and the filled inputs.
+1. The assistant (usually after `mthds_validate` and `mthds_inputs_template`) calls `mthds_run` with the files (same per-deployment forms as validation), the pipe to run, and the filled inputs.
 2. The tool starts the run and returns the durable `run_id` immediately. The `run-follow` view renders above the response and follows the run on its own — the user watches it without prompting the assistant.
 3. If the user asks how it is going, the assistant calls `mthds_run_status` — one cheap read, with a retry hint in the summary so it doesn't spin-poll.
 4. When the run reaches its terminal outcome, the view fires the completion handoff — a `sendFollowUpMessage` naming the run id — and the assistant answers it by calling `mthds_run_results` and reporting: the main output (bounded) on success, or the failure message otherwise. (The handoff fires after the view's own results fetch settled, so the assistant's results call lands past the mid-write race.)
@@ -294,7 +294,7 @@ Every `errors[]` entry also carries `retryable` — whether retrying the same ca
 
 ## Non-Goals
 
-The server must not add Pipelex Hosted API deployment behavior, bearer-token extraction, blocking execution (`POST /v1/execute` or the SDK's blocking wrappers), run cancellation, resources, logs, package publishing, subprocess fallbacks, or a production validation UI. Filesystem reads are scoped per deployment: the **hosted console** never reads files (a `{ path }` submission is rejected instructively — see Deployments); the **local workshop** reads exactly the `{ path }` items submitted to it, within its trust boundary. The workshop registers no views at launch (tools-first — see Deployments); local view delivery is a later increment gated on self-contained view bundles. Also out of scope for this increment: registered-method runs by catalog id, per-user OAuth, and a storage upload tool for binary inputs (binary inputs ride reachable https URLs; upload is a later increment).
+The server must not add Pipelex Hosted API deployment behavior, bearer-token extraction, blocking execution (`POST /v1/execute` or the SDK's blocking wrappers), run cancellation, resources, logs, package publishing (of MTHDS method packages to a registry — not this server's own npm distribution, which is how the workshop ships; see Deployments), subprocess fallbacks, or a production validation UI. Filesystem reads are scoped per deployment: the **hosted console** never reads files (a `{ path }` submission is rejected instructively — see Deployments); the **local workshop** reads exactly the `{ path }` items submitted to it, within its trust boundary. The workshop registers no views at launch (tools-first — see Deployments); local view delivery is a later increment gated on self-contained view bundles. Also out of scope for this increment: registered-method runs by catalog id, per-user OAuth, and a storage upload tool for binary inputs (binary inputs ride reachable https URLs; upload is a later increment).
 
 Repository quality gates are in scope: ESLint, Prettier, TypeScript type checking, Vitest unit tests, and a combined `npm run check` command should remain available locally.
 
@@ -305,21 +305,21 @@ The prototype should call the Pipelex API (local OSS `pipelex-api` during develo
 Validate MTHDS files:
 
 1. The user asks the assistant to validate one or more `.mthds` files.
-2. The assistant submits the file contents and optional provenance URIs to `mthds_validate`.
+2. The assistant submits the files to `mthds_validate` — inline contents with optional provenance URIs, or `{ path }` items on the local workshop (see Deployments).
 3. The tool returns structured validation facts plus a text summary that the assistant can use to repair the files.
 4. The assistant may repeat the same flow after editing the submitted source content.
 
 Prepare inputs for a method:
 
 1. The user asks the assistant to prepare inputs for a `.mthds` method (or a skill needs the method's input schema).
-2. The assistant submits the file contents (and optionally a qualified `pipe_ref`) to `mthds_inputs_template`.
+2. The assistant submits the files (and optionally a qualified `pipe_ref`) to `mthds_inputs_template` — same per-deployment file forms as validation.
 3. The tool returns the fill-in template plus the resolved pipe, which the assistant fills with user data, synthetic data, or placeholders.
 4. On an invalid closure, the tool returns the validation errors instead; the assistant can repair via the validation flow and retry.
 
 Run a method durably:
 
 1. The user asks the assistant to run a `.mthds` method (usually after validating it and filling the inputs template).
-2. The assistant submits the file contents, the pipe to run, and the filled inputs to `mthds_run`; the tool returns the durable `run_id` immediately and the `run-follow` view follows the run live.
+2. The assistant submits the files (same per-deployment forms as validation), the pipe to run, and the filled inputs to `mthds_run`; the tool returns the durable `run_id` immediately and the `run-follow` view follows the run live.
 3. The assistant checks on the run with `mthds_run_status` when asked (honoring the retry hint rather than spin-polling); when the run reaches its terminal outcome the view's completion handoff prompts the assistant, which reports via `mthds_run_results`.
 4. Days later, the same `run_id` still answers `mthds_run_status` / `mthds_run_results` — the run is durable and the MCP is stateless.
 
