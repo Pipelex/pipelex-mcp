@@ -3,6 +3,7 @@ import path from "node:path";
 
 import type { FileResolution, FileResolver } from "../capabilities/shared.js";
 
+const MTHDS_EXTENSION = ".mthds";
 const INLINE_FALLBACK = "or inline the contents as { content, uri? }.";
 
 /**
@@ -17,6 +18,18 @@ const INLINE_FALLBACK = "or inline the contents as { content, uri? }.";
 export function localFileResolver(rootDir: string = process.cwd()): FileResolver {
   return {
     async resolve(submitted: string): Promise<FileResolution> {
+      // The `{ path }` arm is contracted to .mthds files (see filesInputSchema).
+      // Enforce that before any filesystem access, so a path pointing at an
+      // unrelated local file — a prompt-injected `.env`, `.git/config`, key
+      // material — is refused without ever being opened. Containment below only
+      // bounds *where* we read; this bounds *what* we read.
+      if (path.extname(submitted).toLowerCase() !== MTHDS_EXTENSION) {
+        return failure(
+          `Path is not a .mthds file: ${submitted}`,
+          `The local workshop reads only .mthds files. Point at a .mthds file, ${INLINE_FALLBACK}`,
+        );
+      }
+
       let rootReal: string;
       try {
         rootReal = await fs.realpath(rootDir);
