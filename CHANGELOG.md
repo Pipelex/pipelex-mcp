@@ -17,6 +17,7 @@
 ### Fixed
 
 - No-verdict error results now surface each `errors[]` entry's `location`, `message`, and `hint` in the MCP `content` text, not only in `structuredContent.errors`. Previously the content stream carried only a terse headline ("… request input is invalid."), so a host that shows the agent the top content line stranded the instructive detail — the hosted `{ path }` rejection naming the local workshop was written but never reached the agent, which had to guess the cause from the tool schema. All four tool-result builders share one `toolResultContent` helper; `structuredContent.errors` stays the untouched machine contract.
+- The MCP handshake now reports the real package version in `serverInfo.version` — it is sourced from `package.json` rather than a hardcoded literal that had drifted (both shells advertised `0.1.0` regardless of the shipped release). The `/release` skill bumps `package.json` alone, so the single source keeps the handshake honest going forward.
 
 ## [0.3.0] - 2026-07-16
 

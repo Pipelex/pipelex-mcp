@@ -1,6 +1,8 @@
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 
+import pkg from "../package.json" with { type: "json" };
+
 import {
   buildInputsContext,
   buildMthdsInputs,
@@ -35,9 +37,12 @@ import {
 } from "./capabilities/validate.js";
 import type { MthdsValidateInput, ValidationContext } from "./capabilities/validate.js";
 
+// Version is sourced from package.json so the MCP handshake always reports the
+// shipped release — the /release skill bumps package.json alone, and a
+// hardcoded copy here would silently drift (it did: 0.1.0 vs a 0.4.0 package).
 export const PIPELEX_MCP_SERVER_INFO = {
   name: "pipelex-mcp",
-  version: "0.1.0",
+  version: pkg.version,
 } as const;
 
 export interface ToolContexts {
