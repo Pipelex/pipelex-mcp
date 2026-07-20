@@ -142,12 +142,19 @@ wherever there's a filesystem, the hosted console everywhere else.
 | ChatGPT (web) | Hosted console | Apps directory |
 | claude.ai (web + mobile) | Hosted console | Connector (custom URL) |
 | Claude Desktop (chat mode) | Hosted console | Connector / marketplace plugin |
-| Claude Code | Local workshop (text-only host — no views) | `claude mcp add` |
-| ChatGPT desktop (Codex mode) | Local workshop (renders views) | `~/.codex/config.toml` |
-| Cursor | Local workshop (text-only in practice today) | `~/.cursor/mcp.json` |
+| Claude Code | Local workshop | `claude mcp add` |
+| ChatGPT desktop (Codex mode) | Local workshop | `~/.codex/config.toml` |
+| Cursor | Local workshop | `~/.cursor/mcp.json` |
 | Cowork | **Dual** — console for consumers, workshop for builders | Connector, or stdio in `claude_desktop_config.json` |
-| Mistral Vibe (TUI) | Local workshop (text-only host) | pending Vibe's MCP mechanics |
+| Mistral Vibe (TUI) | Local workshop | pending Vibe's MCP mechanics |
 | Mistral Vibe (web) | Hosted console | Connector / config |
+
+**On views:** the hosted console ships the `run-graph` and `run-follow`
+views, which render on view-capable hosts (ChatGPT, claude.ai, Cowork) and
+degrade to text on Claude Code. The **local workshop is tools-first — it ships
+no views on any host today**, so it reports structured results and text
+summaries directly. (Codex and Cowork are view-capable hosts and would render
+workshop views if local view delivery lands in a later increment.)
 
 ## One host, one server
 
