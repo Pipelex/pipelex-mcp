@@ -15,6 +15,7 @@ import {
   filesInputSchema,
   resolveSubmittedFiles,
   toolErrorSchema,
+  toolResultContent,
   validateRequest,
   validateRunIdRequest,
 } from "./shared.js";
@@ -790,7 +791,7 @@ function resultsErrorResult(summary: string, errors: ToolError[]): RunResultsRes
 export function runToolResult(result: RunStartResult) {
   return {
     structuredContent: result.structuredContent,
-    content: [{ type: "text" as const, text: result.summary }],
+    content: toolResultContent(result.summary, result.structuredContent.errors),
     isError: result.structuredContent.status === "error",
   };
 }
@@ -798,7 +799,7 @@ export function runToolResult(result: RunStartResult) {
 export function runStatusToolResult(result: RunStatusResult) {
   return {
     structuredContent: result.structuredContent,
-    content: [{ type: "text" as const, text: result.summary }],
+    content: toolResultContent(result.summary, result.structuredContent.errors),
     isError: result.structuredContent.status === "error",
   };
 }
@@ -806,7 +807,7 @@ export function runStatusToolResult(result: RunStatusResult) {
 export function runResultsToolResult(result: RunResultsResult) {
   return {
     structuredContent: result.structuredContent,
-    content: [{ type: "text" as const, text: result.summary }],
+    content: toolResultContent(result.summary, result.structuredContent.errors),
     isError: result.structuredContent.status === "error",
     // Response-metadata channel (the mthds_validate convention): the executed
     // graph and the FULL unbounded main output ride `_meta`, never

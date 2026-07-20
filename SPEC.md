@@ -141,7 +141,7 @@ The structured output is:
 
 The graph (`graph_spec`) is not part of `structuredContent`; on a positive verdict it rides the tool result's view-only `_meta` channel (`_meta.graph_spec`) for the `run-graph` view, so the model never pays its tokens. Because the model never sees `_meta`, `available_view_specs` is its signal that a view exists to surface: it lists the renderable view kinds for this result. The only kind for now is `"dry_run_graph"` — the method graph from the validation dry run, whose spec rides `_meta.graph_spec`. It contains `"dry_run_graph"` exactly when that spec was produced (valid verdict with `include_graph` not false), and is empty otherwise. On those same verdicts a short `## Views` note is appended to the `content` summary so agents that read the prose more reliably than the structured fields also learn the view exists.
 
-The MCP `content` text contains the human-readable summary. The summary is not duplicated in structured output.
+The MCP `content` text contains the human-readable summary. The summary is not duplicated in structured output. On a no-verdict error (`status: "error"`), the content summary is a terse headline followed by a Markdown list of each `errors[]` entry — its `location`, `message`, and `hint`. This surfacing is shared by every tool (the same `toolResultContent` helper): the agent reads `content`, so the actionable detail the capability writes into `errors[]` (e.g. the hosted `{ path }` rejection naming the local workshop) must reach that stream, not sit only in `structuredContent.errors` where a host that shows the agent only the top content line would strand it. `structuredContent.errors` stays the untouched machine contract.
 
 ## Inputs Template Scope (`mthds_inputs_template`)
 

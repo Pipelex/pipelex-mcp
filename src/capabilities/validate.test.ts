@@ -328,6 +328,24 @@ describe("validateMthds path submissions", () => {
     expect(result.summary).toBe("Validation was not run: request input is invalid.");
   });
 
+  it("surfaces the hosted rejection message and hint into the content stream", async () => {
+    // The desktop-host scenario: a { path } submission to the hosted console.
+    // The instructive detail must reach the agent-facing `content`, not sit
+    // only in structuredContent.errors where the agent had to guess from it.
+    const result = await validateMthds(
+      { files: [{ path: "methods/bundle.mthds" }] },
+      { baseUrl: DEFAULT_API_URL },
+    );
+
+    const { content } = toolResult(result);
+    const text = content[0]?.text ?? "";
+
+    expect(text).toContain("Validation was not run: request input is invalid.");
+    expect(text).toContain("`files[0].path`");
+    expect(text).toContain("This deployment cannot read files from disk");
+    expect(text).toContain("npx @pipelex/mcp");
+  });
+
   it("does not call the client when resolution fails", async () => {
     let called = false;
 

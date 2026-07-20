@@ -14,6 +14,7 @@ import {
   filesInputSchema,
   resolveSubmittedFiles,
   toolErrorSchema,
+  toolResultContent,
   validateRequest,
 } from "./shared.js";
 import type {
@@ -186,7 +187,7 @@ function summaryForError(error: ToolError): string {
 export function toolResult(result: ValidationResult) {
   return {
     structuredContent: result.structuredContent,
-    content: [{ type: "text" as const, text: result.summary }],
+    content: toolResultContent(result.summary, result.structuredContent.errors),
     isError: result.structuredContent.status === "error",
     // View-only channel: the graph rides `_meta`, never `structuredContent`, so
     // the model never pays its tokens. `_meta` still travels on the raw MCP

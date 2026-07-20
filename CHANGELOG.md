@@ -6,6 +6,10 @@
 
 - Upgraded `skybridge` to 1.2.x (with `@skybridge/devtools` to match). Since Skybridge 1.2.0, views emit a single canonical MCP Apps resource regardless of host (the former dual `apps-sdk`/`ext-apps` emission is unified, with legacy URIs still resolved), and OAuth is a first-class `McpServer` field with branded providers (including WorkOS). No code changes were needed; the full check suite and tests pass unchanged.
 
+### Fixed
+
+- No-verdict error results now surface each `errors[]` entry's `location`, `message`, and `hint` in the MCP `content` text, not only in `structuredContent.errors`. Previously the content stream carried only a terse headline ("… request input is invalid."), so a host that shows the agent the top content line stranded the instructive detail — the hosted `{ path }` rejection naming the local workshop was written but never reached the agent, which had to guess the cause from the tool schema. All four tool-result builders share one `toolResultContent` helper; `structuredContent.errors` stays the untouched machine contract.
+
 ## [0.3.0] - 2026-07-16
 
 ### Changed

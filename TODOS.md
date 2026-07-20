@@ -78,7 +78,7 @@ The capability core learns about `{ path }` submissions without knowing any file
 
 ## Phase 4 — E2E verification + latency baseline
 
-- [ ] Register the local shell in Claude Code (`claude mcp add` on the packed bin or dist entry) and exercise the full flow on a real method (from `../test-bed/` or `../pipelex-cookbook/`): `mthds_validate` by path, `mthds_inputs_template`, then the run family against the hosted API with a hand-minted key.
+- [ ] Register the local shell in Claude Code (`claude mcp add` on the packed bin or dist entry) and exercise the full flow on a real method (from `../pipelex-demos/` or `../pipelex-cookbook/`): `mthds_validate` by path, `mthds_inputs_template`, then the run family against the hosted API with a hand-minted key.
 - [ ] Verify provenance: force a validation error and confirm diagnostics locate to the real on-disk paths.
 - [ ] Verify the trust boundary live: a path outside cwd is rejected with the instructive error.
 - [ ] Verify the hosted rejection: submit `{ path }` to the hosted/dev Skybridge server and confirm the instructive `input_domain` error reads well in-host.

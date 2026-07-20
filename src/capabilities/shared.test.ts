@@ -14,10 +14,11 @@ import {
   DEFAULT_API_URL,
   filesInputSchema,
   resolveSubmittedFiles,
+  toolResultContent,
   validateRequest,
   validateRunIdRequest,
 } from "./shared.js";
-import type { FileResolver } from "./shared.js";
+import type { FileResolver, ToolError } from "./shared.js";
 
 describe("buildApiConfig", () => {
   it("defaults to the hosted API with no key", () => {
@@ -167,6 +168,65 @@ describe("resolveSubmittedFiles", () => {
     expect(resolution.errors[0]?.message).toBe("File not found: missing.mthds");
     expect(resolution.errors[0]?.hint).toBe("Check the path.");
     expect(resolution.errors[0]?.retryable).toBe(false);
+  });
+});
+
+describe("toolResultContent", () => {
+  it("returns just the summary when there are no errors (success)", () => {
+    expect(toolResultContent("# Validation passed")).toEqual([
+      { type: "text", text: "# Validation passed" },
+    ]);
+  });
+
+  it("returns just the summary for an empty error list", () => {
+    expect(toolResultContent("headline", [])).toEqual([{ type: "text", text: "headline" }]);
+  });
+
+  it("surfaces each error's locator, message, and hint under the summary", () => {
+    const errors: ToolError[] = [
+      {
+        class: "input_domain",
+        location: "files[1].path",
+        message: "This deployment cannot read files from disk; submit the file contents instead.",
+        hint: "Resubmit this item as { content, uri? }, or use the local workshop server (npx @pipelex/mcp).",
+        retryable: false,
+      },
+    ];
+
+    const [content] = toolResultContent(
+      "Validation was not run: request input is invalid.",
+      errors,
+    );
+
+    // The headline stays first, so hosts that show only the top line still read well.
+    expect(content.text.startsWith("Validation was not run: request input is invalid.")).toBe(true);
+    // The instructive detail every capability writes into errors[] now reaches
+    // the agent-facing content stream, not just structuredContent.errors.
+    expect(content.text).toContain("`files[1].path`");
+    expect(content.text).toContain(
+      "This deployment cannot read files from disk; submit the file contents instead.",
+    );
+    expect(content.text).toContain("*Hint: Resubmit this item as { content, uri? }");
+    expect(content.text).toContain("npx @pipelex/mcp");
+  });
+
+  it("omits the locator and hint segments when they are absent", () => {
+    const [content] = toolResultContent("headline", [
+      { class: "runtime", message: "Server fault.", retryable: true },
+    ]);
+
+    expect(content.text).toBe("headline\n\n- Server fault.");
+  });
+
+  it("lists every error, one per line", () => {
+    const [content] = toolResultContent("headline", [
+      { class: "input_domain", location: "files[0].path", message: "First.", retryable: false },
+      { class: "input_domain", location: "files[1].path", message: "Second.", retryable: false },
+    ]);
+
+    expect(content.text).toBe(
+      "headline\n\n- `files[0].path` — First.\n- `files[1].path` — Second.",
+    );
   });
 });
 

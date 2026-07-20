@@ -173,6 +173,38 @@ export interface ToolError {
   retryable: boolean;
 }
 
+/** One MCP `content` item — the human/LLM-readable text stream. */
+export type ContentText = { type: "text"; text: string };
+
+/**
+ * Compose a tool result's `content` text stream. On success (no `errors`) the
+ * summary is the whole stream. On a no-verdict error, each {@link ToolError}'s
+ * locator, message, and hint are appended as a Markdown list under the summary
+ * headline.
+ *
+ * Without this, the instructive detail every capability writes into
+ * `errors[]` (e.g. the hosted `{ path }` rejection naming the local workshop)
+ * would live *only* in `structuredContent.errors` — the machine contract — and
+ * never reach the agent, which reads `content`. The summary alone is a terse
+ * headline ("… request input is invalid."), leaving the agent to guess the
+ * cause. Surfacing message + hint here keeps the human/LLM-readable stream
+ * actually actionable (the workspace "format follows consumer" rule), while
+ * `structuredContent.errors` stays the untouched contract.
+ */
+export function toolResultContent(summary: string, errors?: ToolError[]): [ContentText] {
+  if (errors === undefined || errors.length === 0) {
+    return [{ type: "text", text: summary }];
+  }
+  const details = errors.map(formatToolError).join("\n");
+  return [{ type: "text", text: `${summary}\n\n${details}` }];
+}
+
+function formatToolError(error: ToolError): string {
+  const locator = error.location === undefined ? "" : `\`${error.location}\` — `;
+  const hint = error.hint === undefined ? "" : `\n  *Hint: ${error.hint}*`;
+  return `- ${locator}${error.message}${hint}`;
+}
+
 /** The env-derived API coordinates every capability context starts from. */
 export interface ApiConfig {
   baseUrl: string;

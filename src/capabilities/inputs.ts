@@ -14,6 +14,7 @@ import {
   filesInputSchema,
   resolveSubmittedFiles,
   toolErrorSchema,
+  toolResultContent,
   validateRequest,
 } from "./shared.js";
 import type {
@@ -197,7 +198,7 @@ function summaryForError(error: ToolError): string {
 export function inputsToolResult(result: InputsResult) {
   return {
     structuredContent: result.structuredContent,
-    content: [{ type: "text" as const, text: result.summary }],
+    content: toolResultContent(result.summary, result.structuredContent.errors),
     isError: result.structuredContent.status === "error",
   };
 }
