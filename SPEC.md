@@ -117,7 +117,7 @@ The public MCP input shape is:
 
 `include_graph` defaults to true. The graph rides the tool result's view-only `_meta` channel (`_meta.graph_spec`, consumed by the `run-graph` view), never `structuredContent`. When false, omit it entirely.
 
-The capability always permits pending signatures and always requests rendered markdown from local OSS `pipelex-api`.
+The capability always permits pending signatures and always requests rendered markdown from the Pipelex API.
 
 The structured output is:
 
