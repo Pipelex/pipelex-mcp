@@ -228,6 +228,25 @@ describe("toolResultContent", () => {
       "headline\n\n- `files[0].path` — First.\n- `files[1].path` — Second.",
     );
   });
+
+  it("collapses embedded newlines so a crafted message stays one Markdown bullet", () => {
+    // A path with an embedded blank line still ends in .mthds, so it clears the
+    // extension gate and reaches the content stream; without normalization the
+    // blank line would terminate the list item early.
+    const [content] = toolResultContent("headline", [
+      {
+        class: "input_domain",
+        location: "files[0].path",
+        message: "File not found: a\n\nb.mthds",
+        hint: "Check\nthe path.",
+        retryable: false,
+      },
+    ]);
+
+    expect(content.text).toBe(
+      "headline\n\n- `files[0].path` — File not found: a b.mthds\n  *Hint: Check the path.*",
+    );
+  });
 });
 
 describe("validateRequest", () => {

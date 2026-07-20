@@ -201,8 +201,20 @@ export function toolResultContent(summary: string, errors?: ToolError[]): [Conte
 
 function formatToolError(error: ToolError): string {
   const locator = error.location === undefined ? "" : `\`${error.location}\` — `;
-  const hint = error.hint === undefined ? "" : `\n  *Hint: ${error.hint}*`;
-  return `- ${locator}${error.message}${hint}`;
+  const message = asOneLine(error.message);
+  const hint = error.hint === undefined ? "" : `\n  *Hint: ${asOneLine(error.hint)}*`;
+  return `- ${locator}${message}${hint}`;
+}
+
+/**
+ * Collapse internal whitespace runs (including newlines) to single spaces so a
+ * message/hint stays a single Markdown list bullet. An embedded blank line would
+ * otherwise terminate the list item early — reachable via a crafted path (a
+ * filename may legally contain newlines and still end in `.mthds`) or SDK-thrown
+ * error text. The raw one-liners we normally emit are unaffected.
+ */
+function asOneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 /** The env-derived API coordinates every capability context starts from. */
