@@ -16,7 +16,31 @@ The cost compounds in exactly the flows SPEC.md promotes:
 
 Beyond latency there is a correctness risk: an LLM copying content by hand can silently truncate or "helpfully fix" it, so what gets validated is not guaranteed byte-identical to what the user has on disk.
 
-Caveat still open: we have not measured the split. A direct `curl` of `POST /v1/validate` with a representative bundle, compared against the wall-clock of the same call through a host, would confirm that argument emission dominates (expected) versus API-side dry-run/render time or Alpic cold starts (possible contributors).
+**Caveat resolved — measured 2026-07-20** (local workshop shell built from `feature/Local-server`, against `api-dev.pipelex.com`; latency figures are min/median over repeated runs, not one-shot). The split behaves as diagnosed, with one important qualification: API-side dry-run time is *not* a negligible constant for complex bundles.
+
+Direct `curl POST /v1/validate` — the API round-trip alone (dry-run + graph build + Markdown render + network), the term paid on **both** deployments:
+
+| bundle | raw | JSON-args bytes (what the LLM must emit) | verdict | curl round-trip |
+|---|---|---|---|---|
+| `hello_world` | 0.3 KB | 0.36 KB | valid | ~0.7 s |
+| `summarize` | 2.7 KB | 3.0 KB | valid | ~0.8 s |
+| `advisory_board` | 17 KB | 17.7 KB | 200 | ~1.6 s |
+| `validate_expense` | 24 KB | 25 KB | valid | ~6 s |
+| `slide_designer` (8-pipe method) | 14 KB | 15 KB | valid, runnable | **~10 s** |
+| `gen_expense` | 30 KB | 31 KB | 500 (deterministic dev fault) | ~1.7 s |
+
+Local workshop round-trip (persistent connection, so it includes the same API call), submitting the *same* bundle two ways:
+
+| bundle | `{ content }` | `{ path }` |
+|---|---|---|
+| `hello_world` | med 387 ms | med 381 ms |
+| `summarize` | med 647 ms | med 565 ms |
+
+What the measurements establish:
+
+- **`{ content }` ≈ `{ path }` at the server.** The workshop's disk read costs nothing measurable over inline content, and both track the direct-`curl` API time (in fact a touch faster — the SDK client reuses one keep-alive connection where each `curl` re-does TLS). So *at the server* a path and its contents are the same request. Everything that makes the hosted path slow is therefore **client-side argument emission**, exactly the diagnosis.
+- **Emission is the dominant, size-scaling term.** The bytes the LLM must emit as tool-call args grow ~100× across this set (0.36 KB → 31 KB); at typical tool-arg decode rates (~50–100 tok/s, slower for `\n`-heavy JSON-escaped content) that is ~1–2 s for `hello_world` but tens of seconds to minutes for the large bundles — re-paid every repair-loop iteration and every tool in the validate→inputs→run chain (this is the mechanism behind the "over ten minutes" full-build observation). The workshop's `{ path }` submission emits a ~20-byte path string regardless of bundle size, so its client-side cost is near-constant and byte-accurate.
+- **Qualification: API-side dry-run time is a real secondary contributor, not a flat ~1 s.** A small bundle's round-trip is sub-second, but a complex valid bundle that actually dry-runs (`slide_designer`, 8 pipes) costs ~10 s server-side. The workshop cannot shrink this term — it is the same server work on both deployments — but it is the *smaller* term, and the dominant emission term is the one the local shell eliminates. (`gen_expense` 500s deterministically on dev — a server fault, not a verdict — so its ~1.7 s is a fast-fail path, not a dry-run.)
 
 ## 2. The key insight: transport decides filesystem access, not the rule
 
