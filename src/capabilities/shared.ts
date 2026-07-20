@@ -11,23 +11,137 @@ import { z } from "zod";
 export const DEFAULT_API_URL = "https://api.pipelex.com";
 
 /**
- * The submitted-files shape every capability shares on its MCP input. The API
- * routes spell the provenance label differently (`uri` on `/v1/validate`,
- * `source` on the `/v1/build/*` envelope); the MCP surface always says `uri`
- * and each capability adapts at its own boundary.
+ * The submitted-files shape every capability shares on its MCP input. Each
+ * item is one of two arms: inline contents (`{ content, uri? }`) or a file
+ * path (`{ path }`, resolved from disk by the local workshop deployment only —
+ * the hosted console rejects it instructively at request validation). The
+ * arms are deliberately non-strict with first-match semantics: a pathological
+ * item carrying both keys parses as the content arm and `path` is ignored.
+ *
+ * The API routes spell the provenance label differently (`uri` on
+ * `/v1/validate`, `source` on the `/v1/build/*` envelope); the MCP surface
+ * always says `uri` and each capability adapts at its own boundary.
  */
 export const filesInputSchema = z
   .array(
-    z.object({
-      content: z.string().describe("The full .mthds file contents."),
-      uri: z.string().nullable().optional().describe("Optional provenance URI for diagnostics."),
-    }),
+    z.union([
+      z.object({
+        content: z.string().describe("The full .mthds file contents."),
+        uri: z.string().nullable().optional().describe("Optional provenance URI for diagnostics."),
+      }),
+      z.object({
+        path: z
+          .string()
+          .describe(
+            "Filesystem path to a .mthds file, resolved by the local workshop server relative to its working directory. The hosted deployment cannot read files and rejects this form.",
+          ),
+      }),
+    ]),
   )
-  .describe("One or more submitted MTHDS files forming the method closure.");
+  .describe(
+    "One or more submitted MTHDS files forming the method closure. Each item is either inline contents ({ content, uri? }) or a file path ({ path }, local workshop only).",
+  );
 
+/** A submitted file resolved to its contents — what the capabilities consume. */
 export interface SubmittedFile {
   content: string;
   uri?: string | null;
+}
+
+/** The path arm of the submitted-files union. */
+export interface SubmittedFilePath {
+  path: string;
+}
+
+/** What the MCP surface accepts per files item — see {@link filesInputSchema}. */
+export type SubmittedFileInput = SubmittedFile | SubmittedFilePath;
+
+/**
+ * Outcome of resolving one `{ path }` item. Resolvers report failures as
+ * values (never throw): every failure is an `input_domain` no-verdict at
+ * `files[i].path`, so the resolver supplies only the message and hint — the
+ * class, locator, and retryable verdict are fixed by
+ * {@link resolveSubmittedFiles}.
+ */
+export type FileResolution =
+  | { ok: true; content: string }
+  | { ok: false; message: string; hint: string };
+
+/**
+ * The seam the shells fill: the local workshop provides a filesystem-backed
+ * resolver; the hosted console provides none, which turns every `{ path }`
+ * item into an instructive rejection.
+ */
+export interface FileResolver {
+  resolve(path: string): Promise<FileResolution>;
+}
+
+export interface ResolvedFiles {
+  files: SubmittedFile[];
+  errors: ToolError[];
+}
+
+/**
+ * Resolve the submitted-files union into plain `{ content, uri? }` items,
+ * ahead of {@link validateRequest}. `{ path }` items go through the resolver
+ * when one is provided; a resolved item carries `uri` = the submitted path,
+ * so diagnostics locate to files the agent can open. Without a resolver a
+ * `{ path }` item is rejected instructively — the hosted deployment cannot
+ * read files, and the rejection names the local workshop that can. `files` is
+ * only meaningful when `errors` is empty.
+ */
+export async function resolveSubmittedFiles(
+  files: SubmittedFileInput[],
+  resolver?: FileResolver,
+): Promise<ResolvedFiles> {
+  const resolved: SubmittedFile[] = [];
+  const errors: ToolError[] = [];
+
+  for (const [index, file] of files.entries()) {
+    // First-match union semantics: a pathological { content, path } item is
+    // the content arm, and its path is ignored.
+    if ("content" in file) {
+      resolved.push(file);
+      continue;
+    }
+
+    if (file.path.trim() === "") {
+      errors.push({
+        class: "input_domain",
+        location: `files[${index}].path`,
+        message: "File path must not be empty.",
+        hint: "Submit the path of a .mthds file, or inline the contents as { content, uri? }.",
+        retryable: false,
+      });
+      continue;
+    }
+
+    if (resolver === undefined) {
+      errors.push({
+        class: "input_domain",
+        location: `files[${index}].path`,
+        message: "This deployment cannot read files from disk; submit the file contents instead.",
+        hint: "Resubmit this item as { content, uri? } with the file contents inline, or use the local workshop server (npx @pipelex/mcp), which resolves paths.",
+        retryable: false,
+      });
+      continue;
+    }
+
+    const resolution = await resolver.resolve(file.path);
+    if (resolution.ok) {
+      resolved.push({ content: resolution.content, uri: file.path });
+    } else {
+      errors.push({
+        class: "input_domain",
+        location: `files[${index}].path`,
+        message: resolution.message,
+        hint: resolution.hint,
+        retryable: false,
+      });
+    }
+  }
+
+  return { files: resolved, errors };
 }
 
 export const errorClassSchema = z.enum(["input_domain", "config", "runtime"]);
@@ -57,6 +171,50 @@ export interface ToolError {
    * `PIPELEX_BASE_URL`, yet only the former is worth retrying.
    */
   retryable: boolean;
+}
+
+/** One MCP `content` item — the human/LLM-readable text stream. */
+export type ContentText = { type: "text"; text: string };
+
+/**
+ * Compose a tool result's `content` text stream. On success (no `errors`) the
+ * summary is the whole stream. On a no-verdict error, each {@link ToolError}'s
+ * locator, message, and hint are appended as a Markdown list under the summary
+ * headline.
+ *
+ * Without this, the instructive detail every capability writes into
+ * `errors[]` (e.g. the hosted `{ path }` rejection naming the local workshop)
+ * would live *only* in `structuredContent.errors` — the machine contract — and
+ * never reach the agent, which reads `content`. The summary alone is a terse
+ * headline ("… request input is invalid."), leaving the agent to guess the
+ * cause. Surfacing message + hint here keeps the human/LLM-readable stream
+ * actually actionable (the workspace "format follows consumer" rule), while
+ * `structuredContent.errors` stays the untouched contract.
+ */
+export function toolResultContent(summary: string, errors?: ToolError[]): [ContentText] {
+  if (errors === undefined || errors.length === 0) {
+    return [{ type: "text", text: summary }];
+  }
+  const details = errors.map(formatToolError).join("\n");
+  return [{ type: "text", text: `${summary}\n\n${details}` }];
+}
+
+function formatToolError(error: ToolError): string {
+  const locator = error.location === undefined ? "" : `\`${error.location}\` — `;
+  const message = asOneLine(error.message);
+  const hint = error.hint === undefined ? "" : `\n  *Hint: ${asOneLine(error.hint)}*`;
+  return `- ${locator}${message}${hint}`;
+}
+
+/**
+ * Collapse internal whitespace runs (including newlines) to single spaces so a
+ * message/hint stays a single Markdown list bullet. An embedded blank line would
+ * otherwise terminate the list item early — reachable via a crafted path (a
+ * filename may legally contain newlines and still end in `.mthds`) or SDK-thrown
+ * error text. The raw one-liners we normally emit are unaffected.
+ */
+function asOneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 /** The env-derived API coordinates every capability context starts from. */

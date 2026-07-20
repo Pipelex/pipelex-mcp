@@ -13,11 +13,20 @@ import {
   buildApiConfig,
   classifyError,
   filesInputSchema,
+  resolveSubmittedFiles,
   toolErrorSchema,
+  toolResultContent,
   validateRequest,
   validateRunIdRequest,
 } from "./shared.js";
-import type { ClassifyErrorOptions, ErrorClass, SubmittedFile, ToolError } from "./shared.js";
+import type {
+  ClassifyErrorOptions,
+  ErrorClass,
+  FileResolver,
+  SubmittedFile,
+  SubmittedFileInput,
+  ToolError,
+} from "./shared.js";
 
 /**
  * The hosted run lifecycle statuses. The `Record<RunStatus, true>` shape ties
@@ -159,6 +168,13 @@ const runResultsStructuredContentSchema = z.object({
 export const mthdsRunResultsOutputSchema = runResultsStructuredContentSchema;
 
 export interface MthdsRunInput {
+  files: SubmittedFileInput[];
+  pipe_code?: string;
+  inputs?: Record<string, unknown>;
+}
+
+/** The run request after `{ path }` resolution — what the checks and the API call consume. */
+interface ResolvedRunRequest {
   files: SubmittedFile[];
   pipe_code?: string;
   inputs?: Record<string, unknown>;
@@ -221,12 +237,15 @@ export interface RunResultsResult {
   /**
    * The executed method graph, for the Skybridge views only. It rides the tool
    * result's `_meta.graph_spec` (never `structuredContent`), so the model never
-   * pays its tokens. Populated only on a completed result that carries one.
+   * pays its tokens. Populated only on a completed result that carries one
+   * and the invoking shell has views.
    */
   graphSpec?: unknown;
   /**
-   * The full, unbounded main output, for the views only (rides
+   * The full, unbounded main output on raw MCP response metadata (rides
    * `_meta.main_stuff`). `structuredContent.main_stuff` is the bounded copy.
+   * It remains on the raw MCP result even when the invoking shell has no views,
+   * so a programmatic consumer never loses the full result.
    */
   mainStuff?: unknown;
 }
@@ -242,6 +261,10 @@ export interface RunContext {
   baseUrl: string;
   apiKey?: string;
   client?: RunClient;
+  /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
+  resolver?: FileResolver;
+  /** Whether this shell can render run-follow and its view-only result payloads. */
+  viewsAvailable?: boolean;
 }
 
 export function buildRunContext(env = process.env): RunContext {
@@ -280,8 +303,8 @@ export const RUN_RESULTS_ERROR_OPTIONS: ClassifyErrorOptions = {
   notFound: { location: "run_id", hint: UNKNOWN_RUN_HINT },
 };
 
-/** Request-shape checks on the mthds_run input. */
-export function validateRunRequest(input: MthdsRunInput): ToolError[] {
+/** Request-shape checks on the mthds_run input, after `{ path }` resolution. */
+export function validateRunRequest(input: ResolvedRunRequest): ToolError[] {
   const errors = validateRequest(input.files);
 
   if (input.pipe_code !== undefined && input.pipe_code.trim() === "") {
@@ -426,11 +449,10 @@ function narrowString(value: unknown): string | undefined {
 /**
  * Project a start ack. `state` and `created_at` are hosted extension fields on
  * the protocol's `RunResultStart` (typed `unknown`), so they are narrowed
- * defensively rather than trusted. A produced ack always advertises the
- * `live_run_status` view — the registered run-follow card that follows the
- * run without any model turn.
+ * defensively rather than trusted. A produced ack advertises the
+ * `live_run_status` view only when the invoking shell registered run-follow.
  */
-export function startResult(ack: RunResultStart): RunStartResult {
+export function startResult(ack: RunResultStart, viewsAvailable = true): RunStartResult {
   const runStatus = narrowRunStatus(ack.state);
   const createdAt = narrowString(ack.created_at);
 
@@ -439,18 +461,22 @@ export function startResult(ack: RunResultStart): RunStartResult {
     run_id: ack.pipeline_run_id,
     ...(runStatus === undefined ? {} : { run_status: runStatus }),
     ...(createdAt === undefined ? {} : { created_at: createdAt }),
-    available_view_specs: ["live_run_status"],
+    available_view_specs: viewsAvailable ? ["live_run_status"] : [],
   };
 
-  const summary = [
+  const summaryParts = [
     "# Run started",
     `The run was accepted; its durable id is \`${ack.pipeline_run_id}\`.`,
     "Check on it with `mthds_run_status` (one cheap read — honor its retry hint instead of polling in a tight loop), and fetch the outcome with `mthds_run_results` once it is terminal.",
-    "## Views",
-    "A live status card follows this run on its own (polling, then the results); the user is already watching it — no need to poll on their behalf.",
-  ].join("\n\n");
+  ];
+  if (viewsAvailable) {
+    summaryParts.push(
+      "## Views",
+      "A live status card follows this run on its own (polling, then the results); the user is already watching it — no need to poll on their behalf.",
+    );
+  }
 
-  return { structuredContent, summary };
+  return { structuredContent, summary: summaryParts.join("\n\n") };
 }
 
 /** Project a self-healing status read. A terminal non-COMPLETED status is a produced verdict. */
@@ -502,12 +528,12 @@ function statusSummary(read: RunRead, isTerminal: boolean): string {
  * Project a one-shot result lookup. All three arms are produced verdicts
  * (`status: "ok"`): "no result yet" and "it failed" are answers, not errors.
  */
-export function resultsResult(state: RunResultState): RunResultsResult {
+export function resultsResult(state: RunResultState, viewsAvailable = true): RunResultsResult {
   switch (state.state) {
     case "running":
       return runningResult(state.pipeline_run_id, state.retry_after_seconds);
     case "completed":
-      return completedResult(state.pipeline_run_id, state.result);
+      return completedResult(state.pipeline_run_id, state.result, viewsAvailable);
     case "failed":
       return failedResult(state.pipeline_run_id, state.status, state.message);
   }
@@ -527,7 +553,11 @@ function runningResult(runId: string, retryAfterSeconds: number | null): RunResu
   };
 }
 
-function completedResult(runId: string, result: RunResults): RunResultsResult {
+function completedResult(
+  runId: string,
+  result: RunResults,
+  viewsAvailable: boolean,
+): RunResultsResult {
   // The SDK guarantees a non-null main_stuff on a completed run (it throws
   // MissingMainStuffError otherwise); reaching here without one is a contract
   // violation the caller surfaces as a runtime no-verdict. A falsy-but-present
@@ -537,7 +567,7 @@ function completedResult(runId: string, result: RunResults): RunResultsResult {
   }
 
   const { value: bounded, truncated } = boundMainStuff(result.main_stuff);
-  const graphSpec = result.graph_spec ?? undefined;
+  const graphSpec = viewsAvailable ? (result.graph_spec ?? undefined) : undefined;
 
   const structuredContent: RunResultsStructuredContent = {
     status: "ok",
@@ -550,7 +580,7 @@ function completedResult(runId: string, result: RunResults): RunResultsResult {
 
   return {
     structuredContent,
-    summary: completedSummary(runId, bounded, truncated),
+    summary: completedSummary(runId, bounded, truncated, viewsAvailable),
     graphSpec,
     mainStuff: result.main_stuff,
   };
@@ -560,7 +590,12 @@ function completedResult(runId: string, result: RunResults): RunResultsResult {
 // mthds_inputs_template pattern): it is the payload the model must read, and some hosts
 // read prose more reliably than structured fields. Text outputs get a plain
 // fence; everything else pretty-printed JSON.
-function completedSummary(runId: string, bounded: unknown, truncated: boolean): string {
+function completedSummary(
+  runId: string,
+  bounded: unknown,
+  truncated: boolean,
+  viewsAvailable: boolean,
+): string {
   const fence =
     typeof bounded === "string"
       ? "```\n" + bounded + "\n```"
@@ -569,7 +604,9 @@ function completedSummary(runId: string, bounded: unknown, truncated: boolean): 
   const parts = ["# Run results", `Run \`${runId}\` completed. Main output:`, fence];
   if (truncated) {
     parts.push(
-      "The output shown above was truncated to fit the response; the full output is available to views.",
+      viewsAvailable
+        ? "The output shown above was truncated to fit the response; the full output is available to views."
+        : "The output shown above was truncated to fit the response.",
     );
   }
   return parts.join("\n\n");
@@ -610,14 +647,20 @@ export async function startMthdsRun(
   input: MthdsRunInput,
   context: RunContext = buildRunContext(),
 ): Promise<RunStartResult> {
-  const inputErrors = validateRunRequest(input);
+  const resolution = await resolveSubmittedFiles(input.files, context.resolver);
+  if (resolution.errors.length > 0) {
+    return startErrorResult("Run was not started: request input is invalid.", resolution.errors);
+  }
+
+  const request: ResolvedRunRequest = { ...input, files: resolution.files };
+  const inputErrors = validateRunRequest(request);
   if (inputErrors.length > 0) {
     return startErrorResult("Run was not started: request input is invalid.", inputErrors);
   }
 
   try {
-    const ack = await runClient(context).start(toStartOptions(input));
-    return startResult(ack);
+    const ack = await runClient(context).start(toStartOptions(request));
+    return startResult(ack, context.viewsAvailable !== false);
   } catch (err) {
     const error = classifyError(err, RUN_START_ERROR_OPTIONS);
     return startErrorResult(startSummaryForError(error), [error]);
@@ -665,7 +708,7 @@ export async function getMthdsRunResults(
   // API. A malformed report (a completed result missing main_stuff) is a
   // reachable contract violation, surfaced as a runtime no-verdict error.
   try {
-    return resultsResult(state);
+    return resultsResult(state, context.viewsAvailable !== false);
   } catch (err) {
     return resultsErrorResult(
       "Run results produced no verdict: the Pipelex API returned a malformed report.",
@@ -684,7 +727,7 @@ export async function getMthdsRunResults(
 
 // `/v1/start` takes no source labels — the MCP surface's `uri` feeds only our
 // own request-shape errors, so only the contents cross the wire.
-function toStartOptions(input: MthdsRunInput): StartOptions {
+function toStartOptions(input: ResolvedRunRequest): StartOptions {
   return {
     mthds_contents: input.files.map((file) => file.content),
     ...(input.pipe_code === undefined ? {} : { pipe_code: input.pipe_code }),
@@ -748,7 +791,7 @@ function resultsErrorResult(summary: string, errors: ToolError[]): RunResultsRes
 export function runToolResult(result: RunStartResult) {
   return {
     structuredContent: result.structuredContent,
-    content: [{ type: "text" as const, text: result.summary }],
+    content: toolResultContent(result.summary, result.structuredContent.errors),
     isError: result.structuredContent.status === "error",
   };
 }
@@ -756,7 +799,7 @@ export function runToolResult(result: RunStartResult) {
 export function runStatusToolResult(result: RunStatusResult) {
   return {
     structuredContent: result.structuredContent,
-    content: [{ type: "text" as const, text: result.summary }],
+    content: toolResultContent(result.summary, result.structuredContent.errors),
     isError: result.structuredContent.status === "error",
   };
 }
@@ -764,11 +807,13 @@ export function runStatusToolResult(result: RunStatusResult) {
 export function runResultsToolResult(result: RunResultsResult) {
   return {
     structuredContent: result.structuredContent,
-    content: [{ type: "text" as const, text: result.summary }],
+    content: toolResultContent(result.summary, result.structuredContent.errors),
     isError: result.structuredContent.status === "error",
-    // View-only channel (the mthds_validate convention): the executed graph
-    // and the FULL unbounded main output ride `_meta`, never structuredContent,
-    // so the model never pays their tokens. Keys mirror the API field names.
+    // Response-metadata channel (the mthds_validate convention): the executed
+    // graph and the FULL unbounded main output ride `_meta`, never
+    // structuredContent, so the model never pays their tokens. Views consume
+    // it on the hosted shell; raw MCP consumers can still retain it on the
+    // tools-only local shell. Keys mirror the API field names.
     _meta: { graph_spec: result.graphSpec, main_stuff: result.mainStuff },
   };
 }

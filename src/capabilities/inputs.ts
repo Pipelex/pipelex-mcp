@@ -12,10 +12,18 @@ import {
   buildApiConfig,
   classifyError,
   filesInputSchema,
+  resolveSubmittedFiles,
   toolErrorSchema,
+  toolResultContent,
   validateRequest,
 } from "./shared.js";
-import type { ClassifyErrorOptions, SubmittedFile, ToolError } from "./shared.js";
+import type {
+  ClassifyErrorOptions,
+  FileResolver,
+  SubmittedFile,
+  SubmittedFileInput,
+  ToolError,
+} from "./shared.js";
 
 const inputsTemplateFormatSchema = z.enum(["json", "toml"]);
 
@@ -66,6 +74,14 @@ const inputsStructuredContentSchema = z.object({
 export const mthdsInputsOutputSchema = inputsStructuredContentSchema;
 
 export interface MthdsInputsInput {
+  files: SubmittedFileInput[];
+  pipe_ref?: string;
+  explicit?: boolean;
+  format?: InputsTemplateFormat;
+}
+
+/** The inputs request after `{ path }` resolution — what the checks and the API call consume. */
+interface ResolvedInputsRequest {
   files: SubmittedFile[];
   pipe_ref?: string;
   explicit?: boolean;
@@ -97,6 +113,8 @@ export interface InputsContext {
   baseUrl: string;
   apiKey?: string;
   client?: InputsClient;
+  /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
+  resolver?: FileResolver;
 }
 
 export function buildInputsContext(env = process.env): InputsContext {
@@ -118,7 +136,13 @@ export async function buildMthdsInputs(
   input: MthdsInputsInput,
   context: InputsContext = buildInputsContext(),
 ): Promise<InputsResult> {
-  const inputErrors = validateInputsRequest(input);
+  const resolution = await resolveSubmittedFiles(input.files, context.resolver);
+  if (resolution.errors.length > 0) {
+    return errorResult("Inputs template was not run: request input is invalid.", resolution.errors);
+  }
+
+  const request: ResolvedInputsRequest = { ...input, files: resolution.files };
+  const inputErrors = validateInputsRequest(request);
   if (inputErrors.length > 0) {
     return errorResult("Inputs template was not run: request input is invalid.", inputErrors);
   }
@@ -131,7 +155,7 @@ export async function buildMthdsInputs(
         baseUrl: context.baseUrl,
         apiKey: context.apiKey,
       });
-    report = await client.buildInputs(toBuildInputsRequest(input));
+    report = await client.buildInputs(toBuildInputsRequest(request));
   } catch (err) {
     const error = classifyError(err, INPUTS_ERROR_OPTIONS);
     return errorResult(summaryForError(error), [error]);
@@ -174,12 +198,12 @@ function summaryForError(error: ToolError): string {
 export function inputsToolResult(result: InputsResult) {
   return {
     structuredContent: result.structuredContent,
-    content: [{ type: "text" as const, text: result.summary }],
+    content: toolResultContent(result.summary, result.structuredContent.errors),
     isError: result.structuredContent.status === "error",
   };
 }
 
-export function validateInputsRequest(input: MthdsInputsInput): ToolError[] {
+export function validateInputsRequest(input: ResolvedInputsRequest): ToolError[] {
   const errors = validateRequest(input.files);
 
   if (input.pipe_ref !== undefined && input.pipe_ref.trim() === "") {
@@ -263,7 +287,7 @@ function invalidSummary(message: string, validationErrors: ValidationErrorItem[]
   ].join("\n\n");
 }
 
-function toBuildInputsRequest(input: MthdsInputsInput): BuildInputsRequest {
+function toBuildInputsRequest(input: ResolvedInputsRequest): BuildInputsRequest {
   return {
     files: toMthdsFileItems(input.files),
     ...(input.pipe_ref === undefined ? {} : { pipe_ref: input.pipe_ref }),

@@ -12,10 +12,18 @@ import {
   buildApiConfig,
   classifyError,
   filesInputSchema,
+  resolveSubmittedFiles,
   toolErrorSchema,
+  toolResultContent,
   validateRequest,
 } from "./shared.js";
-import type { ClassifyErrorOptions, SubmittedFile, ToolError } from "./shared.js";
+import type {
+  ClassifyErrorOptions,
+  FileResolver,
+  SubmittedFile,
+  SubmittedFileInput,
+  ToolError,
+} from "./shared.js";
 
 export const mthdsValidateInputSchema = {
   files: filesInputSchema,
@@ -51,7 +59,7 @@ const validationStructuredContentSchema = z.object({
 export const mthdsValidateOutputSchema = validationStructuredContentSchema;
 
 export interface MthdsValidateInput {
-  files: SubmittedFile[];
+  files: SubmittedFileInput[];
   include_graph?: boolean;
 }
 
@@ -76,7 +84,7 @@ export interface ValidationResult {
    * the agent acts on the verdict in `structuredContent` and the Markdown
    * summary, never the raw graph. Opaque (`unknown`) here; the view casts it to
    * `@pipelex/mthds-ui`'s `GraphSpec`. Populated only on a valid verdict when
-   * `include_graph !== false`.
+   * `include_graph !== false` and the invoking shell has a registered view.
    */
   graphSpec?: unknown;
 }
@@ -92,6 +100,10 @@ export interface ValidationContext {
   baseUrl: string;
   apiKey?: string;
   client?: ValidationClient;
+  /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
+  resolver?: FileResolver;
+  /** Whether this shell can render the graph carried on the view-only channel. */
+  viewsAvailable?: boolean;
 }
 
 export function buildValidationContext(env = process.env): ValidationContext {
@@ -106,7 +118,13 @@ export async function validateMthds(
   input: MthdsValidateInput,
   context: ValidationContext = buildValidationContext(),
 ): Promise<ValidationResult> {
-  const inputErrors = validateRequest(input.files);
+  const resolution = await resolveSubmittedFiles(input.files, context.resolver);
+  if (resolution.errors.length > 0) {
+    return errorResult("Validation was not run: request input is invalid.", resolution.errors);
+  }
+
+  const files = resolution.files;
+  const inputErrors = validateRequest(files);
   if (inputErrors.length > 0) {
     return errorResult("Validation was not run: request input is invalid.", inputErrors);
   }
@@ -119,7 +137,7 @@ export async function validateMthds(
         baseUrl: context.baseUrl,
         apiKey: context.apiKey,
       });
-    report = await client.validateFiles(toMthdsFiles(input.files), {
+    report = await client.validateFiles(toMthdsFiles(files), {
       allowSignatures: true,
       render: ["markdown"],
     });
@@ -132,7 +150,11 @@ export async function validateMthds(
   // API. A malformed report (e.g. missing rendered_markdown) is a reachable
   // contract violation, surfaced as a runtime no-verdict error.
   try {
-    return validationResult(report, input.include_graph !== false);
+    return validationResult(
+      report,
+      input.include_graph !== false,
+      context.viewsAvailable !== false,
+    );
   } catch (err) {
     return errorResult(
       "Validation produced no verdict: the Pipelex API returned a malformed report.",
@@ -165,7 +187,7 @@ function summaryForError(error: ToolError): string {
 export function toolResult(result: ValidationResult) {
   return {
     structuredContent: result.structuredContent,
-    content: [{ type: "text" as const, text: result.summary }],
+    content: toolResultContent(result.summary, result.structuredContent.errors),
     isError: result.structuredContent.status === "error",
     // View-only channel: the graph rides `_meta`, never `structuredContent`, so
     // the model never pays its tokens. `_meta` still travels on the raw MCP
@@ -179,6 +201,7 @@ export function toolResult(result: ValidationResult) {
 export function validationResult(
   report: PipelexValidationResult,
   includeGraph: boolean,
+  viewsAvailable = true,
 ): ValidationResult {
   const structuredContent: ValidationStructuredContent = {
     status: "ok",
@@ -191,7 +214,7 @@ export function validationResult(
   let graphSpec: unknown;
   if (report.is_valid) {
     const validReport = report as PipelexValidationReport;
-    if (includeGraph) {
+    if (includeGraph && viewsAvailable) {
       graphSpec = validReport.graph_spec;
     }
   } else {

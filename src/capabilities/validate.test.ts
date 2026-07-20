@@ -9,6 +9,7 @@ import type {
 } from "@pipelex/sdk";
 
 import { DEFAULT_API_URL } from "./shared.js";
+import type { FileResolver } from "./shared.js";
 import { toolResult, validateMthds, validationResult } from "./validate.js";
 
 const validReport: PipelexValidationReport = {
@@ -74,6 +75,14 @@ describe("validationResult", () => {
     // No graph produced → no view advertised.
     expect(result.structuredContent.available_view_specs).toEqual([]);
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
+  });
+
+  it("does not advertise or emit a graph when the invoking shell has no views", () => {
+    const result = validationResult(validReport, true, false);
+
+    expect(result.structuredContent.available_view_specs).toEqual([]);
+    expect(result.graphSpec).toBeUndefined();
+    expect(result.summary).toBe("# Valid");
   });
 
   it("projects pending signatures as valid but not runnable", () => {
@@ -261,5 +270,102 @@ describe("validateMthds", () => {
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("config");
     expect(result.summary).toMatch(/misconfigured/i);
+  });
+});
+
+describe("validateMthds path submissions", () => {
+  const resolver: FileResolver = {
+    async resolve(path) {
+      if (path === "methods/bundle.mthds") {
+        return { ok: true, content: 'domain = "demo"' };
+      }
+      return { ok: false, message: `File not found: ${path}`, hint: "Check the path." };
+    },
+  };
+
+  it("resolves { path } items through the context resolver, with the path as uri", async () => {
+    let capturedFiles: MthdsFile[] | undefined;
+
+    const result = await validateMthds(
+      { files: [{ path: "methods/bundle.mthds" }] },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver,
+        client: {
+          async validateFiles(files) {
+            capturedFiles = files;
+            return validReport;
+          },
+        },
+      },
+    );
+
+    expect(capturedFiles).toEqual([{ content: 'domain = "demo"', uri: "methods/bundle.mthds" }]);
+    expect(result.structuredContent.status).toBe("ok");
+  });
+
+  it("rejects { path } items instructively without a resolver (hosted)", async () => {
+    let called = false;
+
+    const result = await validateMthds(
+      { files: [{ path: "methods/bundle.mthds" }] },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          async validateFiles() {
+            called = true;
+            return validReport;
+          },
+        },
+      },
+    );
+
+    expect(called).toBe(false);
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("files[0].path");
+    expect(result.structuredContent.errors?.[0]?.hint).toContain("npx @pipelex/mcp");
+    expect(result.summary).toBe("Validation was not run: request input is invalid.");
+  });
+
+  it("surfaces the hosted rejection message and hint into the content stream", async () => {
+    // The desktop-host scenario: a { path } submission to the hosted console.
+    // The instructive detail must reach the agent-facing `content`, not sit
+    // only in structuredContent.errors where the agent had to guess from it.
+    const result = await validateMthds(
+      { files: [{ path: "methods/bundle.mthds" }] },
+      { baseUrl: DEFAULT_API_URL },
+    );
+
+    const { content } = toolResult(result);
+    const text = content[0]?.text ?? "";
+
+    expect(text).toContain("Validation was not run: request input is invalid.");
+    expect(text).toContain("`files[0].path`");
+    expect(text).toContain("This deployment cannot read files from disk");
+    expect(text).toContain("npx @pipelex/mcp");
+  });
+
+  it("does not call the client when resolution fails", async () => {
+    let called = false;
+
+    const result = await validateMthds(
+      { files: [{ path: "missing.mthds" }] },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver,
+        client: {
+          async validateFiles() {
+            called = true;
+            return validReport;
+          },
+        },
+      },
+    );
+
+    expect(called).toBe(false);
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("files[0].path");
+    expect(result.structuredContent.errors?.[0]?.message).toBe("File not found: missing.mthds");
   });
 });

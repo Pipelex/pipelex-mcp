@@ -301,3 +301,57 @@ describe("buildMthdsInputs", () => {
     expect(result.summary).not.toMatch(/unreachable/i);
   });
 });
+
+describe("buildMthdsInputs path submissions", () => {
+  it("resolves { path } items through the context resolver, with the path as source", async () => {
+    let capturedRequest: BuildInputsRequest | undefined;
+
+    const result = await buildMthdsInputs(
+      { files: [{ path: "methods/bundle.mthds" }] },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: {
+          async resolve(path) {
+            return { ok: true, content: 'domain = "demo"' + `\n# ${path}` };
+          },
+        },
+        client: {
+          async buildInputs(request) {
+            capturedRequest = request;
+            return validJsonReport;
+          },
+        },
+      },
+    );
+
+    // The resolved uri (= the submitted path) crosses into the build
+    // envelope's `source` label, so diagnostics locate to the real file.
+    expect(capturedRequest?.files).toEqual([
+      { content: 'domain = "demo"\n# methods/bundle.mthds', source: "methods/bundle.mthds" },
+    ]);
+    expect(result.structuredContent.status).toBe("ok");
+  });
+
+  it("rejects { path } items instructively without a resolver (hosted)", async () => {
+    let called = false;
+
+    const result = await buildMthdsInputs(
+      { files: [{ path: "methods/bundle.mthds" }] },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          async buildInputs() {
+            called = true;
+            return validJsonReport;
+          },
+        },
+      },
+    );
+
+    expect(called).toBe(false);
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("files[0].path");
+    expect(result.summary).toBe("Inputs template was not run: request input is invalid.");
+  });
+});

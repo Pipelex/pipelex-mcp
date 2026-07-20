@@ -32,8 +32,8 @@ Core actions:
 
 **Validation flow**:
 
-1. The assistant submits `files: [{ content, uri? }]` to `mthds_validate`.
-2. The MCP server validates request shape and provenance.
+1. The assistant submits `files` to `mthds_validate` — inline `{ content, uri? }` items, or `{ path }` items on the local workshop (see Deployments).
+2. The MCP server validates request shape and provenance (the workshop resolves `{ path }` items from disk first; the console rejects them instructively).
 3. The capability calls the Pipelex API (`POST /v1/validate`) through `@pipelex/sdk`'s `PipelexApiClient`.
 4. The result is projected into stable MCP `structuredContent` plus a text summary.
 
@@ -46,8 +46,8 @@ Core actions:
 
 **Inputs template flow**:
 
-1. The assistant submits `files: [{ content, uri? }]` (and optionally `pipe_ref`, `explicit`, `format`) to `mthds_inputs_template`.
-2. The MCP server validates request shape and provenance.
+1. The assistant submits `files` (and optionally `pipe_ref`, `explicit`, `format`) to `mthds_inputs_template` — the same shared shape, `{ path }` items included on the workshop.
+2. The MCP server validates request shape and provenance (same per-deployment `{ path }` behavior as validation).
 3. The capability calls the Pipelex API (`POST /v1/build/inputs`) through `@pipelex/sdk`'s `PipelexApiClient`, adapting the `uri` provenance label to the build envelope's `source` field.
 4. The result is projected into stable MCP `structuredContent` plus a text summary that includes the template itself in a fenced code block.
 
@@ -62,11 +62,37 @@ The richer error-grouping validation view (diagnostics grouped by class, clickab
 ## Product Context
 
 - **Existing products**: Pipelex, MTHDS, `@pipelex/sdk`, and the Pipelex API (local OSS `pipelex-api` during development).
-- **App shell**: `pipelex-mcp`, a Skybridge MCP app scaffold.
+- **App shell**: `pipelex-mcp`, a Skybridge MCP app scaffold — the hosted console. A second shell, the local workshop stdio server, shares its capability core (see Deployments).
 - **Runtime API**: the hosted Pipelex API, defaulting to `https://api.pipelex.com` (point `PIPELEX_BASE_URL` at a local OSS `pipelex-api` on `http://localhost:8081` during development).
 - **SDK dependency**: the `@pipelex/sdk` npm package (`PipelexApiClient`, published from `../pipelex-sdk-js`). It re-exports the `mthds/protocol` surface, so the MCP imports one SDK and still reaches the open protocol routes; `mthds` rides along as a transitive dependency.
 - **Auth**: optional `PIPELEX_API_KEY` for the validation and inputs tools; local development normally runs without hosted auth. The run tools execute on the hosted API, so `PIPELEX_API_KEY` is effectively mandatory for them — a missing or invalid key is a `config` no-verdict.
 - **Primary environment variable**: `PIPELEX_BASE_URL`, defaulting to `https://api.pipelex.com`.
+
+## Deployments
+
+The product ships as **two servers from one repo and one capability core**, sharing one logical identity: the same server key (`pipelex`), the same tool names, the same structured contracts, and the same verdict discipline. The capability core (`capabilities/`) knows nothing about which shell invoked it.
+
+- **Hosted console** — the existing Skybridge HTTP server, deployed on Alpic. Serves remote-connector hosts (ChatGPT, claude.ai, Claude Desktop/Cowork as consumers). Registers the Skybridge views (`run-graph`, `run-follow`). Auth is server-held today (per-user OAuth is the console workstream, out of this increment).
+- **Local workshop** — an npm-distributed stdio server (`@pipelex/mcp`, bin `pipelex-mcp`) that coding-agent hosts (Claude Code, Codex, Cursor, Cowork-as-builder) spawn via `npx`. Built on the plain MCP SDK (`McpServer` + `StdioServerTransport`) over the shared capability core. **Tools-first: it registers no views at launch** — the empirically verified V1 posture (view-rendering workshop hosts penalize localhost asset origins; the text summaries carry the flow on their own in text-only hosts). Auth is a per-user `plx_sk_` platform key in `PIPELEX_API_KEY`, supplied through the host's MCP server config env — per-user auth for free, no OAuth machinery.
+
+**The `{ path }` arm and per-deployment behavior.** The shared submitted-files shape accepts two item forms — inline content or a file path:
+
+```ts
+type SubmittedFileInput = { content: string; uri?: string | null } | { path: string };
+```
+
+Both shells register this same union schema (so the tool contract never forks); what differs is behavior:
+
+- The **workshop resolves `{ path }` from disk** before invoking the capability — this is its headline feature: near-constant token cost, byte-accurate reads, and real provenance (the resolved item carries `uri` = the submitted path, so diagnostics locate to files the agent can open and edit). Inline `{ content, uri? }` items stay accepted for parity.
+- The **console rejects `{ path }` items** at request validation with an instructive `input_domain` no-verdict error located at `files[i].path`: this deployment cannot read files from disk; resubmit as `{ content, uri? }`, or use the local workshop server (`npx @pipelex/mcp`), which resolves paths. The rejection makes accidental misrouting diagnose itself on the first call — the failure mode to avoid is silent divergence between two servers carrying the same tool names.
+
+An item is one arm or the other; on a malformed item carrying both keys, `content` wins (first-match union semantics) and `path` is ignored.
+
+**Path trust boundary (workshop).** `{ path }` values resolve relative to the server's working directory — the host spawns the server in the workspace. Two bounds apply. **What** it reads: the `{ path }` arm is contracted to `.mthds` files, so the resolver rejects any path whose extension is not `.mthds` (case-insensitive) *before touching the filesystem* — it never opens a `.env`, `.git/config`, or key file a prompt-injected path could point at. **Where** it reads: containment is enforced by real-path check — the resolved target (symlinks followed) must live inside the working-directory subtree. Non-`.mthds` paths, escapes, missing files, and non-regular files are `input_domain` errors located at `files[i].path`. MCP client roots are deliberately not consulted in this increment — cwd containment is the simple, correct core; honoring host-declared roots is a possible later widening.
+
+The extension gate is checked on the *submitted* path, which fully closes the prompt-injection vector (an injected path string is the only thing that threat controls). Two residuals require a local process with **write** access to the workspace and are accepted, not mitigated, in this increment: (a) a `.mthds`-named symlink pointing at an in-boundary non-`.mthds` file, and (b) a TOCTOU symlink swap between the real-path containment check and the read. Both demand an attacker who already holds direct read access to those same files (and stronger primitives, e.g. planting a malicious `.mthds`), so the resolver's fail-value contract gains nothing from an fd-based read-after-verify here.
+
+**One host, one server.** A host should be connected to exactly one of the two shells, never both — same tool names on both mean a both-installed host has ambiguous routing. Notably, a claude.ai Pipelex connector syncs into Claude Code; a workshop user disables it there (`/mcp`) in favor of the local server.
 
 ## Naming Conventions
 
@@ -84,17 +110,14 @@ The public MCP input shape is:
 
 ```ts
 {
-  files: Array<{
-    content: string;
-    uri?: string | null;
-  }>;
+  files: SubmittedFileInput[]; // { content, uri? } | { path } — see Deployments
   include_graph?: boolean;
 }
 ```
 
 `include_graph` defaults to true. The graph rides the tool result's view-only `_meta` channel (`_meta.graph_spec`, consumed by the `run-graph` view), never `structuredContent`. When false, omit it entirely.
 
-The capability always permits pending signatures and always requests rendered markdown from local OSS `pipelex-api`.
+The capability always permits pending signatures and always requests rendered markdown from the Pipelex API.
 
 The structured output is:
 
@@ -118,7 +141,7 @@ The structured output is:
 
 The graph (`graph_spec`) is not part of `structuredContent`; on a positive verdict it rides the tool result's view-only `_meta` channel (`_meta.graph_spec`) for the `run-graph` view, so the model never pays its tokens. Because the model never sees `_meta`, `available_view_specs` is its signal that a view exists to surface: it lists the renderable view kinds for this result. The only kind for now is `"dry_run_graph"` — the method graph from the validation dry run, whose spec rides `_meta.graph_spec`. It contains `"dry_run_graph"` exactly when that spec was produced (valid verdict with `include_graph` not false), and is empty otherwise. On those same verdicts a short `## Views` note is appended to the `content` summary so agents that read the prose more reliably than the structured fields also learn the view exists.
 
-The MCP `content` text contains the human-readable summary. The summary is not duplicated in structured output.
+The MCP `content` text contains the human-readable summary. The summary is not duplicated in structured output. On a no-verdict error (`status: "error"`), the content summary is a terse headline followed by a Markdown list of each `errors[]` entry — its `location`, `message`, and `hint`. This surfacing is shared by every tool (the same `toolResultContent` helper): the agent reads `content`, so the actionable detail the capability writes into `errors[]` (e.g. the hosted `{ path }` rejection naming the local workshop) must reach that stream, not sit only in `structuredContent.errors` where a host that shows the agent only the top content line would strand it. `structuredContent.errors` stays the untouched machine contract.
 
 ## Inputs Template Scope (`mthds_inputs_template`)
 
@@ -128,10 +151,7 @@ The public MCP input shape is:
 
 ```ts
 {
-  files: Array<{
-    content: string;
-    uri?: string | null;
-  }>;
+  files: SubmittedFileInput[]; // { content, uri? } | { path } — see Deployments
   pipe_ref?: string;
   explicit?: boolean;
   format?: "json" | "toml";
@@ -175,7 +195,7 @@ The run family adds durable (async) method execution against the hosted Pipelex 
 
 **Run UX flow**:
 
-1. The assistant (usually after `mthds_validate` and `mthds_inputs_template`) calls `mthds_run` with the file contents, the pipe to run, and the filled inputs.
+1. The assistant (usually after `mthds_validate` and `mthds_inputs_template`) calls `mthds_run` with the files (same per-deployment forms as validation), the pipe to run, and the filled inputs.
 2. The tool starts the run and returns the durable `run_id` immediately. The `run-follow` view renders above the response and follows the run on its own — the user watches it without prompting the assistant.
 3. If the user asks how it is going, the assistant calls `mthds_run_status` — one cheap read, with a retry hint in the summary so it doesn't spin-poll.
 4. When the run reaches its terminal outcome, the view fires the completion handoff — a `sendFollowUpMessage` naming the run id — and the assistant answers it by calling `mthds_run_results` and reporting: the main output (bounded) on success, or the failure message otherwise. (The handoff fires after the view's own results fetch settled, so the assistant's results call lands past the mid-write race.)
@@ -186,7 +206,7 @@ The run family adds durable (async) method execution against the hosted Pipelex 
 ```ts
 // input
 {
-  files: Array<{ content: string; uri?: string | null }>;  // the shared submitted-files shape
+  files: SubmittedFileInput[];       // the shared submitted-files shape ({ content, uri? } | { path } — see Deployments)
   pipe_code?: string;                // pipe to run; omitted → server resolves the bundle's main pipe
   inputs?: Record<string, unknown>;  // method inputs, as filled from the mthds_inputs_template template
 }
@@ -276,7 +296,7 @@ Every `errors[]` entry also carries `retryable` — whether retrying the same ca
 
 ## Non-Goals
 
-The server must not add Pipelex Hosted API deployment behavior, bearer-token extraction, blocking execution (`POST /v1/execute` or the SDK's blocking wrappers), run cancellation, resources, logs, package publishing, MCP-side filesystem reads, subprocess fallbacks, or a production validation UI. Also out of scope for this increment: registered-method runs by catalog id, per-user OAuth, and a storage upload tool for binary inputs (binary inputs ride reachable https URLs; upload is a later increment).
+The server must not add Pipelex Hosted API deployment behavior, bearer-token extraction, blocking execution (`POST /v1/execute` or the SDK's blocking wrappers), run cancellation, resources, logs, package publishing (of MTHDS method packages to a registry — not this server's own npm distribution, which is how the workshop ships; see Deployments), subprocess fallbacks, or a production validation UI. Filesystem reads are scoped per deployment: the **hosted console** never reads files (a `{ path }` submission is rejected instructively — see Deployments); the **local workshop** reads exactly the `{ path }` items submitted to it, within its trust boundary. The workshop registers no views at launch (tools-first — see Deployments); local view delivery is a later increment gated on self-contained view bundles. Also out of scope for this increment: registered-method runs by catalog id, per-user OAuth, and a storage upload tool for binary inputs (binary inputs ride reachable https URLs; upload is a later increment).
 
 Repository quality gates are in scope: ESLint, Prettier, TypeScript type checking, Vitest unit tests, and a combined `npm run check` command should remain available locally.
 
@@ -287,21 +307,21 @@ The prototype should call the Pipelex API (local OSS `pipelex-api` during develo
 Validate MTHDS files:
 
 1. The user asks the assistant to validate one or more `.mthds` files.
-2. The assistant submits the file contents and optional provenance URIs to `mthds_validate`.
+2. The assistant submits the files to `mthds_validate` — inline contents with optional provenance URIs, or `{ path }` items on the local workshop (see Deployments).
 3. The tool returns structured validation facts plus a text summary that the assistant can use to repair the files.
 4. The assistant may repeat the same flow after editing the submitted source content.
 
 Prepare inputs for a method:
 
 1. The user asks the assistant to prepare inputs for a `.mthds` method (or a skill needs the method's input schema).
-2. The assistant submits the file contents (and optionally a qualified `pipe_ref`) to `mthds_inputs_template`.
+2. The assistant submits the files (and optionally a qualified `pipe_ref`) to `mthds_inputs_template` — same per-deployment file forms as validation.
 3. The tool returns the fill-in template plus the resolved pipe, which the assistant fills with user data, synthetic data, or placeholders.
 4. On an invalid closure, the tool returns the validation errors instead; the assistant can repair via the validation flow and retry.
 
 Run a method durably:
 
 1. The user asks the assistant to run a `.mthds` method (usually after validating it and filling the inputs template).
-2. The assistant submits the file contents, the pipe to run, and the filled inputs to `mthds_run`; the tool returns the durable `run_id` immediately and the `run-follow` view follows the run live.
+2. The assistant submits the files (same per-deployment forms as validation), the pipe to run, and the filled inputs to `mthds_run`; the tool returns the durable `run_id` immediately and the `run-follow` view follows the run live.
 3. The assistant checks on the run with `mthds_run_status` when asked (honoring the retry hint rather than spin-polling); when the run reaches its terminal outcome the view's completion handoff prompts the assistant, which reports via `mthds_run_results`.
 4. Days later, the same `run_id` still answers `mthds_run_status` / `mthds_run_results` — the run is durable and the MCP is stateless.
 

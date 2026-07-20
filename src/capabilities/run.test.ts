@@ -213,6 +213,14 @@ describe("startResult", () => {
     expect(result.structuredContent).not.toHaveProperty("created_at");
   });
 
+  it("does not advertise or narrate a live card when the invoking shell has no views", () => {
+    const result = startResult({ pipeline_run_id: RUN_ID }, false);
+
+    expect(result.structuredContent.available_view_specs).toEqual([]);
+    expect(result.summary).not.toContain("## Views");
+    expect(result.summary).not.toContain("live status card");
+  });
+
   it("drops an unrecognized state extension instead of guessing", () => {
     const result = startResult({ pipeline_run_id: RUN_ID, state: "WARMING_UP" });
 
@@ -331,6 +339,27 @@ describe("resultsResult", () => {
     expect(result.mainStuff).toBe(mainStuff);
     expect(result.summary).toContain("```json");
     expect(result.summary).toContain('"answer": 42');
+  });
+
+  it("does not advertise a view but preserves full result metadata when the shell has no views", () => {
+    const mainStuff = { answer: "x".repeat(MAIN_STUFF_CAP * 2) };
+    const result = resultsResult(
+      {
+        state: "completed",
+        pipeline_run_id: RUN_ID,
+        result: {
+          pipeline_run_id: RUN_ID,
+          main_stuff: mainStuff,
+          graph_spec: { nodes: [{ id: "demo.main" }] },
+        },
+      },
+      false,
+    );
+
+    expect(result.structuredContent.available_view_specs).toEqual([]);
+    expect(result.structuredContent.truncated).toBe(true);
+    expect(result.graphSpec).toBeUndefined();
+    expect(result.mainStuff).toBe(mainStuff);
   });
 
   it("keeps a falsy-but-present main output as a valid completed result", () => {
@@ -699,5 +728,44 @@ describe("runResultsToolResult", () => {
     expect(toolResult.isError).toBe(true);
     expect(toolResult._meta.graph_spec).toBeUndefined();
     expect(toolResult._meta.main_stuff).toBeUndefined();
+  });
+});
+
+describe("startMthdsRun path submissions", () => {
+  it("resolves { path } items through the context resolver before starting", async () => {
+    let seen: StartOptions | undefined;
+    const context: RunContext = {
+      ...contextWith({
+        start: (options: StartOptions) => {
+          seen = options;
+          return Promise.resolve({ pipeline_run_id: RUN_ID });
+        },
+      }),
+      resolver: {
+        async resolve() {
+          return { ok: true, content: 'domain = "demo"' };
+        },
+      },
+    };
+
+    const result = await startMthdsRun({ files: [{ path: "methods/bundle.mthds" }] }, context);
+
+    // /v1/start takes no source labels — only the resolved contents cross.
+    expect(seen).toEqual({ mthds_contents: ['domain = "demo"'] });
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.run_id).toBe(RUN_ID);
+  });
+
+  it("rejects { path } items instructively without a resolver (hosted)", async () => {
+    const result = await startMthdsRun(
+      { files: [{ path: "methods/bundle.mthds" }] },
+      contextWith({}),
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("files[0].path");
+    expect(result.structuredContent.errors?.[0]?.hint).toContain("npx @pipelex/mcp");
+    expect(result.summary).toBe("Run was not started: request input is invalid.");
   });
 });
