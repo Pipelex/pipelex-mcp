@@ -1,6 +1,6 @@
 {
   "name": "@pipelex/mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Pipelex MCP servers for validating, preparing, and running MTHDS methods",
   "license": "MIT",
   "type": "module",
