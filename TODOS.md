@@ -30,13 +30,13 @@ Build plan recorded 2026-07-21. This is the "catalog run-by-reference" item from
 
 ## Phase 0 — SPEC.md increment (record the decisions)
 
-- [ ] Non-Goals: move "registered-method runs by catalog id" OUT; add explicit still-out items with rationale: `mthds_validate` by id (conducted-views workstream), catalog discovery tools (list/get methods), publish/save tool, stored-`input_data` defaulting.
-- [ ] Run Scope: add `method_id?` to the `mthds_run` input contract; state the precedence rule (files run + linkage; id-only resolves current stored source); state no-versioning; add the classification additions (unknown id 404 → `input_domain`@`method_id`, paywall 402 → `config`, org-context 400 → `input_domain` with combined hint, key required — keyless BYOK gets the existing instructive `config` texture).
-- [ ] Inputs Template Scope: add `method_id?` + the fetch-and-forward mechanics (`getMethod` → mirror-parse `mthds` → `buildInputs`), the files-win/ignored rule, the no-source no-verdict, and the classification for the fetch leg (route `/v1/methods/{id}`).
-- [ ] UX Flows: add the console run-by-reference flow (discover id out-of-band for now → `mthds_inputs_template` by id → fill → `mthds_run` by id → run-follow unchanged).
-- [ ] Tools and Views: update the two tools' Input lines; note `run-follow` is untouched (follows by `run_id`).
+- [x] Non-Goals: move "registered-method runs by catalog id" OUT; add explicit still-out items with rationale: `mthds_validate` by id (conducted-views workstream), catalog discovery tools (list/get methods), publish/save tool, stored-`input_data` defaulting.
+- [x] Run Scope: add `method_id?` to the `mthds_run` input contract; state the precedence rule (files run + linkage; id-only resolves current stored source); state no-versioning; add the classification additions (unknown id 404 → `input_domain`@`method_id`, paywall 402 → `config`, org-context 400 → `input_domain` with combined hint, key required — keyless BYOK gets the existing instructive `config` texture).
+- [x] Inputs Template Scope: add `method_id?` + the fetch-and-forward mechanics (`getMethod` → mirror-parse `mthds` → `buildInputs`), the files-win/ignored rule, the no-source no-verdict, and the classification for the fetch leg (route `/v1/methods/{id}`).
+- [x] UX Flows: add the console run-by-reference flow (discover id out-of-band for now → `mthds_inputs_template` by id → fill → `mthds_run` by id → run-follow unchanged).
+- [x] Tools and Views: update the two tools' Input lines; note `run-follow` is untouched (follows by `run_id`). (Also aligned the server `instructions` sentence in Tools and Views with the by-id start, ahead of the Phase 2 code change.)
 
-**CHECKPOINT A** — commit the SPEC increment on its own (`docs/` prefix branch or the feature branch's first commit). Natural handoff: the design is fully recorded; implementation can start cold from SPEC.md + this file.
+**CHECKPOINT A — DONE (2026-07-21)** — SPEC increment committed as the first commit on `feature/method-id-catalog-runs`. Natural handoff: the design is fully recorded; implementation can start cold from SPEC.md + this file.
 
 ## Phase 1 — shared plumbing (`src/capabilities/shared.ts` + new helper)
 
