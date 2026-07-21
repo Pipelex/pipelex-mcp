@@ -235,7 +235,7 @@ export function buildApiConfig(env: ApiEnv = process.env): ApiConfig {
   };
 }
 
-/** Request-shape checks on the shared submitted-files input. */
+/** Request-shape checks on the shared submitted-files input (files required). */
 export function validateRequest(files: SubmittedFile[]): ToolError[] {
   const errors: ToolError[] = [];
 
@@ -248,6 +248,51 @@ export function validateRequest(files: SubmittedFile[]): ToolError[] {
       retryable: false,
     });
   }
+
+  errors.push(...validateFileItems(files));
+  return errors;
+}
+
+/**
+ * Request-shape checks for the tools that accept files OR a registered
+ * method's catalog id (`mthds_run`, `mthds_inputs_template`): at least one of
+ * a non-empty `files` and `method_id` must be supplied; a supplied-but-blank
+ * `method_id` is rejected at `method_id`; id format beyond non-blank stays
+ * server-owned (the `run_id` stance). `mthds_validate` keeps the
+ * files-required {@link validateRequest}.
+ */
+export function validateFilesOrMethodIdRequest(
+  files: SubmittedFile[],
+  methodId: string | undefined,
+): ToolError[] {
+  const errors: ToolError[] = [];
+
+  if (methodId !== undefined && methodId.trim() === "") {
+    errors.push({
+      class: "input_domain",
+      location: "method_id",
+      message: "method_id must not be empty when supplied.",
+      hint: "Pass the catalog id (mt_…) of a registered method, or submit files instead.",
+      retryable: false,
+    });
+  }
+
+  if (files.length === 0 && methodId === undefined) {
+    errors.push({
+      class: "input_domain",
+      location: "files",
+      message: "Provide MTHDS files or a method_id.",
+      hint: "Submit files as [{ content, uri? }], or pass the catalog id (mt_…) of a registered method as method_id.",
+      retryable: false,
+    });
+  }
+
+  errors.push(...validateFileItems(files));
+  return errors;
+}
+
+function validateFileItems(files: SubmittedFile[]): ToolError[] {
+  const errors: ToolError[] = [];
 
   for (const [index, file] of files.entries()) {
     if (file.content.trim() === "") {
@@ -446,6 +491,18 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
       location: options.auth?.location ?? "PIPELEX_API_KEY",
       message,
       hint: options.auth?.hint ?? "Check PIPELEX_API_KEY for the configured API.",
+      retryable: false,
+    };
+  }
+
+  // Paywall: the platform reports a plan limit as 402 SubscriptionRequiredError.
+  // Branch on the HTTP status only — its problem `code` is "forbidden" and must
+  // never be sniffed.
+  if (err.status === 402) {
+    return {
+      class: "config",
+      message,
+      hint: "The organization's plan does not cover this call. Review the plan and billing for the API key's organization on app.pipelex.com.",
       retryable: false,
     };
   }

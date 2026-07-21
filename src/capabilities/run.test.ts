@@ -49,6 +49,18 @@ describe("validateRunRequest", () => {
     expect(errors[0]?.location).toBe("files");
   });
 
+  it("accepts a method_id-only request", () => {
+    expect(validateRunRequest({ files: [], method_id: "mt_abc123" })).toEqual([]);
+  });
+
+  it("rejects a blank method_id at method_id", () => {
+    const errors = validateRunRequest({ files: [], method_id: "  " });
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.class).toBe("input_domain");
+    expect(errors[0]?.location).toBe("method_id");
+  });
+
   it("rejects a blank pipe_code", () => {
     const errors = validateRunRequest({
       files: [{ content: 'domain = "demo"' }],
@@ -589,6 +601,154 @@ describe("startMthdsRun", () => {
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("config");
     expect(result.summary).toContain("unreachable or misconfigured");
+  });
+});
+
+describe("startMthdsRun by method_id", () => {
+  function notFound(): ApiResponseError {
+    return new ApiResponseError(
+      "HTTP 404",
+      `${DEFAULT_API_URL}/v1/start`,
+      404,
+      "Not Found",
+      "{}",
+      "not_found",
+      "Method 'mt_missing' not found",
+      undefined, // validationErrors
+      "not_found",
+    );
+  }
+
+  it("starts by id alone — extra.method_id crosses, no mthds_contents", async () => {
+    let seen: StartOptions | undefined;
+    const context = contextWith({
+      start: (options: StartOptions) => {
+        seen = options;
+        return Promise.resolve({ pipeline_run_id: RUN_ID, state: "STARTED" });
+      },
+    });
+
+    const result = await startMthdsRun(
+      { method_id: "mt_abc123", inputs: { question: "why?" } },
+      context,
+    );
+
+    expect(seen).toEqual({ extra: { method_id: "mt_abc123" }, inputs: { question: "why?" } });
+    expect(seen).not.toHaveProperty("mthds_contents");
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.run_id).toBe(RUN_ID);
+  });
+
+  it("passes both when files and method_id are supplied (files run, id is linkage)", async () => {
+    let seen: StartOptions | undefined;
+    const context = contextWith({
+      start: (options: StartOptions) => {
+        seen = options;
+        return Promise.resolve({ pipeline_run_id: RUN_ID });
+      },
+    });
+
+    await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }], method_id: "mt_abc123" },
+      context,
+    );
+
+    expect(seen).toEqual({
+      mthds_contents: ['domain = "demo"'],
+      extra: { method_id: "mt_abc123" },
+    });
+  });
+
+  it("does not call the client when neither files nor method_id is supplied", async () => {
+    const result = await startMthdsRun({}, contextWith({}));
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("files");
+    expect(result.structuredContent.errors?.[0]?.message).toBe(
+      "Provide MTHDS files or a method_id.",
+    );
+  });
+
+  it("does not call the client on a blank method_id", async () => {
+    const result = await startMthdsRun({ method_id: "   " }, contextWith({}));
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
+  });
+
+  it("classifies an unknown-method 404 as input_domain at method_id, not retryable", async () => {
+    const context = contextWith({ start: () => Promise.reject(notFound()) });
+
+    const result = await startMthdsRun({ method_id: "mt_missing" }, context);
+
+    expect(result.structuredContent.status).toBe("error");
+    const error = result.structuredContent.errors?.[0];
+    expect(error?.class).toBe("input_domain");
+    expect(error?.location).toBe("method_id");
+    expect(error?.hint).toMatch(/org-scoped/);
+    expect(error?.retryable).toBe(false);
+  });
+
+  it("keeps a files-only 404 as config at PIPELEX_BASE_URL (regression guard)", async () => {
+    const context = contextWith({ start: () => Promise.reject(notFound()) });
+
+    const result = await startMthdsRun({ files: [{ content: 'domain = "demo"' }] }, context);
+
+    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
+  });
+
+  it("classifies a paywall 402 as config with the billing hint", async () => {
+    const context = contextWith({
+      start: () =>
+        Promise.reject(
+          new ApiResponseError(
+            "HTTP 402",
+            `${DEFAULT_API_URL}/v1/start`,
+            402,
+            "Payment Required",
+            "{}",
+            "subscription_required",
+            "Subscription required to run methods",
+            undefined, // validationErrors
+            "forbidden",
+          ),
+        ),
+    });
+
+    const result = await startMthdsRun({ method_id: "mt_abc123" }, context);
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.hint).toContain("app.pipelex.com");
+  });
+
+  it("points a by-id 422 at method_id with the combined no-source/org-context hint", async () => {
+    const context = contextWith({
+      start: () =>
+        Promise.reject(
+          new ApiResponseError(
+            "HTTP 422",
+            `${DEFAULT_API_URL}/v1/start`,
+            422,
+            "Unprocessable Entity",
+            "{}",
+            "unprocessable_entity",
+            "Stored method 'mt_abc123' has no MTHDS source to run.",
+            undefined, // validationErrors
+            undefined, // code
+          ),
+        ),
+    });
+
+    const result = await startMthdsRun({ method_id: "mt_abc123" }, context);
+
+    const error = result.structuredContent.errors?.[0];
+    expect(error?.class).toBe("input_domain");
+    expect(error?.location).toBe("method_id");
+    expect(error?.hint).toMatch(/no MTHDS source/);
+    expect(error?.hint).toMatch(/organization context/);
   });
 });
 

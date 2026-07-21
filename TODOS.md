@@ -40,21 +40,23 @@ Build plan recorded 2026-07-21. This is the "catalog run-by-reference" item from
 
 ## Phase 1 — shared plumbing (`src/capabilities/shared.ts` + new helper)
 
-- [ ] `classifyApiResponseError`: add the 402 arm (`config`, retryable false, billing hint) ahead of the generic catch-all. Unit tests in `shared.test.ts` (402 with/without serverMessage).
-- [ ] Add `validateMethodIdRequest`-style check (blank `method_id` → `input_domain`@`method_id`) and a shared "provide files or method_id" emptiness check usable by both capabilities (replaces the unconditional `files.length === 0` error path for the two tools; `mthds_validate` keeps the current behavior).
-- [ ] New method-source parsing helper (suggest `src/capabilities/method-source.ts`): `methodSourceToContents(mthds: string): string[]` mirroring the platform (`execution.py`) — JSON `[]` → `[]`; JSON array of `{name, content}` → non-blank contents; otherwise `[mthds]`. Comment names the canonical platform implementation. Unit tests: raw TOML string, file-array, file-array with blank contents, `"[]"`, empty string, non-array JSON.
-- [ ] Keep `resolveSubmittedFiles` untouched — callers pass `input.files ?? []`.
+- [x] `classifyApiResponseError`: add the 402 arm (`config`, retryable false, billing hint) ahead of the generic catch-all. Unit tests in `shared.test.ts` (402 with/without serverMessage).
+- [x] Add `validateMethodIdRequest`-style check (blank `method_id` → `input_domain`@`method_id`) and a shared "provide files or method_id" emptiness check usable by both capabilities (replaces the unconditional `files.length === 0` error path for the two tools; `mthds_validate` keeps the current behavior). → Shipped as one combined `validateFilesOrMethodIdRequest(files, methodId)` in `shared.ts` (blank-id check + at-least-one-of + the per-file checks, extracted as `validateFileItems`).
+- [x] New method-source parsing helper (suggest `src/capabilities/method-source.ts`): `methodSourceToContents(mthds: string): string[]` mirroring the platform (`execution.py`) — JSON `[]` → `[]`; JSON array of `{name, content}` → non-blank contents; otherwise `[mthds]`. Comment names the canonical platform implementation. Unit tests: raw TOML string, file-array, file-array with blank contents, `"[]"`, empty string, non-array JSON. → Also folds in `_resolve_method_contents`' blank-source guard: a blank raw arm yields `[]` (documented in the helper).
+- [x] Keep `resolveSubmittedFiles` untouched — callers pass `input.files ?? []`.
+
+**Phase 1 note (2026-07-21):** the platform's `_start_failure` in `execution.py` has been reworked since the premise was recorded — runner 4xx rejections now translate to 422 instead of the blanket opaque 503. The existing 503 `serverError` hint is kept per plan (harmless, still points at validation first), and the 422 arm now carries the real rejection reason.
 
 ## Phase 2 — `mthds_run` by id (`src/capabilities/run.ts`, `src/tools.ts`)
 
-- [ ] Input schema: `files` → optional; add `method_id` (describe: "Catalog id (mt_…) of a registered method. Runs the method's CURRENT stored content. With files also present, the files run and method_id is recorded as run-history linkage."). `MthdsRunInput` type updated.
-- [ ] `validateRunRequest`: at-least-one-of check, blank-`method_id` check, per-file checks only when files present, existing `pipe_code` check unchanged.
-- [ ] `toStartOptions`: emit `mthds_contents` only when files present; add `extra: { method_id }` when supplied (matches the `createRun` production call shape).
-- [ ] Classify options: add `RUN_START_BY_ID_ERROR_OPTIONS` (route `/v1/start`; `notFound`@`method_id` with the org-scoped-catalog hint; `badRequest` with the combined no-source/org-context hint; keep the existing opaque-503 `serverError` hint). `startMthdsRun` picks by request shape (`method_id` present → by-id options).
-- [ ] Tool description (`src/tools.ts`): state the by-id form, the precedence rule, current-content semantics, and that by-id needs an API key. Update the server `instructions` string (both shells — find where it's set, likely `hosted/server.ts` + `local/server.ts`) to mention running registered methods by catalog id.
-- [ ] Tests (`run.test.ts`, fake `RunClient` seam): id-only start passes `extra.method_id` and no `mthds_contents`; files+id passes both; neither → `input_domain`; blank id; 404 `ApiResponseError` → `input_domain`@`method_id` retryable false; 402 → `config`; files-only requests keep today's classification (regression guard); start ack projection unchanged.
+- [x] Input schema: `files` → optional; add `method_id` (describe: "Catalog id (mt_…) of a registered method. Runs the method's CURRENT stored content. With files also present, the files run and method_id is recorded as run-history linkage."). `MthdsRunInput` type updated.
+- [x] `validateRunRequest`: at-least-one-of check, blank-`method_id` check, per-file checks only when files present, existing `pipe_code` check unchanged.
+- [x] `toStartOptions`: emit `mthds_contents` only when files present; add `extra: { method_id }` when supplied (matches the `createRun` production call shape).
+- [x] Classify options: add `RUN_START_BY_ID_ERROR_OPTIONS` (route `/v1/start`; `notFound`@`method_id` with the org-scoped-catalog hint; `badRequest`@`method_id` with the combined no-source/org-context hint; keep the existing opaque-503 `serverError` hint, extracted as a shared `START_SERVER_ERROR` const). `startMthdsRun` picks by request shape (`method_id` present → by-id options).
+- [x] Tool description (`src/tools.ts`): state the by-id form, the precedence rule, current-content semantics, and that by-id needs an API key. Update the server `instructions` string (both shells: `hosted/server.ts` `HOSTED_SERVER_INSTRUCTIONS` + `local/server.ts` `LOCAL_SERVER_INSTRUCTIONS`) to mention running registered methods by catalog id.
+- [x] Tests (`run.test.ts`, fake `RunClient` seam): id-only start passes `extra.method_id` and no `mthds_contents`; files+id passes both; neither → `input_domain`; blank id; 404 `ApiResponseError` → `input_domain`@`method_id` retryable false; 402 → `config`; files-only requests keep today's classification (regression guard); start ack projection unchanged. Plus: by-id 422 → the combined hint at `method_id`.
 
-**CHECKPOINT B** — commit ("feature/…" branch). Run-by-id is live end to end; the inputs-template leg can land in a fresh session with only SPEC.md + this file as context.
+**CHECKPOINT B — DONE (2026-07-21)** — committed on `feature/method-id-catalog-runs`; `make check` + tests green. Run-by-id is live end to end; the inputs-template leg can land in a fresh session with only SPEC.md + this file as context.
 
 ## Phase 3 — `mthds_inputs_template` by id (`src/capabilities/inputs.ts`)
 

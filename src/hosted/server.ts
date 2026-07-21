@@ -20,7 +20,8 @@ export const HOSTED_SERVER_INSTRUCTIONS = [
   "rendered through the run-graph view.",
   "Call `mthds_inputs_template` with the same file contents to get a fill-in template of a pipe's",
   "declared inputs, ready to populate for a run.",
-  "Run a method durably with `mthds_run` (start by files + pipe + inputs, returns a durable run id),",
+  "Run a method durably with `mthds_run` (start from files + pipe + inputs, or from a registered",
+  "method's catalog id via method_id; returns a durable run id),",
   "then check on it with `mthds_run_status` and fetch the outcome with `mthds_run_results` by that id.",
 ].join(" ");
 
