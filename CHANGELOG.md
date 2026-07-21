@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.0] - 2026-07-21
+
+### Added
+
+- **Catalog run-by-reference (`method_id`)** on `mthds_run` and `mthds_inputs_template`. Both tools accept a registered method's catalog id (`mt_…`) beside a now-optional `files` — at least one of the two is required. `mthds_run` uses the platform's native by-id resolution on `POST /v1/start`: `method_id` alone runs the method's **current** stored content (methods are not versioned) without the bundle ever riding the wire; with files also supplied, the files run and the id is recorded as run-history linkage (the webapp's own semantics). `mthds_inputs_template` fetches-and-forwards: it resolves the stored method via `GET /v1/methods/{id}`, parses the polymorphic `MethodData.mthds` source (raw `.mthds` or the webapp editor's JSON file array — the parser mirrors the platform's canonical implementation), and forwards the contents to the build route, each labeled with the method id as provenance; files win and the id is ignored when both are supplied (the build routes have no linkage concept). By-id calls require an API key, since the catalog is org-scoped. `mthds_validate` deliberately does not take `method_id` (a registered method was validated at publish; the "show a registered method" story belongs to the conducted-views workstream).
+- **Paywall and unknown-method error classification.** A 402 (the org's plan does not cover the call) now classifies as an instructive `config` no-verdict with a billing hint, on every route — previously it fell into the generic runtime catch-all. An unknown or foreign-org `method_id` (404 on `/v1/start` or `/v1/methods/{id}`) classifies as `input_domain` at `method_id` with an org-scoped-catalog hint, instead of misreading as a wrong base URL; a by-id 400/422 carries a combined hint covering a source-less stored method and a mis-bound API key org.
+
+### Fixed
+
+- A mixed `mthds_run` start (files + `method_id`) now classifies a 400/422 at `files` — the executed source — instead of misattributing it to `method_id` with the stored-method hint; the unknown-method 404 stays located at `method_id` (the linkage id is the one field the files cannot explain).
+
+### Changed
+
+- The `mthds_run` tool description no longer warns that the hosted API rejects a bad bundle "with an opaque server error": the platform now reports runner-rejected starts as a 422 carrying the real rejection reason. The description still nudges validating first — validation gives a structured, repairable verdict, where a start-time rejection only reports the failure.
+
 ## [0.5.0] - 2026-07-21
 
 ### Added

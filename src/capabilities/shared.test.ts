@@ -16,6 +16,7 @@ import {
   filesInputSchema,
   resolveSubmittedFiles,
   toolResultContent,
+  validateFilesOrMethodIdRequest,
   validateRequest,
   validateRunIdRequest,
 } from "./shared.js";
@@ -281,6 +282,50 @@ describe("validateRequest", () => {
   });
 });
 
+describe("validateFilesOrMethodIdRequest", () => {
+  it("accepts files only, method_id only, and both", () => {
+    const files = [{ content: 'domain = "demo"' }];
+
+    expect(validateFilesOrMethodIdRequest(files, undefined)).toEqual([]);
+    expect(validateFilesOrMethodIdRequest([], "mt_abc123")).toEqual([]);
+    expect(validateFilesOrMethodIdRequest(files, "mt_abc123")).toEqual([]);
+  });
+
+  it("rejects a request with neither files nor method_id", () => {
+    const errors = validateFilesOrMethodIdRequest([], undefined);
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.class).toBe("input_domain");
+    expect(errors[0]?.location).toBe("files");
+    expect(errors[0]?.message).toBe("Provide MTHDS files or a method_id.");
+    expect(errors[0]?.hint).toContain("method_id");
+  });
+
+  it("rejects a blank method_id at method_id, with or without files", () => {
+    for (const files of [[], [{ content: 'domain = "demo"' }]]) {
+      const errors = validateFilesOrMethodIdRequest(files, "  ");
+
+      expect(errors).toHaveLength(1);
+      expect(errors[0]?.class).toBe("input_domain");
+      expect(errors[0]?.location).toBe("method_id");
+      expect(errors[0]?.retryable).toBe(false);
+    }
+  });
+
+  it("accepts any non-blank method_id — format stays server-owned", () => {
+    expect(validateFilesOrMethodIdRequest([], "not-an-mt-id")).toEqual([]);
+  });
+
+  it("still applies the per-file checks when files are present", () => {
+    const errors = validateFilesOrMethodIdRequest(
+      [{ content: "" }, { content: "x", uri: "" }],
+      "mt_abc123",
+    );
+
+    expect(errors.map((error) => error.location)).toEqual(["files[0].content", "files[1].uri"]);
+  });
+});
+
 describe("validateRunIdRequest", () => {
   it("rejects an empty or whitespace-only run id", () => {
     for (const runId of ["", "   ", "\n\t"]) {
@@ -433,6 +478,50 @@ describe("classifyError", () => {
 
     expect(error.location).toBe("PIPELEX_API_KEY");
     expect(error.hint).toBe("Check the API key for the configured Pipelex API.");
+  });
+
+  it("classifies a paywall 402 as config with the billing hint", () => {
+    const error = classifyError(
+      new ApiResponseError(
+        "HTTP 402",
+        `${DEFAULT_API_URL}/v1/start`,
+        402,
+        "Payment Required",
+        "{}",
+        "subscription_required",
+        "Subscription required to run methods",
+        undefined, // validationErrors
+        // The platform's problem code for 402 is "forbidden" — classification
+        // must branch on the status, never on this.
+        "forbidden",
+      ),
+    );
+
+    expect(error.class).toBe("config");
+    expect(error.location).toBeUndefined();
+    expect(error.message).toBe("Subscription required to run methods");
+    expect(error.hint).toContain("app.pipelex.com");
+    expect(error.retryable).toBe(false);
+  });
+
+  it("falls back to the transport message on a 402 without a server message", () => {
+    const error = classifyError(
+      new ApiResponseError(
+        "HTTP 402",
+        `${DEFAULT_API_URL}/v1/start`,
+        402,
+        "Payment Required",
+        "{}",
+        undefined, // errorType
+        undefined, // serverMessage
+        undefined, // validationErrors
+        undefined, // code
+      ),
+    );
+
+    expect(error.class).toBe("config");
+    expect(error.message).toBe("HTTP 402");
+    expect(error.retryable).toBe(false);
   });
 
   it("classifies API server failures as runtime, retryable", () => {

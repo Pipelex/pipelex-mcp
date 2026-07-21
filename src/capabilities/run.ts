@@ -16,7 +16,7 @@ import {
   resolveSubmittedFiles,
   toolErrorSchema,
   toolResultContent,
-  validateRequest,
+  validateFilesOrMethodIdRequest,
   validateRunIdRequest,
 } from "./shared.js";
 import type {
@@ -50,7 +50,13 @@ const runStatusSchema = z.enum(Object.keys(RUN_STATUS_SET) as [RunStatus, ...Run
 const runIdInputField = z.string().describe("The durable run id returned by mthds_run.");
 
 export const mthdsRunInputSchema = {
-  files: filesInputSchema,
+  files: filesInputSchema.optional(),
+  method_id: z
+    .string()
+    .optional()
+    .describe(
+      "Catalog id (mt_…) of a registered method. Runs the method's CURRENT stored content — requires an API key (the catalog is org-scoped). With files also present, the files run and method_id is recorded as run-history linkage. Provide files, method_id, or both.",
+    ),
   pipe_code: z
     .string()
     .optional()
@@ -169,7 +175,8 @@ const runResultsStructuredContentSchema = z.object({
 export const mthdsRunResultsOutputSchema = runResultsStructuredContentSchema;
 
 export interface MthdsRunInput {
-  files: SubmittedFileInput[];
+  files?: SubmittedFileInput[];
+  method_id?: string;
   pipe_code?: string;
   inputs?: Record<string, unknown>;
 }
@@ -177,6 +184,7 @@ export interface MthdsRunInput {
 /** The run request after `{ path }` resolution — what the checks and the API call consume. */
 interface ResolvedRunRequest {
   files: SubmittedFile[];
+  method_id?: string;
   pipe_code?: string;
   inputs?: Record<string, unknown>;
 }
@@ -274,19 +282,55 @@ export function buildRunContext(env = process.env): RunContext {
   return buildApiConfig(env);
 }
 
+// Live-checked (2026-07-15): the hosted /v1/start reports start-time
+// rejections — including an invalid bundle — as a generic 503 "Failed to
+// start pipeline", indistinguishable from real server trouble. Point the
+// agent at the recoverable cause first.
+const START_SERVER_ERROR = {
+  hint: "The hosted API reports start-time rejections (e.g. an invalid bundle or bad inputs) as a generic server error. Validate the bundle with mthds_validate and check the inputs against mthds_inputs_template; if both pass, the platform itself may be having trouble.",
+};
+
 export const RUN_START_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/start",
   badRequest: {
     location: "files",
     hint: "Check files, pipe_code, and inputs; validate the bundle with mthds_validate and fill the template from mthds_inputs_template first.",
   },
-  // Live-checked (2026-07-15): the hosted /v1/start reports start-time
-  // rejections — including an invalid bundle — as a generic 503 "Failed to
-  // start pipeline", indistinguishable from real server trouble. Point the
-  // agent at the recoverable cause first.
-  serverError: {
-    hint: "The hosted API reports start-time rejections (e.g. an invalid bundle or bad inputs) as a generic server error. Validate the bundle with mthds_validate and check the inputs against mthds_inputs_template; if both pass, the platform itself may be having trouble.",
+  serverError: START_SERVER_ERROR,
+};
+
+/**
+ * Classify options for an id-only `/v1/start` request — the stored method is
+ * the executed source, so both 400/422 and 404 locate at `method_id`. The
+ * `notFound` override is safe on this route: a bare-runner missing-route 404
+ * is intercepted earlier by the SDK as `RunLifecycleUnavailableError`, so any
+ * `ApiResponseError` 404 that reaches classification is the platform's
+ * structured unknown-method envelope.
+ */
+export const RUN_START_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
+  route: "/v1/start",
+  badRequest: {
+    location: "method_id",
+    hint: "The stored method may have no MTHDS source yet. If the error mentions organization context, the API key's org binding is the issue — mint a key in the right organization.",
   },
+  notFound: {
+    location: "method_id",
+    hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.",
+  },
+  serverError: START_SERVER_ERROR,
+};
+
+/**
+ * Classify options for a mixed `/v1/start` request (files + `method_id`): the
+ * files are the executed source and the id rides only as run-history linkage,
+ * so a 400/422 keeps the files-only texture — but a 404 is still about the
+ * linkage id, so the by-id unknown-method arm is retained.
+ */
+export const RUN_START_MIXED_ERROR_OPTIONS: ClassifyErrorOptions = {
+  route: "/v1/start",
+  badRequest: RUN_START_ERROR_OPTIONS.badRequest,
+  notFound: RUN_START_BY_ID_ERROR_OPTIONS.notFound,
+  serverError: START_SERVER_ERROR,
 };
 
 const UNKNOWN_RUN_HINT =
@@ -308,7 +352,7 @@ export const RUN_RESULTS_ERROR_OPTIONS: ClassifyErrorOptions = {
 
 /** Request-shape checks on the mthds_run input, after `{ path }` resolution. */
 export function validateRunRequest(input: ResolvedRunRequest): ToolError[] {
-  const errors = validateRequest(input.files);
+  const errors = validateFilesOrMethodIdRequest(input.files, input.method_id);
 
   if (input.pipe_code !== undefined && input.pipe_code.trim() === "") {
     errors.push({
@@ -650,7 +694,7 @@ export async function startMthdsRun(
   input: MthdsRunInput,
   context: RunContext = buildRunContext(),
 ): Promise<RunStartResult> {
-  const resolution = await resolveSubmittedFiles(input.files, context.resolver);
+  const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
   if (resolution.errors.length > 0) {
     return startErrorResult("Run was not started: request input is invalid.", resolution.errors);
   }
@@ -661,11 +705,21 @@ export async function startMthdsRun(
     return startErrorResult("Run was not started: request input is invalid.", inputErrors);
   }
 
+  // Options follow the executed source: id-only gets the full by-id texture;
+  // mixed (files + id) keeps the files 400/422 texture but retains the by-id
+  // unknown-method 404; files-only keeps today's options.
+  const classifyOptions =
+    request.method_id === undefined
+      ? RUN_START_ERROR_OPTIONS
+      : request.files.length === 0
+        ? RUN_START_BY_ID_ERROR_OPTIONS
+        : RUN_START_MIXED_ERROR_OPTIONS;
+
   try {
     const ack = await runClient(context).start(toStartOptions(request));
     return startResult(ack, context.viewsAvailable !== false);
   } catch (err) {
-    const error = classifyError(err, { ...RUN_START_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, { ...classifyOptions, auth: context.authError });
     return startErrorResult(startSummaryForError(error), [error]);
   }
 }
@@ -729,12 +783,18 @@ export async function getMthdsRunResults(
 }
 
 // `/v1/start` takes no source labels — the MCP surface's `uri` feeds only our
-// own request-shape errors, so only the contents cross the wire.
+// own request-shape errors, so only the contents cross the wire. `method_id`
+// rides the SDK's `extra` extension args (the webapp's own createRun shape):
+// alone it resolves the stored method server-side; beside files it becomes the
+// run-history linkage while the inline contents are what runs.
 function toStartOptions(input: ResolvedRunRequest): StartOptions {
   return {
-    mthds_contents: input.files.map((file) => file.content),
+    ...(input.files.length === 0
+      ? {}
+      : { mthds_contents: input.files.map((file) => file.content) }),
     ...(input.pipe_code === undefined ? {} : { pipe_code: input.pipe_code }),
     ...(input.inputs === undefined ? {} : { inputs: input.inputs }),
+    ...(input.method_id === undefined ? {} : { extra: { method_id: input.method_id } }),
   };
 }
 

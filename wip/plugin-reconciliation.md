@@ -23,6 +23,8 @@ The Pipelex MCP is distributed to coding agents as part of the `pipelex` plugin 
 
 ## 4. The one genuine tension: the Claude target serves two personas
 
+> **Revised 2026-07-21 — see §8.** BYOK (pipelex-mcp 0.5.0) dissolved this tension rather than resolving it: the hosted shape stopped being bakeable at all, so option 3 below is now the lead — justified on the transport axis, not on BYOK.
+
 The Claude marketplace artifact is installed by builders (Claude Code — node available, want the local workshop) and consumers (Claude Desktop/Cowork — node not guaranteed, want the zero-dependency hosted console). One artifact, two wants. Three resolutions, in order of preference:
 
 1. **Hosted-by-default, local as explicit builder opt-in (recommended).** The marketplace plugin keeps declaring the hosted URL — zero-dependency, Desktop/Cowork consumers untouched. Builders flip to local via a documented `claude mcp add` of the launcher (or a small setup skill that does it and reminds them to disable the plugin's hosted entry). Cost: one manual step for builders; the opt-in flow is also the natural place to warn about the both-installed state.
@@ -69,3 +71,20 @@ The host→server matrix as currently agreed (drafted here; final homes per `dua
 | Cursor | Local workshop (text-only in practice — V1 found no view rendering on either origin, doc 4 §4) | Docs-only `.cursor/mcp.json` snippet or a future target (open, §6) |
 | Mistral Vibe TUI | Local workshop (text-only host — V1) | `pipelex-vibe` plugin, pending Vibe's MCP mechanics (§6) |
 | Mistral Vibe web (chat.mistral.ai) | Hosted console (view rendering currently broken there — empty iframe, doc 4 §4) | Connector/config — no plugin |
+
+## 8. Revision (2026-07-21): BYOK inverts §4 — every baked declaration becomes the workshop launcher
+
+`pipelex-mcp` 0.5.0 shipped the hosted console **bring-your-own-key**: the deployment holds no server-side `PIPELEX_API_KEY`; each caller supplies their own `plx_sk_` key per request (`Authorization: Bearer` header or `?api_key=` on the connector URL), and a keyless call gets an instructive `config` no-verdict — never a verdict. That breaks the premise §4's recommendation stood on ("the baked hosted URL is zero-config — Desktop/Cowork consumers untouched"). The plugin bakes a **literal** URL into a shared artifact (§2 — no env expansion on Desktop), so there is no channel to carry a per-user key through a plugin-declared hosted URL: under BYOK the baked hosted default produces verdicts for **no one**.
+
+Re-run §4's personas: the Claude Code builder is served only by the local launcher (node guaranteed, shell env inherited — the workshop reads `PIPELEX_API_KEY`, the same export the plugin's hook already documents). The Desktop consumer is served by **neither** shape through the plugin: no shell env reaches a GUI app, and the keyless console's "append `?api_key=`" instruction is a dead end on a URL they cannot edit. Their channel is the host's own connector UI with a per-user key — which is not a plugin. So the two-persona tension is *dissolved*, not resolved: the hosted shape stopped being bakeable at all, and the plugin artifact serves builders, period. Consumers were always connector/directory customers (§3).
+
+**Option 3 is now the lead — on the transport axis, not the auth axis.** The reason the plugin bakes the workshop is the one §7 already fixed: builder hosts submitting local files through the hosted console pay the LLM hand-copy penalty, and no auth mechanism changes that (run-by-reference fixes it for consumers running published methods, not for builders authoring local files). BYOK merely removed the last argument *for* the hosted fallback. Console OAuth (`auth-design.md`), due shortly, makes a baked hosted URL technically viable again (the host runs the handshake per user) — but it does not resurrect the fallback's justification, because post-OAuth the Desktop/Cowork consumer has a first-class channel of their own (connector + sign-in) and the plugin no longer needs to compromise its primary audience for its weakest installer.
+
+Definitive vs contingent — so the OAuth transition is measured before it happens:
+
+- **Definitive (survives OAuth):** one plugin; per-target server block; every baked declaration is the workshop stdio launcher (`npx -y @pipelex/mcp@latest`); server key `pipelex` in every shape; the hosted console is never a plugin declaration; the workshop authenticates with `PIPELEX_API_KEY` in env even post-OAuth (`auth-design.md` §6 — the `login` subcommand improves key *acquisition*, not the mechanism); the one-install-one-server rule and the host→server matrix in the plugin README.
+- **Contingent (BYOK-era prose, swapped at OAuth cutover):** the `?api_key=`/Bearer connection instructions in the READMEs and the keyless console's error texture. The cutover's blast radius on the plugin repo is one README passage — zero manifests, zero build mechanics.
+
+Consequences for §5's change list: the "builder opt-in" inverts into a *consumer pointer* (builders get the workshop on install; consumers who want the console add the connector in their host's UI); the renderer needs only the command shape (the url shape returns if a consumer-facing target ever wants a baked hosted entry — a post-OAuth question); and the skills' "no API key is needed on your side" line is retired — the workshop authenticates with the caller's key. §6's "can Desktop spawn command-type plugin servers" question becomes a failure-UX question (how loud must the Desktop caveat be), no longer a default-choosing one. In the §7 matrix, the "How it gets it" cells for Claude Code and Cowork read accordingly: the plugin installs the *workshop launcher*; the console reaches those hosts only as a user-added connector.
+
+Implementation: `../../pipelex-plugins/TODOS.md` (branch `feature/Dual-MCP`) is the phase tracker.

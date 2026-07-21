@@ -42,6 +42,8 @@ The one-host-one-server rule from the first assessment is unchanged by all this 
 
 ## 4. What this implies for the tool surface (sketch, not design)
 
+> **Revision 2026-07-21 — the first two bullets are shipped** (on `feature/method-id-catalog-runs`; SPEC.md is now the authority). Schema shape as decided: a separate optional top-level `method_id?` beside a now-optional `files` — not a third arm on the files union (a method id is not a file) and not a distinct tool. Transport as decided: `mthds_run` uses the platform's **native** `method_id` resolution on `/v1/start` (`start({ extra: { method_id } })` — no fetch round-trip, files win with the id riding as run-history linkage); `mthds_inputs_template` uses **fetch-and-forward** (`getMethod` → mirror-parse `MethodData.mthds` → `buildInputs`). The last two bullets (catalog discovery tools, the publish/save tool) remain unshipped sketch, and `mthds_validate` by id is parked with the conducted-views workstream (`dual-server-conducted-views.md`).
+
 Following the SPEC naming conventions (noun names the artifact; lifecycle families share a stem):
 
 - **`mthds_run` grows a `method_id` arm** as an alternative to `files` — the run family keeps its stem and the durable-id flow downstream (`mthds_run_status`, `mthds_run_results`) is untouched.

@@ -151,7 +151,8 @@ The public MCP input shape is:
 
 ```ts
 {
-  files: SubmittedFileInput[]; // { content, uri? } | { path } — see Deployments
+  files?: SubmittedFileInput[]; // { content, uri? } | { path } — see Deployments
+  method_id?: string;           // catalog id (mt_…) of a registered method — files win when both are supplied
   pipe_ref?: string;
   explicit?: boolean;
   format?: "json" | "toml";
@@ -159,6 +160,7 @@ The public MCP input shape is:
 ```
 
 - `files` mirrors `mthds_validate`'s shape for consistency. The SDK's build envelope spells the provenance label `source` (`MthdsFileItem`), so the capability adapts `uri` → `source` at its boundary, the way validate adapts to `/v1/validate`'s parallel arrays.
+- `method_id` projects a registered method by its catalog id, via **fetch-and-forward**: the build routes have no by-id support, so the capability fetches the stored method (`GET /v1/methods/{id}` through the SDK's `getMethod`), parses the polymorphic `MethodData.mthds` source — either raw `.mthds` source or a JSON-serialized `[{ name, content }]` file array (the webapp editor format); the parsing helper mirrors the platform's canonical implementation — and forwards the resulting contents as the build envelope's files, each carrying the method id as its `source` provenance label so diagnostics point back at the registered method. At least one of (non-empty `files`, `method_id`) is required, else `input_domain`; a supplied-but-blank `method_id` is `input_domain` at `method_id`. When both are supplied, **files win and `method_id` is ignored** (the build routes have no linkage concept) — documented behavior, not an error. A stored method with no MTHDS source is an `input_domain` no-verdict at `method_id` ("the stored method has no MTHDS source yet"), raised without calling the build route. Fetch-leg failures classify against the route `/v1/methods/{id}`: an unknown or foreign-org id is a 404 → `input_domain` at `method_id` (the catalog is org-scoped to the key's org, so a foreign-org method reads exactly like a miss; unlike `/v1/start`, the SDK does not intercept a missing-route 404 on this route, so a bare-runner base URL reads the same — the hint covers both causes), a paywall 402 → `config` (the generic billing arm), and auth failures get the deployment's usual `config` texture — a key is required for by-id calls.
 - `pipe_ref` is the pipe to project, as a qualified `domain.pipe_code`. Optional; it defaults server-side to the closure's declared `main_pipe`, which fails as a no-verdict error (API 422) when the closure declares none or several across its domains. `method_ref` is deliberately not exposed (the registry answers 501 today).
 - `explicit` defaults to **false** (the light template shape); `true` requests the ceremonial `{concept, content}` envelope per input.
 - `format` defaults to **"json"** (parsed template object in `inputs`); `"toml"` returns raw TOML text in `inputs_toml`, preserving concept comments and key order.
@@ -206,7 +208,8 @@ The run family adds durable (async) method execution against the hosted Pipelex 
 ```ts
 // input
 {
-  files: SubmittedFileInput[];       // the shared submitted-files shape ({ content, uri? } | { path } — see Deployments)
+  files?: SubmittedFileInput[];      // the shared submitted-files shape ({ content, uri? } | { path } — see Deployments)
+  method_id?: string;                // catalog id (mt_…) of a registered method — see run-by-reference below
   pipe_code?: string;                // pipe to run; omitted → server resolves the bundle's main pipe
   inputs?: Record<string, unknown>;  // method inputs, as filled from the mthds_inputs_template template
 }
@@ -223,6 +226,8 @@ The run family adds durable (async) method execution against the hosted Pipelex 
 ```
 
 `RunStatus` is the hosted lifecycle set: `PENDING | STARTED | RUNNING | COMPLETED | FAILED | CANCELLED | TERMINATED | TIMED_OUT`. The `content` summary states the run was accepted, gives the id, and spells out follow-up etiquette for the model (check with `mthds_run_status`, fetch with `mthds_run_results` when terminal, don't poll in a tight loop). Deliberately not exposed in v1: `output_name`, `output_multiplicity`, `dynamic_output_concept_ref`, `extra`, webhooks, client-supplied run ids. Binary inputs (PDFs, images) ride reachable https URLs inside `inputs`; a storage upload tool is a later increment.
+
+**Run-by-reference (`method_id`)**: the tool also starts a registered method by its catalog id, so the model never carries the bundle — a run of a registered method is a tens-of-tokens call from any host. `method_id` is a separate optional top-level argument beside a now-optional `files` — deliberately **not** a third arm on the files union (a method id is not a file, and a mixed array would falsely suggest merging) and not a distinct tool (one run tool for the model; the lifecycle family keeps its stem). Request shape: at least one of (non-empty `files`, `method_id`) is required, else `input_domain`; a supplied-but-blank `method_id` is `input_domain` at `method_id`; id format beyond non-blank stays server-owned (the same stance as `run_id`). Precedence mirrors the platform: **inline `files` win** — when both are supplied, the files run and `method_id` is recorded as the run-history linkage on the platform's Run row (the webapp's own semantics for saved methods); `method_id` alone resolves the stored method's source server-side, natively on `POST /v1/start` (no fetch round-trip, no bundle on the wire). Methods have no versioning: a by-id run always executes the method's **current** stored content — the tool description states this explicitly so agents don't assume a run pins what they previously validated. By-id calls require an API key (the catalog is org-scoped to the key's org); a keyless BYOK call fails with the existing instructive `config` auth texture.
 
 **Tool: `mthds_run_status`** — check on a run. Read-only, plain tool (no view).
 
@@ -273,15 +278,15 @@ On `completed`, `content` composes a Markdown summary with the main output in a 
 
 **Run verdict discipline**: `status: "ok"` means the API answered the question about the run — including "it failed" and "not done yet". A FAILED/CANCELLED/TIMED_OUT run is a produced verdict (`status: "ok"` with the terminal `run_status`), and so is a `state: "running"` results lookup. `status: "error"` + `errors[]` is reserved for no-verdict conditions:
 
-- `input_domain` — empty/blank `run_id`, blank `pipe_code`, request-shape 400/422 at start, unknown `run_id` (a 404 on the run routes with the server's structured error envelope).
-- `config` — missing/invalid `PIPELEX_API_KEY` (401/403), unreachable API, `RunLifecycleUnavailableError` (the configured base URL points at a bare runner — durable runs need the hosted API).
+- `input_domain` — empty/blank `run_id`, blank `pipe_code`, neither `files` nor `method_id` supplied, a blank `method_id`, request-shape 400/422 at start, unknown `run_id` (a 404 on the run routes with the server's structured error envelope), unknown `method_id` (a 404 on `/v1/start`, located at `method_id`, not retryable — the hint says to check the id as the catalog returned it; the catalog is org-scoped to the API key's org, so a method from another org reads exactly like a miss). On an id-only start the 400/422 arm covers two causes with one combined hint at `method_id`: the stored method may have no MTHDS source yet, and if the error mentions organization context the key's org binding is the issue (mint a key in the right org) — no message-sniffing to split them. On a mixed start (files + `method_id`) a 400/422 locates at `files` instead — the files are the executed source, so the rejection is about the submitted bundle/pipe_code/inputs, never the stored method (stored-source resolution does not run on that path).
+- `config` — missing/invalid `PIPELEX_API_KEY` (401/403), a paywall 402 (the org's plan does not cover the call — classified on the HTTP status, never the problem `code`, no location, not retryable, with a hint pointing at the org's plan/billing on app.pipelex.com; this arm is generic across routes), unreachable API, `RunLifecycleUnavailableError` (the configured base URL points at a bare runner — durable runs need the hosted API).
 - `runtime` — 5xx, malformed report (e.g. a completed result missing `main_stuff`, the SDK's `MissingMainStuffError`).
 
-The unknown-id 404 vs missing-route 404 distinction comes from the SDK: a missing lifecycle route throws `RunLifecycleUnavailableError` (`config`), while an unknown id surfaces as a plain 404 `ApiResponseError` (`input_domain`, via a per-route classification override).
+The unknown-id 404 vs missing-route 404 distinction comes from the SDK: a missing lifecycle route throws `RunLifecycleUnavailableError` (`config`), while an unknown id surfaces as a plain 404 `ApiResponseError` (`input_domain`, via a per-route classification override). The same holds for an unknown `method_id` on `/v1/start`: any `ApiResponseError` 404 that reaches classification there is the platform's structured unknown-method envelope (a bare runner's missing-route 404 was already intercepted as `RunLifecycleUnavailableError`), so the `notFound` override at `method_id` is safe. The classify options follow the executed source, in three shapes: an id-only request gets the full by-id texture (400/422 and 404 both at `method_id`); a mixed request (files + `method_id`) keeps the files 400/422 texture but retains the by-id unknown-method 404 at `method_id` (a 404 there is about the linkage id, the one field the files cannot explain); a files-only request keeps today's options so nothing regresses.
 
 Every `errors[]` entry also carries `retryable` — whether retrying the same call may succeed. It is decided in `classifyError`, where the concrete SDK error / HTTP status is still known, because the class+locator pair alone cannot: an unreachable API (transient) and a missing run lifecycle (permanent) both classify as `config` at `PIPELEX_BASE_URL`, and a 5xx (transient) and a malformed report (permanent) are both `runtime`. The `run-follow` view's poll loops branch on this flag (`isTransientPollError`) — transient errors keep the follow alive with a reassuring note, hard errors stop polling and surface the classified message.
 
-**Start-time rejection is opaque on the hosted API** (live-checked): `/v1/start` reports submission-time failures — including an invalid bundle or missing required inputs — as a generic 503 "Failed to start pipeline", not a 422. It classifies as a `runtime` no-verdict, but its hint (a per-route 5xx override) points the agent at `mthds_validate` / `mthds_inputs_template` before blaming the platform, and the `mthds_run` tool description nudges validating first.
+**Start-time rejection on the hosted API**: `/v1/start` reports runner-rejected submissions — an invalid bundle, missing required inputs — as a 422 carrying the real rejection reason (`input_domain`); earlier platform builds answered a generic 503 "Failed to start pipeline". The per-route 5xx hint is kept for any 503 that still occurs, pointing the agent at `mthds_validate` / `mthds_inputs_template` before blaming the platform, and the `mthds_run` tool description still nudges validating first — validation gives a structured, repairable verdict, where a start-time rejection only reports the failure.
 
 **View: `run-follow`** (registered on `mthds_run`) — described in UI Overview. `available_view_specs` on `mthds_run` lists `"live_run_status"` when the view is registered; `mthds_run_results` lists `"run_graph"` when the executed graph rides its `_meta` (the kind is minted now; a view directly on the results tool is a later increment).
 
@@ -296,7 +301,7 @@ Every `errors[]` entry also carries `retryable` — whether retrying the same ca
 
 ## Non-Goals
 
-The server must not add Pipelex Hosted API deployment behavior, OAuth token verification (the hosted console's bring-your-own-key middleware forwards the caller's key and verifies nothing — the API is the authority; see Deployments), blocking execution (`POST /v1/execute` or the SDK's blocking wrappers), run cancellation, resources, logs, package publishing (of MTHDS method packages to a registry — not this server's own npm distribution, which is how the workshop ships; see Deployments), subprocess fallbacks, or a production validation UI. Filesystem reads are scoped per deployment: the **hosted console** never reads files (a `{ path }` submission is rejected instructively — see Deployments); the **local workshop** reads exactly the `{ path }` items submitted to it, within its trust boundary. The workshop registers no views at launch (tools-first — see Deployments); local view delivery is a later increment gated on self-contained view bundles. Also out of scope for this increment: registered-method runs by catalog id, per-user OAuth, and a storage upload tool for binary inputs (binary inputs ride reachable https URLs; upload is a later increment).
+The server must not add Pipelex Hosted API deployment behavior, OAuth token verification (the hosted console's bring-your-own-key middleware forwards the caller's key and verifies nothing — the API is the authority; see Deployments), blocking execution (`POST /v1/execute` or the SDK's blocking wrappers), run cancellation, resources, logs, package publishing (of MTHDS method packages to a registry — not this server's own npm distribution, which is how the workshop ships; see Deployments), subprocess fallbacks, or a production validation UI. Filesystem reads are scoped per deployment: the **hosted console** never reads files (a `{ path }` submission is rejected instructively — see Deployments); the **local workshop** reads exactly the `{ path }` items submitted to it, within its trust boundary. The workshop registers no views at launch (tools-first — see Deployments); local view delivery is a later increment gated on self-contained view bundles. Also out of scope for this increment: per-user OAuth, and a storage upload tool for binary inputs (binary inputs ride reachable https URLs; upload is a later increment). Registered-method runs by catalog id are in scope (`method_id` on `mthds_run` and `mthds_inputs_template` — see Run Scope and Inputs Template Scope); around that catalog surface, these stay out: `mthds_validate` by id (a registered method was validated at publish, and "show me a registered method's graph" belongs to the undecided conducted-views workstream), catalog discovery tools (listing methods or fetching method detail — the id arrives out-of-band until those land; they are the natural next increment after this one), a publish/save tool from the workshop, and stored-`input_data` defaulting (an omitted `inputs` passes through as-is; platform behavior governs).
 
 Repository quality gates are in scope: ESLint, Prettier, TypeScript type checking, Vitest unit tests, and a combined `npm run check` command should remain available locally.
 
@@ -325,9 +330,16 @@ Run a method durably:
 3. The assistant checks on the run with `mthds_run_status` when asked (honoring the retry hint rather than spin-polling); when the run reaches its terminal outcome the view's completion handoff prompts the assistant, which reports via `mthds_run_results`.
 4. Days later, the same `run_id` still answers `mthds_run_status` / `mthds_run_results` — the run is durable and the MCP is stateless.
 
+Run a registered method by reference:
+
+1. The user names a registered method by its catalog id (`mt_…`) — obtained out-of-band for now (the webapp catalog, a teammate); catalog discovery tools are the natural next increment.
+2. The assistant calls `mthds_inputs_template` with `method_id` (no files) and fills the returned template with user data.
+3. The assistant calls `mthds_run` with `method_id` and the filled `inputs` — no bundle ever enters the conversation, and the run executes the method's current stored content.
+4. Everything downstream is unchanged: the `run-follow` view, `mthds_run_status`, and `mthds_run_results` operate on the durable `run_id` and don't care how the run started.
+
 ## Tools and Views
 
-**Server instructions**: The server sets a short MCP `instructions` string (server-wide, on the `McpServer` constructor options) that hosts surface to the model. It states that the server validates `.mthds` method files (returning an interactive dry-run graph on a valid verdict), projects a method's declared inputs as a fill-in template, and runs methods durably on the hosted Pipelex API (start by files+pipe+inputs, then check status and fetch results by durable run id). It is a server-level hint only — argument-level detail stays in the tool `description`.
+**Server instructions**: The server sets a short MCP `instructions` string (server-wide, on the `McpServer` constructor options) that hosts surface to the model. It states that the server validates `.mthds` method files (returning an interactive dry-run graph on a valid verdict), projects a method's declared inputs as a fill-in template, and runs methods durably on the hosted Pipelex API (start from files or from a registered method's catalog id, then check status and fetch results by durable run id). It is a server-level hint only — argument-level detail stays in the tool `description`.
 
 **Tool: `mthds_validate`**
 
@@ -339,19 +351,19 @@ Run a method durably:
 
 **Tool: `mthds_inputs_template`**
 
-- **Input**: `{ files, pipe_ref?, explicit?, format? }`
+- **Input**: `{ files?, method_id?, pipe_ref?, explicit?, format? }` — at least one of `files` / `method_id` (see Inputs Template Scope)
 - **Output**: `{ status, is_valid, pipe_ref?, format?, explicit?, inputs?, inputs_toml?, validation_errors?, errors? }` in `structuredContent`, plus a text summary in MCP `content` that includes the template in a fenced code block. No `_meta`, no `available_view_specs`.
-- **Behavior**: Validates request shape, calls `POST /v1/build/inputs` against `PIPELEX_BASE_URL` or `https://api.pipelex.com` (adapting `uri` → `source`), and maps the produced verdict into flattened structured content with the same `status`/`is_valid` discipline as `mthds_validate`.
+- **Behavior**: Validates request shape, calls `POST /v1/build/inputs` against `PIPELEX_BASE_URL` or `https://api.pipelex.com` (adapting `uri` → `source`), and maps the produced verdict into flattened structured content with the same `status`/`is_valid` discipline as `mthds_validate`. With `method_id` and no files, fetch-and-forward: `GET /v1/methods/{id}` resolves the stored method's source, which is forwarded to the build route (files win when both are supplied).
 - **Annotations**: Read-only, non-destructive, no open-world publishing.
 - **View**: none — the template is small structured data the model reads directly.
 
 **Tool: `mthds_run`**
 
-- **Input**: `{ files, pipe_code?, inputs? }`
+- **Input**: `{ files?, method_id?, pipe_code?, inputs? }` — at least one of `files` / `method_id` (see Run Scope)
 - **Output**: `{ status, run_id?, run_status?, created_at?, available_view_specs, errors? }` in `structuredContent`, plus a start-ack text summary in MCP `content` with the run id and follow-up etiquette.
-- **Behavior**: Validates request shape, then starts a durable run via `POST /v1/start` (fire-and-forget 202). Never blocks on the result.
+- **Behavior**: Validates request shape, then starts a durable run via `POST /v1/start` (fire-and-forget 202) — from inline files, or from a registered method's current stored content by `method_id` (files win when both are supplied; the id then rides as run-history linkage — see Run Scope). Never blocks on the result.
 - **Annotations**: NOT read-only (`readOnlyHint: false`), non-destructive, no open-world publishing. The description states it executes the method on the hosted API and spends inference credit.
-- **View**: `run-follow` — the self-polling live status card described in UI Overview; on the terminal outcome it fires the once-per-run completion handoff (see Run Scope) so the assistant reports unprompted.
+- **View**: `run-follow` — the self-polling live status card described in UI Overview; on the terminal outcome it fires the once-per-run completion handoff (see Run Scope) so the assistant reports unprompted. Untouched by run-by-reference: it follows by `run_id` and assumes nothing about how the run started.
 
 **Tool: `mthds_run_status`**
 

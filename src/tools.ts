@@ -127,7 +127,9 @@ export const mthdsValidateTool = defineTool({
 export const mthdsInputsTemplateTool = defineTool({
   name: "mthds_inputs_template",
   description:
-    "Project a pipe's declared inputs as a fill-in template from submitted MTHDS file contents.",
+    "Project a pipe's declared inputs as a fill-in template — from submitted MTHDS file contents, or from a registered method's catalog id (mt_…) passed as method_id. " +
+    "A by-id call projects from the method's CURRENT stored content and requires an API key, since the catalog is org-scoped. " +
+    "With both files and method_id supplied, the files win and method_id is ignored.",
   inputSchema: mthdsInputsInputSchema,
   outputSchema: mthdsInputsOutputSchema,
   annotations: {
@@ -144,10 +146,12 @@ export const mthdsInputsTemplateTool = defineTool({
 export const mthdsRunTool = defineTool({
   name: "mthds_run",
   description:
-    "Start a durable run of a MTHDS method from submitted file contents, a pipe to run, and filled inputs. " +
+    "Start a durable run of a MTHDS method — from submitted file contents, or from a registered method's catalog id (mt_…) passed as method_id. " +
+    "A by-id run executes the method's CURRENT stored content (methods are not versioned — it does not pin what you previously validated) and requires an API key, since the catalog is org-scoped. " +
+    "With both files and method_id supplied, the files run and method_id is recorded as run-history linkage. " +
     "Executes the method on the hosted Pipelex API and spends inference credit. " +
-    "Validate the bundle with mthds_validate and fill the inputs template from mthds_inputs_template first — " +
-    "the hosted API rejects a bad bundle at start with an opaque server error. " +
+    "When running from files, validate the bundle with mthds_validate and fill the inputs template from mthds_inputs_template first — " +
+    "validation gives a structured, repairable verdict, where a start-time rejection only reports the failure. " +
     "Returns the durable run id immediately (never blocks); follow up with mthds_run_status and mthds_run_results.",
   inputSchema: mthdsRunInputSchema,
   outputSchema: mthdsRunOutputSchema,

@@ -172,10 +172,10 @@ wherever there's a filesystem, the hosted console everywhere else.
 | ChatGPT (web) | Hosted console | Apps directory |
 | claude.ai (web + mobile) | Hosted console | Connector (custom URL) |
 | Claude Desktop (chat mode) | Hosted console | Connector / marketplace plugin |
-| Claude Code | Local workshop | `claude mcp add` |
+| Claude Code | Local workshop | `claude mcp add`, or the `pipelex` plugin from the `pipelex-plugins` marketplace (its manifest spawns the workshop) |
 | ChatGPT desktop (Codex mode) | Local workshop | `~/.codex/config.toml` |
 | Cursor | Local workshop | `~/.cursor/mcp.json` |
-| Cowork | **Dual** — console for consumers, workshop for builders | Connector, or stdio in `claude_desktop_config.json` |
+| Claude Desktop (Cowork mode) | **Dual** — console for consumers, workshop for builders | Connector, or stdio in `claude_desktop_config.json` |
 | Mistral Vibe (TUI) | Local workshop | pending Vibe's MCP mechanics |
 | Mistral Vibe (web) | Hosted console | Connector / config |
 
@@ -239,8 +239,14 @@ carries the human-readable summary.
 ### `mthds_inputs_template`
 
 ```ts
-// input
-{ files: SubmittedFileInput[]; pipe_ref?: string; explicit?: boolean; format?: "json" | "toml" }
+// input — at least one of files / method_id
+{
+  files?: SubmittedFileInput[];
+  method_id?: string;          // catalog id (mt_…) of a registered method
+  pipe_ref?: string;
+  explicit?: boolean;
+  format?: "json" | "toml";
+}
 
 // structuredContent
 {
@@ -259,15 +265,24 @@ carries the human-readable summary.
 `pipe_ref` is a qualified `domain.pipe_code`; omit it to default to the closure's
 declared `main_pipe`. `explicit` (default false) requests the ceremonial
 `{concept, content}` envelope per input. `format` (default `"json"`) chooses the
-template encoding. No Skybridge view — the template is small structured data the
-model reads directly, and the `content` summary repeats it in a fenced block.
+template encoding. `method_id` projects a registered method by its catalog id
+(fetch-and-forward from the method's current stored content); it requires an API
+key, since the catalog is org-scoped, and when both `files` and `method_id` are
+supplied the files win and the id is ignored. No Skybridge view — the template is
+small structured data the model reads directly, and the `content` summary repeats
+it in a fenced block.
 
 ### `mthds_run` / `mthds_run_status` / `mthds_run_results`
 
 Durable (async) method execution on the hosted Pipelex API. `mthds_run` starts a
-run and returns a durable `run_id` immediately (never blocks); `mthds_run_status`
-is a cheap read of the coarse lifecycle state; `mthds_run_results` fetches the
-terminal outcome (main output on success, failure message otherwise). All run
+run — from submitted files (`files?`, plus `pipe_code?` and `inputs?`), or from a
+registered method's catalog id (`method_id?`, mt_…) — and returns a durable
+`run_id` immediately (never blocks); `mthds_run_status` is a cheap read of the
+coarse lifecycle state; `mthds_run_results` fetches the terminal outcome (main
+output on success, failure message otherwise). A by-id run executes the method's
+**current** stored content (methods are not versioned) and requires an API key;
+when both `files` and `method_id` are supplied, the files run and the id is
+recorded as run-history linkage on the platform. All run
 state lives behind the durable `run_id` on the platform, so the flow survives
 conversation gaps — days later, the same id still answers. On the hosted console,
 `mthds_run` ships the `run-follow` live-status view; on the workshop these are
