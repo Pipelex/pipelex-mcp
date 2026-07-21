@@ -72,19 +72,19 @@ Build plan recorded 2026-07-21. This is the "catalog run-by-reference" item from
 
 ## Phase 3 — `mthds_inputs_template` by id (`src/capabilities/inputs.ts`)
 
-- [ ] Input schema: `files` → optional; add `method_id` (describe: files win / id-only resolves the stored method). `MthdsInputsInput` updated.
-- [ ] `InputsContext` client seam: add `getMethod(methodId: string): Promise<MethodData>` to the client interface (test seam widens; real client already has it).
-- [ ] Flow in `buildMthdsInputs`: resolve/validate as today; when no files and `method_id` present → `getMethod` (errors classified with new `METHOD_FETCH_ERROR_OPTIONS`: route `/v1/methods/{id}`, `notFound`@`method_id`, auth texture threaded) → `methodSourceToContents` → empty result is an `input_domain`@`method_id` no-verdict ("stored method has no MTHDS source yet") without calling the API → else forward as the build envelope's files (source label: the method id or `mt_<id>#<name>` per stored file — pick during implementation, record in SPEC if it deviates).
-- [ ] Tests (`inputs.test.ts`, fake client): id-only happy path with raw-source `mthds`; id-only with file-array `mthds` (multiple files forwarded); unknown id 404 → `input_domain`@`method_id`; no-source method (no `buildInputs` call made); files+id → files win and `getMethod` is NOT called; 402 on the fetch leg → `config`.
+- [x] Input schema: `files` → optional; add `method_id` (describe: files win / id-only resolves the stored method). `MthdsInputsInput` updated.
+- [x] `InputsContext` client seam: add `getMethod(methodId: string): Promise<MethodData>` to the client interface (test seam widens; real client already has it).
+- [x] Flow in `buildMthdsInputs`: resolve/validate as today; when no files and `method_id` present → `getMethod` (errors classified with new `METHOD_FETCH_ERROR_OPTIONS`: route `/v1/methods/{id}`, `notFound`@`method_id`, auth texture threaded) → `methodSourceToContents` → empty result is an `input_domain`@`method_id` no-verdict ("stored method has no MTHDS source yet") without calling the API → else forward as the build envelope's files. → Source label decided: **each forwarded file carries the method id** (not `mt_<id>#<name>` — the agent can't open stored files anyway; the id is the actionable pointer), recorded in SPEC.md. One deviation from the premise: the SDK does NOT intercept a missing-route 404 on `/v1/methods/{id}` (no `RunLifecycleUnavailableError` equivalent on `requestProduct`), so the `notFound` hint covers the bare-runner cause too — recorded in SPEC + a code comment.
+- [x] Tests (`inputs.test.ts`, fake client): id-only happy path with raw-source `mthds`; id-only with file-array `mthds` (multiple files forwarded); unknown id 404 → `input_domain`@`method_id`; no-source method (no `buildInputs` call made); files+id → files win and `getMethod` is NOT called; 402 on the fetch leg → `config`. Plus: neither-supplied, blank/valid `method_id` shape checks.
 
 ## Phase 4 — docs sync + gates
 
-- [ ] `README.md`: tool contract sections for both tools (input shapes, precedence rule, key requirement for by-id).
-- [ ] `CHANGELOG.md` `## [Unreleased]`: Added — `method_id` catalog runs on `mthds_run` and inputs projection on `mthds_inputs_template`; Added — paywall (402) and unknown-method classification. (Do not mention `wip/` doc changes.)
-- [ ] `CLAUDE.md` (this repo): update the tool/union description ("The files union and the resolution seam" + run/inputs sections) to reflect optional files + `method_id`.
-- [ ] Reconsider the "opaque server error" wording in the `mthds_run` tool description (`src/tools.ts`) and the 503 `serverError` hint: per the Phase 1 note, the platform now returns a 422 with the real rejection reason for runner-rejected starts, so "rejects a bad bundle at start with an opaque server error" is pessimistic. Soften or drop; if changed, mirror in SPEC.md's "Start-time rejection is opaque" paragraph (Run Scope).
-- [ ] `make check` green; `make t` green.
-- [ ] Optional manual smoke against the hosted API (needs a real `plx_sk_` key + a registered method): `listMethods` via a scratch script to grab an `mt_` id, then `mthds_run` by id through `make inspect-local` or the dev console. Record the outcome here.
+- [x] `README.md`: tool contract sections for both tools (input shapes, precedence rule, key requirement for by-id).
+- [x] `CHANGELOG.md` `## [Unreleased]`: Added — `method_id` catalog runs on `mthds_run` and inputs projection on `mthds_inputs_template`; Added — paywall (402) and unknown-method classification. Changed — the softened start-rejection wording.
+- [x] `CLAUDE.md` (this repo): updated "The files union and the resolution seam" + the shared/inputs bullets; also fixed pre-existing drift (added the missing `capabilities/run.ts` and `capabilities/method-source.ts` bullets to the architecture list).
+- [x] Softened the "opaque server error" wording in the `mthds_run` tool description ("validation gives a structured, repairable verdict, where a start-time rejection only reports the failure") and rewrote SPEC.md's start-time-rejection paragraph (422 with the real reason; 5xx hint kept for any 503 that still occurs).
+- [x] `make check` green; `make t` green (all tests passing).
+- [x] Manual smoke against the live dev API (api-dev.pipelex.com, real `plx_sk_` key from `.env`) — **all green (2026-07-21)**: `listMethods` found `mt_e24ea8dd-…` ("Test illustration"); `mthds_inputs_template` by id returned a valid template (`illustration.illustrate_from_notes`, `{ notes: ["text_value"] }`); unknown id classified `input_domain`@`method_id` retryable false with the org-scoped hint; `mthds_run` by id (no files, filled inputs) started `run_7745b0d4-…` (STARTED ack) and reached COMPLETED.
 
 **CHECKPOINT C** — commit; then run an independent no-context review on the full diff (`pr-review-toolkit:code-reviewer` agent on the branch diff vs `dev`), fix findings, re-run gates.
 
