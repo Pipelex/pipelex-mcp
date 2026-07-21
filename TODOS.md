@@ -90,10 +90,10 @@ Build plan recorded 2026-07-21. This is the "catalog run-by-reference" item from
 
 ## Phase 5 — wrap-up
 
-- [ ] `wip/README.md`: mark the queue's SPEC catalog portion done for run + inputs-template; note validate-by-id stays parked with the conducted-views workstream; add a dated revision note to `wip/build-vs-run-dimension.md` §4 (the sketch is now shipped for run/inputs, schema shape as decided here).
-- [ ] Delete `wip/prompt-run-by-method-id.md` (its content is superseded by this executed plan) or mark it executed.
-- [ ] Update auto-memory (`mcp-release-state.md` / design-series pointer) with the shipped state.
-- [ ] PR `feature/… → dev` per the branch flow; release later via `/release` (not part of this plan).
+- [x] `wip/README.md`: queue item 4's catalog portion marked done (with the shipped mechanics + what stays parked); ground-rule update paragraph and the fetch-and-forward decision bullet revised (native `/v1/start` resolution for run, fetch-and-forward for inputs only); dated revision note added to `wip/build-vs-run-dimension.md` §4 (first two bullets shipped, schema/transport as decided, last two bullets + validate-by-id remain sketch/parked).
+- [x] Deleted `wip/prompt-run-by-method-id.md` (superseded by this executed plan; content preserved in git history).
+- [x] Auto-memory updated with the shipped state.
+- [x] PR `feature/method-id-catalog-runs → dev` opened per the branch flow; release later via `/release` (not part of this plan).
 
 ## Parked / explicitly out of scope (do not scope-creep into this build)
 
