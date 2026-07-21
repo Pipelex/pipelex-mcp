@@ -12,7 +12,7 @@ export const LOCAL_SERVER_INSTRUCTIONS = [
   "the directory where the host starts this server, and diagnostics keep that path as provenance.",
   "Inline `{ content: string, uri?: string }` files remain accepted for parity with the hosted console.",
   "Use `mthds_validate` for a structured validation verdict and `mthds_inputs_template` for a pipe's",
-  "fill-in input template (from files, or from a registered method's catalog id via method_id).",
+  "fill-in input template — both accept files, or a registered method's catalog id via method_id.",
   "Start durable execution with `mthds_run` (from files, or from a registered",
   "method's catalog id via method_id), then use `mthds_run_status` and",
   "`mthds_run_results` with the returned run id. This tools-first workshop has no views at launch,",

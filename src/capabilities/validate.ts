@@ -11,23 +11,31 @@ import { z } from "zod";
 import {
   buildApiConfig,
   classifyError,
+  fetchMethodFiles,
   filesInputSchema,
   resolveSubmittedFiles,
   toolErrorSchema,
   toolResultContent,
-  validateRequest,
+  validateFilesOrMethodIdRequest,
 } from "./shared.js";
 import type {
   AuthErrorTexture,
   ClassifyErrorOptions,
   FileResolver,
+  MethodFetchClient,
   SubmittedFile,
   SubmittedFileInput,
   ToolError,
 } from "./shared.js";
 
 export const mthdsValidateInputSchema = {
-  files: filesInputSchema,
+  files: filesInputSchema.optional(),
+  method_id: z
+    .string()
+    .optional()
+    .describe(
+      "Catalog id (mt_…) of a registered method. Validates the method's CURRENT stored content — requires an API key (the catalog is org-scoped). With files also present, the files win and method_id is ignored. Provide files or method_id.",
+    ),
   include_graph: z
     .boolean()
     .optional()
@@ -60,7 +68,15 @@ const validationStructuredContentSchema = z.object({
 export const mthdsValidateOutputSchema = validationStructuredContentSchema;
 
 export interface MthdsValidateInput {
-  files: SubmittedFileInput[];
+  files?: SubmittedFileInput[];
+  method_id?: string;
+  include_graph?: boolean;
+}
+
+/** The validate request after `{ path }` resolution — what the checks and the fetch-or-call step consume. */
+interface ResolvedValidateRequest {
+  files: SubmittedFile[];
+  method_id?: string;
   include_graph?: boolean;
 }
 
@@ -90,7 +106,7 @@ export interface ValidationResult {
   graphSpec?: unknown;
 }
 
-interface ValidationClient {
+interface ValidationClient extends MethodFetchClient {
   validateFiles(
     files: MthdsFile[],
     options?: ValidateFilesOptions,
@@ -117,30 +133,59 @@ const VALIDATE_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/validate",
 };
 
+// Constructed inside each caught block (mirroring run.ts's runClient): the SDK
+// constructor throws PipelineRequestError on a malformed base URL, and that
+// must classify to a config ToolError, not reject the MCP handler.
+function validationClient(context: ValidationContext): ValidationClient {
+  return (
+    context.client ??
+    new PipelexApiClient({
+      baseUrl: context.baseUrl,
+      apiKey: context.apiKey,
+    })
+  );
+}
+
 export async function validateMthds(
   input: MthdsValidateInput,
   context: ValidationContext = buildValidationContext(),
 ): Promise<ValidationResult> {
-  const resolution = await resolveSubmittedFiles(input.files, context.resolver);
+  const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
   if (resolution.errors.length > 0) {
     return errorResult("Validation was not run: request input is invalid.", resolution.errors);
   }
 
-  const files = resolution.files;
-  const inputErrors = validateRequest(files);
+  const request: ResolvedValidateRequest = { ...input, files: resolution.files };
+  const inputErrors = validateFilesOrMethodIdRequest(request.files, request.method_id);
   if (inputErrors.length > 0) {
     return errorResult("Validation was not run: request input is invalid.", inputErrors);
   }
 
+  // Fetch-and-forward: /v1/validate has no by-id support, so an id-only
+  // request fetches the stored method and forwards its current source as the
+  // submitted files (each labeled with the method id as provenance). Inline
+  // files win — with both supplied, method_id is ignored (no linkage concept
+  // on this route, unlike /v1/start).
+  let files = request.files;
+  if (files.length === 0 && request.method_id !== undefined) {
+    const fetched = await fetchMethodFiles(() => validationClient(context), request.method_id, {
+      authError: context.authError,
+      noSourceHint:
+        "Add MTHDS content to the method (e.g. in the webapp editor) before validating it, or submit files instead.",
+    });
+    if (!fetched.ok) {
+      const summary =
+        fetched.reason === "no_source"
+          ? "Validation was not run: the stored method has no MTHDS source."
+          : summaryForError(fetched.error);
+      return errorResult(summary, [fetched.error]);
+    }
+    files = fetched.files;
+  }
+
   let report: PipelexValidationResult;
   try {
-    const client =
-      context.client ??
-      new PipelexApiClient({
-        baseUrl: context.baseUrl,
-        apiKey: context.apiKey,
-      });
-    report = await client.validateFiles(toMthdsFiles(files), {
+    report = await validationClient(context).validateFiles(toMthdsFiles(files), {
       allowSignatures: true,
       render: ["markdown"],
     });

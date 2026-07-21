@@ -8,19 +8,30 @@ import {
   PipelineRequestError,
   RunLifecycleUnavailableError,
 } from "@pipelex/sdk";
+import type { MethodData } from "@pipelex/sdk";
 
 import {
   buildApiConfig,
   classifyError,
   DEFAULT_API_URL,
+  fetchMethodFiles,
   filesInputSchema,
   resolveSubmittedFiles,
   toolResultContent,
   validateFilesOrMethodIdRequest,
-  validateRequest,
   validateRunIdRequest,
 } from "./shared.js";
-import type { FileResolver, ToolError } from "./shared.js";
+import type { FileResolver, MethodFetchClient, ToolError } from "./shared.js";
+
+function methodData(mthds: string): MethodData {
+  return {
+    method_id: "mt_123",
+    name: "Demo method",
+    mthds,
+    created_at: "2026-07-21T00:00:00Z",
+    updated_at: "2026-07-21T00:00:00Z",
+  };
+}
 
 describe("buildApiConfig", () => {
   it("defaults to the hosted API with no key", () => {
@@ -248,37 +259,6 @@ describe("toolResultContent", () => {
     expect(content.text).toBe(
       "headline\n\n- `files[0].path` — File not found: a b.mthds\n  *Hint: Check the path.*",
     );
-  });
-});
-
-describe("validateRequest", () => {
-  it("rejects empty file URIs", () => {
-    const errors = validateRequest([
-      { content: 'domain = "demo"', uri: "" },
-      { content: 'main_pipe = "main"', uri: "bundle.mthds" },
-    ]);
-
-    expect(errors.map((error) => error.location)).toEqual(["files[0].uri"]);
-  });
-
-  it("rejects an empty file list", () => {
-    const errors = validateRequest([]);
-
-    expect(errors).toHaveLength(1);
-    expect(errors[0]?.class).toBe("input_domain");
-    expect(errors[0]?.location).toBe("files");
-    expect(errors[0]?.retryable).toBe(false);
-  });
-
-  it("rejects empty and whitespace-only file content", () => {
-    const errors = validateRequest([
-      { content: "" },
-      { content: "  \n\t " },
-      { content: 'domain = "demo"' },
-    ]);
-
-    expect(errors.map((error) => error.location)).toEqual(["files[0].content", "files[1].content"]);
-    expect(errors.every((error) => error.class === "input_domain")).toBe(true);
   });
 });
 
@@ -622,5 +602,112 @@ describe("classifyError", () => {
     expect(error.location).toBe("run_id");
     expect(error.hint).toBe("Check the run id.");
     expect(error.retryable).toBe(false);
+  });
+});
+
+describe("fetchMethodFiles", () => {
+  const noSourceHint = "Add MTHDS content to the method, or submit files instead.";
+
+  it("fetches a raw-source method and forwards it as one file labeled with the id", async () => {
+    const client: MethodFetchClient = {
+      async getMethod() {
+        return methodData('domain = "demo"\nmain_pipe = "main"');
+      },
+    };
+
+    const result = await fetchMethodFiles(() => client, "mt_123", { noSourceHint });
+
+    expect(result).toEqual({
+      ok: true,
+      files: [{ content: 'domain = "demo"\nmain_pipe = "main"', uri: "mt_123" }],
+    });
+  });
+
+  it("forwards each stored file of a file-array method", async () => {
+    const client: MethodFetchClient = {
+      async getMethod() {
+        return methodData(
+          JSON.stringify([
+            { name: "a.mthds", content: 'domain = "demo"' },
+            { name: "b.mthds", content: 'main_pipe = "main"' },
+            { name: "empty.mthds", content: "   " },
+          ]),
+        );
+      },
+    };
+
+    const result = await fetchMethodFiles(() => client, "mt_123", { noSourceHint });
+
+    expect(result).toEqual({
+      ok: true,
+      files: [
+        { content: 'domain = "demo"', uri: "mt_123" },
+        { content: 'main_pipe = "main"', uri: "mt_123" },
+      ],
+    });
+  });
+
+  it("reports a no-source method at method_id with the caller's hint, tagged no_source", async () => {
+    const client: MethodFetchClient = {
+      async getMethod() {
+        return methodData("[]");
+      },
+    };
+
+    const result = await fetchMethodFiles(() => client, "mt_123", { noSourceHint });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("no_source");
+      expect(result.error.class).toBe("input_domain");
+      expect(result.error.location).toBe("method_id");
+      expect(result.error.hint).toBe(noSourceHint);
+      expect(result.error.retryable).toBe(false);
+    }
+  });
+
+  it("classifies a fetch failure as input_domain at method_id, tagged fetch", async () => {
+    const client: MethodFetchClient = {
+      async getMethod(): Promise<MethodData> {
+        throw new ApiResponseError(
+          "HTTP 404",
+          `${DEFAULT_API_URL}/v1/methods/mt_missing`,
+          404,
+          "Not Found",
+          "{}",
+          "not_found",
+          "Method not found",
+          undefined, // validationErrors
+          "not_found", // code
+        );
+      },
+    };
+
+    const result = await fetchMethodFiles(() => client, "mt_missing", { noSourceHint });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("fetch");
+      expect(result.error.class).toBe("input_domain");
+      expect(result.error.location).toBe("method_id");
+      expect(result.error.retryable).toBe(false);
+    }
+  });
+
+  it("constructs the client lazily, so a synchronous throw classifies instead of escaping", async () => {
+    const result = await fetchMethodFiles(
+      () => {
+        throw new PipelineRequestError("bad base URL");
+      },
+      "mt_123",
+      { noSourceHint },
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("fetch");
+      expect(result.error.class).toBe("config");
+      expect(result.error.location).toBe("PIPELEX_BASE_URL");
+    }
   });
 });

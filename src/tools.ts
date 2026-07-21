@@ -110,7 +110,10 @@ function defineTool<
 
 export const mthdsValidateTool = defineTool({
   name: "mthds_validate",
-  description: "Validate submitted MTHDS file contents with the local Pipelex API.",
+  description:
+    "Validate MTHDS file contents with the Pipelex API — from submitted file contents, or from a registered method's catalog id (mt_…) passed as method_id. " +
+    "A by-id call validates the method's CURRENT stored content and requires an API key, since the catalog is org-scoped. " +
+    "With both files and method_id supplied, the files win and method_id is ignored.",
   inputSchema: mthdsValidateInputSchema,
   outputSchema: mthdsValidateOutputSchema,
   annotations: {

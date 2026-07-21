@@ -6,7 +6,10 @@ import {
   PipelineRequestError,
   RunLifecycleUnavailableError,
 } from "@pipelex/sdk";
+import type { MethodData } from "@pipelex/sdk";
 import { z } from "zod";
+
+import { methodSourceToContents } from "./method-source.js";
 
 export const DEFAULT_API_URL = "https://api.pipelex.com";
 
@@ -83,7 +86,8 @@ export interface ResolvedFiles {
 
 /**
  * Resolve the submitted-files union into plain `{ content, uri? }` items,
- * ahead of {@link validateRequest}. `{ path }` items go through the resolver
+ * ahead of the request-shape checks ({@link validateFilesOrMethodIdRequest}).
+ * `{ path }` items go through the resolver
  * when one is provided; a resolved item carries `uri` = the submitted path,
  * so diagnostics locate to files the agent can open. Without a resolver a
  * `{ path }` item is rejected instructively — the hosted deployment cannot
@@ -235,31 +239,12 @@ export function buildApiConfig(env: ApiEnv = process.env): ApiConfig {
   };
 }
 
-/** Request-shape checks on the shared submitted-files input (files required). */
-export function validateRequest(files: SubmittedFile[]): ToolError[] {
-  const errors: ToolError[] = [];
-
-  if (files.length === 0) {
-    errors.push({
-      class: "input_domain",
-      location: "files",
-      message: "At least one MTHDS file must be submitted.",
-      hint: "Pass files as [{ content, uri? }].",
-      retryable: false,
-    });
-  }
-
-  errors.push(...validateFileItems(files));
-  return errors;
-}
-
 /**
  * Request-shape checks for the tools that accept files OR a registered
- * method's catalog id (`mthds_run`, `mthds_inputs_template`): at least one of
- * a non-empty `files` and `method_id` must be supplied; a supplied-but-blank
- * `method_id` is rejected at `method_id`; id format beyond non-blank stays
- * server-owned (the `run_id` stance). `mthds_validate` keeps the
- * files-required {@link validateRequest}.
+ * method's catalog id (`mthds_validate`, `mthds_run`, `mthds_inputs_template`):
+ * at least one of a non-empty `files` and `method_id` must be supplied; a
+ * supplied-but-blank `method_id` is rejected at `method_id`; id format beyond
+ * non-blank stays server-owned (the `run_id` stance).
  */
 export function validateFilesOrMethodIdRequest(
   files: SubmittedFile[],
@@ -468,6 +453,89 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
     hint: "Inspect the MCP server logs and local pipelex-api logs.",
     retryable: true,
   };
+}
+
+/** The slice of `PipelexApiClient` the by-id fetch leg calls (test seam). */
+export interface MethodFetchClient {
+  getMethod(methodId: string): Promise<MethodData>;
+}
+
+/**
+ * Classify options for the by-id fetch leg (`getMethod`), shared by every
+ * capability that fetches-and-forwards a stored method's source (currently
+ * `mthds_inputs_template` and `mthds_validate`). Unlike `/v1/start`, the SDK
+ * does not intercept a missing-route 404 on `/v1/methods/{id}` (no
+ * `RunLifecycleUnavailableError` equivalent), so a bare-runner base URL and a
+ * genuinely unknown method read the same here — the `notFound` hint covers
+ * both causes.
+ */
+export const METHOD_FETCH_ERROR_OPTIONS: ClassifyErrorOptions = {
+  route: "/v1/methods/{id}",
+  badRequest: {
+    location: "method_id",
+    hint: "Check the method_id as the catalog returned it. If the error mentions organization context, the API key's org binding is the issue — mint a key in the right organization.",
+  },
+  notFound: {
+    location: "method_id",
+    hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss. If PIPELEX_BASE_URL points at a bare pipelex-api runner, the catalog routes do not exist there — use the hosted Pipelex API.",
+  },
+};
+
+/**
+ * `reason` lets callers pick their own headline text for the two failure
+ * shapes without this shared leg hardcoding either one: `"fetch"` is a
+ * classified SDK/HTTP failure (pair with each capability's own
+ * `summaryForError`); `"no_source"` is the stored method having no MTHDS
+ * content yet (a caller-composed headline, since only the caller's verb
+ * — "validated", "projected" — makes it read naturally).
+ */
+export type MethodFetchResult =
+  | { ok: true; files: SubmittedFile[] }
+  | { ok: false; reason: "fetch" | "no_source"; error: ToolError };
+
+/**
+ * Fetch a stored method's current source and forward it as submitted files,
+ * each labeled with the method id as provenance (`uri`) — the shared
+ * fetch-and-forward leg behind every files-or-`method_id` capability's
+ * id-only path. `getClient` is a factory, not a pre-built client, so a
+ * malformed-base-URL throw from the SDK constructor happens inside this
+ * function's own try block and classifies as a `config` `ToolError` instead
+ * of escaping uncaught (mirrors `run.ts`'s `runClient` call-inline pattern).
+ * The no-source hint is the only thing that differs per caller (what the
+ * caller was trying to do with the method).
+ */
+export async function fetchMethodFiles(
+  getClient: () => MethodFetchClient,
+  methodId: string,
+  options: { authError?: AuthErrorTexture; noSourceHint: string },
+): Promise<MethodFetchResult> {
+  let method: MethodData;
+  try {
+    method = await getClient().getMethod(methodId);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: "fetch",
+      error: classifyError(err, { ...METHOD_FETCH_ERROR_OPTIONS, auth: options.authError }),
+    };
+  }
+
+  const contents = methodSourceToContents(method.mthds);
+  if (contents.length === 0) {
+    return {
+      ok: false,
+      reason: "no_source",
+      error: {
+        class: "input_domain",
+        location: "method_id",
+        message: "The stored method has no MTHDS source yet.",
+        hint: options.noSourceHint,
+        retryable: false,
+      },
+    };
+  }
+
+  return { ok: true, files: contents.map((content) => ({ content, uri: methodId })) };
 }
 
 function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorOptions): ToolError {

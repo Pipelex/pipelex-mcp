@@ -62,6 +62,9 @@ describe("local stdio server", () => {
     let submittedFiles: MthdsFile[] | undefined;
     const contexts = buildLocalToolContexts({}, rootDir);
     contexts.validation.client = {
+      async getMethod() {
+        throw new Error("getMethod must not be called in this test");
+      },
       async validateFiles(files) {
         submittedFiles = files;
         return validReport;

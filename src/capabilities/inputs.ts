@@ -3,16 +3,15 @@ import type {
   BuildInputsRequest,
   BuildInputsResponse,
   BuildInputsValidReport,
-  MethodData,
   MthdsFileItem,
   ValidationErrorItem,
 } from "@pipelex/sdk";
 import { z } from "zod";
 
-import { methodSourceToContents } from "./method-source.js";
 import {
   buildApiConfig,
   classifyError,
+  fetchMethodFiles,
   filesInputSchema,
   resolveSubmittedFiles,
   toolErrorSchema,
@@ -23,6 +22,7 @@ import type {
   AuthErrorTexture,
   ClassifyErrorOptions,
   FileResolver,
+  MethodFetchClient,
   SubmittedFile,
   SubmittedFileInput,
   ToolError,
@@ -117,9 +117,8 @@ export interface InputsResult {
 }
 
 /** The slice of `PipelexApiClient` the inputs capability calls (test seam). */
-interface InputsClient {
+interface InputsClient extends MethodFetchClient {
   buildInputs(request: BuildInputsRequest): Promise<BuildInputsResponse>;
-  getMethod(methodId: string): Promise<MethodData>;
 }
 
 export interface InputsContext {
@@ -144,25 +143,6 @@ const INPUTS_ERROR_OPTIONS: ClassifyErrorOptions = {
   badRequest: {
     location: "pipe_ref",
     hint: "Pass pipe_ref as a qualified domain.pipe_code; omitting it requires the closure to declare exactly one main_pipe.",
-  },
-};
-
-/**
- * Classify options for the by-id fetch leg (`getMethod`). Unlike `/v1/start`,
- * the SDK does not intercept a missing-route 404 on `/v1/methods/{id}` (no
- * `RunLifecycleUnavailableError` equivalent), so a bare-runner base URL and a
- * genuinely unknown method read the same here — the `notFound` hint covers
- * both causes.
- */
-const METHOD_FETCH_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/methods/{id}",
-  badRequest: {
-    location: "method_id",
-    hint: "Check the method_id as the catalog returned it. If the error mentions organization context, the API key's org binding is the issue — mint a key in the right organization.",
-  },
-  notFound: {
-    location: "method_id",
-    hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss. If PIPELEX_BASE_URL points at a bare pipelex-api runner, the catalog routes do not exist there — use the hosted Pipelex API.",
   },
 };
 
@@ -196,35 +176,25 @@ export async function buildMthdsInputs(
 
   // Fetch-and-forward: the build routes have no by-id support, so an id-only
   // request fetches the stored method and forwards its current source as the
-  // submitted files. Inline files win — with both supplied, method_id is
-  // ignored (the build routes have no linkage concept, unlike /v1/start).
+  // submitted files (each labeled with the method id as provenance, which
+  // crosses into the build envelope's `source` via toMthdsFileItems). Inline
+  // files win — with both supplied, method_id is ignored (the build routes
+  // have no linkage concept, unlike /v1/start).
   let files = request.files;
   if (files.length === 0 && request.method_id !== undefined) {
-    let method: MethodData;
-    try {
-      method = await inputsClient(context).getMethod(request.method_id);
-    } catch (err) {
-      const error = classifyError(err, { ...METHOD_FETCH_ERROR_OPTIONS, auth: context.authError });
-      return errorResult(summaryForError(error), [error]);
+    const fetched = await fetchMethodFiles(() => inputsClient(context), request.method_id, {
+      authError: context.authError,
+      noSourceHint:
+        "Add MTHDS content to the method (e.g. in the webapp editor) before projecting its inputs template, or submit files instead.",
+    });
+    if (!fetched.ok) {
+      const summary =
+        fetched.reason === "no_source"
+          ? "Inputs template was not run: the stored method has no MTHDS source."
+          : summaryForError(fetched.error);
+      return errorResult(summary, [fetched.error]);
     }
-
-    const contents = methodSourceToContents(method.mthds);
-    if (contents.length === 0) {
-      return errorResult("Inputs template was not run: the stored method has no MTHDS source.", [
-        {
-          class: "input_domain",
-          location: "method_id",
-          message: "The stored method has no MTHDS source yet.",
-          hint: "Add MTHDS content to the method (e.g. in the webapp editor) before projecting its inputs template, or submit files instead.",
-          retryable: false,
-        },
-      ]);
-    }
-
-    // Each forwarded file carries the method id as its provenance label (it
-    // crosses into the build envelope's `source` via toMthdsFileItems), so
-    // diagnostics point back at the registered method.
-    files = contents.map((content) => ({ content, uri: request.method_id }));
+    files = fetched.files;
   }
 
   let report: BuildInputsResponse;

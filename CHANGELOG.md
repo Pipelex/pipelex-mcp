@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.0] - 2026-07-22
+
+### Added
+
+- **Catalog validate-by-reference (`method_id`) on `mthds_validate`.** The tool now accepts a registered method's catalog id (`mt_…`) beside a now-optional `files` — at least one of the two is required. `/v1/validate` has no by-id support, so a `method_id`-only call fetches-and-forwards: it resolves the stored method via `GET /v1/methods/{id}`, parses the polymorphic `MethodData.mthds` source, and forwards the contents to `/v1/validate`, each labeled with the method id as `uri` provenance — the same fetch-and-forward leg `mthds_inputs_template` already used, now shared as `fetchMethodFiles` in `capabilities/shared.ts`. Files win when both are supplied; a by-id call requires an API key, since the catalog is org-scoped. The dry-run graph view works identically regardless of whether the content came from files or a by-id fetch. This reverses the 0.6.0 non-goal that scoped `mthds_validate` by id out for that increment.
+
+### Changed
+
+- Removed the now-dead `validateRequest` request-shape helper (superseded by `validateFilesOrMethodIdRequest`, which every files-taking tool uses now that `mthds_validate` also accepts `method_id`).
+
 ## [0.6.0] - 2026-07-21
 
 ### Added
