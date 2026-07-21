@@ -10,6 +10,7 @@ import {
   mthdsValidateTool,
 } from "../tools.js";
 import type { ToolContexts } from "../tools.js";
+import { byokKeyMiddleware, contextsForRequest } from "./byok.js";
 
 export const HOSTED_SERVER_INSTRUCTIONS = [
   "pipelex-mcp helps you work with executable AI Methods written in the MTHDS language (.mthds).",
@@ -28,6 +29,7 @@ export function createHostedServer(contexts: ToolContexts = buildToolContexts())
     capabilities: {},
     instructions: HOSTED_SERVER_INSTRUCTIONS,
   })
+    .use("/mcp", byokKeyMiddleware)
     .registerTool(
       {
         name: mthdsValidateTool.name,
@@ -44,7 +46,8 @@ export function createHostedServer(contexts: ToolContexts = buildToolContexts())
           "openai/toolInvocation/invoked": "MTHDS validation finished.",
         },
       },
-      (input) => mthdsValidateTool.handler(input, contexts),
+      (input, extra) =>
+        mthdsValidateTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
     )
     .registerTool(
       {
@@ -58,7 +61,8 @@ export function createHostedServer(contexts: ToolContexts = buildToolContexts())
           "openai/toolInvocation/invoked": "MTHDS inputs template finished.",
         },
       },
-      (input) => mthdsInputsTemplateTool.handler(input, contexts),
+      (input, extra) =>
+        mthdsInputsTemplateTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
     )
     .registerTool(
       {
@@ -87,7 +91,7 @@ export function createHostedServer(contexts: ToolContexts = buildToolContexts())
           "openai/toolInvocation/invoked": "MTHDS run started.",
         },
       },
-      (input) => mthdsRunTool.handler(input, contexts),
+      (input, extra) => mthdsRunTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
     )
     .registerTool(
       {
@@ -101,7 +105,8 @@ export function createHostedServer(contexts: ToolContexts = buildToolContexts())
           "openai/toolInvocation/invoked": "MTHDS run status checked.",
         },
       },
-      (input) => mthdsRunStatusTool.handler(input, contexts),
+      (input, extra) =>
+        mthdsRunStatusTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
     )
     .registerTool(
       {
@@ -115,6 +120,7 @@ export function createHostedServer(contexts: ToolContexts = buildToolContexts())
           "openai/toolInvocation/invoked": "MTHDS run results fetched.",
         },
       },
-      (input) => mthdsRunResultsTool.handler(input, contexts),
+      (input, extra) =>
+        mthdsRunResultsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
     );
 }

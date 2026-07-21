@@ -325,7 +325,23 @@ export interface ClassifyErrorOptions {
   serverError?: {
     hint: string;
   };
+  /**
+   * Per-deployment texture for auth failures (`ClientAuthenticationError`,
+   * HTTP 401/403). The default wording points at the `PIPELEX_API_KEY` env
+   * var — right for the workshop, where the caller owns the process env. The
+   * hosted console overrides it per request (`src/hosted/byok.ts`): its
+   * callers cannot touch the server env and must be pointed at the
+   * bring-your-own-key channels instead. Capabilities thread it from their
+   * context's `authError` field.
+   */
+  auth?: {
+    location?: string;
+    hint: string;
+  };
 }
+
+/** The per-deployment auth-failure texture a capability context can carry. */
+export type AuthErrorTexture = NonNullable<ClassifyErrorOptions["auth"]>;
 
 const DEFAULT_BAD_REQUEST = {
   location: "files",
@@ -346,9 +362,9 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
   if (err instanceof ClientAuthenticationError) {
     return {
       class: "config",
-      location: "PIPELEX_API_KEY",
+      location: options.auth?.location ?? "PIPELEX_API_KEY",
       message: err.message,
-      hint: "Check the API key for the configured Pipelex API.",
+      hint: options.auth?.hint ?? "Check the API key for the configured Pipelex API.",
       retryable: false,
     };
   }
@@ -427,9 +443,9 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
   if (err.status === 401 || err.status === 403) {
     return {
       class: "config",
-      location: "PIPELEX_API_KEY",
+      location: options.auth?.location ?? "PIPELEX_API_KEY",
       message,
-      hint: "Check PIPELEX_API_KEY for the configured API.",
+      hint: options.auth?.hint ?? "Check PIPELEX_API_KEY for the configured API.",
       retryable: false,
     };
   }

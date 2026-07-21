@@ -132,6 +132,36 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }
   against a local OSS `pipelex-api` runner. Durable runs need the hosted API; a
   bare runner has no run lifecycle.
 
+## Hosted console: bring your own key
+
+The hosted console holds **no server-side API key**. Until per-user OAuth
+ships, every caller supplies their own `plx_sk_` platform key at the transport
+level — the key never travels through tool arguments, so it never enters the
+model's context. Two channels, depending on what your host's connector UI
+supports:
+
+- **`Authorization` header** — for hosts with header config (Claude Code,
+  Cursor, Codex, scripted clients):
+
+  ```bash
+  claude mcp add --transport http pipelex https://<console-url>/mcp \
+    --header "Authorization: Bearer plx_sk_..."
+  ```
+
+- **`?api_key=` on the connector URL** — for hosts whose connector UI accepts
+  only a URL (claude.ai, ChatGPT, Cowork): register the connector as
+  `https://<console-url>/mcp?api_key=plx_sk_...`. Mind that URLs can end up in
+  intermediary logs — this channel is the documented compromise until real
+  auth lands; use a key you can rotate.
+
+A supplied key takes precedence over any server-held env key. Without a key
+the handshake and `tools/list` still work, but every tool call returns a
+`config` no-verdict at `api_key` explaining both channels.
+
+(That said, prefer the **local workshop** on hosts that can spawn it — see the
+matrix below. The header example above is for testing the console from Claude
+Code, not the recommended pairing.)
+
 ## Host → server matrix
 
 Connect each host to **exactly one** Pipelex server — the local workshop

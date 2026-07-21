@@ -20,6 +20,7 @@ import {
   validateRunIdRequest,
 } from "./shared.js";
 import type {
+  AuthErrorTexture,
   ClassifyErrorOptions,
   ErrorClass,
   FileResolver,
@@ -265,6 +266,8 @@ export interface RunContext {
   resolver?: FileResolver;
   /** Whether this shell can render run-follow and its view-only result payloads. */
   viewsAvailable?: boolean;
+  /** Deployment-specific auth-failure texture (hosted BYOK); default env-var wording when absent. */
+  authError?: AuthErrorTexture;
 }
 
 export function buildRunContext(env = process.env): RunContext {
@@ -662,7 +665,7 @@ export async function startMthdsRun(
     const ack = await runClient(context).start(toStartOptions(request));
     return startResult(ack, context.viewsAvailable !== false);
   } catch (err) {
-    const error = classifyError(err, RUN_START_ERROR_OPTIONS);
+    const error = classifyError(err, { ...RUN_START_ERROR_OPTIONS, auth: context.authError });
     return startErrorResult(startSummaryForError(error), [error]);
   }
 }
@@ -681,7 +684,7 @@ export async function getMthdsRunStatus(
     const read = await runClient(context).getRunStatus(input.run_id);
     return statusResult(read);
   } catch (err) {
-    const error = classifyError(err, RUN_STATUS_ERROR_OPTIONS);
+    const error = classifyError(err, { ...RUN_STATUS_ERROR_OPTIONS, auth: context.authError });
     return statusErrorResult(statusSummaryForError(error), [error]);
   }
 }
@@ -700,7 +703,7 @@ export async function getMthdsRunResults(
   try {
     state = await runClient(context).getRunResult(input.run_id);
   } catch (err) {
-    const error = classifyError(err, RUN_RESULTS_ERROR_OPTIONS);
+    const error = classifyError(err, { ...RUN_RESULTS_ERROR_OPTIONS, auth: context.authError });
     return resultsErrorResult(resultsSummaryForError(error), [error]);
   }
 
