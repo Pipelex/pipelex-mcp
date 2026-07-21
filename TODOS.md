@@ -58,6 +58,18 @@ Build plan recorded 2026-07-21. This is the "catalog run-by-reference" item from
 
 **CHECKPOINT B — DONE (2026-07-21)** — committed on `feature/method-id-catalog-runs`; `make check` + tests green. Run-by-id is live end to end; the inputs-template leg can land in a fresh session with only SPEC.md + this file as context.
 
+## State at handoff (2026-07-21, end of the Checkpoint B session)
+
+- **Branch**: `feature/method-id-catalog-runs` (off `dev`), working tree clean. Commits: `d4a7981` (Phase 0 SPEC increment), `096852a` (Phases 1–2). Gates green at `096852a`: `make check` exit 0, `make t` all passing.
+- **Next**: Phase 3 below. Cold-start as stated at the top (CLAUDE.md → SPEC.md → this file; invoke the `skybridge` skill before touching code).
+- **Available shared pieces Phase 3 should use** (all in place, tested):
+  - `validateFilesOrMethodIdRequest(files, methodId)` in `src/capabilities/shared.ts` — replaces `inputs.ts`'s current files-emptiness path (mirror how `run.ts` `validateRunRequest` now calls it). Blank-id → `input_domain`@`method_id`; neither-supplied → `input_domain`@`files` ("Provide MTHDS files or a method_id.").
+  - `methodSourceToContents(mthds)` in `src/capabilities/method-source.ts` — empty result means "no MTHDS source" (the blank-source guard is folded in; no extra falsy check needed at the call site).
+  - The 402 paywall arm is generic in `classifyApiResponseError` — the fetch leg gets it for free, no per-route work.
+  - Callers pass `input.files ?? []` to `resolveSubmittedFiles` (files is optional on the input type).
+- **Pattern to mirror for the fetch leg**: `run.ts`'s `RUN_START_BY_ID_ERROR_OPTIONS` + the request-shape pick in `startMthdsRun` (`method_id` present → by-id options). Convention set in Phase 2: the by-id `badRequest`/`notFound` locator is `method_id`. `METHOD_FETCH_ERROR_OPTIONS` should follow it (route `/v1/methods/{id}`).
+- **Premise drift found in Phase 1** (recorded in the Phase 1 note below the checklist): the platform's `/v1/start` no longer answers a blanket opaque 503 for runner rejections — 4xx now translate to 422 with the real reason. Kept the 503 hint per plan; see the Phase 4 note about the tool-description wording.
+
 ## Phase 3 — `mthds_inputs_template` by id (`src/capabilities/inputs.ts`)
 
 - [ ] Input schema: `files` → optional; add `method_id` (describe: files win / id-only resolves the stored method). `MthdsInputsInput` updated.
@@ -70,6 +82,7 @@ Build plan recorded 2026-07-21. This is the "catalog run-by-reference" item from
 - [ ] `README.md`: tool contract sections for both tools (input shapes, precedence rule, key requirement for by-id).
 - [ ] `CHANGELOG.md` `## [Unreleased]`: Added — `method_id` catalog runs on `mthds_run` and inputs projection on `mthds_inputs_template`; Added — paywall (402) and unknown-method classification. (Do not mention `wip/` doc changes.)
 - [ ] `CLAUDE.md` (this repo): update the tool/union description ("The files union and the resolution seam" + run/inputs sections) to reflect optional files + `method_id`.
+- [ ] Reconsider the "opaque server error" wording in the `mthds_run` tool description (`src/tools.ts`) and the 503 `serverError` hint: per the Phase 1 note, the platform now returns a 422 with the real rejection reason for runner-rejected starts, so "rejects a bad bundle at start with an opaque server error" is pessimistic. Soften or drop; if changed, mirror in SPEC.md's "Start-time rejection is opaque" paragraph (Run Scope).
 - [ ] `make check` green; `make t` green.
 - [ ] Optional manual smoke against the hosted API (needs a real `plx_sk_` key + a registered method): `listMethods` via a scratch script to grab an `mt_` id, then `mthds_run` by id through `make inspect-local` or the dev console. Record the outcome here.
 
