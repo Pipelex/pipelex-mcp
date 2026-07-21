@@ -300,23 +300,36 @@ export const RUN_START_ERROR_OPTIONS: ClassifyErrorOptions = {
 };
 
 /**
- * Classify options for a `/v1/start` request that carried `method_id` (with or
- * without files); a files-only request keeps {@link RUN_START_ERROR_OPTIONS}
- * so nothing regresses. The `notFound` override is safe on this route: a
- * bare-runner missing-route 404 is intercepted earlier by the SDK as
- * `RunLifecycleUnavailableError`, so any `ApiResponseError` 404 that reaches
- * classification is the platform's structured unknown-method envelope.
+ * Classify options for an id-only `/v1/start` request — the stored method is
+ * the executed source, so both 400/422 and 404 locate at `method_id`. The
+ * `notFound` override is safe on this route: a bare-runner missing-route 404
+ * is intercepted earlier by the SDK as `RunLifecycleUnavailableError`, so any
+ * `ApiResponseError` 404 that reaches classification is the platform's
+ * structured unknown-method envelope.
  */
 export const RUN_START_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/start",
   badRequest: {
     location: "method_id",
-    hint: "The stored method may have no MTHDS source yet. If the error mentions organization context, the API key's org binding is the issue — mint a key in the right organization. With files also supplied, check files, pipe_code, and inputs too.",
+    hint: "The stored method may have no MTHDS source yet. If the error mentions organization context, the API key's org binding is the issue — mint a key in the right organization.",
   },
   notFound: {
     location: "method_id",
     hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.",
   },
+  serverError: START_SERVER_ERROR,
+};
+
+/**
+ * Classify options for a mixed `/v1/start` request (files + `method_id`): the
+ * files are the executed source and the id rides only as run-history linkage,
+ * so a 400/422 keeps the files-only texture — but a 404 is still about the
+ * linkage id, so the by-id unknown-method arm is retained.
+ */
+export const RUN_START_MIXED_ERROR_OPTIONS: ClassifyErrorOptions = {
+  route: "/v1/start",
+  badRequest: RUN_START_ERROR_OPTIONS.badRequest,
+  notFound: RUN_START_BY_ID_ERROR_OPTIONS.notFound,
   serverError: START_SERVER_ERROR,
 };
 
@@ -692,10 +705,15 @@ export async function startMthdsRun(
     return startErrorResult("Run was not started: request input is invalid.", inputErrors);
   }
 
-  // A request that carried method_id gets the by-id texture (unknown-method
-  // 404, no-source/org-context 400/422); files-only keeps today's options.
+  // Options follow the executed source: id-only gets the full by-id texture;
+  // mixed (files + id) keeps the files 400/422 texture but retains the by-id
+  // unknown-method 404; files-only keeps today's options.
   const classifyOptions =
-    request.method_id === undefined ? RUN_START_ERROR_OPTIONS : RUN_START_BY_ID_ERROR_OPTIONS;
+    request.method_id === undefined
+      ? RUN_START_ERROR_OPTIONS
+      : request.files.length === 0
+        ? RUN_START_BY_ID_ERROR_OPTIONS
+        : RUN_START_MIXED_ERROR_OPTIONS;
 
   try {
     const ack = await runClient(context).start(toStartOptions(request));

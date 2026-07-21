@@ -724,6 +724,51 @@ describe("startMthdsRun by method_id", () => {
     expect(result.structuredContent.errors?.[0]?.hint).toContain("app.pipelex.com");
   });
 
+  it("points a mixed-request 422 at files — the executed source — not method_id", async () => {
+    const context = contextWith({
+      start: () =>
+        Promise.reject(
+          new ApiResponseError(
+            "HTTP 422",
+            `${DEFAULT_API_URL}/v1/start`,
+            422,
+            "Unprocessable Entity",
+            "{}",
+            "unprocessable_entity",
+            "Pipe 'missing_pipe' not found in the submitted bundle",
+            undefined, // validationErrors
+            undefined, // code
+          ),
+        ),
+    });
+
+    const result = await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }], method_id: "mt_abc123" },
+      context,
+    );
+
+    const error = result.structuredContent.errors?.[0];
+    expect(error?.class).toBe("input_domain");
+    expect(error?.location).toBe("files");
+    expect(error?.hint).toMatch(/files, pipe_code, and inputs/);
+    expect(error?.retryable).toBe(false);
+  });
+
+  it("keeps a mixed-request 404 at method_id — the linkage id is what a 404 is about", async () => {
+    const context = contextWith({ start: () => Promise.reject(notFound()) });
+
+    const result = await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }], method_id: "mt_missing" },
+      context,
+    );
+
+    const error = result.structuredContent.errors?.[0];
+    expect(error?.class).toBe("input_domain");
+    expect(error?.location).toBe("method_id");
+    expect(error?.hint).toMatch(/org-scoped/);
+    expect(error?.retryable).toBe(false);
+  });
+
   it("points a by-id 422 at method_id with the combined no-source/org-context hint", async () => {
     const context = contextWith({
       start: () =>
