@@ -175,7 +175,7 @@ wherever there's a filesystem, the hosted console everywhere else.
 | Claude Code | Local workshop | `claude mcp add`, or the `pipelex` plugin from the `pipelex-plugins` marketplace (its manifest spawns the workshop) |
 | ChatGPT desktop (Codex mode) | Local workshop | `~/.codex/config.toml` |
 | Cursor | Local workshop | `~/.cursor/mcp.json` |
-| Cowork | **Dual** — console for consumers, workshop for builders | Connector, or stdio in `claude_desktop_config.json` |
+| Claude Desktop (Cowork mode) | **Dual** — console for consumers, workshop for builders | Connector, or stdio in `claude_desktop_config.json` |
 | Mistral Vibe (TUI) | Local workshop | pending Vibe's MCP mechanics |
 | Mistral Vibe (web) | Hosted console | Connector / config |
 
