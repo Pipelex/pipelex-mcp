@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Bring-your-own-key (BYOK) on the hosted console** — the interim auth posture until per-user OAuth ships. The console holds no server-side API key; each caller supplies their own `plx_sk_` platform key at the transport level, via an `Authorization: Bearer plx_sk_...` header (hosts with header config: Claude Code, Cursor, Codex) or `?api_key=plx_sk_...` on the connector URL (URL-only connector UIs: claude.ai, ChatGPT, Cowork). The key never rides a tool argument, so it never enters the model's context; a supplied key takes precedence over any server-held `PIPELEX_API_KEY`. Keyless requests still handshake and list tools — a keyless tool call fails as an instructive `config` no-verdict at `api_key` explaining both channels. Implemented as a disposable Express middleware + per-request context derivation in `src/hosted/byok.ts`; the local workshop is untouched (its per-user key remains the host-supplied `PIPELEX_API_KEY` env).
+
+### Changed
+
+- Auth-failure errors (`ClientAuthenticationError`, HTTP 401/403) now carry deployment-specific wording: `classifyError` accepts an `auth` texture (threaded from each capability context's new `authError` field), so the hosted console points callers at the BYOK channels while the workshop keeps the `PIPELEX_API_KEY` env-var wording.
+
 ## [0.4.0] - 2026-07-20
 
 ### Added

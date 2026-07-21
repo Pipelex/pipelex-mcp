@@ -18,6 +18,7 @@ import {
   validateRequest,
 } from "./shared.js";
 import type {
+  AuthErrorTexture,
   ClassifyErrorOptions,
   FileResolver,
   SubmittedFile,
@@ -104,6 +105,8 @@ export interface ValidationContext {
   resolver?: FileResolver;
   /** Whether this shell can render the graph carried on the view-only channel. */
   viewsAvailable?: boolean;
+  /** Deployment-specific auth-failure texture (hosted BYOK); default env-var wording when absent. */
+  authError?: AuthErrorTexture;
 }
 
 export function buildValidationContext(env = process.env): ValidationContext {
@@ -142,7 +145,7 @@ export async function validateMthds(
       render: ["markdown"],
     });
   } catch (err) {
-    const error = classifyError(err, VALIDATE_ERROR_OPTIONS);
+    const error = classifyError(err, { ...VALIDATE_ERROR_OPTIONS, auth: context.authError });
     return errorResult(summaryForError(error), [error]);
   }
 

@@ -18,6 +18,7 @@ import {
   validateRequest,
 } from "./shared.js";
 import type {
+  AuthErrorTexture,
   ClassifyErrorOptions,
   FileResolver,
   SubmittedFile,
@@ -115,6 +116,8 @@ export interface InputsContext {
   client?: InputsClient;
   /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
   resolver?: FileResolver;
+  /** Deployment-specific auth-failure texture (hosted BYOK); default env-var wording when absent. */
+  authError?: AuthErrorTexture;
 }
 
 export function buildInputsContext(env = process.env): InputsContext {
@@ -157,7 +160,7 @@ export async function buildMthdsInputs(
       });
     report = await client.buildInputs(toBuildInputsRequest(request));
   } catch (err) {
-    const error = classifyError(err, INPUTS_ERROR_OPTIONS);
+    const error = classifyError(err, { ...INPUTS_ERROR_OPTIONS, auth: context.authError });
     return errorResult(summaryForError(error), [error]);
   }
 
