@@ -110,10 +110,13 @@ The public MCP input shape is:
 
 ```ts
 {
-  files: SubmittedFileInput[]; // { content, uri? } | { path } — see Deployments
+  files?: SubmittedFileInput[]; // { content, uri? } | { path } — see Deployments
+  method_id?: string;           // catalog id (mt_…) of a registered method — files win when both are supplied
   include_graph?: boolean;
 }
 ```
+
+At least one of (non-empty `files`, `method_id`) is required, else `input_domain` at `files`; a supplied-but-blank `method_id` is `input_domain` at `method_id`. `method_id` validates a registered method by its catalog id via the same **fetch-and-forward** as `mthds_inputs_template`'s by-id path — `/v1/validate` has no by-id support either, so the capability fetches the stored method (`GET /v1/methods/{id}` through the SDK's `getMethod`), parses its polymorphic `MethodData.mthds` source the same way, and forwards the resulting contents as `/v1/validate`'s files, each carrying the method id as its `uri` provenance label. When both are supplied, **files win and `method_id` is ignored** (no linkage concept on this route, unlike `/v1/start`) — documented behavior, not an error. A stored method with no MTHDS source is an `input_domain` no-verdict at `method_id`, raised without calling `/v1/validate`. Fetch-leg failures classify against `/v1/methods/{id}` exactly as they do for `mthds_inputs_template` (unknown/foreign-org id → 404 → `input_domain` at `method_id`; paywall → 402 → `config`; a key is required for by-id calls). The dry-run graph view works identically regardless of whether the validated content came from submitted files or a by-id fetch — the fetch leg only supplies files upstream of the existing `/v1/validate` call.
 
 `include_graph` defaults to true. The graph rides the tool result's view-only `_meta` channel (`_meta.graph_spec`, consumed by the `run-graph` view), never `structuredContent`. When false, omit it entirely.
 
@@ -301,7 +304,7 @@ Every `errors[]` entry also carries `retryable` — whether retrying the same ca
 
 ## Non-Goals
 
-The server must not add Pipelex Hosted API deployment behavior, OAuth token verification (the hosted console's bring-your-own-key middleware forwards the caller's key and verifies nothing — the API is the authority; see Deployments), blocking execution (`POST /v1/execute` or the SDK's blocking wrappers), run cancellation, resources, logs, package publishing (of MTHDS method packages to a registry — not this server's own npm distribution, which is how the workshop ships; see Deployments), subprocess fallbacks, or a production validation UI. Filesystem reads are scoped per deployment: the **hosted console** never reads files (a `{ path }` submission is rejected instructively — see Deployments); the **local workshop** reads exactly the `{ path }` items submitted to it, within its trust boundary. The workshop registers no views at launch (tools-first — see Deployments); local view delivery is a later increment gated on self-contained view bundles. Also out of scope for this increment: per-user OAuth, and a storage upload tool for binary inputs (binary inputs ride reachable https URLs; upload is a later increment). Registered-method runs by catalog id are in scope (`method_id` on `mthds_run` and `mthds_inputs_template` — see Run Scope and Inputs Template Scope); around that catalog surface, these stay out: `mthds_validate` by id (a registered method was validated at publish, and "show me a registered method's graph" belongs to the undecided conducted-views workstream), catalog discovery tools (listing methods or fetching method detail — the id arrives out-of-band until those land; they are the natural next increment after this one), a publish/save tool from the workshop, and stored-`input_data` defaulting (an omitted `inputs` passes through as-is; platform behavior governs).
+The server must not add Pipelex Hosted API deployment behavior, OAuth token verification (the hosted console's bring-your-own-key middleware forwards the caller's key and verifies nothing — the API is the authority; see Deployments), blocking execution (`POST /v1/execute` or the SDK's blocking wrappers), run cancellation, resources, logs, package publishing (of MTHDS method packages to a registry — not this server's own npm distribution, which is how the workshop ships; see Deployments), subprocess fallbacks, or a production validation UI. Filesystem reads are scoped per deployment: the **hosted console** never reads files (a `{ path }` submission is rejected instructively — see Deployments); the **local workshop** reads exactly the `{ path }` items submitted to it, within its trust boundary. The workshop registers no views at launch (tools-first — see Deployments); local view delivery is a later increment gated on self-contained view bundles. Also out of scope for this increment: per-user OAuth, and a storage upload tool for binary inputs (binary inputs ride reachable https URLs; upload is a later increment). Registered-method access by catalog id is in scope (`method_id` on `mthds_validate`, `mthds_run`, and `mthds_inputs_template` — see Validation Scope, Run Scope, and Inputs Template Scope), all via the same fetch-and-forward leg where the route itself has no by-id support. This does not extend to a dedicated "show me a registered method's graph" surface independent of validation — that belongs to the undecided conducted-views workstream (`wip/dual-server-conducted-views.md`), which is about a different concern (a hosted-connector-conducted scenario where content would cross the model twice); fetch-and-forward never puts content in the model's context, so it doesn't bear on that question either way. Around this catalog surface, these stay out: catalog discovery tools (listing methods or fetching method detail — the id arrives out-of-band until those land; they are the natural next increment after this one), a publish/save tool from the workshop, and stored-`input_data` defaulting (an omitted `inputs` passes through as-is; platform behavior governs).
 
 Repository quality gates are in scope: ESLint, Prettier, TypeScript type checking, Vitest unit tests, and a combined `npm run check` command should remain available locally.
 
@@ -333,9 +336,10 @@ Run a method durably:
 Run a registered method by reference:
 
 1. The user names a registered method by its catalog id (`mt_…`) — obtained out-of-band for now (the webapp catalog, a teammate); catalog discovery tools are the natural next increment.
-2. The assistant calls `mthds_inputs_template` with `method_id` (no files) and fills the returned template with user data.
-3. The assistant calls `mthds_run` with `method_id` and the filled `inputs` — no bundle ever enters the conversation, and the run executes the method's current stored content.
-4. Everything downstream is unchanged: the `run-follow` view, `mthds_run_status`, and `mthds_run_results` operate on the durable `run_id` and don't care how the run started.
+2. The assistant may first call `mthds_validate` with `method_id` (no files) to confirm the stored method's current content still validates — e.g. after a suspected edit — getting the same structured verdict and dry-run graph view as a files-based call, with no bundle entering the conversation.
+3. The assistant calls `mthds_inputs_template` with `method_id` (no files) and fills the returned template with user data.
+4. The assistant calls `mthds_run` with `method_id` and the filled `inputs` — no bundle ever enters the conversation, and the run executes the method's current stored content.
+5. Everything downstream is unchanged: the `run-follow` view, `mthds_run_status`, and `mthds_run_results` operate on the durable `run_id` and don't care how the run started.
 
 ## Tools and Views
 
@@ -343,11 +347,11 @@ Run a registered method by reference:
 
 **Tool: `mthds_validate`**
 
-- **Input**: `{ files, include_graph? }`
+- **Input**: `{ files?, method_id?, include_graph? }` — at least one of `files` / `method_id` (see Validation Scope)
 - **Output**: `{ status, is_valid, is_runnable, pending_signatures, available_view_specs, validation_errors?, errors? }` in `structuredContent`, plus a text summary in MCP `content`. On a positive verdict the graph rides the view-only `_meta` channel (`_meta.graph_spec`), never `structuredContent`; `available_view_specs` tells the model the `"dry_run_graph"` view is available to surface.
-- **Behavior**: Validates request shape, calls the Pipelex API against `PIPELEX_BASE_URL` or `https://api.pipelex.com` with signatures and markdown enabled, and maps produced validation verdicts into flattened structured content.
+- **Behavior**: Validates request shape, calls the Pipelex API against `PIPELEX_BASE_URL` or `https://api.pipelex.com` with signatures and markdown enabled, and maps produced validation verdicts into flattened structured content. With `method_id` and no files, fetch-and-forward: `GET /v1/methods/{id}` resolves the stored method's source, which is forwarded to `/v1/validate` (files win when both are supplied).
 - **Annotations**: Read-only, non-destructive, no open-world publishing.
-- **View**: `run-graph` — renders `_meta.graph_spec` with `@pipelex/mthds-ui`'s `GraphViewer` (inline preview plus a user-triggered fullscreen toggle); compact empty state when there is no graph.
+- **View**: `run-graph` — renders `_meta.graph_spec` with `@pipelex/mthds-ui`'s `GraphViewer` (inline preview plus a user-triggered fullscreen toggle); compact empty state when there is no graph. Works identically whether the validated content came from `files` or a `method_id` fetch.
 
 **Tool: `mthds_inputs_template`**
 

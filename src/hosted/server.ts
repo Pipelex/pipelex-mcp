@@ -14,10 +14,10 @@ import { byokKeyMiddleware, contextsForRequest } from "./byok.js";
 
 export const HOSTED_SERVER_INSTRUCTIONS = [
   "pipelex-mcp helps you work with executable AI Methods written in the MTHDS language (.mthds).",
-  "Call `mthds_validate` with the file contents you hold to get a stable, structured verdict",
-  "(is_valid / is_runnable, validation errors, pending signatures).",
-  "When the method is valid, the tool also returns an interactive dry-run graph of the method,",
-  "rendered through the run-graph view.",
+  "Call `mthds_validate` with the file contents you hold (or a registered method's catalog id via",
+  "method_id) to get a stable, structured verdict (is_valid / is_runnable, validation errors,",
+  "pending signatures). When the method is valid, the tool also returns an interactive dry-run",
+  "graph of the method, rendered through the run-graph view.",
   "Call `mthds_inputs_template` with the same file contents (or a registered method's catalog id",
   "via method_id) to get a fill-in template of a pipe's declared inputs, ready to populate for a run.",
   "Run a method durably with `mthds_run` (start from files + pipe + inputs, or from a registered",

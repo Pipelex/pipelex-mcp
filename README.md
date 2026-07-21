@@ -18,7 +18,7 @@ contracts:
 
 | Tool | What it does |
 |---|---|
-| `mthds_validate` | Validate submitted `.mthds` files; on a valid verdict, ship the dry-run method graph to the `run-graph` view (hosted only). |
+| `mthds_validate` | Validate submitted `.mthds` files, or a registered method by catalog id; on a valid verdict, ship the dry-run method graph to the `run-graph` view (hosted only). |
 | `mthds_inputs_template` | Project a pipe's declared inputs as a fill-in template for a run. |
 | `mthds_run` | Start a durable run on the hosted Pipelex API; returns a durable `run_id` immediately. |
 | `mthds_run_status` | Check a durable run's coarse lifecycle state by `run_id`. |
@@ -125,8 +125,10 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }
 **Environment**
 
 - `PIPELEX_API_KEY` — a `plx_sk_` platform key. Optional for `mthds_validate` /
-  `mthds_inputs_template` against a key-less API; effectively required for the
-  run family (a missing/invalid key is a `config` no-verdict).
+  `mthds_inputs_template` calls that submit `files` against a key-less API;
+  effectively required for the run family and for any `method_id` call on any
+  tool, since the catalog is org-scoped (a missing/invalid key is a `config`
+  no-verdict).
 - `PIPELEX_BASE_URL` — defaults to the hosted Pipelex API
   (`https://api.pipelex.com`). Set it to `http://localhost:8081` to develop
   against a local OSS `pipelex-api` runner. Durable runs need the hosted API; a
@@ -215,8 +217,12 @@ Full contracts (verdict discipline, `_meta` channels, view behavior) live in
 ### `mthds_validate`
 
 ```ts
-// input
-{ files: SubmittedFileInput[]; include_graph?: boolean }
+// input — at least one of files / method_id
+{
+  files?: SubmittedFileInput[];
+  method_id?: string;          // catalog id (mt_…) of a registered method
+  include_graph?: boolean;
+}
 
 // structuredContent
 {
@@ -234,7 +240,12 @@ The graph (`graph_spec`) rides the tool result's view-only `_meta` channel
 (`_meta.graph_spec`) for the `run-graph` view — never `structuredContent`, so the
 model never pays its tokens. `available_view_specs` is how the model learns a
 view exists to surface; `include_graph` defaults to true. The MCP `content` text
-carries the human-readable summary.
+carries the human-readable summary. `method_id` validates a registered method by
+its catalog id (fetch-and-forward from the method's current stored content, the
+same pattern as `mthds_inputs_template`); it requires an API key, since the
+catalog is org-scoped, and when both `files` and `method_id` are supplied the
+files win and the id is ignored. The graph view works identically whether the
+content came from submitted files or a by-id fetch.
 
 ### `mthds_inputs_template`
 
