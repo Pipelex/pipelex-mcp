@@ -86,7 +86,7 @@ Build plan recorded 2026-07-21. This is the "catalog run-by-reference" item from
 - [x] `make check` green; `make t` green (all tests passing).
 - [x] Manual smoke against the live dev API (api-dev.pipelex.com, real `plx_sk_` key from `.env`) — **all green (2026-07-21)**: `listMethods` found `mt_e24ea8dd-…` ("Test illustration"); `mthds_inputs_template` by id returned a valid template (`illustration.illustrate_from_notes`, `{ notes: ["text_value"] }`); unknown id classified `input_domain`@`method_id` retryable false with the org-scoped hint; `mthds_run` by id (no files, filled inputs) started `run_7745b0d4-…` (STARTED ack) and reached COMPLETED.
 
-**CHECKPOINT C** — commit; then run an independent no-context review on the full diff (`pr-review-toolkit:code-reviewer` agent on the branch diff vs `dev`), fix findings, re-run gates.
+**CHECKPOINT C — DONE (2026-07-21)** — Phases 3–4 committed (`ca89703`); independent no-context review of the full branch diff vs `dev` ran (`pr-review-toolkit:code-reviewer`): **no must-fix defects** — it verified the load-bearing premises live (SDK extension-only start, the `/v1/start` 404-interception safety claim, files-win parity with `execution.py`, 402 branch ordering) and raised two minor hardening suggestions, both applied: a falsy guard in `methodSourceToContents` (a contract-violating null `mthds` now reads as "no source" instead of crashing, mirroring the platform's `if method.mthds`) and a docstring note on the deliberate whitespace-only divergence (we trim to "no source"; the platform's falsy-only guard would let it fail downstream at parse). Gates re-run green after the fixes.
 
 ## Phase 5 — wrap-up
 

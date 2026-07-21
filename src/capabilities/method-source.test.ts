@@ -43,6 +43,11 @@ describe("methodSourceToContents", () => {
     expect(methodSourceToContents("   \n")).toEqual([]);
   });
 
+  it("treats a contract-violating null source as no source, not a crash", () => {
+    expect(methodSourceToContents(null as unknown as string)).toEqual([]);
+    expect(methodSourceToContents(undefined as unknown as string)).toEqual([]);
+  });
+
   it("treats non-array JSON as a raw bundle string", () => {
     // Valid JSON that is not the file-array format IS the source — a method
     // could legally start with a number or a JSON-looking object.

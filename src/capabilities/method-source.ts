@@ -10,8 +10,19 @@
  * objects yields the non-blank contents; anything else (raw source, non-array
  * JSON, unparseable) is one plain bundle string, itself dropped when blank.
  * An empty result means the stored method has no MTHDS source.
+ *
+ * One deliberate divergence: the platform's blank-source guard is a falsy
+ * check (`if method.mthds`), so a whitespace-only raw source would pass there
+ * and fail downstream at parse; here it trims to "no source" — a clearer
+ * verdict for the same degenerate input.
  */
 export function methodSourceToContents(mthds: string): string[] {
+  // The API types `mthds` as string, but mirror the platform's falsy guard so
+  // a contract-violating null/undefined reads as "no source", not a crash.
+  if (!mthds) {
+    return [];
+  }
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(mthds);
