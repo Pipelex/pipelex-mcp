@@ -172,7 +172,7 @@ wherever there's a filesystem, the hosted console everywhere else.
 | ChatGPT (web) | Hosted console | Apps directory |
 | claude.ai (web + mobile) | Hosted console | Connector (custom URL) |
 | Claude Desktop (chat mode) | Hosted console | Connector / marketplace plugin |
-| Claude Code | Local workshop | `claude mcp add` |
+| Claude Code | Local workshop | `claude mcp add`, or the `pipelex` plugin from the `pipelex-plugins` marketplace (its manifest spawns the workshop) |
 | ChatGPT desktop (Codex mode) | Local workshop | `~/.codex/config.toml` |
 | Cursor | Local workshop | `~/.cursor/mcp.json` |
 | Cowork | **Dual** — console for consumers, workshop for builders | Connector, or stdio in `claude_desktop_config.json` |
