@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ApiResponseError,
   ApiUnreachableError,
+  ClientAuthenticationError,
   MissingMainStuffError,
   PipelineRequestError,
   RunLifecycleUnavailableError,
@@ -392,6 +393,46 @@ describe("classifyError", () => {
     expect(error.class).toBe("config");
     expect(error.location).toBe("PIPELEX_API_KEY");
     expect(error.retryable).toBe(false);
+  });
+
+  it("applies deployment auth texture to a 401 response", () => {
+    const error = classifyError(
+      new ApiResponseError(
+        "HTTP 401",
+        `${DEFAULT_API_URL}/v1/validate`,
+        401,
+        "Unauthorized",
+        "{}",
+        "unauthorized",
+        "Missing key",
+        undefined, // validationErrors
+        undefined, // code
+      ),
+      { auth: { location: "api_key", hint: "Bring your own key." } },
+    );
+
+    expect(error.class).toBe("config");
+    expect(error.location).toBe("api_key");
+    expect(error.hint).toBe("Bring your own key.");
+    expect(error.retryable).toBe(false);
+  });
+
+  it("applies deployment auth texture to a ClientAuthenticationError", () => {
+    const error = classifyError(new ClientAuthenticationError("Unauthorized"), {
+      auth: { location: "api_key", hint: "Bring your own key." },
+    });
+
+    expect(error.class).toBe("config");
+    expect(error.location).toBe("api_key");
+    expect(error.hint).toBe("Bring your own key.");
+    expect(error.retryable).toBe(false);
+  });
+
+  it("keeps the env-var auth texture when no override is provided", () => {
+    const error = classifyError(new ClientAuthenticationError("Unauthorized"));
+
+    expect(error.location).toBe("PIPELEX_API_KEY");
+    expect(error.hint).toBe("Check the API key for the configured Pipelex API.");
   });
 
   it("classifies API server failures as runtime, retryable", () => {
