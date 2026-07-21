@@ -166,6 +166,19 @@ const METHOD_FETCH_ERROR_OPTIONS: ClassifyErrorOptions = {
   },
 };
 
+// Constructed inside each caught block (mirroring run.ts's runClient): the SDK
+// constructor throws PipelineRequestError on a malformed base URL, and that
+// must classify to a config ToolError, not reject the MCP handler.
+function inputsClient(context: InputsContext): InputsClient {
+  return (
+    context.client ??
+    new PipelexApiClient({
+      baseUrl: context.baseUrl,
+      apiKey: context.apiKey,
+    })
+  );
+}
+
 export async function buildMthdsInputs(
   input: MthdsInputsInput,
   context: InputsContext = buildInputsContext(),
@@ -181,13 +194,6 @@ export async function buildMthdsInputs(
     return errorResult("Inputs template was not run: request input is invalid.", inputErrors);
   }
 
-  const client =
-    context.client ??
-    new PipelexApiClient({
-      baseUrl: context.baseUrl,
-      apiKey: context.apiKey,
-    });
-
   // Fetch-and-forward: the build routes have no by-id support, so an id-only
   // request fetches the stored method and forwards its current source as the
   // submitted files. Inline files win — with both supplied, method_id is
@@ -196,7 +202,7 @@ export async function buildMthdsInputs(
   if (files.length === 0 && request.method_id !== undefined) {
     let method: MethodData;
     try {
-      method = await client.getMethod(request.method_id);
+      method = await inputsClient(context).getMethod(request.method_id);
     } catch (err) {
       const error = classifyError(err, { ...METHOD_FETCH_ERROR_OPTIONS, auth: context.authError });
       return errorResult(summaryForError(error), [error]);
@@ -223,7 +229,7 @@ export async function buildMthdsInputs(
 
   let report: BuildInputsResponse;
   try {
-    report = await client.buildInputs(toBuildInputsRequest({ ...request, files }));
+    report = await inputsClient(context).buildInputs(toBuildInputsRequest({ ...request, files }));
   } catch (err) {
     const error = classifyError(err, { ...INPUTS_ERROR_OPTIONS, auth: context.authError });
     return errorResult(summaryForError(error), [error]);

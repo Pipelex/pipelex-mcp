@@ -321,6 +321,20 @@ describe("buildMthdsInputs", () => {
     expect(result.summary).toMatch(/unreachable|misconfigured/i);
   });
 
+  it("classifies a malformed base URL as config instead of rejecting the handler", async () => {
+    // No injected client: the real SDK constructor must run — it throws
+    // PipelineRequestError on a path-carrying base URL, and that throw has to
+    // land in the caught path (regression guard for the by-id client hoist).
+    const result = await buildMthdsInputs(
+      { files: [{ content: 'domain = "demo"' }] },
+      { baseUrl: `${DEFAULT_API_URL}/v1` },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
+  });
+
   it("treats a reachable but malformed report as runtime, not unreachable", async () => {
     const malformed = { ...validJsonReport, inputs: undefined } as unknown as BuildInputsResponse;
 
@@ -566,6 +580,17 @@ describe("buildMthdsInputs by method_id", () => {
     expect(result.structuredContent.errors?.[0]?.class).toBe("config");
     expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
     expect(result.structuredContent.errors?.[0]?.hint).toMatch(/plan|billing/i);
+  });
+
+  it("classifies a malformed base URL on the fetch leg as config", async () => {
+    const result = await buildMthdsInputs(
+      { method_id: "mt_123" },
+      { baseUrl: `${DEFAULT_API_URL}/v1` },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
   });
 
   it("rejects a request with neither files nor method_id", async () => {
