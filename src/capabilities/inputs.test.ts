@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
-import type { BuildInputsRequest, BuildInputsResponse } from "@pipelex/sdk";
+import type { BuildInputsRequest, BuildInputsResponse, MethodData } from "@pipelex/sdk";
 
 import {
   buildMthdsInputs,
@@ -29,6 +29,30 @@ const validTomlReport: BuildInputsResponse = {
   explicit: true,
   inputs_toml: '# question (Text)\nquestion = "Your question here"\n',
 };
+
+/** Fake getMethod arm for tests whose request must never fetch a method. */
+const getMethodNotCalled = {
+  async getMethod(): Promise<MethodData> {
+    throw new Error("getMethod must not be called in this test");
+  },
+};
+
+/** Fake buildInputs arm for tests whose request must never reach the build route. */
+const buildInputsNotCalled = {
+  async buildInputs(): Promise<BuildInputsResponse> {
+    throw new Error("buildInputs must not be called in this test");
+  },
+};
+
+function methodData(mthds: string): MethodData {
+  return {
+    method_id: "mt_123",
+    name: "Demo method",
+    mthds,
+    created_at: "2026-07-21T00:00:00Z",
+    updated_at: "2026-07-21T00:00:00Z",
+  };
+}
 
 const invalidReport: BuildInputsResponse = {
   is_valid: false,
@@ -143,6 +167,18 @@ describe("validateInputsRequest", () => {
 
     expect(errors).toEqual([]);
   });
+
+  it("accepts a method_id with no files", () => {
+    const errors = validateInputsRequest({ files: [], method_id: "mt_123" });
+
+    expect(errors).toEqual([]);
+  });
+
+  it("rejects a blank method_id", () => {
+    const errors = validateInputsRequest({ files: [], method_id: "  " });
+
+    expect(errors.map((error) => error.location)).toContain("method_id");
+  });
 });
 
 describe("buildMthdsInputs", () => {
@@ -159,6 +195,7 @@ describe("buildMthdsInputs", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
+          ...getMethodNotCalled,
           async buildInputs(request) {
             capturedRequest = request;
             return validJsonReport;
@@ -195,6 +232,7 @@ describe("buildMthdsInputs", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
+          ...getMethodNotCalled,
           async buildInputs(request) {
             capturedRequest = request;
             return validTomlReport;
@@ -219,6 +257,7 @@ describe("buildMthdsInputs", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
+          ...getMethodNotCalled,
           async buildInputs() {
             called = true;
             return validJsonReport;
@@ -239,6 +278,7 @@ describe("buildMthdsInputs", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
+          ...getMethodNotCalled,
           async buildInputs() {
             throw new ApiResponseError(
               "HTTP 422",
@@ -268,6 +308,7 @@ describe("buildMthdsInputs", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
+          ...getMethodNotCalled,
           async buildInputs() {
             throw new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED");
           },
@@ -280,6 +321,20 @@ describe("buildMthdsInputs", () => {
     expect(result.summary).toMatch(/unreachable|misconfigured/i);
   });
 
+  it("classifies a malformed base URL as config instead of rejecting the handler", async () => {
+    // No injected client: the real SDK constructor must run — it throws
+    // PipelineRequestError on a path-carrying base URL, and that throw has to
+    // land in the caught path (regression guard for the by-id client hoist).
+    const result = await buildMthdsInputs(
+      { files: [{ content: 'domain = "demo"' }] },
+      { baseUrl: `${DEFAULT_API_URL}/v1` },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
+  });
+
   it("treats a reachable but malformed report as runtime, not unreachable", async () => {
     const malformed = { ...validJsonReport, inputs: undefined } as unknown as BuildInputsResponse;
 
@@ -288,6 +343,7 @@ describe("buildMthdsInputs", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
+          ...getMethodNotCalled,
           async buildInputs() {
             return malformed;
           },
@@ -316,6 +372,7 @@ describe("buildMthdsInputs path submissions", () => {
           },
         },
         client: {
+          ...getMethodNotCalled,
           async buildInputs(request) {
             capturedRequest = request;
             return validJsonReport;
@@ -340,6 +397,7 @@ describe("buildMthdsInputs path submissions", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
+          ...getMethodNotCalled,
           async buildInputs() {
             called = true;
             return validJsonReport;
@@ -353,5 +411,198 @@ describe("buildMthdsInputs path submissions", () => {
     expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
     expect(result.structuredContent.errors?.[0]?.location).toBe("files[0].path");
     expect(result.summary).toBe("Inputs template was not run: request input is invalid.");
+  });
+});
+
+describe("buildMthdsInputs by method_id", () => {
+  it("fetches a raw-source method and forwards it as one file labeled with the id", async () => {
+    let capturedRequest: BuildInputsRequest | undefined;
+    let fetchedId: string | undefined;
+
+    const result = await buildMthdsInputs(
+      { method_id: "mt_123" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          async getMethod(methodId) {
+            fetchedId = methodId;
+            return methodData('domain = "demo"\nmain_pipe = "main"');
+          },
+          async buildInputs(request) {
+            capturedRequest = request;
+            return validJsonReport;
+          },
+        },
+      },
+    );
+
+    expect(fetchedId).toBe("mt_123");
+    // The stored source is forwarded as the build envelope's files, each
+    // labeled with the method id as provenance.
+    expect(capturedRequest).toEqual({
+      files: [{ content: 'domain = "demo"\nmain_pipe = "main"', source: "mt_123" }],
+      format: "json",
+      explicit: false,
+    });
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.inputs).toEqual({ question: "Your question here" });
+  });
+
+  it("forwards each stored file of a file-array method", async () => {
+    let capturedRequest: BuildInputsRequest | undefined;
+
+    const result = await buildMthdsInputs(
+      { method_id: "mt_123", pipe_ref: "demo.main" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          async getMethod() {
+            return methodData(
+              JSON.stringify([
+                { name: "a.mthds", content: 'domain = "demo"' },
+                { name: "b.mthds", content: 'main_pipe = "main"' },
+                { name: "empty.mthds", content: "   " },
+              ]),
+            );
+          },
+          async buildInputs(request) {
+            capturedRequest = request;
+            return validJsonReport;
+          },
+        },
+      },
+    );
+
+    expect(capturedRequest?.files).toEqual([
+      { content: 'domain = "demo"', source: "mt_123" },
+      { content: 'main_pipe = "main"', source: "mt_123" },
+    ]);
+    expect(capturedRequest?.pipe_ref).toBe("demo.main");
+    expect(result.structuredContent.status).toBe("ok");
+  });
+
+  it("surfaces an unknown method id (404) at method_id without calling the build route", async () => {
+    const result = await buildMthdsInputs(
+      { method_id: "mt_missing" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...buildInputsNotCalled,
+          async getMethod(): Promise<MethodData> {
+            throw new ApiResponseError(
+              "HTTP 404",
+              `${DEFAULT_API_URL}/v1/methods/mt_missing`,
+              404,
+              "Not Found",
+              "{}",
+              "not_found",
+              "Method not found",
+              undefined, // validationErrors
+              "not_found", // code
+            );
+          },
+        },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
+    expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
+  });
+
+  it("reports a no-source method at method_id without calling the build route", async () => {
+    const result = await buildMthdsInputs(
+      { method_id: "mt_123" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...buildInputsNotCalled,
+          async getMethod() {
+            return methodData("[]");
+          },
+        },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
+    expect(result.summary).toContain("no MTHDS source");
+  });
+
+  it("lets files win over method_id without fetching the method", async () => {
+    let capturedRequest: BuildInputsRequest | undefined;
+
+    const result = await buildMthdsInputs(
+      { files: [{ content: 'domain = "demo"' }], method_id: "mt_123" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...getMethodNotCalled,
+          async buildInputs(request) {
+            capturedRequest = request;
+            return validJsonReport;
+          },
+        },
+      },
+    );
+
+    expect(capturedRequest?.files).toEqual([{ content: 'domain = "demo"' }]);
+    expect(result.structuredContent.status).toBe("ok");
+  });
+
+  it("classifies a paywall (402) on the fetch leg as config", async () => {
+    const result = await buildMthdsInputs(
+      { method_id: "mt_123" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...buildInputsNotCalled,
+          async getMethod(): Promise<MethodData> {
+            throw new ApiResponseError(
+              "HTTP 402",
+              `${DEFAULT_API_URL}/v1/methods/mt_123`,
+              402,
+              "Payment Required",
+              "{}",
+              "forbidden",
+              "Subscription required",
+              undefined, // validationErrors
+              "forbidden", // code
+            );
+          },
+        },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
+    expect(result.structuredContent.errors?.[0]?.hint).toMatch(/plan|billing/i);
+  });
+
+  it("classifies a malformed base URL on the fetch leg as config", async () => {
+    const result = await buildMthdsInputs(
+      { method_id: "mt_123" },
+      { baseUrl: `${DEFAULT_API_URL}/v1` },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
+  });
+
+  it("rejects a request with neither files nor method_id", async () => {
+    const result = await buildMthdsInputs(
+      {},
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: { ...buildInputsNotCalled, ...getMethodNotCalled },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("files");
   });
 });

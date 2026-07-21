@@ -3,11 +3,13 @@ import type {
   BuildInputsRequest,
   BuildInputsResponse,
   BuildInputsValidReport,
+  MethodData,
   MthdsFileItem,
   ValidationErrorItem,
 } from "@pipelex/sdk";
 import { z } from "zod";
 
+import { methodSourceToContents } from "./method-source.js";
 import {
   buildApiConfig,
   classifyError,
@@ -15,7 +17,7 @@ import {
   resolveSubmittedFiles,
   toolErrorSchema,
   toolResultContent,
-  validateRequest,
+  validateFilesOrMethodIdRequest,
 } from "./shared.js";
 import type {
   AuthErrorTexture,
@@ -31,7 +33,13 @@ const inputsTemplateFormatSchema = z.enum(["json", "toml"]);
 export type InputsTemplateFormat = z.infer<typeof inputsTemplateFormatSchema>;
 
 export const mthdsInputsInputSchema = {
-  files: filesInputSchema,
+  files: filesInputSchema.optional(),
+  method_id: z
+    .string()
+    .optional()
+    .describe(
+      "Catalog id (mt_…) of a registered method. Projects the template from the method's CURRENT stored content — requires an API key (the catalog is org-scoped). With files also present, the files win and method_id is ignored. Provide files or method_id.",
+    ),
   pipe_ref: z
     .string()
     .optional()
@@ -75,7 +83,8 @@ const inputsStructuredContentSchema = z.object({
 export const mthdsInputsOutputSchema = inputsStructuredContentSchema;
 
 export interface MthdsInputsInput {
-  files: SubmittedFileInput[];
+  files?: SubmittedFileInput[];
+  method_id?: string;
   pipe_ref?: string;
   explicit?: boolean;
   format?: InputsTemplateFormat;
@@ -84,6 +93,7 @@ export interface MthdsInputsInput {
 /** The inputs request after `{ path }` resolution — what the checks and the API call consume. */
 interface ResolvedInputsRequest {
   files: SubmittedFile[];
+  method_id?: string;
   pipe_ref?: string;
   explicit?: boolean;
   format?: InputsTemplateFormat;
@@ -106,8 +116,10 @@ export interface InputsResult {
   summary: string;
 }
 
+/** The slice of `PipelexApiClient` the inputs capability calls (test seam). */
 interface InputsClient {
   buildInputs(request: BuildInputsRequest): Promise<BuildInputsResponse>;
+  getMethod(methodId: string): Promise<MethodData>;
 }
 
 export interface InputsContext {
@@ -135,11 +147,43 @@ const INPUTS_ERROR_OPTIONS: ClassifyErrorOptions = {
   },
 };
 
+/**
+ * Classify options for the by-id fetch leg (`getMethod`). Unlike `/v1/start`,
+ * the SDK does not intercept a missing-route 404 on `/v1/methods/{id}` (no
+ * `RunLifecycleUnavailableError` equivalent), so a bare-runner base URL and a
+ * genuinely unknown method read the same here — the `notFound` hint covers
+ * both causes.
+ */
+const METHOD_FETCH_ERROR_OPTIONS: ClassifyErrorOptions = {
+  route: "/v1/methods/{id}",
+  badRequest: {
+    location: "method_id",
+    hint: "Check the method_id as the catalog returned it. If the error mentions organization context, the API key's org binding is the issue — mint a key in the right organization.",
+  },
+  notFound: {
+    location: "method_id",
+    hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss. If PIPELEX_BASE_URL points at a bare pipelex-api runner, the catalog routes do not exist there — use the hosted Pipelex API.",
+  },
+};
+
+// Constructed inside each caught block (mirroring run.ts's runClient): the SDK
+// constructor throws PipelineRequestError on a malformed base URL, and that
+// must classify to a config ToolError, not reject the MCP handler.
+function inputsClient(context: InputsContext): InputsClient {
+  return (
+    context.client ??
+    new PipelexApiClient({
+      baseUrl: context.baseUrl,
+      apiKey: context.apiKey,
+    })
+  );
+}
+
 export async function buildMthdsInputs(
   input: MthdsInputsInput,
   context: InputsContext = buildInputsContext(),
 ): Promise<InputsResult> {
-  const resolution = await resolveSubmittedFiles(input.files, context.resolver);
+  const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
   if (resolution.errors.length > 0) {
     return errorResult("Inputs template was not run: request input is invalid.", resolution.errors);
   }
@@ -150,15 +194,42 @@ export async function buildMthdsInputs(
     return errorResult("Inputs template was not run: request input is invalid.", inputErrors);
   }
 
+  // Fetch-and-forward: the build routes have no by-id support, so an id-only
+  // request fetches the stored method and forwards its current source as the
+  // submitted files. Inline files win — with both supplied, method_id is
+  // ignored (the build routes have no linkage concept, unlike /v1/start).
+  let files = request.files;
+  if (files.length === 0 && request.method_id !== undefined) {
+    let method: MethodData;
+    try {
+      method = await inputsClient(context).getMethod(request.method_id);
+    } catch (err) {
+      const error = classifyError(err, { ...METHOD_FETCH_ERROR_OPTIONS, auth: context.authError });
+      return errorResult(summaryForError(error), [error]);
+    }
+
+    const contents = methodSourceToContents(method.mthds);
+    if (contents.length === 0) {
+      return errorResult("Inputs template was not run: the stored method has no MTHDS source.", [
+        {
+          class: "input_domain",
+          location: "method_id",
+          message: "The stored method has no MTHDS source yet.",
+          hint: "Add MTHDS content to the method (e.g. in the webapp editor) before projecting its inputs template, or submit files instead.",
+          retryable: false,
+        },
+      ]);
+    }
+
+    // Each forwarded file carries the method id as its provenance label (it
+    // crosses into the build envelope's `source` via toMthdsFileItems), so
+    // diagnostics point back at the registered method.
+    files = contents.map((content) => ({ content, uri: request.method_id }));
+  }
+
   let report: BuildInputsResponse;
   try {
-    const client =
-      context.client ??
-      new PipelexApiClient({
-        baseUrl: context.baseUrl,
-        apiKey: context.apiKey,
-      });
-    report = await client.buildInputs(toBuildInputsRequest(request));
+    report = await inputsClient(context).buildInputs(toBuildInputsRequest({ ...request, files }));
   } catch (err) {
     const error = classifyError(err, { ...INPUTS_ERROR_OPTIONS, auth: context.authError });
     return errorResult(summaryForError(error), [error]);
@@ -207,7 +278,7 @@ export function inputsToolResult(result: InputsResult) {
 }
 
 export function validateInputsRequest(input: ResolvedInputsRequest): ToolError[] {
-  const errors = validateRequest(input.files);
+  const errors = validateFilesOrMethodIdRequest(input.files, input.method_id);
 
   if (input.pipe_ref !== undefined && input.pipe_ref.trim() === "") {
     errors.push({

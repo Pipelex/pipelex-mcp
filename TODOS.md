@@ -30,55 +30,70 @@ Build plan recorded 2026-07-21. This is the "catalog run-by-reference" item from
 
 ## Phase 0 — SPEC.md increment (record the decisions)
 
-- [ ] Non-Goals: move "registered-method runs by catalog id" OUT; add explicit still-out items with rationale: `mthds_validate` by id (conducted-views workstream), catalog discovery tools (list/get methods), publish/save tool, stored-`input_data` defaulting.
-- [ ] Run Scope: add `method_id?` to the `mthds_run` input contract; state the precedence rule (files run + linkage; id-only resolves current stored source); state no-versioning; add the classification additions (unknown id 404 → `input_domain`@`method_id`, paywall 402 → `config`, org-context 400 → `input_domain` with combined hint, key required — keyless BYOK gets the existing instructive `config` texture).
-- [ ] Inputs Template Scope: add `method_id?` + the fetch-and-forward mechanics (`getMethod` → mirror-parse `mthds` → `buildInputs`), the files-win/ignored rule, the no-source no-verdict, and the classification for the fetch leg (route `/v1/methods/{id}`).
-- [ ] UX Flows: add the console run-by-reference flow (discover id out-of-band for now → `mthds_inputs_template` by id → fill → `mthds_run` by id → run-follow unchanged).
-- [ ] Tools and Views: update the two tools' Input lines; note `run-follow` is untouched (follows by `run_id`).
+- [x] Non-Goals: move "registered-method runs by catalog id" OUT; add explicit still-out items with rationale: `mthds_validate` by id (conducted-views workstream), catalog discovery tools (list/get methods), publish/save tool, stored-`input_data` defaulting.
+- [x] Run Scope: add `method_id?` to the `mthds_run` input contract; state the precedence rule (files run + linkage; id-only resolves current stored source); state no-versioning; add the classification additions (unknown id 404 → `input_domain`@`method_id`, paywall 402 → `config`, org-context 400 → `input_domain` with combined hint, key required — keyless BYOK gets the existing instructive `config` texture).
+- [x] Inputs Template Scope: add `method_id?` + the fetch-and-forward mechanics (`getMethod` → mirror-parse `mthds` → `buildInputs`), the files-win/ignored rule, the no-source no-verdict, and the classification for the fetch leg (route `/v1/methods/{id}`).
+- [x] UX Flows: add the console run-by-reference flow (discover id out-of-band for now → `mthds_inputs_template` by id → fill → `mthds_run` by id → run-follow unchanged).
+- [x] Tools and Views: update the two tools' Input lines; note `run-follow` is untouched (follows by `run_id`). (Also aligned the server `instructions` sentence in Tools and Views with the by-id start, ahead of the Phase 2 code change.)
 
-**CHECKPOINT A** — commit the SPEC increment on its own (`docs/` prefix branch or the feature branch's first commit). Natural handoff: the design is fully recorded; implementation can start cold from SPEC.md + this file.
+**CHECKPOINT A — DONE (2026-07-21)** — SPEC increment committed as the first commit on `feature/method-id-catalog-runs`. Natural handoff: the design is fully recorded; implementation can start cold from SPEC.md + this file.
 
 ## Phase 1 — shared plumbing (`src/capabilities/shared.ts` + new helper)
 
-- [ ] `classifyApiResponseError`: add the 402 arm (`config`, retryable false, billing hint) ahead of the generic catch-all. Unit tests in `shared.test.ts` (402 with/without serverMessage).
-- [ ] Add `validateMethodIdRequest`-style check (blank `method_id` → `input_domain`@`method_id`) and a shared "provide files or method_id" emptiness check usable by both capabilities (replaces the unconditional `files.length === 0` error path for the two tools; `mthds_validate` keeps the current behavior).
-- [ ] New method-source parsing helper (suggest `src/capabilities/method-source.ts`): `methodSourceToContents(mthds: string): string[]` mirroring the platform (`execution.py`) — JSON `[]` → `[]`; JSON array of `{name, content}` → non-blank contents; otherwise `[mthds]`. Comment names the canonical platform implementation. Unit tests: raw TOML string, file-array, file-array with blank contents, `"[]"`, empty string, non-array JSON.
-- [ ] Keep `resolveSubmittedFiles` untouched — callers pass `input.files ?? []`.
+- [x] `classifyApiResponseError`: add the 402 arm (`config`, retryable false, billing hint) ahead of the generic catch-all. Unit tests in `shared.test.ts` (402 with/without serverMessage).
+- [x] Add `validateMethodIdRequest`-style check (blank `method_id` → `input_domain`@`method_id`) and a shared "provide files or method_id" emptiness check usable by both capabilities (replaces the unconditional `files.length === 0` error path for the two tools; `mthds_validate` keeps the current behavior). → Shipped as one combined `validateFilesOrMethodIdRequest(files, methodId)` in `shared.ts` (blank-id check + at-least-one-of + the per-file checks, extracted as `validateFileItems`).
+- [x] New method-source parsing helper (suggest `src/capabilities/method-source.ts`): `methodSourceToContents(mthds: string): string[]` mirroring the platform (`execution.py`) — JSON `[]` → `[]`; JSON array of `{name, content}` → non-blank contents; otherwise `[mthds]`. Comment names the canonical platform implementation. Unit tests: raw TOML string, file-array, file-array with blank contents, `"[]"`, empty string, non-array JSON. → Also folds in `_resolve_method_contents`' blank-source guard: a blank raw arm yields `[]` (documented in the helper).
+- [x] Keep `resolveSubmittedFiles` untouched — callers pass `input.files ?? []`.
+
+**Phase 1 note (2026-07-21):** the platform's `_start_failure` in `execution.py` has been reworked since the premise was recorded — runner 4xx rejections now translate to 422 instead of the blanket opaque 503. The existing 503 `serverError` hint is kept per plan (harmless, still points at validation first), and the 422 arm now carries the real rejection reason.
 
 ## Phase 2 — `mthds_run` by id (`src/capabilities/run.ts`, `src/tools.ts`)
 
-- [ ] Input schema: `files` → optional; add `method_id` (describe: "Catalog id (mt_…) of a registered method. Runs the method's CURRENT stored content. With files also present, the files run and method_id is recorded as run-history linkage."). `MthdsRunInput` type updated.
-- [ ] `validateRunRequest`: at-least-one-of check, blank-`method_id` check, per-file checks only when files present, existing `pipe_code` check unchanged.
-- [ ] `toStartOptions`: emit `mthds_contents` only when files present; add `extra: { method_id }` when supplied (matches the `createRun` production call shape).
-- [ ] Classify options: add `RUN_START_BY_ID_ERROR_OPTIONS` (route `/v1/start`; `notFound`@`method_id` with the org-scoped-catalog hint; `badRequest` with the combined no-source/org-context hint; keep the existing opaque-503 `serverError` hint). `startMthdsRun` picks by request shape (`method_id` present → by-id options).
-- [ ] Tool description (`src/tools.ts`): state the by-id form, the precedence rule, current-content semantics, and that by-id needs an API key. Update the server `instructions` string (both shells — find where it's set, likely `hosted/server.ts` + `local/server.ts`) to mention running registered methods by catalog id.
-- [ ] Tests (`run.test.ts`, fake `RunClient` seam): id-only start passes `extra.method_id` and no `mthds_contents`; files+id passes both; neither → `input_domain`; blank id; 404 `ApiResponseError` → `input_domain`@`method_id` retryable false; 402 → `config`; files-only requests keep today's classification (regression guard); start ack projection unchanged.
+- [x] Input schema: `files` → optional; add `method_id` (describe: "Catalog id (mt_…) of a registered method. Runs the method's CURRENT stored content. With files also present, the files run and method_id is recorded as run-history linkage."). `MthdsRunInput` type updated.
+- [x] `validateRunRequest`: at-least-one-of check, blank-`method_id` check, per-file checks only when files present, existing `pipe_code` check unchanged.
+- [x] `toStartOptions`: emit `mthds_contents` only when files present; add `extra: { method_id }` when supplied (matches the `createRun` production call shape).
+- [x] Classify options: add `RUN_START_BY_ID_ERROR_OPTIONS` (route `/v1/start`; `notFound`@`method_id` with the org-scoped-catalog hint; `badRequest`@`method_id` with the combined no-source/org-context hint; keep the existing opaque-503 `serverError` hint, extracted as a shared `START_SERVER_ERROR` const). `startMthdsRun` picks by request shape (`method_id` present → by-id options).
+- [x] Tool description (`src/tools.ts`): state the by-id form, the precedence rule, current-content semantics, and that by-id needs an API key. Update the server `instructions` string (both shells: `hosted/server.ts` `HOSTED_SERVER_INSTRUCTIONS` + `local/server.ts` `LOCAL_SERVER_INSTRUCTIONS`) to mention running registered methods by catalog id.
+- [x] Tests (`run.test.ts`, fake `RunClient` seam): id-only start passes `extra.method_id` and no `mthds_contents`; files+id passes both; neither → `input_domain`; blank id; 404 `ApiResponseError` → `input_domain`@`method_id` retryable false; 402 → `config`; files-only requests keep today's classification (regression guard); start ack projection unchanged. Plus: by-id 422 → the combined hint at `method_id`.
 
-**CHECKPOINT B** — commit ("feature/…" branch). Run-by-id is live end to end; the inputs-template leg can land in a fresh session with only SPEC.md + this file as context.
+**CHECKPOINT B — DONE (2026-07-21)** — committed on `feature/method-id-catalog-runs`; `make check` + tests green. Run-by-id is live end to end; the inputs-template leg can land in a fresh session with only SPEC.md + this file as context.
+
+## State at handoff (2026-07-21, end of the Checkpoint B session)
+
+- **Branch**: `feature/method-id-catalog-runs` (off `dev`), working tree clean. Commits: `d4a7981` (Phase 0 SPEC increment), `096852a` (Phases 1–2). Gates green at `096852a`: `make check` exit 0, `make t` all passing.
+- **Next**: Phase 3 below. Cold-start as stated at the top (CLAUDE.md → SPEC.md → this file; invoke the `skybridge` skill before touching code).
+- **Available shared pieces Phase 3 should use** (all in place, tested):
+  - `validateFilesOrMethodIdRequest(files, methodId)` in `src/capabilities/shared.ts` — replaces `inputs.ts`'s current files-emptiness path (mirror how `run.ts` `validateRunRequest` now calls it). Blank-id → `input_domain`@`method_id`; neither-supplied → `input_domain`@`files` ("Provide MTHDS files or a method_id.").
+  - `methodSourceToContents(mthds)` in `src/capabilities/method-source.ts` — empty result means "no MTHDS source" (the blank-source guard is folded in; no extra falsy check needed at the call site).
+  - The 402 paywall arm is generic in `classifyApiResponseError` — the fetch leg gets it for free, no per-route work.
+  - Callers pass `input.files ?? []` to `resolveSubmittedFiles` (files is optional on the input type).
+- **Pattern to mirror for the fetch leg**: `run.ts`'s `RUN_START_BY_ID_ERROR_OPTIONS` + the request-shape pick in `startMthdsRun` (`method_id` present → by-id options). Convention set in Phase 2: the by-id `badRequest`/`notFound` locator is `method_id`. `METHOD_FETCH_ERROR_OPTIONS` should follow it (route `/v1/methods/{id}`).
+- **Premise drift found in Phase 1** (recorded in the Phase 1 note below the checklist): the platform's `/v1/start` no longer answers a blanket opaque 503 for runner rejections — 4xx now translate to 422 with the real reason. Kept the 503 hint per plan; see the Phase 4 note about the tool-description wording.
 
 ## Phase 3 — `mthds_inputs_template` by id (`src/capabilities/inputs.ts`)
 
-- [ ] Input schema: `files` → optional; add `method_id` (describe: files win / id-only resolves the stored method). `MthdsInputsInput` updated.
-- [ ] `InputsContext` client seam: add `getMethod(methodId: string): Promise<MethodData>` to the client interface (test seam widens; real client already has it).
-- [ ] Flow in `buildMthdsInputs`: resolve/validate as today; when no files and `method_id` present → `getMethod` (errors classified with new `METHOD_FETCH_ERROR_OPTIONS`: route `/v1/methods/{id}`, `notFound`@`method_id`, auth texture threaded) → `methodSourceToContents` → empty result is an `input_domain`@`method_id` no-verdict ("stored method has no MTHDS source yet") without calling the API → else forward as the build envelope's files (source label: the method id or `mt_<id>#<name>` per stored file — pick during implementation, record in SPEC if it deviates).
-- [ ] Tests (`inputs.test.ts`, fake client): id-only happy path with raw-source `mthds`; id-only with file-array `mthds` (multiple files forwarded); unknown id 404 → `input_domain`@`method_id`; no-source method (no `buildInputs` call made); files+id → files win and `getMethod` is NOT called; 402 on the fetch leg → `config`.
+- [x] Input schema: `files` → optional; add `method_id` (describe: files win / id-only resolves the stored method). `MthdsInputsInput` updated.
+- [x] `InputsContext` client seam: add `getMethod(methodId: string): Promise<MethodData>` to the client interface (test seam widens; real client already has it).
+- [x] Flow in `buildMthdsInputs`: resolve/validate as today; when no files and `method_id` present → `getMethod` (errors classified with new `METHOD_FETCH_ERROR_OPTIONS`: route `/v1/methods/{id}`, `notFound`@`method_id`, auth texture threaded) → `methodSourceToContents` → empty result is an `input_domain`@`method_id` no-verdict ("stored method has no MTHDS source yet") without calling the API → else forward as the build envelope's files. → Source label decided: **each forwarded file carries the method id** (not `mt_<id>#<name>` — the agent can't open stored files anyway; the id is the actionable pointer), recorded in SPEC.md. One deviation from the premise: the SDK does NOT intercept a missing-route 404 on `/v1/methods/{id}` (no `RunLifecycleUnavailableError` equivalent on `requestProduct`), so the `notFound` hint covers the bare-runner cause too — recorded in SPEC + a code comment.
+- [x] Tests (`inputs.test.ts`, fake client): id-only happy path with raw-source `mthds`; id-only with file-array `mthds` (multiple files forwarded); unknown id 404 → `input_domain`@`method_id`; no-source method (no `buildInputs` call made); files+id → files win and `getMethod` is NOT called; 402 on the fetch leg → `config`. Plus: neither-supplied, blank/valid `method_id` shape checks.
 
 ## Phase 4 — docs sync + gates
 
-- [ ] `README.md`: tool contract sections for both tools (input shapes, precedence rule, key requirement for by-id).
-- [ ] `CHANGELOG.md` `## [Unreleased]`: Added — `method_id` catalog runs on `mthds_run` and inputs projection on `mthds_inputs_template`; Added — paywall (402) and unknown-method classification. (Do not mention `wip/` doc changes.)
-- [ ] `CLAUDE.md` (this repo): update the tool/union description ("The files union and the resolution seam" + run/inputs sections) to reflect optional files + `method_id`.
-- [ ] `make check` green; `make t` green.
-- [ ] Optional manual smoke against the hosted API (needs a real `plx_sk_` key + a registered method): `listMethods` via a scratch script to grab an `mt_` id, then `mthds_run` by id through `make inspect-local` or the dev console. Record the outcome here.
+- [x] `README.md`: tool contract sections for both tools (input shapes, precedence rule, key requirement for by-id).
+- [x] `CHANGELOG.md` `## [Unreleased]`: Added — `method_id` catalog runs on `mthds_run` and inputs projection on `mthds_inputs_template`; Added — paywall (402) and unknown-method classification. Changed — the softened start-rejection wording.
+- [x] `CLAUDE.md` (this repo): updated "The files union and the resolution seam" + the shared/inputs bullets; also fixed pre-existing drift (added the missing `capabilities/run.ts` and `capabilities/method-source.ts` bullets to the architecture list).
+- [x] Softened the "opaque server error" wording in the `mthds_run` tool description ("validation gives a structured, repairable verdict, where a start-time rejection only reports the failure") and rewrote SPEC.md's start-time-rejection paragraph (422 with the real reason; 5xx hint kept for any 503 that still occurs).
+- [x] `make check` green; `make t` green (all tests passing).
+- [x] Manual smoke against the live dev API (api-dev.pipelex.com, real `plx_sk_` key from `.env`) — **all green (2026-07-21)**: `listMethods` found `mt_e24ea8dd-…` ("Test illustration"); `mthds_inputs_template` by id returned a valid template (`illustration.illustrate_from_notes`, `{ notes: ["text_value"] }`); unknown id classified `input_domain`@`method_id` retryable false with the org-scoped hint; `mthds_run` by id (no files, filled inputs) started `run_7745b0d4-…` (STARTED ack) and reached COMPLETED.
 
-**CHECKPOINT C** — commit; then run an independent no-context review on the full diff (`pr-review-toolkit:code-reviewer` agent on the branch diff vs `dev`), fix findings, re-run gates.
+**CHECKPOINT C — DONE (2026-07-21)** — Phases 3–4 committed (`ca89703`); independent no-context review of the full branch diff vs `dev` ran (`pr-review-toolkit:code-reviewer`): **no must-fix defects** — it verified the load-bearing premises live (SDK extension-only start, the `/v1/start` 404-interception safety claim, files-win parity with `execution.py`, 402 branch ordering) and raised two minor hardening suggestions, both applied: a falsy guard in `methodSourceToContents` (a contract-violating null `mthds` now reads as "no source" instead of crashing, mirroring the platform's `if method.mthds`) and a docstring note on the deliberate whitespace-only divergence (we trim to "no source"; the platform's falsy-only guard would let it fail downstream at parse). Gates re-run green after the fixes.
 
 ## Phase 5 — wrap-up
 
-- [ ] `wip/README.md`: mark the queue's SPEC catalog portion done for run + inputs-template; note validate-by-id stays parked with the conducted-views workstream; add a dated revision note to `wip/build-vs-run-dimension.md` §4 (the sketch is now shipped for run/inputs, schema shape as decided here).
-- [ ] Delete `wip/prompt-run-by-method-id.md` (its content is superseded by this executed plan) or mark it executed.
-- [ ] Update auto-memory (`mcp-release-state.md` / design-series pointer) with the shipped state.
-- [ ] PR `feature/… → dev` per the branch flow; release later via `/release` (not part of this plan).
+- [x] `wip/README.md`: queue item 4's catalog portion marked done (with the shipped mechanics + what stays parked); ground-rule update paragraph and the fetch-and-forward decision bullet revised (native `/v1/start` resolution for run, fetch-and-forward for inputs only); dated revision note added to `wip/build-vs-run-dimension.md` §4 (first two bullets shipped, schema/transport as decided, last two bullets + validate-by-id remain sketch/parked).
+- [x] Deleted `wip/prompt-run-by-method-id.md` (superseded by this executed plan; content preserved in git history).
+- [x] Auto-memory updated with the shipped state.
+- [x] PR `feature/method-id-catalog-runs → dev` opened per the branch flow; release later via `/release` (not part of this plan).
 
 ## Parked / explicitly out of scope (do not scope-creep into this build)
 
