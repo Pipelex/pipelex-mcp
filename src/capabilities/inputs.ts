@@ -50,7 +50,7 @@ export const mthdsInputsInputSchema = {
     .boolean()
     .optional()
     .describe(
-      "Emit the ceremonial {concept, content} envelope per input. Defaults to false (the light shape).",
+      "Emit the ceremonial {concept, content} envelope per input, showing each input's declared concept and canonical content shape. Defaults to true. Pass false for the light shape (bare example values).",
     ),
   format: inputsTemplateFormatSchema
     .optional()
@@ -336,7 +336,7 @@ function toBuildInputsRequest(input: ResolvedInputsRequest): BuildInputsRequest 
     files: toMthdsFileItems(input.files),
     ...(input.pipe_ref === undefined ? {} : { pipe_ref: input.pipe_ref }),
     format: input.format ?? "json",
-    explicit: input.explicit ?? false,
+    explicit: input.explicit ?? true,
   };
 }
 
