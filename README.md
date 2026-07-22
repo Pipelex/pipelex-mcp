@@ -274,9 +274,10 @@ content came from submitted files or a by-id fetch.
 ```
 
 `pipe_ref` is a qualified `domain.pipe_code`; omit it to default to the closure's
-declared `main_pipe`. `explicit` (default false) requests the ceremonial
-`{concept, content}` envelope per input. `format` (default `"json"`) chooses the
-template encoding. `method_id` projects a registered method by its catalog id
+declared `main_pipe`. `explicit` (default true) emits the ceremonial
+`{concept, content}` envelope per input — the declared concept ref plus the
+canonical content shape; pass `false` for the light shape (bare example values).
+`format` (default `"json"`) chooses the template encoding. `method_id` projects a registered method by its catalog id
 (fetch-and-forward from the method's current stored content); it requires an API
 key, since the catalog is org-scoped, and when both `files` and `method_id` are
 supplied the files win and the id is ignored. No Skybridge view — the template is

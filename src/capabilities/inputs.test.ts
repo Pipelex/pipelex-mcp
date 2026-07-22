@@ -205,14 +205,14 @@ describe("buildMthdsInputs", () => {
     );
 
     // The MCP surface spells provenance `uri`; the build envelope spells it
-    // `source`. Defaults are sent explicitly: format json, light shape.
+    // `source`. Defaults are sent explicitly: format json, explicit envelope.
     expect(capturedRequest).toEqual({
       files: [
         { content: 'domain = "demo"', source: "bundle.mthds" },
         { content: 'main_pipe = "main"' },
       ],
       format: "json",
-      explicit: false,
+      explicit: true,
     });
     expect(capturedRequest).not.toHaveProperty("pipe_ref");
     expect(result.structuredContent.status).toBe("ok");
@@ -442,7 +442,7 @@ describe("buildMthdsInputs by method_id", () => {
     expect(capturedRequest).toEqual({
       files: [{ content: 'domain = "demo"\nmain_pipe = "main"', source: "mt_123" }],
       format: "json",
-      explicit: false,
+      explicit: true,
     });
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.inputs).toEqual({ question: "Your question here" });
