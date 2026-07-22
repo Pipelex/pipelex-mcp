@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **SPEC.md reserves the boundary for a planned tool-only input-preparation operation** (provisionally `mthds_prepare_inputs`, backed by `@pipelex/sdk`'s `prepareInputs`). Forward-looking note only — no tool, schema, or behavior added yet: the local workshop will prepare local paths/bytes within its asset boundary, while the hosted console refuses path/bytes preparation instructively (HTTP(S) URLs and existing `pipelex-storage://` URIs already work there). The full contract lands with the operation itself.
+
 ## [0.7.0] - 2026-07-22
 
 ### Added
