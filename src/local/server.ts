@@ -13,6 +13,9 @@ export const LOCAL_SERVER_INSTRUCTIONS = [
   "Inline `{ content: string, uri?: string }` files remain accepted for parity with the hosted console.",
   "Use `mthds_validate` for a structured validation verdict and `mthds_inputs_template` for a pipe's",
   "fill-in input template — both accept files, or a registered method's catalog id via method_id.",
+  "Once the template is filled, call `mthds_prepare_inputs` to make file-bearing inputs run-ready:",
+  "this workshop uploads local file paths, data: URLs, and bytes to Pipelex storage with your API key",
+  "and rewrites them to pipelex-storage:// references (http(s) URLs pass through unchanged).",
   "Start durable execution with `mthds_run` (from files, or from a registered",
   "method's catalog id via method_id), then use `mthds_run_status` and",
   "`mthds_run_results` with the returned run id. This tools-first workshop has no views at launch,",
@@ -33,6 +36,9 @@ export function buildLocalToolContexts(
     env,
     resolver: localFileResolver(rootDir),
     viewsAvailable: false,
+    // The workshop is co-located with the user's files, so it uploads
+    // file-bearing inputs (local paths, data: URLs, bytes) for mthds_prepare_inputs.
+    allowUpload: true,
   });
 }
 

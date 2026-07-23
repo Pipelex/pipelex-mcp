@@ -153,7 +153,8 @@ describe("BYOK auth failures through a capability", () => {
       {
         ...contexts.validation,
         client: {
-          getMethod: () => Promise.reject(new Error("getMethod must not be called in this test")),
+          getMethodClosure: () =>
+            Promise.reject(new Error("getMethodClosure must not be called in this test")),
           validateFiles: () => Promise.reject(new ClientAuthenticationError("Unauthorized")),
         },
       },
