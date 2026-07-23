@@ -47,6 +47,8 @@ const buildInputsNotCalled = {
 function methodData(mthds: string): MethodData {
   return {
     method_id: "mt_123",
+    org_id: "org_123",
+    created_by_user_id: "user_123",
     name: "Demo method",
     mthds,
     created_at: "2026-07-21T00:00:00Z",
