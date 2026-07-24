@@ -4,22 +4,23 @@ Build plan recorded 2026-07-23. Three sequential phases, smallest/safest first: 
 
 **Cold-start for a new session**: read the **STATUS** banner directly below first — all three phases are done, so the only open work is the SDK-publish finishing sequence. For background, read `CLAUDE.md`, `SPEC.md` (Inputs Template Scope + Run Scope + Prepare Inputs Scope + Non-Goals), and the archived origin memo `wip/archive/sdk-0.5-leverage-plan-2026-07-23.md` (the `wip/sdk-0.5-leverage-plan.md` path this doc referenced earlier is gone — it was archived). Invoke the `skybridge` skill per `AGENTS.md` before touching code. The premise below was verified against live code on 2026-07-23.
 
-## STATUS (2026-07-24) — all three phases COMPLETE; SDK published, link swapped, full gate green; ready to merge
+## STATUS (2026-07-24) — all three phases COMPLETE + on npm-published SDK; RELEASE BLOCKED on an SDK envelope-prepare fix
 
-Phases 1–3 are implemented, documented, gates-green, and **committed** on branch **`feature/Use-new-sdk-for-uploads`** (the current branch — *not* `dev`, and *not* the `feature/sdk-0.6-adoption` name older notes below suggest). **This supersedes every per-checkpoint "Not committed" note below** — those described the state before the work was committed.
+Phases 1–3 are implemented, documented, gates-green, and **committed** on branch **`feature/Use-new-sdk-for-uploads`** (the current branch), now on the **published `@pipelex/sdk@^0.7.0`** (the `file:` link is gone). **This supersedes every per-checkpoint "Not committed" note below.**
 
 - Phase 1 (retire `method-source.ts`) — committed (`19671ac`).
 - Phase 2 (`mthds_prepare_inputs`) — committed (`prepare.ts` present at HEAD).
 - Phase 3 (run usage & cost) — committed (`ee29aa2`).
+- SDK link → npm pin — `0b5ea8a` (`^0.6.0`) then `72b17f2` (bumped to `^0.7.0`). Full gate green on 0.7.0, **249 pass**. PR [#15](https://github.com/Pipelex/pipelex-mcp/pull/15) open into `dev`; CI (Quality Checks, gate-dev, Greptile) green.
 
-**The external blocker is CLEARED: `@pipelex/sdk@0.6.0` is published on npm (confirmed 2026-07-24), and the `file:` link is swapped for the `^0.6.0` pin.** Commit `6114d74` had introduced the link so the branch could develop against local 0.6.0 code; the swap commit removes it, so it never reaches dev/release/main. Finishing-sequence status:
+**The SDK-publish blocker is CLEARED, but a NEW release-blocker was found (2026-07-24) and it lives in the SDK.** `prepareInputs` (hence `mthds_prepare_inputs`, both deployments) throws on the **explicit `{concept, content}` envelope** that `mthds_inputs_template` now produces **by default** (`explicit: true`). The documented default flow `mthds_inputs_template → fill → mthds_prepare_inputs → mthds_run` is broken for any file-bearing input: the walk matches the signature's *compact* content against the caller's *envelope* value and reports the envelope as "inline bytes" / "Unsupported value at a file input". Compact inputs work; the default (explicit) inputs don't. Found via a Codex comment on PR #15, reproduced pure-SDK and through the MCP console path.
 
-1. ~~`make use-npm-sdk` and pin `"@pipelex/sdk": "^0.6.0"`~~ — **DONE**, committed (`package.json` + `package-lock.json`; no `file:` residue anywhere in the lockfile).
-2. ~~`make check` green~~ — **DONE**. The `check-no-local-deps` guard is satisfied, so the full gate runs unmodified: lint + format:check + build + build:local + typecheck all pass, and `make test` is **249 pass**.
-3. **NEXT — merge `feature/Use-new-sdk-for-uploads`** via the normal flow (`guard-branches.yml`: work-branch → dev → release/vX.Y.Z → main). The link-swap commit is part of what merges, so the `file:` link never reaches dev/release/main.
-4. Cut the release with the **`/release` skill**; `mthds_prepare_inputs` + run usage/cost ship in that version.
+- **Owner decision (2026-07-24): fix in `@pipelex/sdk`, not worked around in the MCP.** Handoff written: **`../pipelex-sdk-js/wip/prepare-inputs-explicit-envelope.md`** (root cause at `prepare-inputs.ts` ~L311/L189/L179, recommended Option A = accept both compact + envelope, plus the blocking open question of what `/v1/start`'s normalizer accepts, acceptance criteria, and the parallel obligations below).
+- **When the SDK ships the fix**, the MCP must: (a) bump to the fixed SDK version; (b) apply the *same* envelope-unwrap to the console mirror `src/capabilities/prepare.ts` `preparePassThrough` (identical bug — ideally consume an SDK-exposed classifier instead of hand-keeping parity); (c) reconcile the SPEC's "FILLED **compact** inputs" wording, now internally inconsistent with the explicit default. Only then cut the release.
 
-**To re-validate at any point:** `make check && make test`. The individual-target workaround (`npm run build` → `typecheck` → `test`) is no longer needed — it existed only because `make check` refuses under a local link.
+**Do NOT cut the release until the envelope fix lands** — shipping would release a version whose own default prepare flow is broken (the explicit-default flip and the new prepare tool are in the same unreleased set — this release introduces both sides of the collision). Merging PR #15 into `dev` is fine (SDK adoption + fixture updates are sound); the release waits.
+
+**To re-validate at any point:** `make check && make test` (green on `^0.7.0`, 249 pass). The individual-target workaround is no longer needed — it existed only because `make check` refuses under a local `file:` link.
 
 ## Cross-cutting constraints — read before any phase
 
