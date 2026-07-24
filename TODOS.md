@@ -4,27 +4,27 @@ Build plan recorded 2026-07-23. Three sequential phases, smallest/safest first: 
 
 **Cold-start for a new session**: read the **STATUS** banner directly below first — all three phases are done, so the only open work is the SDK-publish finishing sequence. For background, read `CLAUDE.md`, `SPEC.md` (Inputs Template Scope + Run Scope + Prepare Inputs Scope + Non-Goals), and the archived origin memo `wip/archive/sdk-0.5-leverage-plan-2026-07-23.md` (the `wip/sdk-0.5-leverage-plan.md` path this doc referenced earlier is gone — it was archived). Invoke the `skybridge` skill per `AGENTS.md` before touching code. The premise below was verified against live code on 2026-07-23.
 
-## STATUS (2026-07-24) — all three phases COMPLETE; only the SDK-publish finishing steps remain
+## STATUS (2026-07-24) — all three phases COMPLETE; SDK published, link swapped, full gate green; ready to merge
 
-Phases 1–3 are implemented, documented, gates-green, and **committed** on branch **`feature/Use-new-sdk-for-uploads`** (the current branch — *not* `dev`, and *not* the `feature/sdk-0.6-adoption` name older notes below suggest). This branch deliberately carries the `@pipelex/sdk` `file:../pipelex-sdk-js` link **committed** (commit `6114d74`) — that is how it develops against local 0.6.0 code. **This supersedes every per-checkpoint "Not committed" note below** — those described the state before the work was committed.
+Phases 1–3 are implemented, documented, gates-green, and **committed** on branch **`feature/Use-new-sdk-for-uploads`** (the current branch — *not* `dev`, and *not* the `feature/sdk-0.6-adoption` name older notes below suggest). **This supersedes every per-checkpoint "Not committed" note below** — those described the state before the work was committed.
 
 - Phase 1 (retire `method-source.ts`) — committed (`19671ac`).
 - Phase 2 (`mthds_prepare_inputs`) — committed (`prepare.ts` present at HEAD).
-- Phase 3 (run usage & cost) — committed this session (see the Phase 3 checkpoint).
+- Phase 3 (run usage & cost) — committed (`ee29aa2`).
 
-**The one remaining blocker is external: `@pipelex/sdk@0.6.0` is not published to npm yet.** Nothing else is in flight. When it publishes, the finishing sequence (identical for all three phases, they ride one branch) is:
+**The external blocker is CLEARED: `@pipelex/sdk@0.6.0` is published on npm (confirmed 2026-07-24), and the `file:` link is swapped for the `^0.6.0` pin.** Commit `6114d74` had introduced the link so the branch could develop against local 0.6.0 code; the swap commit removes it, so it never reaches dev/release/main. Finishing-sequence status:
 
-1. `make use-npm-sdk` and pin `"@pipelex/sdk": "^0.6.0"` in `package.json` — swaps the committed `file:` link for the published range; commit that swap.
-2. `make check` green (it *refuses* while the `file:` link is present — see Cross-cutting constraints; that is why we've validated with the individual targets so far).
-3. Merge `feature/Use-new-sdk-for-uploads` via the normal flow (`guard-branches.yml`: work-branch → dev → release/vX.Y.Z → main). The link-swap commit MUST be part of what merges so the `file:` link never reaches dev/release/main.
+1. ~~`make use-npm-sdk` and pin `"@pipelex/sdk": "^0.6.0"`~~ — **DONE**, committed (`package.json` + `package-lock.json`; no `file:` residue anywhere in the lockfile).
+2. ~~`make check` green~~ — **DONE**. The `check-no-local-deps` guard is satisfied, so the full gate runs unmodified: lint + format:check + build + build:local + typecheck all pass, and `make test` is **249 pass**.
+3. **NEXT — merge `feature/Use-new-sdk-for-uploads`** via the normal flow (`guard-branches.yml`: work-branch → dev → release/vX.Y.Z → main). The link-swap commit is part of what merges, so the `file:` link never reaches dev/release/main.
 4. Cut the release with the **`/release` skill**; `mthds_prepare_inputs` + run usage/cost ship in that version.
 
-**To resume validation right now** (SDK still unpublished): `cd ../pipelex-sdk-js && npm run build` to refresh the linked `dist/`, then back in this repo `npm run build && npm run typecheck && npm test` — expect **249 pass**. Do NOT run `make check` (it refuses under the link).
+**To re-validate at any point:** `make check && make test`. The individual-target workaround (`npm run build` → `typecheck` → `test`) is no longer needed — it existed only because `make check` refuses under a local link.
 
 ## Cross-cutting constraints — read before any phase
 
-- **SDK 0.6.0 is not published yet.** We develop against a local `file:` link (`make use-local-sdk`, currently active — `package.json`/`package-lock.json` point `@pipelex/sdk` at `../pipelex-sdk-js`, whose built `dist/` carries the 0.6.0 code even though its `package.json` still reads `0.5.1`). **`make check` refuses under the link** (the `check-no-local-deps` guard) — validate with the individual targets instead: `npm run build` (regenerates the Skybridge view registry), then `npm run typecheck`, then `npm test`. Rebuild the SDK (`cd ../pipelex-sdk-js && npm run build`) after pulling SDK changes, or the link serves stale `dist/`.
-- **Nothing merges to dev/release/main until the SDK publishes v0.6.0.** See the STATUS banner for the finishing sequence. The "**do not commit the `file:` link**" rule applies to what reaches **dev/release/main** — it must be swapped to the `^0.6.0` pin first. It does NOT mean the WIP branch can't carry the link: `feature/Use-new-sdk-for-uploads` *does* commit the link (that is how it develops against local 0.6.0), and Phases 1–3 are committed on top of it.
+- ~~**SDK 0.6.0 is not published yet.**~~ **RESOLVED (2026-07-24)** — `@pipelex/sdk@0.6.0` is on npm and `package.json` pins `^0.6.0`. The local `file:` link (`make use-local-sdk`) and its individual-target validation workaround are history; `make check` runs the full gate again. Historical note, in case a future phase needs the same setup: `make check` *refuses* while a `@pipelex` dep is a local link (the `check-no-local-deps` guard), so under a link you validate with `npm run build` (regenerates the Skybridge view registry) → `npm run typecheck` → `npm test`, and you must rebuild the sibling SDK (`cd ../pipelex-sdk-js && npm run build`) after pulling its changes or the link serves stale `dist/`.
+- **The `file:` link must never reach dev/release/main** — it didn't. `feature/Use-new-sdk-for-uploads` committed the link (`6114d74`) to develop against local 0.6.0 and Phases 1–3 landed on top of it; the swap commit replaces it with the `^0.6.0` pin *before* the branch merges, which is the whole point of the rule.
 - **The bump rides with the fixture fix.** `MethodData` gained required `org_id` / `created_by_user_id` in 0.6.0; the three test fixtures were updated (`shared.test.ts`, `inputs.test.ts`, `validate.test.ts`). That edit only type-checks on 0.6.0, so it lands together with the `^0.6.0` pin — not before. (Already committed on the branch.)
 - **Branch hygiene — CORRECTED.** Earlier notes said "uncommitted on `dev`, move to `feature/sdk-0.6-adoption`". Reality: the work lives on **`feature/Use-new-sdk-for-uploads`** (already a proper work branch under `guard-branches.yml`), with the link + all three phases committed. No branch move is needed; ignore the `feature/sdk-0.6-adoption` suggestion wherever it still appears below.
 
