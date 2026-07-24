@@ -329,7 +329,11 @@ run — from submitted files (`files?`, plus `pipe_code?` and `inputs?`), or fro
 registered method's catalog id (`method_id?`, mt_…) — and returns a durable
 `run_id` immediately (never blocks); `mthds_run_status` is a cheap read of the
 coarse lifecycle state; `mthds_run_results` fetches the terminal outcome (main
-output on success, failure message otherwise). A by-id run executes the method's
+output on success, failure message otherwise) along with a compact run-level
+`usage` object — total USD cost (null-aware), tokens, and inference-call count.
+The per-pipe rollup and the full per-call record list ride the view-only `_meta`
+(`_meta.usage_by_pipe` / `_meta.tokens_usages`) for a future detailed-cost
+surface, and usage never appears in the prose. A by-id run executes the method's
 **current** stored content (methods are not versioned) and requires an API key;
 when both `files` and `method_id` are supplied, the files run and the id is
 recorded as run-history linkage on the platform. All run

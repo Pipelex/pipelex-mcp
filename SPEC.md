@@ -340,14 +340,29 @@ The `content` summary while non-terminal includes "check again in ~Ns" from the 
   failure_message?: string;                     // state=failed only
   main_stuff?: unknown;                         // state=completed only — bounded, see below
   truncated?: boolean;                          // state=completed only; true when main_stuff was bounded down
+  usage?: RunUsage;                             // state=completed only — RUN-LEVEL token & USD-cost totals; per-pipe rollup + full per-call list ride _meta (see below)
   available_view_specs: Array<"run_graph">;     // populated when graph_spec rides _meta
   errors?: ToolError[];
 }
 ```
 
-On `completed`, `content` composes a Markdown summary with the main output in a fenced code block (the `mthds_inputs_template` duplication pattern: the payload the model must read is deliberately repeated in the prose), bounded by the same cap as `structuredContent`. The executed `graph_spec` and the **full** (unbounded) `main_stuff` ride the view-only `_meta` channel (keys mirror the API field names: `_meta.graph_spec`, `_meta.main_stuff`), never model context. A `state: "running"` result is a produced verdict ("no result *yet*" is an answer): `status: "ok"` with the retry hint. On `failed`, the summary carries the terminal status and failure message and states plainly that no graph exists for failed runs.
+On `completed`, `content` composes a Markdown summary with the main output in a fenced code block (the `mthds_inputs_template` duplication pattern: the payload the model must read is deliberately repeated in the prose), bounded by the same cap as `structuredContent`. The executed `graph_spec`, the **full** (unbounded) `main_stuff`, the **full** per-call `tokens_usages` record list, and the per-pipe usage rollup ride the view-only `_meta` channel (keys mirror the API field names where they exist: `_meta.graph_spec`, `_meta.main_stuff`, `_meta.tokens_usages`, plus our own `_meta.usage_by_pipe`), never model context. A `state: "running"` result is a produced verdict ("no result *yet*" is an answer): `status: "ok"` with the retry hint. On `failed`, the summary carries the terminal status and failure message and states plainly that no graph exists for failed runs.
 
 **Bounding `main_stuff`**: an output can be huge. The structured copy (and the fenced summary block) is bounded to a serialized cap (~32KB, tunable constant): JSON trees are pruned deterministically (deepest levels and longest collections first, with an ellipsis marker); plain text keeps head+tail. When bounded, `truncated: true` and the summary says the output was cut. The full output always rides `_meta` for views.
+
+**Run usage & cost**: on a `completed` result, `structuredContent.usage` carries **run-level** token and cost totals projected from the SDK's `RunResults.tokens_usages` — the per-inference-call record list (token counts by category, server-computed USD `cost`, and the `pipe_code` that made the call). It is a small, fixed-shape totals object; there is deliberately **no per-pipe breakdown in the model-facing usage** (the agent gets the run's bottom line, not a table). The per-pipe rollup and the **full** per-call `tokens_usages` list ride the view-only `_meta` channel (`_meta.usage_by_pipe`, `_meta.tokens_usages`) — never model context, exactly like `main_stuff` — where a future detailed-cost tool/view can read them. Usage is also **never rendered into the `content` prose**: the totals live only in `structuredContent.usage`.
+
+```ts
+usage: {
+  cost_usd: number | null;      // Σ per-call cost, null-aware: null when NO call was priced (own-GPU/mock/dry-run) — distinct from 0 (a run that made no inference)
+  cost_partial?: boolean;       // some calls priced, some not — cost_usd is a lower bound
+  tokens: number | null;        // Σ (input + output) across calls; null when no call reported counts. input_cached / output_reasoning are documented subsets and deliberately excluded to avoid double-counting
+  calls: number;                // number of inference calls (0 → the run did no inference)
+  assembly_error?: string;      // usage assembly broke for this run (the SDK's usage_assembly_error)
+}
+```
+
+Presence follows the SDK's usage signal, branching on `usage_assembly_error` (**not** on the list being null — all of "off", "broke", and "pre-artifact run" leave `tokens_usages` null): `tokens_usages` a non-empty list → `usage` with the computed totals; `[]` (assembly ran, no inference) → `usage` with zero totals; `tokens_usages` null **with** `usage_assembly_error` set → `usage` carrying `assembly_error` and null totals; `tokens_usages` null **without** an error (usage off / run predates the artifact) → `usage` omitted entirely. Cost is null-aware: a `null` per-call `cost` means the model had no rate table (own-GPU/mock/dry-run) and `0` means it was priced at zero, so a total of `null` ("no priced call") is deliberately distinct from `0` ("no inference"), and `cost_partial` flags a mix. Tokens sum only the two documented joined totals (`input`, `output`) to avoid double-counting the non-additive subsets. The per-pipe rollup on `_meta.usage_by_pipe` uses the same null-aware cost and `input`+`output` token math per pipe, sorted by cost descending (a `null` `pipe_code` groups the runtime-unattributed calls) — it is computed on every completed run with a usage list, unbounded (it rides `_meta`, not the model's context), and carried even on the tools-only local shell so a programmatic consumer keeps it.
 
 **Run verdict discipline**: `status: "ok"` means the API answered the question about the run — including "it failed" and "not done yet". A FAILED/CANCELLED/TIMED_OUT run is a produced verdict (`status: "ok"` with the terminal `run_status`), and so is a `state: "running"` results lookup. `status: "error"` + `errors[]` is reserved for no-verdict conditions:
 

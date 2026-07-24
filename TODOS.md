@@ -2,14 +2,31 @@
 
 Build plan recorded 2026-07-23. Three sequential phases, smallest/safest first: **(1) retire `method-source.ts`** onto the SDK's canonical closure helper → **(2) spec + build `mthds_prepare_inputs`** (the upload feature) → **(3) surface token usage + cost in `mthds_run_results`**. Rationale and the leverage-point analysis live in the SDK-side and platform-side handoffs (`../pipelex-sdk-js/wip/method-id-closure-resolution.md`, `../wip/method-id-native-tooling-routes/`); the superseded origin memo is archived at `wip/archive/sdk-0.5-leverage-plan-2026-07-23.md`.
 
-**Cold-start for a new session**: read `CLAUDE.md`, `SPEC.md` (Inputs Template Scope + Run Scope + Non-Goals), `wip/sdk-0.5-leverage-plan.md`, then this file top to bottom. Invoke the `skybridge` skill per `AGENTS.md` before touching code. The premise below was verified against live code on 2026-07-23.
+**Cold-start for a new session**: read the **STATUS** banner directly below first — all three phases are done, so the only open work is the SDK-publish finishing sequence. For background, read `CLAUDE.md`, `SPEC.md` (Inputs Template Scope + Run Scope + Prepare Inputs Scope + Non-Goals), and the archived origin memo `wip/archive/sdk-0.5-leverage-plan-2026-07-23.md` (the `wip/sdk-0.5-leverage-plan.md` path this doc referenced earlier is gone — it was archived). Invoke the `skybridge` skill per `AGENTS.md` before touching code. The premise below was verified against live code on 2026-07-23.
+
+## STATUS (2026-07-24) — all three phases COMPLETE; only the SDK-publish finishing steps remain
+
+Phases 1–3 are implemented, documented, gates-green, and **committed** on branch **`feature/Use-new-sdk-for-uploads`** (the current branch — *not* `dev`, and *not* the `feature/sdk-0.6-adoption` name older notes below suggest). This branch deliberately carries the `@pipelex/sdk` `file:../pipelex-sdk-js` link **committed** (commit `6114d74`) — that is how it develops against local 0.6.0 code. **This supersedes every per-checkpoint "Not committed" note below** — those described the state before the work was committed.
+
+- Phase 1 (retire `method-source.ts`) — committed (`19671ac`).
+- Phase 2 (`mthds_prepare_inputs`) — committed (`prepare.ts` present at HEAD).
+- Phase 3 (run usage & cost) — committed this session (see the Phase 3 checkpoint).
+
+**The one remaining blocker is external: `@pipelex/sdk@0.6.0` is not published to npm yet.** Nothing else is in flight. When it publishes, the finishing sequence (identical for all three phases, they ride one branch) is:
+
+1. `make use-npm-sdk` and pin `"@pipelex/sdk": "^0.6.0"` in `package.json` — swaps the committed `file:` link for the published range; commit that swap.
+2. `make check` green (it *refuses* while the `file:` link is present — see Cross-cutting constraints; that is why we've validated with the individual targets so far).
+3. Merge `feature/Use-new-sdk-for-uploads` via the normal flow (`guard-branches.yml`: work-branch → dev → release/vX.Y.Z → main). The link-swap commit MUST be part of what merges so the `file:` link never reaches dev/release/main.
+4. Cut the release with the **`/release` skill**; `mthds_prepare_inputs` + run usage/cost ship in that version.
+
+**To resume validation right now** (SDK still unpublished): `cd ../pipelex-sdk-js && npm run build` to refresh the linked `dist/`, then back in this repo `npm run build && npm run typecheck && npm test` — expect **249 pass**. Do NOT run `make check` (it refuses under the link).
 
 ## Cross-cutting constraints — read before any phase
 
 - **SDK 0.6.0 is not published yet.** We develop against a local `file:` link (`make use-local-sdk`, currently active — `package.json`/`package-lock.json` point `@pipelex/sdk` at `../pipelex-sdk-js`, whose built `dist/` carries the 0.6.0 code even though its `package.json` still reads `0.5.1`). **`make check` refuses under the link** (the `check-no-local-deps` guard) — validate with the individual targets instead: `npm run build` (regenerates the Skybridge view registry), then `npm run typecheck`, then `npm test`. Rebuild the SDK (`cd ../pipelex-sdk-js && npm run build`) after pulling SDK changes, or the link serves stale `dist/`.
-- **Nothing merges until the SDK publishes v0.6.0.** The merge sequence for every phase's work: SDK cuts + publishes `@pipelex/sdk@0.6.0` → here run `make use-npm-sdk` and pin `"@pipelex/sdk": "^0.6.0"` → `make check` green → commit. Do **not** commit the `file:` link.
-- **The bump rides with the fixture fix.** `MethodData` gained required `org_id` / `created_by_user_id` in 0.6.0; the three test fixtures were updated this session (`shared.test.ts`, `inputs.test.ts`, `validate.test.ts`). That edit only type-checks on 0.6.0, so it lands together with the `^0.6.0` pin — not before.
-- **Branch hygiene.** This work is currently uncommitted on `dev`. Move it to a feature branch (suggest `feature/sdk-0.6-adoption`) before committing; `dev` is an integration target, not a work branch (`guard-branches.yml`).
+- **Nothing merges to dev/release/main until the SDK publishes v0.6.0.** See the STATUS banner for the finishing sequence. The "**do not commit the `file:` link**" rule applies to what reaches **dev/release/main** — it must be swapped to the `^0.6.0` pin first. It does NOT mean the WIP branch can't carry the link: `feature/Use-new-sdk-for-uploads` *does* commit the link (that is how it develops against local 0.6.0), and Phases 1–3 are committed on top of it.
+- **The bump rides with the fixture fix.** `MethodData` gained required `org_id` / `created_by_user_id` in 0.6.0; the three test fixtures were updated (`shared.test.ts`, `inputs.test.ts`, `validate.test.ts`). That edit only type-checks on 0.6.0, so it lands together with the `^0.6.0` pin — not before. (Already committed on the branch.)
+- **Branch hygiene — CORRECTED.** Earlier notes said "uncommitted on `dev`, move to `feature/sdk-0.6-adoption`". Reality: the work lives on **`feature/Use-new-sdk-for-uploads`** (already a proper work branch under `guard-branches.yml`), with the link + all three phases committed. No branch move is needed; ignore the `feature/sdk-0.6-adoption` suggestion wherever it still appears below.
 
 ## Premise — VERIFIED this session (2026-07-23)
 
@@ -75,12 +92,12 @@ Resolve and record in `SPEC.md` (mirror into the Zod schemas afterward):
 
 Standalone, independent of Phases 1–2 (needs only the 0.6.0 surface). The SDK already hands us `RunResults.tokens_usages`; project it.
 
-- [ ] **Design (small):** decide what to surface in `structuredContent` — total USD `cost` (sum of records; null-aware), total tokens, and/or a per-`pipe_code` breakdown — and the bounded shape (mirror the `main_stuff` bounding discipline). The full `tokens_usages` record list rides the view-only `_meta`, never model context. Branch on `usage_assembly_error` (not on the list being null) to distinguish "assembly broke" from "usage off".
-- [ ] Extend the `mthds_run_results` output schema + `RunResults` projection in `capabilities/run.ts`; add a cost line to the composed `content` summary on `completed`.
-- [ ] Tests: a completed run with `tokens_usages` (cost summed, per-pipe if chosen); `tokens_usages: null` + `usage_assembly_error` set; the `[]` (assembly ran, no inference) case.
-- [ ] `SPEC.md` (Run Scope / `mthds_run_results` output), `README.md`, `CHANGELOG.md`, `CLAUDE.md`.
+- [x] **Design (small):** decided, then **refined per sign-off (2026-07-24): model-facing usage is RUN-LEVEL only, and never in the prose.** `structuredContent.usage` = null-aware total `cost_usd` (+ `cost_partial` for a priced/unpriced mix) + `tokens` (Σ `input`+`output` only, excluding the non-additive `input_cached`/`output_reasoning` subsets) + `calls` + `assembly_error?`. **No `by_pipe` on the model-facing surface** and **no `## Usage` prose** — the per-pipe rollup (`computeUsageByPipe`, unbounded, same null-aware math per pipe) rides view-only `_meta.usage_by_pipe` alongside the full per-call `_meta.tokens_usages`, both kept for a future detailed-cost tool/view ("keep reading the per-pipe usage, just not rendered to the agent"). Branch on `usage_assembly_error` (not the null list): list→totals (`[]`→zero); null+error→null totals + `assembly_error`; null+no error→`usage` omitted. Cost null (nothing priced) is deliberately distinct from 0 (no inference). — recorded in SPEC "Run usage & cost". (Dropped from the first cut: `by_pipe`/`by_pipe_truncated` in structuredContent, `USAGE_PIPE_CAP`, and every prose helper.)
+- [x] Extend the `mthds_run_results` output schema + `RunResults` projection in `capabilities/run.ts`. — done; `summarizeUsage` (run-level totals) + `totalUsage`/`computeUsageByPipe` helpers, `usage` in `structuredContent` only (no prose), `_meta.tokens_usages` + `_meta.usage_by_pipe` added to `runResultsToolResult`, Zod `runUsageSchema` + `RunUsage`/`PipeUsage` types. (Also fixed a stray NUL byte from the first cut's pipe-group sentinel — `computeUsageByPipe` now keys the `Map` on `null` directly.)
+- [x] Tests: completed run with `tokens_usages` (run-level totals in structuredContent, per-pipe only off it, no usage prose); `tokens_usages: null` + `usage_assembly_error` set; `[]` (assembly ran, no inference); nothing-priced→null cost; priced/unpriced mix→`cost_partial`; cached/reasoning subset exclusion; `computeUsageByPipe` grouping/sorting/null-pipe + unbounded rollup; `_meta.usage_by_pipe` + `_meta.tokens_usages` carriage; usage-stays-out-of-prose. — done; suite at 249 pass.
+- [x] `SPEC.md` (Run Scope / `mthds_run_results` output + `_meta` keys), `README.md`, `CHANGELOG.md` (Unreleased Added), `CLAUDE.md` (run.ts bullet). — done.
 
-**CHECKPOINT 3** — run cost/usage surfaced; gates green; ready for the `/release` cut once `@pipelex/sdk@0.6.0` is published and pinned.
+**CHECKPOINT 3 — REACHED (2026-07-23; refined 2026-07-24).** Run cost/usage surfaced on `mthds_run_results`: compact **run-level** null-aware `usage` (cost/tokens/calls) in `structuredContent` only — no per-pipe on the model-facing surface, no usage prose. Per-pipe rollup + full per-call list ride view-only `_meta.usage_by_pipe` / `_meta.tokens_usages` for a future detailed-cost surface. All gates green under the local link (`@pipelex/sdk` `file:../pipelex-sdk-js`, 0.6.0 code): `build` + `build:local` + `typecheck` + `lint` + `format:check` + `test` (249 pass). **Committed on `feature/Use-new-sdk-for-uploads` (2026-07-24)** alongside the TODOS cold-start refresh — see the STATUS banner. Remaining finishing steps are the shared SDK-publish sequence in the STATUS banner (swap the `file:` link → `^0.6.0` pin, `make check`, merge via the normal flow, `/release`), gated only on `@pipelex/sdk@0.6.0` publishing.
 
 ---
 
