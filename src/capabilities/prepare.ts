@@ -303,6 +303,14 @@ async function preparePassThrough(
       // Not a declared input (or an unexpected envelope) — pass through untouched.
       continue;
     }
+    if (isExplicitEnvelope(callerValue)) {
+      // The caller filled the explicit `{ concept, content }` template: walk the inner
+      // content against the compact signature, then re-wrap so the concept annotation
+      // rides through to the run (the runtime accepts the envelope). SDK parity.
+      const walked = resolveNodePassThrough(entry.content, callerValue.content, name);
+      rewritten[name] = { ...callerValue, content: walked };
+      continue;
+    }
     rewritten[name] = resolveNodePassThrough(entry.content, callerValue, name);
   }
 
@@ -312,6 +320,17 @@ async function preparePassThrough(
 /** Strict plain-object test — excludes arrays, typed arrays, and other exotics (SDK parity). */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Object.prototype.toString.call(value) === "[object Object]";
+}
+
+/**
+ * The explicit-template envelope: a plain object whose keys are EXACTLY `concept` and
+ * `content` (SDK parity, mirroring the runtime's own collision rule) — so a declared
+ * structured concept that merely happens to carry both fields is not misread as one.
+ */
+function isExplicitEnvelope(value: unknown): value is { concept: unknown; content: unknown } {
+  if (!isPlainObject(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === 2 && "concept" in value && "content" in value;
 }
 
 /** A canonical Image/Document content is a plain object carrying a `url` key (SDK parity). */

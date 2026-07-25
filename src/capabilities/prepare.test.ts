@@ -345,6 +345,83 @@ describe("prepareMthdsInputs — console (pass-through only)", () => {
     });
   });
 
+  it("accepts the filled explicit {concept, content} envelope and re-wraps it", async () => {
+    const result = await prepareMthdsInputs(
+      {
+        files,
+        inputs: {
+          photo: { concept: "native.Image", content: { url: "https://cdn.example.com/a.png" } },
+          question: { concept: "native.Text", content: "hi" },
+        },
+      },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...getMethodClosureNotCalled,
+          ...prepareInputsNotCalled,
+          async buildInputs() {
+            return explicitTemplate;
+          },
+        },
+      },
+    );
+
+    // The envelope survives: `concept` rides through, only the inner content is rewritten.
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.uploads).toEqual([]);
+    expect(result.structuredContent.inputs).toEqual({
+      photo: { concept: "native.Image", content: { url: "https://cdn.example.com/a.png" } },
+      question: { concept: "native.Text", content: "hi" },
+    });
+  });
+
+  it("still refuses an upload-needing value nested inside an envelope", async () => {
+    const result = await prepareMthdsInputs(
+      { files, inputs: { photo: { concept: "native.Image", content: "./local/a.png" } } },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...getMethodClosureNotCalled,
+          ...prepareInputsNotCalled,
+          async buildInputs() {
+            return explicitTemplate;
+          },
+        },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "inputs",
+    });
+  });
+
+  it("does not misread a structured concept that merely has concept+content fields", async () => {
+    // Exactly-two-keys is the envelope rule; a third key means it is ordinary structured content.
+    const result = await prepareMthdsInputs(
+      {
+        files,
+        inputs: { question: { concept: "x", content: "y", extra: 1 } },
+      },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...getMethodClosureNotCalled,
+          ...prepareInputsNotCalled,
+          async buildInputs() {
+            return explicitTemplate;
+          },
+        },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.inputs).toEqual({
+      question: { concept: "x", content: "y", extra: 1 },
+    });
+  });
+
   it("passes an existing pipelex-storage:// reference through", async () => {
     const result = await prepareMthdsInputs(
       { files, inputs: { photo: "pipelex-storage://existing" } },
