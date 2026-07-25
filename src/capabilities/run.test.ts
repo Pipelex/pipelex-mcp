@@ -3,14 +3,17 @@ import { describe, expect, it } from "vitest";
 import { ApiResponseError, ApiUnreachableError, MissingMainStuffError } from "@pipelex/sdk";
 import type {
   RunRead,
+  RunResults,
   RunResultStart,
   RunResultState,
   RunStatus,
   StartOptions,
+  TokensUsageRecord,
 } from "@pipelex/sdk";
 
 import {
   boundMainStuff,
+  computeUsageByPipe,
   ELLIPSIS_MARKER,
   getMthdsRunResults,
   getMthdsRunStatus,
@@ -23,6 +26,7 @@ import {
   startMthdsRun,
   startResult,
   statusResult,
+  summarizeUsage,
   validateRunRequest,
 } from "./run.js";
 import type { RunContext } from "./run.js";
@@ -351,6 +355,10 @@ describe("resultsResult", () => {
     expect(result.mainStuff).toBe(mainStuff);
     expect(result.summary).toContain("```json");
     expect(result.summary).toContain('"answer": 42');
+    // No tokens_usages on the wire → usage omitted, nothing on _meta.
+    expect(result.structuredContent).not.toHaveProperty("usage");
+    expect(result.tokensUsages).toBeUndefined();
+    expect(result.summary).not.toContain("## Usage");
   });
 
   it("does not advertise a view but preserves full result metadata when the shell has no views", () => {
@@ -417,6 +425,55 @@ describe("resultsResult", () => {
     expect(result.summary).toMatch(/truncated/i);
   });
 
+  it("projects run-level usage in structuredContent, per-pipe only off it, and no usage prose", () => {
+    const tokensUsages: TokensUsageRecord[] = [
+      {
+        pipe_code: "extract",
+        cost: 0.018,
+        nb_tokens_by_category: { input: 6000, input_cached: 2000, output: 3000 },
+      },
+      { pipe_code: "summarize", cost: 0.005, nb_tokens_by_category: { input: 2500, output: 1000 } },
+    ];
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: { pipeline_run_id: RUN_ID, main_stuff: "done", tokens_usages: tokensUsages },
+    });
+
+    const usage = result.structuredContent.usage;
+    // Run-level totals only; input_cached (a subset of input) is excluded: 9000 + 3500 = 12500.
+    expect(usage?.cost_usd).toBeCloseTo(0.023, 10);
+    expect(usage?.tokens).toBe(12500);
+    expect(usage?.calls).toBe(2);
+    expect(usage).not.toHaveProperty("cost_partial");
+    expect(usage).not.toHaveProperty("assembly_error");
+    // Per-pipe is deliberately absent from the model-facing structuredContent.
+    expect(usage).not.toHaveProperty("by_pipe");
+    expect(usage).not.toHaveProperty("by_pipe_truncated");
+    // Per-pipe rollup + full per-call list ride the result (→ _meta), never structuredContent.
+    expect(result.tokensUsages).toBe(tokensUsages);
+    expect(result.usageByPipe).toEqual([
+      { pipe_code: "extract", cost_usd: 0.018, tokens: 9000, calls: 1 },
+      { pipe_code: "summarize", cost_usd: 0.005, tokens: 3500, calls: 1 },
+    ]);
+    // Usage never appears in the prose summary.
+    expect(result.summary).not.toContain("Usage");
+    expect(result.summary).not.toContain("$0.02");
+    expect(result.summary).not.toContain("tokens");
+  });
+
+  it("omits usage but keeps the completed result when the run reported no usage", () => {
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: { pipeline_run_id: RUN_ID, main_stuff: "done", tokens_usages: null },
+    });
+
+    expect(result.structuredContent).not.toHaveProperty("usage");
+    expect(result.tokensUsages).toBeUndefined();
+    expect(result.usageByPipe).toBeUndefined();
+  });
+
   it("hard-errors when a completed result is missing its main output", () => {
     const state = {
       state: "completed",
@@ -446,6 +503,190 @@ describe("resultsResult", () => {
     expect(result.summary).toContain("FAILED");
     expect(result.summary).toContain("Pipe demo.main raised.");
     expect(result.summary).toMatch(/no graph/i);
+  });
+});
+
+describe("summarizeUsage", () => {
+  function runResults(overrides: Partial<RunResults>): RunResults {
+    return { pipeline_run_id: RUN_ID, main_stuff: "done", ...overrides };
+  }
+
+  function record(overrides: Partial<TokensUsageRecord> = {}): TokensUsageRecord {
+    return {
+      pipe_code: "demo",
+      cost: 0.01,
+      nb_tokens_by_category: { input: 100, output: 50 },
+      ...overrides,
+    };
+  }
+
+  it("omits usage when tokens_usages is null and no assembly error (usage off / pre-artifact)", () => {
+    expect(summarizeUsage(runResults({ tokens_usages: null }))).toBeUndefined();
+    expect(summarizeUsage(runResults({}))).toBeUndefined();
+  });
+
+  it("branches on usage_assembly_error, not the null list, when assembly broke", () => {
+    const usage = summarizeUsage(
+      runResults({ tokens_usages: null, usage_assembly_error: "artifact read failed" }),
+    );
+
+    expect(usage).toEqual({
+      cost_usd: null,
+      tokens: null,
+      calls: 0,
+      assembly_error: "artifact read failed",
+    });
+  });
+
+  it("reports zero totals for an empty list (assembly ran, no inference)", () => {
+    const usage = summarizeUsage(runResults({ tokens_usages: [] }));
+
+    expect(usage).toEqual({ cost_usd: 0, tokens: 0, calls: 0 });
+  });
+
+  it("returns null cost (not 0) when calls happened but none were priced", () => {
+    const usage = summarizeUsage(
+      runResults({
+        tokens_usages: [
+          record({ cost: null, nb_tokens_by_category: { input: 10, output: 5 } }),
+          record({ cost: undefined, nb_tokens_by_category: { input: 20, output: 5 } }),
+        ],
+      }),
+    );
+
+    expect(usage?.cost_usd).toBeNull();
+    expect(usage?.tokens).toBe(40);
+    expect(usage).not.toHaveProperty("cost_partial");
+  });
+
+  it("flags cost_partial and sums only the priced calls when the run mixes priced and unpriced", () => {
+    const usage = summarizeUsage(
+      runResults({
+        tokens_usages: [record({ cost: 0.02 }), record({ cost: null })],
+      }),
+    );
+
+    expect(usage?.cost_usd).toBeCloseTo(0.02, 10);
+    expect(usage?.cost_partial).toBe(true);
+  });
+
+  it("excludes cached-input and reasoning subsets from the token total", () => {
+    const usage = summarizeUsage(
+      runResults({
+        tokens_usages: [
+          record({
+            nb_tokens_by_category: {
+              input: 1000,
+              input_cached: 400,
+              output: 300,
+              output_reasoning: 120,
+            },
+          }),
+        ],
+      }),
+    );
+
+    // input + output only: 1000 + 300 = 1300 (cached/reasoning are subsets).
+    expect(usage?.tokens).toBe(1300);
+  });
+
+  it("returns null tokens when no record reported input or output counts", () => {
+    const usage = summarizeUsage(
+      runResults({
+        tokens_usages: [
+          record({ nb_tokens_by_category: null }),
+          record({ nb_tokens_by_category: {} }),
+        ],
+      }),
+    );
+
+    expect(usage?.tokens).toBeNull();
+  });
+
+  it("does not put per-pipe on the run-level usage — that rides _meta only", () => {
+    const usage = summarizeUsage(
+      runResults({
+        tokens_usages: [
+          record({ pipe_code: "a", cost: 0.01 }),
+          record({ pipe_code: "b", cost: 0.02 }),
+        ],
+      }),
+    );
+
+    expect(usage?.calls).toBe(2);
+    expect(usage).not.toHaveProperty("by_pipe");
+    expect(usage).not.toHaveProperty("by_pipe_truncated");
+  });
+});
+
+describe("computeUsageByPipe", () => {
+  function record(overrides: Partial<TokensUsageRecord> = {}): TokensUsageRecord {
+    return {
+      pipe_code: "demo",
+      cost: 0.01,
+      nb_tokens_by_category: { input: 100, output: 50 },
+      ...overrides,
+    };
+  }
+
+  it("groups by pipe_code, sorts by cost desc, and groups unattributed calls under null", () => {
+    const rows = computeUsageByPipe([
+      record({ pipe_code: "cheap", cost: 0.001, nb_tokens_by_category: { input: 10, output: 5 } }),
+      record({
+        pipe_code: "pricey",
+        cost: 0.05,
+        nb_tokens_by_category: { input: 100, output: 50 },
+      }),
+      record({ pipe_code: "pricey", cost: 0.02, nb_tokens_by_category: { input: 40, output: 10 } }),
+      record({ pipe_code: null, cost: null, nb_tokens_by_category: null }),
+    ]);
+
+    expect(rows.map((row) => row.pipe_code)).toEqual(["pricey", "cheap", null]);
+    const pricey = rows[0];
+    expect(pricey?.calls).toBe(2);
+    expect(pricey?.cost_usd).toBeCloseTo(0.07, 10);
+    expect(pricey?.tokens).toBe(200);
+    // The unattributed (null-priced) group sorts last with a null cost.
+    expect(rows[2]).toEqual({ pipe_code: null, cost_usd: null, tokens: null, calls: 1 });
+  });
+
+  it("keeps every distinct pipe — the rollup is unbounded (it rides _meta, not model context)", () => {
+    const many = Array.from({ length: 50 }, (_, index) =>
+      record({
+        pipe_code: `pipe_${index}`,
+        cost: 0.001,
+        nb_tokens_by_category: { input: 10, output: 10 },
+      }),
+    );
+
+    expect(computeUsageByPipe(many)).toHaveLength(50);
+  });
+});
+
+describe("usage stays out of the run-results prose", () => {
+  function completedSummaryFor(overrides: Partial<RunResults>): string {
+    return resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: { pipeline_run_id: RUN_ID, main_stuff: "done", ...overrides },
+    }).summary;
+  }
+
+  it("never mentions usage, cost, or tokens for a run with usage records", () => {
+    const summary = completedSummaryFor({
+      tokens_usages: [
+        { pipe_code: "demo", cost: 0.02, nb_tokens_by_category: { input: 10, output: 5 } },
+      ],
+    });
+    expect(summary).not.toMatch(/usage/i);
+    expect(summary).not.toContain("$");
+    expect(summary).not.toContain("tokens");
+  });
+
+  it("never mentions a usage assembly error in the prose", () => {
+    const summary = completedSummaryFor({ usage_assembly_error: "boom" });
+    expect(summary).not.toMatch(/usage/i);
+    expect(summary).not.toContain("boom");
   });
 });
 
@@ -906,10 +1147,19 @@ describe("getMthdsRunResults", () => {
 describe("runResultsToolResult", () => {
   it("delivers the graph and the full output on _meta, never on structuredContent", async () => {
     const huge = { text: "x".repeat(MAIN_STUFF_CAP * 2) };
+    const tokensUsages: TokensUsageRecord[] = [
+      { pipe_code: "extract", cost: 0.01, nb_tokens_by_category: { input: 100, output: 50 } },
+      { pipe_code: "summarize", cost: 0.02, nb_tokens_by_category: { input: 40, output: 20 } },
+    ];
     const state: RunResultState = {
       state: "completed",
       pipeline_run_id: RUN_ID,
-      result: { pipeline_run_id: RUN_ID, main_stuff: huge, graph_spec: { nodes: [] } },
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: huge,
+        graph_spec: { nodes: [] },
+        tokens_usages: tokensUsages,
+      },
     };
     const context = contextWith({ getRunResult: () => Promise.resolve(state) });
 
@@ -917,8 +1167,17 @@ describe("runResultsToolResult", () => {
 
     expect(toolResult.isError).toBe(false);
     expect(toolResult._meta.graph_spec).toEqual({ nodes: [] });
-    // _meta carries the FULL output; structuredContent the bounded copy.
+    // _meta carries the FULL output, the raw per-call list, and the per-pipe rollup;
+    // structuredContent carries only the bounded output and the run-level usage.
     expect(toolResult._meta.main_stuff).toBe(huge);
+    expect(toolResult._meta.tokens_usages).toBe(tokensUsages);
+    expect(toolResult._meta.usage_by_pipe).toEqual([
+      { pipe_code: "summarize", cost_usd: 0.02, tokens: 60, calls: 1 },
+      { pipe_code: "extract", cost_usd: 0.01, tokens: 150, calls: 1 },
+    ]);
+    // The run-level usage totals are in structuredContent; per-pipe is not.
+    expect(toolResult.structuredContent.usage?.calls).toBe(2);
+    expect(toolResult.structuredContent.usage).not.toHaveProperty("by_pipe");
     expect(toolResult.structuredContent.truncated).toBe(true);
     expect(JSON.stringify(toolResult.structuredContent.main_stuff).length).toBeLessThanOrEqual(
       MAIN_STUFF_CAP,
@@ -933,6 +1192,8 @@ describe("runResultsToolResult", () => {
     expect(toolResult.isError).toBe(true);
     expect(toolResult._meta.graph_spec).toBeUndefined();
     expect(toolResult._meta.main_stuff).toBeUndefined();
+    expect(toolResult._meta.tokens_usages).toBeUndefined();
+    expect(toolResult._meta.usage_by_pipe).toBeUndefined();
   });
 });
 

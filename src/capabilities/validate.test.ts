@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
+import { ApiResponseError, ApiUnreachableError, EmptyMethodSourceError } from "@pipelex/sdk";
 import type {
-  MethodData,
   MthdsFile,
+  MthdsFileItem,
   PipelexInvalidReport,
   PipelexValidationReport,
   PipelexValidationResult,
@@ -14,10 +14,10 @@ import { DEFAULT_API_URL } from "./shared.js";
 import type { FileResolver } from "./shared.js";
 import { toolResult, validateMthds, validationResult } from "./validate.js";
 
-/** Fake getMethod arm for tests whose request must never fetch a method. */
-const getMethodNotCalled = {
-  async getMethod(): Promise<MethodData> {
-    throw new Error("getMethod must not be called in this test");
+/** Fake getMethodClosure arm for tests whose request must never fetch a method. */
+const getMethodClosureNotCalled = {
+  async getMethodClosure(): Promise<MthdsFileItem[]> {
+    throw new Error("getMethodClosure must not be called in this test");
   },
 };
 
@@ -27,16 +27,6 @@ const validateFilesNotCalled = {
     throw new Error("validateFiles must not be called in this test");
   },
 };
-
-function methodData(mthds: string): MethodData {
-  return {
-    method_id: "mt_123",
-    name: "Demo method",
-    mthds,
-    created_at: "2026-07-21T00:00:00Z",
-    updated_at: "2026-07-21T00:00:00Z",
-  };
-}
 
 const validReport: PipelexValidationReport = {
   is_valid: true,
@@ -180,7 +170,7 @@ describe("validateMthds", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async validateFiles(files, options) {
             capturedFiles = files;
             capturedOptions = options;
@@ -214,7 +204,7 @@ describe("validateMthds", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async validateFiles() {
             called = true;
             return validReport;
@@ -241,7 +231,7 @@ describe("validateMthds", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async validateFiles() {
             return malformedReport;
           },
@@ -261,7 +251,7 @@ describe("validateMthds", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async validateFiles() {
             throw new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED");
           },
@@ -280,7 +270,7 @@ describe("validateMthds", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async validateFiles() {
             throw new ApiResponseError(
               "HTTP 401",
@@ -323,7 +313,7 @@ describe("validateMthds path submissions", () => {
         baseUrl: DEFAULT_API_URL,
         resolver,
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async validateFiles(files) {
             capturedFiles = files;
             return validReport;
@@ -344,7 +334,7 @@ describe("validateMthds path submissions", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async validateFiles() {
             called = true;
             return validReport;
@@ -388,7 +378,7 @@ describe("validateMthds path submissions", () => {
         baseUrl: DEFAULT_API_URL,
         resolver,
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async validateFiles() {
             called = true;
             return validReport;
@@ -405,7 +395,7 @@ describe("validateMthds path submissions", () => {
 });
 
 describe("validateMthds by method_id", () => {
-  it("fetches a raw-source method and forwards it as one file labeled with the id", async () => {
+  it("forwards a resolved single-file closure as one file labeled with the id", async () => {
     let capturedFiles: MthdsFile[] | undefined;
     let fetchedId: string | undefined;
 
@@ -414,9 +404,9 @@ describe("validateMthds by method_id", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          async getMethod(methodId) {
+          async getMethodClosure(methodId) {
             fetchedId = methodId;
-            return methodData('domain = "demo"\nmain_pipe = "main"');
+            return [{ content: 'domain = "demo"\nmain_pipe = "main"', source: "mt_123" }];
           },
           async validateFiles(files) {
             capturedFiles = files;
@@ -427,7 +417,7 @@ describe("validateMthds by method_id", () => {
     );
 
     expect(fetchedId).toBe("mt_123");
-    // The stored source is forwarded as validateFiles' input, each labeled
+    // The resolved closure is forwarded as validateFiles' input, each labeled
     // with the method id as `uri` provenance.
     expect(capturedFiles).toEqual([
       { content: 'domain = "demo"\nmain_pipe = "main"', uri: "mt_123" },
@@ -439,7 +429,7 @@ describe("validateMthds by method_id", () => {
     expect(result.graphSpec).toEqual(validReport.graph_spec);
   });
 
-  it("forwards each stored file of a file-array method", async () => {
+  it("forwards each file of a multi-file closure", async () => {
     let capturedFiles: MthdsFile[] | undefined;
 
     const result = await validateMthds(
@@ -447,14 +437,11 @@ describe("validateMthds by method_id", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          async getMethod() {
-            return methodData(
-              JSON.stringify([
-                { name: "a.mthds", content: 'domain = "demo"' },
-                { name: "b.mthds", content: 'main_pipe = "main"' },
-                { name: "empty.mthds", content: "   " },
-              ]),
-            );
+          async getMethodClosure() {
+            return [
+              { content: 'domain = "demo"', source: "mt_123" },
+              { content: 'main_pipe = "main"', source: "mt_123" },
+            ];
           },
           async validateFiles(files) {
             capturedFiles = files;
@@ -478,7 +465,7 @@ describe("validateMthds by method_id", () => {
         baseUrl: DEFAULT_API_URL,
         client: {
           ...validateFilesNotCalled,
-          async getMethod(): Promise<MethodData> {
+          async getMethodClosure(): Promise<MthdsFileItem[]> {
             throw new ApiResponseError(
               "HTTP 404",
               `${DEFAULT_API_URL}/v1/methods/mt_missing`,
@@ -501,15 +488,15 @@ describe("validateMthds by method_id", () => {
     expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
   });
 
-  it("reports a no-source method at method_id without calling the validate route", async () => {
+  it("reports a no-source method (EmptyMethodSourceError) at method_id without calling the validate route", async () => {
     const result = await validateMthds(
       { method_id: "mt_123" },
       {
         baseUrl: DEFAULT_API_URL,
         client: {
           ...validateFilesNotCalled,
-          async getMethod() {
-            return methodData("[]");
+          async getMethodClosure(): Promise<MthdsFileItem[]> {
+            throw new EmptyMethodSourceError("mt_123");
           },
         },
       },
@@ -529,7 +516,7 @@ describe("validateMthds by method_id", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async validateFiles(files) {
             capturedFiles = files;
             return validReport;
@@ -549,7 +536,7 @@ describe("validateMthds by method_id", () => {
         baseUrl: DEFAULT_API_URL,
         client: {
           ...validateFilesNotCalled,
-          async getMethod(): Promise<MethodData> {
+          async getMethodClosure(): Promise<MthdsFileItem[]> {
             throw new ApiResponseError(
               "HTTP 402",
               `${DEFAULT_API_URL}/v1/methods/mt_123`,
@@ -588,7 +575,7 @@ describe("validateMthds by method_id", () => {
       {},
       {
         baseUrl: DEFAULT_API_URL,
-        client: { ...validateFilesNotCalled, ...getMethodNotCalled },
+        client: { ...validateFilesNotCalled, ...getMethodClosureNotCalled },
       },
     );
 

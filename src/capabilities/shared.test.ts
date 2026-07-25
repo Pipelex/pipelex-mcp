@@ -4,11 +4,12 @@ import {
   ApiResponseError,
   ApiUnreachableError,
   ClientAuthenticationError,
+  EmptyMethodSourceError,
   MissingMainStuffError,
   PipelineRequestError,
   RunLifecycleUnavailableError,
 } from "@pipelex/sdk";
-import type { MethodData } from "@pipelex/sdk";
+import type { MthdsFileItem } from "@pipelex/sdk";
 
 import {
   buildApiConfig,
@@ -22,16 +23,6 @@ import {
   validateRunIdRequest,
 } from "./shared.js";
 import type { FileResolver, MethodFetchClient, ToolError } from "./shared.js";
-
-function methodData(mthds: string): MethodData {
-  return {
-    method_id: "mt_123",
-    name: "Demo method",
-    mthds,
-    created_at: "2026-07-21T00:00:00Z",
-    updated_at: "2026-07-21T00:00:00Z",
-  };
-}
 
 describe("buildApiConfig", () => {
   it("defaults to the hosted API with no key", () => {
@@ -608,10 +599,10 @@ describe("classifyError", () => {
 describe("fetchMethodFiles", () => {
   const noSourceHint = "Add MTHDS content to the method, or submit files instead.";
 
-  it("fetches a raw-source method and forwards it as one file labeled with the id", async () => {
+  it("forwards a resolved single-file closure, relabeling source as the id uri", async () => {
     const client: MethodFetchClient = {
-      async getMethod() {
-        return methodData('domain = "demo"\nmain_pipe = "main"');
+      async getMethodClosure() {
+        return [{ content: 'domain = "demo"\nmain_pipe = "main"', source: "mt_123" }];
       },
     };
 
@@ -623,16 +614,13 @@ describe("fetchMethodFiles", () => {
     });
   });
 
-  it("forwards each stored file of a file-array method", async () => {
+  it("forwards each file of a multi-file closure", async () => {
     const client: MethodFetchClient = {
-      async getMethod() {
-        return methodData(
-          JSON.stringify([
-            { name: "a.mthds", content: 'domain = "demo"' },
-            { name: "b.mthds", content: 'main_pipe = "main"' },
-            { name: "empty.mthds", content: "   " },
-          ]),
-        );
+      async getMethodClosure() {
+        return [
+          { content: 'domain = "demo"', source: "mt_123" },
+          { content: 'main_pipe = "main"', source: "mt_123" },
+        ];
       },
     };
 
@@ -647,10 +635,10 @@ describe("fetchMethodFiles", () => {
     });
   });
 
-  it("reports a no-source method at method_id with the caller's hint, tagged no_source", async () => {
+  it("maps EmptyMethodSourceError to a no_source verdict at method_id with the caller's hint", async () => {
     const client: MethodFetchClient = {
-      async getMethod() {
-        return methodData("[]");
+      async getMethodClosure(): Promise<MthdsFileItem[]> {
+        throw new EmptyMethodSourceError("mt_123");
       },
     };
 
@@ -668,7 +656,7 @@ describe("fetchMethodFiles", () => {
 
   it("classifies a fetch failure as input_domain at method_id, tagged fetch", async () => {
     const client: MethodFetchClient = {
-      async getMethod(): Promise<MethodData> {
+      async getMethodClosure(): Promise<MthdsFileItem[]> {
         throw new ApiResponseError(
           "HTTP 404",
           `${DEFAULT_API_URL}/v1/methods/mt_missing`,

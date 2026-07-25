@@ -2,14 +2,19 @@ import {
   ApiResponseError,
   ApiUnreachableError,
   ClientAuthenticationError,
+  EmptyMethodSourceError,
+  InputPreparationError,
+  InvalidLocalSourceError,
   MissingMainStuffError,
   PipelineRequestError,
+  RejectedAssetError,
   RunLifecycleUnavailableError,
+  UnsupportedUploadCapabilityError,
+  UploadAuthenticationError,
+  UploadTransportError,
 } from "@pipelex/sdk";
-import type { MethodData } from "@pipelex/sdk";
+import type { MthdsFileItem } from "@pipelex/sdk";
 import { z } from "zod";
-
-import { methodSourceToContents } from "./method-source.js";
 
 export const DEFAULT_API_URL = "https://api.pipelex.com";
 
@@ -426,6 +431,87 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
     };
   }
 
+  // ── Input-preparation family (mthds_prepare_inputs) ──
+  // Every one of these derives from PipelineRequestError, so they MUST be
+  // classified here, ahead of the generic PipelineRequestError arm below
+  // (mirroring how EmptyMethodSourceError is caught in fetchMethodFiles).
+  // Ordered most-specific first: subclasses before the InputPreparationError
+  // base.
+
+  // Normally caught in fetchMethodFiles before reaching classifyError; mapped
+  // defensively so a stray one still locates at method_id, not pipe_ref.
+  if (err instanceof EmptyMethodSourceError) {
+    return {
+      class: "input_domain",
+      location: "method_id",
+      message: err.message,
+      hint: "The stored method has no MTHDS source yet. Add MTHDS content to it, or submit files instead.",
+      retryable: false,
+    };
+  }
+
+  // A missing/unreadable local path or an asset the storage service refused
+  // (413): the caller's input value is the problem.
+  if (err instanceof InvalidLocalSourceError || err instanceof RejectedAssetError) {
+    return {
+      class: "input_domain",
+      location: "inputs",
+      message: err.message,
+      hint:
+        err instanceof RejectedAssetError
+          ? "Pipelex storage refused the asset (too large). Shrink the file, or reference it by an http(s) URL instead."
+          : "Check the file path is correct and readable, or reference the asset by an http(s) URL / pipelex-storage:// URI instead.",
+      retryable: false,
+    };
+  }
+
+  // The configured deployment has no upload route (a bare pipelex-api runner):
+  // an environment/config problem, not the caller's request.
+  if (err instanceof UnsupportedUploadCapabilityError) {
+    return {
+      class: "config",
+      location: "PIPELEX_BASE_URL",
+      message: err.message,
+      hint: "The configured Pipelex deployment has no /v1/upload route. Point PIPELEX_BASE_URL at the hosted Pipelex API, or pass assets as http(s) URLs / pipelex-storage:// references.",
+      retryable: false,
+    };
+  }
+
+  if (err instanceof UploadAuthenticationError) {
+    return {
+      class: "config",
+      location: options.auth?.location ?? "PIPELEX_API_KEY",
+      message: err.message,
+      hint: options.auth?.hint ?? "Check the API key for the configured Pipelex API.",
+      retryable: false,
+    };
+  }
+
+  // A network/server fault reaching the upload route stays retryable.
+  if (err instanceof UploadTransportError) {
+    return {
+      class: "runtime",
+      message: err.message,
+      hint: "The upload could not reach Pipelex storage; retry, and inspect the API if it persists.",
+      retryable: true,
+    };
+  }
+
+  // The base class: the method signature did not resolve (invalid closure), or
+  // a caller value at a file position was malformed/unsupported. All are
+  // request-domain problems; locate at the route's bad-request field (pipe_ref
+  // for the prepare route).
+  if (err instanceof InputPreparationError) {
+    const inputBadRequest = options.badRequest ?? DEFAULT_BAD_REQUEST;
+    return {
+      class: "input_domain",
+      ...(inputBadRequest.location === undefined ? {} : { location: inputBadRequest.location }),
+      message: err.message,
+      hint: inputBadRequest.hint,
+      retryable: false,
+    };
+  }
+
   if (err instanceof PipelineRequestError) {
     return {
       class: "config",
@@ -457,12 +543,13 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
 
 /** The slice of `PipelexApiClient` the by-id fetch leg calls (test seam). */
 export interface MethodFetchClient {
-  getMethod(methodId: string): Promise<MethodData>;
+  getMethodClosure(methodId: string): Promise<MthdsFileItem[]>;
 }
 
 /**
- * Classify options for the by-id fetch leg (`getMethod`), shared by every
- * capability that fetches-and-forwards a stored method's source (currently
+ * Classify options for the by-id fetch leg (`getMethodClosure`, itself a
+ * `getMethod` + parse under the hood), shared by every capability that
+ * fetches-and-forwards a stored method's source (currently
  * `mthds_inputs_template` and `mthds_validate`). Unlike `/v1/start`, the SDK
  * does not intercept a missing-route 404 on `/v1/methods/{id}` (no
  * `RunLifecycleUnavailableError` equivalent), so a bare-runner base URL and a
@@ -494,25 +581,48 @@ export type MethodFetchResult =
   | { ok: false; reason: "fetch" | "no_source"; error: ToolError };
 
 /**
- * Fetch a stored method's current source and forward it as submitted files,
+ * Resolve a stored method's current closure and forward it as submitted files,
  * each labeled with the method id as provenance (`uri`) — the shared
  * fetch-and-forward leg behind every files-or-`method_id` capability's
- * id-only path. `getClient` is a factory, not a pre-built client, so a
- * malformed-base-URL throw from the SDK constructor happens inside this
- * function's own try block and classifies as a `config` `ToolError` instead
- * of escaping uncaught (mirrors `run.ts`'s `runClient` call-inline pattern).
- * The no-source hint is the only thing that differs per caller (what the
- * caller was trying to do with the method).
+ * id-only path. `getMethodClosure` (the SDK's canonical fetch-and-parse over
+ * `getMethod` + `methodSourceToContents`) already labels each file's `source`
+ * with the method id; the MCP surface spells provenance `uri`, so we relabel.
+ * `getClient` is a factory, not a pre-built client, so a malformed-base-URL
+ * throw from the SDK constructor happens inside this function's own try block
+ * and classifies as a `config` `ToolError` instead of escaping uncaught
+ * (mirrors `run.ts`'s `runClient` call-inline pattern). The no-source hint is
+ * the only thing that differs per caller (what the caller was trying to do
+ * with the method).
  */
 export async function fetchMethodFiles(
   getClient: () => MethodFetchClient,
   methodId: string,
   options: { authError?: AuthErrorTexture; noSourceHint: string },
 ): Promise<MethodFetchResult> {
-  let method: MethodData;
+  let closure: MthdsFileItem[];
   try {
-    method = await getClient().getMethod(methodId);
+    closure = await getClient().getMethodClosure(methodId);
   } catch (err) {
+    // A real, in-org method whose stored source parses to nothing throws
+    // EmptyMethodSourceError (the empty-closure check the MCP used to run by
+    // hand, now folded into getMethodClosure). Map it to the same
+    // input_domain@method_id no-verdict, tagged `no_source` so the caller can
+    // compose its own headline. It derives from PipelineRequestError, so it
+    // MUST be caught ahead of classifyError, which would otherwise call it a
+    // config fault.
+    if (err instanceof EmptyMethodSourceError) {
+      return {
+        ok: false,
+        reason: "no_source",
+        error: {
+          class: "input_domain",
+          location: "method_id",
+          message: "The stored method has no MTHDS source yet.",
+          hint: options.noSourceHint,
+          retryable: false,
+        },
+      };
+    }
     return {
       ok: false,
       reason: "fetch",
@@ -520,22 +630,7 @@ export async function fetchMethodFiles(
     };
   }
 
-  const contents = methodSourceToContents(method.mthds);
-  if (contents.length === 0) {
-    return {
-      ok: false,
-      reason: "no_source",
-      error: {
-        class: "input_domain",
-        location: "method_id",
-        message: "The stored method has no MTHDS source yet.",
-        hint: options.noSourceHint,
-        retryable: false,
-      },
-    };
-  }
-
-  return { ok: true, files: contents.map((content) => ({ content, uri: methodId })) };
+  return { ok: true, files: closure.map((item) => ({ content: item.content, uri: methodId })) };
 }
 
 function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorOptions): ToolError {
