@@ -4,6 +4,7 @@ import {
   PIPELEX_MCP_SERVER_INFO,
   buildToolContexts,
   mthdsInputsTemplateTool,
+  mthdsPrepareInputsTool,
   mthdsRunResultsTool,
   mthdsRunStatusTool,
   mthdsRunTool,
@@ -20,6 +21,9 @@ export const HOSTED_SERVER_INSTRUCTIONS = [
   "graph of the method, rendered through the run-graph view.",
   "Call `mthds_inputs_template` with the same file contents (or a registered method's catalog id",
   "via method_id) to get a fill-in template of a pipe's declared inputs, ready to populate for a run.",
+  "Once the template is filled, call `mthds_prepare_inputs` to make file-bearing inputs run-ready",
+  "(this hosted console is pass-through only — it accepts http(s) URLs and pipelex-storage:// references",
+  "and refuses inputs that would need an upload; the local workshop uploads local files).",
   "Run a method durably with `mthds_run` (start from files + pipe + inputs, or from a registered",
   "method's catalog id via method_id; returns a durable run id),",
   "then check on it with `mthds_run_status` and fetch the outcome with `mthds_run_results` by that id.",
@@ -64,6 +68,21 @@ export function createHostedServer(contexts: ToolContexts = buildToolContexts())
       },
       (input, extra) =>
         mthdsInputsTemplateTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+    )
+    .registerTool(
+      {
+        name: mthdsPrepareInputsTool.name,
+        description: mthdsPrepareInputsTool.description,
+        inputSchema: mthdsPrepareInputsTool.inputSchema,
+        outputSchema: mthdsPrepareInputsTool.outputSchema,
+        annotations: mthdsPrepareInputsTool.annotations,
+        _meta: {
+          "openai/toolInvocation/invoking": "Preparing MTHDS run inputs...",
+          "openai/toolInvocation/invoked": "MTHDS run inputs prepared.",
+        },
+      },
+      (input, extra) =>
+        mthdsPrepareInputsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
     )
     .registerTool(
       {

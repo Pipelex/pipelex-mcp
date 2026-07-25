@@ -1,9 +1,9 @@
 # Pipelex MCP
 
-Pipelex MCP exposes MTHDS validation, inputs projection, and durable method
-runs to MCP hosts, wrapping the Pipelex API through the `@pipelex/sdk`
-`PipelexApiClient`. It ships as **two servers from one repo and one capability
-core**:
+Pipelex MCP exposes MTHDS validation, inputs projection and preparation, and
+durable method runs to MCP hosts, wrapping the Pipelex API through the
+`@pipelex/sdk` `PipelexApiClient`. It ships as **two servers from one repo and
+one capability core**:
 
 - **Hosted console** — a [Skybridge](https://docs.skybridge.tech) HTTP server
   (deployed on Alpic) for remote-connector hosts (ChatGPT, claude.ai, Claude
@@ -20,6 +20,7 @@ contracts:
 |---|---|
 | `mthds_validate` | Validate submitted `.mthds` files, or a registered method by catalog id; on a valid verdict, ship the dry-run method graph to the `run-graph` view (hosted only). |
 | `mthds_inputs_template` | Project a pipe's declared inputs as a fill-in template for a run. |
+| `mthds_prepare_inputs` | Turn filled inputs run-ready: upload file-bearing values to Pipelex storage and rewrite them to `pipelex-storage://` (workshop uploads; console is pass-through only). |
 | `mthds_run` | Start a durable run on the hosted Pipelex API; returns a durable `run_id` immediately. |
 | `mthds_run_status` | Check a durable run's coarse lifecycle state by `run_id`. |
 | `mthds_run_results` | Fetch a durable run's terminal outcome by `run_id`. |
@@ -284,6 +285,43 @@ supplied the files win and the id is ignored. No Skybridge view — the template
 small structured data the model reads directly, and the `content` summary repeats
 it in a fenced block.
 
+### `mthds_prepare_inputs`
+
+```ts
+// input — at least one of files / method_id, plus the filled inputs
+{
+  files?: SubmittedFileInput[];
+  method_id?: string;               // catalog id (mt_…) of a registered method
+  pipe_ref?: string;
+  inputs: Record<string, unknown>;  // the FILLED mthds_inputs_template output
+}
+
+// structuredContent
+{
+  status: "ok" | "error";
+  is_valid: boolean;
+  pipe_ref?: string;                // echoed only when the caller supplied it
+  inputs?: Record<string, unknown>; // the prepared (rewritten) inputs — ready for mthds_run
+  uploads?: string[];               // the pipelex-storage:// uris uploaded this call ([] when all pass-through)
+  errors?: ToolError[];
+}
+```
+
+Sits between `mthds_inputs_template` (produces the empty template) and `mthds_run`
+(executes the filled inputs): it makes file-bearing inputs run-ready. The pipe's
+declared signature identifies which values are assets; each is uploaded to Pipelex
+storage and rewritten to `pipelex-storage://`. `http(s)` URLs and existing
+`pipelex-storage://` references pass through unchanged, so an inputs set that is
+already all pass-through can skip this step. **Per-deployment asset boundary:** the
+**local workshop** uploads local paths, `data:` URLs, and inline bytes with your
+API key; the **hosted console is pass-through only** and refuses any upload-needing
+input up front with an `input_domain` error at `inputs`, naming the workshop. No
+Skybridge view — the prepared inputs are small structured data the model reads
+directly, repeated in the `content` summary. Unlike the other tools this has **no
+produced-invalid arm**: an unresolvable closure is a no-verdict `status: "error"`
+(recover via `mthds_validate` / `mthds_inputs_template`). See `SPEC.md` →
+"Prepare Inputs Scope" for the full contract.
+
 ### `mthds_run` / `mthds_run_status` / `mthds_run_results`
 
 Durable (async) method execution on the hosted Pipelex API. `mthds_run` starts a
@@ -291,7 +329,11 @@ run — from submitted files (`files?`, plus `pipe_code?` and `inputs?`), or fro
 registered method's catalog id (`method_id?`, mt_…) — and returns a durable
 `run_id` immediately (never blocks); `mthds_run_status` is a cheap read of the
 coarse lifecycle state; `mthds_run_results` fetches the terminal outcome (main
-output on success, failure message otherwise). A by-id run executes the method's
+output on success, failure message otherwise) along with a compact run-level
+`usage` object — total USD cost (null-aware), tokens, and inference-call count.
+The per-pipe rollup and the full per-call record list ride the view-only `_meta`
+(`_meta.usage_by_pipe` / `_meta.tokens_usages`) for a future detailed-cost
+surface, and usage never appears in the prose. A by-id run executes the method's
 **current** stored content (methods are not versioned) and requires an API key;
 when both `files` and `method_id` are supplied, the files run and the id is
 recorded as run-history linkage on the platform. All run

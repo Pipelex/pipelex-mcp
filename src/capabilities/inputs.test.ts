@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
-import type { BuildInputsRequest, BuildInputsResponse, MethodData } from "@pipelex/sdk";
+import { ApiResponseError, ApiUnreachableError, EmptyMethodSourceError } from "@pipelex/sdk";
+import type { BuildInputsRequest, BuildInputsResponse, MthdsFileItem } from "@pipelex/sdk";
 
 import {
   buildMthdsInputs,
@@ -30,10 +30,10 @@ const validTomlReport: BuildInputsResponse = {
   inputs_toml: '# question (Text)\nquestion = "Your question here"\n',
 };
 
-/** Fake getMethod arm for tests whose request must never fetch a method. */
-const getMethodNotCalled = {
-  async getMethod(): Promise<MethodData> {
-    throw new Error("getMethod must not be called in this test");
+/** Fake getMethodClosure arm for tests whose request must never fetch a method. */
+const getMethodClosureNotCalled = {
+  async getMethodClosure(): Promise<MthdsFileItem[]> {
+    throw new Error("getMethodClosure must not be called in this test");
   },
 };
 
@@ -43,16 +43,6 @@ const buildInputsNotCalled = {
     throw new Error("buildInputs must not be called in this test");
   },
 };
-
-function methodData(mthds: string): MethodData {
-  return {
-    method_id: "mt_123",
-    name: "Demo method",
-    mthds,
-    created_at: "2026-07-21T00:00:00Z",
-    updated_at: "2026-07-21T00:00:00Z",
-  };
-}
 
 const invalidReport: BuildInputsResponse = {
   is_valid: false,
@@ -195,7 +185,7 @@ describe("buildMthdsInputs", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async buildInputs(request) {
             capturedRequest = request;
             return validJsonReport;
@@ -232,7 +222,7 @@ describe("buildMthdsInputs", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async buildInputs(request) {
             capturedRequest = request;
             return validTomlReport;
@@ -257,7 +247,7 @@ describe("buildMthdsInputs", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async buildInputs() {
             called = true;
             return validJsonReport;
@@ -278,7 +268,7 @@ describe("buildMthdsInputs", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async buildInputs() {
             throw new ApiResponseError(
               "HTTP 422",
@@ -308,7 +298,7 @@ describe("buildMthdsInputs", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async buildInputs() {
             throw new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED");
           },
@@ -343,7 +333,7 @@ describe("buildMthdsInputs", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async buildInputs() {
             return malformed;
           },
@@ -372,7 +362,7 @@ describe("buildMthdsInputs path submissions", () => {
           },
         },
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async buildInputs(request) {
             capturedRequest = request;
             return validJsonReport;
@@ -397,7 +387,7 @@ describe("buildMthdsInputs path submissions", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async buildInputs() {
             called = true;
             return validJsonReport;
@@ -415,7 +405,7 @@ describe("buildMthdsInputs path submissions", () => {
 });
 
 describe("buildMthdsInputs by method_id", () => {
-  it("fetches a raw-source method and forwards it as one file labeled with the id", async () => {
+  it("forwards a resolved single-file closure as the build envelope's files labeled with the id", async () => {
     let capturedRequest: BuildInputsRequest | undefined;
     let fetchedId: string | undefined;
 
@@ -424,9 +414,9 @@ describe("buildMthdsInputs by method_id", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          async getMethod(methodId) {
+          async getMethodClosure(methodId) {
             fetchedId = methodId;
-            return methodData('domain = "demo"\nmain_pipe = "main"');
+            return [{ content: 'domain = "demo"\nmain_pipe = "main"', source: "mt_123" }];
           },
           async buildInputs(request) {
             capturedRequest = request;
@@ -437,7 +427,7 @@ describe("buildMthdsInputs by method_id", () => {
     );
 
     expect(fetchedId).toBe("mt_123");
-    // The stored source is forwarded as the build envelope's files, each
+    // The resolved closure is forwarded as the build envelope's files, each
     // labeled with the method id as provenance.
     expect(capturedRequest).toEqual({
       files: [{ content: 'domain = "demo"\nmain_pipe = "main"', source: "mt_123" }],
@@ -448,7 +438,7 @@ describe("buildMthdsInputs by method_id", () => {
     expect(result.structuredContent.inputs).toEqual({ question: "Your question here" });
   });
 
-  it("forwards each stored file of a file-array method", async () => {
+  it("forwards each file of a multi-file closure", async () => {
     let capturedRequest: BuildInputsRequest | undefined;
 
     const result = await buildMthdsInputs(
@@ -456,14 +446,11 @@ describe("buildMthdsInputs by method_id", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          async getMethod() {
-            return methodData(
-              JSON.stringify([
-                { name: "a.mthds", content: 'domain = "demo"' },
-                { name: "b.mthds", content: 'main_pipe = "main"' },
-                { name: "empty.mthds", content: "   " },
-              ]),
-            );
+          async getMethodClosure() {
+            return [
+              { content: 'domain = "demo"', source: "mt_123" },
+              { content: 'main_pipe = "main"', source: "mt_123" },
+            ];
           },
           async buildInputs(request) {
             capturedRequest = request;
@@ -488,7 +475,7 @@ describe("buildMthdsInputs by method_id", () => {
         baseUrl: DEFAULT_API_URL,
         client: {
           ...buildInputsNotCalled,
-          async getMethod(): Promise<MethodData> {
+          async getMethodClosure(): Promise<MthdsFileItem[]> {
             throw new ApiResponseError(
               "HTTP 404",
               `${DEFAULT_API_URL}/v1/methods/mt_missing`,
@@ -511,15 +498,15 @@ describe("buildMthdsInputs by method_id", () => {
     expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
   });
 
-  it("reports a no-source method at method_id without calling the build route", async () => {
+  it("reports a no-source method (EmptyMethodSourceError) at method_id without calling the build route", async () => {
     const result = await buildMthdsInputs(
       { method_id: "mt_123" },
       {
         baseUrl: DEFAULT_API_URL,
         client: {
           ...buildInputsNotCalled,
-          async getMethod() {
-            return methodData("[]");
+          async getMethodClosure(): Promise<MthdsFileItem[]> {
+            throw new EmptyMethodSourceError("mt_123");
           },
         },
       },
@@ -539,7 +526,7 @@ describe("buildMthdsInputs by method_id", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodNotCalled,
+          ...getMethodClosureNotCalled,
           async buildInputs(request) {
             capturedRequest = request;
             return validJsonReport;
@@ -559,7 +546,7 @@ describe("buildMthdsInputs by method_id", () => {
         baseUrl: DEFAULT_API_URL,
         client: {
           ...buildInputsNotCalled,
-          async getMethod(): Promise<MethodData> {
+          async getMethodClosure(): Promise<MthdsFileItem[]> {
             throw new ApiResponseError(
               "HTTP 402",
               `${DEFAULT_API_URL}/v1/methods/mt_123`,
@@ -598,7 +585,7 @@ describe("buildMthdsInputs by method_id", () => {
       {},
       {
         baseUrl: DEFAULT_API_URL,
-        client: { ...buildInputsNotCalled, ...getMethodNotCalled },
+        client: { ...buildInputsNotCalled, ...getMethodClosureNotCalled },
       },
     );
 

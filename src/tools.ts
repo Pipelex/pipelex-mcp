@@ -12,6 +12,14 @@ import {
 } from "./capabilities/inputs.js";
 import type { InputsContext, MthdsInputsInput } from "./capabilities/inputs.js";
 import {
+  buildPrepareContext,
+  mthdsPrepareInputsInputSchema,
+  mthdsPrepareInputsOutputSchema,
+  prepareInputsToolResult,
+  prepareMthdsInputs,
+} from "./capabilities/prepare.js";
+import type { MthdsPrepareInputsInput, PrepareContext } from "./capabilities/prepare.js";
+import {
   buildRunContext,
   getMthdsRunResults,
   getMthdsRunStatus,
@@ -48,6 +56,7 @@ export const PIPELEX_MCP_SERVER_INFO = {
 export interface ToolContexts {
   validation: ValidationContext;
   inputs: InputsContext;
+  prepare: PrepareContext;
   run: RunContext;
 }
 
@@ -55,6 +64,8 @@ interface ToolContextOptions {
   env?: NodeJS.ProcessEnv;
   resolver?: FileResolver;
   viewsAvailable?: boolean;
+  /** The per-deployment asset boundary for mthds_prepare_inputs (workshop uploads; console pass-through only). */
+  allowUpload?: boolean;
 }
 
 /** Build one capability-context set for either deployment shell. */
@@ -62,6 +73,7 @@ export function buildToolContexts(options: ToolContextOptions = {}): ToolContext
   const env = options.env ?? process.env;
   const resolver = options.resolver;
   const viewsAvailable = options.viewsAvailable ?? true;
+  const allowUpload = options.allowUpload ?? false;
 
   return {
     validation: {
@@ -72,6 +84,11 @@ export function buildToolContexts(options: ToolContextOptions = {}): ToolContext
     inputs: {
       ...buildInputsContext(env),
       resolver,
+    },
+    prepare: {
+      ...buildPrepareContext(env),
+      resolver,
+      allowUpload,
     },
     run: {
       ...buildRunContext(env),
@@ -146,6 +163,26 @@ export const mthdsInputsTemplateTool = defineTool({
   },
 });
 
+export const mthdsPrepareInputsTool = defineTool({
+  name: "mthds_prepare_inputs",
+  description:
+    "Prepare a pipe's FILLED inputs for a run — upload file-bearing values (local paths, data: URLs, bytes) to Pipelex storage and rewrite them to pipelex-storage:// so they are run-ready. " +
+    "http(s) URLs and existing pipelex-storage:// references pass through unchanged; an inputs set that is already all pass-through can skip this and go straight to mthds_run. " +
+    "Supply the method closure as files (or a registered method's catalog id via method_id) plus the filled inputs from mthds_inputs_template. " +
+    "The local workshop uploads local/byte assets with your API key; the hosted console is pass-through only and refuses upload-needing inputs (use a URL, a pipelex-storage:// reference, or the local workshop).",
+  inputSchema: mthdsPrepareInputsInputSchema,
+  outputSchema: mthdsPrepareInputsOutputSchema,
+  annotations: {
+    title: "Prepare MTHDS run inputs",
+    readOnlyHint: false,
+    destructiveHint: false,
+    openWorldHint: false,
+  },
+  async handler(input: MthdsPrepareInputsInput, contexts: ToolContexts) {
+    return prepareInputsToolResult(await prepareMthdsInputs(input, contexts.prepare));
+  },
+});
+
 export const mthdsRunTool = defineTool({
   name: "mthds_run",
   description:
@@ -209,6 +246,7 @@ export const mthdsRunResultsTool = defineTool({
 export const toolDefinitions = [
   mthdsValidateTool,
   mthdsInputsTemplateTool,
+  mthdsPrepareInputsTool,
   mthdsRunTool,
   mthdsRunStatusTool,
   mthdsRunResultsTool,

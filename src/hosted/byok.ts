@@ -118,6 +118,7 @@ function overrideContexts(
   return {
     validation: { ...base.validation, ...keyOverride, authError },
     inputs: { ...base.inputs, ...keyOverride, authError },
+    prepare: { ...base.prepare, ...keyOverride, authError },
     run: { ...base.run, ...keyOverride, authError },
   };
 }

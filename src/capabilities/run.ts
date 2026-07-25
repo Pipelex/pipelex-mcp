@@ -6,6 +6,7 @@ import type {
   RunResultState,
   RunStatus,
   StartOptions,
+  TokensUsageRecord,
 } from "@pipelex/sdk";
 import { z } from "zod";
 
@@ -136,6 +137,37 @@ const runStatusStructuredContentSchema = z.object({
 
 export const mthdsRunStatusOutputSchema = runStatusStructuredContentSchema;
 
+// Run-level usage only. The per-pipe breakdown is deliberately NOT in this
+// model-facing schema — it is computed and carried on the view-only
+// `_meta.usage_by_pipe` for a future detailed-cost surface (see completedResult).
+const runUsageSchema = z.object({
+  cost_usd: z
+    .number()
+    .nullable()
+    .describe(
+      "Σ per-call USD cost across the run, null-aware: null when NO call was priced (own-GPU / mock / dry run) — distinct from 0, which means the run made no inference.",
+    ),
+  cost_partial: z
+    .boolean()
+    .optional()
+    .describe(
+      "True when some calls were priced and others were not — cost_usd is then a lower bound.",
+    ),
+  tokens: z
+    .number()
+    .nullable()
+    .describe(
+      "Σ (input + output) tokens across the run; null when no call reported counts. Cached-input and reasoning subsets are excluded to avoid double-counting.",
+    ),
+  calls: z.number().describe("Number of inference calls recorded (0 → the run did no inference)."),
+  assembly_error: z
+    .string()
+    .optional()
+    .describe(
+      "Present when the runner's usage assembly failed for this run (the SDK's usage_assembly_error).",
+    ),
+});
+
 const runResultsStructuredContentSchema = z.object({
   status: z.enum(["ok", "error"]),
   run_id: z.string().optional(),
@@ -164,6 +196,11 @@ const runResultsStructuredContentSchema = z.object({
     .boolean()
     .optional()
     .describe("True when main_stuff was bounded down; the full output rides the view-only _meta."),
+  usage: runUsageSchema
+    .optional()
+    .describe(
+      'State "completed" only — token and USD-cost aggregates for the run; the full per-call record list rides the view-only _meta.tokens_usages. Omitted when the run reported no usage information.',
+    ),
   available_view_specs: z
     .array(resultsViewSpecSchema)
     .describe(
@@ -217,6 +254,22 @@ export interface RunStatusStructuredContent {
   errors?: ToolError[];
 }
 
+export interface PipeUsage {
+  pipe_code: string | null;
+  cost_usd: number | null;
+  tokens: number | null;
+  calls: number;
+}
+
+/** Run-level usage totals — the model-facing projection in `structuredContent`. */
+export interface RunUsage {
+  cost_usd: number | null;
+  cost_partial?: boolean;
+  tokens: number | null;
+  calls: number;
+  assembly_error?: string;
+}
+
 export interface RunResultsStructuredContent {
   status: "ok" | "error";
   run_id?: string;
@@ -226,6 +279,7 @@ export interface RunResultsStructuredContent {
   failure_message?: string;
   main_stuff?: unknown;
   truncated?: boolean;
+  usage?: RunUsage;
   available_view_specs: ResultsViewSpec[];
   errors?: ToolError[];
 }
@@ -257,6 +311,24 @@ export interface RunResultsResult {
    * so a programmatic consumer never loses the full result.
    */
   mainStuff?: unknown;
+  /**
+   * The full per-call token-usage record list on raw MCP response metadata
+   * (rides `_meta.tokens_usages`). `structuredContent.usage` is the compact
+   * run-level projection. Like `mainStuff`, it is carried ungated by
+   * `viewsAvailable` so a programmatic consumer keeps the full detail; the model
+   * never sees it (it is not in `structuredContent`). Absent when the run
+   * reported no usage list.
+   */
+  tokensUsages?: TokensUsageRecord[];
+  /**
+   * The per-pipe usage rollup on raw MCP response metadata (rides
+   * `_meta.usage_by_pipe`). Deliberately kept off the model-facing
+   * `structuredContent.usage` (which is run-level only) so a future
+   * detailed-cost tool/view can display per-pipe attribution without spending
+   * model tokens on it now. Ungated by views, like `tokensUsages`. Absent when
+   * the run reported no usage list.
+   */
+  usageByPipe?: PipeUsage[];
 }
 
 /** The slice of `PipelexApiClient` the run capabilities call (test seam). */
@@ -475,6 +547,139 @@ function headTail(text: string, cap: number): string {
   return text.slice(0, headLength) + marker + text.slice(text.length - tailLength);
 }
 
+// ── usage aggregation ───────────────────────────────────────────────
+
+interface CostTokenTotals {
+  cost_usd: number | null;
+  cost_partial: boolean;
+  tokens: number | null;
+}
+
+/**
+ * Sum cost and tokens across a set of usage records.
+ *
+ * Cost is null-aware: `null` per-call `cost` means the model had no rate table
+ * (own-GPU / mock / dry run), `0` means it was priced at zero, and there is no
+ * run-level aggregate on the wire — so the total is `null` only when NOTHING was
+ * priced, and `cost_partial` flags a priced/unpriced mix. An empty set is a run
+ * that did no inference: cost and tokens are both `0`, not `null`.
+ *
+ * Tokens sum ONLY the two documented joined totals (`input`, `output`) from
+ * `nb_tokens_by_category`; `input_cached` / `output_reasoning` and any unknown
+ * categories are subsets or non-additive and would double-count, so they are
+ * excluded. `null` when no record reported an `input` or `output` count.
+ */
+function totalUsage(records: TokensUsageRecord[]): CostTokenTotals {
+  if (records.length === 0) {
+    return { cost_usd: 0, cost_partial: false, tokens: 0 };
+  }
+
+  let pricedSum = 0;
+  let anyPriced = false;
+  let anyUnpriced = false;
+  let tokenSum = 0;
+  let anyTokens = false;
+
+  for (const record of records) {
+    if (typeof record.cost === "number") {
+      pricedSum += record.cost;
+      anyPriced = true;
+    } else {
+      anyUnpriced = true;
+    }
+
+    const byCategory = record.nb_tokens_by_category;
+    if (byCategory != null) {
+      const input = typeof byCategory.input === "number" ? byCategory.input : undefined;
+      const output = typeof byCategory.output === "number" ? byCategory.output : undefined;
+      if (input !== undefined || output !== undefined) {
+        tokenSum += (input ?? 0) + (output ?? 0);
+        anyTokens = true;
+      }
+    }
+  }
+
+  return {
+    cost_usd: anyPriced ? pricedSum : null,
+    cost_partial: anyPriced && anyUnpriced,
+    tokens: anyTokens ? tokenSum : null,
+  };
+}
+
+/**
+ * Aggregate usage per `pipe_code`, sorted by cost desc (nulls last) then calls
+ * desc. Kept for the system/off-model channel only: its output rides
+ * `_meta.usage_by_pipe` for a future detailed-cost surface and is deliberately
+ * absent from the model-facing `structuredContent.usage` (run-level only).
+ * A `null` `pipe_code` (calls the runtime did not attribute) groups together —
+ * a `Map` keys `null` directly, so no string sentinel is needed.
+ */
+export function computeUsageByPipe(records: TokensUsageRecord[]): PipeUsage[] {
+  const groups = new Map<string | null, TokensUsageRecord[]>();
+  for (const record of records) {
+    const pipeCode = typeof record.pipe_code === "string" ? record.pipe_code : null;
+    const group = groups.get(pipeCode);
+    if (group === undefined) {
+      groups.set(pipeCode, [record]);
+    } else {
+      group.push(record);
+    }
+  }
+
+  const rows: PipeUsage[] = [];
+  for (const [pipe_code, pipeRecords] of groups) {
+    const totals = totalUsage(pipeRecords);
+    rows.push({
+      pipe_code,
+      cost_usd: totals.cost_usd,
+      tokens: totals.tokens,
+      calls: pipeRecords.length,
+    });
+  }
+
+  rows.sort((a, b) => {
+    const aCost = a.cost_usd ?? -Infinity;
+    const bCost = b.cost_usd ?? -Infinity;
+    if (bCost !== aCost) return bCost - aCost;
+    if (b.calls !== a.calls) return b.calls - a.calls;
+    return (a.pipe_code ?? "").localeCompare(b.pipe_code ?? "");
+  });
+
+  return rows;
+}
+
+/**
+ * Project the SDK's `RunResults` usage fields into the run-level `RunUsage` —
+ * the model-facing totals only (no per-pipe; that rides `_meta.usage_by_pipe`).
+ *
+ * Branches on `usage_assembly_error`, NOT on the list being null — "off",
+ * "broke", and "pre-artifact run" all leave `tokens_usages` null, and only the
+ * error field separates them:
+ * - a list (possibly `[]`)         → totals (`[]` = zero totals, a run with no inference);
+ * - null + `usage_assembly_error`  → null totals carrying the `assembly_error`;
+ * - null + no error                → `undefined` (usage off / run predates the artifact — nothing to report).
+ */
+export function summarizeUsage(result: RunResults): RunUsage | undefined {
+  const records = result.tokens_usages;
+  const assemblyError = narrowString(result.usage_assembly_error ?? undefined);
+
+  if (records == null) {
+    if (assemblyError === undefined) {
+      return undefined;
+    }
+    return { cost_usd: null, tokens: null, calls: 0, assembly_error: assemblyError };
+  }
+
+  const totals = totalUsage(records);
+  const usage: RunUsage = {
+    cost_usd: totals.cost_usd,
+    tokens: totals.tokens,
+    calls: records.length,
+  };
+  if (totals.cost_partial) usage.cost_partial = true;
+  return usage;
+}
+
 // ── projections ─────────────────────────────────────────────────────
 
 /**
@@ -615,6 +820,7 @@ function completedResult(
 
   const { value: bounded, truncated } = boundMainStuff(result.main_stuff);
   const graphSpec = viewsAvailable ? (result.graph_spec ?? undefined) : undefined;
+  const usage = summarizeUsage(result);
 
   const structuredContent: RunResultsStructuredContent = {
     status: "ok",
@@ -622,14 +828,26 @@ function completedResult(
     state: "completed",
     main_stuff: bounded,
     truncated,
+    ...(usage === undefined ? {} : { usage }),
     available_view_specs: graphSpec === undefined ? [] : ["run_graph"],
   };
 
   return {
     structuredContent,
+    // Usage is deliberately kept OUT of the prose summary — the run-level totals
+    // ride structuredContent.usage; the per-pipe rollup rides _meta only.
     summary: completedSummary(runId, bounded, truncated, viewsAvailable),
     graphSpec,
     mainStuff: result.main_stuff,
+    // Both ride `_meta` ungated by views (like mainStuff): the full per-call
+    // list, and the per-pipe rollup for a future detailed-cost surface. Kept off
+    // the model-facing channels so they cost no model tokens now.
+    ...(result.tokens_usages == null
+      ? {}
+      : {
+          tokensUsages: result.tokens_usages,
+          usageByPipe: computeUsageByPipe(result.tokens_usages),
+        }),
   };
 }
 
@@ -873,10 +1091,16 @@ export function runResultsToolResult(result: RunResultsResult) {
     content: toolResultContent(result.summary, result.structuredContent.errors),
     isError: result.structuredContent.status === "error",
     // Response-metadata channel (the mthds_validate convention): the executed
-    // graph and the FULL unbounded main output ride `_meta`, never
-    // structuredContent, so the model never pays their tokens. Views consume
-    // it on the hosted shell; raw MCP consumers can still retain it on the
-    // tools-only local shell. Keys mirror the API field names.
-    _meta: { graph_spec: result.graphSpec, main_stuff: result.mainStuff },
+    // graph, the FULL unbounded main output, the FULL per-call token-usage list,
+    // and the per-pipe usage rollup ride `_meta`, never structuredContent, so the
+    // model never pays their tokens. Views consume it on the hosted shell; raw
+    // MCP consumers can still retain it on the tools-only local shell. Keys
+    // mirror the API field names (usage_by_pipe is our own rollup).
+    _meta: {
+      graph_spec: result.graphSpec,
+      main_stuff: result.mainStuff,
+      tokens_usages: result.tokensUsages,
+      usage_by_pipe: result.usageByPipe,
+    },
   };
 }
