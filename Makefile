@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint format format-check typecheck test test-watch test-coverage check check-no-local-deps build build-local all clean dev dev-local inspect-local dev-tunnel start deploy c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
+.PHONY: help install lint format format-check typecheck test test-watch test-coverage check check-no-local-deps check-release-ready build build-local all clean dev dev-local inspect-local dev-tunnel start deploy publish c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
 
 # Sibling repos for live development of our npm dependencies (see use-local / use-npm).
 MTHDS_UI_DIR := ../mthds-ui
@@ -16,7 +16,8 @@ make dev-local      - Start the local stdio server from TypeScript
 make inspect-local  - Open MCP Inspector against the local stdio server
 make dev-tunnel     - Start Skybridge dev server with tunnel
 make start          - Start the built app
-make deploy         - Deploy with Alpic
+make deploy         - Deploy the hosted console to Alpic (from a clean main)
+make publish        - Publish @pipelex/mcp to npm (from a clean main)
 
 make lint           - Run ESLint
 make format         - Format source files with Prettier
@@ -108,8 +109,26 @@ dev-tunnel:
 start:
 	npm run start
 
-deploy:
+# --- Release-only publish/deploy ---
+# Both surfaces always ship from the same clean main commit (see CLAUDE.md
+# "Versioning & changelog" and the /release skill). check-release-ready guards
+# that, plus check-no-local-deps: a @pipelex file: link would ship a broken
+# install (npm) or fail to resolve on Alpic's build machine (deploy).
+
+check-release-ready:
+	@current_branch="$$(git rev-parse --abbrev-ref HEAD)"; \
+	if [ "$$current_branch" != "main" ]; then \
+		echo "ERROR: must run from main (currently on $$current_branch). Publish/deploy only ship from main."; exit 1; \
+	fi
+	@if [ -n "$$(git status --porcelain)" ]; then \
+		echo "ERROR: working tree is not clean. Commit or stash changes before publishing/deploying."; exit 1; \
+	fi
+
+deploy: check-no-local-deps check-release-ready
 	npm run deploy
+
+publish: check-no-local-deps check-release-ready
+	npm publish
 
 c: check
 t: test

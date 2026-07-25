@@ -199,12 +199,16 @@ retried without changing the version:
 1. **Pin the release source:** switch to and update `main`, verify the working
    tree is clean, `package.json` is `{TARGET_VERSION}`, and capture its commit as
    `{MERGE_COMMIT}`. Every remaining step must run from that commit.
-2. **Publish the workshop:** run `npm publish`. The package's public
-   `publishConfig` supplies `--access public`, and `prepack` rebuilds
-   `dist/local/main.js`; do not publish from a different branch or commit.
+2. **Publish the workshop:** run `make publish` (`npm publish`). The package's
+   public `publishConfig` supplies `--access public`, and `prepack` rebuilds
+   `dist/local/main.js`. The target itself refuses to run unless the branch is
+   `main` and the working tree is clean (`check-release-ready`), and refuses a
+   local `@pipelex/*` file link (`check-no-local-deps`) — do not bypass it by
+   calling `npm publish` directly.
 3. **Deploy the console:** run `make deploy` (`alpic deploy`) from the same
-   `{MERGE_COMMIT}`. If Alpic's git integration already deployed this exact
-   commit, verify that deployment instead of starting a duplicate.
+   `{MERGE_COMMIT}` — same `check-release-ready` / `check-no-local-deps` guards
+   apply. If Alpic's git integration already deployed this exact commit, verify
+   that deployment instead of starting a duplicate.
 4. **Tag the completed release:** `git tag v{TARGET_VERSION} {MERGE_COMMIT}` then
    `git push origin v{TARGET_VERSION}`. The tag carries the `v` prefix and is
    created only after both release surfaces are live.
