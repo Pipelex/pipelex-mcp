@@ -40,6 +40,24 @@ const explicitTemplate: BuildInputsResponse = {
   },
 };
 
+/**
+ * An explicit json template for a declared-MULTIPLE file input (`Exhibit[]`). The runtime encodes
+ * multiplicity structurally, not as an envelope key: the envelope stays exactly `{concept, content}`
+ * (`concept` is the bare item ref, no `[]` suffix) and `content` becomes a ONE-element example list
+ * (pipelex `concept.py`: `result["content"] = [result["content"]]`). That single element is the
+ * element template the file-position walk reuses for every caller item.
+ */
+const explicitMultipleTemplate: BuildInputsResponse = {
+  is_valid: true,
+  pipe_ref: "demo.main",
+  message: "Inputs template built.",
+  format: "json",
+  explicit: true,
+  inputs: {
+    exhibits: { concept: "demo.Exhibit", content: [{ url: "https://mock.invalid/url" }] },
+  },
+};
+
 const invalidTemplate: BuildInputsResponse = {
   is_valid: false,
   message: "The closure did not validate.",
@@ -419,6 +437,94 @@ describe("prepareMthdsInputs — console (pass-through only)", () => {
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.inputs).toEqual({
       question: { concept: "x", content: "y", extra: 1 },
+    });
+  });
+
+  // Multiplicity rides in the template's SHAPE (a one-element content list), never as an envelope
+  // key — so the array arm of the walk, reusing content[0] as the element template, is the whole
+  // multiplicity story. These pin that arm for both filled forms.
+  it("walks every element of a declared-multiple file input inside an envelope", async () => {
+    const result = await prepareMthdsInputs(
+      {
+        files,
+        inputs: {
+          exhibits: {
+            concept: "demo.Exhibit",
+            content: ["https://cdn.example.com/a.pdf", "pipelex-storage://kept"],
+          },
+        },
+      },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...getMethodClosureNotCalled,
+          ...prepareInputsNotCalled,
+          async buildInputs() {
+            return explicitMultipleTemplate;
+          },
+        },
+      },
+    );
+
+    // Every element is rewritten to canonical {url} content; the envelope survives.
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.uploads).toEqual([]);
+    expect(result.structuredContent.inputs).toEqual({
+      exhibits: {
+        concept: "demo.Exhibit",
+        content: [{ url: "https://cdn.example.com/a.pdf" }, { url: "pipelex-storage://kept" }],
+      },
+    });
+  });
+
+  it("walks every element of a declared-multiple file input filled compactly", async () => {
+    const result = await prepareMthdsInputs(
+      { files, inputs: { exhibits: ["https://cdn.example.com/a.pdf"] } },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...getMethodClosureNotCalled,
+          ...prepareInputsNotCalled,
+          async buildInputs() {
+            return explicitMultipleTemplate;
+          },
+        },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.inputs).toEqual({
+      exhibits: [{ url: "https://cdn.example.com/a.pdf" }],
+    });
+  });
+
+  it("refuses an upload-needing element nested in a declared-multiple list", async () => {
+    const result = await prepareMthdsInputs(
+      {
+        files,
+        inputs: {
+          exhibits: {
+            concept: "demo.Exhibit",
+            content: ["https://cdn.example.com/a.pdf", "./local/b.pdf"],
+          },
+        },
+      },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...getMethodClosureNotCalled,
+          ...prepareInputsNotCalled,
+          async buildInputs() {
+            return explicitMultipleTemplate;
+          },
+        },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "inputs",
     });
   });
 
