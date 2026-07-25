@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-25
+
 ### Added
 
 - **Token usage & cost on `mthds_run_results`.** A completed result now carries a compact **run-level** `usage` object in `structuredContent` — total USD `cost_usd` (null-aware: `null` when no call was priced, e.g. own-GPU/mock/dry-run, distinct from `0` for a run that did no inference; `cost_partial` flags a priced/unpriced mix), `tokens` (Σ of the `input` + `output` categories only — cached-input and reasoning subsets are excluded to avoid double-counting), and `calls`. It is projected from `@pipelex/sdk`'s `RunResults.tokens_usages`, branching on `usage_assembly_error` (not the null list) to tell "assembly broke" from "usage off"; usage is omitted when the run reported none. The per-pipe rollup (`usage_by_pipe`) and the **full** per-call `tokens_usages` record list ride the view-only `_meta` channel (`_meta.usage_by_pipe` / `_meta.tokens_usages`) — never model context, exactly like `main_stuff` — where a future detailed-cost tool/view can read them; usage is deliberately kept out of the `content` prose. Requires `@pipelex/sdk` 0.9.0.
