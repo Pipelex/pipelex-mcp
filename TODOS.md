@@ -1,113 +1,318 @@
-# TODOS — Adopt `@pipelex/sdk` 0.6.0: retire the parser mirror, build `prepare_inputs`, surface run cost
+# TODOS — ChatGPT file inputs: let the hosted console take the user's uploaded files
 
-Build plan recorded 2026-07-23. Three sequential phases, smallest/safest first: **(1) retire `method-source.ts`** onto the SDK's canonical closure helper → **(2) spec + build `mthds_prepare_inputs`** (the upload feature) → **(3) surface token usage + cost in `mthds_run_results`**. Rationale and the leverage-point analysis live in the SDK-side and platform-side handoffs (`../pipelex-sdk-js/wip/method-id-closure-resolution.md`, `../wip/method-id-native-tooling-routes/`); the superseded origin memo is archived at `wip/archive/sdk-0.5-leverage-plan-2026-07-23.md`.
+Build plan recorded 2026-07-30. Four phases, verification first: **(0) verify the channel against a live ChatGPT connection** → **(1) SPEC.md design pass + sign-off** → **(2) implement** → **(3) docs, gates, release**. The research this rests on — what each host actually supports, the vendor contract, the standards trajectory, and a sizing sketch — is in `wip/console-attachments-landscape.html` (recorded the same day, primary sources verified). The previous build plan (SDK 0.6.0 adoption → `mthds_prepare_inputs` → run cost) shipped as **0.8.0** and is archived at `wip/archive/TODOS-sdk-0.6-adoption-2026-07-24.md`.
 
-**Cold-start for a new session**: read the **STATUS** banner directly below first — all three phases are done, so the only open work is the SDK-publish finishing sequence. For background, read `CLAUDE.md`, `SPEC.md` (Inputs Template Scope + Run Scope + Prepare Inputs Scope + Non-Goals), and the archived origin memo `wip/archive/sdk-0.5-leverage-plan-2026-07-23.md` (the `wip/sdk-0.5-leverage-plan.md` path this doc referenced earlier is gone — it was archived). Invoke the `skybridge` skill per `AGENTS.md` before touching code. The premise below was verified against live code on 2026-07-23.
+**The one-line problem.** Since 0.8.0 the local workshop uploads file-bearing inputs; the hosted console is pass-through only. But on chatgpt.com and claude.ai the console is *all a user has*, and both let people drop a PDF into the chat. ChatGPT — and only ChatGPT — exposes those attachments to an MCP tool call. This plan takes that channel.
 
-## STATUS (2026-07-24) — all three phases COMPLETE, envelope blocker CLEARED on SDK 0.9.0; READY TO MERGE + RELEASE
+**Cold-start for a new session**: read the **STATUS** banner below, then `wip/console-attachments-landscape.html` (the why and the host facts), then `SPEC.md` → Deployments + Prepare Inputs Scope + Non-Goals, then `CLAUDE.md`. Invoke the `skybridge` skill per `AGENTS.md` before touching code. Nothing here is implemented.
 
-Phases 1–3 are implemented, documented, gates-green, and **committed** on branch **`feature/Use-new-sdk-for-uploads`** (the current branch), now on the **published `@pipelex/sdk@^0.7.0`** (the `file:` link is gone). **This supersedes every per-checkpoint "Not committed" note below.**
+## STATUS (2026-07-30) — PHASE 0 COMPLETE, CHECKPOINT 0 = GO. Next session starts at Phase 1 (the SPEC design pass).
 
-- Phase 1 (retire `method-source.ts`) — committed (`19671ac`).
-- Phase 2 (`mthds_prepare_inputs`) — committed (`prepare.ts` present at HEAD).
-- Phase 3 (run usage & cost) — committed (`ee29aa2`).
-- SDK link → npm pin — `0b5ea8a` (`^0.6.0`) → `72b17f2` (`^0.7.0`) → `9328f36` (`^0.8.0`) → **`^0.9.0`** (the envelope fix). Full gate green on each. PR [#15](https://github.com/Pipelex/pipelex-mcp/pull/15) open into `dev`; CI green.
-- **Runtime finding that decided the fix** (worth keeping): the `pipelex` runtime *accepts* the explicit `{concept, content}` envelope as a first-class input form (`input_shaper.py` `_is_explicit` / the D6 "compat-checked escape"), and file-URL resolution runs on the **already-shaped** `ImageContent`/`DocumentContent` in `WorkingMemory` (`input_normalizer.py`), so it is envelope-agnostic. Hence re-wrap (not normalize-to-compact) on output. Corollary: the "skip prepare" path (fill the explicit template with all-URL inputs → `mthds_run` directly) was never broken — the bug was scoped to `prepareInputs` alone.
+Branch **`probe/openai-fileparams-phase0`** (throwaway, never merged). Current release is **0.8.0**; `main`/`dev` carry an `## [Unreleased]` Skybridge-1.3.2 entry only. No SPEC change yet, and none until CHECKPOINT 0 clears.
 
-**The envelope blocker is CLEARED (2026-07-24).** The explicit-`{concept, content}`-envelope bug — `prepareInputs` choking on the very template `mthds_inputs_template` produces by default, breaking the documented `template → fill → prepare → run` flow for file-bearing inputs — was handed off to the SDK, **implemented there, and released as `@pipelex/sdk@0.9.0`** exactly as specced (Option A: walk the envelope's inner `content` against the compact signature, then re-wrap so the `concept` annotation rides through; `isExplicitEnvelope` uses the strict exactly-two-keys rule mirroring the runtime's own collision rule). Handoff: `../pipelex-sdk-js/wip/prepare-inputs-explicit-envelope.md`.
+The channel works on ChatGPT desktop web **and** iOS. Five captures, three Azure regions, 140 KB to 19.6 MB, all fetched and byte-verified. The findings are recorded below as **A1–A11** (live observations) and **F1–F5** (rig self-test); read A1, A2, A9, A10 and A11 first — those four changed the design. Two non-blocking items are carried into Phase 1: an image on mobile, and an end-to-end ingest timing against the hosted request timeout.
 
-All three downstream obligations from that handoff are now **DONE** on this branch:
+**Before anything else in Phase 1**, tear the rig down per CHECKPOINT 0 — it logs request `_meta` containing user location and stable account identifiers (A4), so it is delete-on-sight, not something to graduate.
 
-- (a) **Bumped to `^0.9.0`** — full gate green, **252 pass** (249 + 3 new envelope regressions).
-- (b) **Fixed the console pass-through mirror** (`src/capabilities/prepare.ts` `preparePassThrough`), which had the identical bug — the SDK fix alone left the hosted console broken. Verified: workshop and console now emit **byte-identical** prepared inputs for the same filled envelope. The SDK exposes no reusable envelope/file-position classifier, so the mirror keeps hand-maintained SDK parity (`isExplicitEnvelope` copied with the same strict rule) — consuming an SDK-exported helper remains the ideal end-state if one is ever added.
-- (c) **Reconciled the "compact" wording** in `SPEC.md` (both shapes accepted, envelope preserved on output, strict recognition rule) and the `CHANGELOG.md` entry.
-
-**No blockers remain.** Merge PR #15 → `dev`, then cut the release with the **`/release` skill`** (version `0.8.0`: `mthds_prepare_inputs` + run usage/cost + the `explicit` default flip). ⚠ Heed the changelog's standing release-coordination note on the `explicit` flip: regenerate the `pipelex-plugins` skills (they still describe the light-template default) in the same release window.
-
-**To re-validate at any point:** `make check && make test` (green on `^0.7.0`, 249 pass). The individual-target workaround is no longer needed — it existed only because `make check` refuses under a local `file:` link.
+**Why Phase 0 is not optional.** The entire plan rests on a *vendor* behavior that is documented but has open defects (mobile sends placeholder strings instead of file objects; duplicate invocations; undocumented URL TTL and size limits). We have read the contract; we have not watched it fire against our own deployed console. Design decisions in Phase 1 — chiefly ingest-vs-pass-through — are *decided by* Phase 0's measurements. Do not skip ahead.
 
 ## Cross-cutting constraints — read before any phase
 
-- ~~**SDK 0.6.0 is not published yet.**~~ **RESOLVED (2026-07-24)** — `@pipelex/sdk@0.6.0` is on npm and `package.json` pins `^0.6.0`. The local `file:` link (`make use-local-sdk`) and its individual-target validation workaround are history; `make check` runs the full gate again. Historical note, in case a future phase needs the same setup: `make check` *refuses* while a `@pipelex` dep is a local link (the `check-no-local-deps` guard), so under a link you validate with `npm run build` (regenerates the Skybridge view registry) → `npm run typecheck` → `npm test`, and you must rebuild the sibling SDK (`cd ../pipelex-sdk-js && npm run build`) after pulling its changes or the link serves stale `dist/`.
-- **The `file:` link must never reach dev/release/main** — it didn't. `feature/Use-new-sdk-for-uploads` committed the link (`6114d74`) to develop against local 0.6.0 and Phases 1–3 landed on top of it; the swap commit replaces it with the `^0.6.0` pin *before* the branch merges, which is the whole point of the rule.
-- **The bump rides with the fixture fix.** `MethodData` gained required `org_id` / `created_by_user_id` in 0.6.0; the three test fixtures were updated (`shared.test.ts`, `inputs.test.ts`, `validate.test.ts`). That edit only type-checks on 0.6.0, so it lands together with the `^0.6.0` pin — not before. (Already committed on the branch.)
-- **Branch hygiene — CORRECTED.** Earlier notes said "uncommitted on `dev`, move to `feature/sdk-0.6-adoption`". Reality: the work lives on **`feature/Use-new-sdk-for-uploads`** (already a proper work branch under `guard-branches.yml`), with the link + all three phases committed. No branch move is needed; ignore the `feature/sdk-0.6-adoption` suggestion wherever it still appears below.
+- **The capability core must stay Skybridge-free.** Verified 2026-07-30: `src/tools.ts` and everything under `src/capabilities/` import zero Skybridge symbols (only `hosted/`, `views/`, `helpers.ts` do). So **do not** import `FileRef` from `skybridge/server` into the shared schema — it would drag Skybridge into the tsup-bundled workshop bin. Declare an equivalent Zod object in the capability layer instead, and keep it byte-compatible with what ChatGPT sends.
+- **The four-field rule is enforced by app review.** Any field named in `_meta["openai/fileParams"]` must declare **exactly** `download_url` (required), `file_id` (required), `mime_type` (optional), `file_name` (optional). A fifth property, a missing one, or a wrongly-required optional fails OpenAI's "Scan Tools" step. This is why the binding between an attachment and an input slot cannot live on the file object — see D1.
+- **Bytes must never enter the model's context.** This is the invariant that made the original console-upload deferral correct, and the only reason this increment is now allowed. Nothing in this plan may return base64 to the model or accept it as an argument.
+- **The console still never reads a filesystem.** Fetching a host-supplied URL is a *network* read; the `readLocalPath` LFI/DoS/existence-oracle refusal (SPEC "Prepare Inputs Scope" blockquote) stays exactly as it is. Do not relax `allowUpload`.
+- **A server-side fetcher on a public endpoint is an SSRF surface.** The host allowlist, size cap, timeout, and redirect policy ship *with* the first fetch, not after it. Treat this as a release blocker, not a hardening follow-up.
+- **Branch + gate hygiene.** Work branch prefixed per `guard-branches.yml` (`feature/…`); `make check && make test` green before any checkpoint is called reached; release only via the `/release` skill.
 
-## Premise — VERIFIED this session (2026-07-23)
+## Premise — confirmed from primary sources (2026-07-30), and what remains unknown
 
-- **The 0.4→0.6 bump is clean.** Against the local 0.6.0 link: `npm run build` + `npm run typecheck` + `npm test` all green after the three `MethodData` fixtures gained `org_id`/`created_by_user_id`. That is the *entire* blast radius — zero production-code breakage. `deleteMethod` was removed in 0.6.0 (breaking) but the MCP never used it.
-- **SDK 0.6.0 gives us, verified in the built `dist/` and source:**
-  - `methodSourceToContents(mthds): string[]` — exported canonical parser, a verbatim port of the platform's `_method_source_to_contents`. **This is the function `src/capabilities/method-source.ts` currently mirrors.**
-  - `client.getMethodClosure(methodId): Promise<MthdsFileItem[]>` — fetch + parse + provenance-label (each file's `source` set to the method id). Throws `EmptyMethodSourceError` when the stored source parses to nothing; surfaces the `getMethod` `404` (`ApiResponseError`, `code: "not_found"`) for an unknown/foreign-org id.
-  - `EmptyMethodSourceError` (extends `InputPreparationError`, carries `methodId`).
-  - `prepareInputs` / `buildInputs` now accept a `method_id` arm (discriminated union: `files` XOR `method_id`, never both) — `method_id` resolved client-side via `getMethodClosure` before the wire, never a wire field (distinct from the reserved `method_ref` registry ref, still 501).
-  - `RunResults.tokens_usages: TokensUsageRecord[] | null` + `RunResults.usage_assembly_error` — per-call token counts by category, server-computed USD `cost`, model id, `pipe_code`. Already on the object `getRunResult` returns; `mthds_run_results` currently drops it.
-- **What we retire (`fetchMethodFiles` leg, `shared.ts`):** `MethodFetchClient` (seam with `getMethod`), `fetchMethodFiles(getClient, methodId, options)` (calls `getMethod` then `methodSourceToContents`, hand-checks the empty result), `METHOD_FETCH_ERROR_OPTIONS`, and the `methodSourceToContents` import. Callers: `validate.ts:171`, `inputs.ts:185` (both on the `files.length === 0 && method_id` branch).
+**Confirmed (vendor docs, changelog, and the installed `skybridge@1.3.2` types):**
 
----
+- A tool declaring `_meta["openai/fileParams"]: ["<field>"]` receives the user's conversation attachment as `{ download_url, file_id, mime_type?, file_name? }` in its arguments, behind a user permission dialog. Model-generated files (`/mnt/data/…`) route through the same substitution. Arrays are supported via `items`.
+- The server fetches the bytes itself from a signed HTTPS URL (observed host `files.oaiusercontent.com`). No base64, no inline binary.
+- Skybridge ships both halves already: `FileRef` (server Zod schema) and `useFiles()` (`upload` / `selectFiles` / `getDownloadUrl`) for views. We are on 1.3.2.
+- **claude.ai has no equivalent** — no file id, no signed URL, no host-injected reference reaches a connector. It will simply leave the field absent. MCP has nothing in-spec either (through `2026-07-28`); SEP-2631 is an open draft.
+- `@pipelex/sdk`'s `uploadFile(client, asset, { filename, contentType })` accepts `Uint8Array` and returns `{ uri }` — no filesystem involvement, so the ingest path needs no new SDK surface.
 
-## Phase 1 — retire `method-source.ts` onto the SDK closure helper
+**Unknown — Phase 0 must measure:**
 
-Pure cleanup, no new capability. Collapse our parser mirror to one canonical SDK copy. Low risk, proves the `getMethodClosure` integration path before Phase 2 leans on the same SDK surface.
-
-- [x] **Rework `fetchMethodFiles` (`shared.ts`) to call `client.getMethodClosure(methodId)`** instead of `getMethod` + `methodSourceToContents`. It returns `MthdsFileItem[]` already source-labelled with the method id — the provenance the MCP hand-set before. Change the `MethodFetchClient` seam from `getMethod` to `getMethodClosure`. — done; the seam is now `getMethodClosure(): Promise<MthdsFileItem[]>`, and the leg relabels each item's `source` back to the MCP-surface `uri` = the method id (preserving current behavior + tests).
-- [x] **Map `EmptyMethodSourceError` → the existing `input_domain`@`method_id` no-verdict** ("the stored method has no MTHDS source yet"), replacing the manual empty-result check. Keep the unknown-id `404` classification via `METHOD_FETCH_ERROR_OPTIONS` (route `/v1/methods/{id}`, `notFound`@`method_id`) — `getMethodClosure`'s 404 is still a `getMethod` `ApiResponseError`. Add `EmptyMethodSourceError` to `classifyError`'s known SDK error types (or catch it in the wrapper) — classify it *here*, where the concrete error is known, per the standing rule. — done; caught in the `fetchMethodFiles` wrapper (ahead of the generic `classifyError`, since it derives from `PipelineRequestError`), preserving the `reason: "no_source"` tag the callers use for their headline. Unknown-id 404 classification unchanged.
-- [x] **Delete `src/capabilities/method-source.ts` and `src/capabilities/method-source.test.ts`** (its edge-case coverage now lives in the SDK). Drop the now-unused `methodSourceToContents` import and any `MethodData` import in `shared.ts` no longer needed once the seam returns `MthdsFileItem[]`. — done; both files deleted, `methodSourceToContents` + `MethodData` imports removed from `shared.ts` (now imports `EmptyMethodSourceError` value + `MthdsFileItem` type).
-- [x] **Keep validate and inputs symmetric.** Both stay fetch-and-forward over the reworked `fetchMethodFiles`. **Decision (settled): do NOT switch `inputs.ts` to the `buildInputs({ method_id })` passthrough** even though the SDK now allows it — that would split by-id error handling (some at our boundary, some inside `buildInputs`) and make inputs asymmetric with validate (which *must* resolve locally, since `/v1/validate` has no `method_id`). One shared resolution path, one place that maps `EmptyMethodSourceError`/404. — done; both `validate.ts` and `inputs.ts` are unchanged (the seam swap is entirely behind `fetchMethodFiles`/`MethodFetchClient`).
-- [x] **Update test seams**: the fakes in `shared.test.ts`, `validate.test.ts`, `inputs.test.ts` provide `getMethodClosure` (returning `MthdsFileItem[]` / throwing `EmptyMethodSourceError` / a 404) instead of `getMethod` + a polymorphic `mthds` string. The by-id happy/empty/unknown cases move onto the new seam. — done; also updated the two other seam stubs in `hosted/byok.test.ts` and `local/server.test.ts`, and removed the now-unused `methodData` fixtures.
-- [x] Validate with the individual targets (build → typecheck → test). SPEC/CLAUDE wording that describes the fetch leg as "parse `MethodData.mthds`" updates to "resolve via the SDK's `getMethodClosure`". — done; `npm run build` + `npm run typecheck` + `npm test` (205 pass) + `npm run lint` + `npm run format:check` all green under the local link. SPEC.md (Validation Scope, Inputs Template Scope, Tools and Views ×2), CLAUDE.md (inputs.ts bullet + removed the method-source.ts bullet), and a CHANGELOG `## [Unreleased]` Changed entry all updated.
-
-**CHECKPOINT 1 — REACHED (2026-07-23).** `method-source.ts` gone, both by-id legs on `getMethodClosure`, gates green under the local link (`@pipelex/sdk` `file:../pipelex-sdk-js`, 0.6.0 code). Natural handoff: Phase 2 starts from a clean SDK-canonical closure path. **Not committed** — per the cross-cutting constraint, this rides the `^0.6.0` pin and must not land as a `file:` link. Remaining finishing steps once `@pipelex/sdk@0.6.0` publishes: `make use-npm-sdk`, pin `"@pipelex/sdk": "^0.6.0"`, `make check` green, move to a feature branch (`feature/sdk-0.6-adoption`), commit.
+- `download_url` TTL (undocumented; the docs imply expiry by offering a "mint a fresh URL" call). **This decides D2.**
+- Maximum file size and which MIME types the host will hand over.
+- Whether the documented payload matches reality on our deployment, on desktop web.
+- The exact malformed shape mobile sends, so we can classify it instead of crashing on it.
 
 ---
 
-## Phase 2 — spec + build `mthds_prepare_inputs`
+## Phase 0 — verify the channel against a live ChatGPT connection
 
-The headline: a tool-only input-preparation operation over the SDK's `prepareInputs` (upload file-bearing inputs to storage, rewrite to `pipelex-storage://`). Its contract is deliberately unspecified in `SPEC.md` today (Non-Goals → "Planned"). **Design first, get sign-off, then build.**
+Cheapest possible probe, on a throwaway branch: add `openai/fileParams` to scratch tools that do nothing but echo what they received, connect ChatGPT to the dev server (or a scratch Alpic deploy), and watch.
 
-### Phase 2a — SPEC.md design pass (decisions, then sign-off)
+### Attempt 1 (2026-07-30, ChatGPT desktop web) — NULL RESULT, self-inflicted. Rig reworked.
 
-Resolve and record in `SPEC.md` (mirror into the Zod schemas afterward):
+ChatGPT called `_probe_files` with **only** `note` — `attachments` absent, zero candidate URLs:
 
-- [x] **Tool name + shape.** `mthds_prepare_inputs`. Input: `files?` / `method_id?` (shared submitted-files shape + by-id arm), `pipe_ref?`, and **required** `inputs` (the filled `mthds_inputs_template` output). No `format`/`explicit`. — recorded in SPEC "Prepare Inputs Scope".
-- [x] **Per-deployment asset boundary — the crux. SIGNED OFF (2026-07-23): URL/storage-only console.** The console accepts only pass-through refs (`http(s)` / `pipelex-storage://`) and **refuses any upload-needing input** (`data:` URLs, bytes, local paths) with an instructive `input_domain`@`inputs`, naming the workshop + alternatives; it never reads a filesystem, never uploads. Rationale: BYOK settles *whose* storage, but inline `data:` bytes still bloat model context — defer console bytes until an out-of-band attachment channel exists. Workshop prepares local/bytes/`data:` via the user's key, delegating to the SDK's `prepareInputs`. Enforcement seam = a per-deployment capability flag on the context (analogous to `resolver`/`viewsAvailable`). **Implementation constraint recorded in SPEC (blockquote in the scope section): the console must NOT hand raw `inputs` to `prepareInputs`** — a bare-path value triggers a server-side `readLocalPath` (LFI/DoS/existence-oracle) before the upload fails; the console resolves the signature itself and rejects non-pass-through file-bearing inputs up front.
-- [x] **Output + verdict discipline. SIGNED OFF (2026-07-23): no produced-invalid arm.** `structuredContent`: `status`/`is_valid`, echoed `pipe_ref?` (SDK doesn't return the resolved default — echo only when caller supplied it), rewritten `inputs`, `uploads: string[]` (uris). An unresolvable closure is a **no-verdict** `status:"error"` `input_domain` (the SDK's `prepareInputs` *throws* `InputPreparationError` without the structured `validation_errors[]` — matching the old "produced `is_valid:false`" assumption would need a redundant second `buildInputs` call). Recovery = `mthds_validate`/`mthds_inputs_template`. No view, no `_meta`.
-- [x] **Error taxonomy.** Recorded in SPEC verdict-discipline list. `EmptyMethodSourceError`→`input_domain`@`method_id`; unresolvable closure (`InputPreparationError`) + unknown `pipe_ref`/`main_pipe` (internal `buildInputs` 422)→`input_domain`@`pipe_ref`; `RejectedAssetError`(413)/`InvalidLocalSourceError`→`input_domain`@`inputs`; `UnsupportedUploadCapabilityError`(404 no `/v1/upload`)→`config`; `UploadAuthenticationError`(401/403)→`config` (auth texture); `UploadTransportError`(5xx/unreachable/malformed `data:`)→`runtime`; paywall 402→`config`. Console refuses uploads pre-flight, so the workshop-only upload errors don't arise there. **`InputPreparationError` family derives from `PipelineRequestError`** → must be mapped ahead of the generic arm in `classifyError` (as `EmptyMethodSourceError` already is in `fetchMethodFiles`).
-- [x] **UX flow + Non-Goals.** Added "Prepare filled inputs for a run" UX flow (template → fill → **prepare** → run); the tool is in "Tools and Views" + the tool-list/core-actions/server-instructions; the "Planned" Non-Goal reservation is retired (residuals kept: console-side byte upload, `http(s)`→storage ingest).
+```json
+{"tool":"_probe_files","arguments_json":"{\n  \"note\": \"Probe the PDF attached by the user: Job-Offer(1).pdf\"\n}",
+ "attachment_shape":"absent","candidate_url_count":0,"url_probes":[]}
+```
 
-**CHECKPOINT 2a — REACHED (2026-07-23), SIGN-OFF OBTAINED.** Both crux decisions confirmed via sign-off (URL/storage-only console; no produced-invalid arm). Full `mthds_prepare_inputs` contract recorded in `SPEC.md` ("Prepare Inputs Scope" + Tools and Views + UX Flows + Non-Goals). SPEC-only pass — no code touched, gates not re-run. Phase 2b (implement) may now proceed. **Fetch-and-forward decision for by-id (settled here): `mthds_prepare_inputs` resolves `method_id` via the shared `fetchMethodFiles`/`getMethodClosure` and always calls `prepareInputs({ files })`** — one by-id resolution path across validate/inputs/prepare, not the SDK's own `prepareInputs({ method_id })`. This still rides the `^0.6.0` pin (per cross-cutting constraints — not committed as a `file:` link).
+**This measured our own tool description, not ChatGPT.** The v1 description said *"Do NOT invent values for `attachments` — the host fills that field in… If the host does not fill it in, call the tool anyway with it absent"*, and `attachments` was optional. The model complied exactly. But the substitution is not spontaneous injection into an untouched field: the model references the file and the host **rewrites** that reference into the signed-URL object. v1 forbade the one action that triggers the mechanism and supplied an explicit escape hatch. Nothing was learned about the vendor.
 
-### Phase 2b — implement
+Two things changed as a result:
 
-- [x] New `src/capabilities/prepare.ts`: Zod input/output schemas, by-id resolution via the shared `fetchMethodFiles` (files win when both supplied) then always `prepareInputs({ files })` — NOT the SDK's `prepareInputs({ method_id })` (one shared by-id error path across validate/inputs/prepare, settled in 2a). Projection to `structuredContent` (`status`/`is_valid`, echoed `pipe_ref?`, rewritten `inputs`, `uploads: string[]`) + composed Markdown summary (resolved pipe, uploaded-vs-passthrough note, fenced prepared `inputs`), per-route `ClassifyErrorOptions` (400/422@`pipe_ref`, by-id 404@`method_id`). Extend `classifyError` for the `InputPreparationError` family — map ahead of the generic `PipelineRequestError` arm. — done; `prepare.ts` built; `classifyError` (shared.ts) now maps `EmptyMethodSourceError`/`InvalidLocalSourceError`/`RejectedAssetError`/`UnsupportedUploadCapabilityError`/`UploadAuthenticationError`/`UploadTransportError`/base `InputPreparationError`, ordered most-specific-first, ahead of the generic `PipelineRequestError` arm.
-- [x] Enforce the per-deployment boundary via a capability flag on the context (mirror `resolver`/`viewsAvailable`; thread through `buildToolContexts`). **Workshop**: delegate the upload walk to the SDK's `prepareInputs`. **Console (pass-through only)**: MUST NOT hand raw `inputs` to `prepareInputs` (server-side `readLocalPath` on a bare-path value = LFI/DoS/existence-oracle — see the SPEC blockquote). Resolve the pipe's signature itself and refuse any non-pass-through file-bearing input up front with `input_domain`@`inputs`. — done; the seam is `PrepareContext.allowUpload` (default `false`, threaded through `buildToolContexts`; local shell sets `true`, hosted keeps default). Workshop calls `client.prepareInputs({ files, pipe_ref?, inputs })`; console runs its own `preparePassThrough` (SDK-parity walk: `buildInputs` explicit → walk `inputs` against the signature → rewrite `http(s)`/`pipelex-storage://`, throw the internal `UploadNotAllowedError` for `data:`/bytes/bare-path → the capability composes the `input_domain`@`inputs` refusal naming `npx @pipelex/mcp`). Never touches `uploadFile`/`readLocalPath`.
-- [x] Register in `src/tools.ts` (ordered table, positioned after `mthds_inputs_template`, before `mthds_run`) for both shells; annotations `readOnlyHint:false`/`destructiveHint:false`/`openWorldHint:false`. Update both server `instructions` strings + `README.md`. — done; `mthdsPrepareInputsTool` in the ordered `toolDefinitions` (auto-registers on the local shell; explicitly registered on the hosted shell with `openai/toolInvocation` `_meta`, no view). `byok.ts` `overrideContexts` threads the `prepare` context. Both `HOSTED_SERVER_INSTRUCTIONS`/`LOCAL_SERVER_INSTRUCTIONS` + `README.md` updated.
-- [x] Tests (fake client + resolver seams): files happy path; `method_id` happy path (fetch-and-forward); URL/storage pass-through (no upload, `uploads: []`); invalid closure → **no-verdict `status:"error"` `input_domain`** (NOT a produced `is_valid:false` — settled in 2a); each error-class mapping; console upload refusal (data-URL, bare path); workshop local-path/data-URL preparation. — done in `prepare.test.ts` (workshop delegation + all upload error-class mappings; console pass-through/refusal; by-id fetch-and-forward both shells; request-shape + `{ path }` resolver seam + malformed base URL). Suite at 235 pass (was 205).
+- `attachments` is now **required** on `_probe_files`, and both descriptions push the opposite way: *always* pass the attached file, an omitted/empty field is a failed test rather than a safe default, and if the strict shape can't be built put whatever reference exists (id, name, URL, placeholder) into the permissive variant.
+- The rig no longer depends on a probe tool being called *correctly* to learn anything — see the protocol recorder below.
 
-### Phase 2c — docs + gates
+### Attempt 2 (2026-07-30, ChatGPT desktop web) — CHANNEL CONFIRMED. The substitution fires.
 
-- [x] `SPEC.md` (done in 2a), `README.md` (new tool contract), `CHANGELOG.md` `## [Unreleased]` (Added: `mthds_prepare_inputs`), `CLAUDE.md` (architecture list + the new capability file). — done; README tool table + `### mthds_prepare_inputs` section + intro; CHANGELOG `### Added` (replacing the superseded "reserves the boundary" bullet) + a `classifyError` Changed note; CLAUDE.md "What this repo is" + Architecture bullet + shared.ts/`fetchMethodFiles`/files-union references (three→four files-taking tools).
-- [x] Gates green (individual targets under the link; full `make check` once on `^0.6.0`). — done; `build` + `build:local` + `typecheck` + `lint` + `format:check` + `test` (235 pass) all green under `@pipelex/sdk` `file:../pipelex-sdk-js` (0.6.0 code).
+With `attachments` required and the description inverted, ChatGPT rewrote the model's file reference into the full four-field object and our server fetched the bytes:
 
-**CHECKPOINT 2 — REACHED (2026-07-23).** `mthds_prepare_inputs` live end to end, specced (2a) and documented, gates green under the local link. Both deployment paths implemented: workshop uploads via the SDK; console is pass-through-only with its own signature walk (never triggers `readLocalPath`). **Not committed** — like Phase 1, this rides the `^0.6.0` pin and must not land as a `file:` link. Finishing steps once `@pipelex/sdk@0.6.0` publishes: `make use-npm-sdk`, pin `"@pipelex/sdk": "^0.6.0"`, `make check` green, move Phases 1+2 to a feature branch (`feature/sdk-0.6-adoption`), commit. Natural handoff: Phase 3 (token usage + cost in `mthds_run_results`) is standalone and can start from here.
+```json
+{"file_id":"sediment://file_000000007170820b8e06c722f24cc48a",
+ "download_url":"https://oaisdmntprnznorth.blob.core.windows.net/files/00000000-7170-820b-8e06-c722f24cc48a/raw?se=2026-07-30T15%3A47%3A24Z&sp=r&sv=2026-02-06&sr=b&scid=…&sig=…",
+ "mime_type":"application/pdf","file_name":"Job-Offer(2).pdf"}
+```
+
+Fetch: `206 Partial Content`, `content-type: application/pdf`, `content-range: bytes 0-4095/140830`, magic `%PDF-1.4`, 751 ms. `attachment_shape: array(1)<object{download_url,file_id,file_name,mime_type}>` — the documented shape exactly, array form included.
+
+**The two calls in that session are the whole lesson.** Call #7 (model improvising) sent only `note`. Call #9 — after the user said *"pass the PDF in the attachments field"* — carried the full object. The host substitutes **only where the model puts a reference**; it never injects into a field the model left alone.
+
+**A1 — the storage host is Azure Blob, it is region-scoped, and it VARIES BETWEEN CALLS.** Two samples, same user, same session, minutes apart:
+
+| # | host | file |
+|---|---|---|
+| 1 | `oaisdmntpr**nznorth**.blob.core.windows.net` | 140 KB PDF |
+| 2 | `oaisdmntpr**koreacentral**.blob.core.windows.net` | 19.6 MB PDF |
+| 3 | `oaisdmntpr**koreacentral**.blob.core.windows.net` | 140 KB PDF (iOS) |
+| 4 | `oaisdmntpr**westus**.blob.core.windows.net` | 298 KB PDF |
+
+`server: Windows-Azure-Blob/1.0`, `x-ms-*` headers throughout. The pattern is `oaisdmntpr<azure-region>.blob.core.windows.net` — the suffix is Azure's, the `oaisdmntpr` prefix is OpenAI's, the middle is an Azure region name (`newzealandnorth`, `koreacentral`, `westus`). Four samples, **three distinct regions, one user, one afternoon** — and the region bears no relation to the user's location (Bangkok throughout), so it is assigned per upload.
+
+**A literal host allowlist is dead.** It would not merely break for users in other regions — it broke *inside a single session for a single user*. D3 must match a pattern.
+
+> **Security note for D3, worth stating explicitly:** a suffix-only rule (`*.blob.core.windows.net`) is **not safe**. Any Azure customer can create a storage account under that suffix, so a suffix-only allowlist would happily fetch an attacker-controlled blob. The `oaisdmntpr` prefix is the only OpenAI-specific part and must be **required**, not optional. And since that prefix is undocumented vendor infrastructure that can change without notice, the byte cap, the timeout and the no-cross-host-redirect rule must hold on their own — the host check is a filter, not the defence.
+
+**A2 — the URL is an Azure SAS with a ~5-minute life *from the tool call*. D2 IS DECIDED: INGEST, NOT FORWARD.** Both samples agree closely:
+
+| # | tool call | SAS `se` | window |
+|---|---|---|---|
+| 1 | 15:42:17.6Z | 15:47:24Z | **306 s** |
+| 2 | 15:55:14.2Z | 16:00:19Z | **305 s** |
+| 4 | 16:29:11.0Z | 16:34:17Z | **306 s** |
+
+**Confirmed empirically, not just read off the URL**: sample 1 re-fetched `206` at +288 s and `403` at +328 s, bracketing its declared expiry exactly.
+
+*Correction to an earlier note in this file*: the window was first recorded as 374 s by anchoring on the blob's `last-modified`. The operationally relevant anchor is **when the URL reaches us**, which gives ~305 s. Design against 5 minutes, not 6. A durable run's workers fetch minutes to hours after the tool call, so forwarding the raw `download_url` into a run would routinely hand them a dead URL. The bytes must be fetched and uploaded to Pipelex storage during the tool call, and the run must receive a `pipelex-storage://` reference. This also settles the D1 tension in favour of **Option B** (a dedicated ingest tool returning storage URIs): with a 6-minute source URL there is no viable pass-through design to weigh it against.
+
+**A3 — the Apps runtime is engaged, and it identifies itself on `tools/call`, not `initialize`.** ChatGPT's `initialize` is plain (`clientInfo: {"name":"openai-mcp","version":"1.0.0"}`, UA `openai-mcp/1.0.0`, `_meta: null`). Every `tools/call` then carries `openai/userAgent`, `openai/locale`, `openai/userLocation`, `openai/subject`, `openai/session`, `openai/organization`, and `io.modelcontextprotocol/clientCapabilities` (`openai/visibility`, plus the MCP-UI `text/html;profile=mcp-app` extension). So "are we talking to the Apps runtime?" must be answered from a tool call, never from the handshake.
+
+**A4 — ChatGPT sends user location and stable identifiers on every tool call.** `openai/userLocation` includes city, region, country, timezone and **latitude/longitude**; `openai/subject` / `openai/session` / `openai/organization` are stable opaque ids. This is PII arriving on a surface we did not ask for. **Production must not log request `_meta`.** The probe rig does log it — that is another reason the rig is delete-on-sight rather than something to graduate. Note it in SPEC when the tool is specified.
+
+**A5 — `file_id` is not an opaque token but a scheme-prefixed URI**: `sediment://file_00000000…`. Do not assume `^file[-_]` when validating.
+
+**A11 — THE DESCRIPTION FIX IS VALIDATED. With a refreshed tool list the model populates `attachments` unprompted, first try.** Connector removed and re-added → ChatGPT issued `tools/list` (twice, plus `resources/read`) at 16:27 → at 16:29 a **single** `tools/call` with `attachments` **present**. No coaching, no absent-field first attempt, no retry.
+
+Contrast the whole session: under the stale v1 text, *every* run either started with an absent field or needed the user to say "pass the PDF in the attachments field". Under v2, zero prompting.
+
+**This closes F5 as proven, not merely suspected:** the tool description *is* the mechanism. Ship-quality wording is not polish; it is the difference between a working feature and a silently inert one. Combined with A10 (descriptions are cached and un-hotfixable), this is the single most important operational constraint Phase 0 produced — carry both into D4 and Phase 3.
+
+**A10 — ChatGPT CACHES THE TOOL LIST PER CONNECTOR AND NEVER REFRESHES IT. Every measurement in this session ran against the v1 tool description.** The model refused to populate the image, quoting *"Do NOT invent values for attachments"* — a phrase **deleted in the rework**. The current server serves the opposite text (*"ALWAYS pass the user's attached file(s)"*), verified directly against `/mcp`. The log settles it: since this server started, ChatGPT has issued `initialize` four times and `tools/call` five times, and **`tools/list` exactly zero times.** It re-handshakes per conversation but never re-reads the tools.
+
+Two consequences, and the second is the important one:
+
+- **Immediate:** the description rework was never actually tested. Every successful capture in this session came from the user manually overriding a *stale* instruction, not from the new one. Whether a good description makes the model populate `attachments` unprompted is **still unknown**. To find out, remove and re-add the connector in ChatGPT, then retry without coaching.
+- **For Phase 3 / release:** *a tool-description change does not reach existing users.* Their connector keeps serving whatever it cached at add-time. Combined with F5 — the description is load-bearing *mechanism*, not documentation — this means **a description defect is not hot-fixable**: shipping a fix leaves every existing installation broken until each user re-adds the connector. The initial wording therefore needs the same review rigour as the schema, and the release notes need to say "re-add the connector" out loud. Record this in SPEC alongside the tool contract.
+
+> This also re-opens A9 slightly. The model's "schema must expect a file parameter" explanation is still corroborated by `_probe_files_raw` never being invoked — but that tool was *also* only ever known to ChatGPT through the same stale list. A9's conclusion is probably right and is consistent with the four-field rule's existence; treat it as strong but not airtight until re-tested against a refreshed connector.
+
+**A9 — the four-field schema is a RUNTIME gate, not just an app-review checkbox. The permissive-capture tool cannot work, and does not need to.** Asked to pass an image to `_probe_files_raw`, the model declined, reporting that the platform instructs it to pass uploaded-file references *only to tools whose schema expects a file parameter* — which the permissive tool's schema (`{"description": …}`, no `type`, no properties) does not. The log corroborates it exactly: across the whole session, **`_probe_files_raw` was never invoked once** (5 calls, all `_probe_files`, 3 with attachments populated).
+
+So the host gates substitution on the declared JSON Schema. A field only receives a file if it declares the four-field object shape.
+
+**This kills the remedy proposed in F2 — but the protocol recorder already replaced it.** The recorder runs at the MCP protocol layer and captures `tools/call` params **before** Zod validates them (proven by entry #19: raw params recorded with `attachments` absent, *then* the validation `isError` at #20). So a malformed payload sent to the **strict** tool is captured verbatim anyway. The two-tool design was sound reasoning from the wrong premise; the recorder, added later for an unrelated purpose, subsumes it entirely.
+
+Two consequences for Phase 1:
+
+- **Point the remaining image-on-mobile probe at `_probe_files`, not `_probe_files_raw`.** The strict tool is the only one the host will populate, and the recorder captures whatever arrives.
+- **A "lenient" production schema is not an option.** D1/D6 must assume the exact four-field object, because anything looser is invisible to the mechanism. `_probe_files_raw` is dead weight in the rig and should be deleted at teardown.
+
+**A7 — iOS mobile WORKS, and the documented placeholder defect did NOT reproduce.** `ChatGPT/1.2026.202 (iOS 26.5.2; iPhone14,7)`, PDF attachment:
+
+- First call: `attachments` **absent** — the exact same "model didn't fill the field" pattern as desktop attempt 1, *not* a placeholder string.
+- After *"call it again and pass the PDF in the attachments field"*: full four-field object, `sediment://file_0000000001ec…`, host `oaisdmntprkoreacentral…`, fetched `206`, 140,830 bytes.
+
+**But do not close the mobile question on this.** The defect reports this plan was written against describe **image** payloads — `{"images": ["chat_upload"]}` and `"chat_upload://image_0"`. We tested a **PDF**. The untested cell is therefore *image + mobile*, and that is exactly where the reported breakage lives. Probe an image on iOS against `_probe_files_raw` before deciding D6's mobile arm. On current evidence, mobile-with-documents is a working path.
+
+**A8 — a schema rejection surfaces as an `isError` tool result on the hosted shell, and the model recovers from it unaided.** The failed mobile call came back as `{"content":[{"type":"text","text":"MCP error -32602: Input validation error… expected array, received undefined"}],"isError":true}` — note skybridge converts the thrown `McpError` into an `isError` result, unlike the local stdio shell which surfaces a raw JSON-RPC `-32602`. **This softens F2 considerably.** We still cannot classify such a failure in the capability layer, but the raw Zod text reached the model and the model self-corrected on the very next call. D6's mobile arm may not need to be implementable at all — the failure is self-correcting in practice. A description hint is likely sufficient; do not build machinery for it.
+
+**A6 — 19.6 MB passes the handoff, and the SAS window is not the binding constraint.** ChatGPT handed over a 19,631,193-byte PDF (`%PDF-1.6`) with no refusal, no truncation, `206` with `content-range: bytes 0-4095/19631193`. Pulling the **whole** file took **6.2 s at 3.2 MB/s — 2 % of the 305 s window**. Extrapolated, the window would allow roughly a gigabyte, so the SAS expiry will not be what stops us; **our own byte cap and the platform's request timeout will be**. Two consequences:
+
+- The D3 byte cap is a *product* decision (what is a sane MTHDS input?), not a safety-driven one forced by the expiry. Pick it deliberately.
+- The real risk moved to the **hosted request budget**: a ~5-minute one-shot tool call that must fetch *and* re-upload. Phase 1 must check Alpic's request timeout before assuming a synchronous ingest of a large file fits in one call. That, not the SAS, is the constraint to design against.
+
+> **Caveat on what A6 does and does not show.** The probe reads only the first 4 KB by design; the 19.6 MB figure is `content-range`, and the full-file timing above was a separate manual fetch. So the *handoff* ceiling is ≥ 19.6 MB and the *fetch* is fast — but an end-to-end ingest (fetch → `uploadFile` → `pipelex-storage://`) at that size has still never been run. Do not treat "19 MB works" as covering the upload leg.
+
+### The rig — reworked, self-tested, ready for attempt 2
+
+Everything lives under `src/probe/` plus `scripts/probe-url-ttl.mjs`, and is **gated behind `PIPELEX_PROBE_ATTACHMENTS=1`** (verified: flag unset or `0` → 6 tools, `1` → 8). `src/tools.ts` and `src/capabilities/` are untouched.
+
+**1. A protocol-level recorder (`mcpMiddleware`) — the important addition.** It records *every* MCP request verbatim, not just our tools: `initialize` (with `clientInfo` and any request `_meta`), `tools/list`, and `tools/call` params. This is what answers the question attempt 1 could not — *is ChatGPT engaging its Apps runtime with us at all?* If `openai/*` keys appear in the request `_meta`, the runtime is live and a null `attachments` is a substitution problem; if they never appear, we are being treated as a plain MCP connector and `openai/fileParams` was never going to fire. Verified capturing `clientInfo`, `openai/*` request `_meta`, and verbatim `tools/call` params. Headers pass an **allowlist**, with `authorization`/`cookie` forced to `<redacted>` — the log is HTTP-readable and must never hold a BYOK key.
+
+**2. `GET /probe` — the log over HTTP.** Returns the whole observation buffer as JSON; `?clear=1` empties it between attempts. This replaces the filesystem as the primary channel: it works on a deployed/ephemeral instance, it needs no copy-paste out of the ChatGPT UI, and it's readable by both of us with `curl`. The JSONL append stays as a durable local secondary.
+
+**3. Two tools, not one.** The plan called for a single echo tool; the self-test proved that insufficient (F2 below):
+
+- `_probe_files` — the **exact** four-field shape, faithful to what we would ship, `attachments` required.
+- `_probe_files_raw` — an unconstrained `attachments`, so a payload that does *not* match gets captured instead of rejected before we see it. Use this for the mobile run, and whenever the strict one errors.
+
+Both echo the verbatim arguments and fetch every http(s) string they find (ranged GET, 4 KB cap, 15 s timeout), recording status, headers, magic bytes, redirect target, elapsed time and `declared_expiry`.
+
+**4. `scripts/probe-url-ttl.mjs`** re-fetches captured URLs on a widening schedule (0/1/2/5/10/15/20/30/45/60/90/120 min) and prints the last-OK / first-FAIL boundary, reading the JSONL directly so nobody copies a 900-character signed URL by hand.
+
+> **Note on the observation channel.** The JSONL was never broken — `dev:tunnel` runs the MCP server *on the developer's machine*; the tunnel only forwards inbound traffic to it, and our own Node process does the write. ChatGPT never touches the filesystem. The real weakness was different: a filesystem log is invisible remotely and dies on a deployed instance. `GET /probe` fixes that.
+
+- [x] **Build the scratch tools.** Done, and verified against both shells: `tools/list` returns the shipped six plus the two probes, with `_meta["openai/fileParams"]: ["attachments"]` present and the shipped tools unchanged.
+- [x] **Connect ChatGPT** (attempt 1, desktop web). The connector works; tools are listed and called. Only the attachment handoff is unresolved.
+- [x] **Rework after the null result** — required field, inverted descriptions, protocol recorder, HTTP-readable log.
+- [x] **Confirm the happy path on desktop web (attempt 2).** Confirmed — full four-field object, `206`, real PDF bytes. Verbatim payload recorded above.
+- [x] **Read the `initialize` capture.** Done — see A3. The answer was neither branch below: `initialize` is plain, and the `openai/*` identification rides on `tools/call` instead.
+  - `openai/*` present → the Apps runtime is live; a still-absent `attachments` means the substitution itself is the problem (wrong `_meta` placement, an unregistered/unreviewed connector, or a dev-mode limitation).
+  - `openai/*` absent → we are a plain MCP connector to this host and `openai/fileParams` will never fire here. That is a **go/no-go answer**, not a bug: it would mean the channel needs a reviewed ChatGPT app, and CHECKPOINT 0 should record it as such.
+- [x] **Measure the TTL.** Answered from the URL itself, exactly as F4 predicted — though via the Azure-SAS `se` parameter, not SigV4. **374 seconds.** D2 is settled: ingest.
+- [x] **Probe the size ceiling — handoff leg.** 19.6 MB passes untruncated; full fetch 6.2 s (A6). The true host-side ceiling is still unfound, but it is above any plausible MTHDS input, so this is no longer blocking. What replaced it: *the upload leg and the hosted request budget*, below.
+- [x] **Collect more host samples** for D3. Two samples, two different regions, one session — enough to settle that the host is a pattern, not a list (A1).
+- [ ] **Time an end-to-end ingest** at ~20 MB: fetch → `uploadFile` → `pipelex-storage://`, and check it against Alpic's request timeout. This is the one measurement A6 leaves open and it now sets the feasibility of a synchronous ingest tool. Can be run without ChatGPT — any 20 MB file and a BYOK key will do.
+- [x] **Reproduce the mobile defect — with a PDF.** Did **not** reproduce; iOS works (A7). The failure mode was an absent field, not a placeholder, and the model self-corrected (A8).
+- [x] **Re-add the connector in ChatGPT (A10).** Done; `tools/list` fired, confirming the refresh path.
+- [x] **Retest without coaching.** Done — populated first try, unprompted (A11). F5 proven.
+- [ ] **Probe an IMAGE on mobile** against **`_probe_files`** (the strict tool — the permissive one is never populated, see A9; the protocol recorder captures malformed payloads regardless). Last untested cell, and the one the original defect reports actually describe (`chat_upload://image_0`). Decides whether D6 needs a mobile arm at all.
+- [ ] **Confirm graceful absence elsewhere.** Same tools over claude.ai and the local workshop: the field must simply be absent, with no schema or handshake complaint. *Partially pre-verified* — an absent field is already handled cleanly (F3); what remains is confirming claude.ai doesn't complain at the handshake. Note `attachments` is now **required**, so claude.ai will have to fabricate or fail — that outcome is itself worth recording.
+- [ ] **Record findings** in this file *and* in `wip/console-attachments-landscape.html` (its "known defects" fold and the open questions), replacing the doc's undocumented-TTL caveat with the measured value.
+- [ ] **Tear down**: `git branch -D probe/openai-fileparams-phase0` and confirm `src/probe/` + `scripts/probe-url-ttl.mjs` exist nowhere on `dev`.
+
+### Runbook for the live session
+
+```bash
+git checkout probe/openai-fileparams-phase0
+PIPELEX_PROBE_ATTACHMENTS=1 npm run dev:tunnel     # public URL for ChatGPT; /mcp is the endpoint
+curl -s "http://localhost:3000/probe?clear=1"      # start the attempt clean
+```
+
+Add the tunnel URL + `/mcp` as a ChatGPT connector (developer mode). In a chat, attach a PDF and say *"probe the file attachments"* — and if the model calls the tool without the file, say so explicitly: *"call it again and pass the PDF in the attachments field"*. Then read everything back:
+
+```bash
+curl -s http://localhost:3000/probe | jq          # every MCP request, verbatim
+node scripts/probe-url-ttl.mjs                    # TTL, once a real download_url is captured
+```
+
+`GET /probe` is the primary channel and works against the tunnel URL too. `wip/probe/observations.jsonl` is the durable local copy; TTL attempts land in `wip/probe/ttl.jsonl`. All throwaway, all gitignored.
+
+> The `/probe` endpoint is unauthenticated and holds signed download URLs. It is gated behind the env flag and sits behind an unguessable tunnel URL — but do not leave a tunnel running after the session.
+
+### Findings already produced by the self-test (synthetic file host, both shells)
+
+**F1 — our Zod mirror satisfies the four-field rule.** The emitted JSON Schema for `attachments.items` is exactly `{type: "object", properties: {file_id, download_url, mime_type, file_name}, required: ["file_id", "download_url"]}`, with **no** `additionalProperties` key (Zod 4's default `$strip` omits it). Byte-identical on the hosted and workshop shells. So the "declare it in the capability layer instead of importing `FileRef`" constraint costs us nothing.
+
+> **F2 was later superseded — read A9 before acting on it.** Its remedy (a permissive twin tool) cannot work: the host gates substitution on the declared schema, so a permissive field is never populated. The protocol recorder solves the same problem properly. F2's *observation* still stands; only its proposed fix is dead.
+
+**F2 — a non-conforming payload is rejected at the MCP SDK boundary, before our handler runs.** Sending `attachments: "file-service://file-abc123"` to the strict tool returns JSON-RPC `-32602 Input validation error` with a raw Zod dump. **This constrains D6:** if the mobile defect really does send a placeholder string, a production tool carrying the mandated strict schema *cannot* classify it into an instructive `input_domain` no-verdict — the error never reaches the capability layer, so there is nothing there to classify. Loosening the schema to catch it would fail app review. The realistic options are (a) accept an opaque failure on mobile and steer with the tool description, or (b) ship a second lenient field purely as a catch — ugly. Decide this in Phase 1 with the real mobile payload in hand; do not assume D6's "mobile placeholder → instructive `input_domain` error" is implementable as written.
+
+**F3 — an absent field is already graceful.** Calling with `{}` yields `shape=absent` and a normal result, no error. Declaring `attachments` optional is what buys this, and it is what makes the claude.ai / workshop absence case a non-event.
+
+**F5 — the tool description is a load-bearing part of the mechanism, not documentation. PROVEN — see A11.** Attempt 1's null result came entirely from wording. Whatever ships in Phase 2 must *instruct* the model to pass the user's attachment; a neutral or defensive description silently yields empty calls that look like a host failure. Add this to D1/D4: the description text is part of the contract and needs the same review as the schema. A controlled before/after (stale v1 → always coaching needed; refreshed v2 → unprompted first try) confirmed it.
+
+**F4 — a SigV4-style expiry is readable from the URL itself.** The rig parses `X-Amz-Expires` + `X-Amz-Date` (and the `Expires` / `se` / `exp` conventions) out of the query string and reports it as `declared_expiry`. Verified against a synthetic presigned URL. If OpenAI signs this way, D2's decisive measurement is available on the very first tool call instead of after an hour of polling.
+
+**CHECKPOINT 0 — GO. Reached 2026-07-30.**
+
+The gate was: *does the field populate reliably on desktop web?* **Yes** — and also on iOS, and unprompted once the tool list is fresh. Five successful captures across three Azure regions, two devices, 140 KB to 19.6 MB, every one fetched and byte-verified.
+
+**What Phase 1 inherits as settled:**
+
+| | |
+|---|---|
+| **D2** | **Ingest, not forward.** ~305 s SAS window, three consistent samples, confirmed by observed `403`. |
+| **D1** | **Option B (dedicated ingest tool).** A 5-minute source URL leaves no pass-through design to weigh against it. |
+| **D3** | **Re-derive.** Host is `oaisdmntpr<azure-region>` and varies per upload; a literal allowlist is dead and a suffix-only rule is unsafe. |
+| **D4/D6** | **The description is mechanism** (F5/A11), and it is **cached un-hotfixably** (A10). The schema must be exactly four fields — that is a runtime gate, not just review (A9). |
+
+**What remains open — carried into Phase 1, none blocking:**
+
+- An **image on mobile** (the cell the original defect reports describe). PDFs work everywhere tested.
+- **End-to-end ingest timing at ~20 MB** against Alpic's request timeout — decides whether the ingest tool can be synchronous. Needs no ChatGPT.
+- More host samples would sharpen D3's pattern, though three regions already prove the shape.
+
+**Teardown:** delete `src/probe/`, `scripts/probe-url-ttl.mjs`, the `.gitignore` entry, the two `hosted/server.ts` + `local/server.ts` hooks, and branch `probe/openai-fileparams-phase0`. Nothing in `src/capabilities/` or `src/tools.ts` was ever touched. `_probe_files_raw` proved a dead end (A9) — do not carry the idea forward.
+
+<details><summary>Original gate wording</summary>
+
+*Gate: if the field does not populate reliably on desktop web, stop here and close the workstream* — everything downstream is void and claude.ai users were never served by it anyway. Record: the verbatim payload, the measured TTL, the size ceiling, the mobile shape, and a go/no-go. Delete the scratch tool and branch. Natural handoff point — Phase 1 is a design session that consumes these numbers.
+
+</details>
 
 ---
 
-## Phase 3 — token usage + cost in `mthds_run_results`
+## Phase 1 — SPEC.md design pass (decisions, then sign-off)
 
-Standalone, independent of Phases 1–2 (needs only the 0.6.0 surface). The SDK already hands us `RunResults.tokens_usages`; project it.
+Same discipline as the `mthds_prepare_inputs` design pass that produced 0.8.0: settle the contract in `SPEC.md`, get sign-off on the crux decisions, *then* build. Follow the `skybridge` skill's architecture workflow (UX flow → does it need UI → API shape → SPEC).
 
-- [x] **Design (small):** decided, then **refined per sign-off (2026-07-24): model-facing usage is RUN-LEVEL only, and never in the prose.** `structuredContent.usage` = null-aware total `cost_usd` (+ `cost_partial` for a priced/unpriced mix) + `tokens` (Σ `input`+`output` only, excluding the non-additive `input_cached`/`output_reasoning` subsets) + `calls` + `assembly_error?`. **No `by_pipe` on the model-facing surface** and **no `## Usage` prose** — the per-pipe rollup (`computeUsageByPipe`, unbounded, same null-aware math per pipe) rides view-only `_meta.usage_by_pipe` alongside the full per-call `_meta.tokens_usages`, both kept for a future detailed-cost tool/view ("keep reading the per-pipe usage, just not rendered to the agent"). Branch on `usage_assembly_error` (not the null list): list→totals (`[]`→zero); null+error→null totals + `assembly_error`; null+no error→`usage` omitted. Cost null (nothing priced) is deliberately distinct from 0 (no inference). — recorded in SPEC "Run usage & cost". (Dropped from the first cut: `by_pipe`/`by_pipe_truncated` in structuredContent, `USAGE_PIPE_CAP`, and every prose helper.)
-- [x] Extend the `mthds_run_results` output schema + `RunResults` projection in `capabilities/run.ts`. — done; `summarizeUsage` (run-level totals) + `totalUsage`/`computeUsageByPipe` helpers, `usage` in `structuredContent` only (no prose), `_meta.tokens_usages` + `_meta.usage_by_pipe` added to `runResultsToolResult`, Zod `runUsageSchema` + `RunUsage`/`PipeUsage` types. (Also fixed a stray NUL byte from the first cut's pipe-group sentinel — `computeUsageByPipe` now keys the `Map` on `null` directly.)
-- [x] Tests: completed run with `tokens_usages` (run-level totals in structuredContent, per-pipe only off it, no usage prose); `tokens_usages: null` + `usage_assembly_error` set; `[]` (assembly ran, no inference); nothing-priced→null cost; priced/unpriced mix→`cost_partial`; cached/reasoning subset exclusion; `computeUsageByPipe` grouping/sorting/null-pipe + unbounded rollup; `_meta.usage_by_pipe` + `_meta.tokens_usages` carriage; usage-stays-out-of-prose. — done; suite at 249 pass.
-- [x] `SPEC.md` (Run Scope / `mthds_run_results` output + `_meta` keys), `README.md`, `CHANGELOG.md` (Unreleased Added), `CLAUDE.md` (run.ts bullet). — done.
+**D1 — the surface shape. This is the crux; it needs sign-off.** Two viable designs:
 
-**CHECKPOINT 3 — REACHED (2026-07-23; refined 2026-07-24).** Run cost/usage surfaced on `mthds_run_results`: compact **run-level** null-aware `usage` (cost/tokens/calls) in `structuredContent` only — no per-pipe on the model-facing surface, no usage prose. Per-pipe rollup + full per-call list ride view-only `_meta.usage_by_pipe` / `_meta.tokens_usages` for a future detailed-cost surface. All gates green under the local link (`@pipelex/sdk` `file:../pipelex-sdk-js`, 0.6.0 code): `build` + `build:local` + `typecheck` + `lint` + `format:check` + `test` (249 pass). **Committed on `feature/Use-new-sdk-for-uploads` (2026-07-24)** alongside the TODOS cold-start refresh — see the STATUS banner. Remaining finishing steps are the shared SDK-publish sequence in the STATUS banner (swap the `file:` link → `^0.6.0` pin, `make check`, merge via the normal flow, `/release`), gated only on `@pipelex/sdk@0.6.0` publishing.
+- **Option A — `attachments` on `mthds_prepare_inputs`.** Add a top-level `attachments: FileRef[]`, and bind each attachment to an input slot with a marker value the model writes into `inputs` (e.g. `"attachment:file-abc123"`). One call, but it invents a binding convention the model must get right, and the four-field rule forbids putting the binding on the file object itself.
+- **Option B — a dedicated ingest tool (recommended; Phase 0 strengthened this).** With a 374-second source URL (A2) there is no pass-through design left to weigh against it: the tool must fetch and re-host during the call, which is exactly what this option does. A new tool takes `attachments: FileRef[]` and returns `pipelex-storage://` URIs. The model then fills those URIs into the template exactly as it would a user-pasted URL. **No binding convention, no new semantics in `prepare`, and literally zero change to `prepare.ts`'s walk** — storage URIs are already a pass-through value it accepts. It also composes with `mthds_run` for free, and preserves the console's "pass-through only" property as a true statement rather than an exception. Cost: one extra round trip, and the URIs pass through the model's context (small strings — the O1 invariant is about bytes, so this is fine).
+- Rejected without discussion: auto-binding a lone attachment to a lone file slot. Magical, and this codebase's input-preparation design is explicitly "explicit, not magical".
+
+**D2 — ingest or forward the URL? — SETTLED BY PHASE 0: INGEST.** The observed SAS window is **374 seconds** (A2). Forwarding it into a durable run would hand the workers a dead URL in the ordinary case, not the edge case. Fetch the bytes during the tool call, upload under the caller's BYOK key, return `pipelex-storage://`. No further discussion needed; record the measurement as the rationale.
+
+**D3 — SSRF policy. MUST BE RE-DERIVED — the assumed allowlist was wrong.** Phase 0 observed `oaisdmntprnznorth.blob.core.windows.net`, not `files.oaiusercontent.com` (A1). The subdomain appears region/tenant-scoped, so pinning literal hosts will break for users elsewhere. Design around a **suffix** rule (`*.blob.core.windows.net`, plus whatever OpenAI-owned prefix pattern holds) and accept that this is a far weaker constraint than a single host — which means the byte cap, the connect/read timeout, and the redirect policy (recommend: refuse cross-host redirects) carry most of the defence, not the host check. Before settling this, collect a few more observed hosts from different accounts/regions if you can; one sample is thin evidence for a pattern. Record it in SPEC as a named policy, the way the path trust boundary is recorded.
+
+**D4 — naming and branding.** If Option B: the tool name. Verb-first per the skill's convention; note the brand boundary — uploading to Pipelex storage is runtime-specific, not an MTHDS-standard concept, so think before reflexively prefixing `mthds_`.
+
+**D5 — the tool-table divergence question.** SPEC's Deployments section states both shells register **the same** tools. A console-only tool would be the first break in that invariant. Either register it on both (the workshop gets a tool no stdio host will ever populate — harmless, keeps the invariant) or accept and document the divergence. **Recommend registering on both**, since the invariant is load-bearing for the plugin and skills story.
+
+**D6 — error taxonomy.** Map onto the existing `input_domain` / `config` / `runtime` classes with `retryable` set where the concrete failure is known (the standing rule): mobile placeholder strings → `input_domain` at the attachments field, naming desktop; expired/403 URL → `input_domain`, retryable by re-attaching; oversize → `input_domain` (mirroring `RejectedAssetError`); fetch timeout / 5xx → `runtime`, retryable; upload auth → `config` with the BYOK texture.
+
+**D7 — annotations.** `readOnlyHint: false` (it uploads). Reconsider `openWorldHint`: unlike every existing tool, this one fetches an arbitrary host-supplied URL.
+
+- [ ] Settle D1–D7; record the full contract in `SPEC.md` (new scope section + Tools and Views + a UX Flow + the Deployments note about which shell populates the field).
+- [ ] Retire the matching Non-Goals sentence **carefully**: console byte-upload was deferred *conditionally* ("until a proper out-of-band attachment channel exists"). The condition is now met **on one host**. Rewrite to say that — do not simply delete it, and keep the residual (claude.ai still has no channel; `http(s)`→storage ingest is still parked).
+
+**CHECKPOINT 1 — PENDING.** SPEC-only pass, no code. Record: each decision and its rationale, the sign-off, and any decision Phase 0 forced. Natural handoff — Phase 2 is mechanical once the contract is fixed.
+
+---
+
+## Phase 2 — implement
+
+Shape assumes Option B; adjust if D1 lands on A.
+
+- [ ] **The attachment schema** — a Zod object with exactly the four fields, in the capability layer, **not** imported from `skybridge/server` (see constraints). Exported for tests.
+- [ ] **The ingest capability** — fetch the bytes from the allowlisted URL, hand them to `@pipelex/sdk`'s `uploadFile` with `filename`/`contentType` from the attachment metadata, return the `pipelex-storage://` URI plus the original filename so the model can match them up. Never touches the filesystem.
+- [ ] **The SSRF guard** — its own small module with its own tests (allowlist, size cap, timeout, redirect policy per D3). Deny by default.
+- [ ] **The context seam** — a per-deployment capability flag alongside `resolver` / `allowUpload` / `viewsAvailable`, threaded through `buildToolContexts` and `byok.ts`'s `overrideContexts` so the caller's BYOK key funds the upload.
+- [ ] **Registration** — add to the ordered table in `src/tools.ts`; on the hosted shell add `_meta["openai/fileParams"]` plus the `openai/toolInvocation` strings. Update both server `instructions`.
+- [ ] **Tests** (fake client + fake fetch, following the established injection seams): happy path; multiple attachments; allowlist rejection; oversize; timeout; expired-URL 403; the mobile placeholder shape from Phase 0; upload auth failure; absent field on non-ChatGPT hosts.
+
+**CHECKPOINT 2 — PENDING.** Record: what landed, the test count, gates, and any contract drift from Phase 1 (with SPEC updated in the same breath, not deferred).
+
+---
+
+## Phase 3 — docs, gates, release
+
+- [ ] `SPEC.md` (done in Phase 1, reconciled against what actually shipped), `README.md` (tool table + section + the ChatGPT-only note), `CHANGELOG.md` `## [Unreleased]`, `CLAUDE.md` (architecture list + the new capability file + the SSRF policy in Conventions).
+- [ ] Full gate: `make check && make test`.
+- [ ] **Deploy and live-smoke on ChatGPT** before releasing — the real end-to-end (drop a PDF, run a method on it). A tool whose whole value is a vendor integration cannot ship on unit tests alone.
+- [ ] Sanity-check claude.ai and the workshop are unaffected (the tool is present and inert).
+- [ ] Release via the `/release` skill. Consider whether `pipelex-plugins` skills need a line about the new console capability — the last release had exactly this coordination footgun.
+
+**CHECKPOINT 3 — PENDING.** Record the shipped version and fold the verified behavior back into `wip/console-attachments-landscape.html` so the research doc stops describing it as a proposal.
 
 ---
 
 ## Parked / explicitly out of scope
 
-- **Native `method_id` on `/v1/validate` and `/v1/build/inputs`** — the deeper platform-side fix that would retire fetch-and-forward entirely (handoff: `../wip/method-id-native-tooling-routes/`). When it ships, `getMethodClosure` becomes a thin delegate and the MCP's by-id legs simplify further. Not blocking; endgame.
-- Opt-in `http(s)` → storage ingest (the SDK passes URLs through unchanged; a later, additive SDK feature).
-- Catalog discovery tools (list/get methods), publish/save from the workshop, console OAuth, methods-as-tools projection — all still parked (see the archived plan `wip/archive/TODOS-method-id-catalog-runs-2026-07-21.md`).
+- **claude.ai attachments.** No channel exists. The sandbox-curl workaround is allowlist-gated (Team/Enterprise only), prompt-injection-adjacent per Anthropic's own warning, and rests on undocumented sandbox behavior. Users keep pasting URLs.
+- **A view-side attach flow** via `useFiles()` / `selectFiles()`. The `imageIds` round-trip back to the model is a known-broken path, and the console's views are ChatGPT/Cowork-only. Tools-first.
+- **SEP-2631 / `x-mcp-file`.** The standard is an open draft that already replaced one predecessor; it landed in no host. Adopt when a host ships it — our `pipelex-storage://` design is already its shape, so it will be an additional intake, not a rewrite.
+- **Opt-in `http(s)` → storage ingest** for ordinary user-pasted URLs (still an additive SDK feature; unchanged from the 0.8.0 plan). Note the tension: if D2 lands on ingest, this tool ingests ChatGPT URLs while `prepare` still passes user URLs through. That asymmetry is intentional (host URLs expire, user URLs generally don't) and should be stated in SPEC so it doesn't read as an inconsistency.
+- Catalog discovery tools, publish/save from the workshop, console OAuth, methods-as-tools projection — all still parked.
