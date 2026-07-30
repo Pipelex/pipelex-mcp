@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Upgraded `skybridge` to 1.3.2 (with `@skybridge/devtools` to match). Skybridge 1.3.0 makes mixed auth enforced rather than declarative — a per-tool `auth` field (`allowsAnonymous` / `scopes`) that rejects anonymous or under-scoped calls before the handler runs — and adds Agent Skills over MCP, a DevTools deploy button, and view console logs forwarded to the dev-server terminal. No code changes were needed: the hosted console has no OAuth provider yet, so the new per-tool gating is inert here. The full check suite and tests pass unchanged.
+
 ## [0.8.0] - 2026-07-25
 
 ### Added
