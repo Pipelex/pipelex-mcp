@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-01
+
 ### Added
 
 - **`mthds_list_methods` catalog discovery on both shells.** The new plain, read-only tool lists the active API key's organization catalog with optional case-insensitive query plus bounded MCP-side paging, returning only deterministic, model-facing metadata: canonical `method_id`, Unicode-bounded name/description with truncation flags, narrow `has_source`, and `updated_at`. Empty catalogs and no matches are successful results. MTHDS/Python source, stored inputs/outputs, org ids, and creator ids are excluded from every tool-output channel and logs. The returned id feeds the existing current-content validate → inputs-template → run flow; no method executes and no inference credit is spent while listing.
@@ -15,6 +17,7 @@
 ### Changed
 
 - `classifyError` route-specific bad-request texture can now override the error class, used so `/v1/methods`' missing active-organization 400 is an auth/configuration error at the deployment's key location rather than a fictitious input error.
+- **Documentation** — Updated `README.md`, `CLAUDE.md`, and `SPEC.md` to document the `mthds_list_methods` contract and projection boundaries. Archived the completed ChatGPT file-inputs build plan and refreshed WIP architecture docs to reflect that catalog discovery has shipped.
 
 ## [0.9.0] - 2026-07-31
 
