@@ -4,6 +4,17 @@ import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/ser
 import pkg from "../package.json" with { type: "json" };
 
 import {
+  attachmentsToolResult,
+  buildAttachmentsContext,
+  mthdsUploadAttachmentsInputSchema,
+  mthdsUploadAttachmentsOutputSchema,
+  uploadMthdsAttachments,
+} from "./capabilities/attachments.js";
+import type {
+  AttachmentsContext,
+  MthdsUploadAttachmentsInput,
+} from "./capabilities/attachments.js";
+import {
   buildInputsContext,
   buildMthdsInputs,
   inputsToolResult,
@@ -58,6 +69,8 @@ export interface ToolContexts {
   inputs: InputsContext;
   prepare: PrepareContext;
   run: RunContext;
+  /** Consumed by the console-only mthds_upload_attachments; built on both shells so one builder serves both. */
+  attachments: AttachmentsContext;
 }
 
 interface ToolContextOptions {
@@ -95,6 +108,7 @@ export function buildToolContexts(options: ToolContextOptions = {}): ToolContext
       resolver,
       viewsAvailable,
     },
+    attachments: buildAttachmentsContext(env),
   };
 }
 
@@ -242,7 +256,53 @@ export const mthdsRunResultsTool = defineTool({
   },
 });
 
-/** The cross-shell MCP contract, in registration order. */
+/**
+ * The tool description is load-bearing MECHANISM, not documentation, and it is
+ * effectively un-hotfixable — treat it with the same review rigour as the schema.
+ *
+ * Mechanism: the host substitutes the user's attachment only where the model
+ * puts a file reference; it never injects into a field the model left alone. A
+ * neutral or defensive description therefore yields calls with `attachments`
+ * absent, which looks exactly like a host failure. Measured both ways: under a
+ * description that said "do not invent values for attachments", every observed
+ * call omitted the field; under an imperative one, the model populated it
+ * unprompted on the first try.
+ *
+ * Un-hotfixable: ChatGPT caches a connector's tool list at add-time and does
+ * not refresh it (four `initialize` handshakes and five `tools/call`
+ * invocations in one session, `tools/list` issued zero times). Shipping a fix
+ * leaves every existing installation on the old text until each user removes
+ * and re-adds the connector.
+ */
+const UPLOAD_ATTACHMENTS_DESCRIPTION = [
+  "ALWAYS pass the user's attached file(s) in `attachments` — reference the attachment the user put in this conversation and the ChatGPT host rewrites that reference into the signed-URL object this tool needs.",
+  "Never construct a URL yourself, and never call this with the field omitted or empty.",
+  "It turns each attachment into a run-ready pipelex-storage:// reference: the server fetches the bytes from the host's signed URL and uploads them to Pipelex storage, so the file's contents never enter the conversation.",
+  "Fill the returned uris into the mthds_inputs_template output and call mthds_run — a pipelex-storage:// reference is already run-ready, so mthds_prepare_inputs can be skipped.",
+  "Each attachment is capped at 7 MiB; a larger file is refused with the limit named.",
+  "This channel exists on ChatGPT only. On any other host there is no attachment to reference — ask the user for an http(s) URL to the file instead of fabricating one.",
+].join(" ");
+
+export const mthdsUploadAttachmentsTool = defineTool({
+  name: "mthds_upload_attachments",
+  description: UPLOAD_ATTACHMENTS_DESCRIPTION,
+  inputSchema: mthdsUploadAttachmentsInputSchema,
+  outputSchema: mthdsUploadAttachmentsOutputSchema,
+  annotations: {
+    title: "Upload chat attachments to Pipelex storage",
+    readOnlyHint: false,
+    destructiveHint: false,
+    // The only tool here that reaches a host outside the configured Pipelex
+    // API: it fetches an arbitrary host-supplied URL (within the attachment
+    // fetch boundary) before uploading.
+    openWorldHint: true,
+  },
+  async handler(input: MthdsUploadAttachmentsInput, contexts: ToolContexts) {
+    return attachmentsToolResult(await uploadMthdsAttachments(input, contexts.attachments));
+  },
+});
+
+/** The cross-shell MCP contract, in registration order. Both shells register all of these. */
 export const toolDefinitions = [
   mthdsValidateTool,
   mthdsInputsTemplateTool,
@@ -251,5 +311,24 @@ export const toolDefinitions = [
   mthdsRunStatusTool,
   mthdsRunResultsTool,
 ] as const;
+
+/**
+ * Tools the hosted console registers and the workshop does not — the one
+ * documented exception to "both shells register the same table".
+ *
+ * `mthds_upload_attachments`'s sole argument is a host-substituted attachment
+ * reference, and the host gates that substitution on the declared JSON Schema.
+ * No stdio host performs it, so on the workshop the tool would be
+ * *structurally unreachable* rather than merely unused: nothing could ever
+ * populate it. Registering it there would spend every workshop user's tokens
+ * on every `tools/list` advertising a capability that cannot fire, and would
+ * invite the model to attempt it.
+ *
+ * The invariant that still holds, and that matters for routing: no tool NAME
+ * means different things on the two shells. Kept as a table beside
+ * {@link toolDefinitions} so there is still one definition per tool and one
+ * registration site per shell.
+ */
+export const consoleOnlyToolDefinitions = [mthdsUploadAttachmentsTool] as const;
 
 export type AnyToolDefinition = (typeof toolDefinitions)[number];

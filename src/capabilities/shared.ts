@@ -373,6 +373,20 @@ export interface ClassifyErrorOptions {
     location?: string;
     hint: string;
   };
+  /**
+   * Per-route texture for a refused or unreadable asset on the upload leg.
+   * `location` covers both arms (`RejectedAssetError` /
+   * `InvalidLocalSourceError`) and defaults to `inputs` — right for
+   * `mthds_prepare_inputs`, whose assets are values inside the filled inputs;
+   * wrong for `mthds_upload_attachments`, whose assets are located per item.
+   * `hint` covers the size-refusal arm only, so a route can name the real
+   * upload ceiling; an unreadable local path keeps its own path-readability
+   * hint either way.
+   */
+  asset?: {
+    location?: string;
+    hint?: string;
+  };
 }
 
 /** The per-deployment auth-failure texture a capability context can carry. */
@@ -455,11 +469,12 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
   if (err instanceof InvalidLocalSourceError || err instanceof RejectedAssetError) {
     return {
       class: "input_domain",
-      location: "inputs",
+      location: options.asset?.location ?? "inputs",
       message: err.message,
       hint:
         err instanceof RejectedAssetError
-          ? "Pipelex storage refused the asset (too large). Shrink the file, or reference it by an http(s) URL instead."
+          ? (options.asset?.hint ??
+            "Pipelex storage refused the asset (too large). Shrink the file, or reference it by an http(s) URL instead.")
           : "Check the file path is correct and readable, or reference the asset by an http(s) URL / pipelex-storage:// URI instead.",
       retryable: false,
     };

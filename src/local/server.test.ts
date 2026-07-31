@@ -10,7 +10,7 @@ import type { MthdsFile, PipelexValidationReport } from "@pipelex/sdk";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createHostedServer } from "../hosted/server.js";
-import { toolDefinitions } from "../tools.js";
+import { consoleOnlyToolDefinitions, toolDefinitions } from "../tools.js";
 import { buildLocalToolContexts, createLocalServer } from "./server.js";
 
 const tempDirs: string[] = [];
@@ -20,14 +20,96 @@ afterEach(async () => {
 });
 
 describe("local stdio server", () => {
-  it("registers the same tool names and schemas as the hosted shell", async () => {
+  it("registers the shared tool table with the same schemas as the hosted shell", async () => {
     const hostedTools = await listTools(createHostedServer());
     const localTools = await listTools(createLocalServer());
+    const sharedNames: string[] = toolDefinitions.map((definition) => definition.name);
 
-    expect(localTools.map((tool) => tool.name)).toEqual(
-      toolDefinitions.map((definition) => definition.name),
+    expect(localTools.map((tool) => tool.name)).toEqual(sharedNames);
+    // The contract of every SHARED tool must be byte-identical across shells —
+    // no tool name may mean different things on the two deployments.
+    expect(localTools.map(sharedContract)).toEqual(
+      hostedTools.filter((tool) => sharedNames.includes(tool.name)).map(sharedContract),
     );
-    expect(localTools.map(sharedContract)).toEqual(hostedTools.map(sharedContract));
+  });
+
+  it("does NOT register the console-only attachment tool (D5)", async () => {
+    const hostedTools = await listTools(createHostedServer());
+    const localTools = await listTools(createLocalServer());
+    const consoleOnlyNames: string[] = consoleOnlyToolDefinitions.map(
+      (definition) => definition.name,
+    );
+
+    expect(consoleOnlyNames).toContain("mthds_upload_attachments");
+    // Absent, not merely inert: the host gates the attachment substitution on
+    // the declared schema and no stdio host performs it, so on the workshop the
+    // tool is structurally unreachable. Advertising it would spend every
+    // workshop user's tokens on every tools/list for a capability that cannot
+    // fire, and would invite the model to attempt it.
+    for (const name of consoleOnlyNames) {
+      expect(localTools.map((tool) => tool.name)).not.toContain(name);
+      expect(hostedTools.map((tool) => tool.name)).toContain(name);
+    }
+  });
+
+  it("advertises the attachment channel in the hosted instructions only", async () => {
+    const { client: hosted, close: closeHosted } = await connectClient(createHostedServer());
+    const { client: local, close: closeLocal } = await connectClient(createLocalServer());
+
+    try {
+      expect(hosted.getInstructions()).toContain("mthds_upload_attachments");
+      expect(local.getInstructions()).not.toContain("mthds_upload_attachments");
+    } finally {
+      await closeHosted();
+      await closeLocal();
+    }
+  });
+
+  it("names `attachments` in openai/fileParams — the substitution mechanism itself", async () => {
+    const hostedTools = await listTools(createHostedServer());
+    const uploadTool = hostedTools.find((tool) => tool.name === "mthds_upload_attachments");
+
+    // Without this key the host never rewrites the model's file reference into
+    // the signed-URL object, and the tool is silently inert.
+    expect(uploadTool?._meta?.["openai/fileParams"]).toEqual(["attachments"]);
+    // The only tool here that reaches outside the configured Pipelex API.
+    expect(uploadTool?.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: true,
+    });
+  });
+
+  it("emits the mandated four-field attachment JSON Schema", async () => {
+    const hostedTools = await listTools(createHostedServer());
+    const uploadTool = hostedTools.find((tool) => tool.name === "mthds_upload_attachments");
+    const schema = uploadTool?.inputSchema as {
+      required?: string[];
+      properties?: { attachments?: { items?: Record<string, unknown> } };
+    };
+    const item = schema.properties?.attachments?.items as {
+      type?: string;
+      properties?: Record<string, unknown>;
+      required?: string[];
+      additionalProperties?: unknown;
+    };
+
+    // This is the JSON Schema OpenAI's app-review "Scan Tools" step reads and
+    // the host's runtime substitution gate matches against: exactly these four
+    // properties, exactly this required/optional split. A fifth property, a
+    // missing one, or a wrongly-required optional fails review AND silently
+    // stops the host populating the field. It is un-hotfixable once users have
+    // added the connector, so it is pinned here rather than trusted.
+    expect(schema.required).toEqual(["attachments"]);
+    expect(item.type).toBe("object");
+    expect(Object.keys(item.properties ?? {}).sort()).toEqual([
+      "download_url",
+      "file_id",
+      "file_name",
+      "mime_type",
+    ]);
+    expect(item.required).toEqual(["download_url", "file_id"]);
+    expect(item).not.toHaveProperty("additionalProperties");
   });
 
   it("advertises paths as the headline and makes the local resolver available to files tools", async () => {

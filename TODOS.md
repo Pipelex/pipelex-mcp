@@ -6,14 +6,22 @@ Build plan recorded 2026-07-30. Four phases, verification first: **(0) verify th
 
 ## COLD START — read this first (updated 2026-07-31)
 
-**You are starting Phase 2 (implement). Nothing is implemented yet; `src/` is untouched.** Phases 0 and 1 are complete and their checkpoints are signed off.
+**You are finishing Phase 3 (docs + release). The code is written, the gates are green, and the live ChatGPT smoke PASSED** — Phases 0, 1 and 2 are complete, and Phase 3's release blocker (the smoke) is cleared. What remains is docs, a deploy, and the release itself.
 
-Reading order, and nothing more is required to start:
+**The three things that are actually left**, in order:
 
-1. The **STATUS** banner and **M1** immediately below — current state, and the one measurement that reshaped the plan.
-2. **`SPEC.md` → "Attachment Ingest Scope (`mthds_upload_attachments`)"** — *this is the contract*, and it is the durable home for every decision. Also read the Deployments subsection "The tool table is shared except for one console-only tool", and the Tools and Views entry for the new tool.
-3. **Phase 2** below — the build checklist, written against that contract.
-4. `CLAUDE.md` (repo conventions) and, only if you want the vendor background, `wip/console-attachments-landscape.html`.
+1. **Docs** — `README.md`, `CHANGELOG.md` `## [Unreleased]`, `CLAUDE.md`. `SPEC.md` is already done *and* reconciled against what shipped; don't redo it.
+2. **Deploy to the production console** (`make deploy` → Alpic). The smoke ran through a **local tunnel**, not the deployed console — see S1. The deploy has NOT happened.
+3. **Release** via the `/release` skill, with the two mandatory release-note lines (re-add the connector; 7 MiB cap).
+
+Reading order:
+
+1. The **STATUS** banner and **S1** (the smoke result) immediately below.
+2. **Phase 3** — the remaining checklist, with what the smoke did and did not cover.
+3. **Phase 2's "What landed" + "Contract drift"** — what exists in `src/` now, and the three places the implementation refined the Phase 1 contract. Read this before touching code; you probably won't need to.
+4. **M1** — the 7.5 MiB transport ceiling, if you touch anything upload-related.
+5. **`SPEC.md` → "Attachment Ingest Scope (`mthds_upload_attachments`)"** — the contract. Also the Deployments subsection "The tool table is shared except for one console-only tool", and the Tools and Views entry.
+6. `CLAUDE.md` (repo conventions) and, only if you want the vendor background, `wip/console-attachments-landscape.html`.
 
 **Invoke the `skybridge` skill before touching code** (`AGENTS.md` mandates it).
 
@@ -21,15 +29,31 @@ Reading order, and nothing more is required to start:
 
 **Everything under "Phase 0" below is a historical record, not instructions.** The probe rig it describes has been deleted (branch, files, and hooks). Its runbook will not run. Read it for the A*/F* findings only; those are cited throughout Phase 2 and Phase 3.
 
-**Git state**: branch `feature/Console-upload`, pushed to origin, working tree clean. It carries two docs-only commits ahead of `dev` — `7fc3a47 plans` (the Phase 0 record) and the Phase 1 design pass (`SPEC.md` + `TODOS.md`). No PR is open yet; Phase 2's code lands on this same branch. `dev` and `main` are untouched by this workstream.
+**Git state**: branch `feature/Console-upload`, working tree clean, pushed to origin. Three commits ahead of `dev`: `7fc3a47 plans` (the Phase 0 record), `2081a24` (the Phase 1 design pass), and the Phase 2 implementation commit. No PR is open yet. `dev` and `main` are untouched by this workstream.
 
-## STATUS (2026-07-31) — PHASE 1 COMPLETE, CHECKPOINT 1 SIGNED OFF. Next session starts at Phase 2 (implement).
+## STATUS (2026-07-31) — PHASE 2 COMPLETE + LIVE SMOKE PASSED. Next session finishes Phase 3 (docs → deploy → release).
 
-Branch **`feature/Console-upload`**. Current release is **0.8.0**; `main`/`dev` carry an `## [Unreleased]` Skybridge-1.3.2 entry only. **`SPEC.md` now carries the full contract** — the new "Attachment Ingest Scope (`mthds_upload_attachments`)" section, the Deployments divergence note, the Naming Conventions widening, the rewritten Non-Goals deferral, the new UX flow, and the Tools and Views entry. Phase 2 implements against SPEC; it should not re-derive any of D1–D7.
+Branch **`feature/Console-upload`**. Current release is **0.8.0**; `main`/`dev` carry an `## [Unreleased]` Skybridge-1.3.2 entry only — **this work is not yet in the changelog**, which is the next task. `SPEC.md` carries the full contract *and* has been reconciled against what actually shipped (three drift points, recorded under Phase 2). `README.md` and `CLAUDE.md` have **not** been updated yet.
+
+**The feature works against real ChatGPT** — see S1 below. That was the release blocker, and it is cleared. The production console has **not** been redeployed; the smoke ran through a local tunnel.
 
 Phase 0's rig is **already torn down** — branch `probe/openai-fileparams-phase0` deleted, no `src/probe/`, no `scripts/probe-url-ttl.mjs`, no server hooks. Verified 2026-07-31.
 
-Phase 1 closed the last blocking measurement and it **changed the plan**: see M1 below. The remaining open item (an image on mobile) is non-blocking and stays open into Phase 3's live smoke.
+Phase 1 closed the last blocking measurement and it **changed the plan**: see M1 below.
+
+### S1 (2026-07-31) — THE LIVE SMOKE PASSED ON REAL CHATGPT
+
+Run against a **local tunnel** (`npm run dev:tunnel`, added to ChatGPT as a developer-mode connector at `<tunnel-url>/mcp`), with `.env` supplying `PIPELEX_BASE_URL=https://api-dev.pipelex.com` and a `PIPELEX_API_KEY`. Because the dev server held a key, BYOK's `?api_key=` channel was not exercised — uploads spent against that key's org. A fresh tunnel URL means a fresh connector, so the A10 tool-list cache was never in the way.
+
+Three of the four watch items were covered, and **all three passed**:
+
+| Watched | Result |
+|---|---|
+| **Unprompted fill + happy path** | The model populated `attachments` with **no coaching**, the PDF ingested to a `pipelex-storage://` uri, and it ran end to end through `mthds_run`. This is the F5/A11 property re-confirmed against the *shipped* description, not the probe's. |
+| **Oversize refusal (>7 MiB)** | Fired correctly. The ordinary case (M1) behaves as designed. |
+| **Image on iOS** | **Worked — this closes the last untested Phase 0 cell** (A7's open corner, and the exact case the original vendor defect reports describe: `chat_upload://image_0`). No mobile arm was needed, confirming D6/A8/A9. |
+
+**Not covered, and still open:** the **claude.ai** sanity check (tool present, model fabricates a URL, fetch boundary refuses it instructively). Non-blocking for release — the refusal is unit-tested and the failure is contained — but it is the one wording nobody has read in situ.
 
 ### M1 (2026-07-31) — THE INGEST CEILING IS ~7.5 MiB, AND IT IS FORCED BY THE TRANSPORT
 
@@ -74,7 +98,7 @@ Three consequences, all folded into SPEC:
 | `download_url` TTL — **decides D2** | **~305 s** from the tool call, Azure SAS `se` param, confirmed by an observed `403` (A2). D2 → ingest. |
 | Max file size / MIME types the host hands over | Handoff ceiling is **≥ 19.6 MB**, no refusal or truncation (A6). Irrelevant in the end — **our** upload leg caps at 7.5 MiB (M1), far below what the host will give. |
 | Does the documented payload match reality on desktop web? | **Yes**, exactly — four-field object, array form included (Attempt 2). |
-| The malformed shape mobile sends | **Did not reproduce** on iOS with a PDF (A7). The real failure was an absent field, and the model self-corrected (A8). No mobile arm is being built. The untested cell is *image* + mobile, carried to Phase 3 as non-blocking. |
+| The malformed shape mobile sends | **There isn't one.** Did not reproduce on iOS with a PDF (A7) — the real failure was an absent field and the model self-corrected (A8). The remaining *image* + mobile cell was then smoked in Phase 3 and **also works** (S1). No mobile arm was built, and none is needed. |
 
 ---
 
@@ -226,8 +250,8 @@ Both echo the verbatim arguments and fetch every http(s) string they find (range
 - [x] **Reproduce the mobile defect — with a PDF.** Did **not** reproduce; iOS works (A7). The failure mode was an absent field, not a placeholder, and the model self-corrected (A8).
 - [x] **Re-add the connector in ChatGPT (A10).** Done; `tools/list` fired, confirming the refresh path.
 - [x] **Retest without coaching.** Done — populated first try, unprompted (A11). F5 proven.
-- [→] **Probe an IMAGE on mobile.** **Not done; moved to Phase 3's live smoke** — the rig is gone, so this now runs against the real tool on a deployed console. Last untested cell, and the one the original defect reports actually describe (`chat_upload://image_0`). Non-blocking: D6 already ships no mobile arm (A8/A9), so this can only confirm or add a description hint, not change the contract.
-- [→] **Confirm graceful absence elsewhere.** **Not done; moved to Phase 3's sanity check** — and D5 changed what it means. The workshop no longer registers this tool at all, so "absent field" is not the workshop's case; verify the *tool* is absent there. On claude.ai the tool **is** present with a required `attachments`, so the model must fabricate a URL or decline — the fetch boundary refuses the fabrication instructively, and confirming that wording is the real check.
+- [x] **Probe an IMAGE on mobile.** **DONE 2026-07-31 in Phase 3's live smoke (S1) — it works.** The last untested cell is closed, and it was the exact case the original vendor defect reports describe (`chat_upload://image_0`). D6's "no mobile arm" stands, confirmed rather than assumed.
+- [→] **Confirm graceful absence elsewhere.** **Split.** The workshop half is done and *pinned by a test* — D5 changed the question from "is the field absent?" to "is the **tool** absent?", and `local/server.test.ts` asserts exactly that. The claude.ai half is still open and carried to Phase 3 as non-blocking: the tool **is** present there with a required `attachments`, so the model must fabricate a URL or decline, and the fetch boundary refuses the fabrication — confirming that wording reads well in situ is the remaining check.
 - [x] **Record findings** in this file. Recorded as A1–A11 / F1–F5 below, and M1 above. *Still owed:* folding them back into `wip/console-attachments-landscape.html` (its "known defects" fold and open questions, replacing the undocumented-TTL caveat with the measured ~305 s and adding the M1 ceiling) — carried to Phase 3, where the doc stops describing a proposal.
 - [x] **Tear down.** Confirmed done 2026-07-31: branch `probe/openai-fileparams-phase0` gone, no `src/probe/`, no `scripts/probe-url-ttl.mjs`, no hooks in `hosted/server.ts` / `local/server.ts`, no `.gitignore` entry.
 
@@ -281,7 +305,7 @@ The gate was: *does the field populate reliably on desktop web?* **Yes** — and
 
 **What remained open at CHECKPOINT 0, and where each landed:**
 
-- An **image on mobile** — still open, non-blocking, now in Phase 3's live smoke.
+- An **image on mobile** — **closed in Phase 3's live smoke (S1): it works.**
 - **End-to-end ingest timing** — **closed in Phase 1 (M1)**, with a different answer than expected: 20 MB is unreachable, and at the real 7.5 MiB ceiling the whole ingest costs ~6 s. Synchronous ingest confirmed.
 - More host samples would sharpen D3's pattern — not pursued; three regions already proved the shape, and D3 ships a required-prefix pattern rather than a list.
 
@@ -321,35 +345,67 @@ Two things Phase 0/1 forced that were not on the original decision list:
 
 ---
 
-## Phase 2 — implement
+## Phase 2 — implement — COMPLETE (2026-07-31)
 
 The contract is fixed in SPEC → Attachment Ingest Scope. Build to it; don't re-derive it.
 
-- [ ] **The attachment schema** — a Zod object with exactly the four fields (`download_url`, `file_id` required; `mime_type`, `file_name` optional), in the capability layer, **not** imported from `skybridge/server` (F1 verified a local mirror emits a byte-identical JSON Schema, so this costs nothing). Exported for tests. `attachments` is **required**.
-- [ ] **The fetch boundary module** (`capabilities/attachment-fetch.ts` or similar) — its own small module, its own tests, deny by default: https-only, the `oaisdmntpr<region>` / `files.oaiusercontent.com` host patterns, `redirect: "error"`, the 7 MiB cap enforced from `content-range`/`content-length` *before* reading the body **and** again mid-stream, a bounded timeout, no credentials. This is a release blocker shipping *with* the first fetch, not after it.
-- [ ] **The ingest capability** (`capabilities/attachments.ts`) — per attachment: fetch within the boundary, hand the bytes to `@pipelex/sdk`'s `uploadFile` with `filename`/`contentType` from the attachment metadata, return the `pipelex-storage://` URI alongside `file_id`/`file_name` so the model can match them up. Per-item errors; partial success is `status: "ok"`, `is_valid: false`. Never touches the filesystem.
-- [ ] **Registration — hosted shell only** (D5). Do **not** add it to the shared ordered table in `src/tools.ts` the way the other six are; it needs a console-only registration path that keeps `local/server.ts` untouched. Decide the cleanest shape for that (a second exported table, or a `consoleOnly` marker the workshop filters) — whichever keeps "one definition, one registration site" rather than duplicating the tool definition. Add `_meta["openai/fileParams"]: ["attachments"]` plus the `openai/toolInvocation` strings, and extend `HOSTED_SERVER_INSTRUCTIONS` only.
-- [ ] **The context seam** — a capability context alongside the existing four, threaded through `buildToolContexts` and `byok.ts`'s `contextsForRequest` so the caller's BYOK key funds the upload.
-- [ ] **The tool description** — treat as schema, not prose (A10/F5). It must *instruct* the model to always pass the user's attached file, state ChatGPT-only, and name the 7 MiB limit. Review it as deliberately as the schema; it cannot be hot-fixed after users add the connector.
-- [ ] **Fix the pre-existing workshop bug** (M1) — a pre-flight size check in `mthds_prepare_inputs`'s upload path that refuses over the real ceiling before reading and base64-encoding the whole asset, naming the true limit rather than letting a late `413` speak for it. Independent of the attachment channel; SPEC → Prepare Inputs Scope records it.
-- [ ] **Tests** (fake client + fake fetch, following the established injection seams): happy path; multiple attachments; partial success (one item fails, siblings still return their URIs); allowlist rejection incl. the suffix-only attack (`evil.blob.core.windows.net`); oversize refused pre-fetch; a lying `content-length`; redirect refused; timeout; expired-URL 403; upload auth failure; and a workshop `tools/list` assertion that the tool is **absent**.
+- [x] **The attachment schema** — a Zod object with exactly the four fields (`download_url`, `file_id` required; `mime_type`, `file_name` optional), in the capability layer, **not** imported from `skybridge/server` (F1 verified a local mirror emits a byte-identical JSON Schema, so this costs nothing). Exported for tests. `attachments` is **required**.
+- [x] **The fetch boundary module** (`capabilities/attachment-fetch.ts` or similar) — its own small module, its own tests, deny by default: https-only, the `oaisdmntpr<region>` / `files.oaiusercontent.com` host patterns, `redirect: "error"`, the 7 MiB cap enforced from `content-range`/`content-length` *before* reading the body **and** again mid-stream, a bounded timeout, no credentials. This is a release blocker shipping *with* the first fetch, not after it.
+- [x] **The ingest capability** (`capabilities/attachments.ts`) — per attachment: fetch within the boundary, hand the bytes to `@pipelex/sdk`'s `uploadFile` with `filename`/`contentType` from the attachment metadata, return the `pipelex-storage://` URI alongside `file_id`/`file_name` so the model can match them up. Per-item errors; partial success is `status: "ok"`, `is_valid: false`. Never touches the filesystem.
+- [x] **Registration — hosted shell only** (D5). Do **not** add it to the shared ordered table in `src/tools.ts` the way the other six are; it needs a console-only registration path that keeps `local/server.ts` untouched. Decide the cleanest shape for that (a second exported table, or a `consoleOnly` marker the workshop filters) — whichever keeps "one definition, one registration site" rather than duplicating the tool definition. Add `_meta["openai/fileParams"]: ["attachments"]` plus the `openai/toolInvocation` strings, and extend `HOSTED_SERVER_INSTRUCTIONS` only.
+- [x] **The context seam** — a capability context alongside the existing four, threaded through `buildToolContexts` and `byok.ts`'s `contextsForRequest` so the caller's BYOK key funds the upload.
+- [x] **The tool description** — treat as schema, not prose (A10/F5). It must *instruct* the model to always pass the user's attached file, state ChatGPT-only, and name the 7 MiB limit. Review it as deliberately as the schema; it cannot be hot-fixed after users add the connector.
+- [x] **Fix the pre-existing workshop bug** (M1) — a pre-flight size check in `mthds_prepare_inputs`'s upload path that refuses over the real ceiling before reading and base64-encoding the whole asset, naming the true limit rather than letting a late `413` speak for it. Independent of the attachment channel; SPEC → Prepare Inputs Scope records it.
+- [x] **Tests** (fake client + fake fetch, following the established injection seams): happy path; multiple attachments; partial success (one item fails, siblings still return their URIs); allowlist rejection incl. the suffix-only attack (`evil.blob.core.windows.net`); oversize refused pre-fetch; a lying `content-length`; redirect refused; timeout; expired-URL 403; upload auth failure; and a workshop `tools/list` assertion that the tool is **absent**.
 
-**CHECKPOINT 2 — PENDING.** Record: what landed, gates, and any contract drift from Phase 1 (with SPEC updated in the same breath, not deferred).
+### What landed
+
+New modules, all Skybridge-free (verified: the tsup workshop bundle contains no Skybridge code, only the inlined `package.json` script names it already carried):
+
+| File | Role |
+|---|---|
+| `src/capabilities/attachment-fetch.ts` | The fetch boundary. Deny-by-default: https only, the `oaisdmntpr<region>` / `files.oaiusercontent.com` host patterns, no credentials in the URL, no non-default port, `redirect: "manual"` with 3xx refused explicitly, the 7 MiB cap from `content-length` *and* mid-stream, a 30 s total budget, no headers sent. Reports failures as values, never throws. |
+| `src/capabilities/attachments.ts` | The ingest capability + the mandated four-field Zod schema. Per-attachment fetch → `uploadFile` → `pipelex-storage://`. Sequential walk; per-item errors; partial success is a produced verdict. |
+| `src/capabilities/upload-ceiling.ts` | `MAX_UPLOAD_BYTES` (derived from the gateway quota, not hardcoded) and `SizeGuardedPipelexApiClient` — the M1 fix, shared by both upload paths. |
+
+Wiring: `mthdsUploadAttachmentsTool` is defined in `src/tools.ts` alongside the other six but exported through a **second table, `consoleOnlyToolDefinitions`** — the hosted shell registers it explicitly (it already registers each tool one by one, for views and `_meta`), and `local/server.ts` is untouched because it loops over `toolDefinitions` only. One definition, one registration site per shell, no duplicated tool. `ToolContexts` gained `attachments`, built by `buildToolContexts` on both shells and overridden by `contextsForRequest` so the caller's BYOK key funds the upload.
+
+Three deliberate choices worth knowing:
+
+- **The `oaisdmntpr` prefix is required, never optional**, and the fetch runs against the **already-parsed `URL` object** rather than the raw string — re-parsing at the fetch is how an allowlist gets walked past.
+- **A `403` carries `retryable: false`**, with the recovery ("ask the user to attach the file again") in the hint. See the drift note below.
+- **The workshop bundle grew 17.9 KB, +23%** (76,942 → 94,877 bytes; measured by stashing the change and re-running tsup, not estimated). `tools.ts` imports the attachment capability for the console-only table, so the code is linked into the workshop bin even though the tool is never registered there, and esbuild cannot tree-shake it (module-scope Zod schema construction is not provably pure). **Accepted deliberately, and here is why it is not worth chasing:** eliminating it means `tools.ts` must stop importing `capabilities/attachments.js` *at all* — including `buildAttachmentsContext`, which `buildToolContexts` calls. That forces the console-only tool's context out of the shared `ToolContexts` bag, which in turn forces a second context type, a second override path in `byok.ts`'s `contextsForRequest`, and a second registration mechanism. Trading a coherent single context plumbing for 18 KB of dead code in a bundle that is already under 100 KB is the wrong direction. Revisit only if the console-only surface grows well beyond one tool.
+
+**Gates: green.** `make check` (lint + format + Skybridge build + tsup build + typecheck) and `make test` (all suites) both pass. New tests cover the happy path, multiple attachments, partial success, the suffix-only allowlist attack, oversize refused pre-body-read, a lying `content-length`, a refused redirect, timeout, expired-URL 403, upload auth/route/unreachable failures, the size guard on both upload paths, and — pinned deliberately, because it is un-hotfixable — **the emitted four-field JSON Schema** plus the workshop's absence of the tool.
+
+### Contract drift from Phase 1 — three points, SPEC updated in the same breath
+
+1. **The `403` `retryable` verdict.** D6 said "retryable *by re-attaching*", which reads as `retryable: true`. But the field is contractually "retrying **this same call** may succeed", and the link is permanently dead — a new attachment is a different call with a different URL. Shipped as `retryable: false` with the fix in the hint; `true` would only invite a pointless identical retry. SPEC → Structured output now says this precisely.
+2. **No ranged GET.** SPEC described revealing the size via a ranged GET's `content-range`. Unnecessary: `fetch` resolves on headers, so a plain GET already gives `content-length` before a byte of body is pulled, and the body is cancelled on refusal — one request instead of two. Same observable contract (refused before the body is read, mid-stream bound as backstop). SPEC → Attachment fetch boundary updated.
+3. **The M1 fix stops one step short of the plan's wording, on purpose.** The guard sits on `upload` (the wire call), which kills the wasted 10 MiB round-trip and lets the message name the real limit — but it does **not** skip reading and base64-encoding a local asset first, because the SDK owns that step inside `uploadFile`/`readLocalPath`. Refusing before the read needs a pre-flight in `@pipelex/sdk`; recorded in SPEC → Prepare Inputs Scope as a cross-repo item next to the presigned direct-upload redesign. `upload` was the only seam available without forking the SDK's `prepareInputs` walk or paying a second `buildInputs` round-trip.
+
+One small shared-surface addition: `ClassifyErrorOptions` gained `asset?: { location?, hint? }` so a route can locate an asset rejection at its own field (`attachments[i]`, not `inputs`) and name its own ceiling. Follows the existing per-route `badRequest` / `notFound` / `auth` pattern.
+
+**CHECKPOINT 2 — REACHED (2026-07-31).** Contract implemented, gates green, drift reconciled into SPEC. Natural handoff: Phase 3 is docs + a live ChatGPT smoke + release, and the smoke is the part that cannot be done from here.
 
 ---
 
-## Phase 3 — docs, gates, release
+## Phase 3 — docs, gates, release — IN PROGRESS (the smoke is done; docs, deploy and release are not)
 
-- [ ] `SPEC.md` (done in Phase 1, reconciled against what actually shipped), `README.md` (tool table + section + the ChatGPT-only note + the 7 MiB limit), `CHANGELOG.md` `## [Unreleased]`, `CLAUDE.md` (architecture list + the new capability files + the fetch boundary in Conventions + the console-only registration note).
-- [ ] Full gate: `make check && make test`.
-- [ ] **Deploy and live-smoke on ChatGPT** before releasing — the real end-to-end (drop a PDF, run a method on it). A tool whose whole value is a vendor integration cannot ship on unit tests alone. Smoke an **oversize** file too: that path is ordinary, not exotic (M1).
-- [ ] **Probe an image on iOS** while you have the live connection — the last untested cell from Phase 0, and the one the original defect reports actually describe. Non-blocking; PDFs work on desktop web and iOS.
-- [ ] Sanity-check claude.ai (tool present, refuses a fabricated URL instructively) and the workshop (tool **absent** — D5, not merely inert).
-- [ ] **Release notes must say two things out loud**: existing users have to **re-add the connector** for the new tool and its description to reach them (A10 — a cached tool list never refreshes), and attachments are capped at **7 MiB** (M1 — users will hit this, since ChatGPT accepts far larger files).
-- [ ] Release via the `/release` skill. Consider whether `pipelex-plugins` skills need a line about the new console capability — the last release had exactly this coordination footgun.
-- [ ] Fold the verified behavior back into `wip/console-attachments-landscape.html` (the Phase-0 record item deferred to here): replace the undocumented-TTL caveat with the measured ~305 s, add the M1 ceiling, and stop describing the channel as a proposal.
+- [x] **Live-smoke on ChatGPT.** **PASSED 2026-07-31 — see S1.** Unprompted fill, happy path to `mthds_run`, the oversize refusal, and an image on iOS. Ran through a tunnel; the deploy is a separate step, still owed below.
+- [x] **Probe an image on iOS.** **PASSED** — the last untested Phase 0 cell is closed. No mobile arm needed; D6 stands.
+- [x] `SPEC.md` — written in Phase 1 and reconciled in Phase 2 against what actually shipped. **Do not redo it.**
+- [ ] **`CHANGELOG.md`** — add the feature under `## [Unreleased]`, beside the existing Skybridge-1.3.2 entry. Cover: the new console-only `mthds_upload_attachments` tool, the 7 MiB attachment cap, the **breaking-ish operational note that existing console users must re-add the connector**, and the `mthds_prepare_inputs` upload-ceiling fix (a separate user-visible improvement — it names the real limit and no longer wastes a 10 MiB round-trip).
+- [ ] **`README.md`** — tool table row + a section for the attachment flow + the ChatGPT-only note + the 7 MiB limit.
+- [ ] **`CLAUDE.md`** — the architecture file list gains `capabilities/attachment-fetch.ts`, `capabilities/attachments.ts`, `capabilities/upload-ceiling.ts`; a Conventions line for the fetch boundary; and a note on the console-only registration table (`consoleOnlyToolDefinitions`) since it breaks the "both shells register the same table" property the file currently states without exception.
+- [ ] Full gate: `make check && make test`. (Was green at the Phase 2 commit; re-run after the doc edits.)
+- [ ] **Deploy the production console**: `make deploy` (Alpic; CLI-only, no git integration). This is what puts the tool in front of real users at `https://pipelex-mcp-a3c6a115.alpic.live/mcp` — the smoke did **not** do this.
+- [ ] **Release notes must say two things out loud**: existing users have to **re-add the connector** for the new tool and its description to reach them (A10 — a cached tool list never refreshes, so the tool is simply invisible until they do), and attachments are capped at **7 MiB** (M1 — users will hit this, since ChatGPT hands over 19 MB files happily).
+- [ ] Release via the `/release` skill. **npm publish needs Louis in-session** (auth lapses between sessions; `npm publish` hits an `EOTP` browser gate — the agent cannot do it). Consider whether `pipelex-plugins` skills need a line about the new console capability — the last release had exactly this coordination footgun.
+- [ ] Fold the verified behavior back into `wip/console-attachments-landscape.html`: replace the undocumented-TTL caveat with the measured ~305 s, add the M1 ceiling and the S1 smoke result, and stop describing the channel as a proposal.
+- [ ] *Non-blocking, do it whenever:* sanity-check **claude.ai** — the tool is present there with a required `attachments`, so the model must fabricate a URL or decline; confirm the fetch boundary's refusal reads instructively in situ. The workshop side needs no manual check: the tool's **absence** is pinned by a test (D5).
 
-**CHECKPOINT 3 — PENDING.** Record the shipped version.
+**CHECKPOINT 3 — PENDING.** Record the shipped version, the Alpic deploy, and whether the claude.ai wording held up.
 
 ---
 

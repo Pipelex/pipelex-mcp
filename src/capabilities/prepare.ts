@@ -1,4 +1,4 @@
-import { InputPreparationError, PipelexApiClient } from "@pipelex/sdk";
+import { InputPreparationError } from "@pipelex/sdk";
 import type {
   BuildInputsRequest,
   BuildInputsResponse,
@@ -27,6 +27,7 @@ import type {
   SubmittedFileInput,
   ToolError,
 } from "./shared.js";
+import { MAX_UPLOAD_BYTES, SizeGuardedPipelexApiClient, formatMib } from "./upload-ceiling.js";
 
 export const mthdsPrepareInputsInputSchema = {
   files: filesInputSchema.optional(),
@@ -141,6 +142,13 @@ const PREPARE_ERROR_OPTIONS: ClassifyErrorOptions = {
     location: "pipe_ref",
     hint: "Pass pipe_ref as a qualified domain.pipe_code; omitting it requires the closure to declare exactly one main_pipe. If the bundle itself is invalid, repair it with mthds_validate.",
   },
+  // Name the real ceiling. `POST /v1/upload` sits behind an AWS gateway whose
+  // 10 MiB request quota, divided by base64's 4/3 inflation, is the actual
+  // wall — NOT the app-level 50 MiB MAX_UPLOAD_MIB, which is unreachable
+  // through the public gateway and must never be quoted to a caller.
+  asset: {
+    hint: `Pipelex storage accepts uploads up to ${formatMib(MAX_UPLOAD_BYTES)}. Shrink the file, or reference it by an http(s) URL instead.`,
+  },
 };
 
 /**
@@ -164,10 +172,14 @@ class UploadNotAllowedError extends Error {
 // Constructed inside each caught block (mirroring inputs.ts / run.ts): the SDK
 // constructor throws PipelineRequestError on a malformed base URL, and that
 // must classify to a config ToolError, not reject the MCP handler.
-function prepareClient(context: PrepareContext): PrepareClient {
+export function prepareClient(context: PrepareContext): PrepareClient {
   return (
     context.client ??
-    new PipelexApiClient({
+    // Size-guarded: the workshop's upload walk (delegated to the SDK's
+    // prepareInputs) would otherwise learn an asset is too big only from the
+    // gateway's 413, after the whole payload had crossed the wire — and with a
+    // server message that cannot name the real limit. See upload-ceiling.ts.
+    new SizeGuardedPipelexApiClient({
       baseUrl: context.baseUrl,
       apiKey: context.apiKey,
     })
