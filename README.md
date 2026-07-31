@@ -14,16 +14,23 @@ one capability core**:
   `.mthds` files from disk instead of having the model hand-copy their contents.
 
 Both servers register the same MCP tools, with identical names, schemas, and
-contracts:
+contracts — with one documented exception, marked below:
 
 | Tool | What it does |
 |---|---|
 | `mthds_validate` | Validate submitted `.mthds` files, or a registered method by catalog id; on a valid verdict, ship the dry-run method graph to the `run-graph` view (hosted only). |
 | `mthds_inputs_template` | Project a pipe's declared inputs as a fill-in template for a run. |
 | `mthds_prepare_inputs` | Turn filled inputs run-ready: upload file-bearing values to Pipelex storage and rewrite them to `pipelex-storage://` (workshop uploads; console is pass-through only). |
+| `mthds_upload_attachments` | **Hosted console only.** Turn a file the user attached in the chat into a run-ready `pipelex-storage://` reference (ChatGPT only — see [Chat attachments](#chat-attachments-chatgpt-only)). |
 | `mthds_run` | Start a durable run on the hosted Pipelex API; returns a durable `run_id` immediately. |
 | `mthds_run_status` | Check a durable run's coarse lifecycle state by `run_id`. |
 | `mthds_run_results` | Fetch a durable run's terminal outcome by `run_id`. |
+
+`mthds_upload_attachments` is the exception: its sole argument is a
+host-substituted attachment reference, and the host gates that substitution on
+the declared JSON Schema, so on the workshop the tool would be *structurally
+unreachable* rather than merely unused. The invariant that still holds is that
+**no tool name means different things on the two shells.**
 
 `SPEC.md` is the source of truth for the full tool contracts, verdict
 discipline, and view behavior. This README covers what you need to install,
@@ -164,6 +171,60 @@ the handshake and `tools/list` still work, but every tool call returns a
 (That said, prefer the **local workshop** on hosts that can spawn it — see the
 matrix below. The header example above is for testing the console from Claude
 Code, not the recommended pairing.)
+
+## Chat attachments (ChatGPT only)
+
+The workshop gets the user's actual file through the `{ path }` arm. The console
+has no filesystem, so it gets it a different way: **ChatGPT's Apps runtime
+rewrites the model's reference to an attached file into a signed-URL object**
+before the call reaches the server. `mthds_upload_attachments` takes that
+channel — it fetches the bytes server-side and uploads them to Pipelex storage
+under your BYOK key, returning only small URI strings. **The bytes never enter
+the model's context**, which is the whole reason console-side upload is allowed
+here at all.
+
+The flow, on the console:
+
+```
+user attaches a PDF in the chat
+  → mthds_upload_attachments   → pipelex-storage://… uris
+  → fill the uris into the mthds_inputs_template output
+  → mthds_run
+```
+
+`mthds_prepare_inputs` can be **skipped** — a `pipelex-storage://` value is
+already run-ready. Nothing else in the flow changes.
+
+Three things to know:
+
+- **Re-add the connector to get it.** ChatGPT caches a connector's tool list at
+  add-time and never refreshes it, so a newly shipped tool (or a changed tool
+  description) stays invisible to an existing installation until you remove and
+  re-add the connector.
+- **7 MiB per attachment.** This is a transport ceiling, not a product choice:
+  `POST /v1/upload` takes a base64 body behind an AWS API Gateway HTTP API, whose
+  10 MiB request quota divides by base64's 4/3 inflation to ~7.5 MiB decoded.
+  (The app-level 50 MiB `MAX_UPLOAD_MIB` is unreachable through the public
+  gateway — don't quote it.) ChatGPT hands over much larger files happily, so
+  expect to meet this; the refusal fires before any bytes are fetched and names
+  the limit.
+- **ChatGPT only.** claude.ai injects no file reference into a connector call, and
+  MCP has nothing in-spec (SEP-2631 is an open draft). On any other host the
+  model can only fabricate a URL, which the fetch boundary refuses — that refusal
+  is also the "this host cannot attach files, ask for an `http(s)` URL"
+  diagnostic.
+
+**Attachment fetch boundary.** Fetching a host-supplied URL from a public
+endpoint is an SSRF surface, so the fetch is a deny-by-default policy: `https:`
+only; the host must match `oaisdmntpr<azure-region>.blob.core.windows.net` or
+`files.oaiusercontent.com` (the `oaisdmntpr` prefix is **required** — a
+suffix-only rule would admit any Azure customer's storage account); no
+credentials in the URL, no non-default port; redirects refused; the size cap
+enforced from `content-length` before the body is read *and* again mid-stream; a
+bounded timeout; no headers forwarded; non-2xx refused. Because the OpenAI host
+prefix is undocumented vendor infrastructure that can change without notice, the
+cap, the timeout, and the no-redirect rule hold on their own — the host check is
+a filter, not the defence.
 
 ## Host → server matrix
 
@@ -321,6 +382,47 @@ directly, repeated in the `content` summary. Unlike the other tools this has **n
 produced-invalid arm**: an unresolvable closure is a no-verdict `status: "error"`
 (recover via `mthds_validate` / `mthds_inputs_template`). See `SPEC.md` →
 "Prepare Inputs Scope" for the full contract.
+
+### `mthds_upload_attachments` — hosted console only
+
+```ts
+// input — the host fills this in; never construct one yourself
+{
+  attachments: Array<{
+    download_url: string;   // required — the host's signed HTTPS URL
+    file_id: string;        // required — e.g. "sediment://file_0000…"
+    mime_type?: string;
+    file_name?: string;
+  }>;
+}
+
+// structuredContent
+{
+  status: "ok" | "error";
+  is_valid: boolean;                  // true only when EVERY attachment ingested
+  attachments?: Array<{
+    file_id: string;
+    file_name?: string;
+    uri?: string;                     // the pipelex-storage:// reference, on success
+    content_type?: string;
+    size?: number;                    // decoded bytes
+    error?: ToolError;                // per-item failure
+  }>;
+  uploads?: string[];                 // the successful uris
+  errors?: ToolError[];               // no-verdict only
+}
+```
+
+Registered on the **hosted console only**, and populated by **ChatGPT only** —
+see [Chat attachments](#chat-attachments-chatgpt-only) for the flow, the 7 MiB
+cap, and the fetch boundary. The four-field attachment shape is mandated, not
+chosen: OpenAI's app review requires exactly these properties with exactly this
+required/optional split, and the host's runtime substitution is gated on the
+same schema — so a deliberately lenient variant would never be populated. **Partial
+success is a produced verdict**: `status: "ok"` with `is_valid: false`, the
+successful `uploads` returned alongside per-item errors rather than discarded.
+No Skybridge view — the returned URIs are small structured data the model reads
+directly, repeated in the `content` summary.
 
 ### `mthds_run` / `mthds_run_status` / `mthds_run_results`
 

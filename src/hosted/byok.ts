@@ -120,5 +120,8 @@ function overrideContexts(
     inputs: { ...base.inputs, ...keyOverride, authError },
     prepare: { ...base.prepare, ...keyOverride, authError },
     run: { ...base.run, ...keyOverride, authError },
+    // The attachment ingest uploads to Pipelex storage, so the caller's own key
+    // is what funds it — the console holds none of its own.
+    attachments: { ...base.attachments, ...keyOverride, authError },
   };
 }

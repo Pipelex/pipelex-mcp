@@ -13,6 +13,7 @@ Core actions:
 - Return optional graph data when requested and available.
 - Project a pipe's declared inputs as a fill-in template (`mthds_inputs_template`), so an assistant can prepare inputs for a run without leaving the conversation. This unblocks the CLI-free skills in `../pipelex-plugins` (`pipelex-inputs`, `pipelex-design`) that used to shell out to `mthds-agent inputs bundle`.
 - Prepare a pipe's *filled* inputs for a run (`mthds_prepare_inputs`): upload file-bearing values (local paths, `data:` URLs, bytes) to Pipelex storage and rewrite them to `pipelex-storage://`, so the inputs are run-ready — on the local workshop, using the user's key; the hosted console stays pass-through only.
+- Turn a file the user attached in the chat into a run-ready storage reference (`mthds_upload_attachments`, hosted console only): fetch the host's signed attachment URL server-side and upload the bytes to Pipelex storage, returning `pipelex-storage://` URIs the assistant fills into an inputs template. This is what lets a ChatGPT user drop a PDF into the conversation and run a method on it without ever pasting a URL.
 - Start a durable run of a method on the hosted Pipelex API (`mthds_run`), then check on it (`mthds_run_status`) and report its results (`mthds_run_results`) by durable run id — the run outlives any single tool call and even the conversation.
 
 ## Why LLM?
@@ -29,7 +30,7 @@ Core actions:
 
 `mthds_run` ships a second Skybridge view, `run-follow`: a self-polling status card that follows a durable run live (friendly status label, elapsed wall-clock, spinner) without any model turns — it polls the read-only `mthds_run_status` on a timer via `useCallTool`. On completion it fetches `mthds_run_results` once and renders the executed graph from the response's view-only metadata plus a compact output preview; on failure it shows the terminal status and failure message (and states plainly that no graph exists for failed runs). Once the terminal outcome is resolved (completed or failed), the view hands the conversation back to the model on its own via `sendFollowUpMessage` — one canned prompt naming the run id — so the assistant reports the outcome without the user prompting (the completion handoff, detailed in Run Scope). On remount it re-resolves the run by id, so reopening the conversation restores the card without re-firing the handoff.
 
-**First view**: The MCP host lists the Pipelex tools: `mthds_validate`, `mthds_inputs_template`, `mthds_prepare_inputs`, `mthds_run`, `mthds_run_status`, and `mthds_run_results`. `mthds_validate` and `mthds_run` carry Skybridge views; the others are plain tools whose payloads are small structured data the model reads directly.
+**First view**: The MCP host lists the Pipelex tools: `mthds_validate`, `mthds_inputs_template`, `mthds_prepare_inputs`, `mthds_run`, `mthds_run_status`, and `mthds_run_results`, plus `mthds_upload_attachments` on the hosted console only (see Deployments). `mthds_validate` and `mthds_run` carry Skybridge views; the others are plain tools whose payloads are small structured data the model reads directly.
 
 **Validation flow**:
 
@@ -71,7 +72,7 @@ The richer error-grouping validation view (diagnostics grouped by class, clickab
 
 ## Deployments
 
-The product ships as **two servers from one repo and one capability core**, sharing one logical identity: the same server key (`pipelex`), the same tool names, the same structured contracts, and the same verdict discipline. The capability core (`capabilities/`) knows nothing about which shell invoked it.
+The product ships as **two servers from one repo and one capability core**, sharing one logical identity: the same server key (`pipelex`), the same tool names (with one documented console-only exception, below), the same structured contracts, and the same verdict discipline. The capability core (`capabilities/`) knows nothing about which shell invoked it.
 
 - **Hosted console** — the existing Skybridge HTTP server, deployed on Alpic. Serves remote-connector hosts (ChatGPT, claude.ai, Claude Desktop/Cowork as consumers). Registers the Skybridge views (`run-graph`, `run-follow`). Auth is **bring-your-own-key (BYOK)** — the interim posture until per-user OAuth (the console auth workstream) ships: the console holds no server-side key; each caller supplies their own `plx_sk_` platform key at the transport level, via an `Authorization: Bearer plx_sk_...` header (hosts with header config) or `?api_key=plx_sk_...` on the connector URL (hosts whose connector UI accepts only a URL). The key never rides a tool argument, so it never enters the model's context. A BYOK key takes precedence over any server-held `PIPELEX_API_KEY`; a keyless request still handshakes and lists tools, and a keyless tool call fails as an instructive `config` no-verdict at `api_key` naming both channels (a server-held env key, when an operator sets one, keeps the env-var wording — it is the operator's concern, not the caller's). The middleware (`src/hosted/byok.ts`) verifies nothing — the Pipelex API is the authority on the key — and is deliberately disposable: when console OAuth lands it is deleted, not migrated.
 - **Local workshop** — an npm-distributed stdio server (`@pipelex/mcp`, bin `pipelex-mcp`) that coding-agent hosts (Claude Code, Codex, Cursor, Cowork-as-builder) spawn via `npx`. Built on the plain MCP SDK (`McpServer` + `StdioServerTransport`) over the shared capability core. **Tools-first: it registers no views at launch** — the empirically verified V1 posture (view-rendering workshop hosts penalize localhost asset origins; the text summaries carry the flow on their own in text-only hosts). Auth is a per-user `plx_sk_` platform key in `PIPELEX_API_KEY`, supplied through the host's MCP server config env — per-user auth for free, no OAuth machinery.
@@ -93,6 +94,8 @@ An item is one arm or the other; on a malformed item carrying both keys, `conten
 
 The extension gate is checked on the *submitted* path, which fully closes the prompt-injection vector (an injected path string is the only thing that threat controls). Two residuals require a local process with **write** access to the workspace and are accepted, not mitigated, in this increment: (a) a `.mthds`-named symlink pointing at an in-boundary non-`.mthds` file, and (b) a TOCTOU symlink swap between the real-path containment check and the read. Both demand an attacker who already holds direct read access to those same files (and stronger primitives, e.g. planting a malicious `.mthds`), so the resolver's fail-value contract gains nothing from an fd-based read-after-verify here.
 
+**The tool table is shared except for one console-only tool.** Both shells register the same tool table from `src/tools.ts`, with one documented exception: **`mthds_upload_attachments` is registered on the hosted console only.** This is the first break in the "same tool names on both shells" property, and it is deliberate rather than incidental. The tool's sole argument is a host-substituted attachment reference, and the substitution is gated by the host on the declared JSON Schema — a field only receives a file if it declares the mandated four-field object shape (see Attachment Ingest Scope). No stdio host performs that substitution, so on the workshop the tool would be *structurally unreachable*, not merely unused: nothing could ever populate it. Registering it there would spend every workshop user's tokens on every `tools/list` to advertise a capability that cannot fire, and would invite the model to attempt it. The shells already differ in behavior behind shared names (views on the console only, the `{ path }` resolver and the upload boundary on the workshop only); this extends that per-deployment split to presence, for the one tool whose input only one host can produce. The invariant that still holds, and that matters for routing: **no tool name means different things on the two shells.**
+
 **One host, one server.** A host should be connected to exactly one of the two shells, never both — same tool names on both mean a both-installed host has ambiguous routing. Notably, a claude.ai Pipelex connector syncs into Claude Code; a workshop user disables it there (`/mcp`) in favor of the local server.
 
 ## Naming Conventions
@@ -100,7 +103,7 @@ The extension gate is checked on the *submitted* path, which fully closes the pr
 Tools are the contract; the `../pipelex-plugins` skills are the manual. The naming follows that split:
 
 - **Server key: `pipelex`** — the product brand (Pipelex is the service; MTHDS is the language). Hosts derive their flattened tool names from it (`mcp__pipelex__mthds_validate` on Codex, `mcp__plugin_pipelex_pipelex__mthds_validate` on Claude Code).
-- **Tool names: `mthds_<stem>`, snake_case** — operations on MTHDS-language artifacts. The `mthds_` prefix stays even though the server prefix could be argued to cover it: some hosts display or match bare tool names, generic verbs (`validate`, `run`) collide across servers in a multi-server session, and a `pipelex_` prefix would stutter against the server key.
+- **Tool names: `mthds_<stem>`, snake_case** — operations on MTHDS-language artifacts, and on the assets that feed an MTHDS run. The `mthds_` prefix stays even though the server prefix could be argued to cover it: some hosts display or match bare tool names, generic verbs (`validate`, `run`, `upload`) collide across servers in a multi-server session, and a `pipelex_` prefix would stutter against the server key. The "and the assets that feed a run" widening is what admits `mthds_upload_attachments`: uploading to Pipelex storage is a runtime-specific operation on a user's file rather than on MTHDS-language content, so the brand boundary would argue for a bare or `pipelex_`-prefixed name — but a single unprefixed tool in an otherwise uniform list costs the model more (one incoherent family, one collision risk) than the loose prefix costs the brand. The tool is named for the workflow it serves, not for the storage it writes to.
 - **Lifecycle families share a stem prefix** — `mthds_run`, `mthds_run_status`, `mthds_run_results` sort and display adjacently, so hosts and models see them as one family.
 - **Names state what you get** — a noun-only name must name the artifact it returns (`mthds_inputs_template`, renamed from the ambiguous `mthds_inputs`); otherwise lead with the operation (`mthds_validate`).
 - **Tools are self-sufficient; the dependency on skills is one-way** — tool names, descriptions, and the server `instructions` never reference the plugin skills, because many consumers (ChatGPT, claude.ai connectors, raw MCP hosts) will never see them. The skills reference tool names verbatim, and where a skill is the manual for one tool the two share a stem (`pipelex-inputs` ↔ `mthds_inputs_template`); that side of the convention is recorded in `../pipelex-plugins/docs/decisions.md`.
@@ -227,6 +230,10 @@ The public MCP input shape is:
 **Per-deployment asset boundary (the seam).** Uploading a local/byte asset requires reading the caller's bytes, which only the deployment co-located with those bytes can do. This is the same per-deployment split as the `{ path }` arm, gated by a per-deployment capability seam on the capability context (analogous to the file `resolver`):
 
 - The **local workshop** prepares local paths, `data:` URLs, and bytes within its asset boundary, uploading with the user's `PIPELEX_API_KEY`. It delegates the upload walk to the SDK's `prepareInputs`.
+
+  **The upload size ceiling is ~7.5 MiB decoded, not the documented 50 MiB.** Measured 2026-07-31 against the hosted API: 7.4 MiB uploads, 7.5 MiB is rejected `413`. `POST /v1/upload` takes a base64 JSON body behind an AWS API Gateway HTTP API integration, whose 10 MiB request limit is a hard quota; base64's 4/3 inflation puts the decoded wall at exactly 7.5 MiB. The app-level `MAX_UPLOAD_MIB` (50 MiB) is therefore unreachable through the public gateway and must not be quoted as the limit anywhere.
+
+  The ceiling is enforced client-side by `SizeGuardedPipelexApiClient` (`capabilities/upload-ceiling.ts`), a `PipelexApiClient` subclass overriding `upload` — the one seam the MCP owns, since the SDK's `prepareInputs` walk reaches the wire through `this.upload`. One override therefore covers both the workshop's delegated walk and `mthds_upload_attachments`'s own `uploadFile` calls. It throws the same `RejectedAssetError` a real `413` maps onto, so every downstream classifier is unchanged; what improves is that the message can name the actual limit, which the server's cannot. **What it does not do is skip reading and base64-encoding the asset first**: for a local path the SDK owns that step inside `uploadFile` (`readLocalPath`), so refusing before the read needs a pre-flight in `@pipelex/sdk` itself — a cross-repo item, carried alongside the presigned direct-upload redesign. The wasted network round-trip, the expensive half, is gone either way. `MAX_UPLOAD_BYTES` is derived from the gateway quota rather than hardcoded, so the derivation stays visible.
 - The **hosted console** is **pass-through only**: it accepts `http(s)` URLs and `pipelex-storage://` URIs, and **refuses any input that would require an upload** — a `data:` URL, inline bytes, or a local path — with an instructive `input_domain` no-verdict located at `inputs`, naming the local workshop (`npx @pipelex/mcp`) and the pass-through alternatives. The console never reads a filesystem and never uploads. (BYOK gives each console caller their own key, which settles *whose* storage an upload would target — but inline `data:` bytes still bloat the model's context, the exact cost the workshop's `{ path }` design exists to avoid, so console byte upload stays deferred until a proper out-of-band attachment channel exists; see Non-Goals.)
 
 Because the console refuses uploads before any SDK upload call, the SDK's upload-side errors (`InvalidLocalSourceError`, `RejectedAssetError`, `UnsupportedUploadCapabilityError`, `UploadAuthenticationError`, `UploadTransportError`) arise only on the **workshop**; on the console the sole upload-related failure is its own pre-flight refusal.
@@ -263,6 +270,104 @@ The structured output is:
 Each is classified in `classifyError` (extended for the `InputPreparationError` family — these derive from `PipelineRequestError`, so they must be mapped ahead of the generic arm, as `EmptyMethodSourceError` already is in `fetchMethodFiles`) with its `retryable` verdict, using per-route `ClassifyErrorOptions` (400/422 located at `pipe_ref`; the by-id 404 at `method_id`; the deployment auth texture threaded from the context's `authError`).
 
 **Summary.** The build/prepare surface returns no `rendered_markdown`, so the capability composes its own `content` summary: the resolved pipe (when known), a one-line note of how many assets were uploaded vs passed through, and the prepared `inputs` in a fenced JSON block (the `mthds_inputs_template` duplication pattern — the prepared inputs are the small payload the model must carry to `mthds_run`).
+
+## Attachment Ingest Scope (`mthds_upload_attachments`) — hosted console only
+
+`mthds_upload_attachments` turns a file the user attached in the conversation into a run-ready `pipelex-storage://` reference. It is the hosted console's answer to the question the workshop answers with `{ path }` items: *how does the user's actual PDF reach a run without its bytes crossing the model's context?* The console fetches the host's signed attachment URL server-side and uploads the bytes to Pipelex storage under the caller's BYOK key; only small URI strings return to the model.
+
+It is a plain tool: no Skybridge view, no `_meta` channel, no `available_view_specs` — the returned URIs are small structured data the model reads directly and fills into an inputs template.
+
+**Where it sits in the flow.** `mthds_upload_attachments` → the URIs → filled into the `mthds_inputs_template` output → `mthds_run`. It **composes with the existing tools without changing any of them**: a `pipelex-storage://` URI is already a pass-through value everywhere downstream, so `mthds_prepare_inputs` needs no change and can be skipped entirely when every file-bearing input is an ingested attachment. This is the whole reason the capability is a separate tool rather than an `attachments` argument on `mthds_prepare_inputs`: no binding convention between an attachment and an input slot has to be invented, and the console's "pass-through only" property stays a true statement rather than an exception.
+
+**Host support: ChatGPT only.** The channel exists because ChatGPT's Apps runtime rewrites a model-authored file reference into a signed-URL object before the call reaches us. Verified against a live connection on desktop web and iOS, with PDFs from 140 KB to 19.6 MB. **claude.ai has no equivalent** — no file id, no signed URL, no host-injected reference reaches a connector — and MCP has nothing in-spec (SEP-2631 remains an open draft). On a host with no channel the model can only fabricate a URL, which the fetch boundary refuses; that refusal doubles as the "this host cannot attach files" diagnostic and its hint says so.
+
+### The attachment object (the four-field rule)
+
+```ts
+{
+  attachments: Array<{
+    download_url: string;   // required — the host's signed HTTPS URL
+    file_id: string;        // required — e.g. "sediment://file_0000…"; a scheme-prefixed URI, not an opaque token
+    mime_type?: string;     // optional
+    file_name?: string;     // optional
+  }>;
+}
+```
+
+This shape is **mandated, not chosen**. Any field named in the tool's `_meta["openai/fileParams"]` must declare exactly these four properties with exactly this required/optional split; a fifth property, a missing one, or a wrongly-required optional fails OpenAI's app-review "Scan Tools" step. It is also a **runtime** gate, not only a review checkbox: the host substitutes a file reference only into a field whose declared schema matches, so a deliberately lenient schema is not a fallback — it is invisible to the mechanism and would never be populated. There is consequently no "accept whatever arrives and classify it" arm to build.
+
+Three consequences follow:
+
+- **`attachments` is required, and the description must push the model to fill it.** An optional field with a neutral or defensive description silently yields calls with the field absent, which looks exactly like a host failure. This was measured: under a description that said "do not invent values for `attachments`", every observed call omitted the field; under a description that says *always* pass the user's attached file, the model populated it unprompted on the first try. **The description text is load-bearing mechanism, not documentation, and gets the same review rigour as the schema.**
+- **The schema is declared in the capability layer, not imported from `skybridge/server`.** Skybridge ships an equivalent `FileRef`, but the capability core is Skybridge-free by construction (`src/tools.ts` and `src/capabilities/` import zero Skybridge symbols) and importing it would drag Skybridge into the tsup-bundled workshop binary. A local Zod object emits a byte-identical JSON Schema, so the constraint costs nothing.
+- **A malformed payload never reaches the capability layer.** The MCP SDK rejects a non-conforming argument at its own boundary. On the hosted shell that surfaces to the model as an `isError` result carrying the raw validation text, from which the model has been observed to self-correct on the next call. This is why no bespoke handling exists for the reported mobile-placeholder defect (which did not reproduce on iOS with a PDF): the failure is self-correcting in practice, and a description hint is the whole mitigation.
+
+### Attachment fetch boundary (console)
+
+Fetching a host-supplied URL from a public endpoint is an SSRF surface, and it is the one genuinely new risk this capability introduces. The boundary is a named policy, enforced by a dedicated module that denies by default — the console's analogue of the workshop's path trust boundary. It ships **with** the first fetch, not as a hardening follow-up.
+
+- **Scheme**: `https:` only.
+- **Host allowlist**: the host must match an OpenAI-owned pattern — `oaisdmntpr<azure-region>.blob.core.windows.net`, or the vendor-documented `files.oaiusercontent.com`. Everything else is refused. A **literal** host list is not an option: four captures in one afternoon, from one user in one location, came back from three different Azure regions (`newzealandnorth`, `koreacentral`, `westus`), so the region is assigned per upload and bears no relation to the user. A **suffix-only** rule (`*.blob.core.windows.net`) is equally unacceptable in the other direction: any Azure customer can create a storage account under that suffix, so the `oaisdmntpr` prefix is required, never optional.
+- **Redirects**: refused outright. A signed SAS URL has no reason to redirect, and refusing is simpler and stricter than comparing hosts across a redirect chain.
+- **Size**: refused **before the body is read**. `fetch` resolves on the response headers, so a `content-length` over the cap is refused there and the body is cancelled without a byte of payload being pulled — one request, no ranged pre-flight needed. The stream is *also* bounded mid-flight, so an absent or lying header cannot exceed the cap.
+- **Timeout**: a bounded connect+read budget on the fetch leg.
+- **Credentials**: none forwarded — no cookies, no auth headers, no ambient identity.
+- **Response**: non-2xx is refused.
+
+The classic SSRF targets — link-local metadata, loopback, RFC1918 — are unreachable *by construction* under https-only + host allowlist + no-redirects. But the `oaisdmntpr` prefix is undocumented vendor infrastructure that can change without notice, so the byte cap, the timeout, and the no-redirect rule must hold on their own: **the host check is a filter, not the defence.**
+
+**Request metadata is never logged.** ChatGPT attaches `openai/userLocation` (city, region, country, timezone, and latitude/longitude), plus stable opaque `openai/subject` / `openai/session` / `openai/organization` identifiers, to **every** `tools/call` — arriving on a surface we did not ask for. Production must not log request `_meta`, on this route or any other.
+
+### The size cap is forced by the transport, not chosen
+
+Measured against the hosted API (2026-07-31): a decoded asset of **7.4 MiB uploads; 7.5 MiB is rejected `413`**. That wall is exactly AWS API Gateway's 10 MiB request limit divided by base64's 4/3 inflation — `POST /v1/upload` takes a base64 JSON body behind an HTTP API integration. **The app-level 50 MiB `MAX_UPLOAD_MIB` is unreachable through the public gateway** and must not be quoted as the limit.
+
+The console therefore caps an attachment at **7 MiB**, leaving headroom for the JSON envelope around the base64 payload. This is a transport ceiling, not a product judgment about what makes a sane MTHDS input.
+
+The uncomfortable consequence, stated plainly because users will meet it: **ChatGPT hands over files far larger than we can ingest** — a 19,631,193-byte PDF was accepted by the host with no refusal or truncation. Oversize attachments are therefore an ordinary case, not an edge case, and the refusal must be excellent: it names the limit in MiB, it fires before any bytes are fetched, and it is called out in the release notes. Raising the ceiling means bypassing the gateway for uploads (a presigned direct-upload redesign), which is out of scope here and belongs to the hosted storage owner.
+
+Timing is not a constraint: an end-to-end ingest at the cap costs roughly 6 s (~2.3 s fetch at the observed 3.2 MB/s, ~2.9 s upload at the observed 2.5 MB/s) against a signed-URL lifetime of ~305 s. A **synchronous** ingest tool fits comfortably in one call.
+
+### Structured output
+
+```ts
+{
+  status: "ok" | "error";
+  is_valid: boolean;                  // true iff EVERY attachment was ingested
+  attachments?: Array<{
+    file_id: string;
+    file_name?: string;
+    uri?: string;                     // the pipelex-storage:// reference, on success
+    content_type?: string;
+    size?: number;                    // decoded bytes
+    error?: ToolError;                // per-item failure — see below
+  }>;
+  uploads?: string[];                 // the successful uris (the mthds_prepare_inputs field, same meaning)
+  errors?: Array<ToolError>;          // no-verdict only
+}
+```
+
+**Verdict discipline**, consistent with every other tool: a *produced* result is `status: "ok"`, discriminated on `is_valid`. Once the per-item walk runs, the result is produced — `is_valid: true` when every attachment ingested, `is_valid: false` when at least one failed, with each failure on its own `attachments[i].error`. **Partial success is a produced verdict, not an error**: the successful uploads already exist in storage, and discarding them because a sibling failed would waste them and strand the model. `status: "error"` + top-level `errors[]` is reserved for the genuine no-verdict conditions — an empty `attachments` array (`input_domain`), a missing/invalid key or unreachable API (`config`), or a fault before any item was attempted.
+
+**Per-item error classes** (each carrying `retryable`, decided where the concrete failure is known, per the standing rule):
+
+- `input_domain` — a host outside the allowlist (not retryable; the hint names ChatGPT as the only host with an attachment channel, and asks for an `http(s)` URL otherwise); an attachment over the size cap (not retryable, naming the limit); a `413` from the upload route (`RejectedAssetError`, not retryable — a backstop, since the pre-flight cap should pre-empt it).
+- `config` — upload auth failure (`UploadAuthenticationError` / `ClientAuthenticationError`, 401/403, carrying the console's BYOK texture), a paywall (402), an unreachable API, a deployment with no upload route (`UnsupportedUploadCapabilityError`, 404).
+- `runtime` — a fetch timeout or network fault, a non-2xx from the storage host, and a transport/server fault reaching the upload route (`UploadTransportError`); retryable.
+
+One case deserves its own note: a **`403` on the download URL** is an expired signed link, classified `input_domain` at that attachment. Recovery is **re-attaching the file**, not repeating the same call — so it carries `retryable: false`, and the hint is what states the fix. (The `retryable` field means precisely "retrying *this same call* may succeed"; the link is dead permanently, and a new attachment is a different call with a different URL. Marking it `true` would invite a pointless identical retry.) The link's life is about five minutes from the tool call, which is why the bytes are ingested during the call rather than forwarded (see below).
+
+### Why ingest rather than forward the URL
+
+The host's `download_url` is an Azure SAS link with a **~305-second** life measured from the tool call — confirmed empirically, not merely read off the URL: a captured link re-fetched `206` at +288 s and `403` at +328 s, bracketing its declared expiry. A durable run's workers fetch minutes to hours after the tool call, so forwarding the raw URL into `mthds_run` would hand them a dead link in the *ordinary* case, not the edge case. The bytes must be fetched and re-hosted during the tool call, and the run must receive a `pipelex-storage://` reference.
+
+This creates a deliberate asymmetry worth stating so it does not read as an inconsistency: **this tool ingests the host's URL, while `mthds_prepare_inputs` still passes an ordinary user-pasted `http(s)` URL through unchanged.** Host attachment URLs expire in minutes; user URLs generally do not. Opt-in ingest for ordinary URLs remains a separate, additive future item (see Non-Goals).
+
+### The tool description is cached and cannot be hot-fixed
+
+ChatGPT caches a connector's tool list at add-time and does not refresh it: across a session with four `initialize` handshakes and five `tools/call` invocations, `tools/list` was issued **zero** times; the list refreshed only when the connector was removed and re-added. Combined with the description being load-bearing mechanism rather than documentation, this means **a description defect is not hot-fixable** — shipping a fix leaves every existing installation on the old text until each user re-adds the connector.
+
+Two obligations follow, and both are release blockers rather than polish: the initial wording gets the same review rigour as the schema, and the release notes tell users to re-add the connector.
 
 ## Run Scope (`mthds_run`, `mthds_run_status`, `mthds_run_results`)
 
@@ -389,7 +494,14 @@ Every `errors[]` entry also carries `retryable` — whether retrying the same ca
 
 ## Non-Goals
 
-The server must not add Pipelex Hosted API deployment behavior, OAuth token verification (the hosted console's bring-your-own-key middleware forwards the caller's key and verifies nothing — the API is the authority; see Deployments), blocking execution (`POST /v1/execute` or the SDK's blocking wrappers), run cancellation, resources, logs, package publishing (of MTHDS method packages to a registry — not this server's own npm distribution, which is how the workshop ships; see Deployments), subprocess fallbacks, or a production validation UI. Filesystem reads are scoped per deployment: the **hosted console** never reads files (a `{ path }` submission is rejected instructively — see Deployments); the **local workshop** reads exactly the `{ path }` items submitted to it, within its trust boundary. The workshop registers no views at launch (tools-first — see Deployments); local view delivery is a later increment gated on self-contained view bundles. Also out of scope for this increment: per-user OAuth. `mthds_prepare_inputs` (see Prepare Inputs Scope) now covers turning file-bearing inputs into run-ready `pipelex-storage://` references — on the **local workshop**, from local paths/bytes/`data:` URLs using the user's key. Still deferred: **console-side byte upload** — the hosted console stays pass-through only (`http(s)` / `pipelex-storage://`) until a proper out-of-band attachment/byte-transfer channel exists, so inline asset bytes never enter the model's context (BYOK settles *whose* storage, not the context-cost concern); and **opt-in `http(s)`→storage ingest** — an `http(s)` URL at a file position always passes through unchanged, and ingesting it into Pipelex storage is a later, additive SDK feature. Registered-method access by catalog id is in scope (`method_id` on `mthds_validate`, `mthds_run`, and `mthds_inputs_template` — see Validation Scope, Run Scope, and Inputs Template Scope), all via the same fetch-and-forward leg where the route itself has no by-id support. This does not extend to a dedicated "show me a registered method's graph" surface independent of validation — that belongs to the undecided conducted-views workstream (`wip/dual-server-conducted-views.md`), which is about a different concern (a hosted-connector-conducted scenario where content would cross the model twice); fetch-and-forward never puts content in the model's context, so it doesn't bear on that question either way. Around this catalog surface, these stay out: catalog discovery tools (listing methods or fetching method detail — the id arrives out-of-band until those land; they are the natural next increment after this one), a publish/save tool from the workshop, and stored-`input_data` defaulting (an omitted `inputs` passes through as-is; platform behavior governs).
+The server must not add Pipelex Hosted API deployment behavior, OAuth token verification (the hosted console's bring-your-own-key middleware forwards the caller's key and verifies nothing — the API is the authority; see Deployments), blocking execution (`POST /v1/execute` or the SDK's blocking wrappers), run cancellation, resources, logs, package publishing (of MTHDS method packages to a registry — not this server's own npm distribution, which is how the workshop ships; see Deployments), subprocess fallbacks, or a production validation UI. Filesystem reads are scoped per deployment: the **hosted console** never reads files (a `{ path }` submission is rejected instructively — see Deployments); the **local workshop** reads exactly the `{ path }` items submitted to it, within its trust boundary. The workshop registers no views at launch (tools-first — see Deployments); local view delivery is a later increment gated on self-contained view bundles. Also out of scope for this increment: per-user OAuth. `mthds_prepare_inputs` (see Prepare Inputs Scope) now covers turning file-bearing inputs into run-ready `pipelex-storage://` references — on the **local workshop**, from local paths/bytes/`data:` URLs using the user's key. **Console-side byte upload was deferred *conditionally* — "until a proper out-of-band attachment channel exists" — and that condition is now met on exactly one host.** ChatGPT's Apps runtime substitutes a signed attachment URL into a declared tool argument, which is precisely the out-of-band channel the deferral was waiting for: the bytes travel server-to-server and never enter the model's context. `mthds_upload_attachments` takes that channel (see Attachment Ingest Scope). What the deferral still covers, unchanged:
+
+- **`mthds_prepare_inputs` on the console stays pass-through only.** Its contract is untouched: `http(s)` / `pipelex-storage://` accepted, upload-needing values refused. It gains nothing from the attachment channel because ingested attachments arrive at it already as storage URIs.
+- **Inline asset bytes in tool arguments remain out of scope on every deployment.** Nothing may return base64 to the model or accept it as an argument — that invariant is what made the original deferral correct and it is unchanged. BYOK settles *whose* storage an upload targets; it never settled the context-cost concern.
+- **claude.ai and every other console host remain unserved**, because no channel exists there: no file id, no signed URL, no host-injected reference reaches a connector, and MCP has nothing in-spec (SEP-2631 is an open draft that already replaced one predecessor and has landed in no host). Those users keep pasting URLs. Adopting a standard intake when a host ships one will be additive — the `pipelex-storage://` design is already its shape, not a rewrite.
+- **The console still never reads a filesystem.** Fetching a host-supplied URL is a *network* read; the `readLocalPath` refusal in Prepare Inputs Scope stands exactly as written.
+- **Opt-in `http(s)`→storage ingest** for ordinary user-pasted URLs stays parked — an `http(s)` URL at a file position passes through unchanged, and ingesting it is a later, additive SDK feature. The asymmetry with `mthds_upload_attachments` (which does ingest) is deliberate and explained in Attachment Ingest Scope: host attachment URLs expire in minutes, user URLs generally do not.
+- **A view-side attach flow** via Skybridge's `useFiles()` / `selectFiles()` is not pursued: the `imageIds` round-trip back to the model is a known-broken path, and the console's views are ChatGPT/Cowork-only. The attachment surface stays tools-first. Registered-method access by catalog id is in scope (`method_id` on `mthds_validate`, `mthds_run`, and `mthds_inputs_template` — see Validation Scope, Run Scope, and Inputs Template Scope), all via the same fetch-and-forward leg where the route itself has no by-id support. This does not extend to a dedicated "show me a registered method's graph" surface independent of validation — that belongs to the undecided conducted-views workstream (`wip/dual-server-conducted-views.md`), which is about a different concern (a hosted-connector-conducted scenario where content would cross the model twice); fetch-and-forward never puts content in the model's context, so it doesn't bear on that question either way. Around this catalog surface, these stay out: catalog discovery tools (listing methods or fetching method detail — the id arrives out-of-band until those land; they are the natural next increment after this one), a publish/save tool from the workshop, and stored-`input_data` defaulting (an omitted `inputs` passes through as-is; platform behavior governs).
 
 Repository quality gates are in scope: ESLint, Prettier, TypeScript type checking, Vitest unit tests, and a combined `npm run check` command should remain available locally.
 
@@ -417,6 +529,14 @@ Prepare filled inputs for a run:
 2. On the local workshop, file-bearing values (local paths, `data:` URLs, bytes) are uploaded and rewritten to `pipelex-storage://`; `http(s)` / `pipelex-storage://` values pass through unchanged. On the hosted console, only pass-through values are accepted — an upload-needing input is refused instructively (use the workshop, or a URL / storage reference).
 3. The assistant passes the prepared `inputs` straight to `mthds_run`. An inputs set that is already all pass-through can skip this step. An unresolvable closure is a no-verdict error; the assistant repairs via the validation flow and retries.
 
+Run a method on a file attached in the chat (hosted console, ChatGPT only):
+
+1. The user drops a PDF (or other asset) into the conversation and asks to run a method on it.
+2. The assistant calls `mthds_upload_attachments`, referencing the attached file; ChatGPT's runtime rewrites that reference into the signed-URL object and asks the user to approve sharing it.
+3. The console fetches the bytes within the attachment fetch boundary and uploads them to Pipelex storage under the caller's BYOK key, returning `pipelex-storage://` URIs — the bytes never enter the conversation.
+4. The assistant fills those URIs into the `mthds_inputs_template` output and calls `mthds_run`. `mthds_prepare_inputs` can be skipped: a storage URI is already run-ready.
+5. On a host with no attachment channel (claude.ai, and every non-ChatGPT connector), the model has nothing to reference; the tool's fetch boundary refuses a fabricated URL and the hint asks the user for an `http(s)` URL instead.
+
 Run a method durably:
 
 1. The user asks the assistant to run a `.mthds` method (usually after validating it and filling the inputs template).
@@ -434,7 +554,7 @@ Run a registered method by reference:
 
 ## Tools and Views
 
-**Server instructions**: The server sets a short MCP `instructions` string (server-wide, on the `McpServer` constructor options) that hosts surface to the model. It states that the server validates `.mthds` method files (returning an interactive dry-run graph on a valid verdict), projects a method's declared inputs as a fill-in template, prepares filled inputs for a run (uploading file-bearing values to storage on the local workshop), and runs methods durably on the hosted Pipelex API (start from files or from a registered method's catalog id, then check status and fetch results by durable run id). It is a server-level hint only — argument-level detail stays in the tool `description`.
+**Server instructions**: The server sets a short MCP `instructions` string (server-wide, on the `McpServer` constructor options) that hosts surface to the model. It states that the server validates `.mthds` method files (returning an interactive dry-run graph on a valid verdict), projects a method's declared inputs as a fill-in template, prepares filled inputs for a run (uploading file-bearing values to storage on the local workshop), and runs methods durably on the hosted Pipelex API (start from files or from a registered method's catalog id, then check status and fetch results by durable run id). The hosted console's instructions additionally state that a file the user attached in the chat can be turned into a run-ready storage reference with `mthds_upload_attachments`; the workshop's do not, since it does not register that tool. It is a server-level hint only — argument-level detail stays in the tool `description`.
 
 **Tool: `mthds_validate`**
 
@@ -459,6 +579,15 @@ Run a registered method by reference:
 - **Behavior**: Resolves the pipe's declared signature, uploads file-bearing input values to Pipelex storage, and rewrites them to `pipelex-storage://` (wrapping `@pipelex/sdk`'s `prepareInputs`); `http(s)` / `pipelex-storage://` values pass through unchanged. With `method_id` and no files, fetch-and-forward (files win when both are supplied). Per-deployment asset boundary: the local workshop uploads with the user's key; the hosted console is pass-through only and refuses upload-needing inputs instructively (it never reads a filesystem or uploads). An unresolvable closure is a no-verdict error (the SDK throws without a structured verdict).
 - **Annotations**: NOT read-only (`readOnlyHint: false` — it uploads on the workshop), non-destructive, no open-world publishing.
 - **View**: none — the prepared inputs are small structured data the model reads directly.
+
+**Tool: `mthds_upload_attachments`** — hosted console only (see Deployments)
+
+- **Input**: `{ attachments }` — a required array of the mandated four-field host attachment object `{ download_url, file_id, mime_type?, file_name? }` (see Attachment Ingest Scope). The shape is fixed by OpenAI's app review *and* by the host's runtime substitution gate; it is not ours to loosen.
+- **Output**: `{ status, is_valid, attachments?, uploads?, errors? }` in `structuredContent`, plus a text summary listing each attachment's filename and resulting `pipelex-storage://` URI (the payload the model must carry into the inputs template, deliberately repeated in the prose). No `_meta`, no `available_view_specs`.
+- **Behavior**: For each attachment, fetches the bytes from the signed URL within the attachment fetch boundary (https-only, OpenAI host-pattern allowlist, no redirects, 7 MiB cap enforced before the body is read, bounded timeout, no credentials forwarded), then uploads them to Pipelex storage with the caller's BYOK key via `@pipelex/sdk`'s `uploadFile`, returning the `pipelex-storage://` URI. Never reads a filesystem. Partial success is a produced verdict: successful uploads are returned alongside per-item failures.
+- **Annotations**: NOT read-only (`readOnlyHint: false` — it uploads), non-destructive, and **`openWorldHint: true`** — the first tool in this server to set it, because it fetches an arbitrary host-supplied URL rather than only talking to the configured Pipelex API.
+- **Host metadata**: the hosted shell registers it with `_meta["openai/fileParams"]: ["attachments"]`, which is what makes the host substitute the user's attachment into that argument, plus the usual `openai/toolInvocation` strings.
+- **View**: none — the returned URIs are small structured data the model reads directly.
 
 **Tool: `mthds_run`**
 

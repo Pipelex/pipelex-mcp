@@ -1,0 +1,678 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Can the console see the user's uploaded files? — host attachment channels, July 2026</title>
+<style>
+  :root {
+    --bg: #FBFCFD;
+    --panel: #F2F6F9;
+    --panel-strong: #E9F0F4;
+    --ink: #182230;
+    --muted: #526070;
+    --line: #DCE4EA;
+    --accent: #0E7490;
+    --accent-soft: #E0F1F5;
+    --warn: #B45309;
+    --warn-soft: #FBF3E7;
+    --code-bg: #10161E;
+    --code-ink: #D9E2EC;
+    --code-comment: #7C93A8;
+    --add: #1B7F4B;
+    --add-soft: #E7F5EC;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0D1319;
+      --panel: #141C25;
+      --panel-strong: #1A2530;
+      --ink: #E4EBF2;
+      --muted: #93A4B5;
+      --line: #243140;
+      --accent: #2CB4CE;
+      --accent-soft: #10303A;
+      --warn: #E0A030;
+      --warn-soft: #2A2113;
+      --code-bg: #0A1016;
+      --code-ink: #D9E2EC;
+      --code-comment: #6E8499;
+      --add: #4ECB84;
+      --add-soft: #11251A;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0D1319; --panel: #141C25; --panel-strong: #1A2530; --ink: #E4EBF2;
+    --muted: #93A4B5; --line: #243140; --accent: #2CB4CE; --accent-soft: #10303A;
+    --warn: #E0A030; --warn-soft: #2A2113; --code-bg: #0A1016; --code-ink: #D9E2EC;
+    --code-comment: #6E8499; --add: #4ECB84; --add-soft: #11251A;
+  }
+  :root[data-theme="light"] {
+    --bg: #FBFCFD; --panel: #F2F6F9; --panel-strong: #E9F0F4; --ink: #182230;
+    --muted: #526070; --line: #DCE4EA; --accent: #0E7490; --accent-soft: #E0F1F5;
+    --warn: #B45309; --warn-soft: #FBF3E7; --code-bg: #10161E; --code-ink: #D9E2EC;
+    --code-comment: #7C93A8; --add: #1B7F4B; --add-soft: #E7F5EC;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    line-height: 1.65;
+    margin: 0;
+    padding: 0 1.25rem 5rem;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 46rem; margin: 0 auto; }
+  .wide { max-width: 54rem; margin-left: auto; margin-right: auto; }
+
+  header.doc-head {
+    padding: 3.5rem 0 1.5rem;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 2rem;
+  }
+  .eyebrow {
+    font-size: 0.72rem; font-weight: 600; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--accent); margin: 0 0 0.75rem;
+  }
+  h1 {
+    font-size: clamp(1.7rem, 4.5vw, 2.4rem); line-height: 1.15; letter-spacing: -0.02em;
+    margin: 0 0 0.75rem; text-wrap: balance; font-weight: 700;
+  }
+  .subtitle { color: var(--muted); font-size: 1.05rem; margin: 0; max-width: 40rem; }
+  .meta-line {
+    margin: 1rem 0 0; font-size: 0.82rem; color: var(--muted);
+    display: flex; flex-wrap: wrap; gap: 0.4rem 1rem;
+  }
+  .pill {
+    display: inline-block; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; padding: 0.15rem 0.55rem; border-radius: 100px;
+    background: var(--warn-soft); color: var(--warn); border: 1px solid var(--warn);
+  }
+
+  h2 {
+    font-size: 1.32rem; letter-spacing: -0.015em; margin: 3rem 0 0.75rem;
+    text-wrap: balance; font-weight: 700;
+  }
+  h2 .sec-label {
+    display: block; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 0.35rem;
+  }
+  h3 { font-size: 1.05rem; margin: 1.75rem 0 0.5rem; font-weight: 650; }
+  p { margin: 0 0 1rem; }
+  ul, ol { margin: 0 0 1rem; padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  strong { font-weight: 650; }
+
+  code {
+    font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.86em; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0.08em 0.35em; white-space: nowrap;
+  }
+  pre.codeblock {
+    background: var(--code-bg); color: var(--code-ink); border-radius: 8px;
+    padding: 1rem 1.2rem; overflow-x: auto;
+    font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.8rem; line-height: 1.6; margin: 0;
+  }
+  pre.codeblock code { background: none; border: none; padding: 0; white-space: pre; color: inherit; }
+  pre.codeblock .cm { color: var(--code-comment); }
+  pre.codeblock .add { color: var(--add); }
+  pre.codeblock .del { color: var(--warn); }
+  pre.codeblock .hdr { color: var(--accent); font-weight: 600; }
+
+  /* TL;DR */
+  .tldr {
+    background: var(--panel); border: 1.5px solid var(--accent); border-radius: 10px;
+    padding: 1.4rem 1.6rem 1.1rem; margin: 0 0 1rem;
+  }
+  .tldr .tag {
+    display: inline-block; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--accent); margin-bottom: 0.6rem;
+  }
+  .tldr p { margin-bottom: 0.75rem; }
+  .tldr ul { margin-bottom: 0.75rem; }
+  .tldr p:last-child, .tldr ul:last-child { margin-bottom: 0.25rem; }
+  .verdict-yes { color: var(--add); font-weight: 700; }
+  .verdict-no { color: var(--warn); font-weight: 700; }
+
+  /* Tables */
+  .tablewrap { overflow-x: auto; margin: 1.25rem 0 1.5rem; }
+  table.cmp { border-collapse: collapse; width: 100%; font-size: 0.9rem; min-width: 34rem; }
+  table.cmp th {
+    text-align: left; font-size: 0.72rem; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--muted); font-weight: 650; padding: 0.5rem 0.9rem; border-bottom: 2px solid var(--line);
+  }
+  table.cmp td { padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.cmp td:first-child { font-weight: 600; }
+  table.cmp .yes { color: var(--add); font-weight: 650; }
+  table.cmp .no  { color: var(--warn); font-weight: 650; }
+  table.cmp .maybe { color: var(--accent); font-weight: 650; }
+
+  /* Diagram panels */
+  .diagram {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 1.1rem 1.2rem 0.6rem; margin: 1.25rem 0 0.5rem; overflow-x: auto;
+  }
+  .diagram pre.mermaid { background: none; margin: 0; display: flex; justify-content: center; }
+  .diagram svg.hand { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+  .caption { font-size: 0.82rem; color: var(--muted); margin: 0.4rem 0.2rem 1.5rem; }
+
+  /* Cards */
+  .cards { display: grid; gap: 0.9rem; margin: 1.25rem 0 1.5rem; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 1.05rem 1.25rem 0.85rem;
+  }
+  .card h3 { margin: 0 0 0.4rem; font-size: 0.98rem; }
+  .card h3 .k {
+    color: var(--accent); font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.8rem; margin-right: 0.5rem;
+  }
+  .card p { margin-bottom: 0.5rem; font-size: 0.93rem; }
+  .card p:last-child { margin-bottom: 0.2rem; }
+  .card .note {
+    font-size: 0.86rem; color: var(--warn); background: var(--warn-soft);
+    border-radius: 6px; padding: 0.5rem 0.75rem; margin-top: 0.6rem;
+  }
+
+  /* Tabs (CSS radio) */
+  .tabs { margin: 1.25rem 0 1.5rem; }
+  .tabs input[type="radio"] { position: absolute; opacity: 0; pointer-events: none; }
+  .tabs .tabbar { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+  .tabs label {
+    font-size: 0.82rem; font-weight: 600; padding: 0.45rem 0.9rem;
+    border: 1px solid var(--line); border-bottom: none; border-radius: 8px 8px 0 0;
+    background: var(--panel); color: var(--muted); cursor: pointer; user-select: none;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .tabs input[type="radio"]:focus-visible + label { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .tabs .pane { display: none; border: 1px solid var(--line); border-radius: 0 8px 8px 8px; }
+  .tabs .pane pre.codeblock { border-radius: 0 7px 7px 7px; }
+  #tab-a:checked ~ .tabbar label[for="tab-a"],
+  #tab-b:checked ~ .tabbar label[for="tab-b"],
+  #tab-c:checked ~ .tabbar label[for="tab-c"],
+  #tab-d:checked ~ .tabbar label[for="tab-d"] {
+    background: var(--code-bg); color: var(--code-ink); border-color: var(--code-bg);
+  }
+  #tab-a:checked ~ .pane-a { display: block; }
+  #tab-b:checked ~ .pane-b { display: block; }
+  #tab-c:checked ~ .pane-c { display: block; }
+  #tab-d:checked ~ .pane-d { display: block; }
+
+  /* Details / folds */
+  details {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    margin: 0.9rem 0; padding: 0;
+  }
+  details summary {
+    cursor: pointer; font-weight: 650; font-size: 0.95rem; padding: 0.85rem 1.2rem; list-style: none;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before {
+    content: "\25B8"; display: inline-block; color: var(--accent);
+    margin-right: 0.6rem; transition: transform 0.15s ease;
+  }
+  @media (prefers-reduced-motion: reduce) { details summary::before { transition: none; } }
+  details[open] summary::before { transform: rotate(90deg); }
+  details .body { padding: 0 1.2rem 1rem; }
+  details .body p, details .body li { font-size: 0.93rem; }
+  details .body pre.codeblock { font-size: 0.76rem; }
+
+  .srclist { font-size: 0.84rem; line-height: 1.55; }
+  .srclist li { margin-bottom: 0.55rem; word-break: break-word; }
+  .srclist a { color: var(--accent); }
+
+  .footnote {
+    margin-top: 3rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 0.85rem;
+  }
+</style>
+
+<div class="wrap">
+<header class="doc-head">
+  <p class="eyebrow">pipelex-mcp · wip · research recap</p>
+  <h1>Can the console see the user's uploaded files?</h1>
+  <p class="subtitle">Host attachment channels on ChatGPT and claude.ai, the MCP standard in flight, and what it would take to lift the hosted console out of pass-through-only.</p>
+  <p class="meta-line">
+    <span class="pill">Shipped — this is now the record of a built feature</span>
+    <span>Recorded 2026-07-30</span>
+    <span>Sources verified same day</span>
+    <span>Outcome folded back 2026-07-31</span>
+  </p>
+</header>
+
+<div class="callout" style="border-left:4px solid var(--ok, #2e7d32); padding:.75rem 1rem; margin:1rem 0;">
+  <p><strong>BUILT AND VERIFIED 2026-07-31. This document is no longer a proposal.</strong> The channel was probed live, designed into <code>SPEC.md</code>, implemented, and smoke-tested against real ChatGPT. Read the sections below as the research that led to a shipped feature — the design sketch in §06 in particular is <em>not</em> what shipped. What actually landed:</p>
+  <ul>
+    <li><strong>A dedicated tool, <code>mthds_upload_attachments</code></strong> — not an <code>attachments</code> argument on <code>mthds_prepare_inputs</code> as §06 sketches. The ~305 s URL life forced ingest-during-the-call, which left no pass-through design to weigh against a separate tool; a separate tool also means no binding convention has to be invented (Q1 below dissolves), <code>prepare.ts</code> is untouched, and the console's "pass-through only" property stays a true statement rather than an exception. The returned <code>pipelex-storage://</code> URIs are filled into the <code>mthds_inputs_template</code> output and handed to <code>mthds_run</code>; <code>mthds_prepare_inputs</code> can be skipped entirely.</li>
+    <li><strong>Registered on the hosted console only</strong> — Q5 below is settled the other way round from both options it offers. The host gates substitution on the declared schema, so on the workshop the tool would be <em>structurally unreachable</em>, and advertising it would cost every workshop user tokens on every <code>tools/list</code>.</li>
+    <li><strong>A named attachment fetch boundary</strong> shipping with the first fetch (Q2, answered properly): https-only, the required <code>oaisdmntpr</code> host prefix, no redirects, no credentials, a cap enforced before the body is read and again mid-stream, a bounded timeout.</li>
+    <li><strong>A 7 MiB cap, forced by the transport</strong> — see the measured box below. Not a product judgement.</li>
+    <li><strong>Live smoke on real ChatGPT passed</strong>: unprompted fill, end-to-end to <code>mthds_run</code>, the oversize refusal, and — closing the last open cell — <strong>an image on iOS</strong>.</li>
+  </ul>
+</div>
+
+<div class="tldr">
+  <span class="tag">TL;DR</span>
+  <p><strong>The question.</strong> Since 0.8.0 the local workshop uploads files, but the hosted console is pass-through only. On chatgpt.com and claude.ai the console is all a user has — and both let people drop a PDF into the chat. Can we get at those files?</p>
+  <ul>
+    <li><strong>ChatGPT — <span class="verdict-yes">yes, and it already works this way today.</span></strong> A tool that declares <code>_meta["openai/fileParams"]</code> receives conversation attachments as <code>{ download_url, file_id, mime_type?, file_name? }</code> inside its arguments: a signed HTTPS URL the <em>server</em> fetches. Bytes never enter the model's context. Skybridge 1.3.2 — which we already ship — wraps both halves (<code>FileRef</code> server-side, <code>useFiles()</code> in views).</li>
+    <li><strong>claude.ai — <span class="verdict-no">no channel at all.</span></strong> No file id, no signed URL, no host-injected reference ever reaches a connector. Uploads become model context only. The realistic path stays "user pastes an https URL", which our pass-through already accepts.</li>
+    <li><strong>MCP spec — <span class="verdict-no">nothing shipped</span></strong>, not even in the brand-new <code>2026-07-28</code> revision. The standard-in-waiting is <strong>SEP-2631</strong> (authored by OpenAI, under an Anthropic-led File Uploads WG). It is a draft with no committed date.</li>
+  </ul>
+  <p><strong>Why this matters to us.</strong> SPEC.md defers console upload explicitly "until a proper out-of-band attachment channel exists." <strong>On ChatGPT that condition is now met</strong> — and it clears both original objections at once: bytes stay out of the model's context, and BYOK already settled whose storage an upload targets. One bounded increment turns the console into a real file-taking surface on ChatGPT, degrading silently to today's behavior everywhere else.</p>
+  <p><strong>And we are already shaped for the endgame.</strong> SEP-2631 standardizes exactly the pattern <code>mthds_prepare_inputs</code> already implements: upload out-of-band, pass an opaque URI in the tool call. Our <code>pipelex-storage://</code> design is the thing the ecosystem is converging on, not a detour from it.</p>
+</div>
+
+<h2><span class="sec-label">01 · Where we were</span>The console's pass-through wall</h2>
+
+<p>The workshop and the console share one capability core and one tool table; they differ at deliberate seams. For files there are two of them: <code>resolver</code> (who may read a <code>{ path }</code> from disk) and <code>allowUpload</code> (who may turn a file-bearing input into storage). The console has neither — it accepts <code>http(s)</code> URLs and <code>pipelex-storage://</code> references and refuses anything that would need an upload.</p>
+
+<p>That refusal was reasoned, not lazy. Two objections stood behind it, recorded in SPEC.md:</p>
+
+<div class="cards">
+  <div class="card">
+    <h3><span class="k">O1</span>Context cost</h3>
+    <p>Inline <code>data:</code> bytes in a tool argument are emitted token by token by the model. That is precisely the cost the workshop's <code>{ path }</code> arm exists to avoid — we measured the through-host penalty scaling roughly 100&times; with bundle size.</p>
+  </div>
+  <div class="card">
+    <h3><span class="k">O2</span>Whose storage?</h3>
+    <p>An upload has to land in <em>someone's</em> Pipelex storage under <em>someone's</em> key. Before BYOK the console held no per-caller key, so the question had no answer.</p>
+  </div>
+  <div class="card">
+    <h3><span class="k">O3</span>Never read the server's filesystem</h3>
+    <p>A related hazard we already designed around: handing raw inputs to the SDK's <code>prepareInputs</code> would make it <code>readLocalPath</code> a bare-path value on the <em>server</em> — LFI read, DoS, path-existence oracle on a public endpoint. Hence the console's own pass-through walk.</p>
+  </div>
+</div>
+
+<p><strong>BYOK (0.5.0) already killed O2.</strong> Each console caller now supplies their own <code>plx_sk_</code> key on the transport. What remained was O1 — and O1 is a statement about <em>inline bytes</em>, not about files as such. A channel that hands the server a <em>reference</em> instead of the bytes does not trip it. That is exactly what we went looking for.</p>
+
+<h2><span class="sec-label">02 · What we checked</span>Three questions, primary sources, same day</h2>
+
+<p>We ran three parallel investigations against primary sources — vendor docs, spec repos, changelogs, and issue trackers — rather than trusting model memory, because this area has moved several times in the last six months.</p>
+
+<div class="tablewrap">
+<table class="cmp">
+  <thead><tr><th>Question</th><th>Verdict</th><th>Mechanism</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Does ChatGPT hand conversation uploads to an MCP tool?</td>
+      <td class="yes">Yes, today</td>
+      <td><code>_meta["openai/fileParams"]</code> &rarr; signed <code>download_url</code> + <code>file_id</code> in tool args</td>
+    </tr>
+    <tr>
+      <td>Does claude.ai hand conversation uploads to a connector?</td>
+      <td class="no">No</td>
+      <td>None. Uploads become model context; nothing reaches the server</td>
+    </tr>
+    <tr>
+      <td>Does the MCP spec define host&rarr;server file input?</td>
+      <td class="no">Not shipped</td>
+      <td>SEP-2631 draft (open); nothing in the <code>2026-07-28</code> revision</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h2><span class="sec-label">03 · ChatGPT</span>The mechanism that already exists</h2>
+
+<p>A tool opts in by listing its file-typed input fields in <code>_meta</code>. At call time ChatGPT resolves the user's attachment — or even a file the model itself generated at <code>/mnt/data/…</code> — into a concrete file object, shows the user a permission dialog, and only then delivers it to the server. The server fetches the bytes itself over plain HTTPS.</p>
+
+<div class="diagram wide">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor U as User
+  participant C as ChatGPT host
+  participant M as Model
+  participant S as pipelex-mcp console
+  participant P as Pipelex API
+  U->>C: drops invoice.pdf into the chat
+  U->>M: "run my extraction method on this"
+  M->>C: tool call mthds_prepare_inputs
+  C-->>U: permission prompt "share file with app?"
+  U-->>C: allow
+  C->>S: args include download_url + file_id
+  Note over M,S: the model emitted a URL, not the bytes
+  S->>C: GET signed download_url
+  C-->>S: file bytes
+  S->>P: uploadFile (caller's BYOK key)
+  P-->>S: pipelex-storage://...
+  S-->>M: prepared inputs, ready for mthds_run
+</pre>
+</div>
+<p class="caption">The ChatGPT file-params round trip. The only thing crossing the model is a URL and an id; the payload travels host&nbsp;&rarr;&nbsp;server&nbsp;&rarr;&nbsp;storage out of band.</p>
+
+<p>That out-of-band property is the whole point, and it is what makes this compatible with objection O1:</p>
+
+<div class="diagram wide">
+<svg class="hand" viewBox="0 0 720 300" role="img" aria-label="Comparison of base64-in-arguments versus file params: in the first, the whole file crosses the model context; in the second, only a URL crosses and the bytes are fetched server-side.">
+  <defs>
+    <marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="3.2" orient="auto">
+      <path d="M0,0 L7,3.2 L0,6.4 z" fill="var(--muted)"/>
+    </marker>
+    <marker id="ahw" markerWidth="9" markerHeight="9" refX="7" refY="3.2" orient="auto">
+      <path d="M0,0 L7,3.2 L0,6.4 z" fill="var(--warn)"/>
+    </marker>
+    <marker id="aha" markerWidth="9" markerHeight="9" refX="7" refY="3.2" orient="auto">
+      <path d="M0,0 L7,3.2 L0,6.4 z" fill="var(--accent)"/>
+    </marker>
+  </defs>
+
+  <text x="18" y="24" font-size="11.5" font-weight="700" letter-spacing="1.4" fill="var(--warn)">WITHOUT A CHANNEL — BASE64 IN TOOL ARGS</text>
+  <rect x="18" y="38" width="150" height="56" rx="8" fill="var(--panel-strong)" stroke="var(--line)"/>
+  <text x="93" y="62" font-size="12.5" font-weight="650" text-anchor="middle" fill="var(--ink)">invoice.pdf</text>
+  <text x="93" y="80" font-size="11" text-anchor="middle" fill="var(--muted)">2 MB</text>
+  <line x1="172" y1="66" x2="266" y2="66" stroke="var(--warn)" stroke-width="7" marker-end="url(#ahw)"/>
+  <rect x="278" y="38" width="176" height="56" rx="8" fill="var(--warn-soft)" stroke="var(--warn)"/>
+  <text x="366" y="60" font-size="12.5" font-weight="650" text-anchor="middle" fill="var(--warn)">MODEL CONTEXT</text>
+  <text x="366" y="78" font-size="11" text-anchor="middle" fill="var(--warn)">whole file, token by token</text>
+  <line x1="458" y1="66" x2="546" y2="66" stroke="var(--warn)" stroke-width="7" marker-end="url(#ahw)"/>
+  <rect x="558" y="38" width="144" height="56" rx="8" fill="var(--panel-strong)" stroke="var(--line)"/>
+  <text x="630" y="62" font-size="12.5" font-weight="650" text-anchor="middle" fill="var(--ink)">our server</text>
+  <text x="630" y="80" font-size="11" text-anchor="middle" fill="var(--warn)">truncates ~2 MB</text>
+
+  <line x1="18" y1="122" x2="702" y2="122" stroke="var(--line)" stroke-dasharray="4 4"/>
+
+  <text x="18" y="152" font-size="11.5" font-weight="700" letter-spacing="1.4" fill="var(--accent)">WITH openai/fileParams — SHIPPED ON CHATGPT</text>
+  <rect x="18" y="166" width="150" height="56" rx="8" fill="var(--panel-strong)" stroke="var(--line)"/>
+  <text x="93" y="190" font-size="12.5" font-weight="650" text-anchor="middle" fill="var(--ink)">invoice.pdf</text>
+  <text x="93" y="208" font-size="11" text-anchor="middle" fill="var(--muted)">2 MB</text>
+  <line x1="172" y1="194" x2="266" y2="194" stroke="var(--accent)" stroke-width="2" marker-end="url(#aha)"/>
+  <rect x="278" y="166" width="176" height="56" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+  <text x="366" y="188" font-size="12.5" font-weight="650" text-anchor="middle" fill="var(--accent)">MODEL CONTEXT</text>
+  <text x="366" y="206" font-size="11" text-anchor="middle" fill="var(--accent)">one URL + one id</text>
+  <line x1="458" y1="194" x2="546" y2="194" stroke="var(--accent)" stroke-width="2" marker-end="url(#aha)"/>
+  <rect x="558" y="166" width="144" height="56" rx="8" fill="var(--panel-strong)" stroke="var(--line)"/>
+  <text x="630" y="190" font-size="12.5" font-weight="650" text-anchor="middle" fill="var(--ink)">our server</text>
+  <text x="630" y="208" font-size="11" text-anchor="middle" fill="var(--accent)">fetches bytes</text>
+
+  <path d="M93,226 Q366,286 630,226" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-dasharray="7 4" marker-end="url(#aha)"/>
+  <text x="366" y="279" font-size="11.5" font-weight="600" text-anchor="middle" fill="var(--accent)">bytes travel out of band, server-side</text>
+</svg>
+</div>
+<p class="caption">Objection O1 was never about files — it was about inline bytes. A reference-passing channel sidesteps it entirely.</p>
+
+<h3>The contract, exactly</h3>
+
+<p>The schema is rigid, and the app-review "Scan Tools" step enforces it. Each field named in <code>openai/fileParams</code> must declare <strong>exactly four properties</strong>: <code>download_url</code> (required), <code>file_id</code> (required), <code>mime_type</code> (optional), <code>file_name</code> (optional). Omit one, require an optional one, or add a fifth, and submission is rejected. Arrays are allowed via <code>items</code>. Skybridge exposes this as the <code>FileRef</code> zod schema; on the view side, <code>useFiles()</code> gives a widget <code>upload</code>, <code>selectFiles</code> (ChatGPT's own file-library picker) and <code>getDownloadUrl</code>.</p>
+
+<details>
+  <summary>Why we cannot simply tag our existing <code>inputs</code> field</summary>
+  <div class="body">
+    <p><code>openai/fileParams</code> lists <strong>top-level input fields</strong>, and each must match the four-property shape. Our <code>inputs</code> is a <code>z.record(z.string(), z.unknown())</code> whose file-bearing values sit at arbitrary depth, discovered by resolving the pipe's declared signature. It cannot be a file param.</p>
+    <p>So the increment needs a <em>separate</em> top-level <code>attachments</code> array, plus a convention binding each attachment to an input slot. And that binding cannot live on the file object either — a fifth field like <code>input_key</code> would fail the scan. It has to live on the <code>inputs</code> side, as a marker value the model writes (e.g. <code>"attachment:file-abc123"</code>) that we resolve against the array. That indirection is forced by the platform, not chosen by us — worth knowing before anyone reviews the schema and asks why it looks roundabout.</p>
+  </div>
+</details>
+
+<details>
+  <summary>Known defects in the mechanism (all currently open)</summary>
+  <div class="body">
+    <ul>
+      <li><strong>Mobile is broken</strong> — <em>did not reproduce; closed 2026-07-31.</em> The iOS/Android native apps were reported to send placeholder strings — <code>{"images": ["chat_upload"]}</code> or <code>"chat_upload://image_0"</code> — instead of file objects. Reported January 2026, no vendor response. <strong>Our own probe did not reproduce this with a PDF on iOS</strong> (<code>ChatGPT/1.2026.202</code>, iOS 26.5.2): the attachment arrived as a correct four-field object and fetched fine. The remaining <em>image</em>-on-mobile cell — the exact case the defect reports describe — was then smoked against the shipped tool on iOS and <strong>also worked</strong>. No mobile-specific handling was built, and none is needed.</li>
+      <li><strong>Duplicate calls.</strong> Cases of the same <code>file_id</code> arriving twice with different <code>download_url</code>s; and cases where the permission dialog never appears and the call never lands. Acknowledged by OpenAI support in March 2026, no documented fix.</li>
+      <li><strong><code>imageIds</code> round-tripping is buggy.</strong> Files a view pushes back to the model via <code>setWidgetState({ imageIds })</code> are documented but reportedly not actually seen by the model. Acknowledged February 2026. Only relevant if we later want a view-side attach flow.</li>
+      <li><strong>Undocumented:</strong> <code>download_url</code> TTL, size limits, and permitted MIME types. The docs imply expiry by offering a "mint a fresh URL" call. <em>The TTL is now measured — <strong>~305 s from the tool call</strong> (Azure SAS <code>se</code>, confirmed by an observed <code>403</code>); see the box below. The vendor's own size ceiling is still undocumented and irrelevant to us: it hands over at least 19.6 MB, far more than <strong>our</strong> upload leg accepts (7.5 MiB, see the ceiling box), so our cap binds first in every case.</em></li>
+    </ul>
+  </div>
+</details>
+
+<div class="callout" style="border-left:4px solid var(--ok, #2e7d32); padding:.75rem 1rem; margin:1rem 0;">
+  <p><strong>MEASURED 2026-07-30 — this section's unknowns are partly resolved.</strong> A live probe (throwaway rig on branch <code>probe/openai-fileparams-phase0</code>) confirmed the channel end-to-end on ChatGPT desktop web and iOS — five captures, three Azure regions, 140 KB to 19.6 MB — and corrected several assumptions made here:</p>
+  <ul>
+    <li><strong>The TTL is ~305 seconds (5 min) measured from the tool call.</strong> The <code>download_url</code> is an <em>Azure SAS</em> URL carrying its own expiry in the <code>se</code> query parameter. Confirmed empirically: <code>206</code> at +288 s, <code>403</code> at +328 s, bracketing the declared expiry exactly. <strong>This settles the design: ingest, never forward.</strong> A ~5-minute URL cannot survive to a durable run's workers.</li>
+    <li><strong>The storage host is not <code>files.oaiusercontent.com</code>, and it changes between calls.</strong> Two samples from one user, one session: <code>oaisdmntpr<strong>nznorth</strong>.blob.core.windows.net</code> and <code>oaisdmntpr<strong>koreacentral</strong>.blob.core.windows.net</code> (Azure Blob, <code>x-ms-*</code> headers, <code>server: Windows-Azure-Blob/1.0</code>). The pattern is <code>oaisdmntpr&lt;azure-region&gt;</code>. The "host allowlist" sketched further down is <em>wrong as written</em>. Note the trap: a suffix-only rule (<code>*.blob.core.windows.net</code>) is <strong>not safe</strong> — any Azure customer can create a storage account there — so the OpenAI-owned <code>oaisdmntpr</code> prefix must be required, and the byte cap and timeout must hold independently of it.</li>
+    <li><strong>Size is not the obstacle we expected.</strong> A 19.6 MB PDF passed the handoff untruncated, and pulling the whole file took 6.2 s — 2% of the SAS window. So the expiry will not be what stops a large ingest; our own byte cap and the hosted request timeout will be.</li>
+    <li><strong>The substitution only fires where the model writes a reference.</strong> The host rewrites a model-supplied reference into the four-field object; it never injects into a field the model left alone. A first attempt whose tool description told the model not to touch the field produced an empty call and measured nothing.</li>
+    <li><strong>Every <code>tools/call</code> carries <code>openai/*</code> request <code>_meta</code></strong> — including <code>openai/userLocation</code> with latitude/longitude, and stable <code>openai/subject</code> / <code>session</code> / <code>organization</code> ids. The handshake itself is plain. Production must not log this.</li>
+    <li><strong>ChatGPT caches a connector's tool list and never refreshes it.</strong> Across a whole probing session it issued <code>initialize</code> four times and <code>tools/call</code> five times — and <code>tools/list</code> <em>zero</em> times, still quoting a tool description that had been deleted from the server. <strong>Shipping consequence:</strong> a tool-description change does not reach existing users; their connector keeps whatever it cached when they added it. Since the description is load-bearing mechanism rather than documentation (see above), a description defect is effectively <em>not hot-fixable</em> — it needs the same review rigour as the schema, and release notes must tell users to re-add the connector.</li>
+    <li><strong>The four-field schema is a runtime gate, not just an app-review rule.</strong> The host will only hand a file to a field whose declared JSON Schema is the four-field object. A deliberately permissive twin tool was <em>never invoked once</em> across the whole session — the model reported being instructed to pass file references only to tools whose schema expects a file parameter. Practical consequence: a "lenient" production schema is not an option, and malformed payloads must be caught at the protocol layer (before validation) rather than by loosening the contract.</li>
+    <li><strong>iOS mobile works with documents.</strong> Same two-call pattern as desktop — first call omitted the field, an explicit "pass the PDF in the attachments field" produced a correct object. A schema rejection comes back as an <code>isError</code> tool result whose Zod text the model reads and self-corrects from, so the strict schema is less brittle in practice than it looks on paper.</li>
+  </ul>
+  <p><strong>Both remaining unknowns closed 2026-07-31.</strong> The <em>image on mobile</em> cell was smoked against the shipped tool on iOS and works. The ~20 MB ingest timing question turned out to be moot — see the ceiling box below. Full record in <code>TODOS.md</code>.</p>
+</div>
+
+<div class="callout" style="border-left:4px solid var(--warn, #b26a00); padding:.75rem 1rem; margin:1rem 0;">
+  <p><strong>MEASURED 2026-07-31 — the ingest ceiling is ~7.5 MiB, and the transport picked it, not us.</strong> Synthetic byte assets uploaded through the SDK against the live API: 1 / 5 / 7 / 7.3 / <strong>7.4 MiB all succeed</strong> (~2.9 s at the top end, ~2.5 MB/s); 7.5 / 7.6 / 8 / 12 / 20 MiB all fail fast with <code>413</code>. The wall is exactly AWS API Gateway's 10 MiB request quota divided by base64's 4/3 inflation — <code>POST /v1/upload</code> is a base64 JSON body behind an HTTP API integration. <strong>The app-level 50 MiB <code>MAX_UPLOAD_MIB</code> is unreachable through the public gateway and must not be quoted as the limit anywhere.</strong> Three consequences:</p>
+  <ul>
+    <li><strong>Synchronous ingest is comfortably feasible.</strong> At the cap: ~2.3 s fetch + ~2.9 s upload ≈ 6 s, against a ~305 s signed-URL window. Timing was never the constraint; payload size is. No async/job design is needed.</li>
+    <li><strong>The byte cap was never a product decision.</strong> The console caps an attachment at <strong>7 MiB</strong>, leaving headroom for the JSON envelope.</li>
+    <li><strong>Oversize is an ordinary case, not an edge case</strong> — ChatGPT hands over 19.6 MB PDFs happily, so users will meet the refusal. It fires before any bytes are fetched, names the limit, and gets a release note. Raising the ceiling means bypassing the gateway for uploads (a presigned direct-upload redesign) — cross-repo, out of scope here.</li>
+  </ul>
+  <p>Same measurement exposed a pre-existing bug in the shipped workshop: <code>mthds_prepare_inputs</code> hit the same wall via a wasted 10 MiB round-trip and a server message that could not name the real limit. Fixed in the same increment with a size-guarded client shared by both upload paths.</p>
+</div>
+
+<h2><span class="sec-label">04 · claude.ai</span>The wall, and the tempting workaround</h2>
+
+<p>The answer here is a clean no, confirmed from the connector docs, the uploads help article, and the MCP spec itself. Every candidate path is closed:</p>
+
+<div class="diagram wide">
+<pre class="mermaid">
+flowchart TD
+  U["User uploads invoice.pdf on claude.ai"] --> MC["Model context (extracted text / vision)"]
+  MC -.->|"no file id"| X1["MCP connector"]
+  MC -.->|"no signed URL"| X1
+  MC -.->|"no host-injected reference"| X1
+  FA["Anthropic Files API file_id"] -.->|"platform API only, not claude.ai web"| X1
+  AR["Artifacts / Projects / Skills"] -.->|"no third-party-fetchable URL"| X1
+  MC ==>|"WORKS: model retypes extracted text"| OK1["string tool arg (text only, lossy)"]
+  UU["User pastes an https URL"] ==>|"WORKS today"| OK2["our pass-through accepts it"]
+  SB["Code-execution sandbox holds the file"] ==>|"works, but needs domain allowlisting"| OK3["curl to an upload endpoint"]
+  style X1 stroke-dasharray: 5 5
+</pre>
+</div>
+<p class="caption">Solid arrows are paths that actually work; dashed arrows are the ones people assume exist and do not.</p>
+
+<p>Two details worth internalizing. First, MCP resources on claude.ai flow <strong>server&nbsp;&rarr;&nbsp;client</strong> only; there is no reverse channel, and <em>Roots</em> — the closest primitive — was formally deprecated in the July 2026 spec, with migration guidance that literally says to pass files via tool parameters instead. Second, the Anthropic Files API does not bridge: it is a platform-API feature, its ids are scoped to the uploading workspace, and user-uploaded files there are not even downloadable by their own owner.</p>
+
+<details>
+  <summary>The sandbox-curl workaround, and why we should not build on it</summary>
+  <div class="body">
+    <p>Conversation attachments do land on the code-execution sandbox filesystem, and Claude can <code>curl</code> them out to an HTTP endpoint — so if we exposed an upload route and users allowlisted our domain, files could reach us. This is a documented community pattern, not an Anthropic feature.</p>
+    <p>Reasons to leave it alone: it requires each user to add our domain under <em>Settings &rarr; Capabilities &rarr; additional allowed domains</em> (a Team/Enterprise-gated setting, so most users simply cannot); Anthropic's own docs pair that setting with an explicit prompt-injection exfiltration warning; and it depends on undocumented sandbox behavior that can change without notice. It would be an onboarding cliff attached to a security caveat, sold to users as a feature. Not worth it while "paste a URL" works for everyone.</p>
+  </div>
+</details>
+
+<h2><span class="sec-label">05 · The standard in flight</span>Why our architecture is already the target shape</h2>
+
+<p>At protocol level there is still nothing. Tool arguments remain plain JSON matching <code>inputSchema</code>; <code>resource_link</code> is defined only as a tool <em>result</em> type; elicitation accepts primitives only. The newest revision, <code>2026-07-28</code>, adds none of it.</p>
+
+<p>The work is real but unlanded. A <strong>File Uploads Working Group</strong> was chartered in April 2026 — led by Anthropic, with OpenAI at the table — and its current anchor is <strong>SEP-2631, "File Objects and Transfer"</strong> (open draft, authored by OpenAI). Its design: file inputs are URI strings annotated <code>x-mcp-file</code>, plus a <code>files/authorizeUpload</code> control-plane call that returns an out-of-band upload descriptor so the <em>client</em> pushes bytes over HTTPS and the tool call carries only the resulting URI. An earlier attempt (SEP-2356, data-URI based) was closed in June in favor of it; a still earlier one (SEP-1306, binary elicitation) died in March.</p>
+
+<div class="diagram">
+<pre class="mermaid">
+timeline
+  title Host-to-server file input, how it got here
+  2025-02 : Issue 155 filed — pass attachments to MCP servers
+  2026-03 : SEP-1306 binary elicitation closed
+  2026-04 : File Uploads WG chartered : SEP-2631 opened
+  2026-06 : SEP-2356 closed in favor of SEP-2631
+  2026-07 : Spec 2026-07-28 ships without file input : Roots deprecated
+</pre>
+</div>
+<p class="caption">Three years of demand, three proposals, nothing in the spec yet. ChatGPT shipped its own in the meantime.</p>
+
+<p><strong>The strategic read:</strong> SEP-2631's shape — upload out of band, pass an opaque URI as the argument — <em>is</em> what <code>mthds_prepare_inputs</code> already does with <code>pipelex-storage://</code>. We are not going to have to rethink the tool when the standard lands; we will have to add a second way of filling the same field. That is a good position to be in, and it is worth saying out loud in review: the ChatGPT increment is not a detour, it is the same pattern with a vendor-specific intake.</p>
+
+<h2><span class="sec-label">06 · The increment</span>What it would take, minimally</h2>
+
+<p class="note"><strong>Superseded by what shipped — read this section as the reasoning, not the design.</strong> The sketch below hangs ingest off <code>mthds_prepare_inputs</code>'s <code>PrepareContext</code>. The measured ~305 s URL life then removed pass-through from the table entirely, and once ingest had to happen <em>during the tool call</em>, a dedicated <code>mthds_upload_attachments</code> tool was strictly better: no binding convention to invent (Q1), no change to <code>prepare.ts</code>'s walk, and the console's "pass-through only" property preserved. The instinct that the change is bounded held; the seam it hangs on did not.</p>
+
+<p>The change is bounded because the seam already exists. <code>PrepareContext</code> is where per-deployment asset policy lives (<code>resolver</code>, <code>allowUpload</code>); this adds a third mode: the console may <em>ingest</em> a host-supplied URL — fetch the bytes and upload them under the caller's BYOK key — while still never touching a filesystem.</p>
+
+<p><strong>Ingest, not pass-through.</strong> Handing the raw <code>download_url</code> through to the runner would be a smaller change, but the URL is short-lived and a durable run's workers may fetch it minutes later. Ingesting to <code>pipelex-storage://</code> at prepare time makes the reference outlive the host's signature. <em>Since measured: the TTL is ~305 seconds (Azure SAS <code>se</code>, measured from the tool call), so this is no longer a judgement call — pass-through is not viable at all.</em></p>
+
+<p class="caption" style="margin-bottom:0.6rem"><strong>Sketch only</strong> — not implemented, not reviewed, not typechecked. Illustrative of size and shape.</p>
+
+<div class="tabs wide">
+  <input type="radio" name="difftab" id="tab-a" checked>
+  <input type="radio" name="difftab" id="tab-b">
+  <input type="radio" name="difftab" id="tab-c">
+  <input type="radio" name="difftab" id="tab-d">
+  <div class="tabbar">
+    <label for="tab-a">1 · schema</label>
+    <label for="tab-b">2 · context seam</label>
+    <label for="tab-c">3 · ingest</label>
+    <label for="tab-d">4 · registration</label>
+  </div>
+
+  <div class="pane pane-a">
+<pre class="codeblock"><code><span class="hdr">--- a/src/capabilities/prepare.ts</span>
+<span class="hdr">+++ b/src/capabilities/prepare.ts</span>
+<span class="cm">/* The four fields openai/fileParams allows — no more, no less. */</span>
+<span class="add">+const attachmentSchema = z.object({</span>
+<span class="add">+  file_id: z.string(),</span>
+<span class="add">+  download_url: z.string(),</span>
+<span class="add">+  mime_type: z.string().optional(),</span>
+<span class="add">+  file_name: z.string().optional(),</span>
+<span class="add">+});</span>
+
+ export const mthdsPrepareInputsInputSchema = {
+   files: filesInputSchema.optional(),
+   method_id: z.string().optional().describe(/* ... */),
+   pipe_ref: z.string().optional().describe(/* ... */),
+<span class="add">+  attachments: z.array(attachmentSchema).optional().describe(</span>
+<span class="add">+    "Conversation files supplied by the host (ChatGPT fills this in). " +</span>
+<span class="add">+    "Reference one from an input value as \"attachment:&lt;file_id&gt;\".",</span>
+<span class="add">+  ),</span>
+   inputs: z.record(z.string(), z.unknown()).describe(/* ... */),
+ };</code></pre>
+  </div>
+
+  <div class="pane pane-b">
+<pre class="codeblock"><code><span class="hdr">--- a/src/capabilities/prepare.ts</span>
+<span class="hdr">+++ b/src/capabilities/prepare.ts</span>
+ export interface PrepareContext {
+   baseUrl: string;
+   apiKey?: string;
+   client?: PrepareClient;
+   resolver?: FileResolver;
+   allowUpload?: boolean;
+<span class="add">+  /**</span>
+<span class="add">+   * Ingest host-supplied attachments into Pipelex storage (hosted console).</span>
+<span class="add">+   * Fetches bytes from the host's signed download_url — never a filesystem</span>
+<span class="add">+   * read, so the LFI/DoS/existence-oracle hazard that motivates the</span>
+<span class="add">+   * pass-through walk does not apply — and uploads under the caller's key.</span>
+<span class="add">+   * Ingests rather than forwarding the URL because host signatures are</span>
+<span class="add">+   * short-lived while a durable run's workers fetch later.</span>
+<span class="add">+   */</span>
+<span class="add">+  ingestAttachments?: boolean;</span>
+   authError?: AuthErrorTexture;
+ }</code></pre>
+  </div>
+
+  <div class="pane pane-c">
+<pre class="codeblock"><code><span class="hdr">--- a/src/capabilities/prepare.ts</span>
+<span class="hdr">+++ b/src/capabilities/prepare.ts</span>
+<span class="cm">/* Resolve "attachment:&lt;file_id&gt;" markers before the signature walk, so the</span>
+<span class="cm">   existing pass-through path then sees ordinary pipelex-storage:// values. */</span>
+<span class="add">+async function ingestOne(</span>
+<span class="add">+  client: UploadCapableClient,</span>
+<span class="add">+  a: Attachment,</span>
+<span class="add">+): Promise&lt;string&gt; {</span>
+<span class="add">+  const url = assertAllowedAttachmentHost(a.download_url); <span class="cm">// SSRF guard</span></span>
+<span class="add">+  const res = await fetch(url, { signal: AbortSignal.timeout(ATTACHMENT_TIMEOUT_MS) });</span>
+<span class="add">+  const bytes = new Uint8Array(await res.arrayBuffer());     <span class="cm">// + size cap</span></span>
+<span class="add">+  const { uri } = await uploadFile(client, bytes, {</span>
+<span class="add">+    filename: a.file_name ?? a.file_id,</span>
+<span class="add">+    contentType: a.mime_type,</span>
+<span class="add">+  });</span>
+<span class="add">+  return uri;                                                <span class="cm">// pipelex-storage://…</span></span>
+<span class="add">+}</span>
+
+<span class="cm">// …in prepareMthdsInputs, ahead of the existing walk:</span>
+<span class="add">+  const inputs = context.ingestAttachments</span>
+<span class="add">+    ? await resolveAttachmentMarkers(prepareClient(context), input.attachments, input.inputs)</span>
+<span class="add">+    : input.inputs;</span></code></pre>
+  </div>
+
+  <div class="pane pane-d">
+<pre class="codeblock"><code><span class="hdr">--- a/src/hosted/server.ts</span>
+<span class="hdr">+++ b/src/hosted/server.ts</span>
+         annotations: mthdsPrepareInputsTool.annotations,
+         _meta: {
+<span class="add">+          <span class="cm">// ChatGPT fills `attachments` from the user's conversation files,</span></span>
+<span class="add">+          <span class="cm">// behind its own permission prompt. Other hosts leave it empty.</span></span>
+<span class="add">+          "openai/fileParams": ["attachments"],</span>
+           "openai/toolInvocation/invoking": "Preparing MTHDS run inputs...",
+           "openai/toolInvocation/invoked": "MTHDS run inputs prepared.",
+         },
+
+<span class="cm">/* plus, where the console's contexts are built: */</span>
+<span class="add">+  prepare: { ...base, allowUpload: false, ingestAttachments: true },</span></code></pre>
+  </div>
+</div>
+
+<p>Four touched surfaces, one new capability, no change to the workshop's behavior and no change to any host that does not populate <code>attachments</code>. The tool table stays shared; the divergence stays where divergence already lives.</p>
+
+<h3>Open questions for the design session <span style="font-weight:400">— all five answered; each card carries its resolution</span></h3>
+
+<div class="cards">
+  <div class="card">
+    <h3><span class="k">Q1</span>The binding convention</h3>
+    <p>How does the model say which attachment fills which input slot? A marker string (<code>"attachment:file-abc"</code>) is the obvious candidate, but positional or filename matching are alternatives. Whatever we pick has to be explained in the tool description well enough that the model gets it right unprompted.</p>
+    <p class="note"><strong>Dissolved, not answered.</strong> A dedicated tool returns <code>pipelex-storage://</code> URIs, which are already ordinary pass-through values — the model fills them into the inputs template like any other string. No convention exists to get wrong.</p>
+  </div>
+  <div class="card">
+    <h3><span class="k">Q2</span>SSRF surface</h3>
+    <p>We would be fetching a caller-supplied URL from a public endpoint. That needs a host allowlist, a size cap, and a timeout — the same care we took with <code>readLocalPath</code>, applied to the network instead of the filesystem. <strong>Corrected 2026-07-30:</strong> this paragraph originally named <code>files.oaiusercontent.com</code> as the host to allowlist. The measured host is <code>oaisdmntprnznorth.blob.core.windows.net</code> — Azure Blob, apparently region-scoped — so a literal host allowlist would both fail legitimate users and be weaker than it looks. Re-derive around a suffix rule, and lean on the byte cap, the timeout, and a no-cross-host-redirect policy for the real defence.</p>
+    <p class="note">Do not ship the fetch without the allowlist. An unrestricted server-side fetcher on a public MCP endpoint is a worse hazard than the filesystem read we already refused.</p>
+    <p class="note"><strong>Answered — and the suffix rule this card proposes is unsafe.</strong> Any Azure customer can create a storage account under <code>*.blob.core.windows.net</code>, so the OpenAI-owned <code>oaisdmntpr</code> prefix is <em>required</em>, never optional. Shipped as a named boundary in its own module: https-only, the host pattern, no credentials in the URL, no non-default port, redirects refused outright, the 7 MiB cap enforced from <code>content-length</code> before the body is read and again mid-stream, a bounded timeout, no headers sent. The advice to lean on the cap and timeout was right and is now doctrine — the prefix is undocumented vendor infrastructure, so <strong>the host check is a filter, not the defence</strong>.</p>
+  </div>
+  <div class="card">
+    <h3><span class="k">Q3</span>Failure texture for broken hosts</h3>
+    <p>ChatGPT mobile sends placeholder strings. That must classify as an instructive <code>input_domain</code> at <code>attachments</code> — telling the user to try desktop — rather than surfacing as a fetch error.</p>
+    <p class="note"><strong>Answered: nothing to build, and it could not have been built as written.</strong> The premise did not reproduce — iOS works with both documents and images. And a malformed payload never reaches the capability layer at all: the MCP SDK rejects it at its own boundary, surfacing to the model as an <code>isError</code> result carrying the raw validation text, from which the model was observed to self-correct on the next call. Loosening the schema to catch it is not an option either — the host would then never populate the field.</p>
+  </div>
+  <div class="card">
+    <h3><span class="k">Q4</span>Does <code>mthds_run</code> get it too?</h3>
+    <p><code>mthds_run</code> also takes <code>inputs</code>. Leaning no: keep one door for file intake so the prepare&nbsp;&rarr;&nbsp;run sequence stays the single story we teach.</p>
+    <p class="note"><strong>Answered: no</strong>, and the lean was right for a better reason than it knew. Ingest is its own tool, so <code>mthds_run</code> needed no change whatsoever — it receives storage URIs like any other input value.</p>
+  </div>
+  <div class="card">
+    <h3><span class="k">Q5</span>Workshop posture</h3>
+    <p>The schema is shared, so <code>attachments</code> exists on the workshop too. Simplest: ignore it there (no host populates it over stdio). Alternatively accept it — the workshop can already upload — for one uniform behavior.</p>
+    <p class="note"><strong>Answered: neither.</strong> The tool is not registered on the workshop at all — the first documented exception to "both shells register the same table". The host gates substitution on the declared schema, so there the tool is <em>structurally unreachable</em>, not merely unused; advertising it would spend every workshop user's tokens on every <code>tools/list</code> for a capability that cannot fire. The invariant that survives: no tool <em>name</em> means different things on the two shells.</p>
+  </div>
+</div>
+
+<h2><span class="sec-label">07 · Scope discipline</span>What we are deliberately not doing</h2>
+
+<ul>
+  <li><strong>No sandbox-curl intake on claude.ai.</strong> Allowlist-gated, injection-adjacent, undocumented. Users keep pasting URLs until the standard lands.</li>
+  <li><strong>No view-side attach flow yet.</strong> <code>useFiles()</code> would let a widget run its own picker, but the <code>imageIds</code> round-trip is a known-broken path and views are ChatGPT/Cowork-only anyway. Tools-first.</li>
+  <li><strong>No speculative SEP-2631 implementation.</strong> It is a draft that already replaced one predecessor. We adopt when it lands in a host.</li>
+  <li><strong>No change to the pass-through contract.</strong> <code>http(s)</code> and <code>pipelex-storage://</code> keep working exactly as they do; attachments are an additional intake, not a replacement.</li>
+</ul>
+
+<p>If we take the increment, SPEC.md's Non-Goals paragraph on deferred console byte-upload needs rewriting rather than deleting: the deferral was conditional, the condition is now met <em>on one host</em>, and that nuance is the thing worth preserving in the record.</p>
+
+<details>
+  <summary>Primary sources consulted</summary>
+  <div class="body">
+    <ul class="srclist">
+      <li>OpenAI Apps SDK reference — <code>openai/fileParams</code> contract, runtime payload shape, widget file APIs, CSP fields: <a href="https://developers.openai.com/apps-sdk/reference">developers.openai.com/apps-sdk/reference</a> · changelog: <a href="https://developers.openai.com/apps-sdk/changelog">developers.openai.com/apps-sdk/changelog</a></li>
+      <li>Mobile placeholder-string bug (desktop payload example included): <a href="https://github.com/openai/openai-apps-sdk-examples/issues/185">github.com/openai/openai-apps-sdk-examples/issues/185</a></li>
+      <li>Duplicate invocations / missing permission dialog: <a href="https://community.openai.com/t/mcp-tool-invocation-issues-with-openai-fileparams/1370569">community.openai.com — MCP tool invocation issues with openai/fileParams</a></li>
+      <li>OpenAI staff guidance to use <code>fileParams</code> pending standardization: <a href="https://community.openai.com/t/how-to-send-file-generated-in-chat-to-mcp-server/1365335">community.openai.com — sending a chat-generated file to an MCP server</a></li>
+      <li>Anthropic connector capabilities (tools/prompts/resources; no attachment channel): <a href="https://claude.com/docs/connectors/building/index.md">claude.com/docs/connectors/building</a></li>
+      <li>claude.ai upload limits, no connector exposure: <a href="https://support.claude.com/en/articles/8241126-upload-files-to-claude">support.claude.com — upload files to Claude</a></li>
+      <li>Files API scoping and non-downloadable user uploads: <a href="https://platform.claude.com/docs/en/build-with-claude/files">platform.claude.com — Files API</a></li>
+      <li>Sandbox egress model and the prompt-injection warning: <a href="https://support.claude.com/en/articles/12111783-create-and-edit-files-with-claude">support.claude.com — create and edit files</a></li>
+      <li>MCP <code>2026-07-28</code> changelog (Roots deprecated; no file input): <a href="https://modelcontextprotocol.io/specification/2026-07-28/changelog">modelcontextprotocol.io — 2026-07-28 changelog</a></li>
+      <li>MCP tools spec — arguments are plain JSON; <code>resource_link</code> is a result type: <a href="https://modelcontextprotocol.io/specification/2026-07-28/server/tools">modelcontextprotocol.io — server/tools</a></li>
+      <li>File Uploads Working Group charter: <a href="https://modelcontextprotocol.io/community/working-groups/file-uploads">modelcontextprotocol.io — file-uploads WG</a></li>
+      <li>SEP-2631 "File Objects and Transfer" (open draft): <a href="https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2631">PR 2631</a> · SEP-2356 (closed in favor of it): <a href="https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2356">PR 2356</a> · original request: <a href="https://github.com/modelcontextprotocol/modelcontextprotocol/issues/155">issue 155</a></li>
+      <li>Skybridge <code>FileRef</code> / <code>useFiles</code> surface, verified against the installed 1.3.2 package and its docs: <a href="https://docs.skybridge.tech/api-reference/file-ref">docs.skybridge.tech/api-reference/file-ref</a> · <a href="https://docs.skybridge.tech/api-reference/use-files">/use-files</a></li>
+    </ul>
+  </div>
+</details>
+
+<p class="footnote">Internal engineering note · Research recap, 2026-07-30. Nothing in section 06 is implemented; the diff is a sizing sketch. The repository's SPEC.md and CHANGELOG.md remain the record of what actually ships.</p>
+</div>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "neutral" });
+</script>

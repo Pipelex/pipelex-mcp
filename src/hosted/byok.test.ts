@@ -99,7 +99,11 @@ describe("contextsForRequest", () => {
 
     expect(contexts.validation.apiKey).toBe("plx_sk_test123");
     expect(contexts.inputs.apiKey).toBe("plx_sk_test123");
+    expect(contexts.prepare.apiKey).toBe("plx_sk_test123");
     expect(contexts.run.apiKey).toBe("plx_sk_test123");
+    // The attachment ingest uploads to storage, so the caller's own key is what
+    // funds it — the console holds none of its own.
+    expect(contexts.attachments.apiKey).toBe("plx_sk_test123");
     expect(contexts.validation.authError?.hint).toContain("rejected the supplied API key");
   });
 
@@ -120,7 +124,9 @@ describe("contextsForRequest", () => {
     expect(contexts.validation.authError?.location).toBe("api_key");
     expect(contexts.validation.authError?.hint).toContain("Authorization: Bearer");
     expect(contexts.inputs.authError).toEqual(contexts.validation.authError);
+    expect(contexts.prepare.authError).toEqual(contexts.validation.authError);
     expect(contexts.run.authError).toEqual(contexts.validation.authError);
+    expect(contexts.attachments.authError).toEqual(contexts.validation.authError);
   });
 
   it("keeps the base contexts untouched when a server-held env key applies", () => {
