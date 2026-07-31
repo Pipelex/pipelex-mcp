@@ -8,6 +8,7 @@ import {
   mthdsRunResultsTool,
   mthdsRunStatusTool,
   mthdsRunTool,
+  mthdsUploadAttachmentsTool,
   mthdsValidateTool,
 } from "../tools.js";
 import type { ToolContexts } from "../tools.js";
@@ -24,6 +25,9 @@ export const HOSTED_SERVER_INSTRUCTIONS = [
   "Once the template is filled, call `mthds_prepare_inputs` to make file-bearing inputs run-ready",
   "(this hosted console is pass-through only — it accepts http(s) URLs and pipelex-storage:// references",
   "and refuses inputs that would need an upload; the local workshop uploads local files).",
+  "When the user attaches a file to the conversation, call `mthds_upload_attachments` with that",
+  "attachment to turn it into a run-ready pipelex-storage:// reference — its bytes never enter the",
+  "conversation, and the reference can be filled straight into the inputs template.",
   "Run a method durably with `mthds_run` (start from files + pipe + inputs, or from a registered",
   "method's catalog id via method_id; returns a durable run id),",
   "then check on it with `mthds_run_status` and fetch the outcome with `mthds_run_results` by that id.",
@@ -83,6 +87,25 @@ export function createHostedServer(contexts: ToolContexts = buildToolContexts())
       },
       (input, extra) =>
         mthdsPrepareInputsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+    )
+    .registerTool(
+      {
+        name: mthdsUploadAttachmentsTool.name,
+        description: mthdsUploadAttachmentsTool.description,
+        inputSchema: mthdsUploadAttachmentsTool.inputSchema,
+        outputSchema: mthdsUploadAttachmentsTool.outputSchema,
+        annotations: mthdsUploadAttachmentsTool.annotations,
+        _meta: {
+          // THE mechanism: naming `attachments` here is what makes the ChatGPT
+          // host rewrite the model's file reference into the four-field
+          // signed-URL object. Without it the field is never populated.
+          "openai/fileParams": ["attachments"],
+          "openai/toolInvocation/invoking": "Uploading attachments to Pipelex storage...",
+          "openai/toolInvocation/invoked": "Attachments uploaded.",
+        },
+      },
+      (input, extra) =>
+        mthdsUploadAttachmentsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
     )
     .registerTool(
       {
