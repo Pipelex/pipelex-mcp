@@ -29,7 +29,7 @@ Reading order:
 
 **Everything under "Phase 0" below is a historical record, not instructions.** The probe rig it describes has been deleted (branch, files, and hooks). Its runbook will not run. Read it for the A*/F* findings only; those are cited throughout Phase 2 and Phase 3.
 
-**Git state**: branch `feature/Console-upload`, working tree clean, pushed to origin. Three commits ahead of `dev`: `7fc3a47 plans` (the Phase 0 record), `2081a24` (the Phase 1 design pass), and the Phase 2 implementation commit. No PR is open yet. `dev` and `main` are untouched by this workstream.
+**Git state**: branch `feature/Console-upload`, working tree clean, pushed to origin. Three commits ahead of `dev`: `7fc3a47 plans` (the Phase 0 record), `2081a24` (the Phase 1 design pass), and `f2246be` (the Phase 2 implementation — `src/` plus the SPEC reconciliation). No PR is open yet. `dev` and `main` are untouched by this workstream.
 
 ## STATUS (2026-07-31) — PHASE 2 COMPLETE + LIVE SMOKE PASSED. Next session finishes Phase 3 (docs → deploy → release).
 
