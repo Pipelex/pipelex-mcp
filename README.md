@@ -219,15 +219,17 @@ Three things to know:
 
 **Attachment fetch boundary.** Fetching a host-supplied URL from a public
 endpoint is an SSRF surface, so the fetch is a deny-by-default policy: `https:`
-only; the host must match `oaisdmntpr<azure-region>.blob.core.windows.net` or
-`files.oaiusercontent.com` (the `oaisdmntpr` prefix is **required** — a
-suffix-only rule would admit any Azure customer's storage account); no
+only; the host must be `oaiusercontent.com` at the apex or on any subdomain
+(OpenAI's own locked domain — where live attachment traffic is served), or
+`oaisdmntpr<azure-region>.blob.core.windows.net` (where it used to be, and where
+the `oaisdmntpr` prefix stays **required**, because that suffix is multi-tenant
+and a suffix-only rule would admit any Azure customer's storage account); no
 credentials in the URL, no non-default port; redirects refused; the size cap
 enforced from `content-length` before the body is read *and* again mid-stream; a
-bounded timeout; no headers forwarded; non-2xx refused. Because the OpenAI host
-prefix is undocumented vendor infrastructure that can change without notice, the
-cap, the timeout, and the no-redirect rule hold on their own — the host check is
-a filter, not the defence.
+bounded timeout; no headers forwarded; non-2xx refused. Because these hosts are
+undocumented vendor infrastructure that changes without notice — it already has
+once — the cap, the timeout, and the no-redirect rule hold on their own; the
+host check is a filter, not the defence.
 
 ## Host → server matrix
 

@@ -14,8 +14,9 @@ import { formatMib } from "./upload-ceiling.js";
  *
  * The classic SSRF targets — link-local metadata, loopback, RFC1918 — are
  * unreachable by construction under https-only + host allowlist + no-redirects.
- * But the `oaisdmntpr` prefix is undocumented vendor infrastructure that can
- * change without notice, so the byte cap, the timeout and the no-redirect rule
+ * But the hosts below are undocumented vendor infrastructure that changes
+ * without notice — it already has once, when serving moved off Azure onto
+ * OpenAI's own domain — so the byte cap, the timeout and the no-redirect rule
  * must hold on their own: the host check is a filter, not the defence.
  *
  * Like `FileResolver`, a fetcher reports failures as values and never throws —
@@ -42,18 +43,53 @@ export const ATTACHMENT_FETCH_TIMEOUT_MS = 30_000;
  * (`*.blob.core.windows.net`) is equally unacceptable in the other direction:
  * any Azure customer can create a storage account under that suffix. The
  * `oaisdmntpr` prefix is the only OpenAI-specific part and is required.
+ *
+ * Kept, but no longer where live traffic arrives: ChatGPT moved attachment
+ * serving onto its own domain (below).
  */
 const OPENAI_BLOB_HOST_PATTERN = /^oaisdmntpr[a-z0-9]+\.blob\.core\.windows\.net$/;
 
-/** The host OpenAI's own documentation names. Live traffic uses the blob pattern above. */
-const OPENAI_FILES_HOST = "files.oaiusercontent.com";
+/**
+ * OpenAI's own user-content domain, accepted at the apex and on ANY subdomain.
+ *
+ * The whole domain, deliberately — not the `sdmntpr<region>` subdomain shape
+ * live traffic currently uses. The `oaisdmntpr` prefix above is mandatory only
+ * because `blob.core.windows.net` is MULTI-TENANT: any Azure customer can
+ * create a storage account under that suffix, so the prefix is the only
+ * OpenAI-specific part of the name. That reasoning does not transfer here.
+ * `oaiusercontent.com` is registered and locked by OpenAI and served from their
+ * own nameservers — there is no "any customer" hazard to filter out, so a
+ * narrower rule would buy no security and would simply break again at the next
+ * subdomain rename. It has already broken once that way: the boundary shipped
+ * knowing only the Azure endpoint and `files.oaiusercontent.com`, and every
+ * ChatGPT attachment was refused the day serving moved to
+ * `sdmntpr<region>.oaiusercontent.com`.
+ *
+ * The residual risk this widening accepts is a dangling-subdomain takeover on
+ * OpenAI's domain, which would grant an attacker one bounded, credential-free,
+ * non-redirected GET of a public name — contained by the rest of this boundary,
+ * per "the host check is a filter, not the defence".
+ */
+const OPENAI_CONTENT_DOMAIN = "oaiusercontent.com";
 
 const WRONG_HOST_HINT =
   "Only files the user attached in a ChatGPT conversation can be ingested — the host supplies the signed URL, it is never one to construct. On any other host, ask the user for an http(s) URL to the file and pass that to mthds_prepare_inputs instead.";
 
-/** True for a host this boundary will fetch from. `hostname` is already lowercased by `URL`. */
+/**
+ * True for a host this boundary will fetch from. `hostname` is already
+ * lowercased by `URL`, and carries no port — `URL` parks that on `url.port`,
+ * which `checkUrl` refuses separately.
+ *
+ * The subdomain test anchors on the dot so a lookalike registration
+ * (`oaiusercontent.com.evil.com`) cannot satisfy it — the classic way a
+ * suffix match is walked past.
+ */
 export function isAllowedAttachmentHost(hostname: string): boolean {
-  return hostname === OPENAI_FILES_HOST || OPENAI_BLOB_HOST_PATTERN.test(hostname);
+  return (
+    hostname === OPENAI_CONTENT_DOMAIN ||
+    hostname.endsWith(`.${OPENAI_CONTENT_DOMAIN}`) ||
+    OPENAI_BLOB_HOST_PATTERN.test(hostname)
+  );
 }
 
 /**
