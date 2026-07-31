@@ -97,6 +97,7 @@ describe("contextsForRequest", () => {
 
     const contexts = contextsForRequest(base, { token: "plx_sk_test123" });
 
+    expect(contexts.catalog.apiKey).toBe("plx_sk_test123");
     expect(contexts.validation.apiKey).toBe("plx_sk_test123");
     expect(contexts.inputs.apiKey).toBe("plx_sk_test123");
     expect(contexts.prepare.apiKey).toBe("plx_sk_test123");
@@ -104,6 +105,7 @@ describe("contextsForRequest", () => {
     // The attachment ingest uploads to storage, so the caller's own key is what
     // funds it — the console holds none of its own.
     expect(contexts.attachments.apiKey).toBe("plx_sk_test123");
+    expect(contexts.catalog.authError?.hint).toContain("rejected the supplied API key");
     expect(contexts.validation.authError?.hint).toContain("rejected the supplied API key");
   });
 
@@ -112,6 +114,7 @@ describe("contextsForRequest", () => {
 
     const contexts = contextsForRequest(base, { token: "plx_sk_caller" });
 
+    expect(contexts.catalog.apiKey).toBe("plx_sk_caller");
     expect(contexts.validation.apiKey).toBe("plx_sk_caller");
   });
 
@@ -120,6 +123,9 @@ describe("contextsForRequest", () => {
 
     const contexts = contextsForRequest(base, undefined);
 
+    expect(contexts.catalog.apiKey).toBeUndefined();
+    expect(contexts.catalog.authError?.location).toBe("api_key");
+    expect(contexts.catalog.authError?.hint).toContain("Authorization: Bearer");
     expect(contexts.validation.apiKey).toBeUndefined();
     expect(contexts.validation.authError?.location).toBe("api_key");
     expect(contexts.validation.authError?.hint).toContain("Authorization: Bearer");
@@ -135,6 +141,8 @@ describe("contextsForRequest", () => {
     const contexts = contextsForRequest(base, undefined);
 
     expect(contexts).toBe(base);
+    expect(contexts.catalog.apiKey).toBe("plx_sk_server");
+    expect(contexts.catalog.authError).toBeUndefined();
     expect(contexts.validation.authError).toBeUndefined();
   });
 

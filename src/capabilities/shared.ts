@@ -219,10 +219,11 @@ function formatToolError(error: ToolError): string {
  * Collapse internal whitespace runs (including newlines) to single spaces so a
  * message/hint stays a single Markdown list bullet. An embedded blank line would
  * otherwise terminate the list item early — reachable via a crafted path (a
- * filename may legally contain newlines and still end in `.mthds`) or SDK-thrown
- * error text. The raw one-liners we normally emit are unaffected.
+ * filename may legally contain newlines and still end in `.mthds`), SDK-thrown
+ * error text, or a stored catalog name/description. The raw one-liners we
+ * normally emit are unaffected.
  */
-function asOneLine(text: string): string {
+export function asOneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
@@ -336,6 +337,8 @@ export interface ClassifyErrorOptions {
   route?: string;
   /** Locator + hint for a 400/422 no-verdict rejection. */
   badRequest?: {
+    /** Override the default input_domain classification for route-level 400/422 responses. */
+    class?: ErrorClass;
     location?: string;
     hint: string;
   };
@@ -392,7 +395,7 @@ export interface ClassifyErrorOptions {
 /** The per-deployment auth-failure texture a capability context can carry. */
 export type AuthErrorTexture = NonNullable<ClassifyErrorOptions["auth"]>;
 
-const DEFAULT_BAD_REQUEST = {
+const DEFAULT_BAD_REQUEST: NonNullable<ClassifyErrorOptions["badRequest"]> = {
   location: "files",
   hint: "Check the submitted file contents and provenance fields.",
 };
@@ -655,7 +658,7 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
 
   if (err.status === 400 || err.status === 422) {
     return {
-      class: "input_domain",
+      class: badRequest.class ?? "input_domain",
       ...(badRequest.location === undefined ? {} : { location: badRequest.location }),
       message,
       hint: badRequest.hint,

@@ -21,13 +21,27 @@ describe("isAllowedAttachmentHost", () => {
     }
   });
 
-  it("accepts the vendor-documented files host", () => {
+  it("accepts the per-upload hosts on OpenAI's own content domain", () => {
+    // The regression that broke every ChatGPT attachment: serving moved off the
+    // Azure endpoint onto `sdmntpr<region>.oaiusercontent.com` (same region
+    // token, OpenAI's domain, Cloudflare-fronted) and the boundary refused it.
+    for (const region of ["southcentralus", "koreacentral", "westus"]) {
+      expect(isAllowedAttachmentHost(`sdmntpr${region}.oaiusercontent.com`)).toBe(true);
+    }
+  });
+
+  it("accepts the vendor-documented files host and the bare content domain", () => {
     expect(isAllowedAttachmentHost("files.oaiusercontent.com")).toBe(true);
+    expect(isAllowedAttachmentHost("oaiusercontent.com")).toBe(true);
+    // Any subdomain — the domain is OpenAI's own, so the next rename is covered.
+    expect(isAllowedAttachmentHost("persistent.oaiusercontent.com")).toBe(true);
+    expect(isAllowedAttachmentHost("a.b.oaiusercontent.com")).toBe(true);
   });
 
   it("rejects a suffix-only match — ANY Azure customer can register one", () => {
     // The whole reason the `oaisdmntpr` prefix is required rather than optional:
     // `*.blob.core.windows.net` would happily fetch an attacker-owned blob.
+    // No such widening applies there, only on OpenAI's single-tenant domain.
     expect(isAllowedAttachmentHost("evil.blob.core.windows.net")).toBe(false);
     expect(isAllowedAttachmentHost("oaisdmntpr.evil.blob.core.windows.net")).toBe(false);
     expect(isAllowedAttachmentHost("notoaisdmntprwestus.blob.core.windows.net")).toBe(false);
@@ -36,6 +50,10 @@ describe("isAllowedAttachmentHost", () => {
   it("rejects lookalike suffixes and unrelated hosts", () => {
     expect(isAllowedAttachmentHost("oaisdmntprwestus.blob.core.windows.net.evil.com")).toBe(false);
     expect(isAllowedAttachmentHost("files.oaiusercontent.com.evil.com")).toBe(false);
+    expect(isAllowedAttachmentHost("oaiusercontent.com.evil.com")).toBe(false);
+    // The dot anchor: a registration that merely ENDS in the domain string.
+    expect(isAllowedAttachmentHost("notoaiusercontent.com")).toBe(false);
+    expect(isAllowedAttachmentHost("evil-oaiusercontent.com")).toBe(false);
     expect(isAllowedAttachmentHost("169.254.169.254")).toBe(false);
     expect(isAllowedAttachmentHost("localhost")).toBe(false);
   });

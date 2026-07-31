@@ -6,7 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { MthdsFile, PipelexValidationReport } from "@pipelex/sdk";
+import type { MethodData, MthdsFile, PipelexValidationReport } from "@pipelex/sdk";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createHostedServer } from "../hosted/server.js";
@@ -31,6 +31,62 @@ describe("local stdio server", () => {
     expect(localTools.map(sharedContract)).toEqual(
       hostedTools.filter((tool) => sharedNames.includes(tool.name)).map(sharedContract),
     );
+  });
+
+  it("registers mthds_list_methods first with its read-only schema and dispatches it", async () => {
+    const contexts = buildLocalToolContexts({ PIPELEX_API_KEY: "plx_sk_test" });
+    let calls = 0;
+    contexts.catalog.client = {
+      async listMethods(): Promise<MethodData[]> {
+        calls += 1;
+        return [catalogMethod];
+      },
+    };
+
+    const { client, close } = await connectClient(createLocalServer({ contexts }));
+    try {
+      const listed = await client.listTools();
+      const tool = listed.tools[0];
+      const inputSchema = tool?.inputSchema as {
+        properties?: { limit?: { maximum?: number }; offset?: { minimum?: number } };
+      };
+
+      expect(tool?.name).toBe("mthds_list_methods");
+      expect(tool?.annotations).toMatchObject({
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      });
+      expect(inputSchema.properties?.limit?.maximum).toBe(50);
+      expect(inputSchema.properties?.offset?.minimum).toBe(0);
+
+      const result = await client.callTool({
+        name: "mthds_list_methods",
+        arguments: { query: "invoice" },
+      });
+
+      expect(calls).toBe(1);
+      expect(result.structuredContent).toMatchObject({
+        status: "ok",
+        total_count: 1,
+        matched_count: 1,
+        methods: [{ method_id: "mt_invoice", name: "Invoice extractor" }],
+      });
+      expect(result._meta).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+
+  it("registers catalog invocation messages on the hosted shell without a view", async () => {
+    const hostedTools = await listTools(createHostedServer());
+    const tool = hostedTools.find((candidate) => candidate.name === "mthds_list_methods");
+
+    expect(tool?._meta).toMatchObject({
+      "openai/toolInvocation/invoking": "Listing registered methods...",
+      "openai/toolInvocation/invoked": "Registered methods listed.",
+    });
+    expect(tool?._meta).not.toHaveProperty("ui/resourceUri");
   });
 
   it("does NOT register the console-only attachment tool (D5)", async () => {
@@ -213,6 +269,17 @@ const validReport: PipelexValidationReport = {
   is_runnable: true,
   message: "ok",
   rendered_markdown: "# Valid",
+};
+
+const catalogMethod: MethodData = {
+  method_id: "mt_invoice",
+  org_id: "org_test",
+  created_by_user_id: "usr_test",
+  name: "Invoice extractor",
+  mthds: 'domain = "invoice"',
+  description: "Extract invoice data",
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-07-31T00:00:00Z",
 };
 
 function sharedContract(tool: Awaited<ReturnType<Client["listTools"]>>["tools"][number]) {
