@@ -1,6 +1,6 @@
 # Methods as tools: dynamic per-user tool projection on the hosted console
 
-Status: design direction, agreed. Third document in the dual-deployment series — reads on top of `wip/dual-deployment-assessment.md` (the two-server decision) and `wip/build-vs-run-dimension.md` (the workshop/console lifecycle split and the catalog bridge). Feeds the same upcoming SPEC.md increment.
+Status: staged direction. Revision 2026-07-31: awareness-gradient stage 1 is shipped through the source-free `mthds_list_methods` tool and its description nudge; catalog-in-instructions and dynamic per-method projection remain later work. `SPEC.md` is authoritative for the shipped slice.
 
 ## 1. The thesis
 
@@ -28,12 +28,12 @@ Hosts inject registered tools' names, descriptions, and schemas into the model's
 
 There is a spectrum of "how present is the catalog in the agent's mind," and it doubles as the incremental shipping plan:
 
-1. **Tool-description nudges** (available now, costs nothing): the catalog `list` tool's description says to call it at the start of any task one of the user's saved methods might solve. Soft power, reactive, but free.
+1. **Tool-description nudges — shipped:** `mthds_list_methods` says to call it when the user asks what methods exist, names one without its id, or a saved method may plausibly solve the task. Soft power, reactive, but free.
 2. **Catalog-in-instructions** (cheap middle step): the server `instructions` string is delivered per session, after auth — embed a compact catalog summary (method names + one-line descriptions, no schemas). A few hundred tokens, staleness bounded by the session. Ships before schema derivation exists.
 3. **Full dynamic tool projection** (the destination): each exposed method becomes a first-class tool as described above. Gated on the OAuth/org milestone and on the concept→JSON-Schema projection.
 4. **Curation** (when real catalogs grow): an "expose as tool" flag or favorites mechanism so a user with a large catalog doesn't blow the host's tool budget — the exposed few become tools, the rest stay reachable through `list`/`get`. This mirrors how skills solved the same economics: terse stub always present, detail on demand.
 
-The generic tools (`mthds_validate`, `mthds_inputs_template`, `mthds_run`, `mthds_run_status`, `mthds_run_results`, plus catalog `list`/`get`) remain registered throughout — projection adds tools, it never replaces the contract surface.
+The generic tools (`mthds_list_methods`, `mthds_validate`, `mthds_inputs_template`, `mthds_run`, `mthds_run_status`, `mthds_run_results`) remain the stable fallback throughout — projection would add tools, never replace this contract surface. A separate catalog get/detail tool is still parked.
 
 ## 4. Constraints that shape the design
 

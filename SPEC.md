@@ -2,12 +2,13 @@
 
 ## Value Proposition
 
-Pipelex MCP lets developers and coding agents validate MTHDS content, project a method's declared inputs, and run methods durably on the hosted Pipelex API from inside an MCP host while they are authoring, repairing, or running `.mthds` files.
+Pipelex MCP lets developers and coding agents discover registered methods, validate MTHDS content, project a method's declared inputs, and run methods durably on the hosted Pipelex API from inside an MCP host while they are authoring, repairing, or running `.mthds` files.
 
 Target users are Pipelex/MTHDS developers working with an AI assistant in a local development loop. Today, validation requires leaving the assistant flow, knowing the local OSS `pipelex-api` or SDK details, and manually mapping diagnostics back to file content. The first product slice is intentionally narrow: validate submitted MTHDS file contents and return structured results the assistant can use to fix issues.
 
 Core actions:
 
+- List the methods visible to the active API key's organization as bounded, source-free catalog metadata, so an assistant can resolve a user's name or intent to a canonical `method_id` without leaving the conversation.
 - Validate one or more submitted MTHDS files.
 - Return valid, invalid, pending-signature, and no-verdict failure states in a stable structured result.
 - Return optional graph data when requested and available.
@@ -30,7 +31,7 @@ Core actions:
 
 `mthds_run` ships a second Skybridge view, `run-follow`: a self-polling status card that follows a durable run live (friendly status label, elapsed wall-clock, spinner) without any model turns — it polls the read-only `mthds_run_status` on a timer via `useCallTool`. On completion it fetches `mthds_run_results` once and renders the executed graph from the response's view-only metadata plus a compact output preview; on failure it shows the terminal status and failure message (and states plainly that no graph exists for failed runs). Once the terminal outcome is resolved (completed or failed), the view hands the conversation back to the model on its own via `sendFollowUpMessage` — one canned prompt naming the run id — so the assistant reports the outcome without the user prompting (the completion handoff, detailed in Run Scope). On remount it re-resolves the run by id, so reopening the conversation restores the card without re-firing the handoff.
 
-**First view**: The MCP host lists the Pipelex tools: `mthds_validate`, `mthds_inputs_template`, `mthds_prepare_inputs`, `mthds_run`, `mthds_run_status`, and `mthds_run_results`, plus `mthds_upload_attachments` on the hosted console only (see Deployments). `mthds_validate` and `mthds_run` carry Skybridge views; the others are plain tools whose payloads are small structured data the model reads directly.
+**First view**: The MCP host lists the Pipelex tools: `mthds_list_methods`, `mthds_validate`, `mthds_inputs_template`, `mthds_prepare_inputs`, `mthds_run`, `mthds_run_status`, and `mthds_run_results`, plus `mthds_upload_attachments` on the hosted console only (see Deployments). `mthds_validate` and `mthds_run` carry the same two Skybridge views as before; the others are plain tools whose payloads are small structured data the model reads directly. `mthds_list_methods` is the assistant-first catalog entry point and deliberately adds no third view.
 
 **Validation flow**:
 
@@ -77,6 +78,8 @@ The product ships as **two servers from one repo and one capability core**, shar
 - **Hosted console** — the existing Skybridge HTTP server, deployed on Alpic. Serves remote-connector hosts (ChatGPT, claude.ai, Claude Desktop/Cowork as consumers). Registers the Skybridge views (`run-graph`, `run-follow`). Auth is **bring-your-own-key (BYOK)** — the interim posture until per-user OAuth (the console auth workstream) ships: the console holds no server-side key; each caller supplies their own `plx_sk_` platform key at the transport level, via an `Authorization: Bearer plx_sk_...` header (hosts with header config) or `?api_key=plx_sk_...` on the connector URL (hosts whose connector UI accepts only a URL). The key never rides a tool argument, so it never enters the model's context. A BYOK key takes precedence over any server-held `PIPELEX_API_KEY`; a keyless request still handshakes and lists tools, and a keyless tool call fails as an instructive `config` no-verdict at `api_key` naming both channels (a server-held env key, when an operator sets one, keeps the env-var wording — it is the operator's concern, not the caller's). The middleware (`src/hosted/byok.ts`) verifies nothing — the Pipelex API is the authority on the key — and is deliberately disposable: when console OAuth lands it is deleted, not migrated.
 - **Local workshop** — an npm-distributed stdio server (`@pipelex/mcp`, bin `pipelex-mcp`) that coding-agent hosts (Claude Code, Codex, Cursor, Cowork-as-builder) spawn via `npx`. Built on the plain MCP SDK (`McpServer` + `StdioServerTransport`) over the shared capability core. **Tools-first: it registers no views at launch** — the empirically verified V1 posture (view-rendering workshop hosts penalize localhost asset origins; the text summaries carry the flow on their own in text-only hosts). Auth is a per-user `plx_sk_` platform key in `PIPELEX_API_KEY`, supplied through the host's MCP server config env — per-user auth for free, no OAuth machinery.
 
+Both shells register `mthds_list_methods` through the shared tool table. Catalog listing uses the same org-bound platform-key source as the existing by-id catalog paths: request-scoped BYOK on the hosted console and `PIPELEX_API_KEY` on the workshop. The API key determines the active organization and therefore the entire visible catalog; no catalog data is embedded in static server instructions.
+
 **The `{ path }` arm and per-deployment behavior.** The shared submitted-files shape accepts two item forms — inline content or a file path:
 
 ```ts
@@ -106,7 +109,51 @@ Tools are the contract; the `../pipelex-plugins` skills are the manual. The nami
 - **Tool names: `mthds_<stem>`, snake_case** — operations on MTHDS-language artifacts, and on the assets that feed an MTHDS run. The `mthds_` prefix stays even though the server prefix could be argued to cover it: some hosts display or match bare tool names, generic verbs (`validate`, `run`, `upload`) collide across servers in a multi-server session, and a `pipelex_` prefix would stutter against the server key. The "and the assets that feed a run" widening is what admits `mthds_upload_attachments`: uploading to Pipelex storage is a runtime-specific operation on a user's file rather than on MTHDS-language content, so the brand boundary would argue for a bare or `pipelex_`-prefixed name — but a single unprefixed tool in an otherwise uniform list costs the model more (one incoherent family, one collision risk) than the loose prefix costs the brand. The tool is named for the workflow it serves, not for the storage it writes to.
 - **Lifecycle families share a stem prefix** — `mthds_run`, `mthds_run_status`, `mthds_run_results` sort and display adjacently, so hosts and models see them as one family.
 - **Names state what you get** — a noun-only name must name the artifact it returns (`mthds_inputs_template`, renamed from the ambiguous `mthds_inputs`); otherwise lead with the operation (`mthds_validate`).
+- **Catalog listing is deliberately `mthds_list_methods`** — the repeated English word is acceptable: `mthds_` is the stable product-family prefix, while `list_methods` is the clearest operation/resource stem and stays recognizable when a host displays the bare tool name.
 - **Tools are self-sufficient; the dependency on skills is one-way** — tool names, descriptions, and the server `instructions` never reference the plugin skills, because many consumers (ChatGPT, claude.ai connectors, raw MCP hosts) will never see them. The skills reference tool names verbatim, and where a skill is the manual for one tool the two share a stem (`pipelex-inputs` ↔ `mthds_inputs_template`); that side of the convention is recorded in `../pipelex-plugins/docs/decisions.md`.
+
+## Catalog Discovery Scope (`mthds_list_methods`)
+
+`mthds_list_methods` lists the registered methods visible to the active API key's organization through `@pipelex/sdk`'s `PipelexApiClient.listMethods()` (`GET /v1/methods`). It is a plain, read-only tool with no Skybridge view and no `_meta` payload: the assistant needs bounded names, descriptions, and canonical ids to choose a method, and a human catalog-management flow does not exist in this increment. Listing executes no method and spends no inference credit.
+
+The public MCP input is:
+
+```ts
+{
+  query?: string;  // case-insensitive substring over method_id, name, description
+  limit?: number;  // integer 1..50; default 20
+  offset?: number; // integer >= 0; default 0
+}
+```
+
+`query` is trimmed and blank means no filter. Filtering uses the full SDK-returned strings, then rows sort deterministically by case-insensitive `name` and `method_id` before `offset`/`limit` are applied. An offset beyond the match set is a successful empty page. Paging is MCP-side only: each call still fetches the endpoint's full, unbounded rows because the platform exposes no compact or paged list route.
+
+Success projects exactly:
+
+```ts
+{
+  status: "ok";
+  total_count: number;
+  matched_count: number;
+  returned_count: number;
+  next_offset: number | null;
+  methods: Array<{
+    method_id: string;
+    name: string;
+    name_truncated: boolean;
+    description: string | null;
+    description_truncated: boolean;
+    has_source: boolean;
+    updated_at: string;
+  }>;
+}
+```
+
+The model-facing `name` is bounded to 200 Unicode code points and `description` to 500, with explicit truncation flags; search still examines their full values. `has_source` is derived with the SDK's `methodSourceToContents(method.mthds).length > 0` and means only that source exists — never that it is valid, runnable, or has satisfied inputs. Missing descriptions normalize to `null`. Empty catalogs and no-match queries are successful empty results.
+
+The projection boundary is strict: `mthds`, `python`, `input_data`, `pipe_output`, `org_id`, and `created_by_user_id` never enter `structuredContent`, `content`, view metadata, or logs. A non-array SDK response or a row missing `method_id`, `name`, or `updated_at` is a reachable, non-retryable `runtime` contract error rather than a partial list. The text summary repeats the bounded name, description, and canonical id for each returned row, marks source-less rows as drafts unusable by reference, and includes paging/query guidance without source or stored defaults.
+
+No-verdict failures use the shared error shape. Unreachable API is retryable `config` at `PIPELEX_BASE_URL`; missing or rejected auth is `config` with the shell's BYOK/`PIPELEX_API_KEY` texture; 402 is the existing billing `config` arm; missing active-org context (400) is `config` at the deployment's key location; missing `/v1/methods` (404) is `config` at `PIPELEX_BASE_URL`; 5xx and unexpected transport failures are retryable `runtime`; malformed success payloads are non-retryable `runtime`.
 
 ## Validation Scope (`mthds_validate`)
 
@@ -501,13 +548,20 @@ The server must not add Pipelex Hosted API deployment behavior, OAuth token veri
 - **claude.ai and every other console host remain unserved**, because no channel exists there: no file id, no signed URL, no host-injected reference reaches a connector, and MCP has nothing in-spec (SEP-2631 is an open draft that already replaced one predecessor and has landed in no host). Those users keep pasting URLs. Adopting a standard intake when a host ships one will be additive — the `pipelex-storage://` design is already its shape, not a rewrite.
 - **The console still never reads a filesystem.** Fetching a host-supplied URL is a *network* read; the `readLocalPath` refusal in Prepare Inputs Scope stands exactly as written.
 - **Opt-in `http(s)`→storage ingest** for ordinary user-pasted URLs stays parked — an `http(s)` URL at a file position passes through unchanged, and ingesting it is a later, additive SDK feature. The asymmetry with `mthds_upload_attachments` (which does ingest) is deliberate and explained in Attachment Ingest Scope: host attachment URLs expire in minutes, user URLs generally do not.
-- **A view-side attach flow** via Skybridge's `useFiles()` / `selectFiles()` is not pursued: the `imageIds` round-trip back to the model is a known-broken path, and the console's views are ChatGPT/Cowork-only. The attachment surface stays tools-first. Registered-method access by catalog id is in scope (`method_id` on `mthds_validate`, `mthds_run`, and `mthds_inputs_template` — see Validation Scope, Run Scope, and Inputs Template Scope), all via the same fetch-and-forward leg where the route itself has no by-id support. This does not extend to a dedicated "show me a registered method's graph" surface independent of validation — that belongs to the undecided conducted-views workstream (`wip/dual-server-conducted-views.md`), which is about a different concern (a hosted-connector-conducted scenario where content would cross the model twice); fetch-and-forward never puts content in the model's context, so it doesn't bear on that question either way. Around this catalog surface, these stay out: catalog discovery tools (listing methods or fetching method detail — the id arrives out-of-band until those land; they are the natural next increment after this one), a publish/save tool from the workshop, and stored-`input_data` defaulting (an omitted `inputs` passes through as-is; platform behavior governs).
+- **A view-side attach flow** via Skybridge's `useFiles()` / `selectFiles()` is not pursued: the `imageIds` round-trip back to the model is a known-broken path, and the console's views are ChatGPT/Cowork-only. The attachment surface stays tools-first. Registered-method access by catalog id is in scope (`method_id` on `mthds_validate`, `mthds_run`, and `mthds_inputs_template` — see Validation Scope, Run Scope, and Inputs Template Scope), all via the same fetch-and-forward leg where the route itself has no by-id support. This does not extend to a dedicated "show me a registered method's graph" surface independent of validation — that belongs to the undecided conducted-views workstream (`wip/dual-server-conducted-views.md`), which is about a different concern (a hosted-connector-conducted scenario where content would cross the model twice); fetch-and-forward never puts content in the model's context, so it doesn't bear on that question either way. Catalog listing is now in scope through `mthds_list_methods`; method detail/source retrieval, catalog create/update, a publish/save tool from the workshop, delete, dynamic per-method tool projection, and stored-`input_data` defaulting remain out of scope for this increment.
 
 Repository quality gates are in scope: ESLint, Prettier, TypeScript type checking, Vitest unit tests, and a combined `npm run check` command should remain available locally.
 
 The prototype should call the Pipelex API (local OSS `pipelex-api` during development) only through `@pipelex/sdk`'s `PipelexApiClient`; it should not expose API internals such as `mthds_contents` or `mthds_sources` in the MCP schema.
 
 ## UX Flows
+
+Discover a registered method:
+
+1. When the user asks what saved methods exist, names one without an id, or a saved method may plausibly solve the task, the assistant calls `mthds_list_methods` (with a focused `query` when possible).
+2. One strong match supplies its canonical `method_id`; several plausible matches are presented by bounded name/description for the user to choose; no matches are reported without inventing an id.
+3. A row with `has_source: false` is explained as a draft and is not passed to by-id validate/template/run. `has_source: true` is not presented as a validation or runnable verdict.
+4. The chosen id feeds the existing current-content flow: optional `mthds_validate` → `mthds_inputs_template` → fill/prepare inputs → `mthds_run`.
 
 Validate MTHDS files:
 
@@ -546,7 +600,7 @@ Run a method durably:
 
 Run a registered method by reference:
 
-1. The user names a registered method by its catalog id (`mt_…`) — obtained out-of-band for now (the webapp catalog, a teammate); catalog discovery tools are the natural next increment.
+1. The user names a registered method. If no catalog id (`mt_…`) is supplied, the assistant resolves it in-band with `mthds_list_methods` and disambiguates by name/description when necessary.
 2. The assistant may first call `mthds_validate` with `method_id` (no files) to confirm the stored method's current content still validates — e.g. after a suspected edit — getting the same structured verdict and dry-run graph view as a files-based call, with no bundle entering the conversation.
 3. The assistant calls `mthds_inputs_template` with `method_id` (no files) and fills the returned template with user data.
 4. The assistant calls `mthds_run` with `method_id` and the filled `inputs` — no bundle ever enters the conversation, and the run executes the method's current stored content.
@@ -554,7 +608,15 @@ Run a registered method by reference:
 
 ## Tools and Views
 
-**Server instructions**: The server sets a short MCP `instructions` string (server-wide, on the `McpServer` constructor options) that hosts surface to the model. It states that the server validates `.mthds` method files (returning an interactive dry-run graph on a valid verdict), projects a method's declared inputs as a fill-in template, prepares filled inputs for a run (uploading file-bearing values to storage on the local workshop), and runs methods durably on the hosted Pipelex API (start from files or from a registered method's catalog id, then check status and fetch results by durable run id). The hosted console's instructions additionally state that a file the user attached in the chat can be turned into a run-ready storage reference with `mthds_upload_attachments`; the workshop's do not, since it does not register that tool. It is a server-level hint only — argument-level detail stays in the tool `description`.
+**Server instructions**: The server sets a short MCP `instructions` string (server-wide, on the `McpServer` constructor options) that hosts surface to the model. It states that `mthds_list_methods` resolves a saved method name or plausible task fit to a canonical id before the existing validate/template/run flow; that the server validates `.mthds` method files (returning an interactive dry-run graph on a valid verdict), projects a method's declared inputs as a fill-in template, prepares filled inputs for a run (uploading file-bearing values to storage on the local workshop), and runs methods durably on the hosted Pipelex API (start from files or from a registered method's catalog id, then check status and fetch results by durable run id). The instructions do not embed a dynamic catalog because hosted auth is request-scoped and host instructions may be cached. The hosted console's instructions additionally state that a file the user attached in the chat can be turned into a run-ready storage reference with `mthds_upload_attachments`; the workshop's do not, since it does not register that tool. It is a server-level hint only — argument-level detail stays in the tool `description`.
+
+**Tool: `mthds_list_methods`**
+
+- **Input**: `{ query?, limit?, offset? }` — trimmed case-insensitive search, bounded page size, MCP-side offset (see Catalog Discovery Scope)
+- **Output**: `{ status, total_count?, matched_count?, returned_count?, next_offset?, methods?, errors? }` in `structuredContent`, plus a bounded text summary repeating names, descriptions, ids, source-draft labels, and paging guidance. No method source, stored inputs/outputs, org/user ids, `_meta`, or view payload.
+- **Behavior**: Fetches the active API key's full organization catalog through the SDK, immediately validates and projects rows, filters/sorts/pages deterministically, and returns empty catalogs/no matches as success. Listing executes nothing; a returned id can be passed to `mthds_validate`, `mthds_inputs_template`, and `mthds_run`.
+- **Annotations**: Read-only, non-destructive, no open-world publishing.
+- **View**: none — bounded catalog metadata is read directly by the model.
 
 **Tool: `mthds_validate`**
 

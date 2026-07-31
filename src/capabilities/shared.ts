@@ -336,6 +336,8 @@ export interface ClassifyErrorOptions {
   route?: string;
   /** Locator + hint for a 400/422 no-verdict rejection. */
   badRequest?: {
+    /** Override the default input_domain classification for route-level 400/422 responses. */
+    class?: ErrorClass;
     location?: string;
     hint: string;
   };
@@ -392,7 +394,7 @@ export interface ClassifyErrorOptions {
 /** The per-deployment auth-failure texture a capability context can carry. */
 export type AuthErrorTexture = NonNullable<ClassifyErrorOptions["auth"]>;
 
-const DEFAULT_BAD_REQUEST = {
+const DEFAULT_BAD_REQUEST: NonNullable<ClassifyErrorOptions["badRequest"]> = {
   location: "files",
   hint: "Check the submitted file contents and provenance fields.",
 };
@@ -655,7 +657,7 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
 
   if (err.status === 400 || err.status === 422) {
     return {
-      class: "input_domain",
+      class: badRequest.class ?? "input_domain",
       ...(badRequest.location === undefined ? {} : { location: badRequest.location }),
       message,
       hint: badRequest.hint,

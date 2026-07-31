@@ -4,6 +4,7 @@ import {
   PIPELEX_MCP_SERVER_INFO,
   buildToolContexts,
   mthdsInputsTemplateTool,
+  mthdsListMethodsTool,
   mthdsPrepareInputsTool,
   mthdsRunResultsTool,
   mthdsRunStatusTool,
@@ -16,6 +17,9 @@ import { byokKeyMiddleware, contextsForRequest } from "./byok.js";
 
 export const HOSTED_SERVER_INSTRUCTIONS = [
   "pipelex-mcp helps you work with executable AI Methods written in the MTHDS language (.mthds).",
+  "Call `mthds_list_methods` when the user asks what saved methods exist, names one without its",
+  "mt_ id, or a saved method may fit the task; choose or disambiguate by name and description,",
+  "then pass the returned id into the current-content validate, inputs-template, and run flow.",
   "Call `mthds_validate` with the file contents you hold (or a registered method's catalog id via",
   "method_id) to get a stable, structured verdict (is_valid / is_runnable, validation errors,",
   "pending signatures). When the method is valid, the tool also returns an interactive dry-run",
@@ -39,6 +43,21 @@ export function createHostedServer(contexts: ToolContexts = buildToolContexts())
     instructions: HOSTED_SERVER_INSTRUCTIONS,
   })
     .use("/mcp", byokKeyMiddleware)
+    .registerTool(
+      {
+        name: mthdsListMethodsTool.name,
+        description: mthdsListMethodsTool.description,
+        inputSchema: mthdsListMethodsTool.inputSchema,
+        outputSchema: mthdsListMethodsTool.outputSchema,
+        annotations: mthdsListMethodsTool.annotations,
+        _meta: {
+          "openai/toolInvocation/invoking": "Listing registered methods...",
+          "openai/toolInvocation/invoked": "Registered methods listed.",
+        },
+      },
+      (input, extra) =>
+        mthdsListMethodsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+    )
     .registerTool(
       {
         name: mthdsValidateTool.name,
