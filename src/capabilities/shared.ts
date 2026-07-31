@@ -219,10 +219,11 @@ function formatToolError(error: ToolError): string {
  * Collapse internal whitespace runs (including newlines) to single spaces so a
  * message/hint stays a single Markdown list bullet. An embedded blank line would
  * otherwise terminate the list item early — reachable via a crafted path (a
- * filename may legally contain newlines and still end in `.mthds`) or SDK-thrown
- * error text. The raw one-liners we normally emit are unaffected.
+ * filename may legally contain newlines and still end in `.mthds`), SDK-thrown
+ * error text, or a stored catalog name/description. The raw one-liners we
+ * normally emit are unaffected.
  */
-function asOneLine(text: string): string {
+export function asOneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
