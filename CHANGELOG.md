@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.10.0] - 2026-08-01
 
 ### Added
 
@@ -15,6 +15,7 @@
 ### Changed
 
 - `classifyError` route-specific bad-request texture can now override the error class, used so `/v1/methods`' missing active-organization 400 is an auth/configuration error at the deployment's key location rather than a fictitious input error.
+- **Documentation** — Updated `README.md`, `CLAUDE.md`, and `SPEC.md` to document the `mthds_list_methods` contract and projection boundaries. Archived the completed ChatGPT file-inputs build plan and refreshed WIP architecture docs to reflect that catalog discovery has shipped.
 
 ## [0.9.0] - 2026-07-31
 
