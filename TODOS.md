@@ -4,24 +4,22 @@ Build plan recorded 2026-07-30. Four phases, verification first: **(0) verify th
 
 **The one-line problem.** Since 0.8.0 the local workshop uploads file-bearing inputs; the hosted console is pass-through only. But on chatgpt.com and claude.ai the console is *all a user has*, and both let people drop a PDF into the chat. ChatGPT — and only ChatGPT — exposes those attachments to an MCP tool call. This plan takes that channel.
 
-## COLD START — read this first (updated 2026-07-31)
+## COLD START — read this first (updated 2026-07-31, after the doc pass)
 
-**You are finishing Phase 3 (docs + release). The code is written, the gates are green, and the live ChatGPT smoke PASSED** — Phases 0, 1 and 2 are complete, and Phase 3's release blocker (the smoke) is cleared. What remains is docs, a deploy, and the release itself.
+**Everything is done except the release, and the release needs Louis.** Phases 0, 1 and 2 are complete; the live ChatGPT smoke PASSED (S1); all documentation is written and the full gate is green. There is **no code work left** and **nothing to re-derive**.
 
-**The three things that are actually left**, in order:
+**The one thing actually left:**
 
-1. **Docs** — `README.md`, `CHANGELOG.md` `## [Unreleased]`, `CLAUDE.md`. `SPEC.md` is already done *and* reconciled against what shipped; don't redo it.
-2. **Deploy to the production console** (`make deploy` → Alpic). The smoke ran through a **local tunnel**, not the deployed console — see S1. The deploy has NOT happened.
-3. **Release** via the `/release` skill, with the two mandatory release-note lines (re-add the connector; 7 MiB cap).
+- **Cut the release** via the `/release` skill. It needs a human because `npm publish` hits an `EOTP` browser gate the agent cannot pass. Branch flow first: this work is on `feature/Console-upload`, so it needs a PR into `dev` before the skill can cut `release/vX.Y.Z → main`. The skill's step 10 then publishes npm **and** runs `make deploy` (Alpic) from the same merged `main` commit.
 
-Reading order:
+> **Do not run `make deploy` on its own before the release.** An earlier revision of this plan listed the deploy as a separate step *before* the release; that contradicts the repo rule that npm and Alpic ship in lockstep from one commit at one version. See the correction in the Phase 3 checklist.
+
+Reading order (short, because little is left):
 
 1. The **STATUS** banner and **S1** (the smoke result) immediately below.
-2. **Phase 3** — the remaining checklist, with what the smoke did and did not cover.
-3. **Phase 2's "What landed" + "Contract drift"** — what exists in `src/` now, and the three places the implementation refined the Phase 1 contract. Read this before touching code; you probably won't need to.
-4. **M1** — the 7.5 MiB transport ceiling, if you touch anything upload-related.
-5. **`SPEC.md` → "Attachment Ingest Scope (`mthds_upload_attachments`)"** — the contract. Also the Deployments subsection "The tool table is shared except for one console-only tool", and the Tools and Views entry.
-6. `CLAUDE.md` (repo conventions) and, only if you want the vendor background, `wip/console-attachments-landscape.html`.
+2. **Phase 3** — the checklist, with the release-note lines the skill must carry and the deploy-ordering correction.
+3. Only if you end up touching code after all: **Phase 2's "What landed" + "Contract drift"**, then **M1** (the 7.5 MiB transport ceiling) for anything upload-related, then **`SPEC.md` → "Attachment Ingest Scope (`mthds_upload_attachments`)"** for the contract (plus Deployments → "The tool table is shared except for one console-only tool" and the Tools and Views entry).
+4. `CLAUDE.md` now documents all of this as repo convention — the fetch boundary, the un-hotfixable tool description, the console-only registration table, the never-log-`_meta` rule. `wip/console-attachments-landscape.html` holds the vendor background and now reads as a shipped-feature record.
 
 **Invoke the `skybridge` skill before touching code** (`AGENTS.md` mandates it).
 
@@ -31,11 +29,13 @@ Reading order:
 
 **Git state**: branch `feature/Console-upload`, working tree clean, pushed to origin. Three commits ahead of `dev`: `7fc3a47 plans` (the Phase 0 record), `2081a24` (the Phase 1 design pass), and `f2246be` (the Phase 2 implementation — `src/` plus the SPEC reconciliation). No PR is open yet. `dev` and `main` are untouched by this workstream.
 
-## STATUS (2026-07-31) — PHASE 2 COMPLETE + LIVE SMOKE PASSED. Next session finishes Phase 3 (docs → deploy → release).
+## STATUS (2026-07-31) — CODE, SMOKE AND DOCS ALL DONE. Only the release itself remains.
 
-Branch **`feature/Console-upload`**. Current release is **0.8.0**; `main`/`dev` carry an `## [Unreleased]` Skybridge-1.3.2 entry only — **this work is not yet in the changelog**, which is the next task. `SPEC.md` carries the full contract *and* has been reconciled against what actually shipped (three drift points, recorded under Phase 2). `README.md` and `CLAUDE.md` have **not** been updated yet.
+Branch **`feature/Console-upload`**, four commits ahead of `dev`, no PR open yet. Current published release is **0.8.0**.
 
-**The feature works against real ChatGPT** — see S1 below. That was the release blocker, and it is cleared. The production console has **not** been redeployed; the smoke ran through a local tunnel.
+Everything but the release is finished: `SPEC.md` (Phase 1, reconciled in Phase 2), `src/` (Phase 2), the live ChatGPT smoke (S1), and now **`CHANGELOG.md` `## [Unreleased]`, `README.md`, `CLAUDE.md`, and `wip/console-attachments-landscape.html`**. Full gate re-run after the doc edits: `make check` and `make test` both **green**.
+
+**The feature works against real ChatGPT** — see S1 below. That was the release blocker, and it is cleared. The production console has **not** been redeployed, and deliberately must not be until the release PR merges — the deploy is step 10 of the `/release` skill, in lockstep with npm publish from the same `main` commit.
 
 Phase 0's rig is **already torn down** — branch `probe/openai-fileparams-phase0` deleted, no `src/probe/`, no `scripts/probe-url-ttl.mjs`, no server hooks. Verified 2026-07-31.
 
@@ -390,19 +390,21 @@ One small shared-surface addition: `ClassifyErrorOptions` gained `asset?: { loca
 
 ---
 
-## Phase 3 — docs, gates, release — IN PROGRESS (the smoke is done; docs, deploy and release are not)
+## Phase 3 — docs, gates, release — IN PROGRESS (smoke + docs done; only the release remains, and it needs Louis)
 
 - [x] **Live-smoke on ChatGPT.** **PASSED 2026-07-31 — see S1.** Unprompted fill, happy path to `mthds_run`, the oversize refusal, and an image on iOS. Ran through a tunnel; the deploy is a separate step, still owed below.
 - [x] **Probe an image on iOS.** **PASSED** — the last untested Phase 0 cell is closed. No mobile arm needed; D6 stands.
 - [x] `SPEC.md` — written in Phase 1 and reconciled in Phase 2 against what actually shipped. **Do not redo it.**
-- [ ] **`CHANGELOG.md`** — add the feature under `## [Unreleased]`, beside the existing Skybridge-1.3.2 entry. Cover: the new console-only `mthds_upload_attachments` tool, the 7 MiB attachment cap, the **breaking-ish operational note that existing console users must re-add the connector**, and the `mthds_prepare_inputs` upload-ceiling fix (a separate user-visible improvement — it names the real limit and no longer wastes a 10 MiB round-trip).
-- [ ] **`README.md`** — tool table row + a section for the attachment flow + the ChatGPT-only note + the 7 MiB limit.
-- [ ] **`CLAUDE.md`** — the architecture file list gains `capabilities/attachment-fetch.ts`, `capabilities/attachments.ts`, `capabilities/upload-ceiling.ts`; a Conventions line for the fetch boundary; and a note on the console-only registration table (`consoleOnlyToolDefinitions`) since it breaks the "both shells register the same table" property the file currently states without exception.
-- [ ] Full gate: `make check && make test`. (Was green at the Phase 2 commit; re-run after the doc edits.)
-- [ ] **Deploy the production console**: `make deploy` (Alpic; CLI-only, no git integration). This is what puts the tool in front of real users at `https://pipelex-mcp-a3c6a115.alpic.live/mcp` — the smoke did **not** do this.
-- [ ] **Release notes must say two things out loud**: existing users have to **re-add the connector** for the new tool and its description to reach them (A10 — a cached tool list never refreshes, so the tool is simply invisible until they do), and attachments are capped at **7 MiB** (M1 — users will hit this, since ChatGPT hands over 19 MB files happily).
-- [ ] Release via the `/release` skill. **npm publish needs Louis in-session** (auth lapses between sessions; `npm publish` hits an `EOTP` browser gate — the agent cannot do it). Consider whether `pipelex-plugins` skills need a line about the new console capability — the last release had exactly this coordination footgun.
-- [ ] Fold the verified behavior back into `wip/console-attachments-landscape.html`: replace the undocumented-TTL caveat with the measured ~305 s, add the M1 ceiling and the S1 smoke result, and stop describing the channel as a proposal.
+- [x] **`CHANGELOG.md`** — done. Under `## [Unreleased]`: the console-only `mthds_upload_attachments` tool (with the re-add-the-connector and 7 MiB warnings inline), the attachment fetch boundary, the `mthds_prepare_inputs` upload-ceiling fix under `### Fixed`, and the `ClassifyErrorOptions.asset` texture under `### Changed`.
+- [x] **`README.md`** — done. Tool table row (marked console-only) + the exception note under the table + a new **"Chat attachments (ChatGPT only)"** section (flow diagram, the three things to know, the fetch boundary) + the `mthds_upload_attachments` shape under "Tools at a glance".
+- [x] **`CLAUDE.md`** — done. Intro sentence amended for the console-only tool; the three new modules in the architecture file list; a paragraph on `consoleOnlyToolDefinitions` (with the accepted 18 KB bundle cost) after the "both shells map over `src/tools.ts`" claim; the `AttachmentsContext.fetcher` seam and the pinned shell-level assertions in Testing conventions; and three new Conventions entries — the fetch boundary as a security boundary, the un-hotfixable description, and never logging request `_meta`.
+- [x] Full gate: `make check && make test` — **green** after the doc edits (all suites, 304 tests).
+- [x] Fold the verified behavior back into `wip/console-attachments-landscape.html` — done. A "BUILT AND VERIFIED" banner replacing the "Research only — nothing implemented" pill (naming the five ways what shipped differs from the sketch), the measured-TTL correction, a new ceiling box for M1, the mobile-defect cell closed by S1, a "superseded" note on §06's `prepare.ts` sketch, and a resolution paragraph on each of Q1–Q5.
+- [ ] **Release via the `/release` skill.** **npm publish needs Louis in-session** (auth lapses between sessions; `npm publish` hits an `EOTP` browser gate — the agent cannot do it). Consider whether `pipelex-plugins` skills need a line about the new console capability — the last release had exactly this coordination footgun.
+  - **Release notes must say two things out loud**: existing users have to **re-add the connector** for the new tool and its description to reach them (A10 — a cached tool list never refreshes, so the tool is simply invisible until they do), and attachments are capped at **7 MiB** (M1 — users will hit this, since ChatGPT hands over 19 MB files happily). Both are already written into the `## [Unreleased]` entry, so the skill will carry them into `## [x.y.z]`.
+  - Branch flow first: this work sits on `feature/Console-upload`, so it needs a PR into `dev` before the skill can cut `release/vX.Y.Z → main`.
+- [ ] **Deploy the production console** — `make deploy` (Alpic; CLI-only, no git integration), putting the tool in front of real users at `https://pipelex-mcp-a3c6a115.alpic.live/mcp`. The smoke did **not** do this; it ran through a local tunnel.
+  > **Ordering correction (2026-07-31).** This plan originally listed the deploy *before* the release. That is wrong, and contradicts the repo's own rule: `CLAUDE.md` and the `/release` skill both require npm publish and the Alpic deploy to ship **in lockstep, from the same `main` commit, at the same `package.json` version** — "never publish npm and deploy Alpic from different commits or versions". Deploying from the feature branch now would put an unreleased build in front of console users while npm still serves 0.8.0. The deploy is step 10 of the release skill, after the release PR merges. **Do not run `make deploy` before then.**
 - [ ] *Non-blocking, do it whenever:* sanity-check **claude.ai** — the tool is present there with a required `attachments`, so the model must fabricate a URL or decline; confirm the fetch boundary's refusal reads instructively in situ. The workshop side needs no manual check: the tool's **absence** is pinned by a test (D5).
 
 **CHECKPOINT 3 — PENDING.** Record the shipped version, the Alpic deploy, and whether the claude.ai wording held up.

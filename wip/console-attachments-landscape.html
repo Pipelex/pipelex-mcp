@@ -234,11 +234,23 @@
   <h1>Can the console see the user's uploaded files?</h1>
   <p class="subtitle">Host attachment channels on ChatGPT and claude.ai, the MCP standard in flight, and what it would take to lift the hosted console out of pass-through-only.</p>
   <p class="meta-line">
-    <span class="pill">Research only — nothing implemented</span>
+    <span class="pill">Shipped — this is now the record of a built feature</span>
     <span>Recorded 2026-07-30</span>
     <span>Sources verified same day</span>
+    <span>Outcome folded back 2026-07-31</span>
   </p>
 </header>
+
+<div class="callout" style="border-left:4px solid var(--ok, #2e7d32); padding:.75rem 1rem; margin:1rem 0;">
+  <p><strong>BUILT AND VERIFIED 2026-07-31. This document is no longer a proposal.</strong> The channel was probed live, designed into <code>SPEC.md</code>, implemented, and smoke-tested against real ChatGPT. Read the sections below as the research that led to a shipped feature — the design sketch in §06 in particular is <em>not</em> what shipped. What actually landed:</p>
+  <ul>
+    <li><strong>A dedicated tool, <code>mthds_upload_attachments</code></strong> — not an <code>attachments</code> argument on <code>mthds_prepare_inputs</code> as §06 sketches. The ~305 s URL life forced ingest-during-the-call, which left no pass-through design to weigh against a separate tool; a separate tool also means no binding convention has to be invented (Q1 below dissolves), <code>prepare.ts</code> is untouched, and the console's "pass-through only" property stays a true statement rather than an exception. The returned <code>pipelex-storage://</code> URIs are filled into the <code>mthds_inputs_template</code> output and handed to <code>mthds_run</code>; <code>mthds_prepare_inputs</code> can be skipped entirely.</li>
+    <li><strong>Registered on the hosted console only</strong> — Q5 below is settled the other way round from both options it offers. The host gates substitution on the declared schema, so on the workshop the tool would be <em>structurally unreachable</em>, and advertising it would cost every workshop user tokens on every <code>tools/list</code>.</li>
+    <li><strong>A named attachment fetch boundary</strong> shipping with the first fetch (Q2, answered properly): https-only, the required <code>oaisdmntpr</code> host prefix, no redirects, no credentials, a cap enforced before the body is read and again mid-stream, a bounded timeout.</li>
+    <li><strong>A 7 MiB cap, forced by the transport</strong> — see the measured box below. Not a product judgement.</li>
+    <li><strong>Live smoke on real ChatGPT passed</strong>: unprompted fill, end-to-end to <code>mthds_run</code>, the oversize refusal, and — closing the last open cell — <strong>an image on iOS</strong>.</li>
+  </ul>
+</div>
 
 <div class="tldr">
   <span class="tag">TL;DR</span>
@@ -397,10 +409,10 @@ sequenceDiagram
   <summary>Known defects in the mechanism (all currently open)</summary>
   <div class="body">
     <ul>
-      <li><strong>Mobile is broken</strong> — <em>partly corrected 2026-07-30, see below.</em> The iOS/Android native apps were reported to send placeholder strings — <code>{"images": ["chat_upload"]}</code> or <code>"chat_upload://image_0"</code> — instead of file objects. Reported January 2026, no vendor response. <strong>Our own probe did not reproduce this with a PDF on iOS</strong> (<code>ChatGPT/1.2026.202</code>, iOS 26.5.2): the attachment arrived as a correct four-field object and fetched fine. Note the reported payloads are <em>image</em>-shaped, and we tested a document — so the defect may well persist for images. That cell is untested.</li>
+      <li><strong>Mobile is broken</strong> — <em>did not reproduce; closed 2026-07-31.</em> The iOS/Android native apps were reported to send placeholder strings — <code>{"images": ["chat_upload"]}</code> or <code>"chat_upload://image_0"</code> — instead of file objects. Reported January 2026, no vendor response. <strong>Our own probe did not reproduce this with a PDF on iOS</strong> (<code>ChatGPT/1.2026.202</code>, iOS 26.5.2): the attachment arrived as a correct four-field object and fetched fine. The remaining <em>image</em>-on-mobile cell — the exact case the defect reports describe — was then smoked against the shipped tool on iOS and <strong>also worked</strong>. No mobile-specific handling was built, and none is needed.</li>
       <li><strong>Duplicate calls.</strong> Cases of the same <code>file_id</code> arriving twice with different <code>download_url</code>s; and cases where the permission dialog never appears and the call never lands. Acknowledged by OpenAI support in March 2026, no documented fix.</li>
       <li><strong><code>imageIds</code> round-tripping is buggy.</strong> Files a view pushes back to the model via <code>setWidgetState({ imageIds })</code> are documented but reportedly not actually seen by the model. Acknowledged February 2026. Only relevant if we later want a view-side attach flow.</li>
-      <li><strong>Undocumented:</strong> <code>download_url</code> TTL, size limits, and permitted MIME types. The docs imply expiry by offering a "mint a fresh URL" call. <em>The TTL is no longer unknown — see the measured box below.</em></li>
+      <li><strong>Undocumented:</strong> <code>download_url</code> TTL, size limits, and permitted MIME types. The docs imply expiry by offering a "mint a fresh URL" call. <em>The TTL is now measured — <strong>~305 s from the tool call</strong> (Azure SAS <code>se</code>, confirmed by an observed <code>403</code>); see the box below. The vendor's own size ceiling is still undocumented and irrelevant to us: it hands over at least 19.6 MB, far more than <strong>our</strong> upload leg accepts (7.5 MiB, see the ceiling box), so our cap binds first in every case.</em></li>
     </ul>
   </div>
 </details>
@@ -417,7 +429,17 @@ sequenceDiagram
     <li><strong>The four-field schema is a runtime gate, not just an app-review rule.</strong> The host will only hand a file to a field whose declared JSON Schema is the four-field object. A deliberately permissive twin tool was <em>never invoked once</em> across the whole session — the model reported being instructed to pass file references only to tools whose schema expects a file parameter. Practical consequence: a "lenient" production schema is not an option, and malformed payloads must be caught at the protocol layer (before validation) rather than by loosening the contract.</li>
     <li><strong>iOS mobile works with documents.</strong> Same two-call pattern as desktop — first call omitted the field, an explicit "pass the PDF in the attachments field" produced a correct object. A schema rejection comes back as an <code>isError</code> tool result whose Zod text the model reads and self-corrects from, so the strict schema is less brittle in practice than it looks on paper.</li>
   </ul>
-  <p>Still open: an <em>image</em> on mobile (the cell the original defect reports describe), and an end-to-end ingest timing at ~20 MB against the hosted request timeout. Full record in <code>TODOS.md</code>.</p>
+  <p><strong>Both remaining unknowns closed 2026-07-31.</strong> The <em>image on mobile</em> cell was smoked against the shipped tool on iOS and works. The ~20 MB ingest timing question turned out to be moot — see the ceiling box below. Full record in <code>TODOS.md</code>.</p>
+</div>
+
+<div class="callout" style="border-left:4px solid var(--warn, #b26a00); padding:.75rem 1rem; margin:1rem 0;">
+  <p><strong>MEASURED 2026-07-31 — the ingest ceiling is ~7.5 MiB, and the transport picked it, not us.</strong> Synthetic byte assets uploaded through the SDK against the live API: 1 / 5 / 7 / 7.3 / <strong>7.4 MiB all succeed</strong> (~2.9 s at the top end, ~2.5 MB/s); 7.5 / 7.6 / 8 / 12 / 20 MiB all fail fast with <code>413</code>. The wall is exactly AWS API Gateway's 10 MiB request quota divided by base64's 4/3 inflation — <code>POST /v1/upload</code> is a base64 JSON body behind an HTTP API integration. <strong>The app-level 50 MiB <code>MAX_UPLOAD_MIB</code> is unreachable through the public gateway and must not be quoted as the limit anywhere.</strong> Three consequences:</p>
+  <ul>
+    <li><strong>Synchronous ingest is comfortably feasible.</strong> At the cap: ~2.3 s fetch + ~2.9 s upload ≈ 6 s, against a ~305 s signed-URL window. Timing was never the constraint; payload size is. No async/job design is needed.</li>
+    <li><strong>The byte cap was never a product decision.</strong> The console caps an attachment at <strong>7 MiB</strong>, leaving headroom for the JSON envelope.</li>
+    <li><strong>Oversize is an ordinary case, not an edge case</strong> — ChatGPT hands over 19.6 MB PDFs happily, so users will meet the refusal. It fires before any bytes are fetched, names the limit, and gets a release note. Raising the ceiling means bypassing the gateway for uploads (a presigned direct-upload redesign) — cross-repo, out of scope here.</li>
+  </ul>
+  <p>Same measurement exposed a pre-existing bug in the shipped workshop: <code>mthds_prepare_inputs</code> hit the same wall via a wasted 10 MiB round-trip and a server message that could not name the real limit. Fixed in the same increment with a size-guarded client shared by both upload paths.</p>
 </div>
 
 <h2><span class="sec-label">04 · claude.ai</span>The wall, and the tempting workaround</h2>
@@ -473,6 +495,8 @@ timeline
 <p><strong>The strategic read:</strong> SEP-2631's shape — upload out of band, pass an opaque URI as the argument — <em>is</em> what <code>mthds_prepare_inputs</code> already does with <code>pipelex-storage://</code>. We are not going to have to rethink the tool when the standard lands; we will have to add a second way of filling the same field. That is a good position to be in, and it is worth saying out loud in review: the ChatGPT increment is not a detour, it is the same pattern with a vendor-specific intake.</p>
 
 <h2><span class="sec-label">06 · The increment</span>What it would take, minimally</h2>
+
+<p class="note"><strong>Superseded by what shipped — read this section as the reasoning, not the design.</strong> The sketch below hangs ingest off <code>mthds_prepare_inputs</code>'s <code>PrepareContext</code>. The measured ~305 s URL life then removed pass-through from the table entirely, and once ingest had to happen <em>during the tool call</em>, a dedicated <code>mthds_upload_attachments</code> tool was strictly better: no binding convention to invent (Q1), no change to <code>prepare.ts</code>'s walk, and the console's "pass-through only" property preserved. The instinct that the change is bounded held; the seam it hangs on did not.</p>
 
 <p>The change is bounded because the seam already exists. <code>PrepareContext</code> is where per-deployment asset policy lives (<code>resolver</code>, <code>allowUpload</code>); this adds a third mode: the console may <em>ingest</em> a host-supplied URL — fetch the bytes and upload them under the caller's BYOK key — while still never touching a filesystem.</p>
 
@@ -581,29 +605,34 @@ timeline
 
 <p>Four touched surfaces, one new capability, no change to the workshop's behavior and no change to any host that does not populate <code>attachments</code>. The tool table stays shared; the divergence stays where divergence already lives.</p>
 
-<h3>Open questions for the design session</h3>
+<h3>Open questions for the design session <span style="font-weight:400">— all five answered; each card carries its resolution</span></h3>
 
 <div class="cards">
   <div class="card">
     <h3><span class="k">Q1</span>The binding convention</h3>
     <p>How does the model say which attachment fills which input slot? A marker string (<code>"attachment:file-abc"</code>) is the obvious candidate, but positional or filename matching are alternatives. Whatever we pick has to be explained in the tool description well enough that the model gets it right unprompted.</p>
+    <p class="note"><strong>Dissolved, not answered.</strong> A dedicated tool returns <code>pipelex-storage://</code> URIs, which are already ordinary pass-through values — the model fills them into the inputs template like any other string. No convention exists to get wrong.</p>
   </div>
   <div class="card">
     <h3><span class="k">Q2</span>SSRF surface</h3>
     <p>We would be fetching a caller-supplied URL from a public endpoint. That needs a host allowlist, a size cap, and a timeout — the same care we took with <code>readLocalPath</code>, applied to the network instead of the filesystem. <strong>Corrected 2026-07-30:</strong> this paragraph originally named <code>files.oaiusercontent.com</code> as the host to allowlist. The measured host is <code>oaisdmntprnznorth.blob.core.windows.net</code> — Azure Blob, apparently region-scoped — so a literal host allowlist would both fail legitimate users and be weaker than it looks. Re-derive around a suffix rule, and lean on the byte cap, the timeout, and a no-cross-host-redirect policy for the real defence.</p>
     <p class="note">Do not ship the fetch without the allowlist. An unrestricted server-side fetcher on a public MCP endpoint is a worse hazard than the filesystem read we already refused.</p>
+    <p class="note"><strong>Answered — and the suffix rule this card proposes is unsafe.</strong> Any Azure customer can create a storage account under <code>*.blob.core.windows.net</code>, so the OpenAI-owned <code>oaisdmntpr</code> prefix is <em>required</em>, never optional. Shipped as a named boundary in its own module: https-only, the host pattern, no credentials in the URL, no non-default port, redirects refused outright, the 7 MiB cap enforced from <code>content-length</code> before the body is read and again mid-stream, a bounded timeout, no headers sent. The advice to lean on the cap and timeout was right and is now doctrine — the prefix is undocumented vendor infrastructure, so <strong>the host check is a filter, not the defence</strong>.</p>
   </div>
   <div class="card">
     <h3><span class="k">Q3</span>Failure texture for broken hosts</h3>
     <p>ChatGPT mobile sends placeholder strings. That must classify as an instructive <code>input_domain</code> at <code>attachments</code> — telling the user to try desktop — rather than surfacing as a fetch error.</p>
+    <p class="note"><strong>Answered: nothing to build, and it could not have been built as written.</strong> The premise did not reproduce — iOS works with both documents and images. And a malformed payload never reaches the capability layer at all: the MCP SDK rejects it at its own boundary, surfacing to the model as an <code>isError</code> result carrying the raw validation text, from which the model was observed to self-correct on the next call. Loosening the schema to catch it is not an option either — the host would then never populate the field.</p>
   </div>
   <div class="card">
     <h3><span class="k">Q4</span>Does <code>mthds_run</code> get it too?</h3>
     <p><code>mthds_run</code> also takes <code>inputs</code>. Leaning no: keep one door for file intake so the prepare&nbsp;&rarr;&nbsp;run sequence stays the single story we teach.</p>
+    <p class="note"><strong>Answered: no</strong>, and the lean was right for a better reason than it knew. Ingest is its own tool, so <code>mthds_run</code> needed no change whatsoever — it receives storage URIs like any other input value.</p>
   </div>
   <div class="card">
     <h3><span class="k">Q5</span>Workshop posture</h3>
     <p>The schema is shared, so <code>attachments</code> exists on the workshop too. Simplest: ignore it there (no host populates it over stdio). Alternatively accept it — the workshop can already upload — for one uniform behavior.</p>
+    <p class="note"><strong>Answered: neither.</strong> The tool is not registered on the workshop at all — the first documented exception to "both shells register the same table". The host gates substitution on the declared schema, so there the tool is <em>structurally unreachable</em>, not merely unused; advertising it would spend every workshop user's tokens on every <code>tools/list</code> for a capability that cannot fire. The invariant that survives: no tool <em>name</em> means different things on the two shells.</p>
   </div>
 </div>
 
