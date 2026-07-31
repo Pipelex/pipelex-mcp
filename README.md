@@ -1,7 +1,7 @@
 # Pipelex MCP
 
-Pipelex MCP exposes MTHDS validation, inputs projection and preparation, and
-durable method runs to MCP hosts, wrapping the Pipelex API through the
+Pipelex MCP exposes registered-method discovery, MTHDS validation, inputs
+projection and preparation, and durable method runs to MCP hosts, wrapping the Pipelex API through the
 `@pipelex/sdk` `PipelexApiClient`. It ships as **two servers from one repo and
 one capability core**:
 
@@ -18,6 +18,7 @@ contracts — with one documented exception, marked below:
 
 | Tool | What it does |
 |---|---|
+| `mthds_list_methods` | List the active API key's organization catalog as bounded names, descriptions, and canonical ids — never method source or stored inputs/outputs. |
 | `mthds_validate` | Validate submitted `.mthds` files, or a registered method by catalog id; on a valid verdict, ship the dry-run method graph to the `run-graph` view (hosted only). |
 | `mthds_inputs_template` | Project a pipe's declared inputs as a fill-in template for a run. |
 | `mthds_prepare_inputs` | Turn filled inputs run-ready: upload file-bearing values to Pipelex storage and rewrite them to `pipelex-storage://` (workshop uploads; console is pass-through only). |
@@ -132,7 +133,9 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }
 
 **Environment**
 
-- `PIPELEX_API_KEY` — a `plx_sk_` platform key. Optional for `mthds_validate` /
+- `PIPELEX_API_KEY` — a `plx_sk_` platform key. Required for
+  `mthds_list_methods` because the returned catalog is the key's active,
+  workspace-shared organization catalog. Optional for `mthds_validate` /
   `mthds_inputs_template` calls that submit `files` against a key-less API;
   effectively required for the run family and for any `method_id` call on any
   tool, since the catalog is org-scoped (a missing/invalid key is a `config`
@@ -216,15 +219,17 @@ Three things to know:
 
 **Attachment fetch boundary.** Fetching a host-supplied URL from a public
 endpoint is an SSRF surface, so the fetch is a deny-by-default policy: `https:`
-only; the host must match `oaisdmntpr<azure-region>.blob.core.windows.net` or
-`files.oaiusercontent.com` (the `oaisdmntpr` prefix is **required** — a
-suffix-only rule would admit any Azure customer's storage account); no
+only; the host must be `oaiusercontent.com` at the apex or on any subdomain
+(OpenAI's own locked domain — where live attachment traffic is served), or
+`oaisdmntpr<azure-region>.blob.core.windows.net` (where it used to be, and where
+the `oaisdmntpr` prefix stays **required**, because that suffix is multi-tenant
+and a suffix-only rule would admit any Azure customer's storage account); no
 credentials in the URL, no non-default port; redirects refused; the size cap
 enforced from `content-length` before the body is read *and* again mid-stream; a
-bounded timeout; no headers forwarded; non-2xx refused. Because the OpenAI host
-prefix is undocumented vendor infrastructure that can change without notice, the
-cap, the timeout, and the no-redirect rule hold on their own — the host check is
-a filter, not the defence.
+bounded timeout; no headers forwarded; non-2xx refused. Because these hosts are
+undocumented vendor infrastructure that changes without notice — it already has
+once — the cap, the timeout, and the no-redirect rule hold on their own; the
+host check is a filter, not the defence.
 
 ## Host → server matrix
 
@@ -275,6 +280,63 @@ connector for those sessions:
 Full contracts (verdict discipline, `_meta` channels, view behavior) live in
 `SPEC.md`. The shapes below use `SubmittedFileInput` from
 [the two deployments](#the-two-deployments-and-the--path--arm).
+
+### `mthds_list_methods`
+
+```ts
+// input
+{
+  query?: string;   // trimmed, case-insensitive substring over id/name/description
+  limit?: number;   // integer 1..50; default 20
+  offset?: number;  // integer >= 0; default 0
+}
+
+// structuredContent — success
+{
+  status: "ok";
+  total_count: number;
+  matched_count: number;
+  returned_count: number;
+  next_offset: number | null;
+  methods: Array<{
+    method_id: string;
+    name: string;
+    name_truncated: boolean;
+    description: string | null;
+    description_truncated: boolean;
+    has_source: boolean;
+    updated_at: string;
+  }>;
+}
+```
+
+Both shells expose this read-only, no-view catalog entry point. It fetches the
+current API key's complete organization catalog through `@pipelex/sdk`, filters
+and pages locally, and returns a deterministic page sorted by case-insensitive
+name then id. Names are bounded to 200 Unicode code points and descriptions to
+500; search uses their full values. Empty catalogs, no matches, and offsets past
+the end are successful empty results. `has_source` says only that stored MTHDS
+source exists — it is **not** a valid/runnable verdict.
+
+The projection is deliberately source-free: `mthds`, Python, stored inputs and
+outputs, organization ids, and creator ids never enter `structuredContent`,
+`content`, `_meta`, or logs. Upstream listing is not paged: the platform still
+returns every full row, and the MCP immediately projects it before producing any
+tool output. A malformed row fails the whole result as a non-retryable runtime
+contract error rather than returning a misleading partial list.
+
+Name-to-run flow:
+
+```text
+mthds_list_methods({ query: "invoice" })
+  → choose/disambiguate method_id (do not use a has_source:false draft)
+  → mthds_validate({ method_id })                 # optional current-content check
+  → mthds_inputs_template({ method_id })
+  → fill inputs; prepare/upload assets if needed
+  → mthds_run({ method_id, inputs })
+```
+
+No method source crosses the conversation in this flow.
 
 ### `mthds_validate`
 
@@ -444,12 +506,14 @@ conversation gaps — days later, the same id still answers. On the hosted conso
 `mthds_run` ships the `run-follow` live-status view; on the workshop these are
 plain tools. See `SPEC.md` → "Run Scope" for the full contract.
 
-### Verdict discipline (all tools)
+### Success and verdict discipline
 
-A *produced* verdict is always `status: "ok"` — discriminate on `is_valid` (and,
-for validation, `is_runnable`); an invalid bundle or unresolvable closure is a
+A successful catalog page is `status: "ok"` with counts and `methods` (there is
+no `is_valid` field). For tools that produce a method verdict, a *produced*
+verdict is always `status: "ok"` — discriminate on `is_valid` (and, for
+validation, `is_runnable`); an invalid bundle or unresolvable closure is a
 produced `is_valid: false` verdict, not an error. `status: "error"` is reserved
-for **no verdict could be produced** and carries an `errors[]` array, each tagged
+for **no result/verdict could be produced** and carries an `errors[]` array, each tagged
 `input_domain` (bad request), `config` (env/auth/unreachable API), or `runtime`
 (server fault), plus a `retryable` flag. Every `errors[]` entry's `location`,
 `message`, and `hint` are also surfaced in the `content` text.

@@ -429,7 +429,7 @@ sequenceDiagram
     <li><strong>The four-field schema is a runtime gate, not just an app-review rule.</strong> The host will only hand a file to a field whose declared JSON Schema is the four-field object. A deliberately permissive twin tool was <em>never invoked once</em> across the whole session — the model reported being instructed to pass file references only to tools whose schema expects a file parameter. Practical consequence: a "lenient" production schema is not an option, and malformed payloads must be caught at the protocol layer (before validation) rather than by loosening the contract.</li>
     <li><strong>iOS mobile works with documents.</strong> Same two-call pattern as desktop — first call omitted the field, an explicit "pass the PDF in the attachments field" produced a correct object. A schema rejection comes back as an <code>isError</code> tool result whose Zod text the model reads and self-corrects from, so the strict schema is less brittle in practice than it looks on paper.</li>
   </ul>
-  <p><strong>Both remaining unknowns closed 2026-07-31.</strong> The <em>image on mobile</em> cell was smoked against the shipped tool on iOS and works. The ~20 MB ingest timing question turned out to be moot — see the ceiling box below. Full record in <code>TODOS.md</code>.</p>
+  <p><strong>Both remaining unknowns closed 2026-07-31.</strong> The <em>image on mobile</em> cell was smoked against the shipped tool on iOS and works. The ~20 MB ingest timing question turned out to be moot — see the ceiling box below. Full record in <code>archive/TODOS-chatgpt-file-inputs-2026-07-31.md</code>.</p>
 </div>
 
 <div class="callout" style="border-left:4px solid var(--warn, #b26a00); padding:.75rem 1rem; margin:1rem 0;">

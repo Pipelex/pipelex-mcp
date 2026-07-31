@@ -116,6 +116,7 @@ function overrideContexts(
 ): ToolContexts {
   const keyOverride = apiKey === undefined ? {} : { apiKey };
   return {
+    catalog: { ...base.catalog, ...keyOverride, authError },
     validation: { ...base.validation, ...keyOverride, authError },
     inputs: { ...base.inputs, ...keyOverride, authError },
     prepare: { ...base.prepare, ...keyOverride, authError },

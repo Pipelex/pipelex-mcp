@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`mthds_list_methods` catalog discovery on both shells.** The new plain, read-only tool lists the active API key's organization catalog with optional case-insensitive query plus bounded MCP-side paging, returning only deterministic, model-facing metadata: canonical `method_id`, Unicode-bounded name/description with truncation flags, narrow `has_source`, and `updated_at`. Empty catalogs and no matches are successful results. MTHDS/Python source, stored inputs/outputs, org ids, and creator ids are excluded from every tool-output channel and logs. The returned id feeds the existing current-content validate → inputs-template → run flow; no method executes and no inference credit is spent while listing.
+  - **ChatGPT console users must re-add the connector to get this tool.** ChatGPT caches a connector's tool list at add-time and never issues `tools/list` again, so a newly registered tool does not reach an installation that already exists — remove and re-add the connector once. (This applies to the new tool only; the attachment fix below needs nothing.)
+  - **The listing's presentation is specified by the server, not left to the model.** A catalog listing is one of the few results a user reads almost verbatim, and the description is what lets them choose — yet the same two-method catalog produced, in one conversation, a name-only answer that volunteered "both contain source code, but I haven't checked whether they validate": the model filling the silence with the one field that carries no verdict. The summary now opens its list with an explicit render directive (report each method with **both** name and description), leads each row with name + description and demotes `method_id` to a trailing parenthetical, and annotates `has_source` **only when false**, where it is actionable as "draft, cannot be used by id". The directive lives in the summary rather than only in the tool description because ChatGPT caches a connector's tool list at add-time — the summary is the one channel where a presentation fix reaches installations that already exist. Names and descriptions stay untrusted data: each is collapsed to a single line so it cannot break out of its bullet, and the directive names them as data to display rather than instructions to follow.
+
+### Fixed
+
+- **ChatGPT attachments are ingested again — the fetch boundary now accepts OpenAI's own content domain.** Serving moved off the Azure endpoint the boundary was built against onto `sdmntpr<azure-region>.oaiusercontent.com` (same region token, OpenAI's domain, Cloudflare-fronted), so `mthds_upload_attachments` refused every attachment on the hosted console with `This server does not fetch attachments from "…"` — a refusal whose hint then sent the model off asking the user for a public `http(s)` URL. `oaiusercontent.com` is now allowed at the apex and on **any** subdomain, alongside the retained Azure pattern. The widening is deliberate and does not weaken the `oaisdmntpr` prefix rule: that prefix is mandatory only because `blob.core.windows.net` is multi-tenant and any Azure customer can register under it, whereas `oaiusercontent.com` is registered and locked by OpenAI, so there is no "any customer" hazard to filter and a narrower rule would only break again at the next subdomain rename. The residual risk accepted is a dangling-subdomain takeover on OpenAI's domain, which yields one bounded, credential-free, non-redirected GET — contained by the rest of the boundary, per **the host check is a filter, not the defence**. Fix is server-side only; no schema or description change, so **no connector re-add is needed**.
+
+### Changed
+
+- `classifyError` route-specific bad-request texture can now override the error class, used so `/v1/methods`' missing active-organization 400 is an auth/configuration error at the deployment's key location rather than a fictitious input error.
+
 ## [0.9.0] - 2026-07-31
 
 ### Added

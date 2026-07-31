@@ -1,6 +1,6 @@
 # Build vs run: the lifecycle dimension of the dual-deployment MCP
 
-Status: companion to `wip/dual-deployment-assessment.md` — read that first. (Revision 2026-07-17: view-rendering claims updated per `wip/mcp-apps-landscape-and-local-ui.md` — views now render in Cursor/Cowork/Codex too; Claude Code is the one text-only host.) This document adds a second axis to the two-server decision, informed by the platform's method-catalog endpoints (recap: `../pipelex-platform/wip/methods-endpoints-recap.md`). Direction discussed, not yet designed; feeds the same upcoming SPEC.md increment.
+Status: companion to `wip/dual-deployment-assessment.md` — read that first. (Revision 2026-07-31: the read-only catalog-list slice described here is shipped as `mthds_list_methods`; method detail and catalog writes remain parked. `SPEC.md` is authoritative.) This document adds a second axis to the two-server decision, informed by the platform's method-catalog endpoints (recap: `../pipelex-platform/wip/methods-endpoints-recap.md`).
 
 ## 1. The claim
 
@@ -33,7 +33,7 @@ The first assessment said the hand-copy cost on chat hosts is irreducible — th
 |---|---|---|---|
 | Author & repair (validate, inputs from files) | **Local** | Files on disk, `{ path }` submission, byte-accurate, diagnostics locate to real files, cheap repair loop | Hosted works with inline content — slow on large bundles; acceptable for small edits discussed in chat |
 | Publish to catalog | **Local** (bridge step) | A save tool reading from paths pushes the built bundle to `POST`/`PUT /methods` — the seam where the workshop hands off to the console | From chat, saving means emitting content by hand — possible, not the promoted path |
-| Discover (list/inspect registered methods) | **Hosted** | Org-shared catalog + conversational surface: "what methods do we have?" → list with derived descriptions | Local server can call the same routes; useful, just less of a headline |
+| Discover (list registered methods; inspect later) | **Hosted** | Org-shared catalog + conversational surface: "what methods do we have?" → `mthds_list_methods` with bounded descriptions and ids | The local server ships the identical list contract for coding-agent parity |
 | Run a registered method | **Hosted** | `method_id` + inputs only; fetch-and-forward keeps content out of context; `run-follow` card + completion handoff render here | Works from coding agents too — same id-based call, with the live card in Cursor/Cowork/Codex and text-only polling in Claude Code |
 | Run an unregistered work-in-progress | **Local** | Paths in, run out — the natural "test what I just built" loop | Hosted requires inline content — the slow path |
 | Follow & report (status, results, days-later lookup) | **Hosted** | Views render here; durable `run_id` already survives conversation gaps | Identical tools and views work locally (Claude Code excepted — text summaries carry the flow there) |
@@ -42,13 +42,13 @@ The one-host-one-server rule from the first assessment is unchanged by all this 
 
 ## 4. What this implies for the tool surface (sketch, not design)
 
-> **Revision 2026-07-21 — the first two bullets are shipped** (on `feature/method-id-catalog-runs`; SPEC.md is now the authority). Schema shape as decided: a separate optional top-level `method_id?` beside a now-optional `files` — not a third arm on the files union (a method id is not a file) and not a distinct tool. Transport as decided: `mthds_run` uses the platform's **native** `method_id` resolution on `/v1/start` (`start({ extra: { method_id } })` — no fetch round-trip, files win with the id riding as run-history linkage); `mthds_inputs_template` uses **fetch-and-forward** (`getMethod` → mirror-parse `MethodData.mthds` → `buildInputs`). The last two bullets (catalog discovery tools, the publish/save tool) remain unshipped sketch, and `mthds_validate` by id is parked with the conducted-views workstream (`dual-server-conducted-views.md`).
+> **Revision 2026-07-31 — run/input/validate by id and the catalog-list bridge are shipped; `SPEC.md` is now the authority.** Schema shape as decided: a separate optional top-level `method_id?` beside a now-optional `files` — not a third arm on the files union (a method id is not a file) and not a distinct tool. `mthds_run` uses the platform's native `method_id` resolution on `/v1/start`; the build/validate paths fetch-and-forward through the SDK. Catalog discovery starts with one source-free shared tool, `mthds_list_methods`. Method detail and the publish/save tool remain parked.
 
 Following the SPEC naming conventions (noun names the artifact; lifecycle families share a stem):
 
 - **`mthds_run` grows a `method_id` arm** as an alternative to `files` — the run family keeps its stem and the durable-id flow downstream (`mthds_run_status`, `mthds_run_results`) is untouched.
 - **`mthds_inputs_template` grows the same arm**, resolving the registered method's closure server-side. (SPEC.md currently notes `method_ref` is unexposed because the registry answered 501 — the platform catalog is now the registry that answers.)
-- **Catalog discovery tools** on the hosted server: list registered methods (name, derived description, id) and fetch one method's detail. Read-only, small structured payloads, no views needed initially.
+- **`mthds_list_methods` is shipped on both shells**: name/description/id discovery with source-free bounded output, no view. A separate method-detail tool remains deliberately unshipped until list usage proves it necessary.
 - **A publish/save tool** on the local server: create or update a catalog method from paths. NOT read-only; org-scoped; idempotent upstream (`POST`/`PUT` are wrapped by org-scoped idempotency). **No delete tool** — mirroring the platform's deliberate no-`DELETE` stance; removal stays a product-owned operation.
 - Registered-method runs by catalog id currently sit in SPEC.md's **Non-Goals** — this dimension pulls that item forward as the hosted server's headline increment, the way directory distribution pulls OAuth forward.
 
