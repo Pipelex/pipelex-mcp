@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`release.yml` — publish and deploy now ship from CI, on a manual trigger.** One `workflow_dispatch` workflow publishes `@pipelex/mcp` to npm, deploys the hosted console to Alpic, and pushes the `vX.Y.Z` tag, all from `main`. It is deliberately **not** triggered by a push: merging to `main` ships nothing, and a human fires the release from the Actions tab once the release PR has landed. The `version` input must match `main`'s `package.json` — that is the guard against dispatching before the merge, or against the wrong bump — and the changelog must already carry the matching heading. `target` (`both` | `npm` | `alpic`) lets a partial failure be retried one leg at a time without re-shipping the other; publishing a version that already exists is skipped and an existing tag is left alone, so re-running at the same version is safe. `make publish` / `make deploy` stay as local escape hatches. Requires an `ALPIC_API_KEY` repo secret plus either an npm trusted-publisher registration for this repo + `release.yml` or an `NPM_TOKEN` secret.
+
 ### Breaking Changes
 
 - **Bring-your-own-key is removed from the hosted console — per-user OAuth is now its only auth posture.** Both BYOK channels are gone: an `Authorization: Bearer plx_sk_...` header and a `?api_key=plx_sk_...` connector URL. A connector still registered either way **stops connecting entirely** (not merely losing tools) — Skybridge mounts `requireBearerAuth` across `/mcp`, so a `plx_sk_` goes to the JWKS verifier and fails as an unverifiable token while a keyed URL carries no `Authorization` header at all. Remove and re-add the connector by its bare URL, then sign in; ChatGPT caches a connector's configuration at add-time, so re-adding is the only path. `src/hosted/byok.ts` is deleted rather than migrated, exactly as it was written to be; `contextsForRequest` moves to `src/hosted/contexts.ts`.
