@@ -18,11 +18,12 @@
 # other (the /release skill's "retry at the same version" rule).
 #
 # One-time external setup:
-#   - npm auth, EITHER register `@pipelex/mcp` as an npm trusted publisher for
-#     this repo + this workflow filename (`release.yml`) — the pattern the
-#     sibling TS repos use, no long-lived secret — OR set an `NPM_TOKEN` repo
-#     secret. The publish step takes the token path when the secret is present
-#     and the OIDC/provenance path when it is not.
+#   - npm: register `@pipelex/mcp` as a trusted publisher on npmjs.com
+#     (package settings) for `Pipelex/pipelex-mcp` with workflow filename
+#     `release.yml` — the same OIDC pattern `pipelex-sdk-js` and `mthds-js`
+#     use, so no long-lived npm secret exists anywhere. **The registration is
+#     bound to this filename**: renaming or moving this workflow breaks
+#     publishing until the trusted publisher is re-registered.
 #   - `ALPIC_API_KEY` repo secret (Alpic dashboard → API key). The project and
 #     environment ids come from the tracked `.alpic/project.json`.
 name: Release (publish + deploy)
@@ -124,7 +125,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # OIDC trusted publishing (--provenance), when no NPM_TOKEN is set
+      id-token: write # mints the OIDC token npm trusted publishing verifies
 
     steps:
       - name: Checkout main
@@ -151,16 +152,11 @@ jobs:
 
       # `prepack` rebuilds dist/local/main.js, so the tarball is built from this
       # commit rather than from whatever a previous step happened to leave behind.
+      # Auth is OIDC trusted publishing — no token; `--provenance` is what binds
+      # the published tarball to this workflow, this repo, and this commit.
       - name: Publish
         if: needs.guard.outputs.already_published == 'false'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -n "$NODE_AUTH_TOKEN" ]; then
-            npm publish --access public
-          else
-            npm publish --access public --provenance
-          fi
+        run: npm publish --access public --provenance
 
       - name: Summary
         env:
