@@ -1,4 +1,5 @@
 import { McpServer } from "skybridge/server";
+import type { OAuthConfig } from "skybridge/server";
 
 import {
   PIPELEX_MCP_SERVER_INFO,
@@ -13,7 +14,7 @@ import {
   mthdsValidateTool,
 } from "../tools.js";
 import type { ToolContexts } from "../tools.js";
-import { byokKeyMiddleware, contextsForRequest } from "./byok.js";
+import { byokKeyMiddleware, contextsForRequest, passthroughMiddleware } from "./byok.js";
 
 export const HOSTED_SERVER_INSTRUCTIONS = [
   "pipelex-mcp helps you work with executable AI Methods written in the MTHDS language (.mthds).",
@@ -37,12 +38,36 @@ export const HOSTED_SERVER_INSTRUCTIONS = [
   "then check on it with `mthds_run_status` and fetch the outcome with `mthds_run_results` by that id.",
 ].join(" ");
 
-export function createHostedServer(contexts: ToolContexts = buildToolContexts()) {
-  return new McpServer(PIPELEX_MCP_SERVER_INFO, {
-    capabilities: {},
-    instructions: HOSTED_SERVER_INSTRUCTIONS,
-  })
-    .use("/mcp", byokKeyMiddleware)
+/**
+ * Build the hosted console.
+ *
+ * `oauth` is resolved by the entrypoint rather than here so this stays
+ * synchronous — the cross-shell parity tests construct the server directly and
+ * have no business awaiting an OAuth discovery fetch. Passing it also flips the
+ * transport auth posture: BYOK and OAuth cannot share `/mcp` (both write
+ * `req.auth`), so the BYOK middleware stands down whenever an OAuth config is
+ * present. See `../server.ts` for why the switch lives in env.
+ */
+export function createHostedServer(
+  contexts: ToolContexts = buildToolContexts(),
+  oauth?: OAuthConfig,
+) {
+  return new McpServer(
+    PIPELEX_MCP_SERVER_INFO,
+    {
+      capabilities: {},
+      instructions: HOSTED_SERVER_INSTRUCTIONS,
+    },
+    // `oauth` belongs to SkybridgeServerOptions — the THIRD constructor
+    // argument. Putting it in the second (the MCP SDK's ServerOptions) is
+    // silently accepted and simply never read, so the well-known metadata and
+    // bearer middleware are never mounted and clients fall back to DCR against
+    // our own origin ("Cannot POST /register"). Pass `undefined` through
+    // rather than spreading conditionally: a spread would defeat the
+    // excess-property check that makes a wrong key a compile error here.
+    { oauth },
+  )
+    .use("/mcp", oauth === undefined ? byokKeyMiddleware : passthroughMiddleware)
     .registerTool(
       {
         name: mthdsListMethodsTool.name,

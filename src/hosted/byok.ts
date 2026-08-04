@@ -77,6 +77,16 @@ export function byokKeyMiddleware(request: ByokRequest, _response: unknown, next
   next();
 }
 
+/**
+ * Stand-in for `byokKeyMiddleware` when console OAuth is configured. It must
+ * NOT touch `req.auth`: Skybridge's bearer middleware owns that field once an
+ * `oauth` config is present, and writing an unverified key over a verified
+ * `AuthInfo` is exactly the race that makes the two postures incompatible.
+ */
+export function passthroughMiddleware(_request: ByokRequest, _response: unknown, next: () => void) {
+  next();
+}
+
 const SUPPLIED_KEY_AUTH_ERROR: AuthErrorTexture = {
   location: "api_key",
   hint: "The Pipelex API rejected the supplied API key; check it is a valid plx_sk_ platform key for this API.",

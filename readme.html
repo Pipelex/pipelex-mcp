@@ -1,0 +1,835 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipelex MCP — two servers, one tool set</title>
+<style>
+  :root {
+    --paper:      #F4F7F7;
+    --surface:    #FFFFFF;
+    --surface-2:  #EDF2F2;
+    --ink:        #101A1C;
+    --ink-muted:  #55686C;
+    --rule:       #D8E2E2;
+    --accent:     #0A7D8C;   /* hosted console — the networked side */
+    --accent-bg:  #E1F0F1;
+    --local:      #A8681A;   /* local workshop — the on-your-machine side */
+    --local-bg:   #F6EBDA;
+    --warn:       #A93B2B;
+    --warn-bg:    #F8E7E3;
+    --add:        #2C7A52;
+    --del:        #A93B2B;
+    --shadow:     0 1px 2px rgba(16, 26, 28, .06), 0 8px 24px -16px rgba(16, 26, 28, .28);
+
+    --font-display: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Mono", Menlo, Consolas, monospace;
+    --font-body: Charter, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --font-ui: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:     #0D1416;
+      --surface:   #141F22;
+      --surface-2: #1A272A;
+      --ink:       #E4ECED;
+      --ink-muted: #93A6AA;
+      --rule:      #253338;
+      --accent:    #4FD3E3;
+      --accent-bg: #102E33;
+      --local:     #E0A85C;
+      --local-bg:  #2E2416;
+      --warn:      #EE9280;
+      --warn-bg:   #33201C;
+      --add:       #6BC492;
+      --del:       #EE9280;
+      --shadow:    0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -16px rgba(0, 0, 0, .8);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --paper:     #0D1416;
+    --surface:   #141F22;
+    --surface-2: #1A272A;
+    --ink:       #E4ECED;
+    --ink-muted: #93A6AA;
+    --rule:      #253338;
+    --accent:    #4FD3E3;
+    --accent-bg: #102E33;
+    --local:     #E0A85C;
+    --local-bg:  #2E2416;
+    --warn:      #EE9280;
+    --warn-bg:   #33201C;
+    --add:       #6BC492;
+    --del:       #EE9280;
+    --shadow:    0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -16px rgba(0, 0, 0, .8);
+  }
+
+  :root[data-theme="light"] {
+    --paper:     #F4F7F7;
+    --surface:   #FFFFFF;
+    --surface-2: #EDF2F2;
+    --ink:       #101A1C;
+    --ink-muted: #55686C;
+    --rule:      #D8E2E2;
+    --accent:    #0A7D8C;
+    --accent-bg: #E1F0F1;
+    --local:     #A8681A;
+    --local-bg:  #F6EBDA;
+    --warn:      #A93B2B;
+    --warn-bg:   #F8E7E3;
+    --add:       #2C7A52;
+    --del:       #A93B2B;
+    --shadow:    0 1px 2px rgba(16, 26, 28, .06), 0 8px 24px -16px rgba(16, 26, 28, .28);
+  }
+
+  * { box-sizing: border-box; }
+
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 17px;
+    line-height: 1.62;
+  }
+
+  .wrap {
+    max-width: 1020px;
+    margin: 0 auto;
+    padding: 3rem 1.25rem 5rem;
+  }
+
+  /* ---- type ---- */
+  h1, h2, h3, h4 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+    margin: 0;
+  }
+  h1 { font-size: clamp(1.9rem, 4.4vw, 2.7rem); line-height: 1.12; }
+  h2 { font-size: clamp(1.25rem, 2.6vw, 1.55rem); line-height: 1.2; }
+  h3 { font-size: 1.02rem; letter-spacing: -0.01em; }
+  p  { margin: 0; max-width: 68ch; }
+  ul, ol { margin: 0; padding-left: 1.15rem; max-width: 68ch; }
+  li + li { margin-top: .38rem; }
+  a { color: var(--accent); text-underline-offset: 3px; }
+  strong { font-weight: 700; }
+
+  .eyebrow {
+    font-family: var(--font-ui);
+    font-size: .7rem;
+    text-transform: uppercase;
+    letter-spacing: .16em;
+    color: var(--ink-muted);
+    margin: 0;
+  }
+
+  .lede { font-size: 1.14rem; color: var(--ink-muted); max-width: 62ch; }
+
+  code, kbd {
+    font-family: var(--font-ui);
+    font-size: .86em;
+    background: var(--surface-2);
+    border-radius: 3px;
+    padding: .1em .34em;
+  }
+
+  pre {
+    font-family: var(--font-ui);
+    font-size: .82rem;
+    line-height: 1.6;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--rule);
+    border-radius: 4px;
+    padding: .85rem 1rem;
+    margin: 0;
+    overflow-x: auto;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+
+  /* ---- layout ---- */
+  main { display: flex; flex-direction: column; gap: 3.25rem; }
+  section { display: flex; flex-direction: column; gap: 1rem; }
+  .stack { display: flex; flex-direction: column; gap: .75rem; }
+  .row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+
+  header.masthead {
+    display: flex; flex-direction: column; gap: .9rem;
+    padding-bottom: 2rem; margin-bottom: .5rem;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .sec-head { display: flex; flex-direction: column; gap: .3rem; }
+
+  /* ---- chips ---- */
+  .chip {
+    font-family: var(--font-ui);
+    font-size: .68rem;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    padding: .2rem .5rem;
+    border-radius: 3px;
+    white-space: nowrap;
+    border: 1px solid transparent;
+  }
+  .chip.both     { background: var(--surface-2); color: var(--ink-muted); border-color: var(--rule); }
+  .chip.local    { background: var(--local-bg); color: var(--local); border-color: color-mix(in srgb, var(--local) 35%, transparent); }
+  .chip.console  { background: var(--accent-bg); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+
+  /* ---- tldr ---- */
+  .tldr {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    box-shadow: var(--shadow);
+    padding: 1.4rem 1.5rem;
+    display: flex; flex-direction: column; gap: 1rem;
+  }
+  .tldr .grid {
+    display: grid; gap: 1rem 1.75rem;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  }
+  .tldr h2 { font-size: 1.05rem; }
+  .tldr p { max-width: none; }
+  .tldr .cell { display: flex; flex-direction: column; gap: .45rem; }
+  .tldr .cell .eyebrow { margin-bottom: .05rem; }
+  .tldr pre { font-size: .76rem; background: var(--surface-2); border-color: transparent; }
+
+  /* ---- tables ---- */
+  .table-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-family: var(--font-body); font-size: .95rem; }
+  th, td { text-align: left; padding: .6rem .85rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th {
+    font-family: var(--font-ui); font-size: .68rem; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .12em; color: var(--ink-muted);
+    background: var(--surface-2); white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.tool { font-family: var(--font-ui); font-size: .8rem; white-space: nowrap; }
+  td.narrow { white-space: nowrap; }
+
+  /* ---- figures ---- */
+  figure { margin: 0; display: flex; flex-direction: column; gap: .55rem; }
+  .fig-body {
+    overflow-x: auto;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 1.1rem;
+  }
+  figcaption { font-size: .85rem; color: var(--ink-muted); font-family: var(--font-ui); }
+  svg { display: block; min-width: 620px; width: 100%; height: auto; }
+  svg text { font-family: var(--font-ui); fill: var(--ink); }
+  .s-box { fill: var(--surface-2); stroke: var(--rule); }
+  .s-local { fill: var(--local-bg); stroke: color-mix(in srgb, var(--local) 45%, transparent); }
+  .s-console { fill: var(--accent-bg); stroke: color-mix(in srgb, var(--accent) 45%, transparent); }
+  .s-core { fill: none; stroke: var(--ink-muted); stroke-dasharray: 3 3; }
+  .s-line { stroke: var(--ink-muted); fill: none; }
+  .s-title { font-size: 13px; font-weight: 600; }
+  .s-sub { font-size: 10.5px; fill: var(--ink-muted); }
+  .s-tag { font-size: 9.5px; letter-spacing: .1em; fill: var(--ink-muted); }
+  .s-local-t { fill: var(--local); }
+  .s-console-t { fill: var(--accent); }
+
+  /* ---- callouts ---- */
+  .note {
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    background: var(--surface);
+    border-radius: 4px;
+    padding: .85rem 1rem;
+    font-size: .95rem;
+  }
+  .note.warn { border-left-color: var(--warn); background: var(--warn-bg); }
+  .note p { max-width: none; }
+  .note .eyebrow { color: var(--warn); }
+
+  /* ---- tabs (pure CSS) ---- */
+  .tabs { position: relative; display: flex; flex-direction: column; gap: .7rem; }
+  .tabs > input { position: absolute; opacity: 0; pointer-events: none; }
+  .tablist { display: flex; flex-wrap: wrap; gap: .35rem; }
+  .tablist label {
+    font-family: var(--font-ui); font-size: .74rem;
+    padding: .35rem .7rem; border: 1px solid var(--rule); border-radius: 4px;
+    background: var(--surface); color: var(--ink-muted); cursor: pointer;
+  }
+  .tablist label:hover { color: var(--ink); }
+  .tabs > .panel { display: none; }
+  #h-cc:checked  ~ .tablist label[for="h-cc"],
+  #h-cx:checked  ~ .tablist label[for="h-cx"],
+  #h-cu:checked  ~ .tablist label[for="h-cu"],
+  #h-cd:checked  ~ .tablist label[for="h-cd"] {
+    background: var(--local-bg); color: var(--local);
+    border-color: color-mix(in srgb, var(--local) 45%, transparent);
+  }
+  #h-cc:focus-visible ~ .tablist label[for="h-cc"],
+  #h-cx:focus-visible ~ .tablist label[for="h-cx"],
+  #h-cu:focus-visible ~ .tablist label[for="h-cu"],
+  #h-cd:focus-visible ~ .tablist label[for="h-cd"] { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #h-cc:checked ~ #p-cc,
+  #h-cx:checked ~ #p-cx,
+  #h-cu:checked ~ #p-cu,
+  #h-cd:checked ~ #p-cd { display: flex; flex-direction: column; gap: .5rem; }
+
+  /* ---- details ---- */
+  details {
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    background: var(--surface);
+    padding: .2rem .1rem;
+  }
+  summary {
+    cursor: pointer;
+    font-family: var(--font-ui);
+    font-size: .84rem;
+    padding: .7rem 1rem;
+    list-style: none;
+    display: flex; align-items: center; gap: .5rem;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "▸"; color: var(--accent); font-size: .8em; }
+  details[open] > summary::before { content: "▾"; }
+  summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 4px; }
+  .details-body { padding: 0 1rem 1.1rem; display: flex; flex-direction: column; gap: 1.1rem; }
+  .details-body > p { font-size: .95rem; }
+
+  .diff .del { color: var(--del); display: block; }
+  .diff .add { color: var(--add); display: block; }
+  .diff .ctx { color: var(--ink-muted); display: block; }
+  .diff-item { display: flex; flex-direction: column; gap: .4rem; }
+  .diff-item h3 { font-size: .88rem; }
+  .diff-item p { font-size: .92rem; color: var(--ink-muted); max-width: 72ch; }
+  .path { font-family: var(--font-ui); font-size: .72rem; color: var(--ink-muted); letter-spacing: .02em; }
+
+  /* ---- flow steps ---- */
+  ol.steps { list-style: none; padding: 0; counter-reset: step; display: flex; flex-direction: column; gap: .55rem; max-width: none; }
+  ol.steps li { counter-increment: step; display: grid; grid-template-columns: 1.9rem 1fr; gap: .7rem; align-items: baseline; }
+  ol.steps li::before {
+    content: counter(step, decimal-leading-zero);
+    font-family: var(--font-ui); font-size: .7rem; color: var(--ink-muted);
+    letter-spacing: .06em;
+  }
+  ol.steps li + li { margin-top: 0; }
+  .step-body { display: block; }
+  .say {
+    font-family: var(--font-ui); font-size: .8rem;
+    background: var(--surface-2); border-radius: 3px;
+    padding: .1em .4em;
+    box-decoration-break: clone; -webkit-box-decoration-break: clone;
+  }
+
+  footer {
+    margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--rule);
+    font-family: var(--font-ui); font-size: .74rem; color: var(--ink-muted);
+    display: flex; flex-wrap: wrap; gap: .35rem 1.25rem;
+  }
+
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">pipelex-mcp · v0.10.0 · live on npm + Alpic</p>
+  <h1>MTHDS methods, inside any MCP host.</h1>
+  <p class="lede">One capability core, shipped as two servers: a <span class="chip local">local workshop</span> that desktop hosts spawn in your working directory, and a <span class="chip console">hosted console</span> you connect as a URL from ChatGPT or claude.ai on the web.</p>
+</header>
+
+<main>
+
+  <!-- ============ TL;DR ============ -->
+  <section aria-labelledby="tldr">
+    <div class="tldr">
+      <h2 id="tldr">TL;DR</h2>
+      <p>Discover, validate, prepare and <strong>durably run</strong> <code>.mthds</code> methods from inside the chat or the coding agent you already use — same eight tools, same names, same contracts on both servers. Pick <strong>one</strong> server per host: workshop where there's a filesystem, console everywhere else.</p>
+      <div class="grid">
+        <div class="cell">
+          <p class="eyebrow">Local workshop → coding agents</p>
+          <pre><code>claude mcp add pipelex \
+  --env PIPELEX_API_KEY=plx_sk_... \
+  -- npx -y @pipelex/mcp</code></pre>
+          <p style="font-size:.88rem;color:var(--ink-muted)">Reads <code>.mthds</code> straight off disk, uploads local assets. Node 24+.</p>
+        </div>
+        <div class="cell">
+          <p class="eyebrow">Hosted console → chat hosts</p>
+          <pre><code>https://pipelex-mcp-a3c6a115.alpic.live/mcp
+  ?api_key=plx_sk_...</code></pre>
+          <p style="font-size:.88rem;color:var(--ink-muted)">Add as a custom connector. Ships interactive views + ChatGPT file attachments.</p>
+        </div>
+      </div>
+      <div class="note">
+        <p><strong>The one rule:</strong> never connect a single host to both servers. Same tool names on both means ambiguous routing — and a claude.ai connector <em>syncs into Claude Code automatically</em>, so that happens by accident. See <a href="#gotchas">Gotchas</a>.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ TOOLS ============ -->
+  <section aria-labelledby="tools">
+    <div class="sec-head">
+      <p class="eyebrow">The surface</p>
+      <h2 id="tools">Eight tools</h2>
+    </div>
+    <p>Every tool returns a <strong>structured verdict</strong> the agent can act on, plus a Markdown summary a human can read. Big payloads (method graphs, full outputs, per-pipe cost) ride a view-only channel, so the model never pays their tokens.</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th scope="col">Tool</th><th scope="col">What it gives you</th><th scope="col">Where</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="tool">mthds_list_methods</td>
+            <td>Your org's saved methods by name + description → the canonical <code>mt_…</code> id. Source-free: no method code ever crosses the conversation.</td>
+            <td class="narrow"><span class="chip both">both</span></td>
+          </tr>
+          <tr>
+            <td class="tool">mthds_validate</td>
+            <td>Stable verdict — <code>is_valid</code>, <code>is_runnable</code>, structured errors, pending signatures — from files or a method id. On the console, a valid verdict also renders the <strong>dry-run graph</strong>.</td>
+            <td class="narrow"><span class="chip both">both</span> <span class="chip console">+ view</span></td>
+          </tr>
+          <tr>
+            <td class="tool">mthds_inputs_template</td>
+            <td>A fill-in template of a pipe's declared inputs (JSON or TOML), with the concept and content shape of each.</td>
+            <td class="narrow"><span class="chip both">both</span></td>
+          </tr>
+          <tr>
+            <td class="tool">mthds_prepare_inputs</td>
+            <td>Turns filled, file-bearing inputs run-ready → <code>pipelex-storage://</code>. Workshop uploads local paths and bytes; console is pass-through only.</td>
+            <td class="narrow"><span class="chip both">both</span></td>
+          </tr>
+          <tr>
+            <td class="tool">mthds_upload_attachments</td>
+            <td>A file the user drops in the chat → <code>pipelex-storage://</code>, fetched and uploaded server-side. The bytes never enter the model's context.</td>
+            <td class="narrow"><span class="chip console">console · ChatGPT</span></td>
+          </tr>
+          <tr>
+            <td class="tool">mthds_run</td>
+            <td>Starts a <strong>durable</strong> run and returns a <code>run_id</code> immediately — never blocks a tool call.</td>
+            <td class="narrow"><span class="chip both">both</span> <span class="chip console">+ view</span></td>
+          </tr>
+          <tr>
+            <td class="tool">mthds_run_status</td>
+            <td>Cheap lifecycle read by <code>run_id</code>. The console's view polls it itself — zero model turns.</td>
+            <td class="narrow"><span class="chip both">both</span></td>
+          </tr>
+          <tr>
+            <td class="tool">mthds_run_results</td>
+            <td>Terminal outcome + run-level usage: cost in USD, tokens, inference calls.</td>
+            <td class="narrow"><span class="chip both">both</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:.93rem;color:var(--ink-muted)">Run state lives behind the durable <code>run_id</code> on the platform — start a run today, ask about it next week in a fresh conversation.</p>
+  </section>
+
+  <!-- ============ ARCHITECTURE ============ -->
+  <section aria-labelledby="arch">
+    <div class="sec-head">
+      <p class="eyebrow">How it fits together</p>
+      <h2 id="arch">Two shells, one core</h2>
+    </div>
+    <p>Both servers are thin shells over the same capability core, so tool names, schemas and contracts can't drift apart. Only the console adds views and host-specific plumbing; only the workshop can touch your filesystem.</p>
+    <figure>
+      <div class="fig-body">
+        <svg viewBox="0 0 880 400" role="img" aria-label="Coding agents connect over stdio to the local workshop; chat hosts connect over HTTPS to the hosted console; both shells call one shared capability core, which calls the Pipelex API.">
+          <!-- hosts -->
+          <rect class="s-box" x="8" y="36" width="176" height="76" rx="5"/>
+          <text class="s-title" x="24" y="62">Desktop hosts</text>
+          <text class="s-sub" x="24" y="82">Claude Code · Codex · Cursor</text>
+          <text class="s-sub" x="24" y="99">Cowork · Claude Desktop</text>
+
+          <rect class="s-box" x="8" y="250" width="176" height="66" rx="5"/>
+          <text class="s-title" x="24" y="276">Web hosts</text>
+          <text class="s-sub" x="24" y="296">ChatGPT · claude.ai</text>
+
+          <!-- arrows host -> shell -->
+          <path class="s-line" d="M184 73 H244" marker-end="url(#ar)"/>
+          <text class="s-tag" x="192" y="64">STDIO</text>
+          <path class="s-line" d="M184 283 H244" marker-end="url(#ar)"/>
+          <text class="s-tag" x="192" y="274">HTTPS /mcp</text>
+
+          <!-- shells -->
+          <rect class="s-local" x="246" y="26" width="216" height="94" rx="5"/>
+          <text class="s-title s-local-t" x="264" y="52">Local workshop</text>
+          <text class="s-sub" x="264" y="72">npx @pipelex/mcp · your cwd</text>
+          <text class="s-sub" x="264" y="90">reads { path } off disk</text>
+          <text class="s-sub" x="264" y="108">uploads local assets</text>
+
+          <rect class="s-console" x="246" y="236" width="216" height="94" rx="5"/>
+          <text class="s-title s-console-t" x="264" y="262">Hosted console</text>
+          <text class="s-sub" x="264" y="282">Skybridge on Alpic · BYOK</text>
+          <text class="s-sub" x="264" y="300">run-graph + run-follow views</text>
+          <text class="s-sub" x="264" y="318">chat attachments (ChatGPT)</text>
+
+          <!-- core -->
+          <rect class="s-core" x="512" y="26" width="196" height="304" rx="6"/>
+          <text class="s-tag" x="530" y="50">SHARED CAPABILITY CORE</text>
+          <rect class="s-box" x="530" y="66" width="160" height="34" rx="4"/>
+          <text class="s-sub" x="546" y="87">tool table · schemas</text>
+          <rect class="s-box" x="530" y="112" width="160" height="34" rx="4"/>
+          <text class="s-sub" x="546" y="133">verdict projection</text>
+          <rect class="s-box" x="530" y="158" width="160" height="34" rx="4"/>
+          <text class="s-sub" x="546" y="179">error classification</text>
+          <rect class="s-box" x="530" y="204" width="160" height="34" rx="4"/>
+          <text class="s-sub" x="546" y="225">@pipelex/sdk client</text>
+          <text class="s-sub" x="530" y="266">seams filled per shell:</text>
+          <text class="s-sub" x="530" y="284">file resolver · upload · views</text>
+
+          <path class="s-line" d="M462 73 H512" marker-end="url(#ar)"/>
+          <path class="s-line" d="M462 283 H512" marker-end="url(#ar)"/>
+
+          <!-- api -->
+          <path class="s-line" d="M708 178 H772" marker-end="url(#ar)"/>
+          <rect class="s-box" x="772" y="120" width="100" height="116" rx="5"/>
+          <text class="s-title" x="786" y="148">Pipelex</text>
+          <text class="s-title" x="786" y="166">API</text>
+          <text class="s-sub" x="786" y="190">validate</text>
+          <text class="s-sub" x="786" y="206">catalog</text>
+          <text class="s-sub" x="786" y="222">durable runs</text>
+
+          <defs>
+            <marker id="ar" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L8 4 L0 8 z" fill="currentColor" style="color: var(--ink-muted)"/>
+            </marker>
+          </defs>
+        </svg>
+      </div>
+      <figcaption>Same tools on both shells — one documented exception: <code>mthds_upload_attachments</code> is console-only, because the host substitutes the attachment based on the declared schema, so on the workshop it would be structurally unreachable.</figcaption>
+    </figure>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th scope="col"></th><th scope="col">Local workshop</th><th scope="col">Hosted console</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="narrow"><strong>Ships as</strong></td><td><code>@pipelex/mcp</code> on npm, spawned with <code>npx</code></td><td>A URL you add as a connector</td></tr>
+          <tr><td class="narrow"><strong>Files</strong></td><td><code>{ path }</code> — reads them off disk, near-constant token cost, diagnostics point at real files</td><td><code>{ content }</code> only — the model re-emits every file it submits</td></tr>
+          <tr><td class="narrow"><strong>Assets</strong></td><td>Uploads local paths, <code>data:</code> URLs and bytes</td><td>Pass-through only (<code>http(s)</code> / <code>pipelex-storage://</code>) — plus chat attachments on ChatGPT</td></tr>
+          <tr><td class="narrow"><strong>Views</strong></td><td>None — tools-first, reports text + structured results</td><td><code>run-graph</code> (interactive method graph) and <code>run-follow</code> (live run status)</td></tr>
+          <tr><td class="narrow"><strong>Your key</strong></td><td><code>PIPELEX_API_KEY</code> in the host's server config</td><td>Bring your own, per request — the console holds no key</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ FLOW ============ -->
+  <section aria-labelledby="flow">
+    <div class="sec-head">
+      <p class="eyebrow">The path a method takes</p>
+      <h2 id="flow">Name → verdict → inputs → run</h2>
+    </div>
+    <figure>
+      <div class="fig-body">
+        <svg viewBox="0 0 880 250" role="img" aria-label="Flow: list methods, then validate, then inputs template, then prepare inputs or upload attachments, then run, then status and results.">
+          <text class="s-tag" x="8" y="22">DISCOVER</text>
+          <rect class="s-box" x="8" y="32" width="150" height="52" rx="5"/>
+          <text class="s-sub" x="22" y="56">mthds_list_methods</text>
+          <text class="s-sub" x="22" y="73">name → mt_… id</text>
+
+          <text class="s-tag" x="186" y="22">CHECK</text>
+          <rect class="s-box" x="186" y="32" width="150" height="52" rx="5"/>
+          <text class="s-sub" x="200" y="56">mthds_validate</text>
+          <text class="s-sub" x="200" y="73">is_valid · is_runnable</text>
+
+          <text class="s-tag" x="364" y="22">SHAPE</text>
+          <rect class="s-box" x="364" y="32" width="158" height="52" rx="5"/>
+          <text class="s-sub" x="378" y="56">mthds_inputs_template</text>
+          <text class="s-sub" x="378" y="73">fill-in template</text>
+
+          <text class="s-tag" x="550" y="22">EXECUTE</text>
+          <rect class="s-box" x="550" y="32" width="150" height="52" rx="5"/>
+          <text class="s-sub" x="564" y="56">mthds_run</text>
+          <text class="s-sub" x="564" y="73">→ run_id (durable)</text>
+
+          <text class="s-tag" x="728" y="22">FOLLOW</text>
+          <rect class="s-box" x="728" y="32" width="144" height="52" rx="5"/>
+          <text class="s-sub" x="742" y="56">…_run_status</text>
+          <text class="s-sub" x="742" y="73">…_run_results</text>
+
+          <path class="s-line" d="M158 58 H186" marker-end="url(#ar2)"/>
+          <path class="s-line" d="M336 58 H364" marker-end="url(#ar2)"/>
+          <path class="s-line" d="M522 58 H550" marker-end="url(#ar2)"/>
+          <path class="s-line" d="M700 58 H728" marker-end="url(#ar2)"/>
+
+          <!-- assets branch -->
+          <path class="s-line" d="M443 84 V128" marker-end="url(#ar2)"/>
+          <text class="s-tag" x="300" y="150">IF THE INPUTS CARRY FILES</text>
+          <rect class="s-local" x="300" y="158" width="150" height="52" rx="5"/>
+          <text class="s-sub" x="314" y="182">mthds_prepare_inputs</text>
+          <text class="s-sub" x="314" y="199">local file → storage</text>
+
+          <rect class="s-console" x="470" y="158" width="164" height="52" rx="5"/>
+          <text class="s-sub" x="484" y="182">mthds_upload_attachments</text>
+          <text class="s-sub" x="484" y="199">chat attachment → storage</text>
+
+          <path class="s-line" d="M634 184 H660 V58" marker-end="url(#ar2)"/>
+          <text class="s-sub" x="150" y="188">pipelex-storage:// values</text>
+          <text class="s-sub" x="150" y="205">are already run-ready</text>
+
+          <defs>
+            <marker id="ar2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L8 4 L0 8 z" fill="currentColor" style="color: var(--ink-muted)"/>
+            </marker>
+          </defs>
+        </svg>
+      </div>
+      <figcaption>Every step accepts either submitted files or a saved method's <code>mt_…</code> id. Skip the asset step entirely when nothing in the inputs is a file.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============ INSTALL: WORKSHOP ============ -->
+  <section aria-labelledby="install-local">
+    <div class="sec-head">
+      <p class="eyebrow"><span class="chip local">local workshop</span></p>
+      <h2 id="install-local">Install it in your coding agent</h2>
+    </div>
+    <p>Nothing to install globally — hosts spawn it on demand with <code>npx</code>. You need <strong>Node 24+</strong> and a <code>plx_sk_</code> platform key. The server name is yours; <code>pipelex</code> yields <code>mcp__pipelex__mthds_validate</code>-style tool names.</p>
+
+    <div class="tabs">
+      <input type="radio" name="host" id="h-cc" checked>
+      <input type="radio" name="host" id="h-cx">
+      <input type="radio" name="host" id="h-cu">
+      <input type="radio" name="host" id="h-cd">
+      <div class="tablist">
+        <label for="h-cc">Claude Code</label>
+        <label for="h-cx">Codex</label>
+        <label for="h-cu">Cursor</label>
+        <label for="h-cd">Cowork · Claude Desktop</label>
+      </div>
+
+      <div class="panel" id="p-cc">
+        <pre><code>claude mcp add pipelex --env PIPELEX_API_KEY=plx_sk_... -- npx -y @pipelex/mcp</code></pre>
+        <p style="font-size:.92rem;color:var(--ink-muted)">Or install the <code>pipelex</code> plugin from the <code>pipelex-plugins</code> marketplace — its manifest spawns the same workshop.</p>
+      </div>
+
+      <div class="panel" id="p-cx">
+        <p class="path">~/.codex/config.toml</p>
+        <pre><code>[mcp_servers.pipelex]
+command = "npx"
+args = ["-y", "@pipelex/mcp"]
+env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
+      </div>
+
+      <div class="panel" id="p-cu">
+        <p class="path">~/.cursor/mcp.json</p>
+        <pre><code>{
+  "mcpServers": {
+    "pipelex": {
+      "command": "npx",
+      "args": ["-y", "@pipelex/mcp"],
+      "env": { "PIPELEX_API_KEY": "plx_sk_..." }
+    }
+  }
+}</code></pre>
+      </div>
+
+      <div class="panel" id="p-cd">
+        <p style="font-size:.92rem;color:var(--ink-muted)">Cowork runs in the desktop app, so it has a filesystem — use the workshop there, not the console.</p>
+        <p class="path">claude_desktop_config.json</p>
+        <pre><code>{
+  "mcpServers": {
+    "pipelex": {
+      "command": "npx",
+      "args": ["-y", "@pipelex/mcp"],
+      "env": { "PIPELEX_API_KEY": "plx_sk_..." }
+    }
+  }
+}</code></pre>
+      </div>
+    </div>
+
+    <div class="note">
+      <p><code>PIPELEX_BASE_URL</code> defaults to <code>https://api.pipelex.com</code>. Point it at <code>http://localhost:8081</code> to work against a local OSS <code>pipelex-api</code> runner — but durable runs need the hosted API; a bare runner has no run lifecycle.</p>
+    </div>
+  </section>
+
+  <!-- ============ INSTALL: CONSOLE ============ -->
+  <section aria-labelledby="install-console">
+    <div class="sec-head">
+      <p class="eyebrow"><span class="chip console">hosted console</span></p>
+      <h2 id="install-console">Connect it to your chat</h2>
+    </div>
+    <p>The console holds <strong>no server-side API key</strong>. Until per-user OAuth ships, every caller brings their own key at the transport level — so it never rides a tool argument and never enters the model's context.</p>
+
+    <div class="stack">
+      <h3>URL-only connector UIs — ChatGPT, claude.ai on the web</h3>
+      <pre><code>https://pipelex-mcp-a3c6a115.alpic.live/mcp?api_key=plx_sk_...</code></pre>
+      <p style="font-size:.92rem;color:var(--ink-muted)">Add it as a custom connector. URLs can land in intermediary logs — use a key you're happy to rotate. This is the documented compromise until real auth lands.</p>
+    </div>
+
+    <div class="stack">
+      <h3>Hosts with header config — for testing the console from a terminal</h3>
+      <pre><code>claude mcp add --transport http pipelex https://pipelex-mcp-a3c6a115.alpic.live/mcp \
+  --header "Authorization: Bearer plx_sk_..."</code></pre>
+    </div>
+
+    <p>Keyless requests still handshake and list tools; the first tool call comes back with an instructive error at <code>api_key</code> explaining both channels — nothing fails silently.</p>
+  </section>
+
+  <!-- ============ PLAY ============ -->
+  <section aria-labelledby="play">
+    <div class="sec-head">
+      <p class="eyebrow">Five minutes</p>
+      <h2 id="play">Go play with it</h2>
+    </div>
+    <p>Once it's connected, you drive it in plain language — the agent picks the tools. A tour that exercises the whole surface:</p>
+    <ol class="steps">
+      <li><span class="step-body"><span class="say">"What Pipelex methods do I have?"</span> — the catalog, by name and description.</span></li>
+      <li><span class="step-body"><span class="say">"Validate ./methods/invoice.mthds"</span> — on the workshop, hand it the <em>path</em>; it reads the file itself. On the console, paste the contents.</span></li>
+      <li><span class="step-body"><span class="say">"Show me the graph"</span> — on ChatGPT or claude.ai the verdict brings the interactive method graph with it.</span></li>
+      <li><span class="step-body"><span class="say">"What inputs does the main pipe need?"</span> — the fill-in template, concept by concept.</span></li>
+      <li><span class="step-body"><span class="say">"Run it on this PDF"</span> — attach the file in ChatGPT, or point at a local path in Claude Code.</span></li>
+      <li><span class="step-body"><span class="say">"Is that run done yet?"</span> — then <span class="say">"What did it cost?"</span> for tokens, calls, and USD.</span></li>
+    </ol>
+    <div class="note">
+      <p>An invalid method is <strong>not</strong> an error — it's a verdict, with structured, located diagnostics the agent can repair against. Errors are reserved for "no verdict could be produced": bad request, bad key, unreachable API.</p>
+    </div>
+  </section>
+
+  <!-- ============ GOTCHAS ============ -->
+  <section aria-labelledby="gotchas">
+    <div class="sec-head">
+      <p class="eyebrow">Known sharp edges</p>
+      <h2 id="gotchas">Gotchas</h2>
+    </div>
+    <div class="stack">
+      <div class="note warn">
+        <p class="eyebrow">One host, one server</p>
+        <p>A claude.ai Pipelex connector <strong>syncs into Claude Code automatically</strong> — so if you also registered the workshop locally, both are live under the same tool names and nothing guarantees which one the model picks. In Claude Code, <code>/mcp</code> → expand <em>"Show unused connectors"</em> and disable Pipelex there (or <code>deniedMcpServers</code> per project).</p>
+      </div>
+      <div class="note warn">
+        <p class="eyebrow">ChatGPT caches the tool list at add-time</p>
+        <p>It never re-issues <code>tools/list</code>. A newly shipped tool — or a changed tool description — stays invisible to an existing connector until you <strong>remove and re-add it</strong>. v0.10.0's <code>mthds_list_methods</code> needs exactly that.</p>
+      </div>
+      <div class="note warn">
+        <p class="eyebrow">Attachments cap at 7 MiB, ChatGPT only</p>
+        <p>A transport ceiling, not a product choice: the upload route takes a base64 body behind an AWS gateway with a hard 10 MiB request quota. ChatGPT hands over far larger files happily, so you <em>will</em> meet this — the refusal fires before any bytes are fetched and names the limit. No other host injects a file reference into a connector call.</p>
+      </div>
+      <div class="note warn">
+        <p class="eyebrow">The console can't touch your filesystem</p>
+        <p>By design. It rejects <code>{ path }</code> items and refuses any input that would need an upload, pointing you at the workshop. That's what keeps a public endpoint from being turned into a file-read oracle by a prompt-injected path.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ DIFFS ============ -->
+  <section aria-labelledby="diffs">
+    <div class="sec-head">
+      <p class="eyebrow">For the curious</p>
+      <h2 id="diffs">The critical changes</h2>
+    </div>
+    <details>
+      <summary>Six abridged diffs — the decisions everything else follows from</summary>
+      <div class="details-body">
+
+        <div class="diff-item">
+          <h3>1 · One files union, two behaviours</h3>
+          <p class="path">src/capabilities/shared.ts</p>
+          <pre class="diff"><code><span class="ctx">export const filesInputSchema = z.array(</span>
+<span class="ctx">  z.union([</span>
+<span class="ctx">    z.object({ content: z.string(), uri: z.string().nullable().optional() }),</span>
+<span class="add">+   z.object({ path: z.string() }),   // local workshop only</span>
+<span class="ctx">  ]),</span>
+<span class="ctx">);</span></code></pre>
+          <p>Both shells register the identical schema, so the contract never forks. What a <code>{ path }</code> item <em>does</em> is decided by a seam, not the schema — which is why misrouting between the two servers self-diagnoses on the first call instead of failing as an opaque schema error.</p>
+        </div>
+
+        <div class="diff-item">
+          <h3>2 · The seams each shell fills</h3>
+          <p class="path">src/local/server.ts</p>
+          <pre class="diff"><code><span class="ctx">return buildToolContexts({</span>
+<span class="ctx">  env,</span>
+<span class="add">+ resolver: localFileResolver(rootDir),  // reads { path } from disk</span>
+<span class="add">+ allowUpload: true,                     // uploads local assets</span>
+<span class="add">+ viewsAvailable: false,                 // tools-first: no views</span>
+<span class="ctx">});</span></code></pre>
+          <p>The hosted console leaves all three at their defaults: no resolver, no upload, views on. Every per-deployment difference in the product is one of these three flags.</p>
+        </div>
+
+        <div class="diff-item">
+          <h3>3 · Paths are a trust boundary, not a convenience</h3>
+          <p class="path">src/local/files.ts</p>
+          <pre class="diff"><code><span class="add">+ if (!path.endsWith(".mthds")) return refuse(...);   // BEFORE any fs access</span>
+<span class="add">+ const real = await fs.realpath(resolved);           // symlinks followed</span>
+<span class="add">+ if (!isInside(rootDir, real)) return refuse(...);   // cwd containment</span></code></pre>
+          <p>The extension check comes first on purpose: a prompt-injected <code>.env</code> or key-file path is never opened, not even to be rejected. Resolvers report failures as values, never throw.</p>
+        </div>
+
+        <div class="diff-item">
+          <h3>4 · The console's key rides the transport, never a tool argument</h3>
+          <p class="path">src/hosted/byok.ts</p>
+          <pre class="diff"><code><span class="add">+ app.use("/mcp", (req, _res, next) => {</span>
+<span class="add">+   const key = bearer(req.headers.authorization) ?? req.query.api_key;</span>
+<span class="add">+   if (key) req.auth = { token: key };   // → extra.authInfo in handlers</span>
+<span class="add">+   next();                               // keyless still handshakes</span>
+<span class="add">+ });</span></code></pre>
+          <p>Deliberately disposable — when console OAuth lands, this gets deleted rather than migrated. Keyless calls are never rejected at the transport; they fail instructively at the capability layer.</p>
+        </div>
+
+        <div class="diff-item">
+          <h3>5 · One <code>_meta</code> key is the entire attachment mechanism</h3>
+          <p class="path">src/hosted/server.ts</p>
+          <pre class="diff"><code><span class="ctx">_meta: {</span>
+<span class="add">+ "openai/fileParams": ["attachments"],</span>
+<span class="ctx">},</span></code></pre>
+          <p>Naming the field here is what makes ChatGPT's runtime rewrite the model's reference to a user's file into a signed-URL object before the call arrives. Without it the field is simply never populated. The tool's <em>description</em> is part of the same mechanism — the host gates substitution on it too, so that text gets reviewed like a schema.</p>
+        </div>
+
+        <div class="diff-item">
+          <h3>6 · Derive the limit, don't hardcode it</h3>
+          <p class="path">src/capabilities/upload-ceiling.ts</p>
+          <pre class="diff"><code><span class="del">- const MAX_UPLOAD = 50 * 1024 * 1024;  // app-level, unreachable in practice</span>
+<span class="add">+ const GATEWAY_REQUEST_LIMIT_BYTES = 10 * 1024 * 1024;   // hard AWS quota</span>
+<span class="add">+ export const MAX_UPLOAD_BYTES = Math.floor(</span>
+<span class="add">+   ((GATEWAY_REQUEST_LIMIT_BYTES - ENVELOPE_ALLOWANCE) * 3) / 4,  // base64 4/3</span>
+<span class="add">+ );</span></code></pre>
+          <p>≈7.4 MiB, matching the wall measured live. Refusing locally throws the <em>same</em> error type the SDK maps a real <code>413</code> onto, so every downstream classifier keeps working — only the message improves, because it can name the true limit where the server's cannot.</p>
+        </div>
+
+      </div>
+    </details>
+  </section>
+
+  <!-- ============ HISTORY ============ -->
+  <section aria-labelledby="history">
+    <details>
+      <summary>How we got here — 0.1.0 → 0.10.0</summary>
+      <div class="details-body">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">Ver</th><th scope="col">What landed</th></tr></thead>
+            <tbody>
+              <tr><td class="tool">0.10.0</td><td>Catalog discovery (<code>mthds_list_methods</code>), source-free by construction; attachment ingest fixed after OpenAI moved its content domain.</td></tr>
+              <tr><td class="tool">0.9.0</td><td>ChatGPT chat attachments + the deny-by-default fetch boundary; the real upload ceiling.</td></tr>
+              <tr><td class="tool">0.8.0</td><td><code>mthds_prepare_inputs</code>; token &amp; cost usage on run results.</td></tr>
+              <tr><td class="tool">0.7.0</td><td>Validate a saved method by its catalog id.</td></tr>
+              <tr><td class="tool">0.6.0</td><td>Run and template by catalog id; paywall and unknown-method diagnostics.</td></tr>
+              <tr><td class="tool">0.5.0</td><td>Bring-your-own-key on the console.</td></tr>
+              <tr><td class="tool">0.4.0</td><td>The local workshop itself — npm package, <code>{ path }</code> arm, path trust boundary.</td></tr>
+              <tr><td class="tool">0.2–0.3</td><td>Durable runs + the live <code>run-follow</code> view; the inputs template.</td></tr>
+              <tr><td class="tool">0.1.0</td><td><code>mthds_validate</code> and the interactive <code>run-graph</code> view.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+  </section>
+
+</main>
+
+<footer>
+  <span>pipelex-mcp v0.10.0</span>
+  <span>@pipelex/mcp on npm · console on Alpic</span>
+  <span>full contracts: SPEC.md · what shipped: CHANGELOG.md</span>
+</footer>
+
+</div>
+</body>
+</html>
