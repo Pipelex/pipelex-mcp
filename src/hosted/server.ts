@@ -14,7 +14,7 @@ import {
   mthdsValidateTool,
 } from "../tools.js";
 import type { ToolContexts } from "../tools.js";
-import { byokKeyMiddleware, contextsForRequest, passthroughMiddleware } from "./byok.js";
+import { contextsForRequest } from "./contexts.js";
 
 export const HOSTED_SERVER_INSTRUCTIONS = [
   "pipelex-mcp helps you work with executable AI Methods written in the MTHDS language (.mthds).",
@@ -41,16 +41,17 @@ export const HOSTED_SERVER_INSTRUCTIONS = [
 /**
  * Build the hosted console.
  *
- * `oauth` is resolved by the entrypoint rather than here so this stays
- * synchronous — the cross-shell parity tests construct the server directly and
- * have no business awaiting an OAuth discovery fetch. Passing it also flips the
- * transport auth posture: BYOK and OAuth cannot share `/mcp` (both write
- * `req.auth`), so the BYOK middleware stands down whenever an OAuth config is
- * present. See `../server.ts` for why the switch lives in env.
+ * `oauth` is **required**: per-user OAuth is the console's only auth posture,
+ * so a console that cannot authenticate a caller is not a thing this function
+ * can produce. Making it a parameter rather than resolving it here keeps the
+ * builder synchronous — the cross-shell parity tests construct the server
+ * directly and have no business awaiting an OAuth discovery fetch. The
+ * entrypoint (`../server.ts`) resolves it from env and refuses to boot without
+ * it.
  */
 export function createHostedServer(
+  oauth: OAuthConfig,
   contexts: ToolContexts = buildToolContexts(),
-  oauth?: OAuthConfig,
 ) {
   return new McpServer(
     PIPELEX_MCP_SERVER_INFO,
@@ -62,12 +63,15 @@ export function createHostedServer(
     // argument. Putting it in the second (the MCP SDK's ServerOptions) is
     // silently accepted and simply never read, so the well-known metadata and
     // bearer middleware are never mounted and clients fall back to DCR against
-    // our own origin ("Cannot POST /register"). Pass `undefined` through
-    // rather than spreading conditionally: a spread would defeat the
-    // excess-property check that makes a wrong key a compile error here.
+    // our own origin ("Cannot POST /register").
+    //
+    // Nothing of ours is mounted on `/mcp`: Skybridge's own bearer middleware
+    // owns `req.auth` and, since no console tool allows anonymous, it mounts
+    // `requireBearerAuth` across the endpoint. Writing that field ourselves is
+    // exactly the race that made the old bring-your-own-key posture
+    // incompatible with OAuth.
     { oauth },
   )
-    .use("/mcp", oauth === undefined ? byokKeyMiddleware : passthroughMiddleware)
     .registerTool(
       {
         name: mthdsListMethodsTool.name,

@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **Bring-your-own-key is removed from the hosted console — per-user OAuth is now its only auth posture.** Both BYOK channels are gone: an `Authorization: Bearer plx_sk_...` header and a `?api_key=plx_sk_...` connector URL. A connector still registered either way **stops connecting entirely** (not merely losing tools) — Skybridge mounts `requireBearerAuth` across `/mcp`, so a `plx_sk_` goes to the JWKS verifier and fails as an unverifiable token while a keyed URL carries no `Authorization` header at all. Remove and re-add the connector by its bare URL, then sign in; ChatGPT caches a connector's configuration at add-time, so re-adding is the only path. `src/hosted/byok.ts` is deleted rather than migrated, exactly as it was written to be; `contextsForRequest` moves to `src/hosted/contexts.ts`.
+- **`WORKOS_AUTHKIT_DOMAIN` and `PIPELEX_MCP_RESOURCE_INDICATOR` are now mandatory — the hosted console refuses to start without both.** OAuth was a deploy-time switch in 0.11.0 precisely so rollback was an env change; with BYOK gone there is nothing left to fall back *to*, and a keyless or shared-key fallback would mean serving unauthenticated or funding every caller's work from one account. A half-configured deploy now fails loudly at startup instead. **This trades the env-var rollback for a redeploy**: reverting to BYOK means deploying 0.11.0 or earlier.
+- The entrypoint now also **validates the shape of `PIPELEX_MCP_RESOURCE_INDICATOR`**, not just its presence: it must be the server origin with a trailing slash and no path/query/fragment. Registering the `/mcp` endpoint or dropping the trailing slash previously booted cleanly and then failed every tool call at audience verification, surfacing as a "reconnect and sign in again" hint that pointed operators away from the real cause.
+- **`createHostedServer` takes the resolved `OAuthConfig` as its required first argument** (contexts move to the second, still defaulted). A console that cannot authenticate a caller is no longer representable.
+
+### Changed
+
+- The console's auth-failure texture is now OAuth-shaped: a rejected session reports `config` at **`authorization`** — "reconnect the Pipelex connector and sign in again" — replacing the `api_key` locator and the bring-your-own-key channel instructions. The workshop's `PIPELEX_API_KEY` env-var wording is unchanged.
+- The verified token now overrides `apiKey` **unconditionally** in every capability context. Previously a server-held `PIPELEX_API_KEY` applied when a request carried no key of its own; that path is gone, because the credential decides the active organization and therefore the whole visible catalog. The tokenless branch is unreachable in production (no console tool allows anonymous) and now fails closed — it sets the credential to the empty string rather than leaving it absent, since `PipelexApiClient` falls back to `process.env.PIPELEX_API_KEY` for a nullish key and would otherwise spend the operator's key on an unauthenticated caller.
+
 ## [0.11.0] - 2026-08-04
 
 ### Added

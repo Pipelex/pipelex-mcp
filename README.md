@@ -145,35 +145,35 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }
   against a local OSS `pipelex-api` runner. Durable runs need the hosted API; a
   bare runner has no run lifecycle.
 
-## Hosted console: bring your own key
+## Hosted console: sign in with your Pipelex account
 
-The hosted console holds **no server-side API key**. Until per-user OAuth
-ships, every caller supplies their own `plx_sk_` platform key at the transport
-level — the key never travels through tool arguments, so it never enters the
-model's context. Two channels, depending on what your host's connector UI
-supports:
+The hosted console holds **no server-side API key** and there is nothing to
+paste. Add the connector by its URL and your host walks you through signing in
+with your Pipelex account:
 
-- **`Authorization` header** — for hosts with header config (Claude Code,
-  Cursor, Codex, scripted clients):
+```
+https://<console-url>/mcp
+```
 
-  ```bash
-  claude mcp add --transport http pipelex https://<console-url>/mcp \
-    --header "Authorization: Bearer plx_sk_..."
-  ```
+Sign-in is OAuth through WorkOS AuthKit, which the console's MCP host drives
+for you — ChatGPT, claude.ai, Claude Desktop/Cowork and Cursor all handle the
+handshake themselves, including picking the organization you want to work in.
+Your verified session is what authorizes every call the console makes on your
+behalf, so the catalog you see and the runs you spend are your own. The token
+never travels through tool arguments, so it never enters the model's context.
 
-- **`?api_key=` on the connector URL** — for hosts whose connector UI accepts
-  only a URL (claude.ai, ChatGPT, Cowork): register the connector as
-  `https://<console-url>/mcp?api_key=plx_sk_...`. Mind that URLs can end up in
-  intermediary logs — this channel is the documented compromise until real
-  auth lands; use a key you can rotate.
+There is **no keyless mode**: every tool call requires a signed-in session. If
+one expires or is revoked, calls come back as a `config` no-verdict at
+`authorization` telling you to reconnect the connector and sign in again.
 
-A supplied key takes precedence over any server-held env key. Without a key
-the handshake and `tools/list` still work, but every tool call returns a
-`config` no-verdict at `api_key` explaining both channels.
+> **Upgrading from a `?api_key=` connector.** Bring-your-own-key has been
+> removed. A connector still registered with `?api_key=plx_sk_...` (or an
+> `Authorization: Bearer plx_sk_...` header) no longer connects at all — remove
+> it and re-add it by the plain URL above. ChatGPT in particular caches a
+> connector's configuration at add-time, so re-adding is the only path.
 
 (That said, prefer the **local workshop** on hosts that can spawn it — see the
-matrix below. The header example above is for testing the console from Claude
-Code, not the recommended pairing.)
+matrix below.)
 
 ## Chat attachments (ChatGPT only)
 
@@ -182,7 +182,7 @@ has no filesystem, so it gets it a different way: **ChatGPT's Apps runtime
 rewrites the model's reference to an attached file into a signed-URL object**
 before the call reaches the server. `mthds_upload_attachments` takes that
 channel — it fetches the bytes server-side and uploads them to Pipelex storage
-under your BYOK key, returning only small URI strings. **The bytes never enter
+under your signed-in account, returning only small URI strings. **The bytes never enter
 the model's context**, which is the whole reason console-side upload is allowed
 here at all.
 
