@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Console OAuth — the caller signs in with their Pipelex account instead of pasting an API key.** The hosted console can now use WorkOS AuthKit acting as an OAuth authorization server for MCP, through Skybridge's built-in `workosProvider`. Skybridge owns the whole handshake — protected-resource metadata, `/.well-known/oauth-authorization-server`, Dynamic Client Registration discovery, JWKS bearer verification, and the per-host quirks of ChatGPT / claude.ai / Cursor — so this repo contributes configuration, not auth-protocol code. The verified bearer token then rides the existing per-request path: `contextsForRequest` already lifts `extra.authInfo.token` into the capability contexts' `apiKey`, and `@pipelex/sdk` already sends that as `Authorization: Bearer`, so the user's identity reaches `api.pipelex.com` with no new plumbing. Verified end to end: signing in through AuthKit's organization picker and calling `mthds_list_methods` returns that organization's catalog.
+  - **It is a deploy-time switch, not a code switch.** OAuth engages only when **both** `WORKOS_AUTHKIT_DOMAIN` and `PIPELEX_MCP_RESOURCE_INDICATOR` are set; with either unset the console behaves exactly as before (bring-your-own-key). Rollback is therefore unsetting an env var rather than redeploying, and a half-configured deploy fails closed to BYOK instead of advertising metadata for an unregistered audience.
+  - **`PIPELEX_MCP_RESOURCE_INDICATOR` is the server's ORIGIN with a trailing slash, not the `/mcp` endpoint path.** `OAuthConfig.baseUrl` is deliberately not set, so Skybridge resolves the protected-resource metadata origin per request from `x-forwarded-host` — which makes the well-known documents follow whatever URL actually served them (dev tunnel vs deployed), but also means the advertised `resource` is `https://host/`. That exact string is what must be registered as a Resource Indicator in the WorkOS dashboard and what the issued token's `aud` will carry. Registering the `/mcp` path instead yields a token whose audience never matches.
+
+### Breaking Changes
+
+- **Turning console OAuth on breaks every bring-your-own-key connector already pointed at that URL — they stop connecting entirely, not merely lose tools.** The two postures cannot share `/mcp`. Both write `req.auth`, and because no console tool allows anonymous, Skybridge mounts `requireBearerAuth` across the whole endpoint the moment an `oauth` config is present: a `plx_sk_` sent as `Authorization: Bearer` is handed to the JWKS verifier and fails as an unverifiable token, while a `?api_key=` connector URL carries no `Authorization` header at all and is rejected for having no token. There is no partial-coexistence window to design around. Existing users must re-add the connector and sign in — ChatGPT in particular caches a connector's configuration at add-time. `byokKeyMiddleware` accordingly stands down for a no-op `passthroughMiddleware` whenever OAuth is configured, so an unverified key can never overwrite a verified `AuthInfo`.
+
+### Changed
+
+- `createHostedServer` takes an optional second parameter, the resolved `OAuthConfig`. It is resolved in the entrypoint rather than inside the builder so the builder stays synchronous — the cross-shell parity tests construct the server directly and have no business awaiting an OAuth discovery fetch.
+
+### Notes
+
+- **The console half alone is not sufficient: `api.pipelex.com` must also accept the AuthKit issuer.** An AuthKit-for-MCP access token is minted by the same WorkOS tenant as the webapp's but carries the AuthKit domain as `iss` rather than the client-scoped `https://api.workos.com/user_management/{client_id}` template, so the API Gateway authorizer rejects it until taught to accept a second issuer. That change lives in `pipelex-api-infra` and is gated on its own `WORKOS_AUTHKIT_DOMAIN`, empty by default. Neither Skybridge nor WorkOS provides anything for this leg — both stop at verifying the token for the MCP server itself.
+- **The local workshop (`@pipelex/mcp` on npm) is untouched.** OAuth is console-only; a stdio server spawned by a coding agent still authenticates with a per-user `plx_sk_` in `PIPELEX_API_KEY`.
+- AuthKit advertises only the standard OIDC scopes (`email`, `offline_access`, `openid`, `profile`) for this resource, so per-route scope enforcement is not available on the issued tokens. Any future narrowing of what an MCP-issued token may reach has to be a route policy at the authorizer, not a token scope.
+
 ## [0.10.0] - 2026-08-01
 
 ### Added
