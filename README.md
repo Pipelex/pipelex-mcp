@@ -530,6 +530,27 @@ Prerequisites:
 - Node.js 24+
 - A Pipelex API serving `POST /v1/validate` and `POST /v1/build/inputs` (a local
   OSS `pipelex-api` during development)
+- A WorkOS AuthKit tenant — **the console has no keyless mode and refuses to
+  start without one** (see below)
+
+**The console requires two WorkOS variables.** Per-user OAuth is its only auth
+posture, so the server throws at startup unless both are set:
+
+| Variable | Value |
+| --- | --- |
+| `WORKOS_AUTHKIT_DOMAIN` | the AuthKit domain, e.g. `<tenant>.authkit.app` |
+| `PIPELEX_MCP_RESOURCE_INDICATOR` | the server **origin with a trailing slash** — `http://localhost:3000/`, not `.../mcp` |
+
+The Resource Indicator must also be registered in the WorkOS dashboard (Connect
+→ Configuration), along with Dynamic Client Registration. It becomes the issued
+token's `aud`, and the server verifies it byte-for-byte — registering the `/mcp`
+path or dropping the trailing slash yields tokens that never validate. The
+startup check rejects both mistakes with a message naming the fix, rather than
+letting every tool call fail later at audience verification.
+
+If you only need to work on the capability core, **use `make dev-local`
+instead** — the workshop shell shares the same capabilities, authenticates with
+a plain `PIPELEX_API_KEY`, and needs no WorkOS setup at all.
 
 Install dependencies, start the API, then the Skybridge dev server:
 
@@ -537,15 +558,26 @@ Install dependencies, start the API, then the Skybridge dev server:
 npm install
 
 cd ../pipelex-api && make run          # serves http://localhost:8081
-PIPELEX_BASE_URL=http://localhost:8081 npm run dev
+npm run dev
+```
+
+```env
+# .env at the repo root (gitignored)
+WORKOS_AUTHKIT_DOMAIN=<tenant>.authkit.app
+PIPELEX_MCP_RESOURCE_INDICATOR=http://localhost:3000/
+PIPELEX_BASE_URL=http://localhost:8081
 ```
 
 `PIPELEX_BASE_URL` defaults to the hosted Pipelex API when unset — set it to
-`http://localhost:8081` to develop against a local runner. Set `PIPELEX_API_KEY`
-only when the configured API requires it. Instead of prefixing every command,
-put the variables in a gitignored `.env` at the repo root; the dev server loads
-it via `nodemon.json` (`tsx --env-file-if-exists=.env`). `.env` is dev-only and
-not watched — restart the dev server after editing it.
+`http://localhost:8081` to develop against a local runner. `PIPELEX_API_KEY` has
+**no effect on the console**: the caller's verified OAuth token always overrides
+it. `.env` is dev-only and loaded via `nodemon.json`
+(`tsx --env-file-if-exists=.env`); it is not watched, so restart the dev server
+after editing it.
+
+If port 3000 is taken, Skybridge falls back to another port and prints it — the
+Resource Indicator then has to match that port too, both in `.env` and in the
+WorkOS dashboard.
 
 The MCP endpoint is at `http://localhost:3000/mcp`, with Skybridge DevTools at
 `http://localhost:3000`.
