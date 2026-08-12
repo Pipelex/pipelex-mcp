@@ -111,7 +111,7 @@ export interface CatalogContext {
   baseUrl: string;
   apiKey?: string;
   client?: CatalogClient;
-  /** Deployment-specific auth-failure texture (hosted BYOK); env-var wording by default. */
+  /** Deployment-specific auth-failure texture (the hosted console overrides it per request); env-var wording by default. */
   authError?: AuthErrorTexture;
 }
 

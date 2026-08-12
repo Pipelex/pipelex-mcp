@@ -127,7 +127,7 @@ export interface InputsContext {
   client?: InputsClient;
   /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
   resolver?: FileResolver;
-  /** Deployment-specific auth-failure texture (hosted BYOK); default env-var wording when absent. */
+  /** Deployment-specific auth-failure texture (the hosted console overrides it per request); default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
 

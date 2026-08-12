@@ -105,7 +105,7 @@ export interface AttachmentsContext {
   client?: AttachmentUploadClient;
   /** The fetch boundary; the real https fetcher unless a test injects one. */
   fetcher?: AttachmentFetcher;
-  /** Deployment-specific auth-failure texture (hosted BYOK); default env-var wording when absent. */
+  /** Deployment-specific auth-failure texture (the hosted console overrides it per request); default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
 

@@ -23,7 +23,7 @@ Verified premises (2026-07-31):
 - Reads include a best-effort derived `description`. Invalid TOML makes it `null`; it does not fail the list.
 - `listMethods()` already exists in `@pipelex/sdk`; the MCP needs no new API route or SDK feature for the first slice.
 - The existing tools already accept `method_id`: validate, input-template, prepare-inputs, and run. Listing is the missing discovery bridge, not a new execution path.
-- Catalog access requires an org-bound platform key and is gated/paywalled. Hosted BYOK and workshop `PIPELEX_API_KEY` already provide the auth seam.
+- Catalog access requires an org-bound credential and is gated/paywalled. The hosted console's per-user OAuth token and the workshop's `PIPELEX_API_KEY` already provide the auth seam. *(Updated 2026-08-04: the console's seam was bring-your-own-key when this was written; BYOK has since been removed and the seam now carries the caller's verified OAuth token. Shape unchanged — same field, same request-scoped, org-isolated behavior.)*
 - Methods are not versioned. A later by-id operation always uses the method's **current** stored content.
 - There is no platform `DELETE`, deliberately. Do not introduce a delete tool.
 - Contract drift to remember for later writes: the SDK's `MethodData` / `MethodWriteInput` currently model optional `python`, while the current platform `MethodSaveBody` and stored `MethodPublic` do not. The listing slice must not depend on `python`; reconcile this before designing create/update.
@@ -129,7 +129,7 @@ The `content` summary should repeat the bounded name, description, and canonical
 Use the existing `classifyError` path and deployment-specific auth texture:
 
 - Unreachable API → `config` at `PIPELEX_BASE_URL`, retryable.
-- Missing/invalid key (401/403 or SDK auth error) → `config`; hosted points to BYOK channels, workshop points to `PIPELEX_API_KEY`.
+- Missing/invalid credential (401/403 or SDK auth error) → `config`; hosted points at reconnecting the connector and signing in again, workshop points to `PIPELEX_API_KEY`.
 - Paywall (402) → existing generic `config` billing arm.
 - Missing active-org context (400 on this argument-less route) → `config` at the deployment's key location, not `input_domain` at a fictitious `files` field. Extend the route-specific bad-request texture to allow a class override, or classify this one route explicitly; add regression tests whichever design is chosen.
 - Missing `/v1/methods` route (404; e.g. bare runner base URL) → `config` at `PIPELEX_BASE_URL`, naming `/v1/methods`.
@@ -232,7 +232,7 @@ Unit tests in `src/capabilities/catalog.test.ts`:
 - The list never exposes MTHDS/Python source, stored inputs/outputs, org ids, or opaque creator ids.
 - Output is deterministic and bounded even though the platform endpoint is not.
 - Both shells expose the same name/schema/result contract.
-- Hosted BYOK remains request-scoped and org-isolated; workshop auth remains `PIPELEX_API_KEY`.
+- Hosted console auth remains request-scoped and org-isolated; workshop auth remains `PIPELEX_API_KEY`.
 - `has_source` is never confused with `is_valid`/`is_runnable`.
 - No API or SDK change is required for MVP.
 - No catalog mutation and no inference spend happens in the list flow.

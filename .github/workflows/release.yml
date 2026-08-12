@@ -1,0 +1,240 @@
+# Ships the two release surfaces from `main`: the public `@pipelex/mcp` npm
+# package (local workshop) and the Skybridge server on Alpic (hosted console).
+#
+# MANUAL TRIGGER ONLY — `workflow_dispatch`, never `push`. Merging to `main`
+# does not ship anything; a human runs this from the Actions tab once the
+# release PR is merged. That is deliberate: publishing to npm is effectively
+# irreversible, and the two surfaces must go out together from one reviewed
+# commit rather than from whatever lands on `main`.
+#
+# The workflow always checks out `main` regardless of the ref the dispatch was
+# fired from, so it cannot ship a feature branch by accident. `version` must be
+# typed to match `package.json` on `main` — that is the guard against running
+# before the release PR merged, or against the wrong bump.
+#
+# Both surfaces are re-runnable at the same version: an npm publish is skipped
+# when that version already exists, and Alpic deploys are idempotent per commit.
+# Use `target` to retry one leg after a partial failure without re-shipping the
+# other (the /release skill's "retry at the same version" rule).
+#
+# One-time external setup:
+#   - npm: register `@pipelex/mcp` as a trusted publisher on npmjs.com
+#     (package settings) for `Pipelex/pipelex-mcp` with workflow filename
+#     `release.yml` — the same OIDC pattern `pipelex-sdk-js` and `mthds-js`
+#     use, so no long-lived npm secret exists anywhere. **The registration is
+#     bound to this filename**: renaming or moving this workflow breaks
+#     publishing until the trusted publisher is re-registered.
+#   - `ALPIC_API_KEY` repo secret (Alpic dashboard → API key). The project and
+#     environment ids come from the tracked `.alpic/project.json`.
+name: Release (publish + deploy)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to ship — must match package.json on main (e.g. 0.12.0, no "v")'
+        required: true
+        type: string
+      target:
+        description: 'Which surfaces to ship (use a single one only to retry a partial failure)'
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - npm
+          - alpic
+
+permissions: {}
+
+# Never cancel a release in flight: a half-published run is worse than a queued one.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Verify main is shippable
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      already_published: ${{ steps.published.outputs.already_published }}
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Verify the requested version matches package.json on main
+        id: version
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          ACTUAL=$(node -p "require('./package.json').version")
+          if [ "$ACTUAL" != "$REQUESTED" ]; then
+            echo "::error::Requested $REQUESTED but main's package.json is $ACTUAL." \
+                 "Did the release PR merge? Never edit the version here — cut it with the /release skill."
+            exit 1
+          fi
+          echo "version=$ACTUAL" >> "$GITHUB_OUTPUT"
+          echo "Shipping $ACTUAL from $(git rev-parse HEAD)"
+
+      - name: Verify the changelog has an entry for it
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # The heading carries no `v` — that prefix lives on the branch and tag only.
+          if ! grep -q "^## \[$VERSION\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' heading. Promote ## [Unreleased] before shipping."
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The merge commit is what ships, and it is not always byte-identical to
+      # what the PR gate saw. Re-run the full gate here rather than trust it.
+      - name: Run quality checks and tests
+        run: make all
+
+      - name: Check whether this version is already on npm
+        id: published
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if npm view "@pipelex/mcp@$VERSION" version >/dev/null 2>&1; then
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+            echo "@pipelex/mcp@$VERSION is already on npm — the publish step will be skipped."
+          else
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    name: Publish @pipelex/mcp to npm
+    needs: guard
+    if: inputs.target != 'alpic'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # mints the OIDC token npm trusted publishing verifies
+
+    steps:
+      - name: Checkout main
+        if: needs.guard.outputs.already_published == 'false'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Node.js
+        if: needs.guard.outputs.already_published == 'false'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Update npm to support trusted publishing
+        if: needs.guard.outputs.already_published == 'false'
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        if: needs.guard.outputs.already_published == 'false'
+        run: npm ci
+
+      # `prepack` rebuilds dist/local/main.js, so the tarball is built from this
+      # commit rather than from whatever a previous step happened to leave behind.
+      # Auth is OIDC trusted publishing — no token; `--provenance` is what binds
+      # the published tarball to this workflow, this repo, and this commit.
+      - name: Publish
+        if: needs.guard.outputs.already_published == 'false'
+        run: npm publish --access public --provenance
+
+      - name: Summary
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+          SKIPPED: ${{ needs.guard.outputs.already_published }}
+        run: |
+          if [ "$SKIPPED" = "true" ]; then
+            echo "Skipped: @pipelex/mcp@$VERSION was already published." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Published @pipelex/mcp@$VERSION to npm." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  deploy:
+    name: Deploy the hosted console to Alpic
+    needs: guard
+    if: inputs.target != 'npm'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Project/team/environment ids come from the tracked `.alpic/project.json`,
+      # so this needs no ids of its own — only the API key. `--non-interactive`
+      # makes a missing or stale link fail loudly instead of hanging on a prompt.
+      - name: Deploy
+        env:
+          ALPIC_API_KEY: ${{ secrets.ALPIC_API_KEY }}
+        run: |
+          if [ -z "$ALPIC_API_KEY" ]; then
+            echo "::error::ALPIC_API_KEY repo secret is not set — cannot deploy the console."
+            exit 1
+          fi
+          npx alpic deploy --non-interactive
+
+      - name: Summary
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: echo "Deployed the hosted console at $VERSION to Alpic." >> "$GITHUB_STEP_SUMMARY"
+
+  tag:
+    name: Tag the released commit
+    needs: [guard, publish, deploy]
+    # Only when both surfaces shipped in this run — a single-target retry is by
+    # definition finishing a release whose tag either exists or is not yet earned.
+    if: inputs.target == 'both'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Create and push the tag
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          # The `v` prefix lives on the tag, never in package.json or the changelog heading.
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "Tag v$VERSION already exists — leaving it alone." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+          echo "Tagged v$VERSION at $(git rev-parse HEAD)." >> "$GITHUB_STEP_SUMMARY"
