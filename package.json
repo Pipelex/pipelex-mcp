@@ -3,6 +3,10 @@
   "version": "0.12.0",
   "description": "Pipelex MCP servers for validating, preparing, and running MTHDS methods",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Pipelex/pipelex-mcp"
+  },
   "type": "module",
   "bin": {
     "pipelex-mcp": "dist/local/main.js"
