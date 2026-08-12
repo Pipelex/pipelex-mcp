@@ -152,11 +152,18 @@ jobs:
 
       # `prepack` rebuilds dist/local/main.js, so the tarball is built from this
       # commit rather than from whatever a previous step happened to leave behind.
-      # Auth is OIDC trusted publishing — no token; `--provenance` is what binds
-      # the published tarball to this workflow, this repo, and this commit.
+      #
+      # Auth is OIDC trusted publishing — no token. **Do not add `--provenance`.**
+      # Sigstore attestations require a *public* source repository, and this repo
+      # is private/internal: the explicit flag forces the attempt and the publish
+      # dies with `422 Unsupported GitHub Actions source repository visibility`.
+      # Without the flag npm reads the visibility from the OIDC token itself and
+      # decides — no provenance while the repo is closed, provenance added
+      # automatically if it is ever opened. Leaving it off is correct in both
+      # states; hardcoding either one is not.
       - name: Publish
         if: needs.guard.outputs.already_published == 'false'
-        run: npm publish --access public --provenance
+        run: npm publish --access public
 
       - name: Summary
         env:

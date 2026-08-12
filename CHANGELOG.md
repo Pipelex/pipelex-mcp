@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **`release.yml` could not publish to npm at all** — the publish step passed `--provenance`, and sigstore attestations require a *public* source repository. This one is private, so every run died with `422 Unsupported GitHub Actions source repository visibility: "internal"`. It bit on the first real use: 0.12.0 deployed to Alpic but never reached npm. The flag is now omitted rather than replaced, because npm reads the repository's visibility from the OIDC token and decides for itself — no provenance while the repo is closed, provenance added automatically if it is ever opened. Correct in both states, so this needs no revisiting when the repo goes public.
+
 ## [0.12.0] - 2026-08-12
 
 ### Added
