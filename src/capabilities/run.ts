@@ -346,7 +346,7 @@ export interface RunContext {
   resolver?: FileResolver;
   /** Whether this shell can render run-follow and its view-only result payloads. */
   viewsAvailable?: boolean;
-  /** Deployment-specific auth-failure texture (hosted BYOK); default env-var wording when absent. */
+  /** Deployment-specific auth-failure texture (the hosted console overrides it per request); default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
 

@@ -121,7 +121,7 @@ export interface ValidationContext {
   resolver?: FileResolver;
   /** Whether this shell can render the graph carried on the view-only channel. */
   viewsAvailable?: boolean;
-  /** Deployment-specific auth-failure texture (hosted BYOK); default env-var wording when absent. */
+  /** Deployment-specific auth-failure texture (the hosted console overrides it per request); default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
 

@@ -367,10 +367,10 @@ export interface ClassifyErrorOptions {
    * Per-deployment texture for auth failures (`ClientAuthenticationError`,
    * HTTP 401/403). The default wording points at the `PIPELEX_API_KEY` env
    * var — right for the workshop, where the caller owns the process env. The
-   * hosted console overrides it per request (`src/hosted/byok.ts`): its
-   * callers cannot touch the server env and must be pointed at the
-   * bring-your-own-key channels instead. Capabilities thread it from their
-   * context's `authError` field.
+   * hosted console overrides it per request (`src/hosted/contexts.ts`): its
+   * callers cannot touch the server env and authenticate by signing in, so
+   * they must be pointed at reconnecting the connector instead. Capabilities
+   * thread it from their context's `authError` field.
    */
   auth?: {
     location?: string;

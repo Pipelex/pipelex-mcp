@@ -7,11 +7,28 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { MethodData, MthdsFile, PipelexValidationReport } from "@pipelex/sdk";
+import type { OAuthConfig } from "skybridge/server";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createHostedServer } from "../hosted/server.js";
 import { consoleOnlyToolDefinitions, toolDefinitions } from "../tools.js";
 import { buildLocalToolContexts, createLocalServer } from "./server.js";
+
+/**
+ * The console requires an `OAuthConfig` — per-user OAuth is its only auth
+ * posture. These tests exercise the tool table, not the handshake, so a static
+ * stand-in is enough: nothing here issues a `tools/call`, and the JWKS is
+ * never fetched.
+ */
+const TEST_OAUTH: OAuthConfig = {
+  oauthMetadata: {
+    issuer: "https://test.authkit.app",
+    authorization_endpoint: "https://test.authkit.app/oauth2/authorize",
+    token_endpoint: "https://test.authkit.app/oauth2/token",
+    response_types_supported: ["code"],
+  },
+  verify: { issuer: "https://test.authkit.app", audience: "https://console.test/" },
+};
 
 const tempDirs: string[] = [];
 
@@ -21,7 +38,7 @@ afterEach(async () => {
 
 describe("local stdio server", () => {
   it("registers the shared tool table with the same schemas as the hosted shell", async () => {
-    const hostedTools = await listTools(createHostedServer());
+    const hostedTools = await listTools(createHostedServer(TEST_OAUTH));
     const localTools = await listTools(createLocalServer());
     const sharedNames: string[] = toolDefinitions.map((definition) => definition.name);
 
@@ -79,7 +96,7 @@ describe("local stdio server", () => {
   });
 
   it("registers catalog invocation messages on the hosted shell without a view", async () => {
-    const hostedTools = await listTools(createHostedServer());
+    const hostedTools = await listTools(createHostedServer(TEST_OAUTH));
     const tool = hostedTools.find((candidate) => candidate.name === "mthds_list_methods");
 
     expect(tool?._meta).toMatchObject({
@@ -90,7 +107,7 @@ describe("local stdio server", () => {
   });
 
   it("does NOT register the console-only attachment tool (D5)", async () => {
-    const hostedTools = await listTools(createHostedServer());
+    const hostedTools = await listTools(createHostedServer(TEST_OAUTH));
     const localTools = await listTools(createLocalServer());
     const consoleOnlyNames: string[] = consoleOnlyToolDefinitions.map(
       (definition) => definition.name,
@@ -109,7 +126,9 @@ describe("local stdio server", () => {
   });
 
   it("advertises the attachment channel in the hosted instructions only", async () => {
-    const { client: hosted, close: closeHosted } = await connectClient(createHostedServer());
+    const { client: hosted, close: closeHosted } = await connectClient(
+      createHostedServer(TEST_OAUTH),
+    );
     const { client: local, close: closeLocal } = await connectClient(createLocalServer());
 
     try {
@@ -122,7 +141,7 @@ describe("local stdio server", () => {
   });
 
   it("names `attachments` in openai/fileParams — the substitution mechanism itself", async () => {
-    const hostedTools = await listTools(createHostedServer());
+    const hostedTools = await listTools(createHostedServer(TEST_OAUTH));
     const uploadTool = hostedTools.find((tool) => tool.name === "mthds_upload_attachments");
 
     // Without this key the host never rewrites the model's file reference into
@@ -137,7 +156,7 @@ describe("local stdio server", () => {
   });
 
   it("emits the mandated four-field attachment JSON Schema", async () => {
-    const hostedTools = await listTools(createHostedServer());
+    const hostedTools = await listTools(createHostedServer(TEST_OAUTH));
     const uploadTool = hostedTools.find((tool) => tool.name === "mthds_upload_attachments");
     const schema = uploadTool?.inputSchema as {
       required?: string[];

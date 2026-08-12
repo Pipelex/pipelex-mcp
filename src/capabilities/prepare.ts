@@ -125,7 +125,7 @@ export interface PrepareContext {
    * any upload-needing input up front instead.
    */
   allowUpload?: boolean;
-  /** Deployment-specific auth-failure texture (hosted BYOK); default env-var wording when absent. */
+  /** Deployment-specific auth-failure texture (the hosted console overrides it per request); default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
 

@@ -190,30 +190,36 @@ Bumps version from `{OLD_VERSION}` to `{TARGET_VERSION}`.
 
 Report the PR URL back.
 
-### 10. After the merge: publish, deploy, and tag (offer, don't auto-run)
+### 10. After the merge: dispatch the release workflow (the user runs it)
 
-Once the PR merges to `main`, remind the user of the finishing sequence below.
-Run each mutation only on request, and stop on failure so the same step can be
-retried without changing the version:
+Publishing and deploying are **not** local steps any more, and merging to `main`
+does not ship anything on its own. Both surfaces go out through
+`.github/workflows/release.yml`, which is `workflow_dispatch`-only — a human
+fires it from the Actions tab. Merging is therefore safe; shipping is a separate,
+deliberate act.
 
-1. **Pin the release source:** switch to and update `main`, verify the working
-   tree is clean, `package.json` is `{TARGET_VERSION}`, and capture its commit as
-   `{MERGE_COMMIT}`. Every remaining step must run from that commit.
-2. **Publish the workshop:** run `make publish` (`npm publish`). The package's
-   public `publishConfig` supplies `--access public`, and `prepack` rebuilds
-   `dist/local/main.js`. The target itself refuses to run unless the branch is
-   `main` and the working tree is clean (`check-release-ready`), and refuses a
-   local `@pipelex/*` file link (`check-no-local-deps`) — do not bypass it by
-   calling `npm publish` directly.
-3. **Deploy the console:** run `make deploy` (`alpic deploy`) from the same
-   `{MERGE_COMMIT}` — same `check-release-ready` / `check-no-local-deps` guards
-   apply. If Alpic's git integration already deployed this exact commit, verify
-   that deployment instead of starting a duplicate.
-4. **Tag the completed release:** `git tag v{TARGET_VERSION} {MERGE_COMMIT}` then
-   `git push origin v{TARGET_VERSION}`. The tag carries the `v` prefix and is
-   created only after both release surfaces are live.
-5. **Sync `dev`:** bring the release commit back so `dev` and `main` don't
+Once the PR merges to `main`, tell the user to run it:
+
+1. **Dispatch:** GitHub → Actions → **Release (publish + deploy)** → *Run
+   workflow*, with `version` = `{TARGET_VERSION}` (no `v`) and `target` = `both`.
+   The `gh` equivalent, if they prefer the terminal:
+   `gh workflow run release.yml -f version={TARGET_VERSION} -f target=both`
+2. **What it does, in order:** checks out `main`; fails unless `main`'s
+   `package.json` is exactly `{TARGET_VERSION}` (the guard against dispatching
+   before the merge landed) and `CHANGELOG.md` has a `## [{TARGET_VERSION}]`
+   heading; re-runs `make all` on the merge commit; publishes `@pipelex/mcp`;
+   deploys the console to Alpic; pushes the `v{TARGET_VERSION}` tag.
+3. **On a partial failure, re-dispatch the failed leg only** — `target` = `npm`
+   or `alpic`, same `version`. Re-running is safe: an already-published version
+   is skipped, and the tag step leaves an existing tag alone. Never bump the
+   version to work around a transient failure.
+4. **Sync `dev`:** bring the release commit back so `dev` and `main` don't
    diverge (merge `main` into `dev`, or fast-forward `dev`).
+
+`make publish` / `make deploy` still exist as local escape hatches (with their
+`check-release-ready` / `check-no-local-deps` guards) for the case where CI
+itself is unavailable. Prefer the workflow — it ships from a verified `main`
+rather than from whatever is in someone's working tree.
 
 ## Rules
 

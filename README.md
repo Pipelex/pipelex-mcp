@@ -145,35 +145,35 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }
   against a local OSS `pipelex-api` runner. Durable runs need the hosted API; a
   bare runner has no run lifecycle.
 
-## Hosted console: bring your own key
+## Hosted console: sign in with your Pipelex account
 
-The hosted console holds **no server-side API key**. Until per-user OAuth
-ships, every caller supplies their own `plx_sk_` platform key at the transport
-level — the key never travels through tool arguments, so it never enters the
-model's context. Two channels, depending on what your host's connector UI
-supports:
+The hosted console holds **no server-side API key** and there is nothing to
+paste. Add the connector by its URL and your host walks you through signing in
+with your Pipelex account:
 
-- **`Authorization` header** — for hosts with header config (Claude Code,
-  Cursor, Codex, scripted clients):
+```
+https://<console-url>/mcp
+```
 
-  ```bash
-  claude mcp add --transport http pipelex https://<console-url>/mcp \
-    --header "Authorization: Bearer plx_sk_..."
-  ```
+Sign-in is OAuth through WorkOS AuthKit, which the console's MCP host drives
+for you — ChatGPT, claude.ai, Claude Desktop/Cowork and Cursor all handle the
+handshake themselves, including picking the organization you want to work in.
+Your verified session is what authorizes every call the console makes on your
+behalf, so the catalog you see and the runs you spend are your own. The token
+never travels through tool arguments, so it never enters the model's context.
 
-- **`?api_key=` on the connector URL** — for hosts whose connector UI accepts
-  only a URL (claude.ai, ChatGPT, Cowork): register the connector as
-  `https://<console-url>/mcp?api_key=plx_sk_...`. Mind that URLs can end up in
-  intermediary logs — this channel is the documented compromise until real
-  auth lands; use a key you can rotate.
+There is **no keyless mode**: every tool call requires a signed-in session. If
+one expires or is revoked, calls come back as a `config` no-verdict at
+`authorization` telling you to reconnect the connector and sign in again.
 
-A supplied key takes precedence over any server-held env key. Without a key
-the handshake and `tools/list` still work, but every tool call returns a
-`config` no-verdict at `api_key` explaining both channels.
+> **Upgrading from a `?api_key=` connector.** Bring-your-own-key has been
+> removed. A connector still registered with `?api_key=plx_sk_...` (or an
+> `Authorization: Bearer plx_sk_...` header) no longer connects at all — remove
+> it and re-add it by the plain URL above. ChatGPT in particular caches a
+> connector's configuration at add-time, so re-adding is the only path.
 
 (That said, prefer the **local workshop** on hosts that can spawn it — see the
-matrix below. The header example above is for testing the console from Claude
-Code, not the recommended pairing.)
+matrix below.)
 
 ## Chat attachments (ChatGPT only)
 
@@ -182,7 +182,7 @@ has no filesystem, so it gets it a different way: **ChatGPT's Apps runtime
 rewrites the model's reference to an attached file into a signed-URL object**
 before the call reaches the server. `mthds_upload_attachments` takes that
 channel — it fetches the bytes server-side and uploads them to Pipelex storage
-under your BYOK key, returning only small URI strings. **The bytes never enter
+under your signed-in account, returning only small URI strings. **The bytes never enter
 the model's context**, which is the whole reason console-side upload is allowed
 here at all.
 
@@ -530,6 +530,27 @@ Prerequisites:
 - Node.js 24+
 - A Pipelex API serving `POST /v1/validate` and `POST /v1/build/inputs` (a local
   OSS `pipelex-api` during development)
+- A WorkOS AuthKit tenant — **the console has no keyless mode and refuses to
+  start without one** (see below)
+
+**The console requires two WorkOS variables.** Per-user OAuth is its only auth
+posture, so the server throws at startup unless both are set:
+
+| Variable | Value |
+| --- | --- |
+| `WORKOS_AUTHKIT_DOMAIN` | the AuthKit domain, e.g. `<tenant>.authkit.app` |
+| `PIPELEX_MCP_RESOURCE_INDICATOR` | the server **origin with a trailing slash** — `http://localhost:3000/`, not `.../mcp` |
+
+The Resource Indicator must also be registered in the WorkOS dashboard (Connect
+→ Configuration), along with Dynamic Client Registration. It becomes the issued
+token's `aud`, and the server verifies it byte-for-byte — registering the `/mcp`
+path or dropping the trailing slash yields tokens that never validate. The
+startup check rejects both mistakes with a message naming the fix, rather than
+letting every tool call fail later at audience verification.
+
+If you only need to work on the capability core, **use `make dev-local`
+instead** — the workshop shell shares the same capabilities, authenticates with
+a plain `PIPELEX_API_KEY`, and needs no WorkOS setup at all.
 
 Install dependencies, start the API, then the Skybridge dev server:
 
@@ -537,15 +558,26 @@ Install dependencies, start the API, then the Skybridge dev server:
 npm install
 
 cd ../pipelex-api && make run          # serves http://localhost:8081
-PIPELEX_BASE_URL=http://localhost:8081 npm run dev
+npm run dev
+```
+
+```env
+# .env at the repo root (gitignored)
+WORKOS_AUTHKIT_DOMAIN=<tenant>.authkit.app
+PIPELEX_MCP_RESOURCE_INDICATOR=http://localhost:3000/
+PIPELEX_BASE_URL=http://localhost:8081
 ```
 
 `PIPELEX_BASE_URL` defaults to the hosted Pipelex API when unset — set it to
-`http://localhost:8081` to develop against a local runner. Set `PIPELEX_API_KEY`
-only when the configured API requires it. Instead of prefixing every command,
-put the variables in a gitignored `.env` at the repo root; the dev server loads
-it via `nodemon.json` (`tsx --env-file-if-exists=.env`). `.env` is dev-only and
-not watched — restart the dev server after editing it.
+`http://localhost:8081` to develop against a local runner. `PIPELEX_API_KEY` has
+**no effect on the console**: the caller's verified OAuth token always overrides
+it. `.env` is dev-only and loaded via `nodemon.json`
+(`tsx --env-file-if-exists=.env`); it is not watched, so restart the dev server
+after editing it.
+
+If port 3000 is taken, Skybridge falls back to another port and prints it — the
+Resource Indicator then has to match that port too, both in `.env` and in the
+WorkOS dashboard.
 
 The MCP endpoint is at `http://localhost:3000/mcp`, with Skybridge DevTools at
 `http://localhost:3000`.
