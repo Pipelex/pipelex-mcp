@@ -22,6 +22,11 @@ import {
 // No `client` seam: this is the real PipelexApiClient talking to the real API.
 const context: CatalogContext = liveApiConfig();
 
+const STALE_SEED_HINT =
+  "the stored fixture disagrees with e2e-support.ts — this is a stale seed, not API drift, " +
+  "if FIXTURE_BUNDLE or FIXTURE_DESCRIPTION changed since the last `make seed-e2e-fixture`; " +
+  "re-run that target before treating this as a client-vs-API disagreement";
+
 describe("mthds_list_methods (live)", () => {
   it("returns a page whose rows carry every projected field", async () => {
     const result = await listMthdsMethods({ limit: 5 }, context);
@@ -70,7 +75,11 @@ describe("mthds_list_methods (live)", () => {
     // Not merely "a string": the platform recomputes `description` from the
     // bundle's top-level key on every save, so this asserts that derivation
     // still happens and still reaches the row.
-    expect(fixture?.description).toBe(FIXTURE_DESCRIPTION);
+    //
+    // A mismatch here has two causes that read alike and need opposite fixes, so
+    // the message names both: the API stopped deriving the field (drift), or the
+    // stored copy predates an edit to FIXTURE_BUNDLE (a stale seed).
+    expect(fixture?.description, STALE_SEED_HINT).toBe(FIXTURE_DESCRIPTION);
     expect(fixture?.description_truncated).toBe(false);
   });
 

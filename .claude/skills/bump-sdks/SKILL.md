@@ -158,7 +158,7 @@ make smoke      # the quick one: the read-only tools, through the workshop shell
 
 `make smoke` is the faster, shallower check: it spawns the workshop stdio server the way a host does, completes the MCP handshake, then calls `mthds_list_methods`, `mthds_validate` and `mthds_inputs_template` and asserts on their `structuredContent` (`scripts/smoke.ts` holds the assertions). It is the right call when you want a verdict in seconds, or when the failure you are chasing is about the shell rather than a capability.
 
-Both are read-only and spend no inference credit. Ask before running either — they do hit the live API with the user's key. Both resolve `PIPELEX_BASE_URL` and `PIPELEX_API_KEY` from the shell or a gitignored `.env`, preflight `/v1/version`, and refuse to start without a key; against a keyless local OSS runner, calling the npm script directly skips those guards.
+Neither spends inference credit, but only `make smoke` is read-only: `make test-e2e` has one write, `prepare.e2e.ts`'s workshop arm, which uploads a 1x1 PNG to the user's organization storage on every run to prove the upload path still rewrites a local path to a `pipelex-storage://` reference. The SDK exposes no delete, so that object persists. Say so when you ask — they do hit the live API with the user's key. Both resolve `PIPELEX_BASE_URL` and `PIPELEX_API_KEY` from the shell or a gitignored `.env`, preflight `/v1/version`, and refuse to start without a key; against a keyless local OSS runner, calling the npm script directly skips those guards.
 
 Read the result as a whole rather than the exit code alone:
 

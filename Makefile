@@ -172,6 +172,13 @@ live-preflight:
 smoke: live-preflight
 	npm run smoke
 
+# The gate has to be closed here, not merely left unset: `run.e2e.ts` reads
+# PIPELEX_E2E_RUN from the environment, and `vitest.e2e.config.ts` loads the
+# whole `.env` — so an ambient `PIPELEX_E2E_RUN=1` (left in a shell, or parked in
+# `.env`) would make this target print "skipped" and then spend inference credit.
+# Setting it empty makes the guarantee the echo claims a property of the target
+# rather than of whatever the caller's environment happened to hold.
+test-e2e: export PIPELEX_E2E_RUN =
 test-e2e: live-preflight
 	@echo "-> the run family is skipped (it spends inference credit); use 'make test-e2e-run' to include it"
 	npm run test:e2e

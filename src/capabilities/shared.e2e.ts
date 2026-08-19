@@ -32,6 +32,16 @@ const inputsContext: InputsContext = liveApiConfig();
 
 const NO_SOURCE_HINT = "Add MTHDS content to the method before using it by id.";
 
+/**
+ * Every assertion below reads the SEEDED copy of the fixture, not the inline one,
+ * so an edit to FIXTURE_BUNDLE that was never re-seeded fails them exactly the way
+ * real drift would — and points the reader at `../pipelex-sdk-js`, which is the
+ * wrong repo. Name the cheaper cause on the assertions that can have it.
+ */
+const STALE_SEED_HINT =
+  "the stored fixture disagrees with e2e-support.ts — if FIXTURE_BUNDLE changed since the last " +
+  "`make seed-e2e-fixture`, this is a stale seed rather than API drift; re-seed before chasing it";
+
 describe("fetchMethodFiles (live)", () => {
   it("resolves a stored method's closure and labels every file with the method id", async () => {
     const methodId = await fixtureMethodId();
@@ -52,7 +62,9 @@ describe("fetchMethodFiles (live)", () => {
     }
 
     // Not merely "some content": this is the bundle the seed script stored.
-    expect(fetched.files.map((file) => file.content).join("\n")).toContain("mcp_e2e_fixture");
+    expect(fetched.files.map((file) => file.content).join("\n"), STALE_SEED_HINT).toContain(
+      "mcp_e2e_fixture",
+    );
   });
 
   it("classifies an unknown method id as an input_domain no-verdict at method_id", async () => {
@@ -86,7 +98,7 @@ describe("by-id capability paths (live)", () => {
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);
-    expect(result.structuredContent.pipe_ref).toBe(FIXTURE_PIPE_REF);
+    expect(result.structuredContent.pipe_ref, STALE_SEED_HINT).toBe(FIXTURE_PIPE_REF);
   });
 
   it("lets inline files win when both files and method_id are supplied", async () => {

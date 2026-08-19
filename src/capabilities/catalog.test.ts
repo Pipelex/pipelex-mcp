@@ -370,6 +370,22 @@ describe("listMthdsMethods failures", () => {
     expect(firstError(result)?.hint).toContain("active organization");
   });
 
+  it("blames the cursor, not the key, when a 400 answers a request that carried one", async () => {
+    // The route has two unrelated bad-request causes and only the request shape
+    // tells them apart. The live API answers a stale cursor with `Invalid cursor`;
+    // routing that to config@PIPELEX_API_KEY sends the caller to rotate a key that
+    // was never wrong, and a machine consumer branches on `class`, not the wording.
+    const result = await failure(apiError(400, "Invalid cursor"), {}, { cursor: "stale-cursor" });
+
+    expect(firstError(result)).toMatchObject({
+      class: "input_domain",
+      location: "cursor",
+      retryable: false,
+    });
+    expect(firstError(result)?.hint).toContain("from the start");
+    expect(firstError(result)?.hint).not.toContain("organization");
+  });
+
   it("maps paywall, missing route, and server faults with catalog-specific semantics", async () => {
     expect(firstError(await failure(apiError(402, "Subscription required")))).toMatchObject({
       class: "config",
@@ -432,6 +448,24 @@ describe("listMthdsMethods failures", () => {
     expect(firstError(malformed)?.message).toContain("name");
   });
 
+  it("treats an absent nextCursor as a contract break, never as the end of the catalog", async () => {
+    // The SDK reads the raw wire key, so a renamed or dropped `next_cursor`
+    // arrives as `undefined`. Coerced to `null` it would read as "last page" and
+    // hide every method past the first one, with both live detectors green
+    // because `null` is exactly what they accept. It has to fail loudly.
+    const result = await listMthdsMethods(
+      {},
+      context({
+        async listMethods() {
+          return { items: [baseMethod] } as unknown as MethodPage;
+        },
+      }),
+    );
+
+    expect(firstError(result)).toMatchObject({ class: "runtime", retryable: false });
+    expect(firstError(result)?.message).toContain("nextCursor");
+  });
+
   it("marks MCP tool results as errors and surfaces classified detail in content", async () => {
     const result = catalogToolResult(await failure(apiError(404, "Not found")));
 
@@ -441,19 +475,20 @@ describe("listMthdsMethods failures", () => {
   });
 });
 
-async function failure(error: unknown, overrides: Partial<CatalogContext> = {}) {
-  return listMthdsMethods(
-    {},
-    {
-      baseUrl: DEFAULT_API_URL,
-      ...overrides,
-      client: {
-        async listMethods() {
-          throw error;
-        },
+async function failure(
+  error: unknown,
+  overrides: Partial<CatalogContext> = {},
+  input: Parameters<typeof listMthdsMethods>[0] = {},
+) {
+  return listMthdsMethods(input, {
+    baseUrl: DEFAULT_API_URL,
+    ...overrides,
+    client: {
+      async listMethods() {
+        throw error;
       },
     },
-  );
+  });
 }
 
 function firstError(result: Awaited<ReturnType<typeof listMthdsMethods>>) {

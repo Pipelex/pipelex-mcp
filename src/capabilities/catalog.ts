@@ -152,7 +152,7 @@ export async function listMthdsMethods(
       ...(normalized.input.cursor === undefined ? {} : { cursor: normalized.input.cursor }),
     });
   } catch (err) {
-    const error = classifyError(err, catalogErrorOptions(context));
+    const error = classifyError(err, catalogErrorOptions(context, normalized.input));
     return errorResult(summaryForError(error), [error]);
   }
 
@@ -216,12 +216,16 @@ export function projectCatalog(value: unknown, input: NormalizedCatalogInput): C
   if (!Array.isArray(wire.items)) {
     throw new Error("Methods catalog page is missing its items array.");
   }
-  if (
-    wire.nextCursor !== null &&
-    wire.nextCursor !== undefined &&
-    typeof wire.nextCursor !== "string"
-  ) {
-    throw new Error("Methods catalog page has a non-string nextCursor.");
+  // An ABSENT cursor field is a contract break, not an end-of-catalog signal, and
+  // it is checked as strictly as `items` for the same reason: the SDK reads the
+  // raw wire key, so a renamed or dropped `next_cursor` arrives here as
+  // `undefined`. Coercing that to `null` would report "this was the last page" on
+  // every call — every method past the first page silently invisible, with both
+  // live detectors green because `null` is what they already accept. `MethodPage`
+  // declares the field required; failing closed is what makes that declaration
+  // mean something on the wire.
+  if (wire.nextCursor !== null && typeof wire.nextCursor !== "string") {
+    throw new Error("Methods catalog page is missing its nextCursor, or it is not a string.");
   }
 
   const methods = wire.items.map(validateRow).map(projectRow);
@@ -229,7 +233,7 @@ export function projectCatalog(value: unknown, input: NormalizedCatalogInput): C
   const structuredContent: CatalogSuccess = {
     status: "ok",
     returned_count: methods.length,
-    next_cursor: (wire.nextCursor as string | null | undefined) ?? null,
+    next_cursor: wire.nextCursor as string | null,
     methods,
   };
 
@@ -358,14 +362,36 @@ function catalogSummary(result: CatalogSuccess, query: string): string {
   return lines.join("\n");
 }
 
-function catalogErrorOptions(context: CatalogContext): ClassifyErrorOptions {
+/**
+ * The 400/422 arm is chosen by REQUEST SHAPE, because this route has two
+ * unrelated bad-request causes and only the caller's own input tells them apart.
+ *
+ * Without a cursor the only reachable rejection is a missing active-organization
+ * context, which is a credential problem. With one, the far likelier cause is the
+ * cursor itself — the API answers a stale or corrupted one with `Invalid cursor`,
+ * and routing that to `config`@`PIPELEX_API_KEY` sends the caller to rotate a key
+ * that was never wrong. The class matters more than the wording: a machine
+ * consumer branches on it, so a paging fault must not read as an auth fault.
+ */
+function catalogErrorOptions(
+  context: CatalogContext,
+  input: NormalizedCatalogInput,
+): ClassifyErrorOptions {
   return {
     route: "/v1/methods",
-    badRequest: {
-      class: "config",
-      location: context.authError?.location ?? "PIPELEX_API_KEY",
-      hint: "The methods catalog needs an active organization context. Use a platform key minted for the intended organization, then retry.",
-    },
+    badRequest:
+      input.cursor === undefined
+        ? {
+            class: "config",
+            location: context.authError?.location ?? "PIPELEX_API_KEY",
+            hint: "The methods catalog needs an active organization context. Use a platform key minted for the intended organization, then retry.",
+          }
+        : {
+            // No `class` override: a rejected cursor is the caller's input, so it
+            // takes the default `input_domain`.
+            location: "cursor",
+            hint: "The cursor was rejected — it may be stale, truncated, or from a different catalog. Drop it and call mthds_list_methods again from the start.",
+          },
     auth: context.authError,
   };
 }
