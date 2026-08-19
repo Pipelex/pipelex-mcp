@@ -2,8 +2,13 @@ node_modules/
 dist/
 coverage/
 .env*
-.DS_store
+.DS_Store
 *.tsbuildinfo
 .skybridge/
 .vercel/
 .gstack/
+
+# This repo is public. Internal working notes live in the private workspace
+# at Pipelex/docs/mcp/ — never here. See Pipelex/docs/mcp/_top_priorities.md.
+wip/
+TODOS.md
