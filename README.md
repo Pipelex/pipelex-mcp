@@ -608,11 +608,15 @@ pack/publish can never ship a stale or absent bin.
 
 ```bash
 make test         # the default suite — hermetic, no network
+make agent-test   # the same suite for an agent — quiet unless it fails
 make test-e2e     # the live suite — real client, real Pipelex API
 make smoke        # the workshop stdio server, end to end, against the live API
+make test-all     # all of the above plus the run family — SPENDS INFERENCE CREDIT
 ```
 
 `make test` fakes every API client, so it proves the projections and never touches the network; `make all` and CI run only that. The live targets are the drift detector: the faked seams mean a wire-shape change on the API side fails nothing at all in the hermetic suite, so `make test-e2e` calls each capability with the real `PipelexApiClient` and `make smoke` drives the whole shell over stdio. Both need `PIPELEX_API_KEY` (a gitignored `.env` at the repo root is enough), and neither spends inference credit — the run family that does only fires under `make test-e2e-run`. `make smoke` is entirely read-only; `make test-e2e` has one write, the workshop arm of `mthds_prepare_inputs`, which uploads a 1x1 PNG to your organization's Pipelex storage to prove the upload path still rewrites values to `pipelex-storage://`. The SDK exposes no delete, so that object persists.
+
+`make test-all` chains all three in cost order and adds the run family, so a single command covers every test in the repo; it spends inference credit, which is why `make all` does not reach it. `make agent-test` is the same hermetic suite as `make test` with its output captured and replayed only on failure, plus a heartbeat while it runs — meant for coding agents, whose context a few hundred lines of green vitest output would otherwise fill.
 
 The by-id paths need one durable fixture method in the API key's organization; `make seed-e2e-fixture` creates or refreshes it, idempotently. See `CLAUDE.md` → "Detecting API drift".
 
