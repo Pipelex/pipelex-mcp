@@ -286,50 +286,49 @@ Full contracts (verdict discipline, `_meta` channels, view behavior) live in
 ```ts
 // input
 {
-  query?: string;   // trimmed, case-insensitive substring over id/name/description
+  query?: string;   // trimmed, case-insensitive; matched SERVER-side over name/description
   limit?: number;   // integer 1..50; default 20
-  offset?: number;  // integer >= 0; default 0
+  cursor?: string;  // opaque next_cursor from a previous call
 }
 
 // structuredContent — success
 {
   status: "ok";
-  total_count: number;
-  matched_count: number;
   returned_count: number;
-  next_offset: number | null;
+  next_cursor: string | null;
   methods: Array<{
     method_id: string;
     name: string;
     name_truncated: boolean;
     description: string | null;
     description_truncated: boolean;
-    has_source: boolean;
-    updated_at: string;
+    created_at: string;
   }>;
 }
 ```
 
-Both shells expose this read-only, no-view catalog entry point. It fetches the
-current API key's complete organization catalog through `@pipelex/sdk`, filters
-and pages locally, and returns a deterministic page sorted by case-insensitive
-name then id. Names are bounded to 200 Unicode code points and descriptions to
-500; search uses their full values. Empty catalogs, no matches, and offsets past
-the end are successful empty results. `has_source` says only that stored MTHDS
-source exists — it is **not** a valid/runnable verdict.
+Both shells expose this read-only, no-view catalog entry point. Search and
+paging are the server's job: `query` is applied across the whole organization
+catalog rather than over one page, and rows arrive already ordered newest first
+by the immutable `created_at` the catalog pages on. Continue a listing by
+passing the returned `next_cursor` back as `cursor`. Names are bounded to 200
+Unicode code points and descriptions to 500, with explicit truncation flags.
+Empty catalogs and no-match queries are successful empty results.
+
+There is deliberately no total: counting a catalog means reading all of it,
+which is the cost paging exists to avoid.
 
 The projection is deliberately source-free: `mthds`, Python, stored inputs and
 outputs, organization ids, and creator ids never enter `structuredContent`,
-`content`, `_meta`, or logs. Upstream listing is not paged: the platform still
-returns every full row, and the MCP immediately projects it before producing any
-tool output. A malformed row fails the whole result as a non-retryable runtime
+`content`, `_meta`, or logs — and the index projection no longer carries them
+at all. A malformed row fails the whole result as a non-retryable runtime
 contract error rather than returning a misleading partial list.
 
 Name-to-run flow:
 
 ```text
 mthds_list_methods({ query: "invoice" })
-  → choose/disambiguate method_id (do not use a has_source:false draft)
+  → choose/disambiguate method_id
   → mthds_validate({ method_id })                 # optional current-content check
   → mthds_inputs_template({ method_id })
   → fill inputs; prepare/upload assets if needed

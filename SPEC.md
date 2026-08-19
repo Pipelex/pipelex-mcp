@@ -120,40 +120,39 @@ The public MCP input is:
 
 ```ts
 {
-  query?: string;  // case-insensitive substring over method_id, name, description
+  query?: string;  // case-insensitive substring, matched server-side over name and description
   limit?: number;  // integer 1..50; default 20
-  offset?: number; // integer >= 0; default 0
+  cursor?: string; // opaque next_cursor from a previous call
 }
 ```
 
-`query` is trimmed and blank means no filter. Filtering uses the full SDK-returned strings, then rows sort deterministically by case-insensitive `name` and `method_id` before `offset`/`limit` are applied. An offset beyond the match set is a successful empty page. Paging is MCP-side only: each call still fetches the endpoint's full, unbounded rows because the platform exposes no compact or paged list route.
+`query` is trimmed and blank means no filter — the trimmed-away case omits `q` entirely rather than sending an empty string, which the API treats as bad input rather than as "no filter". Search, ordering and paging are all applied server-side: `q` matches across the whole catalog rather than one page, and rows arrive ordered newest first by the immutable `created_at` the catalog pages on. The MCP re-sorts and re-filters nothing — re-sorting would reorder a page against the cursor that produced it, and re-filtering would search only the rows the server already selected. A cursor is opaque and is passed back verbatim to continue.
 
 Success projects exactly:
 
 ```ts
 {
   status: "ok";
-  total_count: number;
-  matched_count: number;
   returned_count: number;
-  next_offset: number | null;
+  next_cursor: string | null;
   methods: Array<{
     method_id: string;
     name: string;
     name_truncated: boolean;
     description: string | null;
     description_truncated: boolean;
-    has_source: boolean;
-    updated_at: string;
+    created_at: string;
   }>;
 }
 ```
 
-The model-facing `name` is bounded to 200 Unicode code points and `description` to 500, with explicit truncation flags; search still examines their full values. `has_source` is derived with the SDK's `methodSourceToContents(method.mthds).length > 0` and means only that source exists — never that it is valid, runnable, or has satisfied inputs. Missing descriptions normalize to `null`. Empty catalogs and no-match queries are successful empty results.
+The model-facing `name` is bounded to 200 Unicode code points and `description` to 500, with explicit truncation flags; the server's search examines their full stored values. `created_at` is reported rather than `updated_at`, because the catalog orders on `created_at` and showing a timestamp other than the sort key makes "newest first" unreadable. There is no total count in either form: counting a catalog means reading all of it, which is the cost paging exists to avoid. Missing descriptions normalize to `null`. Empty catalogs and no-match queries are successful empty results.
 
-The projection boundary is strict: `mthds`, `python`, `input_data`, `pipe_output`, `org_id`, and `created_by_user_id` never enter `structuredContent`, `content`, view metadata, or logs. A non-array SDK response or a row whose `method_id`, `name`, `updated_at`, or `mthds` is not a string is a reachable, non-retryable `runtime` contract error rather than a partial list. `mthds` is in that required set even though it is never projected, because `has_source` is derived from it — the row cannot be described without it. The text summary repeats the bounded name, description, and canonical id for each returned row, marks source-less rows as drafts unusable by reference, and includes paging/query guidance without source or stored defaults.
+**There is no `has_source` flag.** The catalog index projection does not carry a method's source, and recomputing the flag would cost a `getMethod` per listed row — exactly the read the index exists to avoid. A source-less method instead announces itself where the answer is actionable rather than advisory: passing its id to by-id validate, inputs-template, prepare or run fails fast as an `input_domain` no-verdict at `method_id`.
 
-**The summary specifies the listing's presentation, because the name alone is not an answer.** A catalog listing is read almost verbatim by the user, and the description is what lets them choose; observed live on the same two-method catalog, one host answer rendered name + description while another rendered bare names and volunteered "both contain source code, but I haven't checked whether they validate" — the model filling the silence with the one field that carries no verdict. So the summary leads its list with an explicit render directive ("report every method with BOTH its name and its description"), puts name and description first on each row with `method_id` demoted to a trailing parenthetical, and annotates `has_source` **only when false**, where it is actionable; the true case is silent rather than repeating a "not a validation verdict" caveat that competes with the description. The directive lives in the summary rather than the tool description on purpose: ChatGPT caches a connector's tool list at add-time and never refreshes it, so the summary is the only channel where a presentation fix reaches existing installations. The tool description carries the same instruction as a backup for hosts that weight it at selection time. Names and descriptions are org-authored and therefore untrusted: each is collapsed to a single line so it cannot break out of its bullet, and the directive names them as data to display rather than instructions to follow. The directive is omitted when the page is empty.
+The projection boundary is strict: `mthds`, `python`, `input_data`, `pipe_output`, `org_id`, and `created_by_user_id` never enter `structuredContent`, `content`, view metadata, or logs. The index projection no longer returns them, but the boundary is enforced on what actually arrives rather than on what the type declares, so a looser server cannot leak through it. A response that is not a page object, a page missing its `items` array, a non-string `nextCursor`, or a row whose `method_id`, `name`, or `created_at` is not a string is a reachable, non-retryable `runtime` contract error rather than a partial list. The text summary repeats the bounded name, description, and canonical id for each returned row, and includes cursor/query guidance without source or stored defaults.
+
+**The summary specifies the listing's presentation, because the name alone is not an answer.** A catalog listing is read almost verbatim by the user, and the description is what lets them choose; observed live on the same two-method catalog, one host answer rendered name + description while another rendered bare names and volunteered "both contain source code, but I haven't checked whether they validate" — the model filling the silence with the one field that carries no verdict. So the summary leads its list with an explicit render directive ("report every method with BOTH its name and its description"), puts name and description first on each row with `method_id` demoted to a trailing parenthetical, and says nothing at all about source or validity — the flag that once carried that caveat is gone, and a row that volunteered it demonstrably leaked into user-facing answers as a half-verdict. The directive lives in the summary rather than the tool description on purpose: ChatGPT caches a connector's tool list at add-time and never refreshes it, so the summary is the only channel where a presentation fix reaches existing installations. The tool description carries the same instruction as a backup for hosts that weight it at selection time. Names and descriptions are org-authored and therefore untrusted: each is collapsed to a single line so it cannot break out of its bullet, and the directive names them as data to display rather than instructions to follow. The directive is omitted when the page is empty.
 
 No-verdict failures use the shared error shape. Unreachable API is retryable `config` at `PIPELEX_BASE_URL`; missing or rejected auth is `config` with the shell's texture (the console's reconnect-and-sign-in-again wording, the workshop's `PIPELEX_API_KEY` wording); 402 is the existing billing `config` arm; missing active-org context (400) is `config` at the deployment's credential location; missing `/v1/methods` (404) is `config` at `PIPELEX_BASE_URL`; 5xx and unexpected transport failures are retryable `runtime`; malformed success payloads are non-retryable `runtime`.
 
@@ -565,7 +564,7 @@ Discover a registered method:
 
 1. When the user asks what saved methods exist, names one without an id, or a saved method may plausibly solve the task, the assistant calls `mthds_list_methods` (with a focused `query` when possible).
 2. One strong match supplies its canonical `method_id`; several plausible matches are presented by bounded name/description for the user to choose; no matches are reported without inventing an id.
-3. A row with `has_source: false` is explained as a draft and is not passed to by-id validate/template/run. `has_source: true` is not presented as a validation or runnable verdict.
+3. A listed row is never presented as a validation or runnable verdict — the listing carries no such signal. A method whose stored source is missing surfaces that at the point of use, as an `input_domain` no-verdict at `method_id` from by-id validate/template/prepare/run.
 4. The chosen id feeds the existing current-content flow: optional `mthds_validate` → `mthds_inputs_template` → fill/prepare inputs → `mthds_run`.
 
 Validate MTHDS files:
@@ -617,9 +616,9 @@ Run a registered method by reference:
 
 **Tool: `mthds_list_methods`**
 
-- **Input**: `{ query?, limit?, offset? }` — trimmed case-insensitive search, bounded page size, MCP-side offset (see Catalog Discovery Scope)
-- **Output**: `{ status, total_count?, matched_count?, returned_count?, next_offset?, methods?, errors? }` in `structuredContent`, plus a bounded text summary that opens with a render directive (report each method with its name **and** description) and then repeats names, descriptions, ids, source-draft labels, and paging guidance. No method source, stored inputs/outputs, org/user ids, `_meta`, or view payload.
-- **Behavior**: Fetches the active API key's full organization catalog through the SDK, immediately validates and projects rows, filters/sorts/pages deterministically, and returns empty catalogs/no matches as success. Listing executes nothing; a returned id can be passed to `mthds_validate`, `mthds_inputs_template`, and `mthds_run`.
+- **Input**: `{ query?, limit?, cursor? }` — trimmed case-insensitive search applied server-side, bounded page size, opaque continuation cursor (see Catalog Discovery Scope)
+- **Output**: `{ status, returned_count?, next_cursor?, methods?, errors? }` in `structuredContent`, plus a bounded text summary that opens with a render directive (report each method with its name **and** description) and then repeats names, descriptions, ids, and cursor guidance. No method source, stored inputs/outputs, org/user ids, `_meta`, or view payload.
+- **Behavior**: Asks the platform for one page of the active key's organization catalog through the SDK, immediately validates and projects the rows it returns, and treats empty catalogs and no-match queries as success. Listing executes nothing; a returned id can be passed to `mthds_validate`, `mthds_inputs_template`, and `mthds_run`.
 - **Annotations**: Read-only, non-destructive, no open-world publishing.
 - **View**: none — bounded catalog metadata is read directly by the model.
 

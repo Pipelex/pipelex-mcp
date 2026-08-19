@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **`mthds_list_methods` reaches the live catalog again.** Every real call had been failing with `wire.map is not a function`: the platform reshaped `GET /v1/methods` into a page object, and the pinned `@pipelex/sdk` 0.9.0 still called `.map()` on the response. The whole check suite stayed green throughout, because the capability tests inject fake clients that satisfy this repo's own narrow `CatalogClient` interface — a shape change on the far side of that seam is invisible to them by construction. The bump to SDK 0.12.0 carries the adapted client, and the capability now consumes the page.
+
+### Breaking Changes
+
+- **`mthds_list_methods` delegates search and paging to the server, so `offset` is replaced by an opaque `cursor`.** The API applies `q` across the whole catalog and returns rows already ordered newest-first by the immutable `created_at` it pages on, so the MCP-side filter, sort and slice are gone: filtering one returned page client-side would have been searching fifty rows of ten thousand and calling it a search. Continue a listing by passing the `next_cursor` from the previous result back as `cursor`. `total_count` and `matched_count` are gone from the output with no replacement — counting a catalog means reading all of it, which is the cost paging exists to avoid; `returned_count` and `next_cursor` are what the result can honestly report.
+- **`has_source` is removed from the catalog row.** The catalog index projection no longer carries a method's MTHDS source, and recomputing the flag would cost a `getMethod` per listed row — precisely the read the index exists to avoid. The signal moves from advisory to actionable: a source-less method now announces itself at the point of use, where passing its id to `mthds_validate`, `mthds_inputs_template`, `mthds_prepare_inputs` or `mthds_run` already fails fast as an `input_domain` no-verdict at `method_id`.
+- **The catalog row reports `created_at` instead of `updated_at`.** `updated_at` is absent from the index projection by design: the catalog sorts on the immutable `created_at`, and showing a timestamp other than the one it orders by makes "newest first" unreadable.
+- **ChatGPT console users must re-add the connector.** The tool's input schema changed (`offset` to `cursor`), and ChatGPT caches a connector's tool list at add-time and never issues `tools/list` again — an existing installation keeps calling the old contract until it is removed and re-added.
+
+### Changed
+
+- Upgraded `@pipelex/sdk` to 0.12.0 (was 0.9.0) and `@pipelex/mthds-ui` to 0.17.0 (was 0.12.0). The SDK's other breaking changes in that span do not reach this repo: `listRuns` is never called here, and `PipelineRun` is not imported. The mthds-ui span's one breaking change is a nullable blueprint field this repo never reads — the views pass `graph_spec` straight to `GraphViewer` without inspecting it.
+- Added a `bump-sdks` skill (`.claude/skills/bump-sdks/`) covering this workflow: read both changelogs, map each breaking bullet onto the client seams and view casts this repo actually declares, bump through the Makefile, then smoke the result against the real API — the step that catches what a fake-client suite cannot.
+
 ## [0.12.0] - 2026-08-12
 
 ### Added

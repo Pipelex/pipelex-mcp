@@ -6,7 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { MethodData, MthdsFile, PipelexValidationReport } from "@pipelex/sdk";
+import type { MethodPage, MthdsFile, PipelexValidationReport } from "@pipelex/sdk";
 import type { OAuthConfig } from "skybridge/server";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -54,9 +54,9 @@ describe("local stdio server", () => {
     const contexts = buildLocalToolContexts({ PIPELEX_API_KEY: "plx_sk_test" });
     let calls = 0;
     contexts.catalog.client = {
-      async listMethods(): Promise<MethodData[]> {
+      async listMethods(): Promise<MethodPage> {
         calls += 1;
-        return [catalogMethod];
+        return { items: [catalogMethod], nextCursor: null };
       },
     };
 
@@ -65,7 +65,7 @@ describe("local stdio server", () => {
       const listed = await client.listTools();
       const tool = listed.tools[0];
       const inputSchema = tool?.inputSchema as {
-        properties?: { limit?: { maximum?: number }; offset?: { minimum?: number } };
+        properties?: { limit?: { maximum?: number }; cursor?: { minLength?: number } };
       };
 
       expect(tool?.name).toBe("mthds_list_methods");
@@ -75,7 +75,7 @@ describe("local stdio server", () => {
         openWorldHint: false,
       });
       expect(inputSchema.properties?.limit?.maximum).toBe(50);
-      expect(inputSchema.properties?.offset?.minimum).toBe(0);
+      expect(inputSchema.properties?.cursor?.minLength).toBe(1);
 
       const result = await client.callTool({
         name: "mthds_list_methods",
@@ -85,8 +85,8 @@ describe("local stdio server", () => {
       expect(calls).toBe(1);
       expect(result.structuredContent).toMatchObject({
         status: "ok",
-        total_count: 1,
-        matched_count: 1,
+        returned_count: 1,
+        next_cursor: null,
         methods: [{ method_id: "mt_invoice", name: "Invoice extractor" }],
       });
       expect(result._meta).toBeUndefined();
@@ -290,15 +290,11 @@ const validReport: PipelexValidationReport = {
   rendered_markdown: "# Valid",
 };
 
-const catalogMethod: MethodData = {
+const catalogMethod: MethodPage["items"][number] = {
   method_id: "mt_invoice",
-  org_id: "org_test",
-  created_by_user_id: "usr_test",
   name: "Invoice extractor",
-  mthds: 'domain = "invoice"',
   description: "Extract invoice data",
   created_at: "2026-01-01T00:00:00Z",
-  updated_at: "2026-07-31T00:00:00Z",
 };
 
 function sharedContract(tool: Awaited<ReturnType<Client["listTools"]>>["tools"][number]) {
