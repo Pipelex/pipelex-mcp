@@ -1,6 +1,6 @@
 ---
 name: bump-sdks
-description: Bump this repo's two @pipelex npm dependencies — @pipelex/sdk and @pipelex/mthds-ui — to their latest published versions (or to versions the user names). Reads each package's CHANGELOG for the versions in between, maps every breaking bullet onto the client seams and view casts this repo actually declares, applies the bump through the Makefile, runs the checks, offers a live smoke run against the real API, and prepares a reviewable commit. Use this whenever the user says "bump the sdk", "bump the sdks", "bump @pipelex/sdk", "bump mthds-ui", "update the pipelex sdk", "upgrade the sdks", "is there a new sdk version", "are we behind on the sdk", or asks to pull in a newer @pipelex/sdk or @pipelex/mthds-ui release. Also use it when a tool fails at runtime against the live API while `make all` passes — that pattern usually means the installed SDK is behind the API.
+description: Bump this repo's two @pipelex npm dependencies — @pipelex/sdk and @pipelex/mthds-ui — to their latest published versions (or to versions the user names). Reads each package's CHANGELOG for the versions in between, maps every breaking bullet onto the client seams and view casts this repo actually declares, applies the bump through the Makefile, runs the checks, offers a live run against the real API, and prepares a reviewable commit. Use this whenever the user says "bump the sdk", "bump the sdks", "bump @pipelex/sdk", "bump mthds-ui", "update the pipelex sdk", "upgrade the sdks", "is there a new sdk version", "are we behind on the sdk", or asks to pull in a newer @pipelex/sdk or @pipelex/mthds-ui release. Also use it when a tool fails at runtime against the live API while `make all` passes — that pattern usually means the installed SDK is behind the API.
 ---
 
 # Bump the @pipelex SDKs
@@ -23,7 +23,7 @@ Every capability here talks to the SDK through a **hand-written narrow interface
 - A **type** change in the SDK is caught — each capability falls back to `new PipelexApiClient(...)` where the local interface is expected, so `tsc` structurally compares the two and fails.
 - A **behavior or wire-shape** change is *not* caught. The local interface still compiles, the fakes still return the shape they were written for, and `make all` goes green while the real client is broken against the live API.
 
-This is not hypothetical. On SDK `0.9.0` the whole suite passed while `mthds_list_methods` failed on every real call with `wire.map is not a function` — the platform had reshaped `GET /v1/methods` into a page object and `0.9.0` still called `.map()` on the response. Step 4 and Step 7 exist to catch exactly that class of failure, and Step 7 is now a real target (`make smoke`) rather than a probe you assemble by hand.
+This is not hypothetical. On SDK `0.9.0` the whole suite passed while `mthds_list_methods` failed on every real call with `wire.map is not a function` — the platform had reshaped `GET /v1/methods` into a page object and `0.9.0` still called `.map()` on the response. Step 4 and Step 7 exist to catch exactly that class of failure, and Step 7 is now two real targets (`make test-e2e` and `make smoke`) rather than a probe you assemble by hand.
 
 ## Step 1 — Gather state
 
@@ -143,25 +143,30 @@ That is clean + check + test: lint, format check, the Skybridge build, the tsup 
 
 Remember what green means here: the suite ran against fakes. It has not touched the API.
 
-## Step 7 — Smoke it against the real API
+## Step 7 — Check it against the real API
 
-An SDK bump always moves the API call path, and this repo has no e2e suite yet — so this is the only step that exercises the real `PipelexApiClient` against the live platform. Offer it every time.
+An SDK bump always moves the API call path, so this is the step that exercises the real `PipelexApiClient` against the live platform — the only thing Step 6 cannot do. Offer it every time.
+
+There are two live targets. **Prefer `make test-e2e`**: it is the thorough one.
 
 ```bash
-make smoke
+make test-e2e   # the thorough option: every capability, through the real client
+make smoke      # the quick one: the read-only tools, through the workshop shell
 ```
 
-That spawns the workshop stdio server the way a host does, completes the MCP handshake, then calls `mthds_list_methods`, `mthds_validate` and `mthds_inputs_template` against the live API and asserts on their `structuredContent` (`scripts/smoke.ts` holds the assertions). Every call is read-only and spends no inference credit. Ask before running it — it does hit the live API with the user's key.
+`make test-e2e` runs one `*.e2e.ts` per capability with **no client seam injected**, so the real client reaches the real API at exactly the layer an SDK bump moves. It covers the catalog, validation, the inputs template, the by-id `getMethodClosure` leg, both arms of input preparation, and the run lifecycle's free reads. It needs the durable fixture method in the key's organization — if a suite fails saying so, run `make seed-e2e-fixture` once and re-run. It stays free: the paid run family only fires under `make test-e2e-run`, which you should not offer as part of a bump unless the changelog span actually touched the run lifecycle.
 
-The target resolves `PIPELEX_BASE_URL` and `PIPELEX_API_KEY` from the shell or a gitignored `.env`, preflights `/v1/version`, and refuses to start without a key. Against a keyless local OSS runner, `npm run smoke` skips those guards.
+`make smoke` is the faster, shallower check: it spawns the workshop stdio server the way a host does, completes the MCP handshake, then calls `mthds_list_methods`, `mthds_validate` and `mthds_inputs_template` and asserts on their `structuredContent` (`scripts/smoke.ts` holds the assertions). It is the right call when you want a verdict in seconds, or when the failure you are chasing is about the shell rather than a capability.
+
+Both are read-only and spend no inference credit. Ask before running either — they do hit the live API with the user's key. Both resolve `PIPELEX_BASE_URL` and `PIPELEX_API_KEY` from the shell or a gitignored `.env`, preflight `/v1/version`, and refuse to start without a key; against a keyless local OSS runner, calling the npm script directly skips those guards.
 
 Read the result as a whole rather than the exit code alone:
 
-- **`SMOKE PASSED`** — the shipped client and the live API agree on every checked shape.
-- **A failed check** — the real client disagreeing with the real API, which is precisely what Step 6 cannot see. The script names the tool, the field, and what it got. If the API moved, the fix belongs in `../pipelex-sdk-js` (plus its own e2e), then a bump here — never a local patch that papers over it.
+- **`SMOKE PASSED`, or a green `make test-e2e`** — the shipped client and the live API agree on every checked shape. Note what a green e2e run reports as *skipped*: the paid run family is expected to skip, and that is the design, not a gap.
+- **A failed check or a failed test** — the real client disagreeing with the real API, which is precisely what Step 6 cannot see. Both surfaces name the tool, the field, and what they got. If the API moved, the fix belongs in `../pipelex-sdk-js` (plus its own e2e), then a bump here — never a local patch that papers over it. If a live result contradicts a unit-test fake in this repo, fix the fake in the same change: a fake that has drifted from the wire is how the mocked suite goes green over a broken client.
 - **`catalog is EMPTY`** on a pass — a note, not a failure, and worth repeating to the user: the org holds no methods, so row projection was not exercised by that run. A pass under an empty catalog is a weaker result than it looks.
 
-Worth running **before** the bump too when the user reports a live failure: a probe that fails on the old version and passes on the new one turns "we upgraded" into "we fixed it", and gives Step 8 something concrete to write.
+Worth running **before** the bump too when the user reports a live failure: a check that fails on the old version and passes on the new one turns "we upgraded" into "we fixed it", and gives Step 8 something concrete to write.
 
 If Step 4c flagged a `GraphSpec` change, the graph view needs eyes on it as well — `make dev` serves the DevTools UI at `http://localhost:3000` where `mthds_validate` renders the run-graph view. That one needs `WORKOS_AUTHKIT_DOMAIN` and `PIPELEX_MCP_RESOURCE_INDICATOR` set, so offer it, but do not treat it as blocking.
 

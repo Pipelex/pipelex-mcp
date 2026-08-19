@@ -7,7 +7,9 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       include: ["src/**/*.{ts,tsx}"],
-      exclude: ["src/**/*.test.{ts,tsx}", "dist/**", "coverage/**"],
+      // `*.e2e.ts` and their shared support module are the live suite; they are
+      // not shipped code and never run under this config (see vitest.e2e.config.ts).
+      exclude: ["src/**/*.test.{ts,tsx}", "src/**/*e2e*", "dist/**", "coverage/**"],
     },
   },
 });

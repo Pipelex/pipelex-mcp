@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint format format-check typecheck test test-watch test-coverage smoke check check-no-local-deps check-release-ready build build-local all clean dev dev-local inspect-local dev-tunnel start deploy publish c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
+.PHONY: help install lint format format-check typecheck test test-watch test-coverage smoke live-preflight test-e2e test-e2e-run seed-e2e-fixture te check check-no-local-deps check-release-ready build build-local all clean dev dev-local inspect-local dev-tunnel start deploy publish c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
 
 # Sibling repos for live development of our npm dependencies (see use-local / use-npm).
 MTHDS_UI_DIR := ../mthds-ui
@@ -28,7 +28,13 @@ make test           - Run the test suite
 make test-watch     - Run tests in watch mode
 make test-coverage  - Run tests with coverage
 make t              - Shorthand -> test
-make smoke          - Smoke the workshop server against a LIVE Pipelex API [PIPELEX_BASE_URL=...]
+
+Live checks against a REAL Pipelex API (never part of `make all`):
+make smoke            - Drive the workshop stdio server end to end [PIPELEX_BASE_URL=...]
+make test-e2e         - Run every capability's free path against the live API
+make te               - Shorthand -> test-e2e
+make test-e2e-run     - Same, plus the run family (SPENDS INFERENCE CREDIT)
+make seed-e2e-fixture - Create/refresh the durable fixture method the by-id legs need
 
 make build          - Build the Skybridge app
 make build-local    - Build the npm-distributed local stdio server
@@ -76,43 +82,74 @@ test-watch:
 test-coverage:
 	npm run test:coverage
 
-# --- The live drift detector (never part of `make all`) ---
-# Needs a reachable Pipelex API and a key: `make check` and CI stay hermetic, so
-# this is the only target in the repo that touches the network. It calls the
-# read-only tools only, so it spends no inference credit.
+# --- The live drift detectors (never part of `make all`) ---
+# These are the only targets in the repo that touch the network, and they exist
+# because the hermetic suite cannot see the failure that actually breaks this
+# server: every capability reaches @pipelex/sdk through a hand-written narrow
+# interface that the unit tests fake, so a wire-shape change on the API side
+# fails nothing at all. See CLAUDE.md -> "Detecting API drift".
 #
-# The target and its key are resolved ONCE here and exported, so the URL this
-# target preflights is the URL the smoke script calls. Precedence follows the
-# dotenv convention: the shell environment (or a `make smoke PIPELEX_BASE_URL=...`
+#   smoke            - the whole path a host exercises, through the stdio shell
+#   test-e2e         - every capability's free path, through the real client
+#   test-e2e-run     - the same, plus the run family (SPENDS INFERENCE CREDIT)
+#   seed-e2e-fixture - WRITES the durable fixture method the by-id legs need
+#
+# The target and its key are resolved ONCE here and exported, so the URL these
+# targets preflight is the URL the suites call. Precedence follows the dotenv
+# convention: the shell environment (or a `make smoke PIPELEX_BASE_URL=...`
 # override) wins, then `.env`, then the hosted API. `?=` is what enforces it — it
 # only reaches for `.env` when the variable is not already set, and Node's
 # `--env-file` in the npm script cannot override an inherited variable either.
 DOTENV = set -a; [ -f .env ] && . ./.env; set +a;
-smoke: export PIPELEX_BASE_URL ?= $(shell $(DOTENV) printf '%s' "$${PIPELEX_BASE_URL:-https://api.pipelex.com}")
-smoke: export PIPELEX_API_KEY ?= $(shell $(DOTENV) printf '%s' "$$PIPELEX_API_KEY")
+LIVE_TARGETS = smoke test-e2e test-e2e-run seed-e2e-fixture live-preflight
+$(LIVE_TARGETS): export PIPELEX_BASE_URL ?= $(shell $(DOTENV) printf '%s' "$${PIPELEX_BASE_URL:-https://api.pipelex.com}")
+$(LIVE_TARGETS): export PIPELEX_API_KEY ?= $(shell $(DOTENV) printf '%s' "$$PIPELEX_API_KEY")
 
 # Trailing slashes are stripped the way the SDK normalizes `baseUrl`, so a value
 # ending in `/` cannot make the probe `//v1/version` — which a runner does not
 # route — and report a live API as unreachable. It happens here, at the point of
 # use: `?=` never fires for a value that arrived from the shell or the command
 # line, so those two sources would otherwise keep their slash.
-SMOKE_TARGET = $$(printf '%s' "$(PIPELEX_BASE_URL)" | sed 's:/*$$::')
+LIVE_API = $$(printf '%s' "$(PIPELEX_BASE_URL)" | sed 's:/*$$::')
 
+# Shared gate for every live target. It is a prerequisite rather than copied
+# recipe lines because target-specific variables are inherited by prerequisites,
+# so the URL checked here is exactly the one the suite is about to call.
 # `/v1/version` is the one route BOTH a bare runner and the hosted origin serve,
 # and it needs no auth.
-smoke:
-	@target="$(SMOKE_TARGET)"; curl -fs --max-time 5 -o /dev/null "$$target/v1/version" || { \
+live-preflight:
+	@target="$(LIVE_API)"; curl -fs --max-time 5 -o /dev/null "$$target/v1/version" || { \
 		echo "ERROR: no Pipelex API reachable at $$target"; \
 		echo "  Point PIPELEX_BASE_URL (shell or .env) at a running instance, or start the OSS runner: cd ../pipelex-api && make run"; \
 		exit 1; \
 	}
 	@if [ -z "$(PIPELEX_API_KEY)" ]; then \
 		echo "ERROR: PIPELEX_API_KEY is not set — every org-scoped call would fail as a config error."; \
-		echo "  Put it in .env or export it. Against a keyless local runner, skip this guard with 'npm run smoke'."; \
+		echo "  Put it in .env or export it. Against a keyless local runner, skip this guard by calling the npm script directly (e.g. 'npm run smoke')."; \
 		exit 1; \
 	fi
-	@echo "-> target: $(SMOKE_TARGET)"
+	@echo "-> target: $(LIVE_API)"
+
+smoke: live-preflight
 	npm run smoke
+
+test-e2e: live-preflight
+	@echo "-> the run family is skipped (it spends inference credit); use 'make test-e2e-run' to include it"
+	npm run test:e2e
+
+# The paid path, as its own target so nobody reaches it by accident: the run
+# family executes the fixture method for real.
+test-e2e-run: export PIPELEX_E2E_RUN = 1
+test-e2e-run: live-preflight
+	@echo "-> including the run family: this SPENDS INFERENCE CREDIT"
+	npm run test:e2e
+
+# Idempotent, and a WRITE: it creates (or refreshes) one durable fixture method
+# in the organization the API key selects. The by-id legs need a registered
+# method and the SDK has no delete, so a create-per-run suite would leak one
+# method per run — hence one seeded fixture, resolved by name.
+seed-e2e-fixture: live-preflight
+	npm run seed:e2e-fixture
 
 check: check-no-local-deps
 	npm run check
@@ -171,6 +208,7 @@ publish: check-no-local-deps check-release-ready
 
 c: check
 t: test
+te: test-e2e
 
 # --- Switch the source of our npm dependencies ---
 # use-local / use-npm act on BOTH @pipelex/mthds-ui and @pipelex/sdk.

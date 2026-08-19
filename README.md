@@ -604,6 +604,18 @@ standalone `typecheck` — the registry must exist for `tsc` to resolve the
 registered view name. The local build follows and `prepack` rebuilds it, so a
 pack/publish can never ship a stale or absent bin.
 
+## Tests
+
+```bash
+make test         # the default suite — hermetic, no network
+make test-e2e     # the live suite — real client, real Pipelex API
+make smoke        # the workshop stdio server, end to end, against the live API
+```
+
+`make test` fakes every API client, so it proves the projections and never touches the network; `make all` and CI run only that. The live targets are the drift detector: the faked seams mean a wire-shape change on the API side fails nothing at all in the hermetic suite, so `make test-e2e` calls each capability with the real `PipelexApiClient` and `make smoke` drives the whole shell over stdio. Both need `PIPELEX_API_KEY` (a gitignored `.env` at the repo root is enough) and both are read-only — the run family that spends inference credit only fires under `make test-e2e-run`.
+
+The by-id paths need one durable fixture method in the API key's organization; `make seed-e2e-fixture` creates or refreshes it, idempotently. See `CLAUDE.md` → "Detecting API drift".
+
 ## Versioning
 
 `pipelex-mcp` follows [Semantic Versioning](https://semver.org); `version` in
