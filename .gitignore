@@ -9,6 +9,6 @@ coverage/
 .gstack/
 
 # This repo is public. Internal working notes live in the private workspace
-# at Pipelex/docs/mcp/ — never here. See docs/mcp/_top_priorities.md.
+# at Pipelex/docs/mcp/ — never here. See Pipelex/docs/mcp/_top_priorities.md.
 wip/
 TODOS.md
