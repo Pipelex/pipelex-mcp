@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`make smoke` — a runnable live check against the real Pipelex API.** The only live verification this repo had was a prose heredoc inside the `bump-sdks` skill: it covered one tool, asserted nothing, and only ran when a human decided to bump. It is now `scripts/smoke.ts`, which spawns the workshop stdio server the way a host does, completes the MCP handshake, and calls `mthds_list_methods`, `mthds_validate` and `mthds_inputs_template`, asserting on their `structuredContent` and exiting non-zero with a readable diagnosis. This is the class of check that catches a wire-shape change: the capability tests inject fakes satisfying this repo's own narrow client interfaces, so a reshaped API response is invisible to them by construction, and there is no OpenAPI schema to diff against. It stays out of `make all` and `make check`, which remain hermetic. Every call it makes is read-only and spends no inference credit, so it is safe to run unattended. The catalog check reports an empty catalog out loud rather than passing quietly, since an empty page proves nothing about row projection.
+
 ### Fixed
 
 - **`mthds_list_methods` reaches the live catalog again.** Every real call had been failing with `wire.map is not a function`: the platform reshaped `GET /v1/methods` into a page object, and the pinned `@pipelex/sdk` 0.9.0 still called `.map()` on the response. The whole check suite stayed green throughout, because the capability tests inject fake clients that satisfy this repo's own narrow `CatalogClient` interface — a shape change on the far side of that seam is invisible to them by construction. The bump to SDK 0.12.0 carries the adapted client, and the capability now consumes the page.

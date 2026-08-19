@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint format format-check typecheck test test-watch test-coverage check check-no-local-deps check-release-ready build build-local all clean dev dev-local inspect-local dev-tunnel start deploy publish c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
+.PHONY: help install lint format format-check typecheck test test-watch test-coverage smoke check check-no-local-deps check-release-ready build build-local all clean dev dev-local inspect-local dev-tunnel start deploy publish c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
 
 # Sibling repos for live development of our npm dependencies (see use-local / use-npm).
 MTHDS_UI_DIR := ../mthds-ui
@@ -28,6 +28,7 @@ make test           - Run the test suite
 make test-watch     - Run tests in watch mode
 make test-coverage  - Run tests with coverage
 make t              - Shorthand -> test
+make smoke          - Smoke the workshop server against a LIVE Pipelex API [PIPELEX_BASE_URL=...]
 
 make build          - Build the Skybridge app
 make build-local    - Build the npm-distributed local stdio server
@@ -74,6 +75,44 @@ test-watch:
 
 test-coverage:
 	npm run test:coverage
+
+# --- The live drift detector (never part of `make all`) ---
+# Needs a reachable Pipelex API and a key: `make check` and CI stay hermetic, so
+# this is the only target in the repo that touches the network. It calls the
+# read-only tools only, so it spends no inference credit.
+#
+# The target and its key are resolved ONCE here and exported, so the URL this
+# target preflights is the URL the smoke script calls. Precedence follows the
+# dotenv convention: the shell environment (or a `make smoke PIPELEX_BASE_URL=...`
+# override) wins, then `.env`, then the hosted API. `?=` is what enforces it — it
+# only reaches for `.env` when the variable is not already set, and Node's
+# `--env-file` in the npm script cannot override an inherited variable either.
+DOTENV = set -a; [ -f .env ] && . ./.env; set +a;
+smoke: export PIPELEX_BASE_URL ?= $(shell $(DOTENV) printf '%s' "$${PIPELEX_BASE_URL:-https://api.pipelex.com}")
+smoke: export PIPELEX_API_KEY ?= $(shell $(DOTENV) printf '%s' "$$PIPELEX_API_KEY")
+
+# Trailing slashes are stripped the way the SDK normalizes `baseUrl`, so a value
+# ending in `/` cannot make the probe `//v1/version` — which a runner does not
+# route — and report a live API as unreachable. It happens here, at the point of
+# use: `?=` never fires for a value that arrived from the shell or the command
+# line, so those two sources would otherwise keep their slash.
+SMOKE_TARGET = $$(printf '%s' "$(PIPELEX_BASE_URL)" | sed 's:/*$$::')
+
+# `/v1/version` is the one route BOTH a bare runner and the hosted origin serve,
+# and it needs no auth.
+smoke:
+	@target="$(SMOKE_TARGET)"; curl -fs --max-time 5 -o /dev/null "$$target/v1/version" || { \
+		echo "ERROR: no Pipelex API reachable at $$target"; \
+		echo "  Point PIPELEX_BASE_URL (shell or .env) at a running instance, or start the OSS runner: cd ../pipelex-api && make run"; \
+		exit 1; \
+	}
+	@if [ -z "$(PIPELEX_API_KEY)" ]; then \
+		echo "ERROR: PIPELEX_API_KEY is not set — every org-scoped call would fail as a config error."; \
+		echo "  Put it in .env or export it. Against a keyless local runner, skip this guard with 'npm run smoke'."; \
+		exit 1; \
+	fi
+	@echo "-> target: $(SMOKE_TARGET)"
+	npm run smoke
 
 check: check-no-local-deps
 	npm run check

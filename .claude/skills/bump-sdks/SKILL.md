@@ -23,7 +23,7 @@ Every capability here talks to the SDK through a **hand-written narrow interface
 - A **type** change in the SDK is caught — each capability falls back to `new PipelexApiClient(...)` where the local interface is expected, so `tsc` structurally compares the two and fails.
 - A **behavior or wire-shape** change is *not* caught. The local interface still compiles, the fakes still return the shape they were written for, and `make all` goes green while the real client is broken against the live API.
 
-This is not hypothetical. On SDK `0.9.0` the whole suite passed while `mthds_list_methods` failed on every real call with `wire.map is not a function` — the platform had reshaped `GET /v1/methods` into a page object and `0.9.0` still called `.map()` on the response. Step 4 and Step 7 exist to catch exactly that class of failure.
+This is not hypothetical. On SDK `0.9.0` the whole suite passed while `mthds_list_methods` failed on every real call with `wire.map is not a function` — the platform had reshaped `GET /v1/methods` into a page object and `0.9.0` still called `.map()` on the response. Step 4 and Step 7 exist to catch exactly that class of failure, and Step 7 is now a real target (`make smoke`) rather than a probe you assemble by hand.
 
 ## Step 1 — Gather state
 
@@ -145,19 +145,21 @@ Remember what green means here: the suite ran against fakes. It has not touched 
 
 ## Step 7 — Smoke it against the real API
 
-An SDK bump always moves the API call path, and this repo has no e2e suite — so this is the only step that exercises the real `PipelexApiClient` against the live platform. Offer it every time.
-
-`mthds_list_methods` is the right probe: it is read-only, spends no inference credit, and it exercises the seam most exposed to platform reshaping. Ask before running it — it does hit the live API with the user's key.
+An SDK bump always moves the API call path, and this repo has no e2e suite yet — so this is the only step that exercises the real `PipelexApiClient` against the live platform. Offer it every time.
 
 ```bash
-printf '%s\n' \
- '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
- '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
- '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mthds_list_methods","arguments":{"limit":3}}}' \
- | npx tsx --env-file-if-exists=.env src/local/main.ts 2>/dev/null | tail -1
+make smoke
 ```
 
-It needs `PIPELEX_API_KEY`, from the shell or from a gitignored `.env`. Read the result carefully — `"status":"ok"` with methods listed is a pass; an `"isError":true` with a `runtime` class is the real client disagreeing with the real API, which is precisely what Step 6 cannot see.
+That spawns the workshop stdio server the way a host does, completes the MCP handshake, then calls `mthds_list_methods`, `mthds_validate` and `mthds_inputs_template` against the live API and asserts on their `structuredContent` (`scripts/smoke.ts` holds the assertions). Every call is read-only and spends no inference credit. Ask before running it — it does hit the live API with the user's key.
+
+The target resolves `PIPELEX_BASE_URL` and `PIPELEX_API_KEY` from the shell or a gitignored `.env`, preflights `/v1/version`, and refuses to start without a key. Against a keyless local OSS runner, `npm run smoke` skips those guards.
+
+Read the result as a whole rather than the exit code alone:
+
+- **`SMOKE PASSED`** — the shipped client and the live API agree on every checked shape.
+- **A failed check** — the real client disagreeing with the real API, which is precisely what Step 6 cannot see. The script names the tool, the field, and what it got. If the API moved, the fix belongs in `../pipelex-sdk-js` (plus its own e2e), then a bump here — never a local patch that papers over it.
+- **`catalog is EMPTY`** on a pass — a note, not a failure, and worth repeating to the user: the org holds no methods, so row projection was not exercised by that run. A pass under an empty catalog is a weaker result than it looks.
 
 Worth running **before** the bump too when the user reports a live failure: a probe that fails on the old version and passes on the new one turns "we upgraded" into "we fixed it", and gives Step 8 something concrete to write.
 
