@@ -61,9 +61,9 @@ unreachable* rather than merely unused. The invariant that still holds is that
 
 `SPEC.md` is the source of truth for the full tool contracts, verdict
 discipline, and view behavior. This README covers what you need to install,
-register, and run the servers. [`docs/readme.html`](docs/readme.html) is an
-illustrated overview of the same ground — the two shells, the tool surface,
-the flow a method takes, and the sharp edges — for reading in a browser.
+register, and run the servers. `docs/readme.html` is an illustrated overview
+of the same ground — the two shells, the tool surface, the flow a method
+takes, and the sharp edges — for reading in a browser.
 
 ## The two deployments, and the `{ path }` arm
 
