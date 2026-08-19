@@ -18,11 +18,12 @@ import {
   fetchMethodFiles,
   filesInputSchema,
   resolveSubmittedFiles,
+  summaryForToolError,
   toolResultContent,
   validateFilesOrMethodIdRequest,
   validateRunIdRequest,
 } from "./shared.js";
-import type { FileResolver, MethodFetchClient, ToolError } from "./shared.js";
+import type { ErrorSummaries, FileResolver, MethodFetchClient, ToolError } from "./shared.js";
 
 describe("buildApiConfig", () => {
   it("defaults to the hosted API with no key", () => {
@@ -469,6 +470,10 @@ describe("classifyError", () => {
     );
 
     expect(error.class).toBe("config");
+    // The class stays `config` (settled contract); `kind` is what tells a
+    // billing refusal from an unreachable API, for the headline and for a
+    // machine consumer that would otherwise have to sniff the message.
+    expect(error.kind).toBe("paywall");
     expect(error.location).toBeUndefined();
     expect(error.message).toBe("Subscription required to run methods");
     expect(error.hint).toContain("app.pipelex.com");
@@ -491,6 +496,7 @@ describe("classifyError", () => {
     );
 
     expect(error.class).toBe("config");
+    expect(error.kind).toBe("paywall");
     expect(error.message).toBe("HTTP 402");
     expect(error.retryable).toBe(false);
   });
@@ -593,6 +599,35 @@ describe("classifyError", () => {
     expect(error.location).toBe("run_id");
     expect(error.hint).toBe("Check the run id.");
     expect(error.retryable).toBe(false);
+  });
+});
+
+describe("summaryForToolError", () => {
+  const summaries: ErrorSummaries = {
+    config: "connectivity headline",
+    input_domain: "request headline",
+    runtime: "server headline",
+    paywall: "billing headline",
+  };
+
+  it("maps an untagged error by its class", () => {
+    expect(
+      summaryForToolError(
+        { class: "config", message: "Connection refused", retryable: true },
+        summaries,
+      ),
+    ).toBe("connectivity headline");
+  });
+
+  it("prefers the kind headline over the class it refines", () => {
+    // The whole point: a 402 is `config` by contract, so a class-first lookup
+    // would blame connectivity for a plan limit.
+    expect(
+      summaryForToolError(
+        { class: "config", kind: "paywall", message: "Subscription required", retryable: false },
+        summaries,
+      ),
+    ).toBe("billing headline");
   });
 });
 

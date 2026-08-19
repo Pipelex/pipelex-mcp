@@ -11,6 +11,7 @@ import { z } from "zod";
 import {
   buildApiConfig,
   classifyError,
+  summaryForToolError,
   fetchMethodFiles,
   filesInputSchema,
   resolveSubmittedFiles,
@@ -25,6 +26,7 @@ import type {
   MethodFetchClient,
   SubmittedFile,
   SubmittedFileInput,
+  ErrorSummaries,
   ToolError,
 } from "./shared.js";
 
@@ -228,15 +230,16 @@ export async function buildMthdsInputs(
   }
 }
 
+const ERROR_SUMMARIES: ErrorSummaries = {
+  config: "Inputs template could not start: the Pipelex API is unreachable or misconfigured.",
+  input_domain: "Inputs template was not run: the Pipelex API rejected the request.",
+  runtime: "Inputs template could not be completed: the Pipelex API returned an error.",
+  paywall:
+    "Inputs template could not start: the organization's Pipelex plan does not cover this call.",
+};
+
 function summaryForError(error: ToolError): string {
-  switch (error.class) {
-    case "config":
-      return "Inputs template could not start: the Pipelex API is unreachable or misconfigured.";
-    case "input_domain":
-      return "Inputs template was not run: the Pipelex API rejected the request.";
-    case "runtime":
-      return "Inputs template could not be completed: the Pipelex API returned an error.";
-  }
+  return summaryForToolError(error, ERROR_SUMMARIES);
 }
 
 export function inputsToolResult(result: InputsResult) {

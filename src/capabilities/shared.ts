@@ -157,8 +157,25 @@ export const errorClassSchema = z.enum(["input_domain", "config", "runtime"]);
 
 export type ErrorClass = z.infer<typeof errorClassSchema>;
 
+/**
+ * Refinement of {@link ErrorClass} for a condition whose class is settled but
+ * whose *cause* the class cannot name. Today the only member is `paywall`: a
+ * 402 is deliberately `config` (the deployment cannot make this call as
+ * credentialed), yet the class alone would have every headline blame
+ * connectivity for what is a billing limit. Adding a member here is how a new
+ * such cause gets a headline — never by re-classifying it.
+ */
+export const errorKindSchema = z.enum(["paywall"]);
+
+export type ErrorKind = z.infer<typeof errorKindSchema>;
+
 export const toolErrorSchema = z.object({
   class: errorClassSchema,
+  kind: errorKindSchema
+    .optional()
+    .describe(
+      "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call.",
+    ),
   location: z.string().optional(),
   message: z.string(),
   hint: z.string().optional(),
@@ -169,6 +186,15 @@ export const toolErrorSchema = z.object({
 
 export interface ToolError {
   class: ErrorClass;
+  /**
+   * Set where the concrete SDK error / HTTP status is still known
+   * ({@link classifyError}), for the same reason `retryable` is: `class` is
+   * the machine contract and must stay coarse, but a paywall and an
+   * unreachable API are both `config` and read nothing alike to a human. A
+   * machine consumer still branches on `class`; `kind` is what lets it — and
+   * the summary headline — tell the two apart without sniffing the message.
+   */
+  kind?: ErrorKind;
   location?: string;
   message: string;
   hint?: string;
@@ -180,6 +206,26 @@ export interface ToolError {
    * `PIPELEX_BASE_URL`, yet only the former is worth retrying.
    */
   retryable: boolean;
+}
+
+/**
+ * A capability's no-verdict headlines: one per {@link ErrorClass}, plus one for
+ * every {@link ErrorKind}. Declaring the kind headlines is **mandatory** — that
+ * is the point of the type. A capability that forgot one would silently print
+ * the connectivity headline for a billing refusal, which is the defect this
+ * shape exists to make unrepresentable: the miss is a type error, not something
+ * a reviewer has to catch.
+ */
+export type ErrorSummaries = Record<ErrorClass, string> & Record<ErrorKind, string>;
+
+/**
+ * Pick a capability's headline for one {@link ToolError}. `kind` is checked
+ * ahead of `class` because it is the refinement: a 402 is `config` by contract,
+ * so consulting the class map first would print "the Pipelex API is unreachable
+ * or misconfigured" for a plan limit and send the agent to debug the base URL.
+ */
+export function summaryForToolError(error: ToolError, summaries: ErrorSummaries): string {
+  return error.kind === undefined ? summaries[error.class] : summaries[error.kind];
 }
 
 /** One MCP `content` item — the human/LLM-readable text stream. */
@@ -678,10 +724,13 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
 
   // Paywall: the platform reports a plan limit as 402 SubscriptionRequiredError.
   // Branch on the HTTP status only — its problem `code` is "forbidden" and must
-  // never be sniffed.
+  // never be sniffed. The class stays `config` (the settled contract: the call
+  // cannot be made as credentialed), and `kind` is what carries the cause into
+  // each capability's headline — see {@link summaryForToolError}.
   if (err.status === 402) {
     return {
       class: "config",
+      kind: "paywall",
       message,
       hint: "The organization's plan does not cover this call. Review the plan and billing for the API key's organization on app.pipelex.com.",
       retryable: false,

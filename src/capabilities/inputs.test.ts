@@ -565,8 +565,15 @@ describe("buildMthdsInputs by method_id", () => {
 
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.kind).toBe("paywall");
     expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
     expect(result.structuredContent.errors?.[0]?.hint).toMatch(/plan|billing/i);
+    // A headline-only host shows just this line, so it must name the plan
+    // rather than the connectivity headline every other `config` error gets.
+    expect(result.summary).toBe(
+      "Inputs template could not start: the organization's Pipelex plan does not cover this call.",
+    );
+    expect(result.summary).not.toMatch(/unreachable/);
   });
 
   it("classifies a malformed base URL on the fetch leg as config", async () => {

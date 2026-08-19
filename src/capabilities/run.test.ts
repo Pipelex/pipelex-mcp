@@ -962,7 +962,14 @@ describe("startMthdsRun by method_id", () => {
 
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.kind).toBe("paywall");
     expect(result.structuredContent.errors?.[0]?.hint).toContain("app.pipelex.com");
+    // A headline-only host shows just this line, so it must name the plan
+    // rather than the connectivity headline every other `config` error gets.
+    expect(result.summary).toBe(
+      "Run could not start: the organization's Pipelex plan does not cover this call.",
+    );
+    expect(result.summary).not.toMatch(/unreachable/);
   });
 
   it("points a mixed-request 422 at files — the executed source — not method_id", async () => {
@@ -1038,6 +1045,22 @@ describe("startMthdsRun by method_id", () => {
   });
 });
 
+// A 402 on a run route: the platform reports a plan limit this way, and its
+// problem `code` really is "forbidden" (never sniffed — the status decides).
+function paywall(routeSuffix: string): ApiResponseError {
+  return new ApiResponseError(
+    "HTTP 402",
+    `${DEFAULT_API_URL}/v1/runs/${RUN_ID}${routeSuffix}`,
+    402,
+    "Payment Required",
+    "{}",
+    "subscription_required",
+    "Subscription required",
+    undefined, // validationErrors
+    "forbidden",
+  );
+}
+
 describe("getMthdsRunStatus", () => {
   it("reads and projects the status by id", async () => {
     let seenId: string | undefined;
@@ -1086,6 +1109,18 @@ describe("getMthdsRunStatus", () => {
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
     expect(result.structuredContent.errors?.[0]?.location).toBe("run_id");
+  });
+
+  it("headlines a paywall (402) as a plan limit, not as connectivity", async () => {
+    const context = contextWith({ getRunStatus: () => Promise.reject(paywall("/status")) });
+
+    const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.errors?.[0]?.kind).toBe("paywall");
+    expect(result.summary).toBe(
+      "Run status could not be read: the organization's Pipelex plan does not cover this call.",
+    );
+    expect(result.summary).not.toMatch(/unreachable/);
   });
 });
 
@@ -1141,6 +1176,18 @@ describe("getMthdsRunResults", () => {
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
     expect(result.summary).toContain("malformed report");
+  });
+
+  it("headlines a paywall (402) as a plan limit, not as connectivity", async () => {
+    const context = contextWith({ getRunResult: () => Promise.reject(paywall("/result")) });
+
+    const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.errors?.[0]?.kind).toBe("paywall");
+    expect(result.summary).toBe(
+      "Run results could not be read: the organization's Pipelex plan does not cover this call.",
+    );
+    expect(result.summary).not.toMatch(/unreachable/);
   });
 });
 

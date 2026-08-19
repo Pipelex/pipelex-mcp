@@ -11,6 +11,7 @@ import { z } from "zod";
 import {
   buildApiConfig,
   classifyError,
+  summaryForToolError,
   fetchMethodFiles,
   filesInputSchema,
   resolveSubmittedFiles,
@@ -25,6 +26,7 @@ import type {
   MethodFetchClient,
   SubmittedFile,
   SubmittedFileInput,
+  ErrorSummaries,
   ToolError,
 } from "./shared.js";
 
@@ -221,15 +223,15 @@ export async function validateMthds(
   }
 }
 
+const ERROR_SUMMARIES: ErrorSummaries = {
+  config: "Validation could not start: the Pipelex API is unreachable or misconfigured.",
+  input_domain: "Validation was not run: the Pipelex API rejected the request.",
+  runtime: "Validation could not be completed: the Pipelex API returned an error.",
+  paywall: "Validation could not start: the organization's Pipelex plan does not cover this call.",
+};
+
 function summaryForError(error: ToolError): string {
-  switch (error.class) {
-    case "config":
-      return "Validation could not start: the Pipelex API is unreachable or misconfigured.";
-    case "input_domain":
-      return "Validation was not run: the Pipelex API rejected the request.";
-    case "runtime":
-      return "Validation could not be completed: the Pipelex API returned an error.";
-  }
+  return summaryForToolError(error, ERROR_SUMMARIES);
 }
 
 export function toolResult(result: ValidationResult) {

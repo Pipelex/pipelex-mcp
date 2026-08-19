@@ -387,10 +387,18 @@ describe("listMthdsMethods failures", () => {
   });
 
   it("maps paywall, missing route, and server faults with catalog-specific semantics", async () => {
-    expect(firstError(await failure(apiError(402, "Subscription required")))).toMatchObject({
+    const paywall = await failure(apiError(402, "Subscription required"));
+    expect(firstError(paywall)).toMatchObject({
       class: "config",
+      kind: "paywall",
       retryable: false,
     });
+    // A headline-only host shows just this line, so it must name the plan
+    // rather than the connectivity headline every other `config` error gets.
+    expect(paywall.summary).toBe(
+      "Method catalog could not be listed: the organization's Pipelex plan does not cover this call.",
+    );
+    expect(paywall.summary).not.toMatch(/misconfigured/);
 
     const missingRoute = firstError(await failure(apiError(404, "Not found")));
     expect(missingRoute).toMatchObject({

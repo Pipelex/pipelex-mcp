@@ -13,6 +13,7 @@ import { z } from "zod";
 import {
   buildApiConfig,
   classifyError,
+  summaryForToolError,
   filesInputSchema,
   resolveSubmittedFiles,
   toolErrorSchema,
@@ -23,10 +24,10 @@ import {
 import type {
   AuthErrorTexture,
   ClassifyErrorOptions,
-  ErrorClass,
   FileResolver,
   SubmittedFile,
   SubmittedFileInput,
+  ErrorSummaries,
   ToolError,
 } from "./shared.js";
 
@@ -1016,34 +1017,39 @@ function toStartOptions(input: ResolvedRunRequest): StartOptions {
   };
 }
 
-const START_ERROR_SUMMARIES: Record<ErrorClass, string> = {
+const START_ERROR_SUMMARIES: ErrorSummaries = {
   config: "Run could not start: the Pipelex API is unreachable or misconfigured.",
   input_domain: "Run was not started: the Pipelex API rejected the request.",
   runtime: "Run could not be started: the Pipelex API returned an error.",
+  paywall: "Run could not start: the organization's Pipelex plan does not cover this call.",
 };
 
-const STATUS_ERROR_SUMMARIES: Record<ErrorClass, string> = {
+const STATUS_ERROR_SUMMARIES: ErrorSummaries = {
   config: "Run status could not be read: the Pipelex API is unreachable or misconfigured.",
   input_domain: "Run status was not read: the Pipelex API rejected the request.",
   runtime: "Run status could not be read: the Pipelex API returned an error.",
+  paywall:
+    "Run status could not be read: the organization's Pipelex plan does not cover this call.",
 };
 
-const RESULTS_ERROR_SUMMARIES: Record<ErrorClass, string> = {
+const RESULTS_ERROR_SUMMARIES: ErrorSummaries = {
   config: "Run results could not be read: the Pipelex API is unreachable or misconfigured.",
   input_domain: "Run results were not read: the Pipelex API rejected the request.",
   runtime: "Run results could not be read: the Pipelex API returned an error.",
+  paywall:
+    "Run results could not be read: the organization's Pipelex plan does not cover this call.",
 };
 
 function startSummaryForError(error: ToolError): string {
-  return START_ERROR_SUMMARIES[error.class];
+  return summaryForToolError(error, START_ERROR_SUMMARIES);
 }
 
 function statusSummaryForError(error: ToolError): string {
-  return STATUS_ERROR_SUMMARIES[error.class];
+  return summaryForToolError(error, STATUS_ERROR_SUMMARIES);
 }
 
 function resultsSummaryForError(error: ToolError): string {
-  return RESULTS_ERROR_SUMMARIES[error.class];
+  return summaryForToolError(error, RESULTS_ERROR_SUMMARIES);
 }
 
 function startErrorResult(summary: string, errors: ToolError[]): RunStartResult {
