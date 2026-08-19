@@ -13,6 +13,32 @@ one capability core**:
   spawn via `npx`. Its headline feature is the `{ path }` file arm: it reads
   `.mthds` files from disk instead of having the model hand-copy their contents.
 
+## Get started
+
+Pick **one** server for a given host — the workshop wherever there is a
+filesystem, the console everywhere else.
+
+**Hosted console** — add as a custom connector in ChatGPT, claude.ai or
+Claude Desktop, then sign in with your Pipelex account. Nothing to install, no
+key to paste:
+
+```
+https://pipelex-mcp-a3c6a115.alpic.live/mcp
+```
+
+**Local workshop** — for hosts that can spawn a process (Claude Code, Codex,
+Cursor). Needs Node.js 24+; hosts fetch it on demand, so there is nothing to
+install globally:
+
+```bash
+claude mcp add pipelex --env PIPELEX_API_KEY=plx_sk_... -- npx -y @pipelex/mcp
+```
+
+Then ask it what methods you have, or point it at a `.mthds` file. Per-host
+registration snippets are under [Local workshop: install &
+register](#local-workshop-install--register), and which server belongs on which
+host is the [Host → server matrix](#host--server-matrix).
+
 Both servers register the same MCP tools, with identical names, schemas, and
 contracts — with one documented exception, marked below:
 
@@ -35,7 +61,9 @@ unreachable* rather than merely unused. The invariant that still holds is that
 
 `SPEC.md` is the source of truth for the full tool contracts, verdict
 discipline, and view behavior. This README covers what you need to install,
-register, and run the servers.
+register, and run the servers. `docs/readme.html` is an illustrated overview
+of the same ground — the two shells, the tool surface, the flow a method
+takes, and the sharp edges — for reading in a browser.
 
 ## The two deployments, and the `{ path }` arm
 
@@ -152,8 +180,13 @@ paste. Add the connector by its URL and your host walks you through signing in
 with your Pipelex account:
 
 ```
-https://<console-url>/mcp
+https://pipelex-mcp-a3c6a115.alpic.live/mcp
 ```
+
+That is the production console. The hostname is assigned by Alpic, and the
+OAuth Resource Indicator registered with WorkOS is pinned to it, so it moves
+only behind a deliberate migration — if it ever does, every existing
+connector has to be re-added anyway.
 
 Sign-in is OAuth through WorkOS AuthKit, which the console's MCP host drives
 for you — ChatGPT, claude.ai, Claude Desktop/Cowork and Cursor all handle the
