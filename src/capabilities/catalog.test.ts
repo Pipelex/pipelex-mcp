@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { ApiResponseError, ApiUnreachableError, ClientAuthenticationError } from "@pipelex/sdk";
-import type { MethodData } from "@pipelex/sdk";
+import type { ListMethodsQuery, MethodPage } from "@pipelex/sdk";
 
 import {
+  CATALOG_DEFAULT_LIMIT,
   CATALOG_DESCRIPTION_LIMIT,
   CATALOG_MAX_LIMIT,
   CATALOG_NAME_LIMIT,
@@ -14,7 +15,15 @@ import {
 import type { CatalogClient, CatalogContext, CatalogSuccess } from "./catalog.js";
 import { DEFAULT_API_URL } from "./shared.js";
 
-const baseMethod: MethodData = {
+type WireRow = Record<string, unknown>;
+
+/**
+ * A catalog row as it arrives on the wire, carrying MORE than `MethodSummary`
+ * declares. The index projection no longer returns source, org or creator
+ * fields, but the projection boundary's job is to drop whatever actually
+ * arrives — so the fixture keeps the sentinels and stays raw wire data.
+ */
+const baseMethod: WireRow = {
   method_id: "mt_base",
   org_id: "org_secret",
   created_by_user_id: "usr_secret",
@@ -24,24 +33,27 @@ const baseMethod: MethodData = {
   input_data: { private_default: "INPUT_SENTINEL" },
   pipe_output: { private_output: "OUTPUT_SENTINEL" },
   description: "Extract invoices",
-  created_at: "2026-01-01T00:00:00Z",
-  updated_at: "2026-07-31T00:00:00Z",
+  created_at: "2026-07-31T00:00:00Z",
 };
 
-function method(overrides: Partial<MethodData> = {}): MethodData {
+function method(overrides: WireRow = {}): WireRow {
   return { ...baseMethod, ...overrides };
+}
+
+function page(items: WireRow[], nextCursor: string | null = null): MethodPage {
+  return { items, nextCursor } as unknown as MethodPage;
 }
 
 function context(client: CatalogClient): CatalogContext {
   return { baseUrl: DEFAULT_API_URL, client };
 }
 
-async function success(methods: MethodData[], input = {}) {
+async function success(methods: WireRow[], input = {}, nextCursor: string | null = null) {
   const result = await listMthdsMethods(
     input,
     context({
       async listMethods() {
-        return methods;
+        return page(methods, nextCursor);
       },
     }),
   );
@@ -53,22 +65,21 @@ describe("mthds_list_methods schemas", () => {
   it("accepts defaults and valid bounds", () => {
     expect(mthdsListMethodsInputObjectSchema.safeParse({}).success).toBe(true);
     expect(
-      mthdsListMethodsInputObjectSchema.safeParse({ query: " invoice ", limit: 1, offset: 0 })
+      mthdsListMethodsInputObjectSchema.safeParse({ query: " invoice ", limit: 1, cursor: "c1" })
         .success,
     ).toBe(true);
-    expect(
-      mthdsListMethodsInputObjectSchema.safeParse({ limit: CATALOG_MAX_LIMIT, offset: 999 })
-        .success,
-    ).toBe(true);
+    expect(mthdsListMethodsInputObjectSchema.safeParse({ limit: CATALOG_MAX_LIMIT }).success).toBe(
+      true,
+    );
   });
 
-  it("rejects invalid limit and offset bounds", () => {
+  it("rejects invalid limit and cursor bounds", () => {
     for (const input of [
       { limit: 0 },
       { limit: CATALOG_MAX_LIMIT + 1 },
       { limit: 1.5 },
-      { offset: -1 },
-      { offset: 1.5 },
+      { cursor: "" },
+      { cursor: 5 },
     ]) {
       expect(mthdsListMethodsInputObjectSchema.safeParse(input).success).toBe(false);
     }
@@ -81,7 +92,7 @@ describe("mthds_list_methods schemas", () => {
       context({
         async listMethods() {
           calls += 1;
-          return [];
+          return page([]);
         },
       }),
     );
@@ -100,13 +111,11 @@ describe("listMthdsMethods projection", () => {
 
     expect(result.structuredContent).toEqual({
       status: "ok",
-      total_count: 0,
-      matched_count: 0,
       returned_count: 0,
-      next_offset: null,
+      next_cursor: null,
       methods: [],
     });
-    expect(result.summary).toContain("0 total, 0 matched, 0 returned");
+    expect(result.summary).toContain("0 returned");
   });
 
   it("projects only allowlisted fields and never serializes sensitive catalog fields", async () => {
@@ -120,13 +129,12 @@ describe("listMthdsMethods projection", () => {
     const projected = result.structuredContent.methods[0];
 
     expect(Object.keys(projected ?? {}).sort()).toEqual([
+      "created_at",
       "description",
       "description_truncated",
-      "has_source",
       "method_id",
       "name",
       "name_truncated",
-      "updated_at",
     ]);
     expect(projected).toEqual({
       method_id: "mt_base",
@@ -134,8 +142,7 @@ describe("listMthdsMethods projection", () => {
       name_truncated: false,
       description: "Extract invoices",
       description_truncated: false,
-      has_source: true,
-      updated_at: "2026-07-31T00:00:00Z",
+      created_at: "2026-07-31T00:00:00Z",
     });
 
     const serialized = JSON.stringify(catalogToolResult(result));
@@ -160,67 +167,51 @@ describe("listMthdsMethods projection", () => {
     expect(result.structuredContent.methods.every((row) => !row.description_truncated)).toBe(true);
   });
 
-  it("derives has_source through the SDK parser for every stored source form", async () => {
-    const result = await success([
-      method({ method_id: "mt_raw", name: "A raw", mthds: 'domain = "raw"' }),
-      method({
-        method_id: "mt_files",
-        name: "B files",
-        mthds: JSON.stringify([{ name: "bundle.mthds", content: 'domain = "files"' }]),
-      }),
-      method({ method_id: "mt_blank", name: "C blank", mthds: "   " }),
-      method({ method_id: "mt_empty_array", name: "D empty", mthds: "[]" }),
-    ]);
+  it("delegates query, limit and cursor to the server and trims a blank query away", async () => {
+    const seen: (ListMethodsQuery | undefined)[] = [];
+    const client: CatalogClient = {
+      async listMethods(query) {
+        seen.push(query);
+        return page([method()]);
+      },
+    };
 
-    expect(
-      Object.fromEntries(
-        result.structuredContent.methods.map((row) => [row.method_id, row.has_source]),
-      ),
-    ).toEqual({ mt_raw: true, mt_files: true, mt_blank: false, mt_empty_array: false });
+    await listMthdsMethods({ query: "  NeEdLe  ", limit: 5, cursor: "c1" }, context(client));
+    await listMthdsMethods({ query: "   " }, context(client));
+
+    expect(seen[0]).toEqual({ q: "NeEdLe", limit: 5, cursor: "c1" });
+    // A blank query is no filter at all, so `q` must be absent rather than "".
+    expect(seen[1]).toEqual({ limit: CATALOG_DEFAULT_LIMIT });
   });
 
-  it("trims query and filters case-insensitively across id, name, and description", async () => {
-    const rows = [
-      method({ method_id: "mt_needle_id", name: "Alpha", description: "first" }),
-      method({ method_id: "mt_two", name: "Name Needle", description: "second" }),
-      method({ method_id: "mt_three", name: "Gamma", description: "Description NEEDLE" }),
-      method({ method_id: "mt_four", name: "Other", description: null }),
-    ];
-    const result = await success(rows, { query: "  NeEdLe  " });
-
-    expect(result.structuredContent.total_count).toBe(4);
-    expect(result.structuredContent.matched_count).toBe(3);
-    expect(result.structuredContent.methods.map((row) => row.method_id)).toEqual([
-      "mt_needle_id",
-      "mt_three",
-      "mt_two",
-    ]);
-
-    const blank = await success(rows, { query: "   " });
-    expect(blank.structuredContent.matched_count).toBe(4);
-  });
-
-  it("sorts stably, pages after sorting, and computes exact counts and next_offset", async () => {
+  it("preserves the server's order and does not re-sort or re-filter the page", async () => {
     const rows = [
       method({ method_id: "mt_z", name: "beta" }),
       method({ method_id: "mt_b", name: "Alpha" }),
       method({ method_id: "mt_a", name: "alpha" }),
-      method({ method_id: "mt_c", name: "Charlie" }),
     ];
-    const result = await success(rows, { limit: 2, offset: 1 });
+    // Re-sorting locally would reorder a page against the cursor that produced
+    // it; the API already returns rows newest-first by the key it pages on.
+    const result = await success(rows, { query: "no-local-filter-please" });
 
-    expect(result.structuredContent).toMatchObject({
-      total_count: 4,
-      matched_count: 4,
-      returned_count: 2,
-      next_offset: 3,
-    });
-    expect(result.structuredContent.methods.map((row) => row.method_id)).toEqual(["mt_b", "mt_z"]);
-    expect(result.summary).toContain("offset 3");
+    expect(result.structuredContent.methods.map((row) => row.method_id)).toEqual([
+      "mt_z",
+      "mt_b",
+      "mt_a",
+    ]);
+    expect(result.structuredContent.returned_count).toBe(3);
+  });
 
-    const beyond = await success(rows, { offset: 50 });
-    expect(beyond.structuredContent.returned_count).toBe(0);
-    expect(beyond.structuredContent.next_offset).toBeNull();
+  it("projects nextCursor and tells the model how to continue", async () => {
+    const result = await success([method()], { query: "inv" }, "opaque-cursor-42");
+
+    expect(result.structuredContent.next_cursor).toBe("opaque-cursor-42");
+    expect(result.summary).toContain('cursor "opaque-cursor-42"');
+    expect(result.summary).toContain('query "inv"');
+
+    const last = await success([method()]);
+    expect(last.structuredContent.next_cursor).toBeNull();
+    expect(last.summary).not.toContain("More methods are available");
   });
 
   it("bounds names and descriptions by Unicode code point without splitting surrogate pairs", async () => {
@@ -244,7 +235,7 @@ describe("listMthdsMethods projection", () => {
       context({
         async listMethods() {
           calls += 1;
-          return [baseMethod];
+          return page([baseMethod]);
         },
       }),
     );
@@ -252,13 +243,11 @@ describe("listMthdsMethods projection", () => {
     expect(calls).toBe(1);
   });
 
-  it("puts bounded names, descriptions, ids, draft labels, and paging guidance in content", async () => {
+  it("puts bounded names, descriptions, ids, and paging guidance in content", async () => {
     const result = await success(
-      [
-        method({ method_id: "mt_draft", name: "Draft", description: "Needs source", mthds: "" }),
-        method({ method_id: "mt_ready", name: "Ready", description: "Can inspect", mthds: "x" }),
-      ],
+      [method({ method_id: "mt_draft", name: "Draft", description: "Needs source" })],
       { limit: 1 },
+      "next-1",
     );
     const toolResult = catalogToolResult(result);
     const text = toolResult.content[0].text;
@@ -266,8 +255,7 @@ describe("listMthdsMethods projection", () => {
     expect(text).toContain("Draft");
     expect(text).toContain("Needs source");
     expect(text).toContain("mt_draft");
-    expect(text).toContain("draft: no MTHDS source");
-    expect(text).toContain("offset 1");
+    expect(text).toContain('cursor "next-1"');
     expect(toolResult.isError).toBe(false);
   });
 
@@ -288,7 +276,7 @@ describe("listMthdsMethods projection", () => {
     const empty = await success([]);
     expect(empty.summary).not.toContain("BOTH its name and its description");
 
-    const noMatch = await success([method()], { query: "nothing-matches-this" });
+    const noMatch = await success([], { query: "nothing-matches-this" });
     expect(noMatch.summary).not.toContain("BOTH its name and its description");
   });
 
@@ -302,15 +290,20 @@ describe("listMthdsMethods projection", () => {
     expect(line).not.toContain('"Does a useful thing"');
   });
 
-  it("annotates has_source only when false, so no row reads as a validity verdict", async () => {
+  it("never lets a row read as a source or validity verdict", async () => {
+    // `has_source` is gone rather than hidden, so the invariant it protected
+    // gets stronger: a row carries name, description and id, and volunteers
+    // nothing about whether the method parses, validates or runs.
     const result = await success([
-      method({ method_id: "mt_ready", name: "Ready", mthds: 'domain = "x"' }),
-      method({ method_id: "mt_draft", name: "Draft", mthds: "" }),
+      method({ method_id: "mt_one", name: "Alpha" }),
+      method({ method_id: "mt_two", name: "Beta" }),
     ]);
     const rows = result.summary.split("\n").filter((row) => row.startsWith("- "));
 
-    expect(rows.find((row) => row.includes("Ready"))).not.toMatch(/source|valid|runnable/i);
-    expect(rows.find((row) => row.includes("Draft"))).toContain("draft: no MTHDS source");
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row).not.toMatch(/source|valid|runnable|draft/i);
+    }
   });
 
   it("renders a null description without pretending one exists", async () => {
@@ -377,6 +370,22 @@ describe("listMthdsMethods failures", () => {
     expect(firstError(result)?.hint).toContain("active organization");
   });
 
+  it("blames the cursor, not the key, when a 400 answers a request that carried one", async () => {
+    // The route has two unrelated bad-request causes and only the request shape
+    // tells them apart. The live API answers a stale cursor with `Invalid cursor`;
+    // routing that to config@PIPELEX_API_KEY sends the caller to rotate a key that
+    // was never wrong, and a machine consumer branches on `class`, not the wording.
+    const result = await failure(apiError(400, "Invalid cursor"), {}, { cursor: "stale-cursor" });
+
+    expect(firstError(result)).toMatchObject({
+      class: "input_domain",
+      location: "cursor",
+      retryable: false,
+    });
+    expect(firstError(result)?.hint).toContain("from the start");
+    expect(firstError(result)?.hint).not.toContain("organization");
+  });
+
   it("maps paywall, missing route, and server faults with catalog-specific semantics", async () => {
     expect(firstError(await failure(apiError(402, "Subscription required")))).toMatchObject({
       class: "config",
@@ -415,27 +424,46 @@ describe("listMthdsMethods failures", () => {
     });
   });
 
-  it("maps non-array and malformed rows to non-retryable runtime contract errors", async () => {
-    const nonArray = await listMthdsMethods(
+  it("maps non-page and malformed rows to non-retryable runtime contract errors", async () => {
+    const nonPage = await listMthdsMethods(
       {},
       context({
         async listMethods() {
-          return {} as unknown as MethodData[];
+          // The pre-page array shape: exactly what a stale SDK would return.
+          return [] as unknown as MethodPage;
         },
       }),
     );
-    expect(firstError(nonArray)).toMatchObject({ class: "runtime", retryable: false });
+    expect(firstError(nonPage)).toMatchObject({ class: "runtime", retryable: false });
 
     const malformed = await listMthdsMethods(
       {},
       context({
         async listMethods() {
-          return [{ ...baseMethod, name: undefined }] as unknown as MethodData[];
+          return page([{ ...baseMethod, name: undefined }]);
         },
       }),
     );
     expect(firstError(malformed)).toMatchObject({ class: "runtime", retryable: false });
     expect(firstError(malformed)?.message).toContain("name");
+  });
+
+  it("treats an absent nextCursor as a contract break, never as the end of the catalog", async () => {
+    // The SDK reads the raw wire key, so a renamed or dropped `next_cursor`
+    // arrives as `undefined`. Coerced to `null` it would read as "last page" and
+    // hide every method past the first one, with both live detectors green
+    // because `null` is exactly what they accept. It has to fail loudly.
+    const result = await listMthdsMethods(
+      {},
+      context({
+        async listMethods() {
+          return { items: [baseMethod] } as unknown as MethodPage;
+        },
+      }),
+    );
+
+    expect(firstError(result)).toMatchObject({ class: "runtime", retryable: false });
+    expect(firstError(result)?.message).toContain("nextCursor");
   });
 
   it("marks MCP tool results as errors and surfaces classified detail in content", async () => {
@@ -447,19 +475,20 @@ describe("listMthdsMethods failures", () => {
   });
 });
 
-async function failure(error: unknown, overrides: Partial<CatalogContext> = {}) {
-  return listMthdsMethods(
-    {},
-    {
-      baseUrl: DEFAULT_API_URL,
-      ...overrides,
-      client: {
-        async listMethods() {
-          throw error;
-        },
+async function failure(
+  error: unknown,
+  overrides: Partial<CatalogContext> = {},
+  input: Parameters<typeof listMthdsMethods>[0] = {},
+) {
+  return listMthdsMethods(input, {
+    baseUrl: DEFAULT_API_URL,
+    ...overrides,
+    client: {
+      async listMethods() {
+        throw error;
       },
     },
-  );
+  });
 }
 
 function firstError(result: Awaited<ReturnType<typeof listMthdsMethods>>) {

@@ -286,50 +286,49 @@ Full contracts (verdict discipline, `_meta` channels, view behavior) live in
 ```ts
 // input
 {
-  query?: string;   // trimmed, case-insensitive substring over id/name/description
+  query?: string;   // trimmed, case-insensitive; matched SERVER-side over name/description
   limit?: number;   // integer 1..50; default 20
-  offset?: number;  // integer >= 0; default 0
+  cursor?: string;  // opaque next_cursor from a previous call
 }
 
 // structuredContent — success
 {
   status: "ok";
-  total_count: number;
-  matched_count: number;
   returned_count: number;
-  next_offset: number | null;
+  next_cursor: string | null;
   methods: Array<{
     method_id: string;
     name: string;
     name_truncated: boolean;
     description: string | null;
     description_truncated: boolean;
-    has_source: boolean;
-    updated_at: string;
+    created_at: string;
   }>;
 }
 ```
 
-Both shells expose this read-only, no-view catalog entry point. It fetches the
-current API key's complete organization catalog through `@pipelex/sdk`, filters
-and pages locally, and returns a deterministic page sorted by case-insensitive
-name then id. Names are bounded to 200 Unicode code points and descriptions to
-500; search uses their full values. Empty catalogs, no matches, and offsets past
-the end are successful empty results. `has_source` says only that stored MTHDS
-source exists — it is **not** a valid/runnable verdict.
+Both shells expose this read-only, no-view catalog entry point. Search and
+paging are the server's job: `query` is applied across the whole organization
+catalog rather than over one page, and rows arrive already ordered newest first
+by the immutable `created_at` the catalog pages on. Continue a listing by
+passing the returned `next_cursor` back as `cursor`. Names are bounded to 200
+Unicode code points and descriptions to 500, with explicit truncation flags.
+Empty catalogs and no-match queries are successful empty results.
+
+There is deliberately no total: counting a catalog means reading all of it,
+which is the cost paging exists to avoid.
 
 The projection is deliberately source-free: `mthds`, Python, stored inputs and
 outputs, organization ids, and creator ids never enter `structuredContent`,
-`content`, `_meta`, or logs. Upstream listing is not paged: the platform still
-returns every full row, and the MCP immediately projects it before producing any
-tool output. A malformed row fails the whole result as a non-retryable runtime
+`content`, `_meta`, or logs — and the index projection no longer carries them
+at all. A malformed row fails the whole result as a non-retryable runtime
 contract error rather than returning a misleading partial list.
 
 Name-to-run flow:
 
 ```text
 mthds_list_methods({ query: "invoice" })
-  → choose/disambiguate method_id (do not use a has_source:false draft)
+  → choose/disambiguate method_id
   → mthds_validate({ method_id })                 # optional current-content check
   → mthds_inputs_template({ method_id })
   → fill inputs; prepare/upload assets if needed
@@ -604,6 +603,22 @@ view-name registry) as its first step, so `npm run check` runs `build` before th
 standalone `typecheck` — the registry must exist for `tsc` to resolve the
 registered view name. The local build follows and `prepack` rebuilds it, so a
 pack/publish can never ship a stale or absent bin.
+
+## Tests
+
+```bash
+make test         # the default suite — hermetic, no network
+make agent-test   # the same suite for an agent — quiet unless it fails
+make test-e2e     # the live suite — real client, real Pipelex API
+make smoke        # the workshop stdio server, end to end, against the live API
+make test-all     # all of the above plus the run family — SPENDS INFERENCE CREDIT
+```
+
+`make test` fakes every API client, so it proves the projections and never touches the network; `make all` and CI run only that. The live targets are the drift detector: the faked seams mean a wire-shape change on the API side fails nothing at all in the hermetic suite, so `make test-e2e` calls each capability with the real `PipelexApiClient` and `make smoke` drives the whole shell over stdio. Both need `PIPELEX_API_KEY` (a gitignored `.env` at the repo root is enough), and neither spends inference credit — the run family that does only fires under `make test-e2e-run`. `make smoke` is entirely read-only; `make test-e2e` has one write, the workshop arm of `mthds_prepare_inputs`, which uploads a 1x1 PNG to your organization's Pipelex storage to prove the upload path still rewrites values to `pipelex-storage://`. The SDK exposes no delete, so that object persists.
+
+`make test-all` chains all three in cost order and adds the run family, so a single command covers every test in the repo; it spends inference credit, which is why `make all` does not reach it. `make agent-test` is the same hermetic suite as `make test` with its output captured and replayed only on failure, plus a heartbeat while it runs — meant for coding agents, whose context a few hundred lines of green vitest output would otherwise fill.
+
+The by-id paths need one durable fixture method in the API key's organization; `make seed-e2e-fixture` creates or refreshes it, idempotently. See `CLAUDE.md` → "Detecting API drift".
 
 ## Versioning
 
