@@ -14,7 +14,7 @@
  * (`tsx src/local/main.ts`), completes the MCP handshake, then calls the
  * read-only tools against the configured API and asserts on their
  * `structuredContent`. Nothing here executes a method, so a run spends no
- * inference credit and is safe to run unattended (the nightly canary reuses it).
+ * inference credit and is safe to run unattended (a scheduled canary reuses it).
  *
  * Run it through `make smoke`, which resolves the env from `.env`, preflights
  * `/v1/version`, and refuses to start without a key. `npm run smoke` runs the

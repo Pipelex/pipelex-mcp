@@ -168,7 +168,7 @@ let cachedFixtureId: Promise<string> | undefined;
  * The catalog id of the durable fixture, resolved BY NAME at run time.
  *
  * Resolving rather than hardcoding is deliberate: a `mt_…` id belongs to one
- * organization, this repo is public, and the nightly canary will run under a
+ * organization, this repo is public, and a scheduled canary would run under a
  * different key from a developer's. A name lookup makes the suites portable
  * across every org that has been seeded, and turns "wrong org" into the same
  * instructive failure as "not seeded".

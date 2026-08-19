@@ -31,7 +31,7 @@ make t              - Shorthand -> test
 
 Live checks against a REAL Pipelex API (never part of `make all`):
 make smoke            - Drive the workshop stdio server end to end [PIPELEX_BASE_URL=...]
-make test-e2e         - Run every capability's free path against the live API
+make test-e2e         - Run every capability's free path (writes one 1x1 PNG)
 make te               - Shorthand -> test-e2e
 make test-e2e-run     - Same, plus the run family (SPENDS INFERENCE CREDIT)
 make seed-e2e-fixture - Create/refresh the durable fixture method the by-id legs need
@@ -90,7 +90,7 @@ test-coverage:
 # fails nothing at all. See CLAUDE.md -> "Detecting API drift".
 #
 #   smoke            - the whole path a host exercises, through the stdio shell
-#   test-e2e         - every capability's free path, through the real client
+#   test-e2e         - every capability's free path; WRITES one 1x1 PNG to storage
 #   test-e2e-run     - the same, plus the run family (SPENDS INFERENCE CREDIT)
 #   seed-e2e-fixture - WRITES the durable fixture method the by-id legs need
 #
@@ -123,7 +123,7 @@ live-preflight:
 		echo "  Point PIPELEX_BASE_URL (shell or .env) at a running instance, or start the OSS runner: cd ../pipelex-api && make run"; \
 		exit 1; \
 	}
-	@if [ -z "$(PIPELEX_API_KEY)" ]; then \
+	@if [ -z "$$PIPELEX_API_KEY" ]; then \
 		echo "ERROR: PIPELEX_API_KEY is not set — every org-scoped call would fail as a config error."; \
 		echo "  Put it in .env or export it. Against a keyless local runner, skip this guard by calling the npm script directly (e.g. 'npm run smoke')."; \
 		exit 1; \

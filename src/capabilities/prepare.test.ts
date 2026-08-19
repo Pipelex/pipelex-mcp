@@ -27,7 +27,15 @@ import {
 } from "./prepare.js";
 import { DEFAULT_API_URL } from "./shared.js";
 
-/** An explicit json template with a file-bearing input (`photo`) and a text input (`question`). */
+/**
+ * An explicit json template with a file-bearing input (`photo`) and a text input (`question`).
+ *
+ * A Text position's `content` is an OBJECT (`{ text }`), not a bare string — that is what the
+ * live API returns, confirmed against it. Only the COMPACT template (`explicit: false`) collapses
+ * to the bare scalar. Keeping the nested shape here is what stops this fake drifting from the wire;
+ * the walk treats both identically (neither is file content, and a string caller value against an
+ * object signature falls to the pass-through arm), so flattening it would be silently unrealistic.
+ */
 const explicitTemplate: BuildInputsResponse = {
   is_valid: true,
   pipe_ref: "demo.main",
@@ -36,7 +44,7 @@ const explicitTemplate: BuildInputsResponse = {
   explicit: true,
   inputs: {
     photo: { concept: "native.Image", content: { url: "https://example.com/placeholder.png" } },
-    question: { concept: "native.Text", content: "Your question here" },
+    question: { concept: "native.Text", content: { text: "Your question here" } },
   },
 };
 

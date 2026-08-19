@@ -9,7 +9,7 @@
  *    still classify the way the run-follow view's poll loops expect — and it
  *    spends nothing. A missing lifecycle route is the failure this catches.
  *  - The PAID half executes the fixture method for real and only runs when
- *    `PIPELEX_E2E_RUN=1` (`make test-e2e-run`). `make test-e2e` and the nightly
+ *    `PIPELEX_E2E_RUN=1` (`make test-e2e-run`). `make test-e2e` and any scheduled
  *    canary therefore cannot reach it by accident.
  */
 
@@ -143,5 +143,11 @@ describe.runIf(RUN_ENABLED)("mthds_run (live, SPENDS INFERENCE CREDIT)", () => {
     const status = await pollToTerminal(runId);
     expect(status.structuredContent.status).toBe("ok");
     expect(status.structuredContent.is_terminal).toBe(true);
+    // Terminal is not success: `is_terminal` is true for FAILED/TIMED_OUT/CANCELLED
+    // too, so a stored fixture that has drifted from FIXTURE_BUNDLE would start
+    // fine, fail in execution, and pass this leg. We paid inference for this run,
+    // so assert the outcome. Keeping both assertions makes the two failures read
+    // differently: `is_terminal` false means the poll deadline expired.
+    expect(status.structuredContent.run_status).toBe("COMPLETED");
   });
 });

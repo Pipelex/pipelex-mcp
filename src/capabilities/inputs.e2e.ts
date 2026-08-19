@@ -71,10 +71,17 @@ describe("mthds_inputs_template (live)", () => {
     const explicitItem = explicit.structuredContent.inputs?.[FIXTURE_INPUT_NAME];
     const compactItem = compact.structuredContent.inputs?.[FIXTURE_INPUT_NAME];
 
-    // The explicit envelope is `{ concept, content }`; the compact form is the
-    // bare value. If the API ever collapsed the two, this is where it shows.
+    // The explicit envelope is `{ concept, content }`; the fixture declares
+    // `topic = "Text"`, so the compact form is the bare scalar. If the API ever
+    // collapsed the two, this is where it shows.
+    //
+    // The compact side is asserted by SHAPE, never by the placeholder's wording:
+    // that prose belongs to the API, and pinning it would make this canary cry
+    // wolf on a copy tweak. A type check also fails when the key is dropped
+    // entirely — an inequality against the explicit envelope would have passed
+    // on `undefined`, which is a drift canary going green on an empty template.
     expect(explicitItem).toHaveProperty("concept");
-    expect(compactItem).not.toEqual(explicitItem);
+    expect(typeof compactItem).toBe("string");
   });
 
   it("classifies an unknown pipe_ref as an input_domain no-verdict at pipe_ref", async () => {

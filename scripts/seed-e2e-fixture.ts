@@ -9,9 +9,11 @@
  * run into the org. One method, seeded once, asserted by name instead.
  *
  * Why it is a separate, hand-invoked target rather than a step of
- * `make test-e2e`: seeding WRITES to whichever organization the key selects,
- * and the suites are meant to be safe to run on a schedule (the nightly canary
- * reuses them). Writes stay explicit.
+ * `make test-e2e`: seeding writes a durable METHOD into whichever organization
+ * the key selects — a row in the user's catalog, and one the SDK cannot delete.
+ * `make test-e2e` writes too (`prepare.e2e.ts` uploads a 1x1 PNG), but a storage
+ * blob nobody browses is a different order of intrusion from a catalog entry, so
+ * the catalog write stays behind its own hand-invoked target.
  *
  * Running it twice is safe. It looks the fixture up by name and updates the
  * stored bundle in place, so re-running after editing {@link FIXTURE_BUNDLE}
