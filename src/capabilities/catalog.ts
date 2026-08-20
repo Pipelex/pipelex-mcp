@@ -6,10 +6,16 @@ import {
   asOneLine,
   buildApiConfig,
   classifyError,
+  summaryForToolError,
   toolErrorSchema,
   toolResultContent,
 } from "./shared.js";
-import type { AuthErrorTexture, ClassifyErrorOptions, ToolError } from "./shared.js";
+import type {
+  AuthErrorTexture,
+  ClassifyErrorOptions,
+  ErrorSummaries,
+  ToolError,
+} from "./shared.js";
 
 export const CATALOG_DEFAULT_LIMIT = 20;
 export const CATALOG_MAX_LIMIT = 50;
@@ -396,15 +402,16 @@ function catalogErrorOptions(
   };
 }
 
+const ERROR_SUMMARIES: ErrorSummaries = {
+  config: "Method catalog could not be listed: the Pipelex API or catalog access is misconfigured.",
+  input_domain: "Method catalog was not listed: the Pipelex API rejected the request.",
+  runtime: "Method catalog could not be listed: the Pipelex API returned an error.",
+  paywall:
+    "Method catalog could not be listed: the organization's Pipelex plan does not cover this call.",
+};
+
 function summaryForError(error: ToolError): string {
-  switch (error.class) {
-    case "config":
-      return "Method catalog could not be listed: the Pipelex API or catalog access is misconfigured.";
-    case "input_domain":
-      return "Method catalog was not listed: the Pipelex API rejected the request.";
-    case "runtime":
-      return "Method catalog could not be listed: the Pipelex API returned an error.";
-  }
+  return summaryForToolError(error, ERROR_SUMMARIES);
 }
 
 function errorResult(summary: string, errors: ToolError[]): CatalogResult {

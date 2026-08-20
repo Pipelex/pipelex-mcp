@@ -11,6 +11,7 @@ import { z } from "zod";
 import {
   buildApiConfig,
   classifyError,
+  summaryForToolError,
   fetchMethodFiles,
   filesInputSchema,
   resolveSubmittedFiles,
@@ -25,6 +26,7 @@ import type {
   MethodFetchClient,
   SubmittedFile,
   SubmittedFileInput,
+  ErrorSummaries,
   ToolError,
 } from "./shared.js";
 import { MAX_UPLOAD_BYTES, SizeGuardedPipelexApiClient, formatMib } from "./upload-ceiling.js";
@@ -466,15 +468,16 @@ function uploadRefusedError(err: UploadNotAllowedError): ToolError {
   };
 }
 
+const ERROR_SUMMARIES: ErrorSummaries = {
+  config: "Inputs could not be prepared: the Pipelex API is unreachable or misconfigured.",
+  input_domain: "Inputs were not prepared: the request could not be prepared as submitted.",
+  runtime: "Inputs could not be prepared: the Pipelex API returned an error.",
+  paywall:
+    "Inputs could not be prepared: the organization's Pipelex plan does not cover this call.",
+};
+
 function summaryForError(error: ToolError): string {
-  switch (error.class) {
-    case "config":
-      return "Inputs could not be prepared: the Pipelex API is unreachable or misconfigured.";
-    case "input_domain":
-      return "Inputs were not prepared: the request could not be prepared as submitted.";
-    case "runtime":
-      return "Inputs could not be prepared: the Pipelex API returned an error.";
-  }
+  return summaryForToolError(error, ERROR_SUMMARIES);
 }
 
 export function prepareInputsToolResult(result: PrepareResult) {

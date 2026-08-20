@@ -724,6 +724,41 @@ describe("prepareMthdsInputs — by method_id (fetch-and-forward)", () => {
     expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
   });
 
+  it("headlines a paywall (402) as a plan limit, not as connectivity", async () => {
+    const result = await prepareMthdsInputs(
+      { method_id: "mt_123", inputs: {} },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...buildInputsNotCalled,
+          ...prepareInputsNotCalled,
+          async getMethodClosure(): Promise<MthdsFileItem[]> {
+            throw new ApiResponseError(
+              "HTTP 402",
+              `${DEFAULT_API_URL}/v1/methods/mt_123`,
+              402,
+              "Payment Required",
+              "{}",
+              "subscription_required",
+              "Subscription required",
+              undefined,
+              "forbidden",
+            );
+          },
+        },
+      },
+    );
+
+    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.kind).toBe("paywall");
+    // A headline-only host shows just this line, so it must name the plan
+    // rather than the connectivity headline every other `config` error gets.
+    expect(result.summary).toBe(
+      "Inputs could not be prepared: the organization's Pipelex plan does not cover this call.",
+    );
+    expect(result.summary).not.toMatch(/unreachable/);
+  });
+
   it("lets files win over method_id without fetching the method", async () => {
     let capturedRequest: BuildInputsRequest | undefined;
 
