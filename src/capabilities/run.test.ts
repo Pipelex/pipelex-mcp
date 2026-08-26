@@ -7,7 +7,7 @@ import type {
   RunResultStart,
   RunResultState,
   RunStatus,
-  StartOptions,
+  PipelexStartOptions,
   TokensUsageRecord,
 } from "@pipelex/sdk";
 
@@ -758,7 +758,7 @@ describe("boundMainStuff", () => {
 
 // Structural mirror of the RunClient seam in run.ts.
 interface FakeRunClient {
-  start(options: StartOptions): Promise<RunResultStart>;
+  start(options: PipelexStartOptions): Promise<RunResultStart>;
   getRunStatus(runId: string): Promise<RunRead>;
   getRunResult(runId: string): Promise<RunResultState>;
 }
@@ -777,10 +777,10 @@ function contextWith(overrides: Partial<FakeRunClient>): RunContext {
 }
 
 describe("startMthdsRun", () => {
-  it("maps MCP input to StartOptions and projects the ack", async () => {
-    let seen: StartOptions | undefined;
+  it("maps MCP input to PipelexStartOptions and projects the ack", async () => {
+    let seen: PipelexStartOptions | undefined;
     const context = contextWith({
-      start: (options: StartOptions) => {
+      start: (options: PipelexStartOptions) => {
         seen = options;
         return Promise.resolve({ pipeline_run_id: RUN_ID, state: "STARTED" });
       },
@@ -805,10 +805,10 @@ describe("startMthdsRun", () => {
     expect(result.structuredContent.run_id).toBe(RUN_ID);
   });
 
-  it("omits pipe_code and inputs from StartOptions when not supplied", async () => {
-    let seen: StartOptions | undefined;
+  it("omits pipe_code and inputs from PipelexStartOptions when not supplied", async () => {
+    let seen: PipelexStartOptions | undefined;
     const context = contextWith({
-      start: (options: StartOptions) => {
+      start: (options: PipelexStartOptions) => {
         seen = options;
         return Promise.resolve({ pipeline_run_id: RUN_ID });
       },
@@ -860,10 +860,10 @@ describe("startMthdsRun by method_id", () => {
     );
   }
 
-  it("starts by id alone — extra.method_id crosses, no mthds_contents", async () => {
-    let seen: StartOptions | undefined;
+  it("starts by id alone — method_id crosses as a named option, no mthds_contents", async () => {
+    let seen: PipelexStartOptions | undefined;
     const context = contextWith({
-      start: (options: StartOptions) => {
+      start: (options: PipelexStartOptions) => {
         seen = options;
         return Promise.resolve({ pipeline_run_id: RUN_ID, state: "STARTED" });
       },
@@ -874,16 +874,16 @@ describe("startMthdsRun by method_id", () => {
       context,
     );
 
-    expect(seen).toEqual({ extra: { method_id: "mt_abc123" }, inputs: { question: "why?" } });
+    expect(seen).toEqual({ method_id: "mt_abc123", inputs: { question: "why?" } });
     expect(seen).not.toHaveProperty("mthds_contents");
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.run_id).toBe(RUN_ID);
   });
 
   it("passes both when files and method_id are supplied (files run, id is linkage)", async () => {
-    let seen: StartOptions | undefined;
+    let seen: PipelexStartOptions | undefined;
     const context = contextWith({
-      start: (options: StartOptions) => {
+      start: (options: PipelexStartOptions) => {
         seen = options;
         return Promise.resolve({ pipeline_run_id: RUN_ID });
       },
@@ -896,7 +896,7 @@ describe("startMthdsRun by method_id", () => {
 
     expect(seen).toEqual({
       mthds_contents: ['domain = "demo"'],
-      extra: { method_id: "mt_abc123" },
+      method_id: "mt_abc123",
     });
   });
 
@@ -1246,10 +1246,10 @@ describe("runResultsToolResult", () => {
 
 describe("startMthdsRun path submissions", () => {
   it("resolves { path } items through the context resolver before starting", async () => {
-    let seen: StartOptions | undefined;
+    let seen: PipelexStartOptions | undefined;
     const context: RunContext = {
       ...contextWith({
-        start: (options: StartOptions) => {
+        start: (options: PipelexStartOptions) => {
           seen = options;
           return Promise.resolve({ pipeline_run_id: RUN_ID });
         },

@@ -35,6 +35,8 @@ const validReport: PipelexValidationReport = {
   graph_spec: { nodes: [{ id: "demo.main" }] },
   validated_pipes: [],
   pending_signatures: [],
+  liftable_pipes: [],
+  warnings: [],
   is_runnable: true,
   message: "ok",
   rendered_markdown: "# Valid",
