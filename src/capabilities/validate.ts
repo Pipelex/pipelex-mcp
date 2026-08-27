@@ -47,11 +47,14 @@ export const mthdsValidateInputSchema = {
 /**
  * Identifiers of the renderable views this result can drive. The model never
  * sees `_meta`, so this list is how it learns a view is available to surface.
- * For now the only kind is `"dry_run_graph"` — the method graph produced by a
- * `/validate` dry run, whose spec rides the tool result's `_meta.graph_spec`.
- * Extend the enum when a new view kind ships.
+ * `"dry_run_graph"` is the method graph produced by a `/validate` dry run,
+ * whose spec rides the tool result's `_meta.graph_spec`; `"input_form"` is the
+ * fill-in form for the main pipe's declared inputs, driven by the per-pipe IO
+ * contracts riding `_meta.pipe_io_contracts` (only on a runnable verdict — a
+ * form that cannot submit is not a view worth advertising). Extend the enum
+ * when a new view kind ships.
  */
-const viewSpecSchema = z.enum(["dry_run_graph"]);
+const viewSpecSchema = z.enum(["dry_run_graph", "input_form"]);
 
 const validationStructuredContentSchema = z.object({
   status: z.enum(["ok", "error"]),
@@ -61,7 +64,7 @@ const validationStructuredContentSchema = z.object({
   available_view_specs: z
     .array(viewSpecSchema)
     .describe(
-      'Renderable views available for this result. Contains "dry_run_graph" when an interactive method graph (from the validation dry run) is available to display; empty otherwise.',
+      'Renderable views available for this result. Contains "dry_run_graph" when an interactive method graph (from the validation dry run) is available to display, and "input_form" when a fill-in form for the main pipe\'s inputs (with a Run button) is available on a runnable verdict; empty otherwise.',
     ),
   validation_errors: z.array(z.unknown()).optional(),
   errors: z.array(toolErrorSchema).optional(),
@@ -106,6 +109,22 @@ export interface ValidationResult {
    * `include_graph !== false` and the invoking shell has a registered view.
    */
   graphSpec?: unknown;
+  /**
+   * Per-pipe IO contracts for the Skybridge view only, keyed by namespaced
+   * `pipe_ref` (`domain.code`) — what `@pipelex/mthds-ui`'s `RunPanel` needs
+   * to render the input form. Same channel discipline as `graphSpec`: rides
+   * `_meta`, never `structuredContent`. Opaque here; `@pipelex/mthds-form`
+   * owns the type. Populated only on a valid **and runnable** verdict when the
+   * invoking shell has a registered view.
+   */
+  pipeIoContracts?: unknown;
+  /**
+   * The bundle's main pipe as a namespaced `pipe_ref`, derived from
+   * `bundle_blueprint`, so the view can pick the default contract without
+   * parsing the blueprint itself. Absent when the blueprint declares no
+   * `main_pipe` (the API returns no graph in that case either).
+   */
+  mainPipeRef?: string;
 }
 
 interface ValidationClient extends MethodFetchClient {
@@ -243,8 +262,13 @@ export function toolResult(result: ValidationResult) {
     // the model never pays its tokens. `_meta` still travels on the raw MCP
     // result, so a non-LLM programmatic consumer can read it off the wire —
     // `_meta` only withholds it from the model's context. The Skybridge view
-    // reads it back as `useToolInfo().responseMetadata.graph_spec`.
-    _meta: { graph_spec: result.graphSpec },
+    // reads it back as `useToolInfo().responseMetadata.graph_spec`. The IO
+    // contracts and the main pipe ref ride the same channel for the input form.
+    _meta: {
+      graph_spec: result.graphSpec,
+      pipe_io_contracts: result.pipeIoContracts,
+      main_pipe_ref: result.mainPipeRef,
+    },
   };
 }
 
@@ -262,10 +286,19 @@ export function validationResult(
   };
 
   let graphSpec: unknown;
+  let pipeIoContracts: unknown;
+  let mainPipeRef: string | undefined;
   if (report.is_valid) {
     const validReport = report as PipelexValidationReport;
     if (includeGraph && viewsAvailable) {
       graphSpec = validReport.graph_spec;
+    }
+    // The input form is only worth advertising when the method can actually
+    // run: a pending-signature verdict would render a form whose Run button
+    // can only fail. Contracts are independent of `include_graph`.
+    if (viewsAvailable && report.is_runnable && hasContracts(validReport.pipe_io_contracts)) {
+      pipeIoContracts = validReport.pipe_io_contracts;
+      mainPipeRef = mainPipeRefOf(validReport.bundle_blueprint);
     }
   } else {
     const invalidReport = report as PipelexInvalidReport;
@@ -284,16 +317,53 @@ export function validationResult(
   // structured signal, and the Markdown note is the prose one for agents that
   // read the summary more reliably than the structured fields.
   if (graphSpec != null) {
-    structuredContent.available_view_specs = ["dry_run_graph"];
-    summary +=
-      "\n\n## Views\n\nThe validation result includes a graph view of the method (dry run).";
+    structuredContent.available_view_specs.push("dry_run_graph");
+  }
+  if (pipeIoContracts != null) {
+    structuredContent.available_view_specs.push("input_form");
+  }
+  if (structuredContent.available_view_specs.length > 0) {
+    summary += `\n\n## Views\n\n${viewsNote(structuredContent.available_view_specs)}`;
   }
 
   return {
     structuredContent,
     summary,
     graphSpec,
+    pipeIoContracts,
+    mainPipeRef,
   };
+}
+
+/** The prose counterpart of `available_view_specs`, for agents that read the summary. */
+function viewsNote(specs: ViewSpec[]): string {
+  const hasGraph = specs.includes("dry_run_graph");
+  const hasForm = specs.includes("input_form");
+  if (hasGraph && hasForm) {
+    return "The validation result includes a graph view of the method (dry run) and an input form the user can fill in to run it.";
+  }
+  if (hasForm) {
+    return "The validation result includes an input form the user can fill in to run the method.";
+  }
+  return "The validation result includes a graph view of the method (dry run).";
+}
+
+function hasContracts(contracts: unknown): boolean {
+  return typeof contracts === "object" && contracts !== null && Object.keys(contracts).length > 0;
+}
+
+/**
+ * `domain.main_pipe` from the batch's primary blueprint, or undefined when the
+ * blueprint declares no main pipe. Both fields are plain strings on the
+ * blueprint; anything else is treated as absent rather than guessed at.
+ */
+function mainPipeRefOf(blueprint: Record<string, unknown>): string | undefined {
+  const domain = blueprint.domain;
+  const mainPipe = blueprint.main_pipe;
+  if (typeof mainPipe !== "string" || mainPipe.length === 0) {
+    return undefined;
+  }
+  return typeof domain === "string" && domain.length > 0 ? `${domain}.${mainPipe}` : mainPipe;
 }
 
 function toMthdsFiles(files: SubmittedFile[]): MthdsFile[] {

@@ -43,13 +43,16 @@ describe("mthds_validate (live)", () => {
     // contract moved.
     expect(result.summary.trim()).not.toBe("");
 
-    // The graph rides `_meta` and never `structuredContent` — the model must not
-    // pay its tokens. `available_view_specs` is the model's structured signal
-    // that it exists.
-    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
+    // The graph and the IO contracts ride `_meta` and never `structuredContent`
+    // — the model must not pay their tokens. `available_view_specs` is the
+    // model's structured signal that they exist.
+    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph", "input_form"]);
     expect(result.graphSpec).toBeDefined();
     expect(typeof result.graphSpec).toBe("object");
+    expect(typeof result.pipeIoContracts).toBe("object");
+    expect(typeof result.mainPipeRef).toBe("string");
     expect(JSON.stringify(result.structuredContent)).not.toContain("graph_spec");
+    expect(JSON.stringify(result.structuredContent)).not.toContain("pipe_io_contracts");
   });
 
   it("omits the graph when include_graph is false", async () => {
@@ -61,7 +64,8 @@ describe("mthds_validate (live)", () => {
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);
     expect(result.graphSpec).toBeUndefined();
-    expect(result.structuredContent.available_view_specs).toEqual([]);
+    // The form does not depend on the graph.
+    expect(result.structuredContent.available_view_specs).toEqual(["input_form"]);
   });
 
   it("reports an invalid bundle as a PRODUCED verdict, not an error", async () => {

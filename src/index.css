@@ -4,6 +4,9 @@
 @import "@alpic-ai/ui/theme";
 
 @source "../node_modules/@alpic-ai/ui/src";
+/* The form kernel's controls are Tailwind classes; without this glob the build
+   purges the ones nothing else uses (focus ring, placeholder, dropzone state). */
+@source "../node_modules/@pipelex/mthds-form/dist";
 
 @theme {
   --font-mozilla: "Mozilla Text", serif;
