@@ -6,8 +6,10 @@
  *
  *  - The FREE half always runs. Reading the status and results of a run id that
  *    does not exist still proves the two lifecycle routes are reachable and
- *    still classify the way the run-follow view's poll loops expect — and it
- *    spends nothing. A missing lifecycle route is the failure this catches.
+ *    still classify the way the run-follow view's poll loops expect, and one
+ *    unknown-`method_id` start proves `/v1/start` still accepts the run source
+ *    the way this client sends it — all of it spending nothing. A missing
+ *    lifecycle route and a mis-sent run source are the failures this catches.
  *  - The PAID half executes the fixture method for real and only runs when
  *    `PIPELEX_E2E_RUN=1` (`make test-e2e-run`). `make test-e2e` and any scheduled
  *    canary therefore cannot reach it by accident.
@@ -29,6 +31,9 @@ const context: RunContext = liveApiConfig();
 
 /** A syntactically plausible id that no run answers to. */
 const UNKNOWN_RUN_ID = "00000000-0000-4000-8000-000000000000";
+
+/** A syntactically plausible id that no stored method answers to. */
+const UNKNOWN_METHOD_ID = "mt_00000000-0000-4000-8000-000000000000";
 
 const RUN_ENABLED = process.env.PIPELEX_E2E_RUN === "1";
 
@@ -64,6 +69,25 @@ describe("run lifecycle reads (live, free)", () => {
 
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+  });
+
+  // The only free reach into `/v1/start`'s ARGUMENT PATH, and the reason it is
+  // here: an unknown id is refused before anything executes, so this crosses
+  // the wire for nothing while still proving the client built a request the
+  // platform understood. That matters because `method_id` is a named option the
+  // SDK reserves on `extra`, and it enforces that with a RUNTIME throw — so
+  // sending it the wrong way compiles, passes the mocked suite, and fails every
+  // real by-id run. Bumping @pipelex/sdk 0.12.0 → 0.14.0 did exactly that. A
+  // `PipelineRequestError` surfacing here instead of the platform's 404 means
+  // the client refused the call itself; check how `toStartOptions` passes the id.
+  it("reaches the platform with method_id as a named option, and 404s on an unknown one", async () => {
+    const result = await startMthdsRun({ method_id: UNKNOWN_METHOD_ID }, context);
+
+    expect(result.structuredContent.status).toBe("error");
+    const error = result.structuredContent.errors?.[0];
+    expect(error?.class).toBe("input_domain");
+    expect(error?.location).toBe("method_id");
+    expect(result.structuredContent.run_id).toBeUndefined();
   });
 });
 

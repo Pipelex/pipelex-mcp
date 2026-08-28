@@ -96,7 +96,8 @@ export function createHostedServer(
         annotations: mthdsValidateTool.annotations,
         view: {
           component: "run-graph",
-          description: "Interactive run graph of the method (the dry-run graph from validation).",
+          description:
+            "Interactive run graph of the method (the dry-run graph from validation), plus an input form to run it.",
         },
         _meta: {
           "openai/toolInvocation/invoking": "Validating MTHDS files...",

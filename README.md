@@ -386,16 +386,22 @@ No method source crosses the conversation in this flow.
   is_valid: boolean;
   is_runnable: boolean;
   pending_signatures: string[];
-  available_view_specs: Array<"dry_run_graph">;
+  available_view_specs: Array<"dry_run_graph" | "input_form">;
   validation_errors?: unknown[];
   errors?: ToolError[];
 }
 ```
 
-The graph (`graph_spec`) rides the tool result's view-only `_meta` channel
-(`_meta.graph_spec`) for the `run-graph` view — never `structuredContent`, so the
-model never pays its tokens. `available_view_specs` is how the model learns a
-view exists to surface; `include_graph` defaults to true. The MCP `content` text
+The graph (`graph_spec`) and the form's per-pipe artifact pair — the IO
+contracts (`pipe_io_contracts`) and the input-form descriptor (`input_form`,
+requested from the API via the opt-in `views: ["input_form"]` token) — ride the
+tool result's view-only `_meta` channel for the `run-graph` view — never
+`structuredContent`, so the model never pays their tokens. On the hosted
+console that view renders the method graph and, on a runnable verdict that
+carries both artifacts, an input form for the main pipe (its fields derived
+from the wire descriptor) whose Run button starts the method from the view.
+`available_view_specs` is how the model learns which views exist to surface;
+`include_graph` defaults to true. The MCP `content` text
 carries the human-readable summary. `method_id` validates a registered method by
 its catalog id (fetch-and-forward from the method's current stored content, the
 same pattern as `mthds_inputs_template`); it requires an API key, since the

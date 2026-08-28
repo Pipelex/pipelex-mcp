@@ -1,11 +1,11 @@
 import { isTerminalRunStatus, PipelexApiClient } from "@pipelex/sdk";
 import type {
+  PipelexStartOptions,
   RunRead,
   RunResults,
   RunResultStart,
   RunResultState,
   RunStatus,
-  StartOptions,
   TokensUsageRecord,
 } from "@pipelex/sdk";
 import { z } from "zod";
@@ -334,7 +334,7 @@ export interface RunResultsResult {
 
 /** The slice of `PipelexApiClient` the run capabilities call (test seam). */
 interface RunClient {
-  start(options: StartOptions): Promise<RunResultStart>;
+  start(options: PipelexStartOptions): Promise<RunResultStart>;
   getRunStatus(runId: string): Promise<RunRead>;
   getRunResult(runId: string): Promise<RunResultState>;
 }
@@ -1002,18 +1002,23 @@ export async function getMthdsRunResults(
 }
 
 // `/v1/start` takes no source labels — the MCP surface's `uri` feeds only our
-// own request-shape errors, so only the contents cross the wire. `method_id`
-// rides the SDK's `extra` extension args (the webapp's own createRun shape):
-// alone it resolves the stored method server-side; beside files it becomes the
-// run-history linkage while the inline contents are what runs.
-function toStartOptions(input: ResolvedRunRequest): StartOptions {
+// own request-shape errors, so only the contents cross the wire. `method_id` is
+// a NAMED option (`PipelexStartOptions`), not an `extra` extension arg: since
+// @pipelex/sdk 0.14.0 the client names it itself and refuses it on `extra`,
+// which merges last into the body and would let one argument arrive by two
+// paths with different validation. That refusal is a runtime throw rather than
+// a type error, so the old `extra: { method_id }` shape compiled and failed
+// only against the live API. The meaning is unchanged: alone it resolves the
+// stored method server-side; beside files it becomes the run-history linkage
+// while the inline contents are what runs.
+function toStartOptions(input: ResolvedRunRequest): PipelexStartOptions {
   return {
     ...(input.files.length === 0
       ? {}
       : { mthds_contents: input.files.map((file) => file.content) }),
     ...(input.pipe_code === undefined ? {} : { pipe_code: input.pipe_code }),
     ...(input.inputs === undefined ? {} : { inputs: input.inputs }),
-    ...(input.method_id === undefined ? {} : { extra: { method_id: input.method_id } }),
+    ...(input.method_id === undefined ? {} : { method_id: input.method_id }),
   };
 }
 
