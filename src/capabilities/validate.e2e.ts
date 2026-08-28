@@ -50,9 +50,16 @@ describe("mthds_validate (live)", () => {
     expect(result.graphSpec).toBeDefined();
     expect(typeof result.graphSpec).toBe("object");
     expect(typeof result.pipeIoContracts).toBe("object");
+    // The descriptor is the `views: ["input_form"]` opt-in round-tripping for
+    // real — the spec keeps it off the report unless asked, so its arrival is
+    // the live proof the token still works.
+    expect(typeof result.inputForm).toBe("object");
     expect(typeof result.mainPipeRef).toBe("string");
     expect(JSON.stringify(result.structuredContent)).not.toContain("graph_spec");
     expect(JSON.stringify(result.structuredContent)).not.toContain("pipe_io_contracts");
+    // (No `input_form` containment check: the view KIND in
+    // `available_view_specs` is legitimately spelled the same.)
+    expect(result.structuredContent).not.toHaveProperty("input_form");
   });
 
   it("omits the graph when include_graph is false", async () => {

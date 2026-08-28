@@ -392,11 +392,14 @@ No method source crosses the conversation in this flow.
 }
 ```
 
-The graph (`graph_spec`) and the per-pipe IO contracts (`pipe_io_contracts`)
-ride the tool result's view-only `_meta` channel for the `run-graph` view —
-never `structuredContent`, so the model never pays their tokens. On the hosted
-console that view renders the method graph and, on a runnable verdict, an input
-form for the main pipe whose Run button starts the method from the view.
+The graph (`graph_spec`) and the form's per-pipe artifact pair — the IO
+contracts (`pipe_io_contracts`) and the input-form descriptor (`input_form`,
+requested from the API via the opt-in `views: ["input_form"]` token) — ride the
+tool result's view-only `_meta` channel for the `run-graph` view — never
+`structuredContent`, so the model never pays their tokens. On the hosted
+console that view renders the method graph and, on a runnable verdict that
+carries both artifacts, an input form for the main pipe (its fields derived
+from the wire descriptor) whose Run button starts the method from the view.
 `available_view_specs` is how the model learns which views exist to surface;
 `include_graph` defaults to true. The MCP `content` text
 carries the human-readable summary. `method_id` validates a registered method by

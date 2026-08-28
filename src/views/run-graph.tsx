@@ -1,8 +1,8 @@
 import "@/index.css";
 import "@pipelex/mthds-ui/form/react/RunPanel.css";
 
-import { getPipeIOContract } from "@pipelex/mthds-form";
-import type { PipeIOContracts } from "@pipelex/mthds-form";
+import { getPipeInputForm, getPipeIOContract } from "@pipelex/mthds-form";
+import type { InputForm, PipeIOContracts } from "@pipelex/mthds-form";
 import { RunPanel } from "@pipelex/mthds-ui/form/react";
 import { GraphViewer } from "@pipelex/mthds-ui/graph/react";
 import { TOOLBAR_POSITION } from "@pipelex/mthds-ui";
@@ -45,8 +45,10 @@ function parsePipeRef(ref: string): SelectedPipe {
  * calls fall back to a compact, non-crashing empty state.
  *
  * On a runnable verdict it also renders the method's **input form** below the
- * graph — mthds-ui's `RunPanel` over the per-pipe IO contracts riding
- * `responseMetadata.pipe_io_contracts`. The form defaults to the main pipe
+ * graph — mthds-ui's `RunPanel` over the wire input-form descriptor riding
+ * `responseMetadata.input_form` (the derivation, since kernel 0.5.0), with the
+ * per-pipe IO contracts (`responseMetadata.pipe_io_contracts`) co-walked
+ * beside it. The form defaults to the main pipe
  * (`responseMetadata.main_pipe_ref`); clicking a pipe node in the graph
  * switches it. Run starts the method through `mthds_run` with the same
  * `files` / `method_id` the validation was called with, then follows the run
@@ -63,10 +65,11 @@ export default function RunGraphView() {
   const sendFollowUpMessage = useSendFollowUpMessage();
 
   const responseMetadata = toolInfo.isSuccess ? toolInfo.responseMetadata : undefined;
-  // Both are opaque on the wire; `@pipelex/mthds-form` owns the contract type
-  // and `RunPanel` re-derives the fields from it, so a malformed map degrades
-  // to "no form" rather than throwing.
+  // All three are opaque on the wire; the standard owns both per-pipe artifact
+  // types (re-exported by `@pipelex/mthds-form`), and a malformed map degrades
+  // to "no form" rather than throwing — the lookups below just miss.
   const contracts = (responseMetadata?.pipe_io_contracts ?? null) as PipeIOContracts | null;
+  const inputForm = (responseMetadata?.input_form ?? null) as InputForm | null;
   const mainPipeRef =
     typeof responseMetadata?.main_pipe_ref === "string" ? responseMetadata.main_pipe_ref : null;
 
@@ -85,6 +88,17 @@ export default function RunGraphView() {
         ? getPipeIOContract(contracts, selectedPipe.domain, selectedPipe.code)
         : undefined,
     [contracts, selectedPipe],
+  );
+  // The descriptor selector — `getPipeIOContract`'s twin over the same
+  // `pipe_ref` key set. Kept as the one lookup line so the wire descriptor has
+  // a single point of entry into the view; `RunPanel` requires it (the kernel
+  // derives the fields from it), so no descriptor for the pipe means no form.
+  const descriptor = useMemo(
+    () =>
+      selectedPipe
+        ? getPipeInputForm(inputForm, selectedPipe.domain, selectedPipe.code)
+        : undefined,
+    [inputForm, selectedPipe],
   );
 
   const [values, setValues] = useState<Record<string, unknown>>({});
@@ -122,7 +136,10 @@ export default function RunGraphView() {
     return <EmptyState message="Validation failed — no graph to display." maxHeight={maxHeight} />;
   }
   const hasGraph = Boolean(graphSpec && graphSpec.nodes?.length);
-  if (!hasGraph && !contract) {
+  // The form needs both artifacts: the descriptor drives the derivation, the
+  // contract is co-walked beside it (and is what the run gate validates on).
+  const hasForm = Boolean(contract && descriptor && selectedPipe);
+  if (!hasGraph && !hasForm) {
     return <EmptyState message="No graph for this verdict." maxHeight={maxHeight} />;
   }
 
@@ -135,7 +152,7 @@ export default function RunGraphView() {
   // below, the fullscreen graph takes roughly half the host and the whole view
   // scrolls.
   const available = (maxHeight ?? 600) - top - bottom;
-  const graphHeight = contract
+  const graphHeight = hasForm
     ? Math.max(isFullscreen ? Math.floor(available * 0.55) : 320, 240)
     : Math.max(isFullscreen ? available : Math.min(available, 420), 240);
 
@@ -186,7 +203,7 @@ export default function RunGraphView() {
   const llmSummary = [
     hasGraph ? `Showing the dry-run graph of the method: ${graphSpec?.nodes.length} nodes` : null,
     `runnable=${output.is_runnable}`,
-    contract ? `input form shown for pipe ${pipeLabel}` : null,
+    hasForm ? `input form shown for pipe ${pipeLabel}` : null,
     runId ? `run ${runId} ${polling.runStatus ?? "starting"}` : null,
   ]
     .filter(Boolean)
@@ -224,11 +241,12 @@ export default function RunGraphView() {
           />
         </div>
       ) : null}
-      {contract && selectedPipe ? (
+      {contract && descriptor && selectedPipe ? (
         <div className="mt-3">
           <RunPanel
             key={pipeLabel}
             contract={contract}
+            descriptor={descriptor}
             values={values}
             onValuesChange={setValues}
             onRun={handleRun}

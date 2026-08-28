@@ -278,10 +278,24 @@ describe("local stdio server", () => {
   }, 10_000);
 });
 
+// Carries both per-pipe artifacts (typed since sdk 0.15.0) so the workshop
+// test above proves the shell advertises nothing even on a report that has
+// everything a form needs.
 const validReport: PipelexValidationReport = {
   is_valid: true,
   bundle_blueprint: { main_pipe: "main" },
-  pipe_io_contracts: { "demo.main": { inputs: {}, output: "Text" } },
+  pipe_io_contracts: {
+    "demo.main": {
+      inputs: {},
+      output: {
+        concept_ref: "native.Text",
+        multiplicity: "single",
+        item_count: null,
+        optional: false,
+      },
+    },
+  },
+  input_form: { "demo.main": { fields: [] } },
   graph_spec: { nodes: [{ id: "demo.main" }] },
   validated_pipes: [],
   pending_signatures: [],
