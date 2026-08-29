@@ -151,7 +151,11 @@ export async function downloadArtifactToFile(
     written = await streamBounded(response, target.handle, maxBytes);
   } catch (err) {
     await removePartial(target);
-    return { ok: false, failure: networkFailure(err) };
+    // A disk fault is not cured by a fresh link; only a transport fault is.
+    return {
+      ok: false,
+      failure: err instanceof ArtifactWriteError ? writeFailure(err.inner) : networkFailure(err),
+    };
   }
 
   if (written === "too_large") {
@@ -162,6 +166,7 @@ export async function downloadArtifactToFile(
   try {
     await target.handle.close();
   } catch (err) {
+    await removePartial(target);
     return { ok: false, failure: writeFailure(err) };
   }
 
@@ -319,12 +324,52 @@ function writeFailure(err: unknown): ArtifactDownloadFailure {
   };
 }
 
+/** The write side of a streamed download: what {@link writeFully} needs of a `FileHandle`. */
+export interface ChunkWriter {
+  write(buffer: Uint8Array, offset: number, length: number): Promise<{ bytesWritten: number }>;
+}
+
+/**
+ * A write to the target file failed. Tagged so the caller can report a disk
+ * fault (not retryable, check the directory) instead of the transport fault it
+ * would otherwise assume for anything thrown while streaming.
+ */
+class ArtifactWriteError extends Error {
+  readonly inner: unknown;
+
+  constructor(inner: unknown) {
+    super(inner instanceof Error ? inner.message : String(inner));
+    this.name = "ArtifactWriteError";
+    this.inner = inner;
+  }
+}
+
+/**
+ * Write the whole chunk, looping on short writes. `FileHandle.write()` resolves
+ * with the count it managed, which can fall short of the chunk on a filesystem
+ * under pressure; taking one call as "written" would report a truncated
+ * artifact as saved.
+ */
+export async function writeFully(writer: ChunkWriter, chunk: Uint8Array): Promise<void> {
+  let offset = 0;
+  while (offset < chunk.byteLength) {
+    const { bytesWritten } = await writer.write(chunk, offset, chunk.byteLength - offset);
+    if (bytesWritten <= 0) {
+      throw new Error(
+        `the filesystem accepted no bytes at offset ${offset} of ${chunk.byteLength}`,
+      );
+    }
+    offset += bytesWritten;
+  }
+}
+
 /**
  * Stream the body into the open handle, abandoning it the moment the cap is
  * passed. Returning `"too_large"` rather than throwing keeps the size refusal a
- * value like every other refusal here, distinct from the transport faults the
- * caller catches around this. The handle is left open on every return path;
- * the caller closes or removes it.
+ * value like every other refusal here, distinct from the faults the caller
+ * catches around this: a transport fault surfaces as thrown, a disk fault as an
+ * {@link ArtifactWriteError}. The handle is left open on every return path; the
+ * caller closes or removes it.
  */
 async function streamBounded(
   response: Response,
@@ -348,7 +393,11 @@ async function streamBounded(
       await reader.cancel();
       return "too_large";
     }
-    await handle.write(value);
+    try {
+      await writeFully(handle, value);
+    } catch (err) {
+      throw new ArtifactWriteError(err);
+    }
   }
 
   return total;

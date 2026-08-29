@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { downloadArtifactToFile, openUniqueFile } from "./artifact-download.js";
+import { downloadArtifactToFile, openUniqueFile, writeFully } from "./artifact-download.js";
 
 const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -41,6 +41,32 @@ async function serve(handler: http.RequestListener): Promise<string> {
   const { port } = server.address() as AddressInfo;
   return `http://127.0.0.1:${port}`;
 }
+
+describe("writeFully", () => {
+  it("loops on short writes until the whole chunk is on disk", async () => {
+    const calls: Array<[number, number]> = [];
+    const writer = {
+      write: async (_buffer: Uint8Array, offset: number, length: number) => {
+        calls.push([offset, length]);
+        return { bytesWritten: Math.min(length, 3) };
+      },
+    };
+
+    await writeFully(writer, new Uint8Array(8));
+
+    expect(calls).toEqual([
+      [0, 8],
+      [3, 5],
+      [6, 2],
+    ]);
+  });
+
+  it("fails rather than spin when the filesystem accepts nothing", async () => {
+    const writer = { write: async () => ({ bytesWritten: 0 }) };
+
+    await expect(writeFully(writer, new Uint8Array(4))).rejects.toThrow(/accepted no bytes/);
+  });
+});
 
 describe("openUniqueFile", () => {
   it("creates the requested name when free and suffixes the stem on collision", async () => {
