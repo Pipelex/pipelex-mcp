@@ -226,6 +226,26 @@ describe("writeCodegenTree — the containment boundary", () => {
     expect(await fs.readdir(outside)).toEqual([]);
   });
 
+  it("creates no directory at a symlink's target when a nested artifact escapes through it", async () => {
+    const root = await makeTempDir();
+    const outside = await makeTempDir("pipelex-codegen-outside-");
+    const dir = path.join(root, "generated");
+    await fs.mkdir(dir);
+    // A symlink INSIDE the generated directory, pointing out of it. The joined
+    // artifact path is lexically contained, so the destination check passes;
+    // only the deepest-existing-ancestor probe sees the escape — and it has to
+    // see it BEFORE `mkdir -p`, which would otherwise create `new` over there.
+    await fs.symlink(outside, path.join(dir, "models"));
+
+    const result = await writeCodegenTree(
+      request(root, { artifacts: [{ path: "models/new/types.ts", content: "// x\n" }] }),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(await fs.readdir(outside)).toEqual([]);
+  });
+
   it("refuses an artifact path the API returned that leaves the generated directory", async () => {
     const root = await makeTempDir();
 

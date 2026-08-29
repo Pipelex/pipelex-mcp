@@ -27,6 +27,49 @@ export function isInsideRoot(root: string, candidate: string): boolean {
   return candidate === root || candidate.startsWith(root + path.sep);
 }
 
+export type AncestorCheck =
+  | { ok: true }
+  | { ok: false; reason: "escape" }
+  | { ok: false; reason: "unusable"; err: unknown };
+
+/**
+ * Where does the deepest EXISTING ancestor of `target` really live?
+ *
+ * This is the rule that has to run BEFORE anything creates a directory, and
+ * the reason it lives here rather than inside either caller: `mkdir -p
+ * root/link/sub`, with `link` a symlink pointing out of `root`, creates `sub`
+ * at the link's target. A real-path check that runs only AFTER the creation
+ * refuses a write that has already mutated the filesystem where it must not —
+ * it reports the escape instead of preventing it.
+ *
+ * A missing path is not an answer, so the walk climbs to the deepest component
+ * that does exist. `escape` means that component resolves outside `root`;
+ * `unusable` carries the error for a path that failed for any other reason.
+ */
+export async function checkDeepestExistingAncestor(
+  root: string,
+  target: string,
+): Promise<AncestorCheck> {
+  let probe = target;
+  for (;;) {
+    try {
+      const real = await fs.realpath(probe);
+      return isInsideRoot(root, real) ? { ok: true } : { ok: false, reason: "escape" };
+    } catch (err) {
+      if (!isMissingPathError(err)) {
+        return { ok: false, reason: "unusable", err };
+      }
+      const parent = path.dirname(probe);
+      // Climbed past the filesystem root without finding anything that exists:
+      // nothing anchors this path inside `root`.
+      if (parent === probe) {
+        return { ok: false, reason: "escape" };
+      }
+      probe = parent;
+    }
+  }
+}
+
 export type SaveDirResolution =
   | { ok: true; root: string; dir: string }
   | { ok: false; error: ToolError };
@@ -80,27 +123,15 @@ export async function resolveSaveDir(
     return { ok: false, error: escapeError(dir, root, location) };
   }
 
-  // Walk up to the deepest EXISTING ancestor and check where it really lives:
-  // `mkdir -p root/link/sub` with `link` pointing outside the workspace would
-  // otherwise create `sub` at the link's target.
-  let probe = target;
-  for (;;) {
-    try {
-      const real = await fs.realpath(probe);
-      if (!isInsideRoot(root, real)) {
-        return { ok: false, error: escapeError(dir, root, location) };
-      }
-      break;
-    } catch (err) {
-      if (!isMissingPathError(err)) {
-        return { ok: false, error: unusableDirError(dir, err, location) };
-      }
-      const parent = path.dirname(probe);
-      if (parent === probe) {
-        return { ok: false, error: escapeError(dir, root, location) };
-      }
-      probe = parent;
-    }
+  const ancestor = await checkDeepestExistingAncestor(root, target);
+  if (!ancestor.ok) {
+    return {
+      ok: false,
+      error:
+        ancestor.reason === "escape"
+          ? escapeError(dir, root, location)
+          : unusableDirError(dir, ancestor.err, location),
+    };
   }
 
   let real: string;

@@ -206,12 +206,17 @@ describe("local stdio server", () => {
       "openai/toolInvocation/invoked": "Typed code generated.",
     });
     expect(hosted?._meta).not.toHaveProperty("ui/resourceUri");
+    // Destructive on BOTH shells: regeneration overwrites the stamped files it
+    // wrote before, discarding hand-edits below the stamp, and this is the hint
+    // a host reads to decide whether to confirm first. The console cannot write,
+    // but an annotation says what a tool MAY do — the same reason `readOnlyHint`
+    // is false there too.
     expect(hosted?.annotations).toMatchObject({
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       openWorldHint: false,
     });
-    expect(local?.annotations).toMatchObject({ readOnlyHint: false });
+    expect(local?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true });
   });
 
   it("dispatches mthds_codegen through the workshop with the artifacts on content and nothing on _meta", async () => {

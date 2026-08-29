@@ -41,6 +41,14 @@ import type {
 } from "./shared.js";
 
 /**
+ * The one projection kind this tool asks for. Concept-set-wide `types` is the
+ * whole of the codegen scope here: per-pipe kinds are a non-goal, and the route
+ * rejects a `pipe_ref` on this kind outright. Named because it is sent on every
+ * request AND checked on every response, and those two must not drift.
+ */
+const CODEGEN_KIND = "types" as const;
+
+/**
  * What each engine target emits and who it is for — the table behind the tool
  * description's decision rule and the `target` schema description.
  *
@@ -496,6 +504,7 @@ export async function generateMthdsCode(
   // the console must not hand over either.
   try {
     assertValidReportShape(report);
+    assertReportAnswersRequest(report, request);
     await preflightReport(report);
   } catch (err) {
     return malformedReportError(err);
@@ -526,6 +535,36 @@ export async function generateMthdsCode(
     return codegenResult(report, written, context.saveRoot !== undefined);
   } catch (err) {
     return malformedReportError(err);
+  }
+}
+
+/**
+ * Does this report answer the request that was sent?
+ *
+ * The SDK documents `kind` and `target` as an echo of the request's projection
+ * axes, so a disagreement is a contract violation — and the one violation the
+ * preflight structurally cannot see, since `runCodegenCheck` verifies a report
+ * only against its OWN lock: a well-formed answer for the wrong language is
+ * internally current and passes. It matters most on the write arm, where a
+ * mismatched or partially upgraded API would otherwise have this tool overwrite
+ * the caller's `output_dir` with another language's files and report a current
+ * tree — but it is checked on both shells, like every other rule about what
+ * arrives, because the console hands the same bytes to a model that will write
+ * them.
+ */
+function assertReportAnswersRequest(
+  report: CodegenValidReport,
+  request: ResolvedCodegenRequest,
+): void {
+  if (report.target !== request.target) {
+    throw new Error(
+      `Codegen report answered for target ${report.target}, not the requested ${request.target}.`,
+    );
+  }
+  if (report.kind !== CODEGEN_KIND) {
+    throw new Error(
+      `Codegen report answered for kind ${report.kind}, not the requested ${CODEGEN_KIND}.`,
+    );
   }
 }
 
@@ -936,7 +975,7 @@ function toCodegenRequest(request: ResolvedCodegenRequest): CodegenRequest {
         : request.method_id !== undefined
           ? { method_id: request.method_id }
           : unreachableSelector();
-  return { ...selector, kind: "types", target: request.target };
+  return { ...selector, kind: CODEGEN_KIND, target: request.target };
 }
 
 function unreachableSelector(): never {

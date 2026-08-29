@@ -283,7 +283,13 @@ export const mthdsCodegenTool = defineTool({
     // already sets the precedent for its workshop-only uploads.
     title: "Generate typed code for an MTHDS method",
     readOnlyHint: false,
-    destructiveHint: false,
+    // Destructive because regeneration OVERWRITES the stamped files it wrote
+    // before, discarding any hand-edits below the stamp without warning — the
+    // rule SPEC.md states and the inverse of `mthds_download_artifacts`, which
+    // never overwrites (`wx`) and so stays additive. This is the one annotation
+    // a host uses to decide whether to confirm before calling, and it is only
+    // meaningful once `readOnlyHint` is false, as it now is.
+    destructiveHint: true,
     openWorldHint: false,
   },
   async handler(input: MthdsCodegenInput, contexts: ToolContexts) {

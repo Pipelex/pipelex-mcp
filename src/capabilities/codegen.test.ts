@@ -918,6 +918,43 @@ describe("generateMthdsCode report-shape rules", () => {
     }
   });
 
+  it("refuses a response that answers for another target, before anything is written", async () => {
+    const root = await makeTempDir();
+    // Internally consistent — it passes the SDK's own check against its own
+    // lock — but it answers a question nobody asked. Only comparing the echo
+    // against the request catches it, and it must catch it before the write:
+    // otherwise output_dir fills with another language's files, reported current.
+    const wrongTarget: CodegenResponse = { ...recordedReport, target: "python-pydantic" };
+
+    const result = await generateMthdsCode(
+      { files: [{ content: 'domain = "demo"' }], target: "ts-zod", output_dir: "generated" },
+      workshopContext(root, wrongTarget),
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
+    expect(result.structuredContent.errors?.[0]?.message).toContain("python-pydantic");
+    expect(await fs.readdir(root)).toEqual([]);
+  });
+
+  it("refuses a response that answers for another kind, on the riding arm too", async () => {
+    const result = await generateMthdsCode(
+      { files: [{ content: 'domain = "demo"' }], target: "ts-zod" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          async codegen(): Promise<CodegenResponse> {
+            return { ...recordedReport, kind: "pipe" as CodegenValidReport["kind"] };
+          },
+        },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
+    expect(result.structuredContent.errors?.[0]?.message).toContain("kind");
+  });
+
   it("refuses a response whose lock and artifacts disagree, before anything is written", async () => {
     const root = await makeTempDir();
     const tampered: CodegenResponse = {

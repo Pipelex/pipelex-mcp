@@ -7,6 +7,7 @@ import type { CodegenDrift, CodegenTreeFile } from "@pipelex/sdk";
 
 import type { ToolError } from "./shared.js";
 import {
+  checkDeepestExistingAncestor,
   errorMessage,
   isInsideRoot,
   isMissingPathError,
@@ -348,18 +349,31 @@ async function readHead(absolute: string): Promise<string | undefined> {
 }
 
 /**
- * Create an artifact's sub-directory and re-contain it on real paths: `mkdir`
- * through a symlinked component inside the generated directory would otherwise
- * put the file at the link's target. Returns a message on failure, `undefined`
- * on success. No target emits a nested artifact today; this is what keeps that
- * true if one starts to.
+ * Create an artifact's sub-directory, contained on real paths BEFORE anything
+ * is created and again after: `mkdir -p` through a symlinked component inside
+ * the generated directory would otherwise create the missing levels at the
+ * link's target, and a check that ran only afterwards would refuse a write
+ * that had already put directories outside the workspace. That is the same
+ * deepest-existing-ancestor rule `resolveSaveDir` applies to `output_dir`
+ * itself, which is why both call the one routine in `workspace-boundary.ts`.
+ *
+ * Returns a message on failure, `undefined` on success. No target emits a
+ * nested artifact today; this is what keeps that safe if one starts to.
  */
 async function createSubdirectory(dir: string, parent: string): Promise<string | undefined> {
+  const escaped = `the artifact's directory ${path.relative(dir, parent)} resolves outside the generated directory`;
+
+  const ancestor = await checkDeepestExistingAncestor(dir, parent);
+  if (!ancestor.ok) {
+    return ancestor.reason === "escape" ? escaped : errorMessage(ancestor.err);
+  }
+
   try {
     await fs.mkdir(parent, { recursive: true });
+    // Closes the window between the check and the creation.
     const real = await fs.realpath(parent);
     if (!isInsideRoot(dir, real)) {
-      return `the artifact's directory ${path.relative(dir, parent)} resolves outside the generated directory`;
+      return escaped;
     }
     return undefined;
   } catch (err) {
