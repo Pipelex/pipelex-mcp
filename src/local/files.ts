@@ -2,6 +2,11 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import type { FileResolution, FileResolver } from "../capabilities/shared.js";
+import {
+  errorMessage,
+  isInsideRoot,
+  isMissingPathError,
+} from "../capabilities/workspace-boundary.js";
 
 const MTHDS_EXTENSION = ".mthds";
 const INLINE_FALLBACK = "or inline the contents as { content, uri? }.";
@@ -46,7 +51,7 @@ export function localFileResolver(rootDir: string = process.cwd()): FileResolver
       try {
         real = await fs.realpath(target);
       } catch (err) {
-        if (isMissingFileError(err)) {
+        if (isMissingPathError(err)) {
           return failure(
             `File not found: ${submitted}`,
             `Paths are resolved relative to the MCP server's working directory (${rootDir}). Check the path, ${INLINE_FALLBACK}`,
@@ -58,7 +63,7 @@ export function localFileResolver(rootDir: string = process.cwd()): FileResolver
         );
       }
 
-      if (real !== rootReal && !real.startsWith(rootReal + path.sep)) {
+      if (!isInsideRoot(rootReal, real)) {
         return failure(
           `Path resolves outside the server's working directory: ${submitted}`,
           `The local workshop only reads files inside the directory it was started in (${rootDir}). Move the file into the workspace, ${INLINE_FALLBACK}`,
@@ -86,16 +91,4 @@ export function localFileResolver(rootDir: string = process.cwd()): FileResolver
 
 function failure(message: string, hint: string): FileResolution {
   return { ok: false, message, hint };
-}
-
-// ENOENT: the file (or a path component) does not exist. ENOTDIR: a path
-// component that should be a directory is not one — the target equally does
-// not exist at that path.
-function isMissingFileError(err: unknown): boolean {
-  const code = (err as NodeJS.ErrnoException).code;
-  return code === "ENOENT" || code === "ENOTDIR";
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

@@ -12,7 +12,6 @@ import {
   artifactFilename,
   artifactsToolResult,
   downloadMthdsArtifacts,
-  resolveSaveDir,
   validateArtifactsRequest,
 } from "./artifacts.js";
 import type { ArtifactClient, ArtifactsContext } from "./artifacts.js";
@@ -173,62 +172,14 @@ describe("artifactFilename", () => {
     expect(name.length).toBeLessThanOrEqual(128);
     expect(name.endsWith(".png")).toBe(true);
   });
-});
 
-describe("resolveSaveDir", () => {
-  it("defaults to the root itself and creates a nested relative dir inside it", async () => {
-    const root = await makeTempDir();
+  it("still caps a name whose extension alone exceeds the cap", () => {
+    // A cap-length arithmetic that keeps the extension unconditionally hands
+    // `slice` a negative start, which counts from the END and returns a name
+    // LONGER than the cap. The extension is dropped instead.
+    const name = artifactFilename(`pipelex-storage://x/stem.${"z".repeat(300)}`, null, 0);
 
-    const bare = await resolveSaveDir(root, undefined);
-    const nested = await resolveSaveDir(root, "out/run-1");
-
-    expect(bare).toMatchObject({ ok: true });
-    if (!bare.ok) return;
-    expect(bare.dir).toBe(await fs.realpath(root));
-    expect(nested.ok).toBe(true);
-    if (!nested.ok) return;
-    expect(nested.dir).toBe(path.join(await fs.realpath(root), "out", "run-1"));
-    expect((await fs.stat(nested.dir)).isDirectory()).toBe(true);
-  });
-
-  it("refuses a lexical escape without creating anything", async () => {
-    const root = await makeTempDir();
-    const sibling = path.join(path.dirname(root), path.basename(root) + "-escaped");
-
-    const result = await resolveSaveDir(root, `../${path.basename(sibling)}`);
-
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.class).toBe("input_domain");
-    expect(result.error.location).toBe("dir");
-    await expect(fs.stat(sibling)).rejects.toMatchObject({ code: "ENOENT" });
-  });
-
-  it("refuses a symlink inside the workspace that points outside it — before mkdir", async () => {
-    const root = await makeTempDir();
-    const outside = await makeTempDir("pipelex-artifacts-outside-");
-    await fs.symlink(outside, path.join(root, "link"));
-
-    const result = await resolveSaveDir(root, "link/sub");
-
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.location).toBe("dir");
-    expect(result.error.message).toContain("outside");
-    // The escape was caught on the deepest existing ancestor: nothing was
-    // created at the link's target.
-    expect(await fs.readdir(outside)).toEqual([]);
-  });
-
-  it("refuses a dir that is an existing regular file", async () => {
-    const root = await makeTempDir();
-    await fs.writeFile(path.join(root, "notes.txt"), "x", "utf8");
-
-    const result = await resolveSaveDir(root, "notes.txt");
-
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.location).toBe("dir");
+    expect(name.length).toBeLessThanOrEqual(128);
   });
 });
 
