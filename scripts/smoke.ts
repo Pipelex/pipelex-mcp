@@ -406,6 +406,94 @@ async function checkInputsTemplate(client: Client): Promise<void> {
   );
 }
 
+async function checkCodegen(client: Client): Promise<void> {
+  section("mthds_codegen");
+
+  let result: ToolCallResult;
+  try {
+    result = await callTool(client, "mthds_codegen", {
+      files: [{ content: VALID_BUNDLE, uri: VALID_BUNDLE_URI }],
+      target: "ts-zod",
+    });
+  } catch (err) {
+    fail("mthds_codegen call", errorMessage(err));
+    return;
+  }
+
+  if (result.isError === true) {
+    reportToolFailure("mthds_codegen verdict", result);
+    return;
+  }
+
+  const structured = result.structuredContent;
+  if (!isRecord(structured)) {
+    fail("structuredContent", `expected an object, got ${describe(structured)}`);
+    return;
+  }
+
+  expect(structured.status === "ok", "status", `expected "ok", got ${describe(structured.status)}`);
+  expect(
+    structured.is_valid === true,
+    "is_valid",
+    `the canonical bundle produced no artifacts: ${describe(structured.validation_errors)}`,
+  );
+  expect(
+    structured.target === "ts-zod",
+    "target",
+    `expected the requested target echoed, got ${describe(structured.target)}`,
+  );
+
+  const artifacts = structured.artifacts;
+  if (
+    expect(
+      Array.isArray(artifacts),
+      "artifacts",
+      `expected an array, got ${describe(artifacts)}`,
+      `${Array.isArray(artifacts) ? artifacts.length : 0} artifact(s)`,
+    )
+  ) {
+    const paths = (artifacts as unknown[])
+      .map((artifact) => (isRecord(artifact) ? artifact.path : undefined))
+      .sort();
+    expect(
+      JSON.stringify(paths) === JSON.stringify(["binder.ts", "types.ts"]),
+      "artifact paths",
+      `expected binder.ts and types.ts, got ${describe(paths)}`,
+      "types.ts + binder.ts",
+    );
+    const withContent = (artifacts as unknown[]).every(
+      (artifact) =>
+        isRecord(artifact) && typeof artifact.content === "string" && artifact.content !== "",
+    );
+    expect(
+      withContent && structured.truncated === false,
+      "artifact content",
+      `a small method must ride whole: truncated=${describe(structured.truncated)}`,
+      "every artifact carries its content",
+    );
+  }
+
+  const lock = structured.lock;
+  if (expect(isRecord(lock), "lock", `expected an object, got ${describe(lock)}`)) {
+    expect(
+      (lock as Record<string, unknown>).filename === "codegen.lock",
+      "lock.filename",
+      `expected codegen.lock, got ${describe((lock as Record<string, unknown>).filename)}`,
+    );
+    expect(
+      typeof (lock as Record<string, unknown>).content === "string",
+      "lock.content",
+      "the lock content is missing",
+    );
+  }
+
+  expect(
+    result._meta === undefined,
+    "no _meta",
+    `a plain tool must carry nothing on _meta, got ${describe(result._meta)}`,
+  );
+}
+
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -461,7 +549,12 @@ async function main(): Promise<void> {
     pass("initialize", `${info?.name ?? "unknown"} ${info?.version ?? "?"}`);
 
     const advertised = (await client.listTools()).tools.map((tool) => tool.name);
-    const required = ["mthds_list_methods", "mthds_validate", "mthds_inputs_template"];
+    const required = [
+      "mthds_list_methods",
+      "mthds_validate",
+      "mthds_inputs_template",
+      "mthds_codegen",
+    ];
     const missing = required.filter((name) => !advertised.includes(name));
     expect(
       missing.length === 0,
@@ -474,6 +567,7 @@ async function main(): Promise<void> {
       await checkListMethods(client);
       await checkValidate(client);
       await checkInputsTemplate(client);
+      await checkCodegen(client);
     }
   } catch (err) {
     fail("smoke run", errorMessage(err));

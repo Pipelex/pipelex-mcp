@@ -593,6 +593,54 @@ describe("classifyError", () => {
     expect(error.retryable).toBe(false);
   });
 
+  it("uses the route's forbidden texture on a 403, keeping the auth locator", () => {
+    const error = classifyError(
+      new ApiResponseError(
+        "HTTP 403",
+        `${DEFAULT_API_URL}/v1/codegen`,
+        403,
+        "Forbidden",
+        "{}",
+        "forbidden",
+        "Feature not enabled",
+        undefined, // validationErrors
+        undefined, // code
+      ),
+      {
+        auth: { location: "authorization", hint: "Sign in again." },
+        forbidden: { hint: "Sign in again. If that is fine, the feature is gated." },
+      },
+    );
+
+    expect(error.class).toBe("config");
+    expect(error.location).toBe("authorization");
+    expect(error.hint).toBe("Sign in again. If that is fine, the feature is gated.");
+    expect(error.retryable).toBe(false);
+  });
+
+  it("never applies the forbidden texture to a 401 — a rejected credential is not a gate", () => {
+    const error = classifyError(
+      new ApiResponseError(
+        "HTTP 401",
+        `${DEFAULT_API_URL}/v1/codegen`,
+        401,
+        "Unauthorized",
+        "{}",
+        "unauthorized",
+        "Missing key",
+        undefined, // validationErrors
+        undefined, // code
+      ),
+      {
+        auth: { location: "authorization", hint: "Sign in again." },
+        forbidden: { hint: "The feature is gated." },
+      },
+    );
+
+    expect(error.location).toBe("authorization");
+    expect(error.hint).toBe("Sign in again.");
+  });
+
   it("keeps the env-var auth texture when no override is provided", () => {
     const error = classifyError(new ClientAuthenticationError("Unauthorized"));
 

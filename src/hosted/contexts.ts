@@ -81,6 +81,7 @@ function overrideContexts(
     catalog: { ...base.catalog, apiKey, authError },
     validation: { ...base.validation, apiKey, authError },
     inputs: { ...base.inputs, apiKey, authError },
+    codegen: { ...base.codegen, apiKey, authError },
     prepare: { ...base.prepare, apiKey, authError },
     run: { ...base.run, apiKey, authError },
     // The attachment ingest uploads to Pipelex storage, so the signed-in

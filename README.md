@@ -47,6 +47,7 @@ contracts — with one documented exception per shell, marked below:
 | `mthds_list_methods` | List the active API key's organization catalog as bounded names, descriptions, and canonical ids — never method source or stored inputs/outputs. |
 | `mthds_validate` | Validate submitted `.mthds` files, or a registered method by catalog id; on a valid verdict, ship the dry-run method graph to the `run-graph` view (hosted only). |
 | `mthds_inputs_template` | Project a pipe's declared inputs as a fill-in template for a run. |
+| `mthds_codegen` | Generate typed code for a method's concepts — TypeScript (`ts-zod`) or Python (`python-pydantic`, `python-structures`) — stamped and locked, to write verbatim into the project. |
 | `mthds_prepare_inputs` | Turn filled inputs run-ready: upload file-bearing values to Pipelex storage and rewrite them to `pipelex-storage://` (workshop uploads; console is pass-through only). |
 | `mthds_upload_attachments` | **Hosted console only.** Turn a file the user attached in the chat into a run-ready `pipelex-storage://` reference (ChatGPT only — see [Chat attachments](#chat-attachments-chatgpt-only)). |
 | `mthds_run` | Start a durable run on the hosted Pipelex API; returns a durable `run_id` immediately. |
@@ -167,7 +168,7 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }
 - `PIPELEX_API_KEY` — a `plx_sk_` platform key. Required for
   `mthds_list_methods` because the returned catalog is the key's active,
   workspace-shared organization catalog. Optional for `mthds_validate` /
-  `mthds_inputs_template` calls that submit `files` against a key-less API;
+  `mthds_inputs_template` / `mthds_codegen` calls that submit `files` against a key-less API;
   effectively required for the run family and for any `method_id` call on any
   tool, since the catalog is org-scoped (a missing/invalid key is a `config`
   no-verdict).
@@ -454,6 +455,50 @@ published method by address, resolved server-side on the build envelope;
 API key, since the catalog is org-scoped). No Skybridge view — the template is
 small structured data the model reads directly, and the `content` summary repeats
 it in a fenced block.
+
+### `mthds_codegen`
+
+```ts
+// input — exactly ONE of files / method_ref / method_id, plus the required target
+{
+  files?: SubmittedFileInput[];
+  method_ref?: string;         // published method address — github.com/<owner>/<repo>[/<selector>][@<tag>]
+  method_id?: string;          // catalog id (mt_…) of a registered method
+  target: "ts-zod" | "python-pydantic" | "python-structures";
+}
+
+// structuredContent
+{
+  status: "ok" | "error";
+  is_valid: boolean;
+  target?: "ts-zod" | "python-pydantic" | "python-structures";
+  kind?: "types";
+  crate_fingerprint?: string;
+  engine_version?: string;
+  artifacts?: Array<{ path: string; bytes: number; content?: string }>;
+  lock?: { filename: string; bytes: number; content?: string };
+  truncated?: boolean;
+  validation_errors?: unknown[];
+  errors?: ToolError[];
+}
+```
+
+Projects the method's concept set into typed models through the Pipelex codegen
+engine (`POST /v1/codegen`). `target` is required and has no default — the tool
+description carries the decision rule, so the assistant picks it from the
+project (the user's explicit request wins): `ts-zod` for a TypeScript or
+JavaScript project (`types.ts` with zod schemas and inferred types, plus
+`binder.ts` with a parse/serialize pair per concept — keep both),
+`python-pydantic` for a Python consumer with no Pipelex runtime (`models.py`),
+`python-structures` for a Pipelex host or a `@pipe_func` implementation
+(`structures.py`). Field keys stay snake_case in every target. The three
+selectors are server pass-throughs — no bundle enters the conversation. Write
+every artifact at its path and the lock as `codegen.lock` beside them,
+**verbatim**, into a dedicated generated directory; `pipelex codegen check` (or
+`runCodegenCheck` from `@pipelex/sdk`) then passes on that tree. The `content`
+summary repeats each file in a fenced block tagged for its language. A large
+set is withheld by whole file rather than cut (`truncated: true`, `content`
+absent on the withheld entries). No Skybridge view.
 
 ### `mthds_prepare_inputs`
 

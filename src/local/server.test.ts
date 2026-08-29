@@ -7,6 +7,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type {
+  CodegenResponse,
   MethodPage,
   MthdsFile,
   PipelexValidationReport,
@@ -15,6 +16,7 @@ import type {
 import type { OAuthConfig } from "skybridge/server";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { CODEGEN_TARGETS } from "../capabilities/codegen.js";
 import { createHostedServer } from "../hosted/server.js";
 import {
   buildToolContexts,
@@ -163,6 +165,88 @@ describe("local stdio server", () => {
       expect(result._meta).toBeUndefined();
     } finally {
       await close();
+    }
+  });
+
+  it("registers mthds_codegen on both shells with the target enum, no view, and no default", async () => {
+    const hostedTools = await listTools(createHostedServer(TEST_OAUTH));
+    const localTools = await listTools(createLocalServer());
+    const hosted = hostedTools.find((tool) => tool.name === "mthds_codegen");
+    const local = localTools.find((tool) => tool.name === "mthds_codegen");
+    const schema = hosted?.inputSchema as {
+      required?: string[];
+      properties?: { target?: { enum?: string[]; default?: unknown } };
+    };
+
+    expect(local).toBeDefined();
+    // `target` is the one required field and carries no default: choosing the
+    // language is the tool's whole point, and a default would pick one silently.
+    expect(schema.required).toEqual(["target"]);
+    expect(schema.properties?.target?.enum).toEqual([...CODEGEN_TARGETS]);
+    expect(schema.properties?.target).not.toHaveProperty("default");
+    expect(Object.keys(schema.properties ?? {}).sort()).toEqual([
+      "files",
+      "method_id",
+      "method_ref",
+      "target",
+    ]);
+    // Plain tool on both shells: invocation strings for the console, no view.
+    expect(hosted?._meta).toMatchObject({
+      "openai/toolInvocation/invoking": "Generating typed code for the method...",
+      "openai/toolInvocation/invoked": "Typed code generated.",
+    });
+    expect(hosted?._meta).not.toHaveProperty("ui/resourceUri");
+    expect(hosted?.annotations).toMatchObject({
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+    });
+  });
+
+  it("dispatches mthds_codegen through the workshop with the artifacts on content and nothing on _meta", async () => {
+    const contexts = buildLocalToolContexts({ PIPELEX_API_KEY: "plx_sk_test" });
+    contexts.codegen.client = {
+      async codegen(): Promise<CodegenResponse> {
+        return codegenReport;
+      },
+    };
+
+    const { client, close } = await connectClient(createLocalServer({ contexts }));
+    try {
+      const result = await client.callTool({
+        name: "mthds_codegen",
+        arguments: { files: [{ content: 'domain = "demo"' }], target: "ts-zod" },
+      });
+
+      expect(result.structuredContent).toMatchObject({
+        status: "ok",
+        is_valid: true,
+        target: "ts-zod",
+        artifacts: [{ path: "types.ts", content: "// stamped\n" }],
+        lock: { filename: "codegen.lock", content: "lock_version = 1\n" },
+        truncated: false,
+      });
+      expect(result._meta).toBeUndefined();
+      const text = (result.content as Array<{ type: string; text: string }>)[0]?.text ?? "";
+      expect(text).toContain("```ts\n// stamped\n```");
+      expect(text).toContain("```toml\nlock_version = 1\n```");
+    } finally {
+      await close();
+    }
+  });
+
+  it("advertises codegen in both shells' instructions", async () => {
+    const { client: hosted, close: closeHosted } = await connectClient(
+      createHostedServer(TEST_OAUTH),
+    );
+    const { client: local, close: closeLocal } = await connectClient(createLocalServer());
+
+    try {
+      expect(hosted.getInstructions()).toContain("mthds_codegen");
+      expect(local.getInstructions()).toContain("mthds_codegen");
+    } finally {
+      await closeHosted();
+      await closeLocal();
     }
   });
 
@@ -376,6 +460,18 @@ const validReport: PipelexValidationReport = {
   is_runnable: true,
   message: "ok",
   rendered_markdown: "# Valid",
+};
+
+const codegenReport: CodegenResponse = {
+  is_valid: true,
+  kind: "types",
+  target: "ts-zod",
+  crate_fingerprint: "crate-abc",
+  engine_version: "0.20.0",
+  artifacts: [{ path: "types.ts", content: "// stamped\n" }],
+  lock: "lock_version = 1\n",
+  lock_filename: "codegen.lock",
+  message: "Generated.",
 };
 
 const catalogMethod: MethodPage["items"][number] = {

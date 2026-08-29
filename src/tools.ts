@@ -31,6 +31,15 @@ import {
 } from "./capabilities/catalog.js";
 import type { CatalogContext, MthdsListMethodsInput } from "./capabilities/catalog.js";
 import {
+  CODEGEN_TARGET_RULE,
+  buildCodegenContext,
+  codegenToolResult,
+  generateMthdsCode,
+  mthdsCodegenInputSchema,
+  mthdsCodegenOutputSchema,
+} from "./capabilities/codegen.js";
+import type { CodegenContext, MthdsCodegenInput } from "./capabilities/codegen.js";
+import {
   buildInputsContext,
   buildMthdsInputs,
   inputsToolResult,
@@ -84,6 +93,7 @@ export interface ToolContexts {
   catalog: CatalogContext;
   validation: ValidationContext;
   inputs: InputsContext;
+  codegen: CodegenContext;
   prepare: PrepareContext;
   run: RunContext;
   /** Consumed by the console-only mthds_upload_attachments; built on both shells so one builder serves both. */
@@ -123,6 +133,10 @@ export function buildToolContexts(options: ToolContextOptions = {}): ToolContext
     },
     inputs: {
       ...buildInputsContext(env),
+      resolver,
+    },
+    codegen: {
+      ...buildCodegenContext(env),
       resolver,
     },
     prepare: {
@@ -233,6 +247,39 @@ export const mthdsInputsTemplateTool = defineTool({
   },
   async handler(input: MthdsInputsInput, contexts: ToolContexts) {
     return inputsToolResult(await buildMthdsInputs(input, contexts.inputs));
+  },
+});
+
+/**
+ * The description carries the language decision rule on purpose: tool
+ * descriptions are the one channel that reaches every host, and picking the
+ * target is the judgment this tool asks of the model — `target` has no
+ * default, since a default would silently pick a language. The rule is
+ * derived from the per-target profiles in `capabilities/codegen.ts`, so a
+ * target the SDK gains cannot be added there without being described here.
+ */
+const CODEGEN_DESCRIPTION = [
+  "Generate typed code for an MTHDS method: its concept set projected into typed models (kind types) by the Pipelex codegen engine, stamped and locked so the written tree can be checked offline.",
+  "Supply exactly ONE of files / method_ref (a published method's address, github.com/<owner>/<repo>[/<selector>][@<tag>]) / method_id (a registered method's mt_… catalog id) — never several. Addresses and ids are resolved server-side, so no bundle enters the conversation; a by-id call generates from the method's CURRENT stored content and requires an API key, since the catalog is org-scoped.",
+  `target is required and has no default — choose it from the context, and the user's explicit request wins: ${CODEGEN_TARGET_RULE}.`,
+  "Field keys stay snake_case in every target.",
+  "Write every returned artifact at its path and the lock as codegen.lock beside them, all VERBATIM (byte for byte — any change breaks the stamp and the lock), into a dedicated generated directory; `pipelex codegen check` and @pipelex/sdk's runCodegenCheck then pass on that tree.",
+  "A large artifact set is withheld for size rather than cut mid-file (truncated: true, content absent on the withheld files) — generate such a method locally with `pipelex codegen types`.",
+].join(" ");
+
+export const mthdsCodegenTool = defineTool({
+  name: "mthds_codegen",
+  description: CODEGEN_DESCRIPTION,
+  inputSchema: mthdsCodegenInputSchema,
+  outputSchema: mthdsCodegenOutputSchema,
+  annotations: {
+    title: "Generate typed code for an MTHDS method",
+    readOnlyHint: true,
+    destructiveHint: false,
+    openWorldHint: false,
+  },
+  async handler(input: MthdsCodegenInput, contexts: ToolContexts) {
+    return codegenToolResult(await generateMthdsCode(input, contexts.codegen));
   },
 });
 
@@ -390,6 +437,7 @@ export const toolDefinitions = [
   mthdsListMethodsTool,
   mthdsValidateTool,
   mthdsInputsTemplateTool,
+  mthdsCodegenTool,
   mthdsPrepareInputsTool,
   mthdsRunTool,
   mthdsRunStatusTool,

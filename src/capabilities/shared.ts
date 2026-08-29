@@ -310,7 +310,7 @@ export interface MethodSelectors {
  * Method Selectors):
  *
  * - `"one_selector"` — the tooling tools (`mthds_validate`,
- *   `mthds_inputs_template`, `mthds_prepare_inputs`): exactly one of files /
+ *   `mthds_inputs_template`, `mthds_prepare_inputs`, `mthds_codegen`): exactly one of files /
  *   `method_ref` / `method_id`. Stateless operations have no Run row, so
  *   "linkage" has no referent and an extra selector could only be ignored —
  *   the worst contract of the three.
@@ -581,6 +581,18 @@ export interface ClassifyErrorOptions {
     hint: string;
   };
   /**
+   * Per-route hint override for a 403 specifically. The generic 401/403 arm
+   * says "check your credential", which is right for a rejected key or an
+   * expired session and wrong for a route a deployment gates beyond
+   * authentication — the hosted `/v1/codegen` sits behind a feature flag as
+   * well as a plan, so a caller whose credential is perfectly valid can still
+   * be refused. A route that knows this composes the deployment's auth wording
+   * with the gate's; the locator stays the auth one. A 401 never reads it.
+   */
+  forbidden?: {
+    hint: string;
+  };
+  /**
    * Per-route texture for a refused or unreadable asset on the upload leg.
    * `location` covers both arms (`RejectedAssetError` /
    * `InvalidLocalSourceError`) and defaults to `inputs` — right for
@@ -603,6 +615,9 @@ const DEFAULT_BAD_REQUEST: NonNullable<ClassifyErrorOptions["badRequest"]> = {
   location: "files",
   hint: "Check the submitted file contents and provenance fields.",
 };
+
+/** The env-var auth wording a 401/403 carries when no deployment texture overrides it. */
+export const DEFAULT_AUTH_HINT = "Check PIPELEX_API_KEY for the configured API.";
 
 export function classifyError(err: unknown, options: ClassifyErrorOptions = {}): ToolError {
   if (err instanceof ApiUnreachableError) {
@@ -899,7 +914,10 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
       class: "config",
       location: options.auth?.location ?? "PIPELEX_API_KEY",
       message,
-      hint: options.auth?.hint ?? "Check PIPELEX_API_KEY for the configured API.",
+      hint:
+        err.status === 403 && options.forbidden !== undefined
+          ? options.forbidden.hint
+          : (options.auth?.hint ?? DEFAULT_AUTH_HINT),
       retryable: false,
     };
   }
