@@ -14,6 +14,7 @@ import type { MthdsFileItem } from "@pipelex/sdk";
 import {
   buildApiConfig,
   classifyError,
+  collectStorageUris,
   DEFAULT_API_URL,
   fetchMethodFiles,
   filesInputSchema,
@@ -23,6 +24,37 @@ import {
   validateMethodSelectorRequest,
   validateRunIdRequest,
 } from "./shared.js";
+
+describe("collectStorageUris", () => {
+  it("finds every pipelex-storage:// string in a JSON-shaped value, once each, in discovery order", () => {
+    const value = {
+      image: { url: "pipelex-storage://a/one.png", public_url: "https://signed.example/one.png" },
+      pages: [
+        { url: "pipelex-storage://a/one.png" },
+        { deeper: { url: "pipelex-storage://b/two.pdf" } },
+        "pipelex-storage://c/three",
+      ],
+      text: "not a reference",
+      count: 3,
+      nothing: null,
+    };
+
+    expect(collectStorageUris(value)).toEqual([
+      "pipelex-storage://a/one.png",
+      "pipelex-storage://b/two.pdf",
+      "pipelex-storage://c/three",
+    ]);
+  });
+
+  it("ignores the bare scheme, other schemes, and non-JSON values", () => {
+    expect(collectStorageUris("pipelex-storage://")).toEqual([]);
+    expect(collectStorageUris(["https://example.com/x.png", "data:image/png;base64,AAAA"])).toEqual(
+      [],
+    );
+    expect(collectStorageUris(undefined)).toEqual([]);
+    expect(collectStorageUris(42)).toEqual([]);
+  });
+});
 import type { ErrorSummaries, FileResolver, MethodFetchClient, ToolError } from "./shared.js";
 
 describe("buildApiConfig", () => {

@@ -4,6 +4,14 @@ import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/ser
 import pkg from "../package.json" with { type: "json" };
 
 import {
+  artifactsToolResult,
+  buildArtifactsContext,
+  downloadMthdsArtifacts,
+  mthdsDownloadArtifactsInputSchema,
+  mthdsDownloadArtifactsOutputSchema,
+} from "./capabilities/artifacts.js";
+import type { ArtifactsContext, MthdsDownloadArtifactsInput } from "./capabilities/artifacts.js";
+import {
   attachmentsToolResult,
   buildAttachmentsContext,
   mthdsUploadAttachmentsInputSchema,
@@ -80,6 +88,8 @@ export interface ToolContexts {
   run: RunContext;
   /** Consumed by the console-only mthds_upload_attachments; built on both shells so one builder serves both. */
   attachments: AttachmentsContext;
+  /** Consumed by the workshop-only mthds_download_artifacts; built on both shells so one builder serves both. */
+  artifacts: ArtifactsContext;
 }
 
 interface ToolContextOptions {
@@ -88,6 +98,12 @@ interface ToolContextOptions {
   viewsAvailable?: boolean;
   /** The per-deployment asset boundary for mthds_prepare_inputs (workshop uploads; console pass-through only). */
   allowUpload?: boolean;
+  /**
+   * The directory mthds_download_artifacts saves under — the workshop's
+   * working directory. Absent on the console, which registers no such tool
+   * and never writes a file.
+   */
+  artifactsRoot?: string;
 }
 
 /** Build one capability-context set for either deployment shell. */
@@ -96,6 +112,7 @@ export function buildToolContexts(options: ToolContextOptions = {}): ToolContext
   const resolver = options.resolver;
   const viewsAvailable = options.viewsAvailable ?? true;
   const allowUpload = options.allowUpload ?? false;
+  const artifactsRoot = options.artifactsRoot;
 
   return {
     catalog: buildCatalogContext(env),
@@ -117,8 +134,14 @@ export function buildToolContexts(options: ToolContextOptions = {}): ToolContext
       ...buildRunContext(env),
       resolver,
       viewsAvailable,
+      // The results summary names the download tool only where it exists.
+      artifactDownloadAvailable: artifactsRoot !== undefined,
     },
     attachments: buildAttachmentsContext(env),
+    artifacts: {
+      ...buildArtifactsContext(env),
+      ...(artifactsRoot === undefined ? {} : { saveRoot: artifactsRoot }),
+    },
   };
 }
 
@@ -340,6 +363,28 @@ export const mthdsUploadAttachmentsTool = defineTool({
   },
 });
 
+export const mthdsDownloadArtifactsTool = defineTool({
+  name: "mthds_download_artifacts",
+  description:
+    "Save the files a completed MTHDS run produced (images, PDFs, documents — anything its main output references as a pipelex-storage:// URI) to disk, under the directory this server was started in. " +
+    "Pass the run id from mthds_run; each reference is resolved to a fresh download link through the Pipelex API, so this works days after the run, unlike the presigned public_url links in mthds_run_results, which expire within the hour. " +
+    "Call it once the run is COMPLETED (a running run has nothing to save yet; a failed run produces no files). " +
+    "Optionally pass dir, a subdirectory relative to the working directory, to save into (created if missing). " +
+    "Existing files are never overwritten — a name collision gets a numeric suffix. Report the saved paths to the user.",
+  inputSchema: mthdsDownloadArtifactsInputSchema,
+  outputSchema: mthdsDownloadArtifactsOutputSchema,
+  annotations: {
+    title: "Save MTHDS run artifacts to disk",
+    // It writes files under the working directory.
+    readOnlyHint: false,
+    destructiveHint: false,
+    openWorldHint: false,
+  },
+  async handler(input: MthdsDownloadArtifactsInput, contexts: ToolContexts) {
+    return artifactsToolResult(await downloadMthdsArtifacts(input, contexts.artifacts));
+  },
+});
+
 /** The cross-shell MCP contract, in registration order. Both shells register all of these. */
 export const toolDefinitions = [
   mthdsListMethodsTool,
@@ -370,4 +415,23 @@ export const toolDefinitions = [
  */
 export const consoleOnlyToolDefinitions = [mthdsUploadAttachmentsTool] as const;
 
-export type AnyToolDefinition = (typeof toolDefinitions)[number];
+/**
+ * Tools the local workshop registers and the hosted console does not — the
+ * mirror image of {@link consoleOnlyToolDefinitions}, for the same reason
+ * inverted.
+ *
+ * `mthds_download_artifacts` writes a run's produced files to disk under the
+ * server's working directory. The console has no working directory and never
+ * writes a file (its users download run outputs from the app's UI), so there
+ * the tool would be *structurally unreachable*: nothing could ever give it a
+ * place to save. Registering it would spend every console user's tokens on
+ * every `tools/list` advertising a capability that cannot fire.
+ *
+ * The invariant that still holds: no tool NAME means different things on the
+ * two shells. One definition per tool, one registration site per shell.
+ */
+export const workshopOnlyToolDefinitions = [mthdsDownloadArtifactsTool] as const;
+
+export type AnyToolDefinition =
+  | (typeof toolDefinitions)[number]
+  | (typeof workshopOnlyToolDefinitions)[number];

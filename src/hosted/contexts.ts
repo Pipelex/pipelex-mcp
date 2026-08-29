@@ -86,5 +86,9 @@ function overrideContexts(
     // The attachment ingest uploads to Pipelex storage, so the signed-in
     // caller's own identity is what funds it — the console holds no key.
     attachments: { ...base.attachments, apiKey, authError },
+    // The console never registers mthds_download_artifacts (it has no working
+    // directory to save into); the override is kept for uniformity so every
+    // context in the set carries the caller's identity, never a server key.
+    artifacts: { ...base.artifacts, apiKey, authError },
   };
 }

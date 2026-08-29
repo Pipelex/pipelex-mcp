@@ -43,7 +43,7 @@ export const mthdsPrepareInputsInputSchema = {
     .string()
     .optional()
     .describe(
-      "The pipe whose declared signature identifies the file-bearing inputs, as a qualified domain.pipe_code. Omit to default to the closure's main_pipe.",
+      "The pipe whose declared signature identifies the file-bearing inputs, as a qualified domain.pipe_code — the same value mthds_run takes as pipe_code and mthds_inputs_template as pipe_ref. Omit to default to the closure's main_pipe.",
     ),
   inputs: z
     .record(z.string(), z.unknown())

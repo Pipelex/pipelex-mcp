@@ -383,6 +383,40 @@ describe("resultsResult", () => {
     expect(result.mainStuff).toBeUndefined();
   });
 
+  it("names mthds_download_artifacts in the summary only where the tool exists and files were produced", () => {
+    const withFiles = {
+      state: "completed" as const,
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: {
+          url: "pipelex-storage://runs/x/illustration.png",
+          public_url: "https://signed.example/illustration.png?X-Amz-Expires=3600",
+        },
+      },
+    };
+    const withoutFiles = {
+      ...withFiles,
+      result: { pipeline_run_id: RUN_ID, main_stuff: { answer: 42 } },
+    };
+
+    // The workshop: files produced → the nudge, with the expiry stated.
+    const workshop = resultsResult(withFiles, false, true);
+    expect(workshop.summary).toContain("mthds_download_artifacts");
+    expect(workshop.summary).toContain("1 stored file(s)");
+    expect(workshop.summary).toContain("expire");
+    // The nudge is prose only — the structured contract is untouched.
+    expect(workshop.structuredContent).not.toHaveProperty("artifacts");
+
+    // The workshop, nothing produced → silent.
+    expect(resultsResult(withoutFiles, false, true).summary).not.toContain(
+      "mthds_download_artifacts",
+    );
+    // The console has no such tool → silent even with files.
+    expect(resultsResult(withFiles, true, false).summary).not.toContain("mthds_download_artifacts");
+    expect(resultsResult(withFiles).summary).not.toContain("mthds_download_artifacts");
+  });
+
   it("projects a completed run and carries graph + full output off structuredContent", () => {
     const mainStuff = { answer: 42, items: ["a", "b"] };
     const graphSpec = { nodes: [{ id: "demo.main" }] };

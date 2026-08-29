@@ -40,7 +40,7 @@ register](#local-workshop-install--register), and which server belongs on which
 host is the [Host → server matrix](#host--server-matrix).
 
 Both servers register the same MCP tools, with identical names, schemas, and
-contracts — with one documented exception, marked below:
+contracts — with one documented exception per shell, marked below:
 
 | Tool | What it does |
 |---|---|
@@ -52,12 +52,15 @@ contracts — with one documented exception, marked below:
 | `mthds_run` | Start a durable run on the hosted Pipelex API; returns a durable `run_id` immediately. |
 | `mthds_run_status` | Check a durable run's coarse lifecycle state by `run_id`. |
 | `mthds_run_results` | Fetch a durable run's terminal outcome by `run_id`. |
+| `mthds_download_artifacts` | **Local workshop only.** Save the files a completed run produced (images, PDFs, documents) under the directory the server was started in — see [Saving run artifacts](#saving-run-artifacts-local-workshop-only). |
 
-`mthds_upload_attachments` is the exception: its sole argument is a
+The two exceptions mirror each other. `mthds_upload_attachments` takes a
 host-substituted attachment reference, and the host gates that substitution on
 the declared JSON Schema, so on the workshop the tool would be *structurally
-unreachable* rather than merely unused. The invariant that still holds is that
-**no tool name means different things on the two shells.**
+unreachable* rather than merely unused. `mthds_download_artifacts` writes files
+under the server's working directory, which the console does not have — its
+users download run outputs from the app's UI. The invariant that still holds is
+that **no tool name means different things on the two shells.**
 
 `SPEC.md` is the source of truth for the full tool contracts, verdict
 discipline, and view behavior. This README covers what you need to install,
@@ -554,6 +557,50 @@ state lives behind the durable `run_id` on the platform, so the flow survives
 conversation gaps — days later, the same id still answers. On the hosted console,
 `mthds_run` ships the `run-follow` live-status view; on the workshop these are
 plain tools. See `SPEC.md` → "Run Scope" for the full contract.
+
+The pipe selector is `pipe_code` here and `pipe_ref` on `mthds_inputs_template`
+/ `mthds_prepare_inputs` — the same qualified `domain.pipe_code` value under the
+name each underlying route uses; each description names the other, so copying
+the value across the two calls is expected.
+
+### Saving run artifacts (local workshop only)
+
+`mthds_download_artifacts` is the download counterpart of `mthds_prepare_inputs`:
+where prepare pushes local files *into* Pipelex storage, this brings a run's
+produced files back *out*, onto disk.
+
+```ts
+// input
+{
+  run_id: string;   // the durable run id from mthds_run
+  dir?: string;     // where to save, relative to the server's working directory (created if missing; must stay inside it)
+}
+
+// structuredContent (state = "completed")
+{
+  status: "ok";
+  run_id: string;
+  state: "completed";
+  artifacts: Array<{ uri: string; path?: string; content_type?: string | null; size?: number; error?: ToolError }>;
+  saved_paths: string[];   // relative to the working directory
+  all_saved: boolean;      // every referenced file saved
+}
+```
+
+A completed run's results carry a produced image, PDF or document with a
+`pipelex-storage://` reference beside a presigned `public_url` that expires
+within the hour. Pass the run id here instead of racing that link: every
+reference in the run's full output is resolved to a *fresh* link through the
+API and streamed into a file under the working directory — so the same call
+still works days later. Filenames come from the storage key, sanitized; files
+are **never overwritten** (a collision gets a numeric suffix); `dir` cannot
+escape the working directory (no absolute paths, no `..`, no symlink out). A
+`running` or `failed` run is a produced verdict with nothing to save; partial
+success is a produced verdict with the failures on their items. On the
+workshop, a `mthds_run_results` summary whose output references stored files
+names this tool. See `SPEC.md` → "Artifact Download Scope" for the full
+contract and the reasoning behind a companion tool rather than a flag on
+`mthds_run_results`.
 
 ### Success and verdict discipline
 
