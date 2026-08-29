@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { ApiResponseError, ApiUnreachableError, MissingMainStuffError } from "@pipelex/sdk";
 import type {
+  MethodProvenance,
   RunRead,
   RunResults,
   RunResultStart,
@@ -218,6 +219,52 @@ describe("startResult", () => {
     expect(result.summary).toContain("mthds_run_status");
     expect(result.summary).toContain("mthds_run_results");
     expect(result.summary).toContain("## Views");
+  });
+
+  it("projects method_provenance and narrates the resolved snapshot", () => {
+    const result = startResult({
+      pipeline_run_id: RUN_ID,
+      method_provenance: {
+        address: "github.com/Pipelex/methods/documents",
+        tag: "v0.1.0",
+        commit_sha: "abc123def456",
+      },
+    });
+
+    expect(result.structuredContent.method_provenance).toEqual({
+      address: "github.com/Pipelex/methods/documents",
+      tag: "v0.1.0",
+      commit_sha: "abc123def456",
+    });
+    expect(result.summary).toContain("github.com/Pipelex/methods/documents");
+    expect(result.summary).toContain("v0.1.0");
+    expect(result.summary).toContain("abc123def456");
+  });
+
+  it("narrates a tagless resolution without inventing a tag", () => {
+    const result = startResult({
+      pipeline_run_id: RUN_ID,
+      method_provenance: {
+        address: "github.com/Pipelex/methods/documents",
+        tag: null,
+        commit_sha: "abc123def456",
+      },
+    });
+
+    expect(result.structuredContent.method_provenance?.tag).toBeNull();
+    expect(result.summary).not.toContain("at tag");
+  });
+
+  it("drops a malformed method_provenance extension instead of guessing", () => {
+    const result = startResult({
+      pipeline_run_id: RUN_ID,
+      method_provenance: {
+        address: "github.com/x/y",
+        commit_sha: 42,
+      } as unknown as MethodProvenance,
+    });
+
+    expect(result.structuredContent).not.toHaveProperty("method_provenance");
   });
 
   it("tolerates a bare protocol ack with no extensions", () => {
@@ -845,6 +892,100 @@ describe("startMthdsRun", () => {
   });
 });
 
+describe("startMthdsRun by method_ref", () => {
+  const ADDRESS = "github.com/Pipelex/methods/documents@v0.1.0";
+
+  it("forwards method_ref as the run source, with no contents and no linkage id", async () => {
+    let seen: PipelexStartOptions | undefined;
+    const context = contextWith({
+      start: (options: PipelexStartOptions) => {
+        seen = options;
+        return Promise.resolve({ pipeline_run_id: RUN_ID });
+      },
+    });
+
+    const result = await startMthdsRun({ method_ref: ADDRESS, inputs: { q: "why?" } }, context);
+
+    expect(seen).toEqual({ inputs: { q: "why?" }, method_ref: ADDRESS });
+    expect(result.structuredContent.status).toBe("ok");
+  });
+
+  it("rejects files beside method_ref without calling the client", async () => {
+    const result = await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }], method_ref: ADDRESS },
+      contextWith({}),
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+  });
+
+  it("rejects method_ref beside method_id without calling the client", async () => {
+    const result = await startMthdsRun(
+      { method_ref: ADDRESS, method_id: "mt_abc123" },
+      contextWith({}),
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
+    expect(result.structuredContent.errors?.[0]?.message).toContain("provenance");
+  });
+
+  it("classifies a structures refusal (403 MethodStructuresRefusedError) at method_ref", async () => {
+    const context = contextWith({
+      start: () =>
+        Promise.reject(
+          new ApiResponseError(
+            "HTTP 403",
+            `${DEFAULT_API_URL}/v1/start`,
+            403,
+            "Forbidden",
+            "{}",
+            "MethodStructuresRefusedError",
+            "The method declares in-process Python structures",
+            undefined,
+            undefined,
+          ),
+        ),
+    });
+
+    const result = await startMthdsRun({ method_ref: ADDRESS }, context);
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+    expect(result.structuredContent.errors?.[0]?.hint).toMatch(/MTHDS concepts/);
+  });
+
+  it("classifies a registry-form 501 at method_ref with the address-form hint", async () => {
+    const context = contextWith({
+      start: () =>
+        Promise.reject(
+          new ApiResponseError(
+            "HTTP 501",
+            `${DEFAULT_API_URL}/v1/start`,
+            501,
+            "Not Implemented",
+            "{}",
+            undefined,
+            "Registry-form refs are not implemented",
+            undefined,
+            undefined,
+          ),
+        ),
+    });
+
+    const result = await startMthdsRun({ method_ref: ADDRESS }, context);
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+    expect(result.structuredContent.errors?.[0]?.hint).toMatch(/address-form/i);
+  });
+});
+
 describe("startMthdsRun by method_id", () => {
   function notFound(): ApiResponseError {
     return new ApiResponseError(
@@ -907,7 +1048,7 @@ describe("startMthdsRun by method_id", () => {
     expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
     expect(result.structuredContent.errors?.[0]?.location).toBe("files");
     expect(result.structuredContent.errors?.[0]?.message).toBe(
-      "Provide MTHDS files or a method_id.",
+      "Provide MTHDS files, a method_ref address, or a method_id.",
     );
   });
 

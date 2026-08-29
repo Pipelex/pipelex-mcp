@@ -17,7 +17,7 @@ import {
   resolveSubmittedFiles,
   toolErrorSchema,
   toolResultContent,
-  validateFilesOrMethodIdRequest,
+  validateMethodSelectorRequest,
 } from "./shared.js";
 import type {
   AuthErrorTexture,
@@ -37,7 +37,7 @@ export const mthdsPrepareInputsInputSchema = {
     .string()
     .optional()
     .describe(
-      "Catalog id (mt_…) of a registered method — the signature source. Uses the method's CURRENT stored content and requires an API key (the catalog is org-scoped). With files also present, the files win and method_id is ignored. Provide files or method_id.",
+      "Catalog id (mt_…) of a registered method — the signature source. Uses the method's CURRENT stored content and requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_id — never both.",
     ),
   pipe_ref: z
     .string()
@@ -203,14 +203,17 @@ export async function prepareMthdsInputs(
     return errorResult("Inputs were not prepared: request input is invalid.", inputErrors);
   }
 
-  // Fetch-and-forward: the build/prepare surface has no by-id support, so an
-  // id-only request fetches the stored method and forwards its current source
-  // as the closure files (each labeled with the method id as provenance).
-  // Inline files win — with both supplied, method_id is ignored (this route has
-  // no linkage concept). One shared by-id resolution path across validate /
-  // inputs / prepare, one place that maps EmptyMethodSourceError / 404.
+  // By-id expansion: the build/prepare surface has no by-id support (the
+  // hosted tooling selector deliberately excludes it — SPEC.md → Method
+  // Selectors), so an id request expands the stored method via the
+  // SDK-canonical getMethodClosure leg and forwards its current source as the
+  // closure files (each labeled with the method id as provenance). One shared
+  // by-id expansion path across inputs-template / prepare, one place that
+  // maps EmptyMethodSourceError / 404. There is deliberately no method_ref on
+  // this tool: preparation is a client-side signature walk over a closure the
+  // caller supplies, and an address's files live server-side.
   let files = request.files;
-  if (files.length === 0 && request.method_id !== undefined) {
+  if (request.method_id !== undefined) {
     const fetched = await fetchMethodFiles(() => prepareClient(context), request.method_id, {
       authError: context.authError,
       noSourceHint:
@@ -403,7 +406,10 @@ function passThroughSource(source: unknown, name: string): string {
 }
 
 export function validatePrepareInputsRequest(input: ResolvedPrepareRequest): ToolError[] {
-  const errors = validateFilesOrMethodIdRequest(input.files, input.method_id);
+  const errors = validateMethodSelectorRequest(input.files, input, {
+    rule: "one_selector",
+    acceptsMethodRef: false,
+  });
 
   if (input.pipe_ref !== undefined && input.pipe_ref.trim() === "") {
     errors.push({

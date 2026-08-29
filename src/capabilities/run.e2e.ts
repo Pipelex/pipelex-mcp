@@ -89,6 +89,25 @@ describe("run lifecycle reads (live, free)", () => {
     expect(error?.location).toBe("method_id");
     expect(result.structuredContent.run_id).toBeUndefined();
   });
+
+  // GATED on the hosted deploy — Checkpoint 3 of `wip/addressing-methods/plan.md`.
+  // `method_ref` on `/v1/start` needs the platform to forward it to the runner
+  // (run-by-address Phase 3); until that deploy, api.pipelex.com rejects the
+  // field as request shape, which would fail this for a reason that is not
+  // drift. Un-skip once it lands: a bad address on a live platform is a 404/422
+  // refused before anything executes, so the leg stays free.
+  it.skip("reaches the platform with method_ref as the run source, and is refused on an unknown address (gated)", async () => {
+    const result = await startMthdsRun(
+      { method_ref: "github.com/Pipelex/methods/does-not-exist@v0.0.0" },
+      context,
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    const error = result.structuredContent.errors?.[0];
+    expect(error?.class).toBe("input_domain");
+    expect(error?.location).toBe("method_ref");
+    expect(result.structuredContent.run_id).toBeUndefined();
+  });
 });
 
 /**

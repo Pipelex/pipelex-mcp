@@ -5,25 +5,25 @@ import type {
   PipelexValidationReport,
   PipelexInvalidReport,
   ValidateFilesOptions,
+  ValidateMethodSelector,
 } from "@pipelex/sdk";
 import { z } from "zod";
 
 import {
+  METHOD_REF_GRAMMAR,
   buildApiConfig,
   classifyError,
   summaryForToolError,
-  fetchMethodFiles,
   filesInputSchema,
   resolveSubmittedFiles,
   toolErrorSchema,
   toolResultContent,
-  validateFilesOrMethodIdRequest,
+  validateMethodSelectorRequest,
 } from "./shared.js";
 import type {
   AuthErrorTexture,
   ClassifyErrorOptions,
   FileResolver,
-  MethodFetchClient,
   SubmittedFile,
   SubmittedFileInput,
   ErrorSummaries,
@@ -32,11 +32,17 @@ import type {
 
 export const mthdsValidateInputSchema = {
   files: filesInputSchema.optional(),
+  method_ref: z
+    .string()
+    .optional()
+    .describe(
+      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side: the repository is fetched at the tag and the package's own file names label the diagnostics; no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.`,
+    ),
   method_id: z
     .string()
     .optional()
     .describe(
-      "Catalog id (mt_…) of a registered method. Validates the method's CURRENT stored content — requires an API key (the catalog is org-scoped). With files also present, the files win and method_id is ignored. Provide files or method_id.",
+      "Catalog id (mt_…) of a registered method. Validates the method's CURRENT stored content server-side — requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_ref / method_id.",
     ),
   include_graph: z
     .boolean()
@@ -76,13 +82,15 @@ export const mthdsValidateOutputSchema = validationStructuredContentSchema;
 
 export interface MthdsValidateInput {
   files?: SubmittedFileInput[];
+  method_ref?: string;
   method_id?: string;
   include_graph?: boolean;
 }
 
-/** The validate request after `{ path }` resolution — what the checks and the fetch-or-call step consume. */
+/** The validate request after `{ path }` resolution — what the checks and the API call consume. */
 interface ResolvedValidateRequest {
   files: SubmittedFile[];
+  method_ref?: string;
   method_id?: string;
   include_graph?: boolean;
 }
@@ -139,10 +147,23 @@ export interface ValidationResult {
   mainPipeRef?: string;
 }
 
-interface ValidationClient extends MethodFetchClient {
+interface ValidationClient {
   validateFiles(
     files: MthdsFile[],
     options?: ValidateFilesOptions,
+  ): Promise<PipelexValidationResult>;
+  /**
+   * The selector arm of `POST /v1/validate` — the SDK's low-level `validate`
+   * with a `{ method_ref }` / `{ method_id }` source (mthds_sources must stay
+   * undefined for selectors: labels come from the package's, or the stored
+   * method's, real file names).
+   */
+  validate(
+    source: ValidateMethodSelector,
+    allowSignatures?: boolean,
+    mthdsSources?: string[],
+    render?: string[],
+    views?: string[],
   ): Promise<PipelexValidationResult>;
 }
 
@@ -164,6 +185,50 @@ export function buildValidationContext(env = process.env): ValidationContext {
 
 const VALIDATE_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/validate",
+};
+
+/**
+ * Classify options for an address-shaped request. The runner's `method_ref`
+ * failures keep their class names as distinct error types over the wire: a
+ * ref that does not parse or fetch, or an ambiguous one, is a 422; no package
+ * matching the address is a 404; the reserved registry form is a 501 — all the
+ * caller's own selector, located at `method_ref`. (The structures-refusal 403
+ * is classified route-independently in `classifyError`.)
+ */
+const VALIDATE_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
+  route: "/v1/validate",
+  badRequest: {
+    location: "method_ref",
+    hint: `Check the address and tag — ${METHOD_REF_GRAMMAR}. The tag must be a git tag on the repository (branches do not pin), and the ref must be resolvable by an anonymous clone.`,
+  },
+  notFound: {
+    location: "method_ref",
+    hint: "The repository was fetched but holds no package matching this address by manifest identity. Check the package selector against the repository's METHODS.toml manifests.",
+  },
+  notImplemented: {
+    location: "method_ref",
+    hint: `Only address-form refs are supported (${METHOD_REF_GRAMMAR}); registry references are reserved until a method registry exists.`,
+  },
+};
+
+/**
+ * Classify options for an id-shaped request. The hosted platform resolves the
+ * id and injects the stored source before the runner sees the request; an
+ * unknown or foreign-org id is a 404 (indistinguishable by design), a stored
+ * method with no MTHDS source is a 422, and a deployment with no catalog (a
+ * bare pipelex-api runner, or a hosted plane that predates the tooling
+ * selector) rejects the request-shape too — the 422 hint covers all three.
+ */
+const VALIDATE_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
+  route: "/v1/validate",
+  badRequest: {
+    location: "method_id",
+    hint: "The stored method may have no MTHDS source yet, or this deployment may not resolve method_id on /v1/validate — the selector is hosted-only (a bare pipelex-api runner has no catalog). Submit files or a method_ref instead if it persists.",
+  },
+  notFound: {
+    location: "method_id",
+    hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.",
+  },
 };
 
 // Constructed inside each caught block (mirroring run.ts's runClient): the SDK
@@ -189,46 +254,57 @@ export async function validateMthds(
   }
 
   const request: ResolvedValidateRequest = { ...input, files: resolution.files };
-  const inputErrors = validateFilesOrMethodIdRequest(request.files, request.method_id);
+  const inputErrors = validateMethodSelectorRequest(request.files, request, {
+    rule: "one_selector",
+  });
   if (inputErrors.length > 0) {
     return errorResult("Validation was not run: request input is invalid.", inputErrors);
   }
 
-  // Fetch-and-forward: /v1/validate has no by-id support, so an id-only
-  // request fetches the stored method and forwards its current source as the
-  // submitted files (each labeled with the method id as provenance). Inline
-  // files win — with both supplied, method_id is ignored (no linkage concept
-  // on this route, unlike /v1/start).
-  let files = request.files;
-  if (files.length === 0 && request.method_id !== undefined) {
-    const fetched = await fetchMethodFiles(() => validationClient(context), request.method_id, {
-      authError: context.authError,
-      noSourceHint:
-        "Add MTHDS content to the method (e.g. in the webapp editor) before validating it, or submit files instead.",
-    });
-    if (!fetched.ok) {
-      const summary =
-        fetched.reason === "no_source"
-          ? "Validation was not run: the stored method has no MTHDS source."
-          : summaryForError(fetched.error);
-      return errorResult(summary, [fetched.error]);
-    }
-    files = fetched.files;
-  }
+  // Classify options follow the request's selector shape — each failure
+  // locates at the field that caused it.
+  const classifyOptions =
+    request.files.length > 0
+      ? VALIDATE_ERROR_OPTIONS
+      : request.method_ref !== undefined
+        ? VALIDATE_BY_REF_ERROR_OPTIONS
+        : VALIDATE_BY_ID_ERROR_OPTIONS;
 
   let report: PipelexValidationResult;
   try {
     // `views` is the structured-view opt-in (the `render` sibling): the
     // descriptor spec keeps `input_form` off the report unless a caller asks.
     // Tokens are lenient — a runner that predates the field simply returns no
-    // `input_form`, and the form view is then not advertised.
-    report = await validationClient(context).validateFiles(toMthdsFiles(files), {
-      allowSignatures: true,
-      render: ["markdown"],
-      views: ["input_form"],
-    });
+    // `input_form`, and the form view is then not advertised. A selector is a
+    // SERVER pass-through on `POST /v1/validate` itself: the runner resolves
+    // an address, the hosted platform resolves an id — nothing is expanded
+    // client-side, and `mthds_sources` stays undefined (labels come from the
+    // package's, or the stored method's, real file names).
+    const client = validationClient(context);
+    if (request.files.length > 0) {
+      report = await client.validateFiles(toMthdsFiles(request.files), {
+        allowSignatures: true,
+        render: ["markdown"],
+        views: ["input_form"],
+      });
+    } else if (request.method_ref !== undefined) {
+      report = await client.validate(
+        { method_ref: request.method_ref },
+        true,
+        undefined,
+        undefined,
+        ["input_form"],
+      );
+    } else if (request.method_id !== undefined) {
+      report = await client.validate({ method_id: request.method_id }, true, undefined, undefined, [
+        "input_form",
+      ]);
+    } else {
+      // Unreachable: the selector checks above guarantee a source.
+      throw new Error("No method selector survived request validation.");
+    }
   } catch (err) {
-    const error = classifyError(err, { ...VALIDATE_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, { ...classifyOptions, auth: context.authError });
     return errorResult(summaryForError(error), [error]);
   }
 

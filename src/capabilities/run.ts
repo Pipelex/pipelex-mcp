@@ -1,9 +1,10 @@
 import { isTerminalRunStatus, PipelexApiClient } from "@pipelex/sdk";
 import type {
+  MethodProvenance,
+  PipelexRunResultStart,
   PipelexStartOptions,
   RunRead,
   RunResults,
-  RunResultStart,
   RunResultState,
   RunStatus,
   TokensUsageRecord,
@@ -11,6 +12,7 @@ import type {
 import { z } from "zod";
 
 import {
+  METHOD_REF_GRAMMAR,
   buildApiConfig,
   classifyError,
   summaryForToolError,
@@ -18,7 +20,7 @@ import {
   resolveSubmittedFiles,
   toolErrorSchema,
   toolResultContent,
-  validateFilesOrMethodIdRequest,
+  validateMethodSelectorRequest,
   validateRunIdRequest,
 } from "./shared.js";
 import type {
@@ -53,16 +55,24 @@ const runIdInputField = z.string().describe("The durable run id returned by mthd
 
 export const mthdsRunInputSchema = {
   files: filesInputSchema.optional(),
+  method_ref: z
+    .string()
+    .optional()
+    .describe(
+      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side: the repository is fetched at the tag and the resolved commit SHA comes back as provenance. A complete run source of its own — it pairs with NOTHING (not files, not method_id).`,
+    ),
   method_id: z
     .string()
     .optional()
     .describe(
-      "Catalog id (mt_…) of a registered method. Runs the method's CURRENT stored content — requires an API key (the catalog is org-scoped). With files also present, the files run and method_id is recorded as run-history linkage. Provide files, method_id, or both.",
+      "Catalog id (mt_…) of a registered method. Runs the method's CURRENT stored content — requires an API key (the catalog is org-scoped). With files also present, the files run and method_id is recorded as run-history linkage. Provide files, method_ref, or method_id (files + method_id together is also legal).",
     ),
   pipe_code: z
     .string()
     .optional()
-    .describe("The pipe to run. Omit to run the bundle's declared main pipe."),
+    .describe(
+      "The pipe to run. Omit to run the bundle's declared main pipe (for a method_ref, the manifest's main_pipe).",
+    ),
   inputs: z
     .record(z.string(), z.unknown())
     .optional()
@@ -94,6 +104,19 @@ const runViewSpecSchema = z.enum(["live_run_status"]);
  */
 const resultsViewSpecSchema = z.enum(["run_graph"]);
 
+const methodProvenanceSchema = z.object({
+  address: z.string().describe("The package's resolved full address."),
+  tag: z
+    .string()
+    .nullable()
+    .describe("The requested tag; null for a bare address (default branch at HEAD)."),
+  commit_sha: z
+    .string()
+    .describe(
+      "The commit that was actually fetched — what keeps the run explainable when a tag moves.",
+    ),
+});
+
 const runStartStructuredContentSchema = z.object({
   status: z.enum(["ok", "error"]),
   run_id: z
@@ -104,6 +127,9 @@ const runStartStructuredContentSchema = z.object({
     .optional()
     .describe("Initial lifecycle state from the start ack, when the server includes one."),
   created_at: z.string().optional(),
+  method_provenance: methodProvenanceSchema
+    .optional()
+    .describe("method_ref runs only — the address, tag, and resolved commit SHA that was fetched."),
   available_view_specs: z
     .array(runViewSpecSchema)
     .describe(
@@ -214,6 +240,7 @@ export const mthdsRunResultsOutputSchema = runResultsStructuredContentSchema;
 
 export interface MthdsRunInput {
   files?: SubmittedFileInput[];
+  method_ref?: string;
   method_id?: string;
   pipe_code?: string;
   inputs?: Record<string, unknown>;
@@ -222,6 +249,7 @@ export interface MthdsRunInput {
 /** The run request after `{ path }` resolution — what the checks and the API call consume. */
 interface ResolvedRunRequest {
   files: SubmittedFile[];
+  method_ref?: string;
   method_id?: string;
   pipe_code?: string;
   inputs?: Record<string, unknown>;
@@ -239,6 +267,8 @@ export interface RunStartStructuredContent {
   run_id?: string;
   run_status?: RunStatus;
   created_at?: string;
+  /** `method_ref` runs only — the address, tag, and resolved commit SHA that was fetched. */
+  method_provenance?: MethodProvenance;
   available_view_specs: RunViewSpec[];
   errors?: ToolError[];
 }
@@ -334,7 +364,7 @@ export interface RunResultsResult {
 
 /** The slice of `PipelexApiClient` the run capabilities call (test seam). */
 interface RunClient {
-  start(options: PipelexStartOptions): Promise<RunResultStart>;
+  start(options: PipelexStartOptions): Promise<PipelexRunResultStart>;
   getRunStatus(runId: string): Promise<RunRead>;
   getRunResult(runId: string): Promise<RunResultState>;
 }
@@ -406,6 +436,32 @@ export const RUN_START_MIXED_ERROR_OPTIONS: ClassifyErrorOptions = {
   serverError: START_SERVER_ERROR,
 };
 
+/**
+ * Classify options for an address-shaped `/v1/start` request. The runner's
+ * `method_ref` failures keep their class names as distinct error types: a ref
+ * that does not parse or fetch, or an ambiguous one, is a 422; no package
+ * matching the address is a 404 (safe to locate at `method_ref` — a bare
+ * runner's missing-route 404 was already intercepted as
+ * `RunLifecycleUnavailableError`); the reserved registry form is a 501. All
+ * are refused before anything executes, so no inference credit was spent.
+ */
+export const RUN_START_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
+  route: "/v1/start",
+  badRequest: {
+    location: "method_ref",
+    hint: `Check the address and tag — ${METHOD_REF_GRAMMAR}. The tag must be a git tag on the repository (branches do not pin). If the address resolved, check pipe_code and the inputs against mthds_inputs_template.`,
+  },
+  notFound: {
+    location: "method_ref",
+    hint: "The repository was fetched but holds no package matching this address by manifest identity. Check the package selector against the repository's METHODS.toml manifests.",
+  },
+  notImplemented: {
+    location: "method_ref",
+    hint: `Only address-form refs are supported (${METHOD_REF_GRAMMAR}); registry references are reserved until a method registry exists.`,
+  },
+  serverError: START_SERVER_ERROR,
+};
+
 const UNKNOWN_RUN_HINT =
   "No run with this id is known to the configured API. Check the run_id returned by mthds_run, and that PIPELEX_BASE_URL points at the deployment that started it.";
 
@@ -425,7 +481,9 @@ export const RUN_RESULTS_ERROR_OPTIONS: ClassifyErrorOptions = {
 
 /** Request-shape checks on the mthds_run input, after `{ path }` resolution. */
 export function validateRunRequest(input: ResolvedRunRequest): ToolError[] {
-  const errors = validateFilesOrMethodIdRequest(input.files, input.method_id);
+  // The run rule: files + method_id is a legal pair (linkage), while
+  // method_ref pairs with nothing — see SPEC.md → Method Selectors.
+  const errors = validateMethodSelectorRequest(input.files, input, { rule: "run_source" });
 
   if (input.pipe_code !== undefined && input.pipe_code.trim() === "") {
     errors.push({
@@ -700,28 +758,60 @@ function narrowString(value: unknown): string | undefined {
 }
 
 /**
+ * Narrow the start ack's `method_provenance` extension field. Populated by the
+ * server for `method_ref` runs only; anything malformed is treated as absent
+ * rather than guessed at (the run itself is unaffected).
+ */
+function narrowMethodProvenance(value: unknown): MethodProvenance | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.address !== "string" ||
+    typeof record.commit_sha !== "string" ||
+    (record.tag !== null && typeof record.tag !== "string")
+  ) {
+    return undefined;
+  }
+  return { address: record.address, tag: record.tag, commit_sha: record.commit_sha };
+}
+
+/**
  * Project a start ack. `state` and `created_at` are hosted extension fields on
  * the protocol's `RunResultStart` (typed `unknown`), so they are narrowed
- * defensively rather than trusted. A produced ack advertises the
- * `live_run_status` view only when the invoking shell registered run-follow.
+ * defensively rather than trusted — as is `method_provenance`, the Pipelex-API
+ * extension a `method_ref` run carries (the resolved commit SHA is what keeps
+ * the run explainable when a tag moves, so it is surfaced to the model and
+ * echoed in the summary). A produced ack advertises the `live_run_status` view
+ * only when the invoking shell registered run-follow.
  */
-export function startResult(ack: RunResultStart, viewsAvailable = true): RunStartResult {
+export function startResult(ack: PipelexRunResultStart, viewsAvailable = true): RunStartResult {
   const runStatus = narrowRunStatus(ack.state);
   const createdAt = narrowString(ack.created_at);
+  const provenance = narrowMethodProvenance(ack.method_provenance);
 
   const structuredContent: RunStartStructuredContent = {
     status: "ok",
     run_id: ack.pipeline_run_id,
     ...(runStatus === undefined ? {} : { run_status: runStatus }),
     ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    ...(provenance === undefined ? {} : { method_provenance: provenance }),
     available_view_specs: viewsAvailable ? ["live_run_status"] : [],
   };
 
   const summaryParts = [
     "# Run started",
     `The run was accepted; its durable id is \`${ack.pipeline_run_id}\`.`,
-    "Check on it with `mthds_run_status` (one cheap read — honor its retry hint instead of polling in a tight loop), and fetch the outcome with `mthds_run_results` once it is terminal.",
   ];
+  if (provenance !== undefined) {
+    summaryParts.push(
+      `Resolved \`${provenance.address}\`${provenance.tag === null ? "" : ` at tag \`${provenance.tag}\``} to commit \`${provenance.commit_sha}\` — the run executes exactly that snapshot.`,
+    );
+  }
+  summaryParts.push(
+    "Check on it with `mthds_run_status` (one cheap read — honor its retry hint instead of polling in a tight loop), and fetch the outcome with `mthds_run_results` once it is terminal.",
+  );
   if (viewsAvailable) {
     summaryParts.push(
       "## Views",
@@ -924,15 +1014,18 @@ export async function startMthdsRun(
     return startErrorResult("Run was not started: request input is invalid.", inputErrors);
   }
 
-  // Options follow the executed source: id-only gets the full by-id texture;
-  // mixed (files + id) keeps the files 400/422 texture but retains the by-id
-  // unknown-method 404; files-only keeps today's options.
+  // Options follow the executed source: an address gets the by-ref texture;
+  // id-only gets the full by-id texture; mixed (files + id) keeps the files
+  // 400/422 texture but retains the by-id unknown-method 404; files-only
+  // keeps today's options.
   const classifyOptions =
-    request.method_id === undefined
-      ? RUN_START_ERROR_OPTIONS
-      : request.files.length === 0
-        ? RUN_START_BY_ID_ERROR_OPTIONS
-        : RUN_START_MIXED_ERROR_OPTIONS;
+    request.method_ref !== undefined
+      ? RUN_START_BY_REF_ERROR_OPTIONS
+      : request.method_id === undefined
+        ? RUN_START_ERROR_OPTIONS
+        : request.files.length === 0
+          ? RUN_START_BY_ID_ERROR_OPTIONS
+          : RUN_START_MIXED_ERROR_OPTIONS;
 
   try {
     const ack = await runClient(context).start(toStartOptions(request));
@@ -1018,6 +1111,11 @@ function toStartOptions(input: ResolvedRunRequest): PipelexStartOptions {
       : { mthds_contents: input.files.map((file) => file.content) }),
     ...(input.pipe_code === undefined ? {} : { pipe_code: input.pipe_code }),
     ...(input.inputs === undefined ? {} : { inputs: input.inputs }),
+    // `method_ref` is the SDK's named Pipelex-API run-source extension
+    // (PipelexApiRunExtensions), resolved by the runner; the request-shape
+    // checks already rejected the illegal pairings, mirroring the SDK's own
+    // client-side guards.
+    ...(input.method_ref === undefined ? {} : { method_ref: input.method_ref }),
     ...(input.method_id === undefined ? {} : { method_id: input.method_id }),
   };
 }
