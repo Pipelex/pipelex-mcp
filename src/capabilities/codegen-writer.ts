@@ -72,8 +72,10 @@ export function isCodegenLock(text: string): boolean {
  * `output_dir: "."` is legal — {@link isInsideRoot} is true for the root
  * itself — so the post-write walk must not be free to read a whole repository
  * into memory: `runCodegenCheck` takes every file's text as a `string`, and
- * this is a stdio server the host keeps alive for the session. The bounds
- * apply to ORPHAN CANDIDATES only; the files just written are always read
+ * this is a stdio server the host keeps alive for the session. The byte
+ * budget is spent from each candidate's size before it is read, so one huge
+ * file is refused rather than loaded. The bounds apply to ORPHAN CANDIDATES
+ * only; the files just written are always read
  * back, so tripping a bound can never fabricate a `missing` drift. Tripping
  * either sets `orphansTruncated`, and the summary then says orphan detection
  * was partial rather than reporting a clean tree it did not fully see.
@@ -497,11 +499,21 @@ async function collectOrphanCandidates(
         return undefined;
       }
 
+      // The budget is spent from the file's SIZE, before it is read: reading
+      // first would decode a single enormous file whole into memory just to
+      // refuse it, which is the allocation the bound exists to prevent. A file
+      // that cannot be stat'ed falls back to the post-read check below.
+      const size = await fileSize(absolute);
+      if (size !== undefined && bytes + size > MAX_WALK_BYTES) {
+        truncated = true;
+        return undefined;
+      }
+
       const text = await readStrict(absolute);
       if (text === undefined) {
         return undecodableError(relative);
       }
-      bytes += utf8.encode(text).length;
+      bytes += size ?? utf8.encode(text).length;
       if (bytes > MAX_WALK_BYTES) {
         truncated = true;
         return undefined;
@@ -524,6 +536,15 @@ async function collectOrphanCandidates(
 async function readStrict(absolute: string): Promise<string | undefined> {
   try {
     return strictDecoder.decode(await fs.readFile(absolute));
+  } catch {
+    return undefined;
+  }
+}
+
+/** The file's size in bytes, or `undefined` when it cannot be stat'ed. */
+async function fileSize(absolute: string): Promise<number | undefined> {
+  try {
+    return (await fs.stat(absolute)).size;
   } catch {
     return undefined;
   }

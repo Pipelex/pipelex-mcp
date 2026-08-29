@@ -6,7 +6,7 @@ import { runCodegenCheck } from "@pipelex/sdk";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { recordedTsZodReport } from "./codegen-fixture.js";
-import { MAX_WALK_CANDIDATES, writeCodegenTree } from "./codegen-writer.js";
+import { MAX_WALK_BYTES, MAX_WALK_CANDIDATES, writeCodegenTree } from "./codegen-writer.js";
 import type { CodegenWriteRequest, CodegenWriteResult } from "./codegen-writer.js";
 
 /**
@@ -450,6 +450,26 @@ describe("writeCodegenTree — the post-write check", () => {
     const result = expectOk(await writeCodegenTree(request(root)));
 
     expect(result.orphansTruncated).toBe(true);
+    expect(result.drifts).toEqual([]);
+  });
+
+  it("refuses a single over-budget file without reading it", async () => {
+    const root = await makeTempDir();
+    const dir = path.join(root, "generated");
+    await fs.mkdir(dir, { recursive: true });
+    // Over the budget on its own AND undecodable: reading it would return the
+    // `undecodableError` no-verdict, so a produced verdict proves the guard
+    // refused it from its size, before the bytes were ever allocated.
+    const oversize = Buffer.concat([
+      Buffer.from("// ".repeat(MAX_WALK_BYTES), "utf8"),
+      Buffer.from([0xff, 0xfe]),
+    ]);
+    await fs.writeFile(path.join(dir, "huge.ts"), oversize);
+
+    const result = expectOk(await writeCodegenTree(request(root)));
+
+    expect(result.orphansTruncated).toBe(true);
+    expect(result.orphans).toEqual([]);
     expect(result.drifts).toEqual([]);
   });
 
