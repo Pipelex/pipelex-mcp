@@ -53,7 +53,7 @@ export const mthdsInputsInputSchema = {
     .string()
     .optional()
     .describe(
-      "The pipe to project, as a qualified domain.pipe_code. Omit to default to the closure's declared main_pipe.",
+      "The pipe to project, as a qualified domain.pipe_code — the same value mthds_run takes as pipe_code (the name mirrors each route: the build routes say pipe_ref, the run routes say pipe_code). Omit to default to the closure's declared main_pipe.",
     ),
   explicit: z
     .boolean()

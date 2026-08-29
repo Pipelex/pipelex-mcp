@@ -2,7 +2,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 
-import { PIPELEX_MCP_SERVER_INFO, buildToolContexts, toolDefinitions } from "../tools.js";
+import {
+  PIPELEX_MCP_SERVER_INFO,
+  buildToolContexts,
+  toolDefinitions,
+  workshopOnlyToolDefinitions,
+} from "../tools.js";
 import type { AnyToolDefinition, ToolContexts } from "../tools.js";
 import { localFileResolver } from "./files.js";
 
@@ -21,7 +26,10 @@ export const LOCAL_SERVER_INSTRUCTIONS = [
   "and rewrites them to pipelex-storage:// references (http(s) URLs pass through unchanged).",
   "Start durable execution with `mthds_run` (from files, or from a registered",
   "method's catalog id via method_id), then use `mthds_run_status` and",
-  "`mthds_run_results` with the returned run id. This tools-first workshop has no views at launch,",
+  "`mthds_run_results` with the returned run id. When a completed run's output references stored",
+  "files (images, PDFs, documents as pipelex-storage:// URIs), call `mthds_download_artifacts` with",
+  "that run id to save them under the working directory — the presigned links in the results expire",
+  "within the hour. This tools-first workshop has no views at launch,",
   "so report the structured result and text summary directly to the user.",
 ].join(" ");
 
@@ -42,6 +50,9 @@ export function buildLocalToolContexts(
     // The workshop is co-located with the user's files, so it uploads
     // file-bearing inputs (local paths, data: URLs, bytes) for mthds_prepare_inputs.
     allowUpload: true,
+    // ...and, in the other direction, saves a run's produced files under the
+    // same working directory for mthds_download_artifacts.
+    artifactsRoot: rootDir,
   });
 }
 
@@ -54,6 +65,10 @@ export function createLocalServer(options: LocalServerOptions = {}): McpServer {
   });
 
   for (const definition of toolDefinitions) {
+    registerLocalTool(server, definition, contexts);
+  }
+  // The workshop-only table — the mirror of the console's `consoleOnlyToolDefinitions`.
+  for (const definition of workshopOnlyToolDefinitions) {
     registerLocalTool(server, definition, contexts);
   }
 

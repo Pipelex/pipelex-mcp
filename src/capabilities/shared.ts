@@ -464,6 +464,44 @@ function validateFileItems(files: SubmittedFile[]): ToolError[] {
   return errors;
 }
 
+/** The scheme of a Pipelex storage reference, as the runtime and the SDK spell it. */
+export const PIPELEX_STORAGE_SCHEME = "pipelex-storage://";
+
+/**
+ * Every `pipelex-storage://` reference inside a JSON-shaped value, in discovery
+ * order and deduplicated. This is how a run's produced files are found: the
+ * runtime serializes an image or document output as content carrying its
+ * storage reference in `url` (beside an expiring presigned `public_url`), and
+ * the scheme is unambiguous, so a walk for scheme-prefixed strings is a
+ * contract, not a heuristic. Shared by `mthds_run_results` (to say the files
+ * exist) and `mthds_download_artifacts` (to save them).
+ */
+export function collectStorageUris(value: unknown): string[] {
+  const found = new Set<string>();
+  walkStorageUris(value, found);
+  return [...found];
+}
+
+function walkStorageUris(value: unknown, found: Set<string>): void {
+  if (typeof value === "string") {
+    if (value.startsWith(PIPELEX_STORAGE_SCHEME) && value.length > PIPELEX_STORAGE_SCHEME.length) {
+      found.add(value);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      walkStorageUris(item, found);
+    }
+    return;
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const entry of Object.values(value)) {
+      walkStorageUris(entry, found);
+    }
+  }
+}
+
 /** Request-shape check on a run id (format stays server-owned). */
 export function validateRunIdRequest(runId: string): ToolError[] {
   if (runId.trim() === "") {

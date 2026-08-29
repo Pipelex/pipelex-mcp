@@ -15,6 +15,7 @@ import {
   METHOD_REF_GRAMMAR,
   buildApiConfig,
   classifyError,
+  collectStorageUris,
   summaryForToolError,
   filesInputSchema,
   resolveSubmittedFiles,
@@ -49,7 +50,7 @@ const RUN_STATUS_SET: Record<RunStatus, true> = {
   TIMED_OUT: true,
 };
 
-const runStatusSchema = z.enum(Object.keys(RUN_STATUS_SET) as [RunStatus, ...RunStatus[]]);
+export const runStatusSchema = z.enum(Object.keys(RUN_STATUS_SET) as [RunStatus, ...RunStatus[]]);
 
 const runIdInputField = z.string().describe("The durable run id returned by mthds_run.");
 
@@ -71,7 +72,7 @@ export const mthdsRunInputSchema = {
     .string()
     .optional()
     .describe(
-      "The pipe to run. Omit to run the bundle's declared main pipe (for a method_ref, the manifest's main_pipe).",
+      "The pipe to run, as a qualified domain.pipe_code — the same value mthds_inputs_template and mthds_prepare_inputs take as pipe_ref (the name mirrors each route: the run routes say pipe_code, the build routes say pipe_ref). Omit to run the bundle's declared main pipe (for a method_ref, the manifest's main_pipe).",
     ),
   inputs: z
     .record(z.string(), z.unknown())
@@ -377,6 +378,14 @@ export interface RunContext {
   resolver?: FileResolver;
   /** Whether this shell can render run-follow and its view-only result payloads. */
   viewsAvailable?: boolean;
+  /**
+   * Whether this shell registers `mthds_download_artifacts` (the workshop
+   * does; the console has a UI for it). When true, a completed result whose
+   * output references stored files says so in its summary and names the tool
+   * — the summary is the channel that reaches the agent at the moment it
+   * matters, and the presigned links in the output die within the hour.
+   */
+  artifactDownloadAvailable?: boolean;
   /** Deployment-specific auth-failure texture (the hosted console overrides it per request); default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
@@ -871,12 +880,21 @@ function statusSummary(read: RunRead, isTerminal: boolean): string {
  * Project a one-shot result lookup. All three arms are produced verdicts
  * (`status: "ok"`): "no result yet" and "it failed" are answers, not errors.
  */
-export function resultsResult(state: RunResultState, viewsAvailable = true): RunResultsResult {
+export function resultsResult(
+  state: RunResultState,
+  viewsAvailable = true,
+  artifactDownloadAvailable = false,
+): RunResultsResult {
   switch (state.state) {
     case "running":
       return runningResult(state.pipeline_run_id, state.retry_after_seconds);
     case "completed":
-      return completedResult(state.pipeline_run_id, state.result, viewsAvailable);
+      return completedResult(
+        state.pipeline_run_id,
+        state.result,
+        viewsAvailable,
+        artifactDownloadAvailable,
+      );
     case "failed":
       return failedResult(state.pipeline_run_id, state.status, state.message);
   }
@@ -900,6 +918,7 @@ function completedResult(
   runId: string,
   result: RunResults,
   viewsAvailable: boolean,
+  artifactDownloadAvailable: boolean,
 ): RunResultsResult {
   // The SDK guarantees a non-null main_stuff on a completed run (it throws
   // MissingMainStuffError otherwise); reaching here without one is a contract
@@ -927,7 +946,15 @@ function completedResult(
     structuredContent,
     // Usage is deliberately kept OUT of the prose summary — the run-level totals
     // ride structuredContent.usage; the per-pipe rollup rides _meta only.
-    summary: completedSummary(runId, bounded, truncated, viewsAvailable),
+    summary: completedSummary(
+      runId,
+      bounded,
+      truncated,
+      viewsAvailable,
+      // Counted on the FULL output, not the bounded copy: a reference pruned
+      // out of the model-facing copy is still a file the workshop can save.
+      artifactDownloadAvailable ? collectStorageUris(result.main_stuff).length : 0,
+    ),
     graphSpec,
     mainStuff: result.main_stuff,
     // Both ride `_meta` ungated by views (like mainStuff): the full per-call
@@ -951,6 +978,7 @@ function completedSummary(
   bounded: unknown,
   truncated: boolean,
   viewsAvailable: boolean,
+  downloadableArtifacts: number,
 ): string {
   const fence =
     typeof bounded === "string"
@@ -963,6 +991,14 @@ function completedSummary(
       viewsAvailable
         ? "The output shown above was truncated to fit the response; the full output is available to views."
         : "The output shown above was truncated to fit the response.",
+    );
+  }
+  // Only on a shell that registers the download tool (the workshop): the
+  // presigned `public_url` links inside the output expire within the hour, so
+  // the moment the results land is the moment to say the files can be saved.
+  if (downloadableArtifacts > 0) {
+    parts.push(
+      `The output references ${downloadableArtifacts} stored file(s) (\`pipelex-storage://\` references). To save them under the working directory, call \`mthds_download_artifacts\` with this run id — the presigned \`public_url\` links in the output expire within the hour.`,
     );
   }
   return parts.join("\n\n");
@@ -1077,7 +1113,11 @@ export async function getMthdsRunResults(
   // API. A malformed report (a completed result missing main_stuff) is a
   // reachable contract violation, surfaced as a runtime no-verdict error.
   try {
-    return resultsResult(state, context.viewsAvailable !== false);
+    return resultsResult(
+      state,
+      context.viewsAvailable !== false,
+      context.artifactDownloadAvailable === true,
+    );
   } catch (err) {
     return resultsErrorResult(
       "Run results produced no verdict: the Pipelex API returned a malformed report.",

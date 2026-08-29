@@ -16,7 +16,12 @@ import type { OAuthConfig } from "skybridge/server";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createHostedServer } from "../hosted/server.js";
-import { consoleOnlyToolDefinitions, toolDefinitions } from "../tools.js";
+import {
+  buildToolContexts,
+  consoleOnlyToolDefinitions,
+  toolDefinitions,
+  workshopOnlyToolDefinitions,
+} from "../tools.js";
 import { buildLocalToolContexts, createLocalServer } from "./server.js";
 
 /**
@@ -46,13 +51,74 @@ describe("local stdio server", () => {
     const hostedTools = await listTools(createHostedServer(TEST_OAUTH));
     const localTools = await listTools(createLocalServer());
     const sharedNames: string[] = toolDefinitions.map((definition) => definition.name);
+    const workshopOnlyNames: string[] = workshopOnlyToolDefinitions.map(
+      (definition) => definition.name,
+    );
 
-    expect(localTools.map((tool) => tool.name)).toEqual(sharedNames);
+    // The shared table first, in order; the workshop-only table after it.
+    expect(localTools.map((tool) => tool.name)).toEqual([...sharedNames, ...workshopOnlyNames]);
     // The contract of every SHARED tool must be byte-identical across shells —
     // no tool name may mean different things on the two deployments.
-    expect(localTools.map(sharedContract)).toEqual(
-      hostedTools.filter((tool) => sharedNames.includes(tool.name)).map(sharedContract),
+    expect(
+      localTools.filter((tool) => sharedNames.includes(tool.name)).map(sharedContract),
+    ).toEqual(hostedTools.filter((tool) => sharedNames.includes(tool.name)).map(sharedContract));
+  });
+
+  it("registers the workshop-only artifact download tool, which the console does NOT", async () => {
+    const hostedTools = await listTools(createHostedServer(TEST_OAUTH));
+    const localTools = await listTools(createLocalServer());
+    const workshopOnlyNames: string[] = workshopOnlyToolDefinitions.map(
+      (definition) => definition.name,
     );
+
+    expect(workshopOnlyNames).toContain("mthds_download_artifacts");
+    // Absent on the console, not merely inert: it has no working directory to
+    // save into, so the tool could never fire there — advertising it would
+    // spend every console user's tokens on every tools/list for nothing.
+    for (const name of workshopOnlyNames) {
+      expect(localTools.map((tool) => tool.name)).toContain(name);
+      expect(hostedTools.map((tool) => tool.name)).not.toContain(name);
+    }
+
+    const downloadTool = localTools.find((tool) => tool.name === "mthds_download_artifacts");
+    // It writes files, so it is not read-only; it only talks to the configured API.
+    expect(downloadTool?.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+    });
+    const schema = downloadTool?.inputSchema as { required?: string[]; properties?: object };
+    expect(schema.required).toEqual(["run_id"]);
+    expect(Object.keys(schema.properties ?? {}).sort()).toEqual(["dir", "run_id"]);
+  });
+
+  it("advertises artifact download in the workshop instructions only", async () => {
+    const { client: hosted, close: closeHosted } = await connectClient(
+      createHostedServer(TEST_OAUTH),
+    );
+    const { client: local, close: closeLocal } = await connectClient(createLocalServer());
+
+    try {
+      expect(local.getInstructions()).toContain("mthds_download_artifacts");
+      expect(hosted.getInstructions()).not.toContain("mthds_download_artifacts");
+    } finally {
+      await closeHosted();
+      await closeLocal();
+    }
+  });
+
+  it("binds the artifact save root and the results nudge to the workshop's working directory", async () => {
+    const rootDir = await makeTempDir();
+
+    const local = buildLocalToolContexts({ PIPELEX_BASE_URL: "http://127.0.0.1:8081" }, rootDir);
+    const hosted = buildToolContexts({ env: { PIPELEX_BASE_URL: "http://127.0.0.1:8081" } });
+
+    expect(local.artifacts.saveRoot).toBe(rootDir);
+    expect(local.run.artifactDownloadAvailable).toBe(true);
+    // The console builds the context (one builder serves both shells) but
+    // gives it nowhere to save and no nudge to emit.
+    expect(hosted.artifacts.saveRoot).toBeUndefined();
+    expect(hosted.run.artifactDownloadAvailable).toBe(false);
   });
 
   it("registers mthds_list_methods first with its read-only schema and dispatches it", async () => {
@@ -271,9 +337,10 @@ describe("local stdio server", () => {
       await client.connect(transport);
       const listed = await client.listTools();
 
-      expect(listed.tools.map((tool) => tool.name)).toEqual(
-        toolDefinitions.map((definition) => definition.name),
-      );
+      expect(listed.tools.map((tool) => tool.name)).toEqual([
+        ...toolDefinitions.map((definition) => definition.name),
+        ...workshopOnlyToolDefinitions.map((definition) => definition.name),
+      ]);
       expect(client.getInstructions()).toContain("Prefer the `{ path: string }` file form");
     } finally {
       await client.close();
