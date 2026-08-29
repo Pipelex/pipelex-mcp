@@ -116,11 +116,21 @@ describe("mthds_codegen (live)", () => {
  * GATED on the hosted deploy — Checkpoint 3 of `wip/addressing-methods/plan.md`.
  *
  * Both selectors are server pass-throughs on `POST /v1/codegen` (the runner
- * resolves the address, the hosted platform resolves the id), and
- * api.pipelex.com does not serve selector bodies until the platform deploy
- * that checkpoint gates on has happened. Un-skip once it lands; against a
- * current hosted API these calls come back as request-shape errors, which
- * would fail the suite for a reason that is not drift.
+ * resolves the address, the hosted platform resolves the id), and the hosted
+ * API does not serve selector bodies until the platform deploy that checkpoint
+ * gates on has happened. Un-skip once it lands; against a hosted API that
+ * predates it these calls come back as request-shape errors, which would fail
+ * the suite for a reason that is not drift.
+ *
+ * Probed on 2026-08-29 to keep this gate honest. The local stack already
+ * serves both, so the capability's mapping is exercised there by hand: an
+ * address returns a stamped `is_valid` report, and so does a catalog id. The
+ * hosted API is the half that is behind — `method_ref` answers `501`
+ * `MethodRefNotSupported` ("no method registry is wired"), and `method_id` is
+ * not yet in its request schema at all, so it answers `422` "provide exactly
+ * one of `files` or `method_ref`". That second body is the one to re-probe
+ * before un-skipping: it means the hosted route rejects the field rather than
+ * failing to resolve it.
  */
 describe.skip("mthds_codegen by selector (live, gated)", () => {
   it("generates from a stored method by id alone (server-side resolution)", async () => {
