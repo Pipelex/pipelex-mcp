@@ -16,6 +16,7 @@ import type {
 import type { OAuthConfig } from "skybridge/server";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { recordedTsZodReport } from "../capabilities/codegen-fixture.js";
 import { CODEGEN_TARGETS } from "../capabilities/codegen.js";
 import { createHostedServer } from "../hosted/server.js";
 import {
@@ -109,17 +110,21 @@ describe("local stdio server", () => {
     }
   });
 
-  it("binds the artifact save root and the results nudge to the workshop's working directory", async () => {
+  it("binds both write roots and the results nudge to the workshop's working directory", async () => {
     const rootDir = await makeTempDir();
 
     const local = buildLocalToolContexts({ PIPELEX_BASE_URL: "http://127.0.0.1:8081" }, rootDir);
     const hosted = buildToolContexts({ env: { PIPELEX_BASE_URL: "http://127.0.0.1:8081" } });
 
+    // One `workspaceRoot` option, three consumers — the download tool's save
+    // root, codegen's `output_dir` root, and the results summary's nudge.
     expect(local.artifacts.saveRoot).toBe(rootDir);
+    expect(local.codegen.saveRoot).toBe(rootDir);
     expect(local.run.artifactDownloadAvailable).toBe(true);
-    // The console builds the context (one builder serves both shells) but
-    // gives it nowhere to save and no nudge to emit.
+    // The console builds the contexts (one builder serves both shells) but
+    // gives them nowhere to write and no nudge to emit.
     expect(hosted.artifacts.saveRoot).toBeUndefined();
+    expect(hosted.codegen.saveRoot).toBeUndefined();
     expect(hosted.run.artifactDownloadAvailable).toBe(false);
   });
 
@@ -188,8 +193,13 @@ describe("local stdio server", () => {
       "files",
       "method_id",
       "method_ref",
+      "output_dir",
       "target",
     ]);
+    // Both shells advertise output_dir and the write annotation; the console
+    // refuses the argument instructively rather than silently ignoring it.
+    expect(local?.description).toContain("output_dir");
+    expect(hosted?.description).toContain("output_dir");
     // Plain tool on both shells: invocation strings for the console, no view.
     expect(hosted?._meta).toMatchObject({
       "openai/toolInvocation/invoking": "Generating typed code for the method...",
@@ -197,10 +207,11 @@ describe("local stdio server", () => {
     });
     expect(hosted?._meta).not.toHaveProperty("ui/resourceUri");
     expect(hosted?.annotations).toMatchObject({
-      readOnlyHint: true,
+      readOnlyHint: false,
       destructiveHint: false,
       openWorldHint: false,
     });
+    expect(local?.annotations).toMatchObject({ readOnlyHint: false });
   });
 
   it("dispatches mthds_codegen through the workshop with the artifacts on content and nothing on _meta", async () => {
@@ -218,18 +229,21 @@ describe("local stdio server", () => {
         arguments: { files: [{ content: 'domain = "demo"' }], target: "ts-zod" },
       });
 
+      const valid = codegenReport as Extract<CodegenResponse, { is_valid: true }>;
       expect(result.structuredContent).toMatchObject({
         status: "ok",
         is_valid: true,
         target: "ts-zod",
-        artifacts: [{ path: "types.ts", content: "// stamped\n" }],
-        lock: { filename: "codegen.lock", content: "lock_version = 1\n" },
         truncated: false,
       });
+      const artifacts = (result.structuredContent as { artifacts: { path: string }[] }).artifacts;
+      expect(artifacts.map((artifact) => artifact.path)).toEqual(
+        valid.artifacts.map((artifact) => artifact.path),
+      );
       expect(result._meta).toBeUndefined();
       const text = (result.content as Array<{ type: string; text: string }>)[0]?.text ?? "";
-      expect(text).toContain("```ts\n// stamped\n```");
-      expect(text).toContain("```toml\nlock_version = 1\n```");
+      expect(text).toContain("```ts\n" + valid.artifacts[0]!.content);
+      expect(text).toContain("```toml\n" + valid.lock);
     } finally {
       await close();
     }
@@ -462,17 +476,10 @@ const validReport: PipelexValidationReport = {
   rendered_markdown: "# Valid",
 };
 
-const codegenReport: CodegenResponse = {
-  is_valid: true,
-  kind: "types",
-  target: "ts-zod",
-  crate_fingerprint: "crate-abc",
-  engine_version: "0.20.0",
-  artifacts: [{ path: "types.ts", content: "// stamped\n" }],
-  lock: "lock_version = 1\n",
-  lock_filename: "codegen.lock",
-  message: "Generated.",
-};
+// A REAL recorded engine response: the capability preflights every valid arm
+// through the SDK's own hash-verifying check before relaying or writing it, so
+// a hand-written stub is refused as a malformed report.
+const codegenReport: CodegenResponse = await recordedTsZodReport();
 
 const catalogMethod: MethodPage["items"][number] = {
   method_id: "mt_invoice",

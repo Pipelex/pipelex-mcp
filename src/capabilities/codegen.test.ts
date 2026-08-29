@@ -1,8 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
 
 import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
 import type { CodegenRequest, CodegenResponse, CodegenValidReport } from "@pipelex/sdk";
 
+import { recordedTsZodReport } from "./codegen-fixture.js";
 import {
   CODEGEN_CONTENT_CAP,
   CODEGEN_TARGETS,
@@ -13,6 +18,16 @@ import {
   generateMthdsCode,
 } from "./codegen.js";
 import { DEFAULT_API_URL } from "./shared.js";
+
+/**
+ * A REAL engine response, recorded from a live `ts-zod` call — the only kind
+ * that survives the preflight, which runs the SDK's own hash-verifying check
+ * over the response before anything is written or relayed. The synthetic
+ * reports below stay for the PURE projection tests (`codegenResult`,
+ * `boundArtifacts`), where controlled byte sizes are the point and no
+ * preflight runs.
+ */
+const recordedReport = await recordedTsZodReport();
 
 const TS_TYPES = [
   "// >>> pipelex-codegen-stamp >>>",
@@ -87,6 +102,31 @@ const invalidReport: CodegenResponse = {
 };
 
 const bytesOf = (text: string): number => new TextEncoder().encode(text).length;
+
+const tempDirs: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+});
+
+async function makeTempDir(): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pipelex-codegen-capability-"));
+  tempDirs.push(dir);
+  return dir;
+}
+
+/** A workshop context whose write root is a real temp directory — no writer fake. */
+function workshopContext(saveRoot: string, response: CodegenResponse = recordedReport) {
+  return {
+    baseUrl: DEFAULT_API_URL,
+    saveRoot,
+    client: {
+      async codegen(): Promise<CodegenResponse> {
+        return response;
+      },
+    },
+  };
+}
 
 /** Fake codegen arm for tests whose request must never reach the route. */
 const codegenNotCalled = {
@@ -210,11 +250,11 @@ describe("boundArtifacts", () => {
     expect(bounded.lock.content).toBe(LOCK);
   });
 
-  it("withholds whole files in order from the first that does not fit", () => {
-    // Enough for types.ts alone: binder.ts does not fit, and once the walk has
-    // stopped the lock is withheld too even though it would fit on its own — a
-    // lock without its artifacts is no more useful than none.
-    const cap = bytesOf(TS_TYPES) + bytesOf(TS_BINDER) - 1;
+  it("withholds whole files in order from the first that does not fit, keeping the lock", () => {
+    // The lock's bytes are reserved off the top, so what remains fits types.ts
+    // and not binder.ts. The trust anchor rides even though the code it
+    // anchors does not: code the model cannot check is the wrong casualty.
+    const cap = bytesOf(LOCK) + bytesOf(TS_TYPES) + bytesOf(TS_BINDER) - 1;
 
     const bounded = boundArtifacts(validTsReport, cap);
 
@@ -223,7 +263,27 @@ describe("boundArtifacts", () => {
       { path: "types.ts", bytes: bytesOf(TS_TYPES), content: TS_TYPES },
       { path: "binder.ts", bytes: bytesOf(TS_BINDER) },
     ]);
-    expect(bounded.lock).toEqual({ filename: "codegen.lock", bytes: bytesOf(LOCK) });
+    expect(bounded.lock).toEqual({
+      filename: "codegen.lock",
+      bytes: bytesOf(LOCK),
+      content: LOCK,
+    });
+  });
+
+  it("keeps the lock's content when the artifacts alone exceed the cap", () => {
+    const bounded = boundArtifacts(validTsReport, bytesOf(LOCK) + 1);
+
+    expect(bounded.truncated).toBe(true);
+    expect(bounded.artifacts.every((artifact) => artifact.content === undefined)).toBe(true);
+    expect(bounded.lock.content).toBe(LOCK);
+  });
+
+  it("reports truncated, and withholds everything, when the lock alone exceeds the cap", () => {
+    const bounded = boundArtifacts(validTsReport, bytesOf(LOCK) - 1);
+
+    expect(bounded.truncated).toBe(true);
+    expect(bounded.lock.content).toBeUndefined();
+    expect(bounded.artifacts.every((artifact) => artifact.content === undefined)).toBe(true);
   });
 
   it("never cuts a file: an artifact larger than the cap is withheld entirely", () => {
@@ -261,9 +321,24 @@ describe("a truncated result's summary", () => {
     });
     expect(result.summary).toContain("## Withheld for size");
     expect(result.summary).toContain(`- \`binder.ts\` (${CODEGEN_CONTENT_CAP} bytes)`);
-    expect(result.summary).toContain("- `codegen.lock` (");
+    // The lock rides: it is reserved off the top, so it is never the casualty.
+    expect(result.structuredContent.lock?.content).toBe(LOCK);
+    expect(result.summary).not.toContain("- `codegen.lock` (");
     expect(result.summary).toContain("pipelex codegen types");
     expect(result.summary).not.toContain(huge);
+  });
+
+  it("offers the write arm only on a shell that can write", () => {
+    const huge = "x".repeat(CODEGEN_CONTENT_CAP);
+    const report: CodegenValidReport = {
+      ...validTsReport,
+      artifacts: [{ path: "types.ts", content: huge }],
+    };
+
+    expect(codegenResult(report, undefined, true).summary).toContain(
+      "Pass `output_dir` to write the tree to disk instead",
+    );
+    expect(codegenResult(report, undefined, false).summary).not.toContain("output_dir");
   });
 });
 
@@ -317,7 +392,7 @@ describe("generateMthdsCode request mapping", () => {
         client: {
           async codegen(request) {
             captured = request;
-            return validTsReport;
+            return recordedReport;
           },
         },
       },
@@ -350,7 +425,7 @@ describe("generateMthdsCode request mapping", () => {
         client: {
           async codegen(request) {
             captured = request;
-            return validPyReport;
+            return recordedReport;
           },
         },
       },
@@ -374,7 +449,7 @@ describe("generateMthdsCode request mapping", () => {
         client: {
           async codegen(request) {
             captured = request;
-            return { ...validPyReport, target: "python-structures" };
+            return recordedReport;
           },
         },
       },
@@ -567,7 +642,7 @@ describe("generateMthdsCode error classification", () => {
         baseUrl: DEFAULT_API_URL,
         client: {
           async codegen() {
-            return { ...validTsReport, lock: undefined } as unknown as CodegenResponse;
+            return { ...recordedReport, lock: undefined } as unknown as CodegenResponse;
           },
         },
       },
@@ -598,7 +673,7 @@ describe("generateMthdsCode path submissions", () => {
         client: {
           async codegen(request) {
             captured = request;
-            return validTsReport;
+            return recordedReport;
           },
         },
       },
@@ -621,5 +696,265 @@ describe("generateMthdsCode path submissions", () => {
     expect(error?.class).toBe("input_domain");
     expect(error?.location).toBe("files[0].path");
     expect(error?.hint).toContain("npx @pipelex/mcp");
+  });
+});
+
+describe("generateMthdsCode write arm", () => {
+  it("writes the tree and withholds every byte from both streams", async () => {
+    const root = await makeTempDir();
+
+    const result = await generateMthdsCode(
+      { files: [{ content: 'domain = "demo"' }], target: "ts-zod", output_dir: "src/generated" },
+      workshopContext(root),
+    );
+
+    const content = result.structuredContent;
+    expect(content.status).toBe("ok");
+    expect(content.is_valid).toBe(true);
+    expect(content.output_dir).toBe(path.join("src", "generated"));
+    expect(content.is_current).toBe(true);
+    expect(content.orphans).toEqual([]);
+    expect(content.orphans_truncated).toBeUndefined();
+    expect(content.drifts).toBeUndefined();
+    // `output_dir`'s presence is the arm discriminator, and `truncated` is
+    // always false there — nothing rode, so nothing was withheld for size.
+    expect(content.truncated).toBe(false);
+    expect(content.artifacts?.every((artifact) => artifact.content === undefined)).toBe(true);
+    expect(content.artifacts?.every((artifact) => artifact.written_to !== undefined)).toBe(true);
+    expect(content.lock?.content).toBeUndefined();
+    expect(content.lock?.written_to).toBe(path.join("src", "generated", "codegen.lock"));
+
+    // The summary carries no fenced block and no content either.
+    expect(result.summary).not.toContain("```");
+    expect(result.summary).toContain("Written under");
+    expect(result.summary).toContain("**current**");
+    expect(result.summary).not.toContain(recordedReport.artifacts[0]!.content);
+
+    // The bytes are on disk, verbatim.
+    for (const artifact of recordedReport.artifacts) {
+      expect(await fs.readFile(path.join(root, "src/generated", artifact.path), "utf8")).toBe(
+        artifact.content,
+      );
+    }
+  });
+
+  it("reports orphans in the summary and never deletes them", async () => {
+    const root = await makeTempDir();
+    const dir = path.join(root, "generated");
+    await fs.mkdir(dir, { recursive: true });
+    const stale = path.join(dir, "structures.py");
+    await fs.writeFile(
+      stale,
+      ["# >>> pipelex-codegen-stamp >>>", "# <<< pipelex-codegen-stamp <<<", ""].join("\n"),
+      "utf8",
+    );
+
+    const result = await generateMthdsCode(
+      { files: [{ content: 'domain = "demo"' }], target: "ts-zod", output_dir: "generated" },
+      workshopContext(root),
+    );
+
+    expect(result.structuredContent.is_current).toBe(false);
+    expect(result.structuredContent.orphans).toEqual(["structures.py"]);
+    expect(result.summary).toContain("not current");
+    expect(result.summary).toContain("never deletes");
+    expect(await fs.stat(stale)).toBeDefined();
+  });
+
+  it("refuses a blank output_dir without calling the route", async () => {
+    const result = await generateMthdsCode(
+      { files: [{ content: 'domain = "demo"' }], target: "ts-zod", output_dir: "  " },
+      { baseUrl: DEFAULT_API_URL, saveRoot: "/tmp", client: codegenNotCalled },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "output_dir",
+    });
+  });
+
+  it("refuses output_dir on a shell with no write root, naming the workshop", async () => {
+    const result = await generateMthdsCode(
+      { files: [{ content: 'domain = "demo"' }], target: "ts-zod", output_dir: "generated" },
+      { baseUrl: DEFAULT_API_URL, client: codegenNotCalled },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    const error = result.structuredContent.errors?.[0];
+    expect(error?.location).toBe("output_dir");
+    expect(error?.hint).toContain("npx @pipelex/mcp");
+  });
+
+  it("refuses an absolute output_dir without calling the route", async () => {
+    const result = await generateMthdsCode(
+      { files: [{ content: 'domain = "demo"' }], target: "ts-zod", output_dir: "/etc/pipelex" },
+      { baseUrl: DEFAULT_API_URL, saveRoot: "/tmp", client: codegenNotCalled },
+    );
+
+    expect(result.structuredContent.errors?.[0]?.location).toBe("output_dir");
+  });
+
+  it("returns a no-verdict error on a refused write, never a fallback to riding the content", async () => {
+    const root = await makeTempDir();
+    const dir = path.join(root, "generated");
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(
+      path.join(dir, recordedReport.artifacts[0]!.path),
+      "export const mine = 1;\n",
+      "utf8",
+    );
+
+    const result = await generateMthdsCode(
+      { files: [{ content: 'domain = "demo"' }], target: "ts-zod", output_dir: "generated" },
+      workshopContext(root),
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("output_dir");
+    // The caller asked for a write and none happened; inlining tens of
+    // kilobytes they did not ask for would change the shape they expected.
+    expect(result.structuredContent.artifacts).toBeUndefined();
+  });
+
+  it("touches no disk at all on a produced-invalid verdict, even with output_dir", async () => {
+    const root = await makeTempDir();
+
+    const result = await generateMthdsCode(
+      { files: [{ content: 'domain = "demo"' }], target: "ts-zod", output_dir: "generated" },
+      workshopContext(root, invalidReport),
+    );
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.is_valid).toBe(false);
+    expect(result.structuredContent.output_dir).toBeUndefined();
+    // Not even the directory: an invalid verdict returns before the write arm.
+    expect(await fs.readdir(root)).toEqual([]);
+  });
+
+  it("refuses a lock that tracks a file the response does not carry, before anything is written", async () => {
+    const root = await makeTempDir();
+    // A lock that tracks a file the response does not carry: the check reports
+    // it `missing`, which is a writer defect and must never vanish behind a
+    // bare `is_current: false`.
+    const drifting: CodegenResponse = {
+      ...recordedReport,
+      lock:
+        recordedReport.lock +
+        '\n[[artifacts]]\npath = "extra.ts"\ncontent_hash = "' +
+        "0".repeat(64) +
+        '"\n',
+    };
+
+    const result = await generateMthdsCode(
+      { files: [{ content: 'domain = "demo"' }], target: "ts-zod", output_dir: "generated" },
+      workshopContext(root, drifting),
+    );
+
+    // The preflight catches it first: a lock that disagrees with its artifacts
+    // is a contract violation, and nothing reaches disk.
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
+    expect(await fs.readdir(root)).toEqual([]);
+  });
+});
+
+describe("the written arm's drift projection", () => {
+  // A non-orphan drift after a successful write can only mean the writer
+  // itself is broken, so it cannot be produced through the capability — the
+  // preflight refuses a disagreeing response before the write. What must not
+  // regress is the PROJECTION: an earlier draft computed drifts and dropped
+  // them, leaving `is_current: false` with nothing anywhere saying why.
+  const written = {
+    ok: true as const,
+    dir: "generated",
+    written: [{ path: "types.ts", bytes: 10, writtenTo: "generated/types.ts" }],
+    lock: { filename: "codegen.lock", bytes: 5, writtenTo: "generated/codegen.lock" },
+    isCurrent: false,
+    orphans: [],
+    orphansTruncated: false,
+    drifts: [{ path: "types.ts", category: "modified" as const, detail: "content hash mismatch" }],
+  };
+
+  it("carries a non-orphan drift into structuredContent and the summary", () => {
+    const result = codegenResult(validTsReport, written);
+
+    expect(result.structuredContent.drifts).toEqual(written.drifts);
+    expect(result.summary).toContain("Unexpected drift");
+    expect(result.summary).toContain("content hash mismatch");
+  });
+
+  it("says orphan detection was partial when a walk bound tripped", () => {
+    const result = codegenResult(validTsReport, {
+      ...written,
+      isCurrent: true,
+      drifts: [],
+      orphansTruncated: true,
+    });
+
+    expect(result.structuredContent.orphans_truncated).toBe(true);
+    expect(result.summary).toContain("partial");
+  });
+});
+
+describe("generateMthdsCode report-shape rules", () => {
+  it("refuses a lock filename that is not bare, on the riding arm too", async () => {
+    for (const lockFilename of ["../codegen.lock", "nested/codegen.lock", ".codegen.lock"]) {
+      const result = await generateMthdsCode(
+        { files: [{ content: 'domain = "demo"' }], target: "ts-zod" },
+        {
+          baseUrl: DEFAULT_API_URL,
+          client: {
+            async codegen(): Promise<CodegenResponse> {
+              return { ...recordedReport, lock_filename: lockFilename };
+            },
+          },
+        },
+      );
+
+      expect(result.structuredContent.status).toBe("error");
+      expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
+      expect(result.structuredContent.errors?.[0]?.message).toContain("bare filename");
+    }
+  });
+
+  it("refuses a response whose lock and artifacts disagree, before anything is written", async () => {
+    const root = await makeTempDir();
+    const tampered: CodegenResponse = {
+      ...recordedReport,
+      artifacts: recordedReport.artifacts.map((artifact, index) =>
+        index === 0 ? { ...artifact, content: artifact.content + "// tampered\n" } : artifact,
+      ),
+    };
+
+    const result = await generateMthdsCode(
+      { files: [{ content: 'domain = "demo"' }], target: "ts-zod", output_dir: "generated" },
+      workshopContext(root, tampered),
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
+    expect(result.structuredContent.errors?.[0]?.message).toContain("offline check");
+    expect(await fs.readdir(root)).toEqual([]);
+  });
+
+  it("refuses an artifact path the offline check cannot verify", async () => {
+    const result = await generateMthdsCode(
+      { files: [{ content: 'domain = "demo"' }], target: "ts-zod" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          async codegen(): Promise<CodegenResponse> {
+            return {
+              ...recordedReport,
+              artifacts: [{ path: "types.rb", content: "# nope\n" }],
+            };
+          },
+        },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.message).toContain("types.rb");
   });
 });

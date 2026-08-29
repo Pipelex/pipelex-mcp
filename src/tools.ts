@@ -109,11 +109,13 @@ interface ToolContextOptions {
   /** The per-deployment asset boundary for mthds_prepare_inputs (workshop uploads; console pass-through only). */
   allowUpload?: boolean;
   /**
-   * The directory mthds_download_artifacts saves under — the workshop's
-   * working directory. Absent on the console, which registers no such tool
-   * and never writes a file.
+   * The workshop's working directory — the one write root, fanned out to every
+   * consumer that needs it: `mthds_download_artifacts` saves under it,
+   * `mthds_codegen` resolves `output_dir` against it, and `mthds_run_results`
+   * names the download tool only where it exists. Absent on the console, which
+   * never writes a file.
    */
-  artifactsRoot?: string;
+  workspaceRoot?: string;
 }
 
 /** Build one capability-context set for either deployment shell. */
@@ -122,7 +124,7 @@ export function buildToolContexts(options: ToolContextOptions = {}): ToolContext
   const resolver = options.resolver;
   const viewsAvailable = options.viewsAvailable ?? true;
   const allowUpload = options.allowUpload ?? false;
-  const artifactsRoot = options.artifactsRoot;
+  const workspaceRoot = options.workspaceRoot;
 
   return {
     catalog: buildCatalogContext(env),
@@ -138,6 +140,7 @@ export function buildToolContexts(options: ToolContextOptions = {}): ToolContext
     codegen: {
       ...buildCodegenContext(env),
       resolver,
+      ...(workspaceRoot === undefined ? {} : { saveRoot: workspaceRoot }),
     },
     prepare: {
       ...buildPrepareContext(env),
@@ -149,12 +152,12 @@ export function buildToolContexts(options: ToolContextOptions = {}): ToolContext
       resolver,
       viewsAvailable,
       // The results summary names the download tool only where it exists.
-      artifactDownloadAvailable: artifactsRoot !== undefined,
+      artifactDownloadAvailable: workspaceRoot !== undefined,
     },
     attachments: buildAttachmentsContext(env),
     artifacts: {
       ...buildArtifactsContext(env),
-      ...(artifactsRoot === undefined ? {} : { saveRoot: artifactsRoot }),
+      ...(workspaceRoot === undefined ? {} : { saveRoot: workspaceRoot }),
     },
   };
 }
@@ -263,7 +266,8 @@ const CODEGEN_DESCRIPTION = [
   "Supply exactly ONE of files / method_ref (a published method's address, github.com/<owner>/<repo>[/<selector>][@<tag>]) / method_id (a registered method's mt_… catalog id) — never several. Addresses and ids are resolved server-side, so no bundle enters the conversation; a by-id call generates from the method's CURRENT stored content and requires an API key, since the catalog is org-scoped.",
   `target is required and has no default — choose it from the context, and the user's explicit request wins: ${CODEGEN_TARGET_RULE}.`,
   "Field keys stay snake_case in every target.",
-  "Write every returned artifact at its path and the lock as codegen.lock beside them, all VERBATIM (byte for byte — any change breaks the stamp and the lock), into a dedicated generated directory; `pipelex codegen check` and @pipelex/sdk's runCodegenCheck then pass on that tree.",
+  "On the local workshop, pass output_dir (a DEDICATED generated directory relative to the working directory, such as src/generated/<method>/) to write the tree directly, so the bytes never enter the conversation; the hosted console does not take output_dir.",
+  "Without output_dir, write every returned artifact at its path and the lock as codegen.lock beside them, all VERBATIM (byte for byte — any change breaks the stamp and the lock), into a dedicated generated directory; `pipelex codegen check` and @pipelex/sdk's runCodegenCheck then pass on that tree.",
   "A large artifact set is withheld for size rather than cut mid-file (truncated: true, content absent on the withheld files) — generate such a method locally with `pipelex codegen types`.",
 ].join(" ");
 
@@ -273,8 +277,12 @@ export const mthdsCodegenTool = defineTool({
   inputSchema: mthdsCodegenInputSchema,
   outputSchema: mthdsCodegenOutputSchema,
   annotations: {
+    // Both shells advertise the write, although only the workshop can perform
+    // it: an annotation says what a tool MAY do, and the shared definition is
+    // what keeps one tool name from meaning two things. `mthds_prepare_inputs`
+    // already sets the precedent for its workshop-only uploads.
     title: "Generate typed code for an MTHDS method",
-    readOnlyHint: true,
+    readOnlyHint: false,
     destructiveHint: false,
     openWorldHint: false,
   },

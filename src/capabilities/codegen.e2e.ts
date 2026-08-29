@@ -12,8 +12,12 @@
  * tree that passes it here would pass it on disk.
  */
 
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { runCodegenCheck } from "@pipelex/sdk";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { CODEGEN_TARGETS, generateMthdsCode } from "./codegen.js";
 import type { CodegenContext } from "./codegen.js";
@@ -29,6 +33,18 @@ import {
 const context: CodegenContext = liveApiConfig();
 
 const fixtureFiles = [{ content: FIXTURE_BUNDLE, uri: FIXTURE_BUNDLE_URI }];
+
+const tempDirs: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+});
+
+async function makeTempDir(): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pipelex-codegen-e2e-"));
+  tempDirs.push(dir);
+  return dir;
+}
 
 describe("mthds_codegen (live)", () => {
   for (const target of CODEGEN_TARGETS) {
@@ -109,6 +125,96 @@ describe("mthds_codegen (live)", () => {
 
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+  });
+});
+
+/**
+ * The workshop's write arm, live. The hermetic writer suite runs against a
+ * RECORDED engine response; this is what proves a CURRENT engine still writes
+ * a tree the offline check accepts — and that the two policies the writer must
+ * hold apart really behave that way on disk: regeneration overwrites its own
+ * files, and a second target into the same directory produces orphans it never
+ * deletes.
+ */
+describe("mthds_codegen output_dir (live)", () => {
+  it("writes a checkable tree, overwrites its own regeneration, and reports a second target as orphans", async () => {
+    const saveRoot = await makeTempDir();
+    const workshop: CodegenContext = { ...context, saveRoot };
+    const dir = path.join(saveRoot, "generated");
+
+    const first = await generateMthdsCode(
+      { files: fixtureFiles, target: "ts-zod", output_dir: "generated" },
+      workshop,
+    );
+
+    expect(first.structuredContent.status).toBe("ok");
+    expect(first.structuredContent.is_valid).toBe(true);
+    expect(first.structuredContent.output_dir).toBe("generated");
+    expect(first.structuredContent.is_current).toBe(true);
+    expect(first.structuredContent.orphans).toEqual([]);
+    expect(first.structuredContent.truncated).toBe(false);
+    // Nothing rode the response: the whole point of the write arm.
+    expect(first.structuredContent.artifacts?.every((a) => a.content === undefined)).toBe(true);
+    expect(first.structuredContent.lock?.content).toBeUndefined();
+    expect(await fs.readdir(dir)).toEqual(
+      expect.arrayContaining(["binder.ts", "codegen.lock", "types.ts"]),
+    );
+
+    // A second opinion on the writer's own check, computed independently from
+    // what is on disk.
+    const check = await runCodegenCheck({
+      lockContent: await fs.readFile(path.join(dir, "codegen.lock"), "utf8"),
+      files: await Promise.all(
+        ["binder.ts", "types.ts"].map(async (name) => ({
+          path: name,
+          content: await fs.readFile(path.join(dir, name), "utf8"),
+        })),
+      ),
+    });
+    expect(check.isCurrent).toBe(true);
+    expect(check.crateFingerprint).toBe(first.structuredContent.crate_fingerprint);
+
+    // Regeneration into the same directory: stamped files, so no refusal.
+    const again = await generateMthdsCode(
+      { files: fixtureFiles, target: "ts-zod", output_dir: "generated" },
+      workshop,
+    );
+    expect(again.structuredContent.status).toBe("ok");
+    expect(again.structuredContent.is_current).toBe(true);
+    expect(again.structuredContent.orphans).toEqual([]);
+
+    // A different target into the same directory: D7 in action — the TypeScript
+    // files are now orphans, reported and left on disk.
+    const mixed = await generateMthdsCode(
+      { files: fixtureFiles, target: "python-pydantic", output_dir: "generated" },
+      workshop,
+    );
+    expect(mixed.structuredContent.status).toBe("ok");
+    expect(mixed.structuredContent.is_current).toBe(false);
+    expect([...(mixed.structuredContent.orphans ?? [])].sort()).toEqual(["binder.ts", "types.ts"]);
+    expect(mixed.structuredContent.drifts).toBeUndefined();
+    expect(await fs.stat(path.join(dir, "types.ts"))).toBeDefined();
+    expect(await fs.stat(path.join(dir, "models.py"))).toBeDefined();
+  });
+
+  it("refuses a foreign file in the target directory, writing nothing", async () => {
+    const saveRoot = await makeTempDir();
+    const dir = path.join(saveRoot, "generated");
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, "types.ts"), "export const mine = 1;\n", "utf8");
+
+    const result = await generateMthdsCode(
+      { files: fixtureFiles, target: "ts-zod", output_dir: "generated" },
+      { ...context, saveRoot },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "output_dir",
+    });
+    expect(await fs.readdir(dir)).toEqual(["types.ts"]);
+    expect(await fs.readFile(path.join(dir, "types.ts"), "utf8")).toBe("export const mine = 1;\n");
   });
 });
 
