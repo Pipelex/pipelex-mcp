@@ -20,7 +20,7 @@ import {
   resolveSubmittedFiles,
   summaryForToolError,
   toolResultContent,
-  validateFilesOrMethodIdRequest,
+  validateMethodSelectorRequest,
   validateRunIdRequest,
 } from "./shared.js";
 import type { ErrorSummaries, FileResolver, MethodFetchClient, ToolError } from "./shared.js";
@@ -254,28 +254,47 @@ describe("toolResultContent", () => {
   });
 });
 
-describe("validateFilesOrMethodIdRequest", () => {
-  it("accepts files only, method_id only, and both", () => {
-    const files = [{ content: 'domain = "demo"' }];
+describe("validateMethodSelectorRequest", () => {
+  const files = [{ content: 'domain = "demo"' }];
+  const ADDRESS = "github.com/Pipelex/methods/documents@v0.1.0";
 
-    expect(validateFilesOrMethodIdRequest(files, undefined)).toEqual([]);
-    expect(validateFilesOrMethodIdRequest([], "mt_abc123")).toEqual([]);
-    expect(validateFilesOrMethodIdRequest(files, "mt_abc123")).toEqual([]);
+  it("accepts each selector alone, under both rules", () => {
+    for (const rule of ["one_selector", "run_source"] as const) {
+      expect(validateMethodSelectorRequest(files, {}, { rule })).toEqual([]);
+      expect(validateMethodSelectorRequest([], { method_ref: ADDRESS }, { rule })).toEqual([]);
+      expect(validateMethodSelectorRequest([], { method_id: "mt_abc123" }, { rule })).toEqual([]);
+    }
   });
 
-  it("rejects a request with neither files nor method_id", () => {
-    const errors = validateFilesOrMethodIdRequest([], undefined);
+  it("rejects a request with no selector at all, naming the accepted forms", () => {
+    const errors = validateMethodSelectorRequest([], {}, { rule: "one_selector" });
 
     expect(errors).toHaveLength(1);
     expect(errors[0]?.class).toBe("input_domain");
     expect(errors[0]?.location).toBe("files");
+    expect(errors[0]?.message).toBe("Provide MTHDS files, a method_ref address, or a method_id.");
+    expect(errors[0]?.hint).toContain("github.com/");
+  });
+
+  it("omits method_ref from the no-selector teaching text when the tool does not accept it", () => {
+    const errors = validateMethodSelectorRequest(
+      [],
+      {},
+      { rule: "one_selector", acceptsMethodRef: false },
+    );
+
+    expect(errors).toHaveLength(1);
     expect(errors[0]?.message).toBe("Provide MTHDS files or a method_id.");
-    expect(errors[0]?.hint).toContain("method_id");
+    expect(errors[0]?.hint).not.toContain("method_ref");
   });
 
   it("rejects a blank method_id at method_id, with or without files", () => {
-    for (const files of [[], [{ content: 'domain = "demo"' }]]) {
-      const errors = validateFilesOrMethodIdRequest(files, "  ");
+    for (const presentFiles of [[], files]) {
+      const errors = validateMethodSelectorRequest(
+        presentFiles,
+        { method_id: "  " },
+        { rule: "run_source" },
+      );
 
       expect(errors).toHaveLength(1);
       expect(errors[0]?.class).toBe("input_domain");
@@ -284,14 +303,111 @@ describe("validateFilesOrMethodIdRequest", () => {
     }
   });
 
-  it("accepts any non-blank method_id — format stays server-owned", () => {
-    expect(validateFilesOrMethodIdRequest([], "not-an-mt-id")).toEqual([]);
+  it("rejects a blank method_ref at method_ref", () => {
+    const errors = validateMethodSelectorRequest(
+      [],
+      { method_ref: "  " },
+      { rule: "one_selector" },
+    );
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.class).toBe("input_domain");
+    expect(errors[0]?.location).toBe("method_ref");
+  });
+
+  it("accepts any non-blank selector — format stays server-owned", () => {
+    expect(
+      validateMethodSelectorRequest([], { method_id: "not-an-mt-id" }, { rule: "one_selector" }),
+    ).toEqual([]);
+    expect(
+      validateMethodSelectorRequest([], { method_ref: "not-an-address" }, { rule: "one_selector" }),
+    ).toEqual([]);
+  });
+
+  it("one_selector: rejects every pairing, each at the extra selector", () => {
+    const filesAndId = validateMethodSelectorRequest(
+      files,
+      { method_id: "mt_abc123" },
+      { rule: "one_selector" },
+    );
+    expect(filesAndId).toHaveLength(1);
+    expect(filesAndId[0]?.location).toBe("method_id");
+    expect(filesAndId[0]?.message).toContain("mutually exclusive");
+
+    const filesAndRef = validateMethodSelectorRequest(
+      files,
+      { method_ref: ADDRESS },
+      { rule: "one_selector" },
+    );
+    expect(filesAndRef).toHaveLength(1);
+    expect(filesAndRef[0]?.location).toBe("method_ref");
+
+    const refAndId = validateMethodSelectorRequest(
+      [],
+      { method_ref: ADDRESS, method_id: "mt_abc123" },
+      { rule: "one_selector" },
+    );
+    expect(refAndId).toHaveLength(1);
+    expect(refAndId[0]?.location).toBe("method_id");
+  });
+
+  it("run_source: files + method_id is the legal linkage pair", () => {
+    expect(
+      validateMethodSelectorRequest(files, { method_id: "mt_abc123" }, { rule: "run_source" }),
+    ).toEqual([]);
+  });
+
+  it("run_source: method_ref pairs with nothing", () => {
+    const filesAndRef = validateMethodSelectorRequest(
+      files,
+      { method_ref: ADDRESS },
+      { rule: "run_source" },
+    );
+    expect(filesAndRef).toHaveLength(1);
+    expect(filesAndRef[0]?.location).toBe("method_ref");
+
+    const refAndId = validateMethodSelectorRequest(
+      [],
+      { method_ref: ADDRESS, method_id: "mt_abc123" },
+      { rule: "run_source" },
+    );
+    expect(refAndId).toHaveLength(1);
+    expect(refAndId[0]?.location).toBe("method_id");
+    expect(refAndId[0]?.message).toContain("provenance");
+  });
+
+  it("all three selectors report each illegal pairing", () => {
+    const errors = validateMethodSelectorRequest(
+      files,
+      { method_ref: ADDRESS, method_id: "mt_abc123" },
+      { rule: "one_selector" },
+    );
+
+    expect(errors.map((error) => error.location).sort()).toEqual([
+      "method_id",
+      "method_id",
+      "method_ref",
+    ]);
+  });
+
+  it("a blank selector earns its own error, not a pairing error", () => {
+    // The blank method_ref is invalid on its own; it must not also produce
+    // an exclusivity error against the files.
+    const errors = validateMethodSelectorRequest(
+      files,
+      { method_ref: "  " },
+      { rule: "run_source" },
+    );
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain("must not be empty");
   });
 
   it("still applies the per-file checks when files are present", () => {
-    const errors = validateFilesOrMethodIdRequest(
+    const errors = validateMethodSelectorRequest(
       [{ content: "" }, { content: "x", uri: "" }],
-      "mt_abc123",
+      {},
+      { rule: "run_source" },
     );
 
     expect(errors.map((error) => error.location)).toEqual(["files[0].content", "files[1].uri"]);

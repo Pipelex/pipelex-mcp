@@ -173,9 +173,12 @@ export const mthdsListMethodsTool = defineTool({
 export const mthdsValidateTool = defineTool({
   name: "mthds_validate",
   description:
-    "Validate MTHDS file contents with the Pipelex API — from submitted file contents, or from a registered method's catalog id (mt_…) passed as method_id. " +
-    "A by-id call validates the method's CURRENT stored content and requires an API key, since the catalog is org-scoped. " +
-    "With both files and method_id supplied, the files win and method_id is ignored.",
+    "Validate an MTHDS method with the Pipelex API — from submitted file contents, from a published method's address passed as method_ref " +
+    "(github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0), " +
+    "or from a registered method's catalog id (mt_…) passed as method_id. " +
+    "Supply exactly ONE of files / method_ref / method_id — never several. " +
+    "Addresses and ids are resolved server-side, so no bundle enters the conversation; " +
+    "a by-id call validates the method's CURRENT stored content and requires an API key, since the catalog is org-scoped.",
   inputSchema: mthdsValidateInputSchema,
   outputSchema: mthdsValidateOutputSchema,
   annotations: {
@@ -192,9 +195,11 @@ export const mthdsValidateTool = defineTool({
 export const mthdsInputsTemplateTool = defineTool({
   name: "mthds_inputs_template",
   description:
-    "Project a pipe's declared inputs as a fill-in template — from submitted MTHDS file contents, or from a registered method's catalog id (mt_…) passed as method_id. " +
-    "A by-id call projects from the method's CURRENT stored content and requires an API key, since the catalog is org-scoped. " +
-    "With both files and method_id supplied, the files win and method_id is ignored.",
+    "Project a pipe's declared inputs as a fill-in template — from submitted MTHDS file contents, from a published method's address passed as method_ref " +
+    "(github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0), " +
+    "or from a registered method's catalog id (mt_…) passed as method_id. " +
+    "Supply exactly ONE of files / method_ref / method_id — never several. " +
+    "A by-id call projects from the method's CURRENT stored content and requires an API key, since the catalog is org-scoped.",
   inputSchema: mthdsInputsInputSchema,
   outputSchema: mthdsInputsOutputSchema,
   annotations: {
@@ -213,7 +218,7 @@ export const mthdsPrepareInputsTool = defineTool({
   description:
     "Prepare a pipe's FILLED inputs for a run — upload file-bearing values (local paths, data: URLs, bytes) to Pipelex storage and rewrite them to pipelex-storage:// so they are run-ready. " +
     "http(s) URLs and existing pipelex-storage:// references pass through unchanged; an inputs set that is already all pass-through can skip this and go straight to mthds_run. " +
-    "Supply the method closure as files (or a registered method's catalog id via method_id) plus the filled inputs from mthds_inputs_template. " +
+    "Supply the method closure as files or as a registered method's catalog id via method_id — exactly one of the two, never both — plus the filled inputs from mthds_inputs_template. " +
     "The local workshop uploads local/byte assets with your API key; the hosted console is pass-through only and refuses upload-needing inputs (use a URL, a pipelex-storage:// reference, or the local workshop).",
   inputSchema: mthdsPrepareInputsInputSchema,
   outputSchema: mthdsPrepareInputsOutputSchema,
@@ -231,9 +236,11 @@ export const mthdsPrepareInputsTool = defineTool({
 export const mthdsRunTool = defineTool({
   name: "mthds_run",
   description:
-    "Start a durable run of a MTHDS method — from submitted file contents, or from a registered method's catalog id (mt_…) passed as method_id. " +
+    "Start a durable run of a MTHDS method — from submitted file contents, from a published method's address passed as method_ref " +
+    "(github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0 — resolved server-side at the tag, with the fetched commit returned as provenance), " +
+    "or from a registered method's catalog id (mt_…) passed as method_id. " +
+    "method_ref is a complete run source and pairs with NOTHING (not files, not method_id); files + method_id together is legal — the files run and method_id is recorded as run-history linkage. " +
     "A by-id run executes the method's CURRENT stored content (methods are not versioned — it does not pin what you previously validated) and requires an API key, since the catalog is org-scoped. " +
-    "With both files and method_id supplied, the files run and method_id is recorded as run-history linkage. " +
     "Executes the method on the hosted Pipelex API and spends inference credit. " +
     "When running from files, validate the bundle with mthds_validate and fill the inputs template from mthds_inputs_template first — " +
     "validation gives a structured, repairable verdict, where a start-time rejection only reports the failure. " +

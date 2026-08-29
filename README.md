@@ -373,9 +373,10 @@ No method source crosses the conversation in this flow.
 ### `mthds_validate`
 
 ```ts
-// input — at least one of files / method_id
+// input — exactly ONE of files / method_ref / method_id
 {
   files?: SubmittedFileInput[];
+  method_ref?: string;         // published method address — github.com/<owner>/<repo>[/<selector>][@<tag>]
   method_id?: string;          // catalog id (mt_…) of a registered method
   include_graph?: boolean;
 }
@@ -402,19 +403,23 @@ carries both artifacts, an input form for the main pipe (its fields derived
 from the wire descriptor) whose Run button starts the method from the view.
 `available_view_specs` is how the model learns which views exist to surface;
 `include_graph` defaults to true. The MCP `content` text
-carries the human-readable summary. `method_id` validates a registered method by
-its catalog id (fetch-and-forward from the method's current stored content, the
-same pattern as `mthds_inputs_template`); it requires an API key, since the
-catalog is org-scoped, and when both `files` and `method_id` are supplied the
-files win and the id is ignored. The graph view works identically whether the
-content came from submitted files or a by-id fetch.
+carries the human-readable summary. The three source forms are **mutually
+exclusive — supply exactly one**. `method_ref` validates a published method by
+its address (`github.com/<owner>/<repo>[/<selector>][@<tag>]`, e.g.
+`github.com/Pipelex/methods/documents@v0.1.0`); `method_id` validates a
+registered method by its catalog id (requires an API key, since the catalog is
+org-scoped). Both are **server pass-throughs**: the selector rides the
+`/v1/validate` body and the hosted API resolves it — no method source enters
+the conversation. The graph view works identically whichever source form the
+verdict came from.
 
 ### `mthds_inputs_template`
 
 ```ts
-// input — at least one of files / method_id
+// input — exactly ONE of files / method_ref / method_id
 {
   files?: SubmittedFileInput[];
+  method_ref?: string;         // published method address — github.com/<owner>/<repo>[/<selector>][@<tag>]
   method_id?: string;          // catalog id (mt_…) of a registered method
   pipe_ref?: string;
   explicit?: boolean;
@@ -439,17 +444,18 @@ content came from submitted files or a by-id fetch.
 declared `main_pipe`. `explicit` (default true) emits the ceremonial
 `{concept, content}` envelope per input — the declared concept ref plus the
 canonical content shape; pass `false` for the light shape (bare example values).
-`format` (default `"json"`) chooses the template encoding. `method_id` projects a registered method by its catalog id
-(fetch-and-forward from the method's current stored content); it requires an API
-key, since the catalog is org-scoped, and when both `files` and `method_id` are
-supplied the files win and the id is ignored. No Skybridge view — the template is
+`format` (default `"json"`) chooses the template encoding. The three source
+forms are **mutually exclusive — supply exactly one**. `method_ref` projects a
+published method by address, resolved server-side on the build envelope;
+`method_id` projects a registered method's current stored content (requires an
+API key, since the catalog is org-scoped). No Skybridge view — the template is
 small structured data the model reads directly, and the `content` summary repeats
 it in a fenced block.
 
 ### `mthds_prepare_inputs`
 
 ```ts
-// input — at least one of files / method_id, plus the filled inputs
+// input — exactly ONE of files / method_id, plus the filled inputs (no method_ref — see below)
 {
   files?: SubmittedFileInput[];
   method_id?: string;               // catalog id (mt_…) of a registered method
@@ -527,8 +533,11 @@ directly, repeated in the `content` summary.
 ### `mthds_run` / `mthds_run_status` / `mthds_run_results`
 
 Durable (async) method execution on the hosted Pipelex API. `mthds_run` starts a
-run — from submitted files (`files?`, plus `pipe_code?` and `inputs?`), or from a
-registered method's catalog id (`method_id?`, mt_…) — and returns a durable
+run — from submitted files (`files?`, plus `pipe_code?` and `inputs?`), from a
+published method's address (`method_ref?` —
+`github.com/<owner>/<repo>[/<selector>][@<tag>]`, resolved server-side with the
+resolved commit SHA echoed back as `method_provenance`), or from a registered
+method's catalog id (`method_id?`, mt_…) — and returns a durable
 `run_id` immediately (never blocks); `mthds_run_status` is a cheap read of the
 coarse lifecycle state; `mthds_run_results` fetches the terminal outcome (main
 output on success, failure message otherwise) along with a compact run-level
@@ -538,7 +547,9 @@ The per-pipe rollup and the full per-call record list ride the view-only `_meta`
 surface, and usage never appears in the prose. A by-id run executes the method's
 **current** stored content (methods are not versioned) and requires an API key;
 when both `files` and `method_id` are supplied, the files run and the id is
-recorded as run-history linkage on the platform. All run
+recorded as run-history linkage on the platform. `method_ref` is a complete run
+source of its own and pairs with nothing — beside `files` or `method_id` the
+request is refused. All run
 state lives behind the durable `run_id` on the platform, so the flow survives
 conversation gaps — days later, the same id still answers. On the hosted console,
 `mthds_run` ships the `run-follow` live-status view; on the workshop these are

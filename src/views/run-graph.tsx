@@ -51,7 +51,7 @@ function parsePipeRef(ref: string): SelectedPipe {
  * beside it. The form defaults to the main pipe
  * (`responseMetadata.main_pipe_ref`); clicking a pipe node in the graph
  * switches it. Run starts the method through `mthds_run` with the same
- * `files` / `method_id` the validation was called with, then follows the run
+ * `files` / `method_ref` / `method_id` the validation was called with, then follows the run
  * by polling `mthds_run_status` and hands the conversation back to the model
  * on the terminal outcome, exactly as `run-follow` does.
  */
@@ -175,8 +175,11 @@ export default function RunGraphView() {
     setRunId(undefined);
     void (async () => {
       try {
+        // Forward the validation's own selector: a run started from the form
+        // executes exactly what was validated — files, an address, or an id.
         const response = await startRun({
           ...(input?.files ? { files: input.files } : {}),
+          ...(input?.method_ref ? { method_ref: input.method_ref } : {}),
           ...(input?.method_id ? { method_id: input.method_id } : {}),
           pipe_code: selectedPipe.code,
           inputs: apiInputs,

@@ -1,29 +1,29 @@
 import { describe, expect, it } from "vitest";
 
-import { ApiResponseError, ApiUnreachableError, EmptyMethodSourceError } from "@pipelex/sdk";
+import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
 import type {
   InputForm,
   MthdsFile,
-  MthdsFileItem,
   PipeIOContracts,
   PipelexInvalidReport,
   PipelexValidationReport,
   PipelexValidationResult,
   ValidateFilesOptions,
+  ValidateMethodSelector,
 } from "@pipelex/sdk";
 
 import { DEFAULT_API_URL } from "./shared.js";
 import type { FileResolver } from "./shared.js";
 import { toolResult, validateMthds, validationResult } from "./validate.js";
 
-/** Fake getMethodClosure arm for tests whose request must never fetch a method. */
-const getMethodClosureNotCalled = {
-  async getMethodClosure(): Promise<MthdsFileItem[]> {
-    throw new Error("getMethodClosure must not be called in this test");
+/** Fake selector arm for tests whose request must never reach the selector leg. */
+const selectorValidateNotCalled = {
+  async validate(): Promise<PipelexValidationResult> {
+    throw new Error("validate (selector leg) must not be called in this test");
   },
 };
 
-/** Fake validateFiles arm for tests whose request must never reach the validate route. */
+/** Fake validateFiles arm for tests whose request must never reach the inline-files leg. */
 const validateFilesNotCalled = {
   async validateFiles(): Promise<PipelexValidationResult> {
     throw new Error("validateFiles must not be called in this test");
@@ -271,7 +271,7 @@ describe("validateMthds", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodClosureNotCalled,
+          ...selectorValidateNotCalled,
           async validateFiles(files, options) {
             capturedFiles = files;
             capturedOptions = options;
@@ -309,7 +309,7 @@ describe("validateMthds", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodClosureNotCalled,
+          ...selectorValidateNotCalled,
           async validateFiles() {
             called = true;
             return validReport;
@@ -336,7 +336,7 @@ describe("validateMthds", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodClosureNotCalled,
+          ...selectorValidateNotCalled,
           async validateFiles() {
             return malformedReport;
           },
@@ -356,7 +356,7 @@ describe("validateMthds", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodClosureNotCalled,
+          ...selectorValidateNotCalled,
           async validateFiles() {
             throw new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED");
           },
@@ -375,7 +375,7 @@ describe("validateMthds", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodClosureNotCalled,
+          ...selectorValidateNotCalled,
           async validateFiles() {
             throw new ApiResponseError(
               "HTTP 401",
@@ -418,7 +418,7 @@ describe("validateMthds path submissions", () => {
         baseUrl: DEFAULT_API_URL,
         resolver,
         client: {
-          ...getMethodClosureNotCalled,
+          ...selectorValidateNotCalled,
           async validateFiles(files) {
             capturedFiles = files;
             return validReport;
@@ -439,7 +439,7 @@ describe("validateMthds path submissions", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodClosureNotCalled,
+          ...selectorValidateNotCalled,
           async validateFiles() {
             called = true;
             return validReport;
@@ -483,7 +483,7 @@ describe("validateMthds path submissions", () => {
         baseUrl: DEFAULT_API_URL,
         resolver,
         client: {
-          ...getMethodClosureNotCalled,
+          ...selectorValidateNotCalled,
           async validateFiles() {
             called = true;
             return validReport;
@@ -499,89 +499,142 @@ describe("validateMthds path submissions", () => {
   });
 });
 
-describe("validateMthds by method_id", () => {
-  it("forwards a resolved single-file closure as one file labeled with the id", async () => {
-    let capturedFiles: MthdsFile[] | undefined;
-    let fetchedId: string | undefined;
+describe("validateMthds by selector (server pass-through)", () => {
+  const ADDRESS = "github.com/Pipelex/methods/documents@v0.1.0";
+
+  function apiError(
+    status: number,
+    statusText: string,
+    errorType?: string,
+    serverMessage?: string,
+  ): ApiResponseError {
+    return new ApiResponseError(
+      `HTTP ${status}`,
+      `${DEFAULT_API_URL}/v1/validate`,
+      status,
+      statusText,
+      "{}",
+      errorType,
+      serverMessage,
+      undefined, // validationErrors
+      undefined, // code
+    );
+  }
+
+  it("forwards method_id to the validate route as a selector — nothing expanded client-side", async () => {
+    let capturedSource: ValidateMethodSelector | undefined;
+    let capturedArgs: unknown[] | undefined;
 
     const result = await validateMthds(
       { method_id: "mt_123" },
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          async getMethodClosure(methodId) {
-            fetchedId = methodId;
-            return [{ content: 'domain = "demo"\nmain_pipe = "main"', source: "mt_123" }];
-          },
-          async validateFiles(files) {
-            capturedFiles = files;
+          ...validateFilesNotCalled,
+          async validate(source, allowSignatures, mthdsSources, render, views) {
+            capturedSource = source;
+            capturedArgs = [allowSignatures, mthdsSources, render, views];
             return validReport;
           },
         },
       },
     );
 
-    expect(fetchedId).toBe("mt_123");
-    // The resolved closure is forwarded as validateFiles' input, each labeled
-    // with the method id as `uri` provenance.
-    expect(capturedFiles).toEqual([
-      { content: 'domain = "demo"\nmain_pipe = "main"', uri: "mt_123" },
-    ]);
+    expect(capturedSource).toEqual({ method_id: "mt_123" });
+    // allowSignatures on; no client-side source labels (the server labels
+    // diagnostics from the stored method's real file names); the descriptor
+    // opt-in rides `views`. `render` stays undefined — the SDK always adds
+    // markdown itself.
+    expect(capturedArgs).toEqual([true, undefined, undefined, ["input_form"]]);
     expect(result.structuredContent.status).toBe("ok");
-    // The views work the same whether the content came from files or a by-id
-    // fetch — the fetch leg only supplies files upstream.
+    // The views work the same whichever selector supplied the content.
     expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph", "input_form"]);
     expect(result.graphSpec).toEqual(validReport.graph_spec);
   });
 
-  it("forwards each file of a multi-file closure", async () => {
-    let capturedFiles: MthdsFile[] | undefined;
+  it("forwards method_ref to the validate route as a selector", async () => {
+    let capturedSource: ValidateMethodSelector | undefined;
 
     const result = await validateMthds(
-      { method_id: "mt_123" },
+      { method_ref: ADDRESS },
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          async getMethodClosure() {
-            return [
-              { content: 'domain = "demo"', source: "mt_123" },
-              { content: 'main_pipe = "main"', source: "mt_123" },
-            ];
-          },
-          async validateFiles(files) {
-            capturedFiles = files;
+          ...validateFilesNotCalled,
+          async validate(source) {
+            capturedSource = source;
             return validReport;
           },
         },
       },
     );
 
-    expect(capturedFiles).toEqual([
-      { content: 'domain = "demo"', uri: "mt_123" },
-      { content: 'main_pipe = "main"', uri: "mt_123" },
-    ]);
+    expect(capturedSource).toEqual({ method_ref: ADDRESS });
     expect(result.structuredContent.status).toBe("ok");
   });
 
-  it("surfaces an unknown method id (404) at method_id without calling the validate route", async () => {
+  it("rejects files + method_id — one selector on a tooling tool, files no longer silently win", async () => {
+    const result = await validateMthds(
+      { files: [{ content: 'domain = "demo"' }], method_id: "mt_123" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: { ...validateFilesNotCalled, ...selectorValidateNotCalled },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
+  });
+
+  it("rejects files + method_ref", async () => {
+    const result = await validateMthds(
+      { files: [{ content: 'domain = "demo"' }], method_ref: ADDRESS },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: { ...validateFilesNotCalled, ...selectorValidateNotCalled },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+  });
+
+  it("rejects method_ref + method_id", async () => {
+    const result = await validateMthds(
+      { method_ref: ADDRESS, method_id: "mt_123" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: { ...validateFilesNotCalled, ...selectorValidateNotCalled },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
+  });
+
+  it("rejects a blank method_ref at method_ref", async () => {
+    const result = await validateMthds(
+      { method_ref: "   " },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: { ...validateFilesNotCalled, ...selectorValidateNotCalled },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+  });
+
+  it("surfaces an unknown method id (404) as input_domain at method_id", async () => {
     const result = await validateMthds(
       { method_id: "mt_missing" },
       {
         baseUrl: DEFAULT_API_URL,
         client: {
           ...validateFilesNotCalled,
-          async getMethodClosure(): Promise<MthdsFileItem[]> {
-            throw new ApiResponseError(
-              "HTTP 404",
-              `${DEFAULT_API_URL}/v1/methods/mt_missing`,
-              404,
-              "Not Found",
-              "{}",
-              "not_found",
-              "Method not found",
-              undefined, // validationErrors
-              "not_found", // code
-            );
+          async validate(): Promise<PipelexValidationResult> {
+            throw apiError(404, "Not Found", "not_found", "Method not found");
           },
         },
       },
@@ -593,15 +646,15 @@ describe("validateMthds by method_id", () => {
     expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
   });
 
-  it("reports a no-source method (EmptyMethodSourceError) at method_id without calling the validate route", async () => {
+  it("locates a by-id 422 (no source, or a deployment without the selector) at method_id", async () => {
     const result = await validateMthds(
       { method_id: "mt_123" },
       {
         baseUrl: DEFAULT_API_URL,
         client: {
           ...validateFilesNotCalled,
-          async getMethodClosure(): Promise<MthdsFileItem[]> {
-            throw new EmptyMethodSourceError("mt_123");
+          async validate(): Promise<PipelexValidationResult> {
+            throw apiError(422, "Unprocessable Entity", "bad_request", "no MTHDS source");
           },
         },
       },
@@ -610,49 +663,90 @@ describe("validateMthds by method_id", () => {
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
     expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
-    expect(result.summary).toContain("no MTHDS source");
+    expect(result.structuredContent.errors?.[0]?.hint).toMatch(/hosted/i);
   });
 
-  it("lets files win over method_id without fetching the method", async () => {
-    let capturedFiles: MthdsFile[] | undefined;
+  it("locates a method_ref parse/fetch 422 and a no-package 404 at method_ref", async () => {
+    for (const [status, statusText, errorType] of [
+      [422, "Unprocessable Entity", "MethodFetchError"],
+      [404, "Not Found", "MethodPackageNotFoundError"],
+    ] as const) {
+      const result = await validateMthds(
+        { method_ref: ADDRESS },
+        {
+          baseUrl: DEFAULT_API_URL,
+          client: {
+            ...validateFilesNotCalled,
+            async validate(): Promise<PipelexValidationResult> {
+              throw apiError(status, statusText, errorType, "resolution failed");
+            },
+          },
+        },
+      );
 
+      expect(result.structuredContent.status).toBe("error");
+      expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+      expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+      expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
+    }
+  });
+
+  it("classifies the structures refusal (403) as the caller's selector, never an auth failure", async () => {
     const result = await validateMthds(
-      { files: [{ content: 'domain = "demo"' }], method_id: "mt_123" },
+      { method_ref: ADDRESS },
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...getMethodClosureNotCalled,
-          async validateFiles(files) {
-            capturedFiles = files;
-            return validReport;
+          ...validateFilesNotCalled,
+          async validate(): Promise<PipelexValidationResult> {
+            throw apiError(
+              403,
+              "Forbidden",
+              "MethodStructuresRefusedError",
+              "hosted execution accepts MTHDS concepts and sandboxed PipeFuncs, not in-process Python",
+            );
           },
         },
       },
     );
 
-    expect(capturedFiles).toEqual([{ content: 'domain = "demo"' }]);
-    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.status).toBe("error");
+    // A plain 403 classifies as config-at-auth; this one names the policy in
+    // its error_type and must read as the caller's own package, not a bad key.
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+    expect(result.structuredContent.errors?.[0]?.hint).toMatch(/MTHDS concepts/);
   });
 
-  it("classifies a paywall (402) on the fetch leg as config", async () => {
+  it("classifies a registry-form 501 as input_domain at method_ref with the address-grammar hint", async () => {
+    const result = await validateMthds(
+      { method_ref: "some-registry/method" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...validateFilesNotCalled,
+          async validate(): Promise<PipelexValidationResult> {
+            throw apiError(501, "Not Implemented", "not_implemented", "registry refs are reserved");
+          },
+        },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+    expect(result.structuredContent.errors?.[0]?.hint).toMatch(/address-form/i);
+  });
+
+  it("classifies a paywall (402) on the selector leg as config with the plan headline", async () => {
     const result = await validateMthds(
       { method_id: "mt_123" },
       {
         baseUrl: DEFAULT_API_URL,
         client: {
           ...validateFilesNotCalled,
-          async getMethodClosure(): Promise<MthdsFileItem[]> {
-            throw new ApiResponseError(
-              "HTTP 402",
-              `${DEFAULT_API_URL}/v1/methods/mt_123`,
-              402,
-              "Payment Required",
-              "{}",
-              "forbidden",
-              "Subscription required",
-              undefined, // validationErrors
-              "forbidden", // code
-            );
+          async validate(): Promise<PipelexValidationResult> {
+            throw apiError(402, "Payment Required", "forbidden", "Subscription required");
           },
         },
       },
@@ -661,8 +755,6 @@ describe("validateMthds by method_id", () => {
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("config");
     expect(result.structuredContent.errors?.[0]?.kind).toBe("paywall");
-    expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
-    expect(result.structuredContent.errors?.[0]?.hint).toMatch(/plan|billing/i);
     // A headline-only host shows just this line, so it must name the plan
     // rather than the connectivity headline every other `config` error gets.
     expect(result.summary).toBe(
@@ -671,7 +763,7 @@ describe("validateMthds by method_id", () => {
     expect(result.summary).not.toMatch(/unreachable/);
   });
 
-  it("classifies a malformed base URL on the fetch leg as config", async () => {
+  it("classifies a malformed base URL on the selector leg as config", async () => {
     const result = await validateMthds(
       { method_id: "mt_123" },
       { baseUrl: `${DEFAULT_API_URL}/v1` },
@@ -682,12 +774,12 @@ describe("validateMthds by method_id", () => {
     expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
   });
 
-  it("rejects a request with neither files nor method_id", async () => {
+  it("rejects a request with no selector at all", async () => {
     const result = await validateMthds(
       {},
       {
         baseUrl: DEFAULT_API_URL,
-        client: { ...validateFilesNotCalled, ...getMethodClosureNotCalled },
+        client: { ...validateFilesNotCalled, ...selectorValidateNotCalled },
       },
     );
 

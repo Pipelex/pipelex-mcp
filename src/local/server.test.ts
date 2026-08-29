@@ -6,7 +6,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { MethodPage, MthdsFile, PipelexValidationReport } from "@pipelex/sdk";
+import type {
+  MethodPage,
+  MthdsFile,
+  PipelexValidationReport,
+  PipelexValidationResult,
+} from "@pipelex/sdk";
 import type { OAuthConfig } from "skybridge/server";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -219,8 +224,8 @@ describe("local stdio server", () => {
     let submittedFiles: MthdsFile[] | undefined;
     const contexts = buildLocalToolContexts({}, rootDir);
     contexts.validation.client = {
-      async getMethodClosure() {
-        throw new Error("getMethodClosure must not be called in this test");
+      async validate(): Promise<PipelexValidationResult> {
+        throw new Error("validate (selector leg) must not be called in this test");
       },
       async validateFiles(files) {
         submittedFiles = files;

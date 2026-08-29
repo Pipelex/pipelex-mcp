@@ -98,10 +98,41 @@ describe("mthds_validate (live)", () => {
     expect(result.structuredContent.available_view_specs).toEqual([]);
   });
 
-  it("rejects a request carrying neither files nor method_id", async () => {
+  it("rejects a request carrying no selector at all", async () => {
     const result = await validateMthds({}, context);
 
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+  });
+});
+
+/**
+ * GATED on the hosted deploy — Checkpoint 3 of `wip/addressing-methods/plan.md`.
+ *
+ * `mthds_validate`'s `method_id` and `method_ref` legs are server pass-throughs
+ * (`POST /v1/validate` with a selector body), and api.pipelex.com does not
+ * serve selector bodies until the platform deploy that checkpoint gates on has
+ * happened. Un-skip once it lands; against a current hosted API these calls
+ * come back as request-shape errors, which would fail the suite for a reason
+ * that is not drift.
+ */
+describe.skip("mthds_validate by selector (live, gated)", () => {
+  it("validates a stored method from its id alone (server-side resolution)", async () => {
+    const { fixtureMethodId } = await import("./e2e-support.js");
+    const result = await validateMthds({ method_id: await fixtureMethodId() }, context);
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.is_valid).toBe(true);
+    expect(result.structuredContent.is_runnable).toBe(true);
+  });
+
+  it("validates a published method by address (server-side git resolution)", async () => {
+    const result = await validateMthds(
+      { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
+      context,
+    );
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.is_valid).toBe(true);
   });
 });

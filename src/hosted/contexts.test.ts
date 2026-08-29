@@ -139,8 +139,8 @@ describe("console auth failures through a capability", () => {
       {
         ...contexts.validation,
         client: {
-          getMethodClosure: () =>
-            Promise.reject(new Error("getMethodClosure must not be called in this test")),
+          validate: () =>
+            Promise.reject(new Error("validate (selector leg) must not be called in this test")),
           validateFiles: () => Promise.reject(new ClientAuthenticationError("Unauthorized")),
         },
       },

@@ -759,26 +759,22 @@ describe("prepareMthdsInputs — by method_id (fetch-and-forward)", () => {
     expect(result.summary).not.toMatch(/unreachable/);
   });
 
-  it("lets files win over method_id without fetching the method", async () => {
-    let capturedRequest: BuildInputsRequest | undefined;
-
+  it("rejects files beside method_id without calling any client leg", async () => {
     const result = await prepareMthdsInputs(
       { files, method_id: "mt_123", inputs: {} },
       {
         baseUrl: DEFAULT_API_URL,
         client: {
           ...getMethodClosureNotCalled,
+          ...buildInputsNotCalled,
           ...prepareInputsNotCalled,
-          async buildInputs(request) {
-            capturedRequest = request;
-            return explicitTemplate;
-          },
         },
       },
     );
 
-    expect(capturedRequest?.files).toEqual([{ content: 'domain = "demo"' }]);
-    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
   });
 });
 

@@ -3,31 +3,24 @@
  *
  * `getMethodClosure` has the same blind spot `listMethods` had: a hand-written
  * narrow interface, a faked client in every unit test, and no live coverage at
- * all. It is also the single leg behind EVERY files-or-`method_id` capability's
- * id-only path, so one wire change there breaks `mthds_validate`,
- * `mthds_inputs_template` and `mthds_prepare_inputs` at once.
+ * all. Since the selector unification it backs the id-only paths of
+ * `mthds_inputs_template` and `mthds_prepare_inputs` (the build routes and the
+ * client-side prepare walk have no server-side `method_id`); `mthds_validate`
+ * forwards its selector to the server instead and its live coverage lives in
+ * `validate.e2e.ts`, gated on the hosted deploy.
  *
  * The suite proves the leg twice over: directly, and then through one capability
- * end to end — the fetched source must actually validate, not merely arrive.
+ * end to end — the fetched source must actually project a template, not merely
+ * arrive.
  */
 
 import { describe, expect, it } from "vitest";
 
 import { buildMthdsInputs } from "./inputs.js";
 import type { InputsContext } from "./inputs.js";
-import {
-  FIXTURE_PIPE_REF,
-  INVALID_BUNDLE,
-  INVALID_BUNDLE_URI,
-  fixtureMethodId,
-  liveApiConfig,
-  liveClient,
-} from "./e2e-support.js";
+import { FIXTURE_PIPE_REF, fixtureMethodId, liveApiConfig, liveClient } from "./e2e-support.js";
 import { fetchMethodFiles } from "./shared.js";
-import { validateMthds } from "./validate.js";
-import type { ValidationContext } from "./validate.js";
 
-const validationContext: ValidationContext = liveApiConfig();
 const inputsContext: InputsContext = liveApiConfig();
 
 const NO_SOURCE_HINT = "Add MTHDS content to the method before using it by id.";
@@ -85,34 +78,11 @@ describe("fetchMethodFiles (live)", () => {
 });
 
 describe("by-id capability paths (live)", () => {
-  it("validates a stored method from its id alone", async () => {
-    const result = await validateMthds({ method_id: await fixtureMethodId() }, validationContext);
-
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.is_valid).toBe(true);
-    expect(result.structuredContent.is_runnable).toBe(true);
-  });
-
   it("projects a stored method's inputs template from its id alone", async () => {
     const result = await buildMthdsInputs({ method_id: await fixtureMethodId() }, inputsContext);
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);
     expect(result.structuredContent.pipe_ref, STALE_SEED_HINT).toBe(FIXTURE_PIPE_REF);
-  });
-
-  it("lets inline files win when both files and method_id are supplied", async () => {
-    // The stored fixture validates and the inline bundle does not, so the
-    // verdict itself says which source was used — no mocking required.
-    const result = await validateMthds(
-      {
-        files: [{ content: INVALID_BUNDLE, uri: INVALID_BUNDLE_URI }],
-        method_id: await fixtureMethodId(),
-      },
-      validationContext,
-    );
-
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.is_valid).toBe(false);
   });
 });

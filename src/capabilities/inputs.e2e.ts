@@ -96,4 +96,19 @@ describe("mthds_inputs_template (live)", () => {
     expect(error?.location).toBe("pipe_ref");
     expect(error?.retryable).toBe(false);
   });
+
+  // GATED on the hosted deploy — Checkpoint 3 of `wip/addressing-methods/plan.md`.
+  // `method_ref` rides the build envelope (`POST /v1/build/inputs`) and is
+  // resolved server-side; api.pipelex.com does not serve it until that deploy,
+  // so running this today fails for a reason that is not drift. Un-skip once it
+  // lands.
+  it.skip("projects a published method's template by address (gated)", async () => {
+    const result = await buildMthdsInputs(
+      { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
+      context,
+    );
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.is_valid).toBe(true);
+  });
 });
