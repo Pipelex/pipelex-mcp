@@ -4,6 +4,7 @@ import type { OAuthConfig } from "skybridge/server";
 import {
   PIPELEX_MCP_SERVER_INFO,
   buildToolContexts,
+  mthdsCodegenTool,
   mthdsInputsTemplateTool,
   mthdsListMethodsTool,
   mthdsPrepareInputsTool,
@@ -27,6 +28,10 @@ export const HOSTED_SERVER_INSTRUCTIONS = [
   "graph of the method, rendered through the run-graph view.",
   "Call `mthds_inputs_template` with the same file contents (or a registered method's catalog id",
   "via method_id) to get a fill-in template of a pipe's declared inputs, ready to populate for a run.",
+  "Call `mthds_codegen` to project a method's concepts into typed code for the user's project —",
+  "TypeScript (target ts-zod) or Python (python-pydantic for a consumer, python-structures for a",
+  "Pipelex host) — from files, a published method's address via method_ref, or a registered",
+  "method's catalog id via method_id; write the returned files and codegen.lock verbatim.",
   "Once the template is filled, call `mthds_prepare_inputs` to make file-bearing inputs run-ready",
   "(this hosted console is pass-through only — it accepts http(s) URLs and pipelex-storage:// references",
   "and refuses inputs that would need an upload; the local workshop uploads local files).",
@@ -121,6 +126,21 @@ export function createHostedServer(
       },
       (input, extra) =>
         mthdsInputsTemplateTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+    )
+    .registerTool(
+      {
+        name: mthdsCodegenTool.name,
+        description: mthdsCodegenTool.description,
+        inputSchema: mthdsCodegenTool.inputSchema,
+        outputSchema: mthdsCodegenTool.outputSchema,
+        annotations: mthdsCodegenTool.annotations,
+        _meta: {
+          "openai/toolInvocation/invoking": "Generating typed code for the method...",
+          "openai/toolInvocation/invoked": "Typed code generated.",
+        },
+      },
+      (input, extra) =>
+        mthdsCodegenTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
     )
     .registerTool(
       {

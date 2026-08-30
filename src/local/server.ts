@@ -21,6 +21,11 @@ export const LOCAL_SERVER_INSTRUCTIONS = [
   "then pass the returned id into the current-content validate, inputs-template, and run flow.",
   "Use `mthds_validate` for a structured validation verdict and `mthds_inputs_template` for a pipe's",
   "fill-in input template — both accept files, or a registered method's catalog id via method_id.",
+  "Use `mthds_codegen` to project a method's concepts into typed code for the project you are in —",
+  "TypeScript (target ts-zod) or Python (python-pydantic for a consumer, python-structures for a",
+  "Pipelex host) — from files, a method_ref address, or a method_id. Pass `output_dir` (a dedicated",
+  "generated directory such as src/generated/<method>/) so this workshop writes the tree and its",
+  "codegen.lock straight to disk, verbatim, instead of returning the bytes through the conversation.",
   "Once the template is filled, call `mthds_prepare_inputs` to make file-bearing inputs run-ready:",
   "this workshop uploads local file paths, data: URLs, and bytes to Pipelex storage with your API key",
   "and rewrites them to pipelex-storage:// references (http(s) URLs pass through unchanged).",
@@ -50,9 +55,10 @@ export function buildLocalToolContexts(
     // The workshop is co-located with the user's files, so it uploads
     // file-bearing inputs (local paths, data: URLs, bytes) for mthds_prepare_inputs.
     allowUpload: true,
-    // ...and, in the other direction, saves a run's produced files under the
-    // same working directory for mthds_download_artifacts.
-    artifactsRoot: rootDir,
+    // ...and, in the other direction, writes under that same working
+    // directory: run artifacts for mthds_download_artifacts, generated trees
+    // for mthds_codegen's output_dir.
+    workspaceRoot: rootDir,
   });
 }
 

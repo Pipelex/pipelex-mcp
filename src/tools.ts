@@ -31,6 +31,15 @@ import {
 } from "./capabilities/catalog.js";
 import type { CatalogContext, MthdsListMethodsInput } from "./capabilities/catalog.js";
 import {
+  CODEGEN_TARGET_RULE,
+  buildCodegenContext,
+  codegenToolResult,
+  generateMthdsCode,
+  mthdsCodegenInputSchema,
+  mthdsCodegenOutputSchema,
+} from "./capabilities/codegen.js";
+import type { CodegenContext, MthdsCodegenInput } from "./capabilities/codegen.js";
+import {
   buildInputsContext,
   buildMthdsInputs,
   inputsToolResult,
@@ -84,6 +93,7 @@ export interface ToolContexts {
   catalog: CatalogContext;
   validation: ValidationContext;
   inputs: InputsContext;
+  codegen: CodegenContext;
   prepare: PrepareContext;
   run: RunContext;
   /** Consumed by the console-only mthds_upload_attachments; built on both shells so one builder serves both. */
@@ -99,11 +109,13 @@ interface ToolContextOptions {
   /** The per-deployment asset boundary for mthds_prepare_inputs (workshop uploads; console pass-through only). */
   allowUpload?: boolean;
   /**
-   * The directory mthds_download_artifacts saves under — the workshop's
-   * working directory. Absent on the console, which registers no such tool
-   * and never writes a file.
+   * The workshop's working directory — the one write root, fanned out to every
+   * consumer that needs it: `mthds_download_artifacts` saves under it,
+   * `mthds_codegen` resolves `output_dir` against it, and `mthds_run_results`
+   * names the download tool only where it exists. Absent on the console, which
+   * never writes a file.
    */
-  artifactsRoot?: string;
+  workspaceRoot?: string;
 }
 
 /** Build one capability-context set for either deployment shell. */
@@ -112,7 +124,7 @@ export function buildToolContexts(options: ToolContextOptions = {}): ToolContext
   const resolver = options.resolver;
   const viewsAvailable = options.viewsAvailable ?? true;
   const allowUpload = options.allowUpload ?? false;
-  const artifactsRoot = options.artifactsRoot;
+  const workspaceRoot = options.workspaceRoot;
 
   return {
     catalog: buildCatalogContext(env),
@@ -125,6 +137,11 @@ export function buildToolContexts(options: ToolContextOptions = {}): ToolContext
       ...buildInputsContext(env),
       resolver,
     },
+    codegen: {
+      ...buildCodegenContext(env),
+      resolver,
+      ...(workspaceRoot === undefined ? {} : { saveRoot: workspaceRoot }),
+    },
     prepare: {
       ...buildPrepareContext(env),
       resolver,
@@ -135,12 +152,12 @@ export function buildToolContexts(options: ToolContextOptions = {}): ToolContext
       resolver,
       viewsAvailable,
       // The results summary names the download tool only where it exists.
-      artifactDownloadAvailable: artifactsRoot !== undefined,
+      artifactDownloadAvailable: workspaceRoot !== undefined,
     },
     attachments: buildAttachmentsContext(env),
     artifacts: {
       ...buildArtifactsContext(env),
-      ...(artifactsRoot === undefined ? {} : { saveRoot: artifactsRoot }),
+      ...(workspaceRoot === undefined ? {} : { saveRoot: workspaceRoot }),
     },
   };
 }
@@ -233,6 +250,50 @@ export const mthdsInputsTemplateTool = defineTool({
   },
   async handler(input: MthdsInputsInput, contexts: ToolContexts) {
     return inputsToolResult(await buildMthdsInputs(input, contexts.inputs));
+  },
+});
+
+/**
+ * The description carries the language decision rule on purpose: tool
+ * descriptions are the one channel that reaches every host, and picking the
+ * target is the judgment this tool asks of the model — `target` has no
+ * default, since a default would silently pick a language. The rule is
+ * derived from the per-target profiles in `capabilities/codegen.ts`, so a
+ * target the SDK gains cannot be added there without being described here.
+ */
+const CODEGEN_DESCRIPTION = [
+  "Generate typed code for an MTHDS method: its concept set projected into typed models (kind types) by the Pipelex codegen engine, stamped and locked so the written tree can be checked offline.",
+  "Supply exactly ONE of files / method_ref (a published method's address, github.com/<owner>/<repo>[/<selector>][@<tag>]) / method_id (a registered method's mt_… catalog id) — never several. Addresses and ids are resolved server-side, so no bundle enters the conversation; a by-id call generates from the method's CURRENT stored content and requires an API key, since the catalog is org-scoped.",
+  `target is required and has no default — choose it from the context, and the user's explicit request wins: ${CODEGEN_TARGET_RULE}.`,
+  "Field keys stay snake_case in every target.",
+  "On the local workshop, pass output_dir (a DEDICATED generated directory relative to the working directory, such as src/generated/<method>/) to write the tree directly, so the bytes never enter the conversation; the hosted console does not take output_dir.",
+  "Without output_dir, write every returned artifact at its path and the lock as codegen.lock beside them, all VERBATIM (byte for byte — any change breaks the stamp and the lock), into a dedicated generated directory; `pipelex codegen check` and @pipelex/sdk's runCodegenCheck then pass on that tree.",
+  "A large artifact set is withheld for size rather than cut mid-file (truncated: true, content absent on the withheld files) — generate such a method locally with `pipelex codegen types`.",
+].join(" ");
+
+export const mthdsCodegenTool = defineTool({
+  name: "mthds_codegen",
+  description: CODEGEN_DESCRIPTION,
+  inputSchema: mthdsCodegenInputSchema,
+  outputSchema: mthdsCodegenOutputSchema,
+  annotations: {
+    // Both shells advertise the write, although only the workshop can perform
+    // it: an annotation says what a tool MAY do, and the shared definition is
+    // what keeps one tool name from meaning two things. `mthds_prepare_inputs`
+    // already sets the precedent for its workshop-only uploads.
+    title: "Generate typed code for an MTHDS method",
+    readOnlyHint: false,
+    // Destructive because regeneration OVERWRITES the stamped files it wrote
+    // before, discarding any hand-edits below the stamp without warning — the
+    // rule SPEC.md states and the inverse of `mthds_download_artifacts`, which
+    // never overwrites (`wx`) and so stays additive. This is the one annotation
+    // a host uses to decide whether to confirm before calling, and it is only
+    // meaningful once `readOnlyHint` is false, as it now is.
+    destructiveHint: true,
+    openWorldHint: false,
+  },
+  async handler(input: MthdsCodegenInput, contexts: ToolContexts) {
+    return codegenToolResult(await generateMthdsCode(input, contexts.codegen));
   },
 });
 
@@ -390,6 +451,7 @@ export const toolDefinitions = [
   mthdsListMethodsTool,
   mthdsValidateTool,
   mthdsInputsTemplateTool,
+  mthdsCodegenTool,
   mthdsPrepareInputsTool,
   mthdsRunTool,
   mthdsRunStatusTool,

@@ -1,4 +1,3 @@
-import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import { PipelexApiClient } from "@pipelex/sdk";
@@ -24,6 +23,7 @@ import type {
   ErrorSummaries,
   ToolError,
 } from "./shared.js";
+import { resolveSaveDir } from "./workspace-boundary.js";
 
 /**
  * `mthds_download_artifacts` — the workshop's download counterpart to its
@@ -284,7 +284,7 @@ export async function downloadMthdsArtifacts(
     return completedResult(runId, [], context.saveRoot);
   }
 
-  const target = await resolveSaveDir(context.saveRoot, input.dir);
+  const target = await resolveSaveDir(context.saveRoot, input.dir, "dir");
   if (!target.ok) {
     return errorResult("No artifacts were saved: the target directory is invalid.", [target.error]);
   }
@@ -340,135 +340,6 @@ async function saveOne(
     content_type: contentType,
     size: download.saved.size,
   };
-}
-
-// ── the save directory ──────────────────────────────────────────────
-
-type SaveDirResolution = { ok: true; root: string; dir: string } | { ok: false; error: ToolError };
-
-/**
- * Turn the optional relative `dir` into an absolute, existing directory inside
- * the working directory, on REAL paths (symlinks followed) — the write-side
- * mirror of the read resolver's containment rule. The lexical check refuses a
- * `..` escape before anything touches the filesystem; the real-path check on
- * the deepest existing ancestor refuses a symlink inside the workspace that
- * points out of it BEFORE `mkdir` could create directories at its target; a
- * final real-path check on the created directory closes the window between
- * the two. Failures are `input_domain` at `dir` — the caller's value is what
- * escaped.
- */
-export async function resolveSaveDir(
-  saveRoot: string,
-  dir: string | undefined,
-): Promise<SaveDirResolution> {
-  let root: string;
-  try {
-    root = await fs.realpath(saveRoot);
-  } catch (err) {
-    return {
-      ok: false,
-      error: {
-        class: "config",
-        location: "deployment",
-        message: `Could not resolve the server's working directory: ${errorMessage(err)}`,
-        hint: `The local workshop saves files under its working directory (${saveRoot}), which must exist.`,
-        retryable: false,
-      },
-    };
-  }
-
-  if (dir === undefined) {
-    return { ok: true, root, dir: root };
-  }
-
-  const target = path.resolve(root, dir);
-  if (!isInside(root, target)) {
-    return { ok: false, error: escapeError(dir, root) };
-  }
-
-  // Walk up to the deepest EXISTING ancestor and check where it really lives:
-  // `mkdir -p root/link/sub` with `link` pointing outside the workspace would
-  // otherwise create `sub` at the link's target.
-  let probe = target;
-  for (;;) {
-    try {
-      const real = await fs.realpath(probe);
-      if (!isInside(root, real)) {
-        return { ok: false, error: escapeError(dir, root) };
-      }
-      break;
-    } catch (err) {
-      if (!isMissingPathError(err)) {
-        return { ok: false, error: unusableDirError(dir, err) };
-      }
-      const parent = path.dirname(probe);
-      if (parent === probe) {
-        return { ok: false, error: escapeError(dir, root) };
-      }
-      probe = parent;
-    }
-  }
-
-  let real: string;
-  try {
-    await fs.mkdir(target, { recursive: true });
-    real = await fs.realpath(target);
-    if (!(await fs.stat(real)).isDirectory()) {
-      return {
-        ok: false,
-        error: {
-          class: "input_domain",
-          location: "dir",
-          message: `dir is not a directory: ${dir}`,
-          hint: "Pass a directory (existing or new) relative to the server's working directory.",
-          retryable: false,
-        },
-      };
-    }
-  } catch (err) {
-    return { ok: false, error: unusableDirError(dir, err) };
-  }
-
-  if (!isInside(root, real)) {
-    return { ok: false, error: escapeError(dir, root) };
-  }
-
-  return { ok: true, root, dir: real };
-}
-
-function isInside(root: string, candidate: string): boolean {
-  return candidate === root || candidate.startsWith(root + path.sep);
-}
-
-function escapeError(dir: string, root: string): ToolError {
-  return {
-    class: "input_domain",
-    location: "dir",
-    message: `dir resolves outside the server's working directory: ${dir}`,
-    hint: `Files are only saved inside the directory the host started this server in (${root}). Pass a relative directory that stays inside it, or omit dir.`,
-    retryable: false,
-  };
-}
-
-function unusableDirError(dir: string, err: unknown): ToolError {
-  return {
-    class: "input_domain",
-    location: "dir",
-    message: `Could not use dir ${dir}: ${errorMessage(err)}`,
-    hint: "Check that the directory (or the path to create it) is writable and not a file.",
-    retryable: false,
-  };
-}
-
-// ENOENT: the path (or a component) does not exist. ENOTDIR: a component that
-// should be a directory is not one — the target equally does not exist there.
-function isMissingPathError(err: unknown): boolean {
-  const code = (err as NodeJS.ErrnoException).code;
-  return code === "ENOENT" || code === "ENOTDIR";
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 // ── the filename ────────────────────────────────────────────────────
@@ -537,7 +408,14 @@ export function artifactFilename(
 
   if (name.length > MAX_FILENAME_LENGTH) {
     const ext = path.extname(name);
-    name = name.slice(0, MAX_FILENAME_LENGTH - ext.length) + ext;
+    // The extension is kept only if there is room left for a stem. An
+    // extension at least as long as the cap would give `slice` a negative
+    // start, which counts from the END and yields a name LONGER than the cap
+    // — so a pathological extension is dropped rather than preserved.
+    name =
+      ext.length < MAX_FILENAME_LENGTH
+        ? name.slice(0, MAX_FILENAME_LENGTH - ext.length) + ext
+        : name.slice(0, MAX_FILENAME_LENGTH);
   }
 
   if (path.extname(name) === "") {

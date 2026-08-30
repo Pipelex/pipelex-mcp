@@ -47,6 +47,7 @@ contracts — with one documented exception per shell, marked below:
 | `mthds_list_methods` | List the active API key's organization catalog as bounded names, descriptions, and canonical ids — never method source or stored inputs/outputs. |
 | `mthds_validate` | Validate submitted `.mthds` files, or a registered method by catalog id; on a valid verdict, ship the dry-run method graph to the `run-graph` view (hosted only). |
 | `mthds_inputs_template` | Project a pipe's declared inputs as a fill-in template for a run. |
+| `mthds_codegen` | Generate typed code for a method's concepts — TypeScript (`ts-zod`) or Python (`python-pydantic`, `python-structures`) — stamped and locked, to write verbatim into the project. On the local workshop, `output_dir` writes the tree straight to disk. |
 | `mthds_prepare_inputs` | Turn filled inputs run-ready: upload file-bearing values to Pipelex storage and rewrite them to `pipelex-storage://` (workshop uploads; console is pass-through only). |
 | `mthds_upload_attachments` | **Hosted console only.** Turn a file the user attached in the chat into a run-ready `pipelex-storage://` reference (ChatGPT only — see [Chat attachments](#chat-attachments-chatgpt-only)). |
 | `mthds_run` | Start a durable run on the hosted Pipelex API; returns a durable `run_id` immediately. |
@@ -167,7 +168,7 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }
 - `PIPELEX_API_KEY` — a `plx_sk_` platform key. Required for
   `mthds_list_methods` because the returned catalog is the key's active,
   workspace-shared organization catalog. Optional for `mthds_validate` /
-  `mthds_inputs_template` calls that submit `files` against a key-less API;
+  `mthds_inputs_template` / `mthds_codegen` calls that submit `files` against a key-less API;
   effectively required for the run family and for any `method_id` call on any
   tool, since the catalog is org-scoped (a missing/invalid key is a `config`
   no-verdict).
@@ -175,6 +176,13 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }
   (`https://api.pipelex.com`). Set it to `http://localhost:8081` to develop
   against a local OSS `pipelex-api` runner. Durable runs need the hosted API; a
   bare runner has no run lifecycle.
+
+**The working directory matters.** The host spawns the workshop in your
+project, and that directory is the boundary for everything the server touches
+on disk: `files: { path }` items resolve inside it, `mthds_download_artifacts`
+saves under it, and `mthds_codegen`'s `output_dir` writes under it. Nothing
+outside it is ever read or written — an absolute path, a `..`, or a symlink
+pointing out of the tree is refused.
 
 ## Hosted console: sign in with your Pipelex account
 
@@ -455,6 +463,71 @@ API key, since the catalog is org-scoped). No Skybridge view — the template is
 small structured data the model reads directly, and the `content` summary repeats
 it in a fenced block.
 
+### `mthds_codegen`
+
+```ts
+// input — exactly ONE of files / method_ref / method_id, plus the required target
+{
+  files?: SubmittedFileInput[];
+  method_ref?: string;         // published method address — github.com/<owner>/<repo>[/<selector>][@<tag>]
+  method_id?: string;          // catalog id (mt_…) of a registered method
+  target: "ts-zod" | "python-pydantic" | "python-structures";
+  output_dir?: string;         // LOCAL WORKSHOP ONLY — write the tree here instead of returning its content
+}
+
+// structuredContent
+{
+  status: "ok" | "error";
+  is_valid: boolean;
+  target?: "ts-zod" | "python-pydantic" | "python-structures";
+  kind?: "types";
+  crate_fingerprint?: string;
+  engine_version?: string;
+  artifacts?: Array<{ path: string; bytes: number; content?: string; written_to?: string }>;
+  lock?: { filename: string; bytes: number; content?: string; written_to?: string };
+  truncated?: boolean;
+  // the written arm (output_dir):
+  output_dir?: string;
+  is_current?: boolean;
+  orphans?: string[];
+  orphans_truncated?: boolean;
+  drifts?: unknown[];
+  validation_errors?: unknown[];
+  errors?: ToolError[];
+}
+```
+
+Projects the method's concept set into typed models through the Pipelex codegen
+engine (`POST /v1/codegen`). `target` is required and has no default — the tool
+description carries the decision rule, so the assistant picks it from the
+project (the user's explicit request wins): `ts-zod` for a TypeScript or
+JavaScript project (`types.ts` with zod schemas and inferred types, plus
+`binder.ts` with a parse/serialize pair per concept — keep both),
+`python-pydantic` for a Python consumer with no Pipelex runtime (`models.py`),
+`python-structures` for a Pipelex host or a `@pipe_func` implementation
+(`structures.py`). Field keys stay snake_case in every target. The three
+selectors are server pass-throughs — no bundle enters the conversation.
+
+**On the local workshop, pass `output_dir`** — a dedicated generated directory
+relative to the working directory, such as `src/generated/<method>/`. The tool
+writes the artifacts and `codegen.lock` there verbatim and returns no file
+content at all: `output_dir`, `written_to` per file, `is_current` and any
+`orphans` instead. It overwrites files it generated (they carry a codegen
+stamp) and the lock beside them, and refuses the whole write rather than touch
+anything else — a symlink, a directory, or a file it did not write. Orphans, a
+stamped file the new lock does not list, are reported and never deleted, so a
+directory holding two generations stays non-current by design; give each
+generation its own directory. The hosted console takes no `output_dir` and
+refuses it instructively.
+
+**Without `output_dir`**, write every artifact at its path and the lock as
+`codegen.lock` beside them, **verbatim**, into a dedicated generated directory;
+`pipelex codegen check` (or `runCodegenCheck` from `@pipelex/sdk`) then passes
+on that tree. The `content` summary repeats each file in a fenced block tagged
+for its language. A large set is withheld by whole file rather than cut
+(`truncated: true`, `content` absent on the withheld entries; the lock's bytes
+are reserved first, so the trust anchor always rides). No Skybridge view.
+
 ### `mthds_prepare_inputs`
 
 ```ts
@@ -711,7 +784,7 @@ make smoke        # the workshop stdio server, end to end, against the live API
 make test-all     # all of the above plus the run family — SPENDS INFERENCE CREDIT
 ```
 
-`make test` fakes every API client, so it proves the projections and never touches the network; `make all` and CI run only that. The live targets are the drift detector: the faked seams mean a wire-shape change on the API side fails nothing at all in the hermetic suite, so `make test-e2e` calls each capability with the real `PipelexApiClient` and `make smoke` drives the whole shell over stdio. Both need `PIPELEX_API_KEY` (a gitignored `.env` at the repo root is enough), and neither spends inference credit — the run family that does only fires under `make test-e2e-run`. `make smoke` is entirely read-only; `make test-e2e` has one write, the workshop arm of `mthds_prepare_inputs`, which uploads a 1x1 PNG to your organization's Pipelex storage to prove the upload path still rewrites values to `pipelex-storage://`. The SDK exposes no delete, so that object persists.
+`make test` fakes every API client, so it proves the projections and never touches the network; `make all` and CI run only that. The live targets are the drift detector: the faked seams mean a wire-shape change on the API side fails nothing at all in the hermetic suite, so `make test-e2e` calls each capability with the real `PipelexApiClient` and `make smoke` drives the whole shell over stdio. Both need `PIPELEX_API_KEY` (a gitignored `.env` at the repo root is enough), and neither spends inference credit — the run family that does only fires under `make test-e2e-run`. Their codegen legs need one thing more against the hosted API: `/v1/codegen` sits behind the `FF_PLAYGROUND` feature flag as well as the plan, so a perfectly valid key whose organization is not enabled for it gets a 403 that reddens the whole run — ask for the flag, or point `PIPELEX_BASE_URL` at a local runner, which does not gate the route. `make smoke` is entirely read-only; `make test-e2e` has one write, the workshop arm of `mthds_prepare_inputs`, which uploads a 1x1 PNG to your organization's Pipelex storage to prove the upload path still rewrites values to `pipelex-storage://`. The SDK exposes no delete, so that object persists.
 
 `make test-all` chains all three in cost order and adds the run family, so a single command covers every test in the repo; it spends inference credit, which is why `make all` does not reach it. `make agent-test` is the same hermetic suite as `make test` with its output captured and replayed only on failure, plus a heartbeat while it runs — meant for coding agents, whose context a few hundred lines of green vitest output would otherwise fill.
 
