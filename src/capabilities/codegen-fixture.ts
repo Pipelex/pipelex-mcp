@@ -69,9 +69,6 @@ export async function recordedTsZodReport(): Promise<CodegenValidReport> {
   return cached;
 }
 
-/** The recorded engine version — what the writer tests report at Checkpoint B. */
-export const RECORDED_ENGINE_VERSION = "0.55.0";
-
 async function readRecorded(name: string): Promise<string> {
   return fs.readFile(path.join(FIXTURE_DIR, `${name}.recorded`), "utf8");
 }
