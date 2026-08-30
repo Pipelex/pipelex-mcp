@@ -27,7 +27,15 @@ import {
 } from "./prepare.js";
 import { DEFAULT_API_URL } from "./shared.js";
 
-/** An explicit json template with a file-bearing input (`photo`) and a text input (`question`). */
+/**
+ * An explicit json template with a file-bearing input (`photo`) and a text input (`question`).
+ *
+ * A Text position's `content` is an OBJECT (`{ text }`), not a bare string — that is what the
+ * live API returns, confirmed against it. Only the COMPACT template (`explicit: false`) collapses
+ * to the bare scalar. Keeping the nested shape here is what stops this fake drifting from the wire;
+ * the walk treats both identically (neither is file content, and a string caller value against an
+ * object signature falls to the pass-through arm), so flattening it would be silently unrealistic.
+ */
 const explicitTemplate: BuildInputsResponse = {
   is_valid: true,
   pipe_ref: "demo.main",
@@ -36,7 +44,7 @@ const explicitTemplate: BuildInputsResponse = {
   explicit: true,
   inputs: {
     photo: { concept: "native.Image", content: { url: "https://example.com/placeholder.png" } },
-    question: { concept: "native.Text", content: "Your question here" },
+    question: { concept: "native.Text", content: { text: "Your question here" } },
   },
 };
 
@@ -716,26 +724,57 @@ describe("prepareMthdsInputs — by method_id (fetch-and-forward)", () => {
     expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
   });
 
-  it("lets files win over method_id without fetching the method", async () => {
-    let capturedRequest: BuildInputsRequest | undefined;
+  it("headlines a paywall (402) as a plan limit, not as connectivity", async () => {
+    const result = await prepareMthdsInputs(
+      { method_id: "mt_123", inputs: {} },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...buildInputsNotCalled,
+          ...prepareInputsNotCalled,
+          async getMethodClosure(): Promise<MthdsFileItem[]> {
+            throw new ApiResponseError(
+              "HTTP 402",
+              `${DEFAULT_API_URL}/v1/methods/mt_123`,
+              402,
+              "Payment Required",
+              "{}",
+              "subscription_required",
+              "Subscription required",
+              undefined,
+              "forbidden",
+            );
+          },
+        },
+      },
+    );
 
+    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.kind).toBe("paywall");
+    // A headline-only host shows just this line, so it must name the plan
+    // rather than the connectivity headline every other `config` error gets.
+    expect(result.summary).toBe(
+      "Inputs could not be prepared: the organization's Pipelex plan does not cover this call.",
+    );
+    expect(result.summary).not.toMatch(/unreachable/);
+  });
+
+  it("rejects files beside method_id without calling any client leg", async () => {
     const result = await prepareMthdsInputs(
       { files, method_id: "mt_123", inputs: {} },
       {
         baseUrl: DEFAULT_API_URL,
         client: {
           ...getMethodClosureNotCalled,
+          ...buildInputsNotCalled,
           ...prepareInputsNotCalled,
-          async buildInputs(request) {
-            capturedRequest = request;
-            return explicitTemplate;
-          },
         },
       },
     );
 
-    expect(capturedRequest?.files).toEqual([{ content: 'domain = "demo"' }]);
-    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
   });
 });
 

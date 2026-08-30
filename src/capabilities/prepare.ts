@@ -11,12 +11,13 @@ import { z } from "zod";
 import {
   buildApiConfig,
   classifyError,
+  summaryForToolError,
   fetchMethodFiles,
   filesInputSchema,
   resolveSubmittedFiles,
   toolErrorSchema,
   toolResultContent,
-  validateFilesOrMethodIdRequest,
+  validateMethodSelectorRequest,
 } from "./shared.js";
 import type {
   AuthErrorTexture,
@@ -25,6 +26,7 @@ import type {
   MethodFetchClient,
   SubmittedFile,
   SubmittedFileInput,
+  ErrorSummaries,
   ToolError,
 } from "./shared.js";
 import { MAX_UPLOAD_BYTES, SizeGuardedPipelexApiClient, formatMib } from "./upload-ceiling.js";
@@ -35,13 +37,13 @@ export const mthdsPrepareInputsInputSchema = {
     .string()
     .optional()
     .describe(
-      "Catalog id (mt_…) of a registered method — the signature source. Uses the method's CURRENT stored content and requires an API key (the catalog is org-scoped). With files also present, the files win and method_id is ignored. Provide files or method_id.",
+      "Catalog id (mt_…) of a registered method — the signature source. Uses the method's CURRENT stored content and requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_id — never both.",
     ),
   pipe_ref: z
     .string()
     .optional()
     .describe(
-      "The pipe whose declared signature identifies the file-bearing inputs, as a qualified domain.pipe_code. Omit to default to the closure's main_pipe.",
+      "The pipe whose declared signature identifies the file-bearing inputs, as a qualified domain.pipe_code — the same value mthds_run takes as pipe_code and mthds_inputs_template as pipe_ref. Omit to default to the closure's main_pipe.",
     ),
   inputs: z
     .record(z.string(), z.unknown())
@@ -201,14 +203,17 @@ export async function prepareMthdsInputs(
     return errorResult("Inputs were not prepared: request input is invalid.", inputErrors);
   }
 
-  // Fetch-and-forward: the build/prepare surface has no by-id support, so an
-  // id-only request fetches the stored method and forwards its current source
-  // as the closure files (each labeled with the method id as provenance).
-  // Inline files win — with both supplied, method_id is ignored (this route has
-  // no linkage concept). One shared by-id resolution path across validate /
-  // inputs / prepare, one place that maps EmptyMethodSourceError / 404.
+  // By-id expansion: the build/prepare surface has no by-id support (the
+  // hosted tooling selector deliberately excludes it — SPEC.md → Method
+  // Selectors), so an id request expands the stored method via the
+  // SDK-canonical getMethodClosure leg and forwards its current source as the
+  // closure files (each labeled with the method id as provenance). One shared
+  // by-id expansion path across inputs-template / prepare, one place that
+  // maps EmptyMethodSourceError / 404. There is deliberately no method_ref on
+  // this tool: preparation is a client-side signature walk over a closure the
+  // caller supplies, and an address's files live server-side.
   let files = request.files;
-  if (files.length === 0 && request.method_id !== undefined) {
+  if (request.method_id !== undefined) {
     const fetched = await fetchMethodFiles(() => prepareClient(context), request.method_id, {
       authError: context.authError,
       noSourceHint:
@@ -401,7 +406,10 @@ function passThroughSource(source: unknown, name: string): string {
 }
 
 export function validatePrepareInputsRequest(input: ResolvedPrepareRequest): ToolError[] {
-  const errors = validateFilesOrMethodIdRequest(input.files, input.method_id);
+  const errors = validateMethodSelectorRequest(input.files, input, {
+    rule: "one_selector",
+    acceptsMethodRef: false,
+  });
 
   if (input.pipe_ref !== undefined && input.pipe_ref.trim() === "") {
     errors.push({
@@ -466,15 +474,16 @@ function uploadRefusedError(err: UploadNotAllowedError): ToolError {
   };
 }
 
+const ERROR_SUMMARIES: ErrorSummaries = {
+  config: "Inputs could not be prepared: the Pipelex API is unreachable or misconfigured.",
+  input_domain: "Inputs were not prepared: the request could not be prepared as submitted.",
+  runtime: "Inputs could not be prepared: the Pipelex API returned an error.",
+  paywall:
+    "Inputs could not be prepared: the organization's Pipelex plan does not cover this call.",
+};
+
 function summaryForError(error: ToolError): string {
-  switch (error.class) {
-    case "config":
-      return "Inputs could not be prepared: the Pipelex API is unreachable or misconfigured.";
-    case "input_domain":
-      return "Inputs were not prepared: the request could not be prepared as submitted.";
-    case "runtime":
-      return "Inputs could not be prepared: the Pipelex API returned an error.";
-  }
+  return summaryForToolError(error, ERROR_SUMMARIES);
 }
 
 export function prepareInputsToolResult(result: PrepareResult) {

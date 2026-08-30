@@ -9,14 +9,16 @@ import type {
 import { z } from "zod";
 
 import {
+  METHOD_REF_GRAMMAR,
   buildApiConfig,
   classifyError,
+  summaryForToolError,
   fetchMethodFiles,
   filesInputSchema,
   resolveSubmittedFiles,
   toolErrorSchema,
   toolResultContent,
-  validateFilesOrMethodIdRequest,
+  validateMethodSelectorRequest,
 } from "./shared.js";
 import type {
   AuthErrorTexture,
@@ -25,6 +27,7 @@ import type {
   MethodFetchClient,
   SubmittedFile,
   SubmittedFileInput,
+  ErrorSummaries,
   ToolError,
 } from "./shared.js";
 
@@ -34,17 +37,23 @@ export type InputsTemplateFormat = z.infer<typeof inputsTemplateFormatSchema>;
 
 export const mthdsInputsInputSchema = {
   files: filesInputSchema.optional(),
+  method_ref: z
+    .string()
+    .optional()
+    .describe(
+      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.`,
+    ),
   method_id: z
     .string()
     .optional()
     .describe(
-      "Catalog id (mt_…) of a registered method. Projects the template from the method's CURRENT stored content — requires an API key (the catalog is org-scoped). With files also present, the files win and method_id is ignored. Provide files or method_id.",
+      "Catalog id (mt_…) of a registered method. Projects the template from the method's CURRENT stored content — requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_ref / method_id.",
     ),
   pipe_ref: z
     .string()
     .optional()
     .describe(
-      "The pipe to project, as a qualified domain.pipe_code. Omit to default to the closure's declared main_pipe.",
+      "The pipe to project, as a qualified domain.pipe_code — the same value mthds_run takes as pipe_code (the name mirrors each route: the build routes say pipe_ref, the run routes say pipe_code). Omit to default to the closure's declared main_pipe.",
     ),
   explicit: z
     .boolean()
@@ -84,6 +93,7 @@ export const mthdsInputsOutputSchema = inputsStructuredContentSchema;
 
 export interface MthdsInputsInput {
   files?: SubmittedFileInput[];
+  method_ref?: string;
   method_id?: string;
   pipe_ref?: string;
   explicit?: boolean;
@@ -93,6 +103,7 @@ export interface MthdsInputsInput {
 /** The inputs request after `{ path }` resolution — what the checks and the API call consume. */
 interface ResolvedInputsRequest {
   files: SubmittedFile[];
+  method_ref?: string;
   method_id?: string;
   pipe_ref?: string;
   explicit?: boolean;
@@ -146,6 +157,29 @@ const INPUTS_ERROR_OPTIONS: ClassifyErrorOptions = {
   },
 };
 
+/**
+ * Classify options for an address-shaped request: a 400/422 can now be the
+ * ref (parse/fetch/ambiguity) as well as the pipe selector, a 404 is the
+ * runner's no-matching-package refusal, and a 501 is the reserved registry
+ * form — all the caller's own selector, located at `method_ref` (except the
+ * pipe selector, which the hint still covers).
+ */
+const INPUTS_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
+  route: "/v1/build/inputs",
+  badRequest: {
+    location: "method_ref",
+    hint: `Check the address and tag — ${METHOD_REF_GRAMMAR} — and that the tag is a git tag on the repository. If the address resolved, check pipe_ref is a qualified domain.pipe_code declared by the package.`,
+  },
+  notFound: {
+    location: "method_ref",
+    hint: "The repository was fetched but holds no package matching this address by manifest identity. Check the package selector against the repository's METHODS.toml manifests.",
+  },
+  notImplemented: {
+    location: "method_ref",
+    hint: `Only address-form refs are supported (${METHOD_REF_GRAMMAR}); registry references are reserved until a method registry exists.`,
+  },
+};
+
 // Constructed inside each caught block (mirroring run.ts's runClient): the SDK
 // constructor throws PipelineRequestError on a malformed base URL, and that
 // must classify to a config ToolError, not reject the MCP handler.
@@ -174,14 +208,16 @@ export async function buildMthdsInputs(
     return errorResult("Inputs template was not run: request input is invalid.", inputErrors);
   }
 
-  // Fetch-and-forward: the build routes have no by-id support, so an id-only
-  // request fetches the stored method and forwards its current source as the
-  // submitted files (each labeled with the method id as provenance, which
-  // crosses into the build envelope's `source` via toMthdsFileItems). Inline
-  // files win — with both supplied, method_id is ignored (the build routes
-  // have no linkage concept, unlike /v1/start).
+  // By-id expansion: the build routes take no method_id (the hosted tooling
+  // selector deliberately excludes them — SPEC.md → Method Selectors), so an
+  // id request expands the stored method via the SDK-canonical
+  // getMethodClosure leg and forwards its current source as the submitted
+  // files (each labeled with the method id as provenance, which crosses into
+  // the build envelope's `source` via toMthdsFileItems). An address needs no
+  // expansion — `method_ref` rides the build envelope itself and the runner
+  // resolves it.
   let files = request.files;
-  if (files.length === 0 && request.method_id !== undefined) {
+  if (request.method_id !== undefined) {
     const fetched = await fetchMethodFiles(() => inputsClient(context), request.method_id, {
       authError: context.authError,
       noSourceHint:
@@ -197,11 +233,14 @@ export async function buildMthdsInputs(
     files = fetched.files;
   }
 
+  const classifyOptions =
+    request.method_ref !== undefined ? INPUTS_BY_REF_ERROR_OPTIONS : INPUTS_ERROR_OPTIONS;
+
   let report: BuildInputsResponse;
   try {
     report = await inputsClient(context).buildInputs(toBuildInputsRequest({ ...request, files }));
   } catch (err) {
-    const error = classifyError(err, { ...INPUTS_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, { ...classifyOptions, auth: context.authError });
     return errorResult(summaryForError(error), [error]);
   }
 
@@ -228,15 +267,16 @@ export async function buildMthdsInputs(
   }
 }
 
+const ERROR_SUMMARIES: ErrorSummaries = {
+  config: "Inputs template could not start: the Pipelex API is unreachable or misconfigured.",
+  input_domain: "Inputs template was not run: the Pipelex API rejected the request.",
+  runtime: "Inputs template could not be completed: the Pipelex API returned an error.",
+  paywall:
+    "Inputs template could not start: the organization's Pipelex plan does not cover this call.",
+};
+
 function summaryForError(error: ToolError): string {
-  switch (error.class) {
-    case "config":
-      return "Inputs template could not start: the Pipelex API is unreachable or misconfigured.";
-    case "input_domain":
-      return "Inputs template was not run: the Pipelex API rejected the request.";
-    case "runtime":
-      return "Inputs template could not be completed: the Pipelex API returned an error.";
-  }
+  return summaryForToolError(error, ERROR_SUMMARIES);
 }
 
 export function inputsToolResult(result: InputsResult) {
@@ -248,7 +288,7 @@ export function inputsToolResult(result: InputsResult) {
 }
 
 export function validateInputsRequest(input: ResolvedInputsRequest): ToolError[] {
-  const errors = validateFilesOrMethodIdRequest(input.files, input.method_id);
+  const errors = validateMethodSelectorRequest(input.files, input, { rule: "one_selector" });
 
   if (input.pipe_ref !== undefined && input.pipe_ref.trim() === "") {
     errors.push({
@@ -331,9 +371,13 @@ function invalidSummary(message: string, validationErrors: ValidationErrorItem[]
   ].join("\n\n");
 }
 
+// The closure crosses as EITHER inline files OR the address — the build
+// envelope's own XOR. An id-shaped request was already expanded to files.
 function toBuildInputsRequest(input: ResolvedInputsRequest): BuildInputsRequest {
   return {
-    files: toMthdsFileItems(input.files),
+    ...(input.method_ref !== undefined
+      ? { method_ref: input.method_ref }
+      : { files: toMthdsFileItems(input.files) }),
     ...(input.pipe_ref === undefined ? {} : { pipe_ref: input.pipe_ref }),
     format: input.format ?? "json",
     explicit: input.explicit ?? true,

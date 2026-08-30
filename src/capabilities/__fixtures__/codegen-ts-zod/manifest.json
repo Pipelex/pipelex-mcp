@@ -1,0 +1,12 @@
+{
+  "target": "ts-zod",
+  "kind": "types",
+  "crate_fingerprint": "d9593db59517b62b0056e47da73021a1b7f200f46b79e23f5da595f52cf76d4e",
+  "engine_version": "0.55.0",
+  "message": "Codegen artifacts generated successfully",
+  "lock_filename": "codegen.lock",
+  "artifact_paths": [
+    "types.ts",
+    "binder.ts"
+  ]
+}

@@ -81,10 +81,15 @@ function overrideContexts(
     catalog: { ...base.catalog, apiKey, authError },
     validation: { ...base.validation, apiKey, authError },
     inputs: { ...base.inputs, apiKey, authError },
+    codegen: { ...base.codegen, apiKey, authError },
     prepare: { ...base.prepare, apiKey, authError },
     run: { ...base.run, apiKey, authError },
     // The attachment ingest uploads to Pipelex storage, so the signed-in
     // caller's own identity is what funds it — the console holds no key.
     attachments: { ...base.attachments, apiKey, authError },
+    // The console never registers mthds_download_artifacts (it has no working
+    // directory to save into); the override is kept for uniformity so every
+    // context in the set carries the caller's identity, never a server key.
+    artifacts: { ...base.artifacts, apiKey, authError },
   };
 }

@@ -1,15 +1,21 @@
-import { PipelexApiClient, methodSourceToContents } from "@pipelex/sdk";
-import type { MethodData } from "@pipelex/sdk";
+import { PipelexApiClient } from "@pipelex/sdk";
+import type { ListMethodsQuery, MethodPage } from "@pipelex/sdk";
 import { z } from "zod";
 
 import {
   asOneLine,
   buildApiConfig,
   classifyError,
+  summaryForToolError,
   toolErrorSchema,
   toolResultContent,
 } from "./shared.js";
-import type { AuthErrorTexture, ClassifyErrorOptions, ToolError } from "./shared.js";
+import type {
+  AuthErrorTexture,
+  ClassifyErrorOptions,
+  ErrorSummaries,
+  ToolError,
+} from "./shared.js";
 
 export const CATALOG_DEFAULT_LIMIT = 20;
 export const CATALOG_MAX_LIMIT = 50;
@@ -21,7 +27,7 @@ export const mthdsListMethodsInputSchema = {
     .string()
     .optional()
     .describe(
-      "Optional case-insensitive substring over method id, name, and description. Whitespace is trimmed; blank means no filter.",
+      "Optional case-insensitive substring matched SERVER-side over method name and description, across the whole catalog. Whitespace is trimmed; blank means no filter.",
     ),
   limit: z
     .number()
@@ -30,12 +36,13 @@ export const mthdsListMethodsInputSchema = {
     .max(CATALOG_MAX_LIMIT)
     .optional()
     .describe(`Maximum methods to return (1-${CATALOG_MAX_LIMIT}; defaults to 20).`),
-  offset: z
-    .number()
-    .int()
-    .min(0)
+  cursor: z
+    .string()
+    .min(1)
     .optional()
-    .describe("Zero-based offset into the deterministically sorted matches; defaults to 0."),
+    .describe(
+      "Opaque next_cursor from a previous call, to continue listing where it stopped. Omit to start from the newest methods.",
+    ),
 };
 
 export const mthdsListMethodsInputObjectSchema = z.object(mthdsListMethodsInputSchema);
@@ -46,10 +53,7 @@ const catalogMethodSchema = z.object({
   name_truncated: z.boolean(),
   description: z.string().nullable(),
   description_truncated: z.boolean(),
-  has_source: z
-    .boolean()
-    .describe("Whether stored MTHDS source exists; not a valid or runnable verdict."),
-  updated_at: z.string(),
+  created_at: z.string(),
 });
 
 // Keep this as one Zod object for MCP SDK compatibility. The TypeScript result
@@ -57,10 +61,8 @@ const catalogMethodSchema = z.object({
 // fields; optionality here lets the transport validate either arm.
 export const mthdsListMethodsOutputSchema = z.object({
   status: z.enum(["ok", "error"]),
-  total_count: z.number().int().nonnegative().optional(),
-  matched_count: z.number().int().nonnegative().optional(),
   returned_count: z.number().int().nonnegative().optional(),
-  next_offset: z.number().int().nonnegative().nullable().optional(),
+  next_cursor: z.string().nullable().optional(),
   methods: z.array(catalogMethodSchema).optional(),
   errors: z.array(toolErrorSchema).optional(),
 });
@@ -68,7 +70,7 @@ export const mthdsListMethodsOutputSchema = z.object({
 export interface MthdsListMethodsInput {
   query?: string;
   limit?: number;
-  offset?: number;
+  cursor?: string;
 }
 
 export interface CatalogMethod {
@@ -77,16 +79,13 @@ export interface CatalogMethod {
   name_truncated: boolean;
   description: string | null;
   description_truncated: boolean;
-  has_source: boolean;
-  updated_at: string;
+  created_at: string;
 }
 
 export interface CatalogSuccess {
   status: "ok";
-  total_count: number;
-  matched_count: number;
   returned_count: number;
-  next_offset: number | null;
+  next_cursor: string | null;
   methods: CatalogMethod[];
 }
 
@@ -104,7 +103,7 @@ export interface CatalogResult {
 
 /** The narrow SDK seam catalog tests and alternate shells can supply. */
 export interface CatalogClient {
-  listMethods(): Promise<MethodData[]>;
+  listMethods(query?: ListMethodsQuery): Promise<MethodPage>;
 }
 
 export interface CatalogContext {
@@ -132,7 +131,7 @@ function catalogClient(context: CatalogContext): CatalogClient {
 export interface NormalizedCatalogInput {
   query: string;
   limit: number;
-  offset: number;
+  cursor?: string;
 }
 
 export async function listMthdsMethods(
@@ -147,18 +146,24 @@ export async function listMthdsMethods(
     );
   }
 
-  let methods: MethodData[];
+  let page: MethodPage;
   try {
     // Client construction stays inside the caught path: malformed base URLs
     // must become classified tool errors, not rejected MCP handlers.
-    methods = await catalogClient(context).listMethods();
+    // Search and paging are the SERVER's job: filtering one page client-side
+    // would be searching 50 of 10,000 rows and calling it a search.
+    page = await catalogClient(context).listMethods({
+      ...(normalized.input.query === "" ? {} : { q: normalized.input.query }),
+      limit: normalized.input.limit,
+      ...(normalized.input.cursor === undefined ? {} : { cursor: normalized.input.cursor }),
+    });
   } catch (err) {
-    const error = classifyError(err, catalogErrorOptions(context));
+    const error = classifyError(err, catalogErrorOptions(context, normalized.input));
     return errorResult(summaryForError(error), [error]);
   }
 
   try {
-    return projectCatalog(methods, normalized.input);
+    return projectCatalog(page, normalized.input);
   } catch (err) {
     const message =
       err instanceof Error ? err.message : "The Pipelex API returned a malformed methods catalog.";
@@ -184,7 +189,7 @@ function normalizeInput(
         class: "input_domain",
         ...(issue.path.length === 0 ? {} : { location: issue.path.join(".") }),
         message: issue.message,
-        hint: `Use query as text, limit as an integer from 1 to ${CATALOG_MAX_LIMIT}, and offset as a non-negative integer.`,
+        hint: `Use query as text, limit as an integer from 1 to ${CATALOG_MAX_LIMIT}, and cursor as the opaque next_cursor from a previous call.`,
         retryable: false,
       })),
     };
@@ -195,33 +200,47 @@ function normalizeInput(
     input: {
       query: parsed.data.query?.trim() ?? "",
       limit: parsed.data.limit ?? CATALOG_DEFAULT_LIMIT,
-      offset: parsed.data.offset ?? 0,
+      ...(parsed.data.cursor === undefined ? {} : { cursor: parsed.data.cursor }),
     },
   };
 }
 
-/** Validate, filter, sort, page, and bound the full SDK response immediately. */
+/**
+ * Validate and bound ONE server-selected page immediately.
+ *
+ * There is no local filtering, sorting or slicing left here: the API applies
+ * the query across the whole catalog and returns rows already ordered newest
+ * first by the immutable `created_at` it pages on. Re-sorting locally would
+ * reorder a page against the cursor that produced it, and re-filtering would
+ * search only the rows that survived the server's own filter.
+ */
 export function projectCatalog(value: unknown, input: NormalizedCatalogInput): CatalogResult {
-  if (!Array.isArray(value)) {
-    throw new Error("Methods catalog response must be an array.");
+  if (typeof value !== "object" || value === null) {
+    throw new Error("Methods catalog response must be a page object.");
+  }
+  const wire = value as Record<string, unknown>;
+  if (!Array.isArray(wire.items)) {
+    throw new Error("Methods catalog page is missing its items array.");
+  }
+  // An ABSENT cursor field is a contract break, not an end-of-catalog signal, and
+  // it is checked as strictly as `items` for the same reason: the SDK reads the
+  // raw wire key, so a renamed or dropped `next_cursor` arrives here as
+  // `undefined`. Coercing that to `null` would report "this was the last page" on
+  // every call — every method past the first page silently invisible, with both
+  // live detectors green because `null` is what they already accept. `MethodPage`
+  // declares the field required; failing closed is what makes that declaration
+  // mean something on the wire.
+  if (wire.nextCursor !== null && typeof wire.nextCursor !== "string") {
+    throw new Error("Methods catalog page is missing its nextCursor, or it is not a string.");
   }
 
-  const rows = value.map(validateRow);
-  const query = input.query.toLowerCase();
-  const matched = rows
-    .filter((row) => query === "" || searchableFields(row).some((field) => field.includes(query)))
-    .sort(compareRows);
-  const page = matched.slice(input.offset, input.offset + input.limit).map(projectRow);
-  const nextOffset =
-    input.offset + page.length < matched.length ? input.offset + page.length : null;
+  const methods = wire.items.map(validateRow).map(projectRow);
 
   const structuredContent: CatalogSuccess = {
     status: "ok",
-    total_count: rows.length,
-    matched_count: matched.length,
-    returned_count: page.length,
-    next_offset: nextOffset,
-    methods: page,
+    returned_count: methods.length,
+    next_cursor: wire.nextCursor as string | null,
+    methods,
   };
 
   return { structuredContent, summary: catalogSummary(structuredContent, input.query) };
@@ -231,8 +250,7 @@ interface ValidatedRow {
   method_id: string;
   name: string;
   description: string | null;
-  mthds: string;
-  updated_at: string;
+  created_at: string;
 }
 
 function validateRow(value: unknown, index: number): ValidatedRow {
@@ -241,7 +259,7 @@ function validateRow(value: unknown, index: number): ValidatedRow {
   }
 
   const row = value as Record<string, unknown>;
-  for (const field of ["method_id", "name", "updated_at", "mthds"] as const) {
+  for (const field of ["method_id", "name", "created_at"] as const) {
     if (typeof row[field] !== "string") {
       throw new Error(`Methods catalog row ${index} is missing string field ${field}.`);
     }
@@ -258,24 +276,8 @@ function validateRow(value: unknown, index: number): ValidatedRow {
     method_id: row.method_id as string,
     name: row.name as string,
     description: (row.description as string | null | undefined) ?? null,
-    mthds: row.mthds as string,
-    updated_at: row.updated_at as string,
+    created_at: row.created_at as string,
   };
-}
-
-function searchableFields(row: ValidatedRow): string[] {
-  return [row.method_id, row.name, row.description ?? ""].map((field) => field.toLowerCase());
-}
-
-function compareRows(left: ValidatedRow, right: ValidatedRow): number {
-  const byName = compareStrings(left.name.toLowerCase(), right.name.toLowerCase());
-  return byName !== 0 ? byName : compareStrings(left.method_id, right.method_id);
-}
-
-function compareStrings(left: string, right: string): number {
-  if (left < right) return -1;
-  if (left > right) return 1;
-  return 0;
 }
 
 function projectRow(row: ValidatedRow): CatalogMethod {
@@ -288,8 +290,7 @@ function projectRow(row: ValidatedRow): CatalogMethod {
     name_truncated: name.truncated,
     description: description?.value ?? null,
     description_truncated: description?.truncated ?? false,
-    has_source: methodSourceToContents(row.mthds).length > 0,
-    updated_at: row.updated_at,
+    created_at: row.created_at,
   };
 }
 
@@ -321,11 +322,12 @@ function boundCodePoints(value: string, limit: number): { value: string; truncat
  *  - Name and description come first on the line and the id is demoted to a
  *    trailing parenthetical. The id is for the model to pass onward, not for
  *    the user to read; it used to sit between the name and the description.
- *  - `has_source` is annotated only when FALSE, where it is actionable ("this
- *    draft cannot be used by id"). The true case said "source present (not a
- *    validation/runnable verdict)" on every row — pure noise that competed with
- *    the description and demonstrably leaked into the user-facing answer as a
- *    half-verdict. It stays in `structuredContent` for machine consumers.
+ *  - `has_source` is GONE, not merely hidden. The catalog index projection
+ *    stopped carrying a method's source, and recovering it would cost a
+ *    getMethod per row — the exact read the index exists to avoid. A
+ *    source-less method now announces itself where the answer is actionable
+ *    rather than advisory: passing its id to validate, inputs-template,
+ *    prepare or run fails fast as an input_domain no-verdict at `method_id`.
  *
  * Names and descriptions are org-authored, hence untrusted: they are collapsed
  * to one line so they cannot break out of their bullet, and the directive names
@@ -335,9 +337,9 @@ function boundCodePoints(value: string, limit: number): { value: string; truncat
  * description instead of by punctuation.
  */
 function catalogSummary(result: CatalogSuccess, query: string): string {
-  const lines = [
-    `Organization method catalog: ${result.total_count} total, ${result.matched_count} matched, ${result.returned_count} returned.`,
-  ];
+  const scope =
+    query === "" ? "Organization method catalog" : `Methods matching ${JSON.stringify(query)}`;
+  const lines = [`${scope}: ${result.returned_count} returned, newest first.`];
 
   if (result.returned_count > 0) {
     lines.push(
@@ -350,46 +352,66 @@ function catalogSummary(result: CatalogSuccess, query: string): string {
   for (const method of result.methods) {
     const description =
       method.description === null ? "(no description recorded)" : asOneLine(method.description);
-    const draft = method.has_source
-      ? ""
-      : " [draft: no MTHDS source — cannot be used by method_id]";
     lines.push(
-      `- **${asOneLine(method.name)}** — ${description} (method_id: \`${method.method_id}\`)${draft}`,
+      `- **${asOneLine(method.name)}** — ${description} (method_id: \`${method.method_id}\`)`,
     );
   }
 
-  if (result.next_offset !== null) {
-    const queryHint = query === "" ? "the same query" : `query ${JSON.stringify(query)}`;
+  if (result.next_cursor !== null) {
+    const queryHint = query === "" ? "no query" : `query ${JSON.stringify(query)}`;
     lines.push(
       "",
-      `More matches are available: call mthds_list_methods with ${queryHint} and offset ${result.next_offset}.`,
+      `More methods are available: call mthds_list_methods with ${queryHint} and cursor ${JSON.stringify(result.next_cursor)}.`,
     );
   }
 
   return lines.join("\n");
 }
 
-function catalogErrorOptions(context: CatalogContext): ClassifyErrorOptions {
+/**
+ * The 400/422 arm is chosen by REQUEST SHAPE, because this route has two
+ * unrelated bad-request causes and only the caller's own input tells them apart.
+ *
+ * Without a cursor the only reachable rejection is a missing active-organization
+ * context, which is a credential problem. With one, the far likelier cause is the
+ * cursor itself — the API answers a stale or corrupted one with `Invalid cursor`,
+ * and routing that to `config`@`PIPELEX_API_KEY` sends the caller to rotate a key
+ * that was never wrong. The class matters more than the wording: a machine
+ * consumer branches on it, so a paging fault must not read as an auth fault.
+ */
+function catalogErrorOptions(
+  context: CatalogContext,
+  input: NormalizedCatalogInput,
+): ClassifyErrorOptions {
   return {
     route: "/v1/methods",
-    badRequest: {
-      class: "config",
-      location: context.authError?.location ?? "PIPELEX_API_KEY",
-      hint: "The methods catalog needs an active organization context. Use a platform key minted for the intended organization, then retry.",
-    },
+    badRequest:
+      input.cursor === undefined
+        ? {
+            class: "config",
+            location: context.authError?.location ?? "PIPELEX_API_KEY",
+            hint: "The methods catalog needs an active organization context. Use a platform key minted for the intended organization, then retry.",
+          }
+        : {
+            // No `class` override: a rejected cursor is the caller's input, so it
+            // takes the default `input_domain`.
+            location: "cursor",
+            hint: "The cursor was rejected — it may be stale, truncated, or from a different catalog. Drop it and call mthds_list_methods again from the start.",
+          },
     auth: context.authError,
   };
 }
 
+const ERROR_SUMMARIES: ErrorSummaries = {
+  config: "Method catalog could not be listed: the Pipelex API or catalog access is misconfigured.",
+  input_domain: "Method catalog was not listed: the Pipelex API rejected the request.",
+  runtime: "Method catalog could not be listed: the Pipelex API returned an error.",
+  paywall:
+    "Method catalog could not be listed: the organization's Pipelex plan does not cover this call.",
+};
+
 function summaryForError(error: ToolError): string {
-  switch (error.class) {
-    case "config":
-      return "Method catalog could not be listed: the Pipelex API or catalog access is misconfigured.";
-    case "input_domain":
-      return "Method catalog was not listed: the Pipelex API rejected the request.";
-    case "runtime":
-      return "Method catalog could not be listed: the Pipelex API returned an error.";
-  }
+  return summaryForToolError(error, ERROR_SUMMARIES);
 }
 
 function errorResult(summary: string, errors: ToolError[]): CatalogResult {

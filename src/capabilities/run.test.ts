@@ -2,12 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import { ApiResponseError, ApiUnreachableError, MissingMainStuffError } from "@pipelex/sdk";
 import type {
+  MethodProvenance,
   RunRead,
   RunResults,
   RunResultStart,
   RunResultState,
   RunStatus,
-  StartOptions,
+  PipelexStartOptions,
   TokensUsageRecord,
 } from "@pipelex/sdk";
 
@@ -220,6 +221,52 @@ describe("startResult", () => {
     expect(result.summary).toContain("## Views");
   });
 
+  it("projects method_provenance and narrates the resolved snapshot", () => {
+    const result = startResult({
+      pipeline_run_id: RUN_ID,
+      method_provenance: {
+        address: "github.com/Pipelex/methods/documents",
+        tag: "v0.1.0",
+        commit_sha: "abc123def456",
+      },
+    });
+
+    expect(result.structuredContent.method_provenance).toEqual({
+      address: "github.com/Pipelex/methods/documents",
+      tag: "v0.1.0",
+      commit_sha: "abc123def456",
+    });
+    expect(result.summary).toContain("github.com/Pipelex/methods/documents");
+    expect(result.summary).toContain("v0.1.0");
+    expect(result.summary).toContain("abc123def456");
+  });
+
+  it("narrates a tagless resolution without inventing a tag", () => {
+    const result = startResult({
+      pipeline_run_id: RUN_ID,
+      method_provenance: {
+        address: "github.com/Pipelex/methods/documents",
+        tag: null,
+        commit_sha: "abc123def456",
+      },
+    });
+
+    expect(result.structuredContent.method_provenance?.tag).toBeNull();
+    expect(result.summary).not.toContain("at tag");
+  });
+
+  it("drops a malformed method_provenance extension instead of guessing", () => {
+    const result = startResult({
+      pipeline_run_id: RUN_ID,
+      method_provenance: {
+        address: "github.com/x/y",
+        commit_sha: 42,
+      } as unknown as MethodProvenance,
+    });
+
+    expect(result.structuredContent).not.toHaveProperty("method_provenance");
+  });
+
   it("tolerates a bare protocol ack with no extensions", () => {
     const result = startResult({ pipeline_run_id: RUN_ID });
 
@@ -334,6 +381,40 @@ describe("resultsResult", () => {
     expect(result.summary).toContain("~3s");
     expect(result.graphSpec).toBeUndefined();
     expect(result.mainStuff).toBeUndefined();
+  });
+
+  it("names mthds_download_artifacts in the summary only where the tool exists and files were produced", () => {
+    const withFiles = {
+      state: "completed" as const,
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: {
+          url: "pipelex-storage://runs/x/illustration.png",
+          public_url: "https://signed.example/illustration.png?X-Amz-Expires=3600",
+        },
+      },
+    };
+    const withoutFiles = {
+      ...withFiles,
+      result: { pipeline_run_id: RUN_ID, main_stuff: { answer: 42 } },
+    };
+
+    // The workshop: files produced → the nudge, with the expiry stated.
+    const workshop = resultsResult(withFiles, false, true);
+    expect(workshop.summary).toContain("mthds_download_artifacts");
+    expect(workshop.summary).toContain("1 stored file(s)");
+    expect(workshop.summary).toContain("expire");
+    // The nudge is prose only — the structured contract is untouched.
+    expect(workshop.structuredContent).not.toHaveProperty("artifacts");
+
+    // The workshop, nothing produced → silent.
+    expect(resultsResult(withoutFiles, false, true).summary).not.toContain(
+      "mthds_download_artifacts",
+    );
+    // The console has no such tool → silent even with files.
+    expect(resultsResult(withFiles, true, false).summary).not.toContain("mthds_download_artifacts");
+    expect(resultsResult(withFiles).summary).not.toContain("mthds_download_artifacts");
   });
 
   it("projects a completed run and carries graph + full output off structuredContent", () => {
@@ -758,7 +839,7 @@ describe("boundMainStuff", () => {
 
 // Structural mirror of the RunClient seam in run.ts.
 interface FakeRunClient {
-  start(options: StartOptions): Promise<RunResultStart>;
+  start(options: PipelexStartOptions): Promise<RunResultStart>;
   getRunStatus(runId: string): Promise<RunRead>;
   getRunResult(runId: string): Promise<RunResultState>;
 }
@@ -777,10 +858,10 @@ function contextWith(overrides: Partial<FakeRunClient>): RunContext {
 }
 
 describe("startMthdsRun", () => {
-  it("maps MCP input to StartOptions and projects the ack", async () => {
-    let seen: StartOptions | undefined;
+  it("maps MCP input to PipelexStartOptions and projects the ack", async () => {
+    let seen: PipelexStartOptions | undefined;
     const context = contextWith({
-      start: (options: StartOptions) => {
+      start: (options: PipelexStartOptions) => {
         seen = options;
         return Promise.resolve({ pipeline_run_id: RUN_ID, state: "STARTED" });
       },
@@ -805,10 +886,10 @@ describe("startMthdsRun", () => {
     expect(result.structuredContent.run_id).toBe(RUN_ID);
   });
 
-  it("omits pipe_code and inputs from StartOptions when not supplied", async () => {
-    let seen: StartOptions | undefined;
+  it("omits pipe_code and inputs from PipelexStartOptions when not supplied", async () => {
+    let seen: PipelexStartOptions | undefined;
     const context = contextWith({
-      start: (options: StartOptions) => {
+      start: (options: PipelexStartOptions) => {
         seen = options;
         return Promise.resolve({ pipeline_run_id: RUN_ID });
       },
@@ -845,6 +926,100 @@ describe("startMthdsRun", () => {
   });
 });
 
+describe("startMthdsRun by method_ref", () => {
+  const ADDRESS = "github.com/Pipelex/methods/documents@v0.1.0";
+
+  it("forwards method_ref as the run source, with no contents and no linkage id", async () => {
+    let seen: PipelexStartOptions | undefined;
+    const context = contextWith({
+      start: (options: PipelexStartOptions) => {
+        seen = options;
+        return Promise.resolve({ pipeline_run_id: RUN_ID });
+      },
+    });
+
+    const result = await startMthdsRun({ method_ref: ADDRESS, inputs: { q: "why?" } }, context);
+
+    expect(seen).toEqual({ inputs: { q: "why?" }, method_ref: ADDRESS });
+    expect(result.structuredContent.status).toBe("ok");
+  });
+
+  it("rejects files beside method_ref without calling the client", async () => {
+    const result = await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }], method_ref: ADDRESS },
+      contextWith({}),
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+  });
+
+  it("rejects method_ref beside method_id without calling the client", async () => {
+    const result = await startMthdsRun(
+      { method_ref: ADDRESS, method_id: "mt_abc123" },
+      contextWith({}),
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
+    expect(result.structuredContent.errors?.[0]?.message).toContain("provenance");
+  });
+
+  it("classifies a structures refusal (403 MethodStructuresRefusedError) at method_ref", async () => {
+    const context = contextWith({
+      start: () =>
+        Promise.reject(
+          new ApiResponseError(
+            "HTTP 403",
+            `${DEFAULT_API_URL}/v1/start`,
+            403,
+            "Forbidden",
+            "{}",
+            "MethodStructuresRefusedError",
+            "The method declares in-process Python structures",
+            undefined,
+            undefined,
+          ),
+        ),
+    });
+
+    const result = await startMthdsRun({ method_ref: ADDRESS }, context);
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+    expect(result.structuredContent.errors?.[0]?.hint).toMatch(/MTHDS concepts/);
+  });
+
+  it("classifies a registry-form 501 at method_ref with the address-form hint", async () => {
+    const context = contextWith({
+      start: () =>
+        Promise.reject(
+          new ApiResponseError(
+            "HTTP 501",
+            `${DEFAULT_API_URL}/v1/start`,
+            501,
+            "Not Implemented",
+            "{}",
+            undefined,
+            "Registry-form refs are not implemented",
+            undefined,
+            undefined,
+          ),
+        ),
+    });
+
+    const result = await startMthdsRun({ method_ref: ADDRESS }, context);
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+    expect(result.structuredContent.errors?.[0]?.hint).toMatch(/address-form/i);
+  });
+});
+
 describe("startMthdsRun by method_id", () => {
   function notFound(): ApiResponseError {
     return new ApiResponseError(
@@ -860,10 +1035,10 @@ describe("startMthdsRun by method_id", () => {
     );
   }
 
-  it("starts by id alone — extra.method_id crosses, no mthds_contents", async () => {
-    let seen: StartOptions | undefined;
+  it("starts by id alone — method_id crosses as a named option, no mthds_contents", async () => {
+    let seen: PipelexStartOptions | undefined;
     const context = contextWith({
-      start: (options: StartOptions) => {
+      start: (options: PipelexStartOptions) => {
         seen = options;
         return Promise.resolve({ pipeline_run_id: RUN_ID, state: "STARTED" });
       },
@@ -874,16 +1049,16 @@ describe("startMthdsRun by method_id", () => {
       context,
     );
 
-    expect(seen).toEqual({ extra: { method_id: "mt_abc123" }, inputs: { question: "why?" } });
+    expect(seen).toEqual({ method_id: "mt_abc123", inputs: { question: "why?" } });
     expect(seen).not.toHaveProperty("mthds_contents");
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.run_id).toBe(RUN_ID);
   });
 
   it("passes both when files and method_id are supplied (files run, id is linkage)", async () => {
-    let seen: StartOptions | undefined;
+    let seen: PipelexStartOptions | undefined;
     const context = contextWith({
-      start: (options: StartOptions) => {
+      start: (options: PipelexStartOptions) => {
         seen = options;
         return Promise.resolve({ pipeline_run_id: RUN_ID });
       },
@@ -896,7 +1071,7 @@ describe("startMthdsRun by method_id", () => {
 
     expect(seen).toEqual({
       mthds_contents: ['domain = "demo"'],
-      extra: { method_id: "mt_abc123" },
+      method_id: "mt_abc123",
     });
   });
 
@@ -907,7 +1082,7 @@ describe("startMthdsRun by method_id", () => {
     expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
     expect(result.structuredContent.errors?.[0]?.location).toBe("files");
     expect(result.structuredContent.errors?.[0]?.message).toBe(
-      "Provide MTHDS files or a method_id.",
+      "Provide MTHDS files, a method_ref address, or a method_id.",
     );
   });
 
@@ -962,7 +1137,14 @@ describe("startMthdsRun by method_id", () => {
 
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.kind).toBe("paywall");
     expect(result.structuredContent.errors?.[0]?.hint).toContain("app.pipelex.com");
+    // A headline-only host shows just this line, so it must name the plan
+    // rather than the connectivity headline every other `config` error gets.
+    expect(result.summary).toBe(
+      "Run could not start: the organization's Pipelex plan does not cover this call.",
+    );
+    expect(result.summary).not.toMatch(/unreachable/);
   });
 
   it("points a mixed-request 422 at files — the executed source — not method_id", async () => {
@@ -1038,6 +1220,22 @@ describe("startMthdsRun by method_id", () => {
   });
 });
 
+// A 402 on a run route: the platform reports a plan limit this way, and its
+// problem `code` really is "forbidden" (never sniffed — the status decides).
+function paywall(routeSuffix: string): ApiResponseError {
+  return new ApiResponseError(
+    "HTTP 402",
+    `${DEFAULT_API_URL}/v1/runs/${RUN_ID}${routeSuffix}`,
+    402,
+    "Payment Required",
+    "{}",
+    "subscription_required",
+    "Subscription required",
+    undefined, // validationErrors
+    "forbidden",
+  );
+}
+
 describe("getMthdsRunStatus", () => {
   it("reads and projects the status by id", async () => {
     let seenId: string | undefined;
@@ -1086,6 +1284,18 @@ describe("getMthdsRunStatus", () => {
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
     expect(result.structuredContent.errors?.[0]?.location).toBe("run_id");
+  });
+
+  it("headlines a paywall (402) as a plan limit, not as connectivity", async () => {
+    const context = contextWith({ getRunStatus: () => Promise.reject(paywall("/status")) });
+
+    const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.errors?.[0]?.kind).toBe("paywall");
+    expect(result.summary).toBe(
+      "Run status could not be read: the organization's Pipelex plan does not cover this call.",
+    );
+    expect(result.summary).not.toMatch(/unreachable/);
   });
 });
 
@@ -1141,6 +1351,18 @@ describe("getMthdsRunResults", () => {
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
     expect(result.summary).toContain("malformed report");
+  });
+
+  it("headlines a paywall (402) as a plan limit, not as connectivity", async () => {
+    const context = contextWith({ getRunResult: () => Promise.reject(paywall("/result")) });
+
+    const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.errors?.[0]?.kind).toBe("paywall");
+    expect(result.summary).toBe(
+      "Run results could not be read: the organization's Pipelex plan does not cover this call.",
+    );
+    expect(result.summary).not.toMatch(/unreachable/);
   });
 });
 
@@ -1199,10 +1421,10 @@ describe("runResultsToolResult", () => {
 
 describe("startMthdsRun path submissions", () => {
   it("resolves { path } items through the context resolver before starting", async () => {
-    let seen: StartOptions | undefined;
+    let seen: PipelexStartOptions | undefined;
     const context: RunContext = {
       ...contextWith({
-        start: (options: StartOptions) => {
+        start: (options: PipelexStartOptions) => {
           seen = options;
           return Promise.resolve({ pipeline_run_id: RUN_ID });
         },

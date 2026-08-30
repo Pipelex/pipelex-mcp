@@ -91,7 +91,7 @@ export interface ResolvedFiles {
 
 /**
  * Resolve the submitted-files union into plain `{ content, uri? }` items,
- * ahead of the request-shape checks ({@link validateFilesOrMethodIdRequest}).
+ * ahead of the request-shape checks ({@link validateMethodSelectorRequest}).
  * `{ path }` items go through the resolver
  * when one is provided; a resolved item carries `uri` = the submitted path,
  * so diagnostics locate to files the agent can open. Without a resolver a
@@ -157,8 +157,25 @@ export const errorClassSchema = z.enum(["input_domain", "config", "runtime"]);
 
 export type ErrorClass = z.infer<typeof errorClassSchema>;
 
+/**
+ * Refinement of {@link ErrorClass} for a condition whose class is settled but
+ * whose *cause* the class cannot name. Today the only member is `paywall`: a
+ * 402 is deliberately `config` (the deployment cannot make this call as
+ * credentialed), yet the class alone would have every headline blame
+ * connectivity for what is a billing limit. Adding a member here is how a new
+ * such cause gets a headline — never by re-classifying it.
+ */
+export const errorKindSchema = z.enum(["paywall"]);
+
+export type ErrorKind = z.infer<typeof errorKindSchema>;
+
 export const toolErrorSchema = z.object({
   class: errorClassSchema,
+  kind: errorKindSchema
+    .optional()
+    .describe(
+      "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call.",
+    ),
   location: z.string().optional(),
   message: z.string(),
   hint: z.string().optional(),
@@ -169,6 +186,15 @@ export const toolErrorSchema = z.object({
 
 export interface ToolError {
   class: ErrorClass;
+  /**
+   * Set where the concrete SDK error / HTTP status is still known
+   * ({@link classifyError}), for the same reason `retryable` is: `class` is
+   * the machine contract and must stay coarse, but a paywall and an
+   * unreachable API are both `config` and read nothing alike to a human. A
+   * machine consumer still branches on `class`; `kind` is what lets it — and
+   * the summary headline — tell the two apart without sniffing the message.
+   */
+  kind?: ErrorKind;
   location?: string;
   message: string;
   hint?: string;
@@ -180,6 +206,26 @@ export interface ToolError {
    * `PIPELEX_BASE_URL`, yet only the former is worth retrying.
    */
   retryable: boolean;
+}
+
+/**
+ * A capability's no-verdict headlines: one per {@link ErrorClass}, plus one for
+ * every {@link ErrorKind}. Declaring the kind headlines is **mandatory** — that
+ * is the point of the type. A capability that forgot one would silently print
+ * the connectivity headline for a billing refusal, which is the defect this
+ * shape exists to make unrepresentable: the miss is a type error, not something
+ * a reviewer has to catch.
+ */
+export type ErrorSummaries = Record<ErrorClass, string> & Record<ErrorKind, string>;
+
+/**
+ * Pick a capability's headline for one {@link ToolError}. `kind` is checked
+ * ahead of `class` because it is the refinement: a 402 is `config` by contract,
+ * so consulting the class map first would print "the Pipelex API is unreachable
+ * or misconfigured" for a plan limit and send the agent to debug the base URL.
+ */
+export function summaryForToolError(error: ToolError, summaries: ErrorSummaries): string {
+  return error.kind === undefined ? summaries[error.class] : summaries[error.kind];
 }
 
 /** One MCP `content` item — the human/LLM-readable text stream. */
@@ -245,20 +291,65 @@ export function buildApiConfig(env: ApiEnv = process.env): ApiConfig {
   };
 }
 
+/** The shared `<address>[@<tag>]` grammar sentence, reused by schema descriptions and hints. */
+export const METHOD_REF_GRAMMAR =
+  "github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0";
+
 /**
- * Request-shape checks for the tools that accept files OR a registered
- * method's catalog id (`mthds_validate`, `mthds_run`, `mthds_inputs_template`):
- * at least one of a non-empty `files` and `method_id` must be supplied; a
- * supplied-but-blank `method_id` is rejected at `method_id`; id format beyond
- * non-blank stays server-owned (the `run_id` stance).
+ * The selectors a method-taking request may carry beside its (already
+ * resolved) inline files. `undefined` means "not supplied"; a supplied-but-
+ * blank value is rejected loudly rather than treated as absent.
  */
-export function validateFilesOrMethodIdRequest(
+export interface MethodSelectors {
+  method_ref?: string;
+  method_id?: string;
+}
+
+/**
+ * The two uniform combination rules of the addressing contract (SPEC.md →
+ * Method Selectors):
+ *
+ * - `"one_selector"` — the tooling tools (`mthds_validate`,
+ *   `mthds_inputs_template`, `mthds_prepare_inputs`, `mthds_codegen`): exactly one of files /
+ *   `method_ref` / `method_id`. Stateless operations have no Run row, so
+ *   "linkage" has no referent and an extra selector could only be ignored —
+ *   the worst contract of the three.
+ * - `"run_source"` — `mthds_run`: inline files win and `method_id` beside them
+ *   demotes to run-history linkage (legal pair), while `method_ref` is a
+ *   complete run source of its own and pairs with nothing.
+ */
+export type SelectorRule = "one_selector" | "run_source";
+
+/**
+ * Request-shape checks for every method-taking tool: at least one method
+ * selector must be supplied, blank selectors are rejected at their own field,
+ * and the illegal pairings for the given {@link SelectorRule} are rejected
+ * before anything reaches the wire (mirroring the API's own 422s). Selector
+ * format beyond non-blank stays server-owned (the `run_id` stance).
+ *
+ * A tool that does not expose `method_ref` (`mthds_prepare_inputs`) simply
+ * never passes one; the "no selector" teaching text adapts to which selectors
+ * the caller's schema actually carries via `acceptsMethodRef`.
+ */
+export function validateMethodSelectorRequest(
   files: SubmittedFile[],
-  methodId: string | undefined,
+  selectors: MethodSelectors,
+  options: { rule: SelectorRule; acceptsMethodRef?: boolean },
 ): ToolError[] {
   const errors: ToolError[] = [];
+  const acceptsMethodRef = options.acceptsMethodRef !== false;
 
-  if (methodId !== undefined && methodId.trim() === "") {
+  if (selectors.method_ref !== undefined && selectors.method_ref.trim() === "") {
+    errors.push({
+      class: "input_domain",
+      location: "method_ref",
+      message: "method_ref must not be empty when supplied.",
+      hint: `Pass a published method's address — ${METHOD_REF_GRAMMAR} — or submit files or a method_id instead.`,
+      retryable: false,
+    });
+  }
+
+  if (selectors.method_id !== undefined && selectors.method_id.trim() === "") {
     errors.push({
       class: "input_domain",
       location: "method_id",
@@ -268,17 +359,80 @@ export function validateFilesOrMethodIdRequest(
     });
   }
 
-  if (files.length === 0 && methodId === undefined) {
+  if (
+    files.length === 0 &&
+    selectors.method_ref === undefined &&
+    selectors.method_id === undefined
+  ) {
     errors.push({
       class: "input_domain",
       location: "files",
-      message: "Provide MTHDS files or a method_id.",
-      hint: "Submit files as [{ content, uri? }], or pass the catalog id (mt_…) of a registered method as method_id.",
+      message: acceptsMethodRef
+        ? "Provide MTHDS files, a method_ref address, or a method_id."
+        : "Provide MTHDS files or a method_id.",
+      hint: acceptsMethodRef
+        ? `Submit files as [{ content, uri? }], a published method's address (${METHOD_REF_GRAMMAR}) as method_ref, or the catalog id (mt_…) of a registered method as method_id.`
+        : "Submit files as [{ content, uri? }], or pass the catalog id (mt_…) of a registered method as method_id.",
       retryable: false,
     });
   }
 
+  errors.push(...validateSelectorExclusivity(files, selectors, options.rule));
   errors.push(...validateFileItems(files));
+  return errors;
+}
+
+/**
+ * The illegal pairings per {@link SelectorRule}. Evaluated only on validly
+ * supplied selectors (a blank one already earned its own error above), and
+ * emitting one error per illegal pair so a three-selector request teaches both
+ * offenses instead of one.
+ */
+function validateSelectorExclusivity(
+  files: SubmittedFile[],
+  selectors: MethodSelectors,
+  rule: SelectorRule,
+): ToolError[] {
+  const errors: ToolError[] = [];
+  const hasFiles = files.length > 0;
+  const hasRef = selectors.method_ref !== undefined && selectors.method_ref.trim() !== "";
+  const hasId = selectors.method_id !== undefined && selectors.method_id.trim() !== "";
+
+  if (hasFiles && hasRef) {
+    errors.push({
+      class: "input_domain",
+      location: "method_ref",
+      message:
+        "files and method_ref are mutually exclusive — submit the files or the address, never both.",
+      hint: "An address is a complete method source resolved server-side; drop method_ref to operate on the submitted files, or drop files to operate on the published package.",
+      retryable: false,
+    });
+  }
+
+  if (hasRef && hasId) {
+    errors.push({
+      class: "input_domain",
+      location: "method_id",
+      message:
+        rule === "run_source"
+          ? "method_ref and method_id are mutually exclusive — an address run carries its own provenance and takes no linkage id."
+          : "method_ref and method_id are mutually exclusive — select the method by exactly one of them.",
+      hint: "Drop one of the two selectors.",
+      retryable: false,
+    });
+  }
+
+  if (rule === "one_selector" && hasFiles && hasId) {
+    errors.push({
+      class: "input_domain",
+      location: "method_id",
+      message:
+        "files and method_id are mutually exclusive on this tool — submit the files or the catalog id, never both.",
+      hint: "This operation is stateless, so there is no run-history linkage for an extra id to feed; drop method_id to operate on the submitted files, or drop files to operate on the registered method.",
+      retryable: false,
+    });
+  }
+
   return errors;
 }
 
@@ -308,6 +462,44 @@ function validateFileItems(files: SubmittedFile[]): ToolError[] {
   }
 
   return errors;
+}
+
+/** The scheme of a Pipelex storage reference, as the runtime and the SDK spell it. */
+export const PIPELEX_STORAGE_SCHEME = "pipelex-storage://";
+
+/**
+ * Every `pipelex-storage://` reference inside a JSON-shaped value, in discovery
+ * order and deduplicated. This is how a run's produced files are found: the
+ * runtime serializes an image or document output as content carrying its
+ * storage reference in `url` (beside an expiring presigned `public_url`), and
+ * the scheme is unambiguous, so a walk for scheme-prefixed strings is a
+ * contract, not a heuristic. Shared by `mthds_run_results` (to say the files
+ * exist) and `mthds_download_artifacts` (to save them).
+ */
+export function collectStorageUris(value: unknown): string[] {
+  const found = new Set<string>();
+  walkStorageUris(value, found);
+  return [...found];
+}
+
+function walkStorageUris(value: unknown, found: Set<string>): void {
+  if (typeof value === "string") {
+    if (value.startsWith(PIPELEX_STORAGE_SCHEME) && value.length > PIPELEX_STORAGE_SCHEME.length) {
+      found.add(value);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      walkStorageUris(item, found);
+    }
+    return;
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const entry of Object.values(value)) {
+      walkStorageUris(entry, found);
+    }
+  }
 }
 
 /** Request-shape check on a run id (format stays server-owned). */
@@ -355,6 +547,18 @@ export interface ClassifyErrorOptions {
     hint: string;
   };
   /**
+   * Per-route 501 override. A 501 on a method-taking route is the reserved
+   * registry form of `method_ref` (any non-address reference) — the caller's
+   * own selector, not a server fault — so selector-shaped requests set this to
+   * classify it `input_domain` at `method_ref` with the address-grammar hint.
+   * Routes that never send a `method_ref` leave it unset and keep the generic
+   * unexpected-status arm.
+   */
+  notImplemented?: {
+    location?: string;
+    hint: string;
+  };
+  /**
    * Per-route 5xx hint override. Use it when a route is known to report
    * request-caused failures as a generic server error (the hosted `/v1/start`
    * answers 503 "Failed to start pipeline" for an invalid bundle), so the
@@ -374,6 +578,18 @@ export interface ClassifyErrorOptions {
    */
   auth?: {
     location?: string;
+    hint: string;
+  };
+  /**
+   * Per-route hint override for a 403 specifically. The generic 401/403 arm
+   * says "check your credential", which is right for a rejected key or an
+   * expired session and wrong for a route a deployment gates beyond
+   * authentication — the hosted `/v1/codegen` sits behind a feature flag as
+   * well as a plan, so a caller whose credential is perfectly valid can still
+   * be refused. A route that knows this composes the deployment's auth wording
+   * with the gate's; the locator stays the auth one. A 401 never reads it.
+   */
+  forbidden?: {
     hint: string;
   };
   /**
@@ -399,6 +615,9 @@ const DEFAULT_BAD_REQUEST: NonNullable<ClassifyErrorOptions["badRequest"]> = {
   location: "files",
   hint: "Check the submitted file contents and provenance fields.",
 };
+
+/** The env-var auth wording a 401/403 carries when no deployment texture overrides it. */
+export const DEFAULT_AUTH_HINT = "Check PIPELEX_API_KEY for the configured API.";
 
 export function classifyError(err: unknown, options: ClassifyErrorOptions = {}): ToolError {
   if (err instanceof ApiUnreachableError) {
@@ -565,14 +784,16 @@ export interface MethodFetchClient {
 }
 
 /**
- * Classify options for the by-id fetch leg (`getMethodClosure`, itself a
- * `getMethod` + parse under the hood), shared by every capability that
- * fetches-and-forwards a stored method's source (currently
- * `mthds_inputs_template` and `mthds_validate`). Unlike `/v1/start`, the SDK
- * does not intercept a missing-route 404 on `/v1/methods/{id}` (no
- * `RunLifecycleUnavailableError` equivalent), so a bare-runner base URL and a
- * genuinely unknown method read the same here — the `notFound` hint covers
- * both causes.
+ * Classify options for the by-id expansion leg (`getMethodClosure`, itself a
+ * `getMethod` + parse under the hood), shared by the two capabilities whose
+ * surfaces the platform's tooling `method_id` selector deliberately excludes
+ * (`mthds_inputs_template` over `/v1/build/inputs`, `mthds_prepare_inputs`
+ * over the SDK's client-side `prepareInputs` walk) — `mthds_validate` no
+ * longer uses it, its `method_id` being a server pass-through. Unlike
+ * `/v1/start`, the SDK does not intercept a missing-route 404 on
+ * `/v1/methods/{id}` (no `RunLifecycleUnavailableError` equivalent), so a
+ * bare-runner base URL and a genuinely unknown method read the same here —
+ * the `notFound` hint covers both causes.
  */
 export const METHOD_FETCH_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/methods/{id}",
@@ -600,11 +821,16 @@ export type MethodFetchResult =
 
 /**
  * Resolve a stored method's current closure and forward it as submitted files,
- * each labeled with the method id as provenance (`uri`) — the shared
- * fetch-and-forward leg behind every files-or-`method_id` capability's
- * id-only path. `getMethodClosure` (the SDK's canonical fetch-and-parse over
- * `getMethod` + `methodSourceToContents`) already labels each file's `source`
- * with the method id; the MCP surface spells provenance `uri`, so we relabel.
+ * each labeled with the method id as provenance (`uri`) — the SDK-canonical
+ * by-id expansion (`buildInputs({ files: await getMethodClosure(methodId) })`
+ * is the SDK's own documented pattern) behind the id-only paths of the two
+ * tools whose surfaces the hosted `method_id` selector deliberately excludes:
+ * `mthds_inputs_template` (the build routes take no `method_id`) and
+ * `mthds_prepare_inputs` (a client-side signature walk with no server leg).
+ * `mthds_validate` forwards its selectors server-side and does not use this.
+ * `getMethodClosure` (the SDK's canonical fetch-and-parse over `getMethod` +
+ * `methodSourceToContents`) already labels each file's `source` with the
+ * method id; the MCP surface spells provenance `uri`, so we relabel.
  * `getClient` is a factory, not a pre-built client, so a malformed-base-URL
  * throw from the SDK constructor happens inside this function's own try block
  * and classifies as a `config` `ToolError` instead of escaping uncaught
@@ -666,22 +892,45 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     };
   }
 
+  // A fetched package that declares in-process Python structure classes is
+  // refused with a 403 whose `error_type` names the policy — a caller-input
+  // condition, not an auth failure, so it must be caught ahead of the generic
+  // 401/403 arm (which would send the caller to debug their API key).
+  // Branching on `errorType` is the runner's declared contract: each
+  // MethodRefError subclass keeps its class name as the distinct error_type
+  // for callers to branch on.
+  if (err.status === 403 && err.errorType === "MethodStructuresRefusedError") {
+    return {
+      class: "input_domain",
+      location: "method_ref",
+      message,
+      hint: "Hosted execution accepts MTHDS concepts and sandboxed PipeFuncs, not in-process Python — the referenced package declares Python structure classes. Express its types as MTHDS concepts, or run it on a self-hosted OSS runner.",
+      retryable: false,
+    };
+  }
+
   if (err.status === 401 || err.status === 403) {
     return {
       class: "config",
       location: options.auth?.location ?? "PIPELEX_API_KEY",
       message,
-      hint: options.auth?.hint ?? "Check PIPELEX_API_KEY for the configured API.",
+      hint:
+        err.status === 403 && options.forbidden !== undefined
+          ? options.forbidden.hint
+          : (options.auth?.hint ?? DEFAULT_AUTH_HINT),
       retryable: false,
     };
   }
 
   // Paywall: the platform reports a plan limit as 402 SubscriptionRequiredError.
   // Branch on the HTTP status only — its problem `code` is "forbidden" and must
-  // never be sniffed.
+  // never be sniffed. The class stays `config` (the settled contract: the call
+  // cannot be made as credentialed), and `kind` is what carries the cause into
+  // each capability's headline — see {@link summaryForToolError}.
   if (err.status === 402) {
     return {
       class: "config",
+      kind: "paywall",
       message,
       hint: "The organization's plan does not cover this call. Review the plan and billing for the API key's organization on app.pipelex.com.",
       retryable: false,
@@ -703,6 +952,21 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
       location: "PIPELEX_BASE_URL",
       message,
       hint: `Check that PIPELEX_BASE_URL points to a host serving ${route}.`,
+      retryable: false,
+    };
+  }
+
+  // The reserved registry form of `method_ref` — the caller's own selector,
+  // classified only on routes that declared the texture (selector-shaped
+  // requests); elsewhere a 501 keeps the generic unexpected-status arm below.
+  if (err.status === 501 && options.notImplemented) {
+    return {
+      class: "input_domain",
+      ...(options.notImplemented.location === undefined
+        ? {}
+        : { location: options.notImplemented.location }),
+      message,
+      hint: options.notImplemented.hint,
       retryable: false,
     };
   }

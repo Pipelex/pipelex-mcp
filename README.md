@@ -13,29 +13,61 @@ one capability core**:
   spawn via `npx`. Its headline feature is the `{ path }` file arm: it reads
   `.mthds` files from disk instead of having the model hand-copy their contents.
 
+## Get started
+
+Pick **one** server for a given host — the workshop wherever there is a
+filesystem, the console everywhere else.
+
+**Hosted console** — add as a custom connector in ChatGPT, claude.ai or
+Claude Desktop, then sign in with your Pipelex account. Nothing to install, no
+key to paste:
+
+```
+https://pipelex-mcp-a3c6a115.alpic.live/mcp
+```
+
+**Local workshop** — for hosts that can spawn a process (Claude Code, Codex,
+Cursor). Needs Node.js 24+; hosts fetch it on demand, so there is nothing to
+install globally:
+
+```bash
+claude mcp add pipelex --env PIPELEX_API_KEY=plx_sk_... -- npx -y @pipelex/mcp
+```
+
+Then ask it what methods you have, or point it at a `.mthds` file. Per-host
+registration snippets are under [Local workshop: install &
+register](#local-workshop-install--register), and which server belongs on which
+host is the [Host → server matrix](#host--server-matrix).
+
 Both servers register the same MCP tools, with identical names, schemas, and
-contracts — with one documented exception, marked below:
+contracts — with one documented exception per shell, marked below:
 
 | Tool | What it does |
 |---|---|
 | `mthds_list_methods` | List the active API key's organization catalog as bounded names, descriptions, and canonical ids — never method source or stored inputs/outputs. |
 | `mthds_validate` | Validate submitted `.mthds` files, or a registered method by catalog id; on a valid verdict, ship the dry-run method graph to the `run-graph` view (hosted only). |
 | `mthds_inputs_template` | Project a pipe's declared inputs as a fill-in template for a run. |
+| `mthds_codegen` | Generate typed code for a method's concepts — TypeScript (`ts-zod`) or Python (`python-pydantic`, `python-structures`) — stamped and locked, to write verbatim into the project. On the local workshop, `output_dir` writes the tree straight to disk. |
 | `mthds_prepare_inputs` | Turn filled inputs run-ready: upload file-bearing values to Pipelex storage and rewrite them to `pipelex-storage://` (workshop uploads; console is pass-through only). |
 | `mthds_upload_attachments` | **Hosted console only.** Turn a file the user attached in the chat into a run-ready `pipelex-storage://` reference (ChatGPT only — see [Chat attachments](#chat-attachments-chatgpt-only)). |
 | `mthds_run` | Start a durable run on the hosted Pipelex API; returns a durable `run_id` immediately. |
 | `mthds_run_status` | Check a durable run's coarse lifecycle state by `run_id`. |
 | `mthds_run_results` | Fetch a durable run's terminal outcome by `run_id`. |
+| `mthds_download_artifacts` | **Local workshop only.** Save the files a completed run produced (images, PDFs, documents) under the directory the server was started in — see [Saving run artifacts](#saving-run-artifacts-local-workshop-only). |
 
-`mthds_upload_attachments` is the exception: its sole argument is a
+The two exceptions mirror each other. `mthds_upload_attachments` takes a
 host-substituted attachment reference, and the host gates that substitution on
 the declared JSON Schema, so on the workshop the tool would be *structurally
-unreachable* rather than merely unused. The invariant that still holds is that
-**no tool name means different things on the two shells.**
+unreachable* rather than merely unused. `mthds_download_artifacts` writes files
+under the server's working directory, which the console does not have — its
+users download run outputs from the app's UI. The invariant that still holds is
+that **no tool name means different things on the two shells.**
 
 `SPEC.md` is the source of truth for the full tool contracts, verdict
 discipline, and view behavior. This README covers what you need to install,
-register, and run the servers.
+register, and run the servers. `docs/readme.html` is an illustrated overview
+of the same ground — the two shells, the tool surface, the flow a method
+takes, and the sharp edges — for reading in a browser.
 
 ## The two deployments, and the `{ path }` arm
 
@@ -136,7 +168,7 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }
 - `PIPELEX_API_KEY` — a `plx_sk_` platform key. Required for
   `mthds_list_methods` because the returned catalog is the key's active,
   workspace-shared organization catalog. Optional for `mthds_validate` /
-  `mthds_inputs_template` calls that submit `files` against a key-less API;
+  `mthds_inputs_template` / `mthds_codegen` calls that submit `files` against a key-less API;
   effectively required for the run family and for any `method_id` call on any
   tool, since the catalog is org-scoped (a missing/invalid key is a `config`
   no-verdict).
@@ -145,6 +177,13 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }
   against a local OSS `pipelex-api` runner. Durable runs need the hosted API; a
   bare runner has no run lifecycle.
 
+**The working directory matters.** The host spawns the workshop in your
+project, and that directory is the boundary for everything the server touches
+on disk: `files: { path }` items resolve inside it, `mthds_download_artifacts`
+saves under it, and `mthds_codegen`'s `output_dir` writes under it. Nothing
+outside it is ever read or written — an absolute path, a `..`, or a symlink
+pointing out of the tree is refused.
+
 ## Hosted console: sign in with your Pipelex account
 
 The hosted console holds **no server-side API key** and there is nothing to
@@ -152,8 +191,13 @@ paste. Add the connector by its URL and your host walks you through signing in
 with your Pipelex account:
 
 ```
-https://<console-url>/mcp
+https://pipelex-mcp-a3c6a115.alpic.live/mcp
 ```
+
+That is the production console. The hostname is assigned by Alpic, and the
+OAuth Resource Indicator registered with WorkOS is pinned to it, so it moves
+only behind a deliberate migration — if it ever does, every existing
+connector has to be re-added anyway.
 
 Sign-in is OAuth through WorkOS AuthKit, which the console's MCP host drives
 for you — ChatGPT, claude.ai, Claude Desktop/Cowork and Cursor all handle the
@@ -286,50 +330,49 @@ Full contracts (verdict discipline, `_meta` channels, view behavior) live in
 ```ts
 // input
 {
-  query?: string;   // trimmed, case-insensitive substring over id/name/description
+  query?: string;   // trimmed, case-insensitive; matched SERVER-side over name/description
   limit?: number;   // integer 1..50; default 20
-  offset?: number;  // integer >= 0; default 0
+  cursor?: string;  // opaque next_cursor from a previous call
 }
 
 // structuredContent — success
 {
   status: "ok";
-  total_count: number;
-  matched_count: number;
   returned_count: number;
-  next_offset: number | null;
+  next_cursor: string | null;
   methods: Array<{
     method_id: string;
     name: string;
     name_truncated: boolean;
     description: string | null;
     description_truncated: boolean;
-    has_source: boolean;
-    updated_at: string;
+    created_at: string;
   }>;
 }
 ```
 
-Both shells expose this read-only, no-view catalog entry point. It fetches the
-current API key's complete organization catalog through `@pipelex/sdk`, filters
-and pages locally, and returns a deterministic page sorted by case-insensitive
-name then id. Names are bounded to 200 Unicode code points and descriptions to
-500; search uses their full values. Empty catalogs, no matches, and offsets past
-the end are successful empty results. `has_source` says only that stored MTHDS
-source exists — it is **not** a valid/runnable verdict.
+Both shells expose this read-only, no-view catalog entry point. Search and
+paging are the server's job: `query` is applied across the whole organization
+catalog rather than over one page, and rows arrive already ordered newest first
+by the immutable `created_at` the catalog pages on. Continue a listing by
+passing the returned `next_cursor` back as `cursor`. Names are bounded to 200
+Unicode code points and descriptions to 500, with explicit truncation flags.
+Empty catalogs and no-match queries are successful empty results.
+
+There is deliberately no total: counting a catalog means reading all of it,
+which is the cost paging exists to avoid.
 
 The projection is deliberately source-free: `mthds`, Python, stored inputs and
 outputs, organization ids, and creator ids never enter `structuredContent`,
-`content`, `_meta`, or logs. Upstream listing is not paged: the platform still
-returns every full row, and the MCP immediately projects it before producing any
-tool output. A malformed row fails the whole result as a non-retryable runtime
+`content`, `_meta`, or logs — and the index projection no longer carries them
+at all. A malformed row fails the whole result as a non-retryable runtime
 contract error rather than returning a misleading partial list.
 
 Name-to-run flow:
 
 ```text
 mthds_list_methods({ query: "invoice" })
-  → choose/disambiguate method_id (do not use a has_source:false draft)
+  → choose/disambiguate method_id
   → mthds_validate({ method_id })                 # optional current-content check
   → mthds_inputs_template({ method_id })
   → fill inputs; prepare/upload assets if needed
@@ -341,9 +384,10 @@ No method source crosses the conversation in this flow.
 ### `mthds_validate`
 
 ```ts
-// input — at least one of files / method_id
+// input — exactly ONE of files / method_ref / method_id
 {
   files?: SubmittedFileInput[];
+  method_ref?: string;         // published method address — github.com/<owner>/<repo>[/<selector>][@<tag>]
   method_id?: string;          // catalog id (mt_…) of a registered method
   include_graph?: boolean;
 }
@@ -354,29 +398,39 @@ No method source crosses the conversation in this flow.
   is_valid: boolean;
   is_runnable: boolean;
   pending_signatures: string[];
-  available_view_specs: Array<"dry_run_graph">;
+  available_view_specs: Array<"dry_run_graph" | "input_form">;
   validation_errors?: unknown[];
   errors?: ToolError[];
 }
 ```
 
-The graph (`graph_spec`) rides the tool result's view-only `_meta` channel
-(`_meta.graph_spec`) for the `run-graph` view — never `structuredContent`, so the
-model never pays its tokens. `available_view_specs` is how the model learns a
-view exists to surface; `include_graph` defaults to true. The MCP `content` text
-carries the human-readable summary. `method_id` validates a registered method by
-its catalog id (fetch-and-forward from the method's current stored content, the
-same pattern as `mthds_inputs_template`); it requires an API key, since the
-catalog is org-scoped, and when both `files` and `method_id` are supplied the
-files win and the id is ignored. The graph view works identically whether the
-content came from submitted files or a by-id fetch.
+The graph (`graph_spec`) and the form's per-pipe artifact pair — the IO
+contracts (`pipe_io_contracts`) and the input-form descriptor (`input_form`,
+requested from the API via the opt-in `views: ["input_form"]` token) — ride the
+tool result's view-only `_meta` channel for the `run-graph` view — never
+`structuredContent`, so the model never pays their tokens. On the hosted
+console that view renders the method graph and, on a runnable verdict that
+carries both artifacts, an input form for the main pipe (its fields derived
+from the wire descriptor) whose Run button starts the method from the view.
+`available_view_specs` is how the model learns which views exist to surface;
+`include_graph` defaults to true. The MCP `content` text
+carries the human-readable summary. The three source forms are **mutually
+exclusive — supply exactly one**. `method_ref` validates a published method by
+its address (`github.com/<owner>/<repo>[/<selector>][@<tag>]`, e.g.
+`github.com/Pipelex/methods/documents@v0.1.0`); `method_id` validates a
+registered method by its catalog id (requires an API key, since the catalog is
+org-scoped). Both are **server pass-throughs**: the selector rides the
+`/v1/validate` body and the hosted API resolves it — no method source enters
+the conversation. The graph view works identically whichever source form the
+verdict came from.
 
 ### `mthds_inputs_template`
 
 ```ts
-// input — at least one of files / method_id
+// input — exactly ONE of files / method_ref / method_id
 {
   files?: SubmittedFileInput[];
+  method_ref?: string;         // published method address — github.com/<owner>/<repo>[/<selector>][@<tag>]
   method_id?: string;          // catalog id (mt_…) of a registered method
   pipe_ref?: string;
   explicit?: boolean;
@@ -401,17 +455,83 @@ content came from submitted files or a by-id fetch.
 declared `main_pipe`. `explicit` (default true) emits the ceremonial
 `{concept, content}` envelope per input — the declared concept ref plus the
 canonical content shape; pass `false` for the light shape (bare example values).
-`format` (default `"json"`) chooses the template encoding. `method_id` projects a registered method by its catalog id
-(fetch-and-forward from the method's current stored content); it requires an API
-key, since the catalog is org-scoped, and when both `files` and `method_id` are
-supplied the files win and the id is ignored. No Skybridge view — the template is
+`format` (default `"json"`) chooses the template encoding. The three source
+forms are **mutually exclusive — supply exactly one**. `method_ref` projects a
+published method by address, resolved server-side on the build envelope;
+`method_id` projects a registered method's current stored content (requires an
+API key, since the catalog is org-scoped). No Skybridge view — the template is
 small structured data the model reads directly, and the `content` summary repeats
 it in a fenced block.
+
+### `mthds_codegen`
+
+```ts
+// input — exactly ONE of files / method_ref / method_id, plus the required target
+{
+  files?: SubmittedFileInput[];
+  method_ref?: string;         // published method address — github.com/<owner>/<repo>[/<selector>][@<tag>]
+  method_id?: string;          // catalog id (mt_…) of a registered method
+  target: "ts-zod" | "python-pydantic" | "python-structures";
+  output_dir?: string;         // LOCAL WORKSHOP ONLY — write the tree here instead of returning its content
+}
+
+// structuredContent
+{
+  status: "ok" | "error";
+  is_valid: boolean;
+  target?: "ts-zod" | "python-pydantic" | "python-structures";
+  kind?: "types";
+  crate_fingerprint?: string;
+  engine_version?: string;
+  artifacts?: Array<{ path: string; bytes: number; content?: string; written_to?: string }>;
+  lock?: { filename: string; bytes: number; content?: string; written_to?: string };
+  truncated?: boolean;
+  // the written arm (output_dir):
+  output_dir?: string;
+  is_current?: boolean;
+  orphans?: string[];
+  orphans_truncated?: boolean;
+  drifts?: unknown[];
+  validation_errors?: unknown[];
+  errors?: ToolError[];
+}
+```
+
+Projects the method's concept set into typed models through the Pipelex codegen
+engine (`POST /v1/codegen`). `target` is required and has no default — the tool
+description carries the decision rule, so the assistant picks it from the
+project (the user's explicit request wins): `ts-zod` for a TypeScript or
+JavaScript project (`types.ts` with zod schemas and inferred types, plus
+`binder.ts` with a parse/serialize pair per concept — keep both),
+`python-pydantic` for a Python consumer with no Pipelex runtime (`models.py`),
+`python-structures` for a Pipelex host or a `@pipe_func` implementation
+(`structures.py`). Field keys stay snake_case in every target. The three
+selectors are server pass-throughs — no bundle enters the conversation.
+
+**On the local workshop, pass `output_dir`** — a dedicated generated directory
+relative to the working directory, such as `src/generated/<method>/`. The tool
+writes the artifacts and `codegen.lock` there verbatim and returns no file
+content at all: `output_dir`, `written_to` per file, `is_current` and any
+`orphans` instead. It overwrites files it generated (they carry a codegen
+stamp) and the lock beside them, and refuses the whole write rather than touch
+anything else — a symlink, a directory, or a file it did not write. Orphans, a
+stamped file the new lock does not list, are reported and never deleted, so a
+directory holding two generations stays non-current by design; give each
+generation its own directory. The hosted console takes no `output_dir` and
+refuses it instructively.
+
+**Without `output_dir`**, write every artifact at its path and the lock as
+`codegen.lock` beside them, **verbatim**, into a dedicated generated directory;
+`pipelex codegen check` (or `runCodegenCheck` from `@pipelex/sdk`) then passes
+on that tree. The `content` summary repeats each file in a fenced block tagged
+for its language. A large set is withheld by whole file rather than cut
+(`truncated: true`, `content` absent on the withheld entries; the lock's bytes
+are reserved first, so the trust anchor always rides). No Skybridge view.
 
 ### `mthds_prepare_inputs`
 
 ```ts
-// input — at least one of files / method_id, plus the filled inputs
+// input — exactly ONE of files / method_id, plus the filled inputs (no method_ref — see below)
 {
   files?: SubmittedFileInput[];
   method_id?: string;               // catalog id (mt_…) of a registered method
@@ -489,8 +609,11 @@ directly, repeated in the `content` summary.
 ### `mthds_run` / `mthds_run_status` / `mthds_run_results`
 
 Durable (async) method execution on the hosted Pipelex API. `mthds_run` starts a
-run — from submitted files (`files?`, plus `pipe_code?` and `inputs?`), or from a
-registered method's catalog id (`method_id?`, mt_…) — and returns a durable
+run — from submitted files (`files?`, plus `pipe_code?` and `inputs?`), from a
+published method's address (`method_ref?` —
+`github.com/<owner>/<repo>[/<selector>][@<tag>]`, resolved server-side with the
+resolved commit SHA echoed back as `method_provenance`), or from a registered
+method's catalog id (`method_id?`, mt_…) — and returns a durable
 `run_id` immediately (never blocks); `mthds_run_status` is a cheap read of the
 coarse lifecycle state; `mthds_run_results` fetches the terminal outcome (main
 output on success, failure message otherwise) along with a compact run-level
@@ -500,11 +623,57 @@ The per-pipe rollup and the full per-call record list ride the view-only `_meta`
 surface, and usage never appears in the prose. A by-id run executes the method's
 **current** stored content (methods are not versioned) and requires an API key;
 when both `files` and `method_id` are supplied, the files run and the id is
-recorded as run-history linkage on the platform. All run
+recorded as run-history linkage on the platform. `method_ref` is a complete run
+source of its own and pairs with nothing — beside `files` or `method_id` the
+request is refused. All run
 state lives behind the durable `run_id` on the platform, so the flow survives
 conversation gaps — days later, the same id still answers. On the hosted console,
 `mthds_run` ships the `run-follow` live-status view; on the workshop these are
 plain tools. See `SPEC.md` → "Run Scope" for the full contract.
+
+The pipe selector is `pipe_code` here and `pipe_ref` on `mthds_inputs_template`
+/ `mthds_prepare_inputs` — the same qualified `domain.pipe_code` value under the
+name each underlying route uses; each description names the other, so copying
+the value across the two calls is expected.
+
+### Saving run artifacts (local workshop only)
+
+`mthds_download_artifacts` is the download counterpart of `mthds_prepare_inputs`:
+where prepare pushes local files *into* Pipelex storage, this brings a run's
+produced files back *out*, onto disk.
+
+```ts
+// input
+{
+  run_id: string;   // the durable run id from mthds_run
+  dir?: string;     // where to save, relative to the server's working directory (created if missing; must stay inside it)
+}
+
+// structuredContent (state = "completed")
+{
+  status: "ok";
+  run_id: string;
+  state: "completed";
+  artifacts: Array<{ uri: string; path?: string; content_type?: string | null; size?: number; error?: ToolError }>;
+  saved_paths: string[];   // relative to the working directory
+  all_saved: boolean;      // every referenced file saved
+}
+```
+
+A completed run's results carry a produced image, PDF or document with a
+`pipelex-storage://` reference beside a presigned `public_url` that expires
+within the hour. Pass the run id here instead of racing that link: every
+reference in the run's full output is resolved to a *fresh* link through the
+API and streamed into a file under the working directory — so the same call
+still works days later. Filenames come from the storage key, sanitized; files
+are **never overwritten** (a collision gets a numeric suffix); `dir` cannot
+escape the working directory (no absolute paths, no `..`, no symlink out). A
+`running` or `failed` run is a produced verdict with nothing to save; partial
+success is a produced verdict with the failures on their items. On the
+workshop, a `mthds_run_results` summary whose output references stored files
+names this tool. See `SPEC.md` → "Artifact Download Scope" for the full
+contract and the reasoning behind a companion tool rather than a flag on
+`mthds_run_results`.
 
 ### Success and verdict discipline
 
@@ -604,6 +773,22 @@ view-name registry) as its first step, so `npm run check` runs `build` before th
 standalone `typecheck` — the registry must exist for `tsc` to resolve the
 registered view name. The local build follows and `prepack` rebuilds it, so a
 pack/publish can never ship a stale or absent bin.
+
+## Tests
+
+```bash
+make test         # the default suite — hermetic, no network
+make agent-test   # the same suite for an agent — quiet unless it fails
+make test-e2e     # the live suite — real client, real Pipelex API
+make smoke        # the workshop stdio server, end to end, against the live API
+make test-all     # all of the above plus the run family — SPENDS INFERENCE CREDIT
+```
+
+`make test` fakes every API client, so it proves the projections and never touches the network; `make all` and CI run only that. The live targets are the drift detector: the faked seams mean a wire-shape change on the API side fails nothing at all in the hermetic suite, so `make test-e2e` calls each capability with the real `PipelexApiClient` and `make smoke` drives the whole shell over stdio. Both need `PIPELEX_API_KEY` (a gitignored `.env` at the repo root is enough), and neither spends inference credit — the run family that does only fires under `make test-e2e-run`. Their codegen legs need one thing more against the hosted API: `/v1/codegen` sits behind the `FF_PLAYGROUND` feature flag as well as the plan, so a perfectly valid key whose organization is not enabled for it gets a 403 that reddens the whole run — ask for the flag, or point `PIPELEX_BASE_URL` at a local runner, which does not gate the route. `make smoke` is entirely read-only; `make test-e2e` has one write, the workshop arm of `mthds_prepare_inputs`, which uploads a 1x1 PNG to your organization's Pipelex storage to prove the upload path still rewrites values to `pipelex-storage://`. The SDK exposes no delete, so that object persists.
+
+`make test-all` chains all three in cost order and adds the run family, so a single command covers every test in the repo; it spends inference credit, which is why `make all` does not reach it. `make agent-test` is the same hermetic suite as `make test` with its output captured and replayed only on failure, plus a heartbeat while it runs — meant for coding agents, whose context a few hundred lines of green vitest output would otherwise fill.
+
+The by-id paths need one durable fixture method in the API key's organization; `make seed-e2e-fixture` creates or refreshes it, idempotently. See `CLAUDE.md` → "Detecting API drift".
 
 ## Versioning
 

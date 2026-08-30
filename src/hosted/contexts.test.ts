@@ -15,6 +15,7 @@ describe("contextsForRequest", () => {
     expect(contexts.catalog.apiKey).toBe("workos_access_token");
     expect(contexts.validation.apiKey).toBe("workos_access_token");
     expect(contexts.inputs.apiKey).toBe("workos_access_token");
+    expect(contexts.codegen.apiKey).toBe("workos_access_token");
     expect(contexts.prepare.apiKey).toBe("workos_access_token");
     expect(contexts.run.apiKey).toBe("workos_access_token");
     // The attachment ingest uploads to storage, so the signed-in caller's own
@@ -40,6 +41,7 @@ describe("contextsForRequest", () => {
     expect(contexts.validation.authError?.hint).toContain("sign in again");
     expect(contexts.catalog.authError).toEqual(contexts.validation.authError);
     expect(contexts.inputs.authError).toEqual(contexts.validation.authError);
+    expect(contexts.codegen.authError).toEqual(contexts.validation.authError);
     expect(contexts.prepare.authError).toEqual(contexts.validation.authError);
     expect(contexts.run.authError).toEqual(contexts.validation.authError);
     expect(contexts.attachments.authError).toEqual(contexts.validation.authError);
@@ -59,6 +61,7 @@ describe("contextsForRequest", () => {
     // this field alone does not prove the guarantee.
     expect(contexts.catalog.apiKey).toBe("");
     expect(contexts.validation.apiKey).toBe("");
+    expect(contexts.codegen.apiKey).toBe("");
     expect(contexts.run.apiKey).toBe("");
     expect(contexts.attachments.apiKey).toBe("");
     expect(contexts.validation.authError?.location).toBe("authorization");
@@ -139,8 +142,8 @@ describe("console auth failures through a capability", () => {
       {
         ...contexts.validation,
         client: {
-          getMethodClosure: () =>
-            Promise.reject(new Error("getMethodClosure must not be called in this test")),
+          validate: () =>
+            Promise.reject(new Error("validate (selector leg) must not be called in this test")),
           validateFiles: () => Promise.reject(new ClientAuthenticationError("Unauthorized")),
         },
       },

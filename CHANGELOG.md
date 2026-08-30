@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.13.0] - 2026-08-30
+
+### Added
+
+- **`mthds_codegen` tool**: Generates typed code (TypeScript `ts-zod`, or Python `python-pydantic` / `python-structures`) for a method's concepts. `target` is required and has no default — choosing the language is a judgment the tool asks of the model, so the tool description carries the decision rule. On the local workshop, passing `output_dir` writes the generated tree and its `codegen.lock` to disk. Responses are preflighted in-memory against the SDK's `runCodegenCheck` on **both** shells before any files are written or relayed, so one notion of a valid report governs the tree the workshop writes and the bytes the console hands to a model.
+- **`mthds_download_artifacts` tool** (local workshop only): Downloads a completed run's produced files (images, PDFs, documents) to local disk, resolving `pipelex-storage://` URIs to fresh presigned links to bypass the one-hour expiry of standard result links. On the workshop, a completed run's results summary now counts those references and names the tool.
+- **`method_ref` addressing**: `mthds_validate`, `mthds_inputs_template`, `mthds_run`, and `mthds_codegen` now accept a published method address (`github.com/<owner>/<repo>[/<selector>][@<tag>]`), resolved server-side so the method bundle never enters the LLM conversation context. On `mthds_run` the runner returns the resolved commit as `method_provenance`, so a run stays explainable when a tag moves.
+- **Interactive input form**: The hosted console's `run-graph` view renders an interactive input form below the graph for runnable methods, letting users fill in inputs and trigger `mthds_run` directly from the UI.
+- **Live E2E testing & drift detectors**: New Makefile targets test against the *live* Pipelex API to catch wire-shape changes that mocked unit tests miss: `make smoke` (read-only end-to-end stdio server drive), `make test-e2e` (every capability's free path), `make test-e2e-run` (includes the paid run family, spends inference credit), `make seed-e2e-fixture` (seeds, once per organization, the durable fixture method the by-id legs resolve by name at run time), and `make agent-test` (quiet, heartbeat-enabled runner for coding agents). The free tier includes a regression test for `/v1/start`'s argument path — starting an unknown `method_id` is refused before anything executes, which proves the run source still reaches the platform the way this client sends it without spending credit.
+- **`bump-sdks` Claude Skill**: New skill in `.claude/skills/` to automate reading changelogs and bumping `@pipelex/sdk` and `@pipelex/mthds-ui` dependencies.
+
+### Changed
+
+- **`mthds_list_methods` pagination and search**: Delegated entirely to the server. Replaced `offset` with an opaque `cursor`; `query` is now applied server-side across the whole catalog (matching `name` and `description` only); rows are returned ordered by `created_at` (newest first) instead of `updated_at`. (Breaking)
+- **Strict method selectors**: `mthds_validate`, `mthds_inputs_template`, `mthds_prepare_inputs`, and `mthds_codegen` now require **exactly one** method source (`files`, `method_ref`, or `method_id`) and refuse requests that pair them (`mthds_run` still allows `files` + `method_id` for run-history linkage). `mthds_validate`'s `method_id` leg is now a server pass-through instead of fetching the closure client-side. (Breaking)
+- **`mthds_codegen` is annotated destructive, not read-only** (`readOnlyHint: false`, `destructiveHint: true`) on both shells, now that `output_dir` can overwrite files in the user's tree. Hosts that gate on tool annotations will prompt accordingly.
+- **`mthds_codegen`'s response budget reserves the lock's bytes first**, then lets artifacts fill the remainder. The bounding walk previously took the lock last, so a large artifact set could drop the very file that anchors it — and code without its lock neither passes `pipelex codegen check` nor tells the user what it was generated from.
+- **The pipe selector's two names now cross-reference each other**: the same qualified `domain.pipe_code` value is `pipe_ref` on `mthds_inputs_template` / `mthds_prepare_inputs` and `pipe_code` on `mthds_run`, so each tool's description now names its counterpart instead of leaving the model to guess they are the same value.
+- **Documentation & package size**: Moved the heavy `readme.html` to `docs/readme.html` to reduce the published npm package size, added a quick "Get started" section to the top of `README.md`, and wrote down the hosted console's real URL (it had shipped as a `https://<console-url>/mcp` placeholder from when the repo was private).
+- **Dependencies**: Upgraded `@pipelex/sdk` to `0.16.0` (was `0.9.0` in 0.12.0) and `@pipelex/mthds-ui` to `0.19.0` (was `0.12.0`), and added `@pipelex/mthds-form` `0.5.0` as a direct dependency — it is an *optional* peer of `mthds-ui`, so it is never installed transitively and the input form would not build without a direct entry.
+- *Note: ChatGPT console users must remove and re-add the connector to pick up schema changes for `mthds_list_methods`, `mthds_codegen`, and the new `method_ref` inputs. ChatGPT caches a connector's tool list at add-time and never refreshes it.*
+
+### Fixed
+
+- **Live API `mthds_list_methods` failure**: Fixed real calls failing with `wire.map is not a function` by updating the client to consume the API's new page-object format.
+- **`mthds_list_methods` error handling**: A rejected `cursor` is now classified as an input error rather than a bad API key, and an absent `next_cursor` is treated as a strict contract error rather than silently ending pagination.
+- **Billing limit error classification**: A `402 Payment Required` is now carried as `kind: "paywall"`, so the error headline names the plan limit instead of announcing a generic "API unreachable or misconfigured" failure. The `class` stays `config`, so machine consumers branching on it are unaffected.
+- **Artifact filename truncation**: Fixed `mthds_download_artifacts` truncating filenames whose extension alone exceeded the length cap, which produced names longer than the cap rather than shorter.
+
+### Removed
+
+- **`has_source` flag**: Removed from the catalog row. The catalog index projection no longer carries a method's source, and recomputing the flag would cost one `getMethod` per row — the exact read the index exists to avoid. Source-less methods now surface as an error at the point of use (e.g. when passed to `mthds_validate` or `mthds_run`). (Breaking)
+- **`total_count` and `matched_count`**: Removed from `mthds_list_methods` output with no replacement, since counting the catalog requires reading all of it, defeating the purpose of pagination. `returned_count` and `next_cursor` are what the result can honestly report. (Breaking)
+
+### Security
+
+- **Workspace boundary escapes**: The codegen writer contained every destination lexically, then created an artifact's sub-directory with a recursive `mkdir` and real-path-checked it *afterwards* — so a symlink inside the generated directory pointing out of it would have had the missing levels created at the link's target, with the check that followed reporting an escape it had already allowed. Containment is now verified with a deepest-existing-ancestor real-path check *before* directory creation, in a single routine both creation sites call. No engine target emits a nested artifact today, so nothing shipped could reach this; the fix is so that the boundary holds the day one does.
+
 ## [0.12.0] - 2026-08-12
 
 ### Added

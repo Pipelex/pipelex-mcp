@@ -518,25 +518,18 @@ describe("buildMthdsInputs by method_id", () => {
     expect(result.summary).toContain("no MTHDS source");
   });
 
-  it("lets files win over method_id without fetching the method", async () => {
-    let capturedRequest: BuildInputsRequest | undefined;
-
+  it("rejects files beside method_id without calling any client leg", async () => {
     const result = await buildMthdsInputs(
       { files: [{ content: 'domain = "demo"' }], method_id: "mt_123" },
       {
         baseUrl: DEFAULT_API_URL,
-        client: {
-          ...getMethodClosureNotCalled,
-          async buildInputs(request) {
-            capturedRequest = request;
-            return validJsonReport;
-          },
-        },
+        client: { ...getMethodClosureNotCalled, ...buildInputsNotCalled },
       },
     );
 
-    expect(capturedRequest?.files).toEqual([{ content: 'domain = "demo"' }]);
-    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
   });
 
   it("classifies a paywall (402) on the fetch leg as config", async () => {
@@ -565,10 +558,106 @@ describe("buildMthdsInputs by method_id", () => {
 
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.kind).toBe("paywall");
     expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
     expect(result.structuredContent.errors?.[0]?.hint).toMatch(/plan|billing/i);
+    // A headline-only host shows just this line, so it must name the plan
+    // rather than the connectivity headline every other `config` error gets.
+    expect(result.summary).toBe(
+      "Inputs template could not start: the organization's Pipelex plan does not cover this call.",
+    );
+    expect(result.summary).not.toMatch(/unreachable/);
+  });
+});
+
+describe("buildMthdsInputs by method_ref (server pass-through)", () => {
+  it("forwards method_ref on the build envelope without fetching anything", async () => {
+    let capturedRequest: BuildInputsRequest | undefined;
+
+    const result = await buildMthdsInputs(
+      { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...getMethodClosureNotCalled,
+          async buildInputs(request) {
+            capturedRequest = request;
+            return validJsonReport;
+          },
+        },
+      },
+    );
+
+    expect(capturedRequest?.method_ref).toBe("github.com/Pipelex/methods/documents@v0.1.0");
+    expect(capturedRequest?.files).toBeUndefined();
+    expect(result.structuredContent.status).toBe("ok");
   });
 
+  it("rejects files beside method_ref without calling any client leg", async () => {
+    const result = await buildMthdsInputs(
+      {
+        files: [{ content: 'domain = "demo"' }],
+        method_ref: "github.com/Pipelex/methods/documents@v0.1.0",
+      },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: { ...getMethodClosureNotCalled, ...buildInputsNotCalled },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+  });
+
+  it("rejects method_ref beside method_id without calling any client leg", async () => {
+    const result = await buildMthdsInputs(
+      {
+        method_ref: "github.com/Pipelex/methods/documents@v0.1.0",
+        method_id: "mt_123",
+      },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: { ...getMethodClosureNotCalled, ...buildInputsNotCalled },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
+  });
+
+  it("classifies a 404 on a by-ref build call at method_ref", async () => {
+    const result = await buildMthdsInputs(
+      { method_ref: "github.com/Pipelex/methods/missing@v0.1.0" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...getMethodClosureNotCalled,
+          async buildInputs(): Promise<BuildInputsResponse> {
+            throw new ApiResponseError(
+              "HTTP 404",
+              `${DEFAULT_API_URL}/v1/build/inputs`,
+              404,
+              "Not Found",
+              "{}",
+              "not_found",
+              "No MTHDS package found",
+              undefined,
+              undefined,
+            );
+          },
+        },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+  });
+});
+
+describe("buildMthdsInputs request shape and transport", () => {
   it("classifies a malformed base URL on the fetch leg as config", async () => {
     const result = await buildMthdsInputs(
       { method_id: "mt_123" },

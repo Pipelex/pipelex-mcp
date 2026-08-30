@@ -336,7 +336,7 @@
 <div class="wrap">
 
 <header class="masthead">
-  <p class="eyebrow">pipelex-mcp · v0.10.0 · live on npm + Alpic</p>
+  <p class="eyebrow">pipelex-mcp · v0.12.0 · live on npm + Alpic</p>
   <h1>MTHDS methods, inside any MCP host.</h1>
   <p class="lede">One capability core, shipped as two servers: a <span class="chip local">local workshop</span> that desktop hosts spawn in your working directory, and a <span class="chip console">hosted console</span> you connect as a URL from ChatGPT or claude.ai on the web.</p>
 </header>
@@ -358,9 +358,8 @@
         </div>
         <div class="cell">
           <p class="eyebrow">Hosted console → chat hosts</p>
-          <pre><code>https://pipelex-mcp-a3c6a115.alpic.live/mcp
-  ?api_key=plx_sk_...</code></pre>
-          <p style="font-size:.88rem;color:var(--ink-muted)">Add as a custom connector. Ships interactive views + ChatGPT file attachments.</p>
+          <pre><code>https://pipelex-mcp-a3c6a115.alpic.live/mcp</code></pre>
+          <p style="font-size:.88rem;color:var(--ink-muted)">Add as a custom connector, then sign in with your Pipelex account. Ships interactive views + ChatGPT file attachments.</p>
         </div>
       </div>
       <div class="note">
@@ -463,7 +462,7 @@
 
           <rect class="s-console" x="246" y="236" width="216" height="94" rx="5"/>
           <text class="s-title s-console-t" x="264" y="262">Hosted console</text>
-          <text class="s-sub" x="264" y="282">Skybridge on Alpic · BYOK</text>
+          <text class="s-sub" x="264" y="282">Skybridge on Alpic · OAuth</text>
           <text class="s-sub" x="264" y="300">run-graph + run-follow views</text>
           <text class="s-sub" x="264" y="318">chat attachments (ChatGPT)</text>
 
@@ -513,7 +512,7 @@
           <tr><td class="narrow"><strong>Files</strong></td><td><code>{ path }</code> — reads them off disk, near-constant token cost, diagnostics point at real files</td><td><code>{ content }</code> only — the model re-emits every file it submits</td></tr>
           <tr><td class="narrow"><strong>Assets</strong></td><td>Uploads local paths, <code>data:</code> URLs and bytes</td><td>Pass-through only (<code>http(s)</code> / <code>pipelex-storage://</code>) — plus chat attachments on ChatGPT</td></tr>
           <tr><td class="narrow"><strong>Views</strong></td><td>None — tools-first, reports text + structured results</td><td><code>run-graph</code> (interactive method graph) and <code>run-follow</code> (live run status)</td></tr>
-          <tr><td class="narrow"><strong>Your key</strong></td><td><code>PIPELEX_API_KEY</code> in the host's server config</td><td>Bring your own, per request — the console holds no key</td></tr>
+          <tr><td class="narrow"><strong>Auth</strong></td><td>A <code>plx_sk_</code> key in <code>PIPELEX_API_KEY</code>, set in the host's server config</td><td>You sign in with your Pipelex account — the console holds no key</td></tr>
         </tbody>
       </table>
     </div>
@@ -656,21 +655,22 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
       <p class="eyebrow"><span class="chip console">hosted console</span></p>
       <h2 id="install-console">Connect it to your chat</h2>
     </div>
-    <p>The console holds <strong>no server-side API key</strong>. Until per-user OAuth ships, every caller brings their own key at the transport level — so it never rides a tool argument and never enters the model's context.</p>
+    <p>The console holds <strong>no server-side API key</strong>, and there is nothing to paste. Add the connector by its bare URL; your host walks you through signing in with your Pipelex account.</p>
 
     <div class="stack">
-      <h3>URL-only connector UIs — ChatGPT, claude.ai on the web</h3>
-      <pre><code>https://pipelex-mcp-a3c6a115.alpic.live/mcp?api_key=plx_sk_...</code></pre>
-      <p style="font-size:.92rem;color:var(--ink-muted)">Add it as a custom connector. URLs can land in intermediary logs — use a key you're happy to rotate. This is the documented compromise until real auth lands.</p>
+      <h3>Every connector UI — ChatGPT, claude.ai, Claude Desktop, Cursor</h3>
+      <pre><code>https://pipelex-mcp-a3c6a115.alpic.live/mcp</code></pre>
+      <p style="font-size:.92rem;color:var(--ink-muted)">Add it as a custom connector, then sign in. The handshake is OAuth through WorkOS AuthKit and the host drives all of it — including picking which organization you want to work in.</p>
     </div>
 
-    <div class="stack">
-      <h3>Hosts with header config — for testing the console from a terminal</h3>
-      <pre><code>claude mcp add --transport http pipelex https://pipelex-mcp-a3c6a115.alpic.live/mcp \
-  --header "Authorization: Bearer plx_sk_..."</code></pre>
-    </div>
+    <p>Your verified session is what authorizes every call the console makes on your behalf, so the catalog you see and the runs you spend are your own. The token rides the transport, never a tool argument, so it never enters the model's context.</p>
 
-    <p>Keyless requests still handshake and list tools; the first tool call comes back with an instructive error at <code>api_key</code> explaining both channels — nothing fails silently.</p>
+    <p>There is <strong>no keyless mode</strong>: every tool call needs a signed-in session. When one expires or is revoked, calls come back as a <code>config</code> no-verdict at <code>authorization</code> that tells you to reconnect and sign in again — nothing fails silently.</p>
+
+    <div class="note warn">
+      <p class="eyebrow">Upgrading from a <code>?api_key=</code> connector</p>
+      <p>Bring-your-own-key was removed in 0.12.0. A connector still registered with <code>?api_key=plx_sk_...</code> — or an <code>Authorization: Bearer plx_sk_...</code> header — no longer connects <em>at all</em>, rather than merely losing its tools. Remove it and re-add it by the plain URL above.</p>
+    </div>
   </section>
 
   <!-- ============ PLAY ============ -->
@@ -706,7 +706,7 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
       </div>
       <div class="note warn">
         <p class="eyebrow">ChatGPT caches the tool list at add-time</p>
-        <p>It never re-issues <code>tools/list</code>. A newly shipped tool — or a changed tool description — stays invisible to an existing connector until you <strong>remove and re-add it</strong>. v0.10.0's <code>mthds_list_methods</code> needs exactly that.</p>
+        <p>It never re-issues <code>tools/list</code>. A newly shipped tool — or a changed tool description — stays invisible to an existing connector until you <strong>remove and re-add it</strong>. 0.12.0's move to OAuth needs exactly that — an existing bring-your-own-key connector cannot be upgraded in place.</p>
       </div>
       <div class="note warn">
         <p class="eyebrow">Attachments cap at 7 MiB, ChatGPT only</p>
@@ -763,14 +763,12 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
         </div>
 
         <div class="diff-item">
-          <h3>4 · The console's key rides the transport, never a tool argument</h3>
-          <p class="path">src/hosted/byok.ts</p>
-          <pre class="diff"><code><span class="add">+ app.use("/mcp", (req, _res, next) => {</span>
-<span class="add">+   const key = bearer(req.headers.authorization) ?? req.query.api_key;</span>
-<span class="add">+   if (key) req.auth = { token: key };   // → extra.authInfo in handlers</span>
-<span class="add">+   next();                               // keyless still handshakes</span>
-<span class="add">+ });</span></code></pre>
-          <p>Deliberately disposable — when console OAuth lands, this gets deleted rather than migrated. Keyless calls are never rejected at the transport; they fail instructively at the capability layer.</p>
+          <h3>4 · The signed-in caller's token overrides the server's key, unconditionally</h3>
+          <p class="path">src/hosted/contexts.ts</p>
+          <pre class="diff"><code><span class="del">- const key = bearer(req.headers.authorization) ?? req.query.api_key;   // BYOK, deleted</span>
+<span class="add">+ const token = authInfo?.token;                    // verified by Skybridge against AuthKit's JWKS</span>
+<span class="add">+ return overrideContexts(base, token ?? "", ...);  // "" — NOT undefined</span></code></pre>
+          <p>The override is unconditional on both branches: a server-held <code>PIPELEX_API_KEY</code> must never fund a signed-in caller's work, because the credential picks the active organization and therefore the whole visible catalog. The empty string is the load-bearing detail — <code>PipelexApiClient</code> reads <code>options.apiKey ?? process.env.PIPELEX_API_KEY</code>, so <code>undefined</code> would silently borrow the deployment's key, the exact opposite of failing closed. BYOK was written to be disposable and was duly deleted rather than migrated.</p>
         </div>
 
         <div class="diff-item">
@@ -800,12 +798,14 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
   <!-- ============ HISTORY ============ -->
   <section aria-labelledby="history">
     <details>
-      <summary>How we got here — 0.1.0 → 0.10.0</summary>
+      <summary>How we got here — 0.1.0 → 0.12.0</summary>
       <div class="details-body">
         <div class="table-wrap">
           <table>
             <thead><tr><th scope="col">Ver</th><th scope="col">What landed</th></tr></thead>
             <tbody>
+              <tr><td class="tool">0.12.0</td><td>Bring-your-own-key removed — per-user OAuth is the console's only posture; publish and deploy move into a manually triggered release workflow.</td></tr>
+              <tr><td class="tool">0.11.0</td><td>Console OAuth through WorkOS AuthKit: the caller signs in with their Pipelex account instead of pasting a key.</td></tr>
               <tr><td class="tool">0.10.0</td><td>Catalog discovery (<code>mthds_list_methods</code>), source-free by construction; attachment ingest fixed after OpenAI moved its content domain.</td></tr>
               <tr><td class="tool">0.9.0</td><td>ChatGPT chat attachments + the deny-by-default fetch boundary; the real upload ceiling.</td></tr>
               <tr><td class="tool">0.8.0</td><td><code>mthds_prepare_inputs</code>; token &amp; cost usage on run results.</td></tr>
@@ -825,7 +825,7 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
 </main>
 
 <footer>
-  <span>pipelex-mcp v0.10.0</span>
+  <span>pipelex-mcp v0.12.0</span>
   <span>@pipelex/mcp on npm · console on Alpic</span>
   <span>full contracts: SPEC.md · what shipped: CHANGELOG.md</span>
 </footer>

@@ -14,15 +14,48 @@ import type { MthdsFileItem } from "@pipelex/sdk";
 import {
   buildApiConfig,
   classifyError,
+  collectStorageUris,
   DEFAULT_API_URL,
   fetchMethodFiles,
   filesInputSchema,
   resolveSubmittedFiles,
+  summaryForToolError,
   toolResultContent,
-  validateFilesOrMethodIdRequest,
+  validateMethodSelectorRequest,
   validateRunIdRequest,
 } from "./shared.js";
-import type { FileResolver, MethodFetchClient, ToolError } from "./shared.js";
+
+describe("collectStorageUris", () => {
+  it("finds every pipelex-storage:// string in a JSON-shaped value, once each, in discovery order", () => {
+    const value = {
+      image: { url: "pipelex-storage://a/one.png", public_url: "https://signed.example/one.png" },
+      pages: [
+        { url: "pipelex-storage://a/one.png" },
+        { deeper: { url: "pipelex-storage://b/two.pdf" } },
+        "pipelex-storage://c/three",
+      ],
+      text: "not a reference",
+      count: 3,
+      nothing: null,
+    };
+
+    expect(collectStorageUris(value)).toEqual([
+      "pipelex-storage://a/one.png",
+      "pipelex-storage://b/two.pdf",
+      "pipelex-storage://c/three",
+    ]);
+  });
+
+  it("ignores the bare scheme, other schemes, and non-JSON values", () => {
+    expect(collectStorageUris("pipelex-storage://")).toEqual([]);
+    expect(collectStorageUris(["https://example.com/x.png", "data:image/png;base64,AAAA"])).toEqual(
+      [],
+    );
+    expect(collectStorageUris(undefined)).toEqual([]);
+    expect(collectStorageUris(42)).toEqual([]);
+  });
+});
+import type { ErrorSummaries, FileResolver, MethodFetchClient, ToolError } from "./shared.js";
 
 describe("buildApiConfig", () => {
   it("defaults to the hosted API with no key", () => {
@@ -253,28 +286,47 @@ describe("toolResultContent", () => {
   });
 });
 
-describe("validateFilesOrMethodIdRequest", () => {
-  it("accepts files only, method_id only, and both", () => {
-    const files = [{ content: 'domain = "demo"' }];
+describe("validateMethodSelectorRequest", () => {
+  const files = [{ content: 'domain = "demo"' }];
+  const ADDRESS = "github.com/Pipelex/methods/documents@v0.1.0";
 
-    expect(validateFilesOrMethodIdRequest(files, undefined)).toEqual([]);
-    expect(validateFilesOrMethodIdRequest([], "mt_abc123")).toEqual([]);
-    expect(validateFilesOrMethodIdRequest(files, "mt_abc123")).toEqual([]);
+  it("accepts each selector alone, under both rules", () => {
+    for (const rule of ["one_selector", "run_source"] as const) {
+      expect(validateMethodSelectorRequest(files, {}, { rule })).toEqual([]);
+      expect(validateMethodSelectorRequest([], { method_ref: ADDRESS }, { rule })).toEqual([]);
+      expect(validateMethodSelectorRequest([], { method_id: "mt_abc123" }, { rule })).toEqual([]);
+    }
   });
 
-  it("rejects a request with neither files nor method_id", () => {
-    const errors = validateFilesOrMethodIdRequest([], undefined);
+  it("rejects a request with no selector at all, naming the accepted forms", () => {
+    const errors = validateMethodSelectorRequest([], {}, { rule: "one_selector" });
 
     expect(errors).toHaveLength(1);
     expect(errors[0]?.class).toBe("input_domain");
     expect(errors[0]?.location).toBe("files");
+    expect(errors[0]?.message).toBe("Provide MTHDS files, a method_ref address, or a method_id.");
+    expect(errors[0]?.hint).toContain("github.com/");
+  });
+
+  it("omits method_ref from the no-selector teaching text when the tool does not accept it", () => {
+    const errors = validateMethodSelectorRequest(
+      [],
+      {},
+      { rule: "one_selector", acceptsMethodRef: false },
+    );
+
+    expect(errors).toHaveLength(1);
     expect(errors[0]?.message).toBe("Provide MTHDS files or a method_id.");
-    expect(errors[0]?.hint).toContain("method_id");
+    expect(errors[0]?.hint).not.toContain("method_ref");
   });
 
   it("rejects a blank method_id at method_id, with or without files", () => {
-    for (const files of [[], [{ content: 'domain = "demo"' }]]) {
-      const errors = validateFilesOrMethodIdRequest(files, "  ");
+    for (const presentFiles of [[], files]) {
+      const errors = validateMethodSelectorRequest(
+        presentFiles,
+        { method_id: "  " },
+        { rule: "run_source" },
+      );
 
       expect(errors).toHaveLength(1);
       expect(errors[0]?.class).toBe("input_domain");
@@ -283,14 +335,111 @@ describe("validateFilesOrMethodIdRequest", () => {
     }
   });
 
-  it("accepts any non-blank method_id — format stays server-owned", () => {
-    expect(validateFilesOrMethodIdRequest([], "not-an-mt-id")).toEqual([]);
+  it("rejects a blank method_ref at method_ref", () => {
+    const errors = validateMethodSelectorRequest(
+      [],
+      { method_ref: "  " },
+      { rule: "one_selector" },
+    );
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.class).toBe("input_domain");
+    expect(errors[0]?.location).toBe("method_ref");
+  });
+
+  it("accepts any non-blank selector — format stays server-owned", () => {
+    expect(
+      validateMethodSelectorRequest([], { method_id: "not-an-mt-id" }, { rule: "one_selector" }),
+    ).toEqual([]);
+    expect(
+      validateMethodSelectorRequest([], { method_ref: "not-an-address" }, { rule: "one_selector" }),
+    ).toEqual([]);
+  });
+
+  it("one_selector: rejects every pairing, each at the extra selector", () => {
+    const filesAndId = validateMethodSelectorRequest(
+      files,
+      { method_id: "mt_abc123" },
+      { rule: "one_selector" },
+    );
+    expect(filesAndId).toHaveLength(1);
+    expect(filesAndId[0]?.location).toBe("method_id");
+    expect(filesAndId[0]?.message).toContain("mutually exclusive");
+
+    const filesAndRef = validateMethodSelectorRequest(
+      files,
+      { method_ref: ADDRESS },
+      { rule: "one_selector" },
+    );
+    expect(filesAndRef).toHaveLength(1);
+    expect(filesAndRef[0]?.location).toBe("method_ref");
+
+    const refAndId = validateMethodSelectorRequest(
+      [],
+      { method_ref: ADDRESS, method_id: "mt_abc123" },
+      { rule: "one_selector" },
+    );
+    expect(refAndId).toHaveLength(1);
+    expect(refAndId[0]?.location).toBe("method_id");
+  });
+
+  it("run_source: files + method_id is the legal linkage pair", () => {
+    expect(
+      validateMethodSelectorRequest(files, { method_id: "mt_abc123" }, { rule: "run_source" }),
+    ).toEqual([]);
+  });
+
+  it("run_source: method_ref pairs with nothing", () => {
+    const filesAndRef = validateMethodSelectorRequest(
+      files,
+      { method_ref: ADDRESS },
+      { rule: "run_source" },
+    );
+    expect(filesAndRef).toHaveLength(1);
+    expect(filesAndRef[0]?.location).toBe("method_ref");
+
+    const refAndId = validateMethodSelectorRequest(
+      [],
+      { method_ref: ADDRESS, method_id: "mt_abc123" },
+      { rule: "run_source" },
+    );
+    expect(refAndId).toHaveLength(1);
+    expect(refAndId[0]?.location).toBe("method_id");
+    expect(refAndId[0]?.message).toContain("provenance");
+  });
+
+  it("all three selectors report each illegal pairing", () => {
+    const errors = validateMethodSelectorRequest(
+      files,
+      { method_ref: ADDRESS, method_id: "mt_abc123" },
+      { rule: "one_selector" },
+    );
+
+    expect(errors.map((error) => error.location).sort()).toEqual([
+      "method_id",
+      "method_id",
+      "method_ref",
+    ]);
+  });
+
+  it("a blank selector earns its own error, not a pairing error", () => {
+    // The blank method_ref is invalid on its own; it must not also produce
+    // an exclusivity error against the files.
+    const errors = validateMethodSelectorRequest(
+      files,
+      { method_ref: "  " },
+      { rule: "run_source" },
+    );
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain("must not be empty");
   });
 
   it("still applies the per-file checks when files are present", () => {
-    const errors = validateFilesOrMethodIdRequest(
+    const errors = validateMethodSelectorRequest(
       [{ content: "" }, { content: "x", uri: "" }],
-      "mt_abc123",
+      {},
+      { rule: "run_source" },
     );
 
     expect(errors.map((error) => error.location)).toEqual(["files[0].content", "files[1].uri"]);
@@ -444,6 +593,54 @@ describe("classifyError", () => {
     expect(error.retryable).toBe(false);
   });
 
+  it("uses the route's forbidden texture on a 403, keeping the auth locator", () => {
+    const error = classifyError(
+      new ApiResponseError(
+        "HTTP 403",
+        `${DEFAULT_API_URL}/v1/codegen`,
+        403,
+        "Forbidden",
+        "{}",
+        "forbidden",
+        "Feature not enabled",
+        undefined, // validationErrors
+        undefined, // code
+      ),
+      {
+        auth: { location: "authorization", hint: "Sign in again." },
+        forbidden: { hint: "Sign in again. If that is fine, the feature is gated." },
+      },
+    );
+
+    expect(error.class).toBe("config");
+    expect(error.location).toBe("authorization");
+    expect(error.hint).toBe("Sign in again. If that is fine, the feature is gated.");
+    expect(error.retryable).toBe(false);
+  });
+
+  it("never applies the forbidden texture to a 401 — a rejected credential is not a gate", () => {
+    const error = classifyError(
+      new ApiResponseError(
+        "HTTP 401",
+        `${DEFAULT_API_URL}/v1/codegen`,
+        401,
+        "Unauthorized",
+        "{}",
+        "unauthorized",
+        "Missing key",
+        undefined, // validationErrors
+        undefined, // code
+      ),
+      {
+        auth: { location: "authorization", hint: "Sign in again." },
+        forbidden: { hint: "The feature is gated." },
+      },
+    );
+
+    expect(error.location).toBe("authorization");
+    expect(error.hint).toBe("Sign in again.");
+  });
+
   it("keeps the env-var auth texture when no override is provided", () => {
     const error = classifyError(new ClientAuthenticationError("Unauthorized"));
 
@@ -469,6 +666,10 @@ describe("classifyError", () => {
     );
 
     expect(error.class).toBe("config");
+    // The class stays `config` (settled contract); `kind` is what tells a
+    // billing refusal from an unreachable API, for the headline and for a
+    // machine consumer that would otherwise have to sniff the message.
+    expect(error.kind).toBe("paywall");
     expect(error.location).toBeUndefined();
     expect(error.message).toBe("Subscription required to run methods");
     expect(error.hint).toContain("app.pipelex.com");
@@ -491,6 +692,7 @@ describe("classifyError", () => {
     );
 
     expect(error.class).toBe("config");
+    expect(error.kind).toBe("paywall");
     expect(error.message).toBe("HTTP 402");
     expect(error.retryable).toBe(false);
   });
@@ -593,6 +795,35 @@ describe("classifyError", () => {
     expect(error.location).toBe("run_id");
     expect(error.hint).toBe("Check the run id.");
     expect(error.retryable).toBe(false);
+  });
+});
+
+describe("summaryForToolError", () => {
+  const summaries: ErrorSummaries = {
+    config: "connectivity headline",
+    input_domain: "request headline",
+    runtime: "server headline",
+    paywall: "billing headline",
+  };
+
+  it("maps an untagged error by its class", () => {
+    expect(
+      summaryForToolError(
+        { class: "config", message: "Connection refused", retryable: true },
+        summaries,
+      ),
+    ).toBe("connectivity headline");
+  });
+
+  it("prefers the kind headline over the class it refines", () => {
+    // The whole point: a 402 is `config` by contract, so a class-first lookup
+    // would blame connectivity for a plan limit.
+    expect(
+      summaryForToolError(
+        { class: "config", kind: "paywall", message: "Subscription required", retryable: false },
+        summaries,
+      ),
+    ).toBe("billing headline");
   });
 });
 
