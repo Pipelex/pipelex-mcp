@@ -606,7 +606,7 @@ function undecodableError(relative: string): ToolError {
   return {
     class: "runtime",
     message: `\`${relative}\` in the generated directory is not valid UTF-8, so the tree could not be checked.`,
-    hint: "The offline check hashes exact UTF-8 bytes; a file that cannot be decoded cannot be verified. Remove or fix that file, or point output_dir at a dedicated generated directory.",
+    hint: "The generated files are on disk under output_dir, but the tree could not be confirmed current. The offline check hashes exact UTF-8 bytes, so a file that cannot be decoded cannot be verified: remove or fix that file, or point output_dir at a dedicated generated directory, then verify with `pipelex codegen check`.",
     retryable: false,
   };
 }

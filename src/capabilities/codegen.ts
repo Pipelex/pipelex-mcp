@@ -49,6 +49,16 @@ import type {
 const CODEGEN_KIND = "types" as const;
 
 /**
+ * The one filename the lock may carry. Pinned to the exact name rather than
+ * merely checked for being bare: the SDK fixes the value it echoes
+ * (`CodegenValidReport.lock_filename` — "The filename `lock` must be written as
+ * (`codegen.lock`)"), and the writer is already coupled to the name through its
+ * lock-ownership prefix (`# codegen.lock`), so pinning it here removes an
+ * inconsistency rather than adding coupling.
+ */
+const CODEGEN_LOCK_FILENAME = "codegen.lock";
+
+/**
  * What each engine target emits and who it is for — the table behind the tool
  * description's decision rule and the `target` schema description.
  *
@@ -738,19 +748,21 @@ function assertValidReportShape(report: CodegenValidReport): void {
   if (typeof report.lock_filename !== "string" || report.lock_filename === "") {
     throw new Error("Codegen report did not include the lock filename.");
   }
-  // The lock filename must be a BARE filename. The writer joins it under the
+  // The lock filename is pinned to the ONE name the contract fixes. Three
+  // things follow from the exact match that a bare-filename rule left open:
+  // `../../…` cannot reach a write uncontained (the writer joins this under the
   // generated directory, and the console hands it to a model that will do the
-  // same, so `../../…` is the one value in the whole path that would otherwise
-  // reach a write uncontained. Containment in the writer still stands on its
-  // own — canonical is not the same as contained — but the rule belongs here,
-  // where it holds for both shells.
-  if (
-    report.lock_filename !== path.posix.basename(report.lock_filename) ||
-    report.lock_filename.includes("\\") ||
-    report.lock_filename.startsWith(".")
-  ) {
+  // same); the lock lands where the offline check looks for it, so `pipelex
+  // codegen check` finds the tree this tool says passes; and it cannot ALIAS an
+  // artifact path — an artifact must carry a stampable suffix to reach here, so
+  // it can never be `codegen.lock`, which closes the one case where the writer
+  // would overwrite an artifact it had just written with lock text and then
+  // report that as drift. Containment in the writer still stands on its own —
+  // canonical is not the same as contained — but the rule belongs here, where
+  // it holds for both shells.
+  if (report.lock_filename !== CODEGEN_LOCK_FILENAME) {
     throw new Error(
-      `Codegen report returned a lock filename that is not a bare filename: ${report.lock_filename}.`,
+      `Codegen report returned a lock filename other than ${CODEGEN_LOCK_FILENAME}: ${report.lock_filename}.`,
     );
   }
 }
@@ -916,7 +928,14 @@ function checkVerdict(written: CodegenWriteSuccess): string {
     : "";
 
   if (written.orphans.length === 0) {
-    return `The offline check reports the tree **current** — \`pipelex codegen check\` and @pipelex/sdk's \`runCodegenCheck\` agree on it.${partial}`;
+    // The verdict line follows `isCurrent`, not the orphan list. `isCurrent` is
+    // the SDK's verdict over EVERY drift and `orphans` is the filtered subset,
+    // so branching on the subset alone would print **current** two paragraphs
+    // above the "Unexpected drift" section saying the tree does not agree with
+    // the lock just written beside it.
+    return written.isCurrent
+      ? `The offline check reports the tree **current** — \`pipelex codegen check\` and @pipelex/sdk's \`runCodegenCheck\` agree on it.${partial}`
+      : `The offline check reports the tree **not current**: it holds no orphans, but it does not agree with the lock written beside it — see the drift below.${partial}`;
   }
 
   return [

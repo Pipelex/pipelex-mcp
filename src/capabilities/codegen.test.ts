@@ -882,6 +882,11 @@ describe("the written arm's drift projection", () => {
     expect(result.structuredContent.drifts).toEqual(written.drifts);
     expect(result.summary).toContain("Unexpected drift");
     expect(result.summary).toContain("content hash mismatch");
+    // The verdict line follows `isCurrent`, not the orphan list: a drifting
+    // tree with no orphans must never be announced as current two paragraphs
+    // above the section saying it disagrees with its own lock.
+    expect(result.summary).not.toContain("**current**");
+    expect(result.summary).toContain("**not current**");
   });
 
   it("says orphan detection was partial when a walk bound tripped", () => {
@@ -898,8 +903,13 @@ describe("the written arm's drift projection", () => {
 });
 
 describe("generateMthdsCode report-shape rules", () => {
-  it("refuses a lock filename that is not bare, on the riding arm too", async () => {
-    for (const lockFilename of ["../codegen.lock", "nested/codegen.lock", ".codegen.lock"]) {
+  it("refuses any lock filename but codegen.lock, on the riding arm too", async () => {
+    for (const lockFilename of [
+      "../codegen.lock",
+      "nested/codegen.lock",
+      ".codegen.lock",
+      "pipelex.lock",
+    ]) {
       const result = await generateMthdsCode(
         { files: [{ content: 'domain = "demo"' }], target: "ts-zod" },
         {
@@ -914,8 +924,29 @@ describe("generateMthdsCode report-shape rules", () => {
 
       expect(result.structuredContent.status).toBe("error");
       expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
-      expect(result.structuredContent.errors?.[0]?.message).toContain("bare filename");
+      expect(result.structuredContent.errors?.[0]?.message).toContain("codegen.lock");
     }
+  });
+
+  it("refuses a lock filename that aliases an artifact path, before anything is written", async () => {
+    const root = await makeTempDir();
+    // The preflight structurally cannot see this: `runCodegenCheck` takes the
+    // lock content separately and never learns its filename, so an aliasing
+    // report is internally current. Without the exact-name rule the writer
+    // would write types.ts and then overwrite it with the lock (written last),
+    // read the lock text back as the locked artifact, and report the result as
+    // drift on a tree where the real lock never existed.
+    const aliasing: CodegenResponse = { ...recordedReport, lock_filename: "types.ts" };
+
+    const result = await generateMthdsCode(
+      { files: [{ content: 'domain = "demo"' }], target: "ts-zod", output_dir: "generated" },
+      workshopContext(root, aliasing),
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
+    expect(result.structuredContent.errors?.[0]?.message).toContain("codegen.lock");
+    expect(await fs.readdir(root)).toEqual([]);
   });
 
   it("refuses a response that answers for another target, before anything is written", async () => {
