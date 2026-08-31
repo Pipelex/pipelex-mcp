@@ -189,7 +189,7 @@ const validationStructuredContentSchema = z.object({
   main_pipe: mainPipeSignatureSchema
     .optional()
     .describe(
-      "The main pipe's signature: its ref, each declared input with the concept it expects, and the concept it produces. Present on every valid verdict whose bundle declares a main pipe. Type a call site from this instead of guessing the shapes.",
+      "The main pipe's signature: its ref, each declared input with the concept it expects, and the concept it produces. Present on every valid verdict for which the server settled an effective entry pipe — for a published method, the one its manifest names. Absent means no entry pipe was settled, not that the method declares none. Type a call site from this instead of guessing the shapes.",
     ),
   validation_errors: z.array(z.unknown()).optional(),
   errors: z.array(toolErrorSchema).optional(),
