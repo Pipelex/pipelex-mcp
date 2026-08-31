@@ -14,6 +14,8 @@ import { describe, expect, it } from "vitest";
 import {
   FIXTURE_BUNDLE,
   FIXTURE_BUNDLE_URI,
+  FIXTURE_INPUT_NAME,
+  FIXTURE_PIPE_REF,
   INVALID_BUNDLE,
   INVALID_BUNDLE_URI,
   liveApiConfig,
@@ -55,6 +57,28 @@ describe("mthds_validate (live)", () => {
     // the live proof the token still works.
     expect(typeof result.inputForm).toBe("object");
     expect(typeof result.mainPipeRef).toBe("string");
+
+    // The main pipe's signature — the wire shape the projection narrows, and
+    // the one field here a mocked suite cannot vouch for. The fixture declares
+    // `topic` and produces text, so both halves are asserted against what the
+    // bundle actually says rather than against "something non-empty".
+    const mainPipe = result.structuredContent.main_pipe;
+    expect(mainPipe?.pipe_ref).toBe(FIXTURE_PIPE_REF);
+    expect(mainPipe?.inputs).toEqual([
+      {
+        name: FIXTURE_INPUT_NAME,
+        concept_ref: "native.Text",
+        multiplicity: "single",
+        required: true,
+      },
+    ]);
+    expect(mainPipe?.output.concept_ref).toBe("native.Text");
+    expect(mainPipe?.output.multiplicity).toBe("single");
+    // The rendered line is the channel a ChatGPT install with a cached tool
+    // list still receives, so it must survive the wire too.
+    expect(result.summary).toContain(
+      `\`${FIXTURE_PIPE_REF}(${FIXTURE_INPUT_NAME}: native.Text) -> native.Text\``,
+    );
     expect(JSON.stringify(result.structuredContent)).not.toContain("graph_spec");
     expect(JSON.stringify(result.structuredContent)).not.toContain("pipe_io_contracts");
     // (No `input_form` containment check: the view KIND in
@@ -71,8 +95,9 @@ describe("mthds_validate (live)", () => {
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);
     expect(result.graphSpec).toBeUndefined();
-    // The form does not depend on the graph.
+    // The form does not depend on the graph, and neither does the signature.
     expect(result.structuredContent.available_view_specs).toEqual(["input_form"]);
+    expect(result.structuredContent.main_pipe?.output.concept_ref).toBe("native.Text");
   });
 
   it("reports an invalid bundle as a PRODUCED verdict, not an error", async () => {
@@ -96,6 +121,7 @@ describe("mthds_validate (live)", () => {
     // leave it nothing to explain.
     expect(result.summary.trim()).not.toBe("");
     expect(result.structuredContent.available_view_specs).toEqual([]);
+    expect(result.structuredContent.main_pipe).toBeUndefined();
   });
 
   it("rejects a request carrying no selector at all", async () => {

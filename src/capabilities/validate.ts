@@ -1,9 +1,11 @@
 import { PipelexApiClient } from "@pipelex/sdk";
 import type {
+  IOMultiplicity,
   MthdsFile,
   PipelexValidationResult,
   PipelexValidationReport,
   PipelexInvalidReport,
+  PresenceMarker,
   ValidateFilesOptions,
   ValidateMethodSelector,
 } from "@pipelex/sdk";
@@ -64,6 +66,116 @@ export const mthdsValidateInputSchema = {
  */
 const viewSpecSchema = z.enum(["dry_run_graph", "input_form"]);
 
+/**
+ * The MTHDS standard's multiplicity vocabulary (`IOMultiplicity`), as a runtime
+ * tuple: the narrowing needs it as a membership test and the output schema
+ * needs it as an enum, and `satisfies` keeps both pinned to the imported type,
+ * so a member the standard drops fails the build here.
+ */
+const IO_MULTIPLICITIES = [
+  "single",
+  "variable",
+  "fixed",
+] as const satisfies readonly IOMultiplicity[];
+
+/** The standard's three-valued input presence marker, same discipline. */
+const PRESENCE_MARKERS = [
+  "plain",
+  "optional",
+  "force",
+] as const satisfies readonly PresenceMarker[];
+
+/**
+ * How each multiplicity is written in the rendered signature line: nothing for
+ * a single item, `[]` for a variable list, `[N]` for a fixed one. A `Record`
+ * over the standard's union rather than a switch, so a multiplicity the
+ * standard ADDS fails the build here — the direction `IO_MULTIPLICITIES`'
+ * `satisfies` cannot catch.
+ */
+const MULTIPLICITY_SUFFIX: Record<IOMultiplicity, (itemCount?: number) => string> = {
+  single: () => "",
+  variable: () => "[]",
+  fixed: (itemCount) => `[${itemCount}]`,
+};
+
+/**
+ * Whether a caller must supply a slot carrying each marker. The three-valued
+ * vocabulary collapses the way the standard itself recommends for a consumer
+ * that only needs "may this be absent?" — the plain/force distinction is lint-
+ * and graph-facing and does not bear on a call site. A `Record` rather than a
+ * `!== "optional"` comparison for `MULTIPLICITY_SUFFIX`'s reason: a marker the
+ * standard ADDS fails the build here and forces the question to be answered,
+ * where the comparison would silently rule it required.
+ */
+const PRESENCE_IS_REQUIRED: Record<PresenceMarker, boolean> = {
+  plain: true,
+  force: true,
+  optional: false,
+};
+
+const ioMultiplicitySchema = z
+  .enum(IO_MULTIPLICITIES)
+  .describe(
+    'How many items the slot carries: "single" for one, "variable" for a list of any length, "fixed" for exactly item_count items.',
+  );
+
+/**
+ * The main pipe's typed signature — what an agent needs to write a call site
+ * against a method it cannot read (a `method_ref` or `method_id` source), and
+ * the reason it rides `structuredContent` rather than the view-only `_meta`
+ * channel the full per-pipe artifacts use. Names follow the standard's own
+ * artifact (`concept_ref`, the `IOMultiplicity` vocabulary): these are MTHDS
+ * concepts inside a Pipelex envelope. Per-slot JSON Schemas stay out — that is
+ * the token-heavy part, and `mthds_inputs_template` / `mthds_codegen` are where
+ * it belongs.
+ */
+const mainPipeSignatureSchema = z.object({
+  pipe_ref: z
+    .string()
+    .describe("Namespaced ref (domain.pipe_code) of the pipe a run executes by default."),
+  inputs: z
+    .array(
+      z.object({
+        name: z
+          .string()
+          .describe("Authored name of the input slot — the key a run's inputs object must use."),
+        concept_ref: z
+          .string()
+          .describe(
+            "Fully-qualified concept the slot expects, with any multiplicity suffix stripped.",
+          ),
+        multiplicity: ioMultiplicitySchema,
+        item_count: z
+          .number()
+          .optional()
+          .describe('Number of items the slot takes; present only when multiplicity is "fixed".'),
+        required: z
+          .boolean()
+          .describe(
+            "Whether the caller must supply this input; false when the slot is declared optional.",
+          ),
+      }),
+    )
+    .describe("The main pipe's declared input slots, in authored order."),
+  output: z
+    .object({
+      concept_ref: z
+        .string()
+        .describe(
+          "Fully-qualified concept the pipe produces, with any multiplicity suffix stripped.",
+        ),
+      multiplicity: ioMultiplicitySchema,
+      item_count: z
+        .number()
+        .optional()
+        .describe('Number of items produced; present only when multiplicity is "fixed".'),
+      optional: z
+        .boolean()
+        .describe("Whether a successful run may resolve the output as a recorded absence."),
+    })
+    .describe("What the main pipe produces."),
+});
+
 const validationStructuredContentSchema = z.object({
   status: z.enum(["ok", "error"]),
   is_valid: z.boolean(),
@@ -73,6 +185,11 @@ const validationStructuredContentSchema = z.object({
     .array(viewSpecSchema)
     .describe(
       'Renderable views available for this result. Contains "dry_run_graph" when an interactive method graph (from the validation dry run) is available to display, and "input_form" when a fill-in form for the main pipe\'s inputs (with a Run button) is available on a runnable verdict; empty otherwise.',
+    ),
+  main_pipe: mainPipeSignatureSchema
+    .optional()
+    .describe(
+      "The main pipe's signature: its ref, each declared input with the concept it expects, and the concept it produces. Present on every valid verdict whose bundle declares a main pipe. Type a call site from this instead of guessing the shapes.",
     ),
   validation_errors: z.array(z.unknown()).optional(),
   errors: z.array(toolErrorSchema).optional(),
@@ -97,12 +214,39 @@ interface ResolvedValidateRequest {
 
 export type ViewSpec = z.infer<typeof viewSpecSchema>;
 
+/** One declared input slot of the main pipe, as the signature reports it. */
+export interface MainPipeInputSignature {
+  name: string;
+  concept_ref: string;
+  multiplicity: IOMultiplicity;
+  /** Present exactly on the fixed arm — the unused field is absent, per this repo's convention. */
+  item_count?: number;
+  /** `presence !== "optional"`: the plain/force distinction has no bearing on typing a call site. */
+  required: boolean;
+}
+
+/** What the main pipe produces, as the signature reports it. */
+export interface MainPipeOutputSignature {
+  concept_ref: string;
+  multiplicity: IOMultiplicity;
+  item_count?: number;
+  optional: boolean;
+}
+
+export interface MainPipeSignature {
+  pipe_ref: string;
+  /** Authored order when the input-form descriptor states it, contract map order otherwise. */
+  inputs: MainPipeInputSignature[];
+  output: MainPipeOutputSignature;
+}
+
 export interface ValidationStructuredContent {
   status: "ok" | "error";
   is_valid: boolean;
   is_runnable: boolean;
   pending_signatures: string[];
   available_view_specs: ViewSpec[];
+  main_pipe?: MainPipeSignature;
   validation_errors?: unknown[];
   errors?: ToolError[];
 }
@@ -386,6 +530,19 @@ export function validationResult(
   let mainPipeRef: string | undefined;
   if (report.is_valid) {
     const validReport = report as PipelexValidationReport;
+    // Hoisted out of the views branch below: the signature needs the main pipe
+    // ref on EVERY valid verdict, views or not. The side effect is that
+    // `_meta.main_pipe_ref` now also rides a valid non-runnable verdict, which
+    // the view ignores.
+    mainPipeRef = mainPipeRefOf(validReport.bundle_blueprint);
+    // The signature is the workshop's deliverable as much as the console's, so
+    // it is independent of `viewsAvailable` and of `include_graph`, and a
+    // pending-signature verdict carries it too — the shape is fully determined
+    // before the signatures resolve.
+    const mainPipe = mainPipeSignatureOf(validReport, mainPipeRef);
+    if (mainPipe !== undefined) {
+      structuredContent.main_pipe = mainPipe;
+    }
     if (includeGraph && viewsAvailable) {
       graphSpec = validReport.graph_spec;
     }
@@ -404,7 +561,6 @@ export function validationResult(
     ) {
       pipeIoContracts = validReport.pipe_io_contracts;
       inputForm = validReport.input_form;
-      mainPipeRef = mainPipeRefOf(validReport.bundle_blueprint);
     }
   } else {
     const invalidReport = report as PipelexInvalidReport;
@@ -427,6 +583,12 @@ export function validationResult(
   }
   if (inputForm != null) {
     structuredContent.available_view_specs.push("input_form");
+  }
+  // Prose, because agents read the summary more reliably than the structured
+  // fields — and because the summary is the one channel that reaches a ChatGPT
+  // install whose cached tool list predates the schema change.
+  if (structuredContent.main_pipe !== undefined) {
+    summary += `\n\n## Main pipe\n\n\`${signatureLine(structuredContent.main_pipe)}\``;
   }
   if (structuredContent.available_view_specs.length > 0) {
     summary += `\n\n## Views\n\n${viewsNote(structuredContent.available_view_specs)}`;
@@ -455,6 +617,196 @@ function viewsNote(specs: ViewSpec[]): string {
   return "The validation result includes a graph view of the method (dry run).";
 }
 
+/**
+ * The main pipe's signature, or `undefined` when the report carries no usable
+ * one. Defensive on purpose (`narrowMethodProvenance` in `run.ts` is the
+ * model): the SDK's declared type is not proof of what arrived, and this is
+ * what an agent types a call site against, so every member is checked and ANY
+ * malformed one omits the WHOLE signature — half a signature actively misleads
+ * where an absent one just sends the agent to `mthds_inputs_template`. The
+ * verdict itself is never affected.
+ */
+export function mainPipeSignatureOf(
+  report: PipelexValidationReport,
+  mainPipeRef: string | undefined,
+): MainPipeSignature | undefined {
+  if (mainPipeRef === undefined) {
+    return undefined;
+  }
+  const contracts = asRecord(report.pipe_io_contracts);
+  const contract = contracts === undefined ? undefined : asRecord(contracts[mainPipeRef]);
+  if (contract === undefined) {
+    return undefined;
+  }
+
+  const output = narrowOutputContract(contract.output);
+  const inputs = narrowInputContracts(
+    contract.inputs,
+    orderedInputNames(report.input_form, mainPipeRef),
+  );
+  if (output === undefined || inputs === undefined) {
+    return undefined;
+  }
+
+  return { pipe_ref: mainPipeRef, inputs, output };
+}
+
+/**
+ * The declared input slots, in authored order where the descriptor states one.
+ * Names the descriptor lists but the contract does not declare are ignored,
+ * and names the contract declares but the descriptor omits keep map order
+ * behind them — a disagreement between the two artifacts costs ordering, never
+ * an input, and never a duplicated one.
+ */
+function narrowInputContracts(
+  value: unknown,
+  order: string[],
+): MainPipeInputSignature[] | undefined {
+  const record = asRecord(value);
+  if (record === undefined) {
+    return undefined;
+  }
+  const declared = Object.keys(record);
+  // The descriptor is a producer artifact like any other, so it may name the
+  // same field twice; `Object.keys` cannot. Deduplicating (first occurrence
+  // wins, which is what `Set` keeps) is the ordering half of the same
+  // whole-signature-or-nothing rule the narrowing below enforces — a repeated
+  // slot would render `main(topic: native.Text, topic: native.Text)`, a call
+  // site wrong in exactly the plausible way a partial signature is.
+  const names = [
+    ...new Set([
+      ...order.filter((name) => declared.includes(name)),
+      ...declared.filter((name) => !order.includes(name)),
+    ]),
+  ];
+
+  const inputs: MainPipeInputSignature[] = [];
+  for (const name of names) {
+    const slot = asRecord(record[name]);
+    if (slot === undefined || name.length === 0) {
+      return undefined;
+    }
+    const conceptRef = narrowConceptRef(slot.concept_ref);
+    const plurality = narrowPlurality(slot.multiplicity, slot.item_count);
+    const presence = slot.presence;
+    if (conceptRef === undefined || plurality === undefined || !isPresenceMarker(presence)) {
+      return undefined;
+    }
+    inputs.push({
+      name,
+      concept_ref: conceptRef,
+      ...plurality,
+      required: PRESENCE_IS_REQUIRED[presence],
+    });
+  }
+  return inputs;
+}
+
+function narrowOutputContract(value: unknown): MainPipeOutputSignature | undefined {
+  const record = asRecord(value);
+  if (record === undefined) {
+    return undefined;
+  }
+  const conceptRef = narrowConceptRef(record.concept_ref);
+  const plurality = narrowPlurality(record.multiplicity, record.item_count);
+  if (conceptRef === undefined || plurality === undefined || typeof record.optional !== "boolean") {
+    return undefined;
+  }
+  return { concept_ref: conceptRef, ...plurality, optional: record.optional };
+}
+
+/** The multiplicity pair, with `item_count` present exactly on the fixed arm. */
+function narrowPlurality(
+  multiplicity: unknown,
+  itemCount: unknown,
+): { multiplicity: IOMultiplicity; item_count?: number } | undefined {
+  if (!isMultiplicity(multiplicity)) {
+    return undefined;
+  }
+  if (multiplicity === "fixed") {
+    // A fixed count is always at least two — the language says `Concept[1]` is
+    // a way of writing `Concept` and reports `"single"`, so a fixed arm
+    // carrying 1 is a producer violation, not an alternate spelling.
+    return typeof itemCount === "number" && Number.isInteger(itemCount) && itemCount > 1
+      ? { multiplicity, item_count: itemCount }
+      : undefined;
+  }
+  // Off the fixed arm the artifact states `item_count: null` — literally, and
+  // always on the wire. Anything else (a number contradicting the multiplicity
+  // beside it, a string, an omitted member) is drift.
+  return itemCount === null ? { multiplicity } : undefined;
+}
+
+/**
+ * Authored input order for one pipe, read from the input-form descriptor — the
+ * one thing the descriptor is consulted for here. The contract's `inputs` map
+ * deliberately carries no order, and the descriptor is the artifact that states
+ * it; when it is absent (an older runner, or a verdict the `views` token never
+ * reached) the map's own iteration order stands. The signature never depends on
+ * the descriptor being present.
+ */
+function orderedInputNames(inputForm: unknown, pipeRef: string): string[] {
+  const forms = asRecord(inputForm);
+  const descriptor = forms === undefined ? undefined : asRecord(forms[pipeRef]);
+  if (descriptor === undefined || !Array.isArray(descriptor.fields)) {
+    return [];
+  }
+  return descriptor.fields
+    .map((field) => {
+      const record = asRecord(field);
+      return record !== undefined && typeof record.name === "string" ? record.name : undefined;
+    })
+    .filter((name): name is string => name !== undefined);
+}
+
+/**
+ * The signature as one line of MTHDS-flavoured notation, e.g.
+ * `demo.main(document: legal.Contract, notes?: native.Text, tags: native.Text[]) -> analysis.Report[2]`:
+ * `?` marks an input the caller may omit (and an output a successful run may
+ * resolve as a recorded absence), `[]` a variable list, `[N]` a fixed one. The
+ * two never meet on an input: the standard pins a plural slot to
+ * `presence: "plain"`, so an optional list is not a shape a caller can be
+ * offered, and only the output can carry both marks.
+ */
+function signatureLine(signature: MainPipeSignature): string {
+  const inputs = signature.inputs
+    .map(
+      (input) =>
+        `${input.name}${input.required ? "" : "?"}: ${conceptNotation(input.concept_ref, input.multiplicity, input.item_count)}`,
+    )
+    .join(", ");
+  const { concept_ref, multiplicity, item_count, optional } = signature.output;
+  const output = `${conceptNotation(concept_ref, multiplicity, item_count)}${optional ? "?" : ""}`;
+  return `${signature.pipe_ref}(${inputs}) -> ${output}`;
+}
+
+function conceptNotation(
+  conceptRef: string,
+  multiplicity: IOMultiplicity,
+  itemCount?: number,
+): string {
+  return `${conceptRef}${MULTIPLICITY_SUFFIX[multiplicity](itemCount)}`;
+}
+
+function narrowConceptRef(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function isMultiplicity(value: unknown): value is IOMultiplicity {
+  return typeof value === "string" && (IO_MULTIPLICITIES as readonly string[]).includes(value);
+}
+
+function isPresenceMarker(value: unknown): value is PresenceMarker {
+  return typeof value === "string" && (PRESENCE_MARKERS as readonly string[]).includes(value);
+}
+
+/** A plain object, or `undefined` — the one narrowing step every check above starts from. */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
 /** A non-empty record — the presence test for both per-pipe artifacts. */
 function hasEntries(artifact: unknown): boolean {
   return typeof artifact === "object" && artifact !== null && Object.keys(artifact).length > 0;
@@ -463,11 +815,18 @@ function hasEntries(artifact: unknown): boolean {
 /**
  * `domain.main_pipe` from the batch's primary blueprint, or undefined when the
  * blueprint declares no main pipe. Both fields are plain strings on the
- * blueprint; anything else is treated as absent rather than guessed at.
+ * blueprint; anything else — a blueprint that is not even an object included,
+ * since this now runs on every valid verdict rather than only where the
+ * contracts already proved the report well-formed — is treated as absent rather
+ * than guessed at.
  */
-function mainPipeRefOf(blueprint: Record<string, unknown>): string | undefined {
-  const domain = blueprint.domain;
-  const mainPipe = blueprint.main_pipe;
+function mainPipeRefOf(blueprint: unknown): string | undefined {
+  const record = asRecord(blueprint);
+  if (record === undefined) {
+    return undefined;
+  }
+  const domain = record.domain;
+  const mainPipe = record.main_pipe;
   if (typeof mainPipe !== "string" || mainPipe.length === 0) {
     return undefined;
   }
