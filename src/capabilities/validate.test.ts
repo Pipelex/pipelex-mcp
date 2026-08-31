@@ -508,6 +508,41 @@ describe("main pipe signature", () => {
         },
       ],
       [
+        // `Concept[1]` is the language's way of writing `Concept` and reports
+        // "single" — a fixed arm carrying 1 is a producer violation.
+        "a fixed count of one",
+        {
+          inputs: {},
+          output: {
+            concept_ref: "analysis.Report",
+            multiplicity: "fixed",
+            item_count: 1,
+            optional: false,
+          },
+        },
+      ],
+      [
+        // The contract states `item_count: null` on every non-fixed arm,
+        // literally and always on the wire — an omitted member is drift.
+        "an omitted item_count off the fixed arm",
+        {
+          inputs: {},
+          output: { concept_ref: "analysis.Report", multiplicity: "single", optional: false },
+        },
+      ],
+      [
+        "a non-null non-number item_count off the fixed arm",
+        {
+          inputs: {},
+          output: {
+            concept_ref: "analysis.Report",
+            multiplicity: "variable",
+            item_count: "3",
+            optional: false,
+          },
+        },
+      ],
+      [
         "an output with no optional flag",
         {
           inputs: {},

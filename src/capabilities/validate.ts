@@ -699,14 +699,17 @@ function narrowPlurality(
     return undefined;
   }
   if (multiplicity === "fixed") {
-    return typeof itemCount === "number" && Number.isInteger(itemCount) && itemCount > 0
+    // A fixed count is always at least two — the language says `Concept[1]` is
+    // a way of writing `Concept` and reports `"single"`, so a fixed arm
+    // carrying 1 is a producer violation, not an alternate spelling.
+    return typeof itemCount === "number" && Number.isInteger(itemCount) && itemCount > 1
       ? { multiplicity, item_count: itemCount }
       : undefined;
   }
-  // Off the fixed arm the artifact states `item_count: null`. A number there
-  // contradicts the multiplicity beside it, so it is drift rather than a
-  // decoration to ignore.
-  return typeof itemCount === "number" ? undefined : { multiplicity };
+  // Off the fixed arm the artifact states `item_count: null` — literally, and
+  // always on the wire. Anything else (a number contradicting the multiplicity
+  // beside it, a string, an omitted member) is drift.
+  return itemCount === null ? { multiplicity } : undefined;
 }
 
 /**
