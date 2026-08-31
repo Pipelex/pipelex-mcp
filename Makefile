@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint format format-check typecheck test agent-test test-watch test-coverage smoke live-preflight test-e2e test-e2e-run test-all seed-e2e-fixture te check check-no-local-deps check-release-ready build build-local all clean dev dev-local inspect-local dev-tunnel start deploy publish c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
+.PHONY: help install lint format format-check typecheck test agent-test test-watch test-coverage smoke live-preflight test-e2e test-e2e-run test-all seed-e2e-fixture te check check-no-local-deps check-release-ready build build-local all clean dev dev-local inspect-local dev-tunnel start deploy deploy-prod deploy-dev deploy-staging deploy-envs alpic-deploy publish c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
 
 # Sibling repos for live development of our npm dependencies (see use-local / use-npm).
 MTHDS_UI_DIR := ../mthds-ui
@@ -16,7 +16,11 @@ make dev-local      - Start the local stdio server from TypeScript
 make inspect-local  - Open MCP Inspector against the local stdio server
 make dev-tunnel     - Start Skybridge dev server with tunnel
 make start          - Start the built app
-make deploy         - Deploy the hosted console to Alpic (from a clean main)
+make deploy         - Deploy the hosted console to Alpic Production (from a clean main)
+make deploy-prod    - Same as deploy
+make deploy-staging - Deploy the working tree to the Alpic Staging console
+make deploy-dev     - Deploy the working tree to the Alpic Dev console
+make deploy-envs    - List this project's Alpic environments and their URLs
 make publish        - Publish @pipelex/mcp to npm (from a clean main)
 
 make lint           - Run ESLint
@@ -268,8 +272,58 @@ check-release-ready:
 deploy: check-no-local-deps check-release-ready
 	npm run deploy
 
+deploy-prod: deploy
+
 publish: check-no-local-deps check-release-ready
 	npm publish
+
+# --- The non-production consoles ---
+# `make deploy` above ships Production through the tracked `.alpic/project.json`,
+# exactly as release.yml does. These two name their environment explicitly and
+# drop the release guards: shipping a work branch to Dev or Staging is the point.
+# `check-no-local-deps` still applies — a @pipelex `file:` link does not resolve
+# on Alpic's build machine, so it would fail the build there instead of here.
+#
+# There is no Alpic git integration on this project. A deploy uploads the
+# WORKING TREE, not the branch the environment is named after, so the banner
+# says which branch (and whether it is dirty) is actually being shipped.
+#
+# Run `make deploy-envs` for the current ids; these are pinned so a deploy
+# needs no lookup, and a renamed or recreated environment fails loudly.
+ALPIC_PROJECT_ID := prj_csxv0ybe166jmf0kohzu8
+ALPIC_ENV_DEV := env_2jw695sbltlu6vzjjqyrx
+ALPIC_ENV_STAGING := env_mfgz1sycy0si0sdc9vsd4
+
+deploy-dev: check-no-local-deps
+	@$(MAKE) --no-print-directory alpic-deploy ALPIC_ENV_NAME=Dev ALPIC_ENV_ID=$(ALPIC_ENV_DEV)
+
+deploy-staging: check-no-local-deps
+	@$(MAKE) --no-print-directory alpic-deploy ALPIC_ENV_NAME=Staging ALPIC_ENV_ID=$(ALPIC_ENV_STAGING)
+
+deploy-envs:
+	npx alpic environment list --project-id $(ALPIC_PROJECT_ID)
+
+# Shared recipe behind deploy-dev / deploy-staging. The CLI relinks
+# `.alpic/project.json` to whatever environment it just deployed, and that file
+# is tracked, pins Production, and is the only thing telling release.yml (which
+# deploys with no ids of its own) where a release goes — so a leftover Dev link
+# would silently ship the next release to the wrong console.
+#
+# The restore is a `trap`, not a line after the CLI call, on purpose: the CLI
+# waits on the build for minutes, so Ctrl-C is the LIKELY way this recipe ends,
+# and a restore that only runs on a clean exit is exactly the one that misses.
+alpic-deploy:
+	@branch="$$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '(unknown)')"; \
+	dirty=""; \
+	if [ -n "$$(git status --porcelain 2>/dev/null)" ]; then dirty=" + uncommitted changes"; fi; \
+	echo "-> Deploying to the Alpic $(ALPIC_ENV_NAME) console ($(ALPIC_ENV_ID))"; \
+	echo "   shipping the working tree at $$branch$$dirty"; \
+	link=.alpic/project.json; \
+	if [ -f "$$link" ]; then \
+		backup="$$(mktemp)"; cp "$$link" "$$backup"; \
+		trap "if [ -f \$$backup ]; then if ! cmp -s \$$link \$$backup; then cp \$$backup \$$link; echo 'Restored .alpic/project.json — it stays pinned to Production for make deploy and release.yml.'; fi; rm -f \$$backup; fi" EXIT INT TERM; \
+	fi; \
+	npx alpic deploy --non-interactive --project-id $(ALPIC_PROJECT_ID) --environment-id $(ALPIC_ENV_ID)
 
 c: check
 t: test

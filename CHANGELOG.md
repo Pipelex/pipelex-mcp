@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Per-environment Alpic deploy targets**: `make deploy-dev` and `make deploy-staging` ship the working tree to the Dev and Staging consoles, and `make deploy-envs` lists the project's environments with their URLs. `make deploy` still means Production and keeps its release guards (clean `main`), so the target name is now the whole decision of where a deploy goes. The two new targets restore `.alpic/project.json` from a shell `trap` — the Alpic CLI relinks that tracked file to whatever environment it deployed, and it is what `release.yml` reads to find Production.
+
 ## [0.13.0] - 2026-08-30
 
 ### Added
