@@ -534,7 +534,7 @@ export function validationResult(
     // ref on EVERY valid verdict, views or not. The side effect is that
     // `_meta.main_pipe_ref` now also rides a valid non-runnable verdict, which
     // the view ignores.
-    mainPipeRef = mainPipeRefOf(validReport.bundle_blueprint);
+    mainPipeRef = defaultPipeRefOf(validReport);
     // The signature is the workshop's deliverable as much as the console's, so
     // it is independent of `viewsAvailable` and of `include_graph`, and a
     // pending-signature verdict carries it too — the shape is fully determined
@@ -813,8 +813,41 @@ function hasEntries(artifact: unknown): boolean {
 }
 
 /**
+ * The pipe a selector-less run of this same request would execute, or undefined
+ * when nothing settles one.
+ *
+ * The server's own `default_pipe_ref` wins unconditionally: it is the only
+ * signal that knows a `method_ref` package's manifest (`METHODS.toml`), whose
+ * `main_pipe` outranks the bundle-level declaration on the run and build
+ * routes, so a package where the two differ would otherwise get a signature
+ * typing a call site `mthds_run` will not run.
+ *
+ * The three arms are distinct on purpose, and `null` is not `undefined` here:
+ *
+ * - a non-empty string is the stated default;
+ * - `null` — or any other value the field carries — is the server saying it
+ *   determined **no** default (no `main_pipe` anywhere, or a manifest naming a
+ *   pipe the closure does not declare or declares in several domains), which is
+ *   exactly when a selector-less `mthds_run` would fail to resolve one too, so
+ *   the blueprint must NOT be consulted behind it;
+ * - the field being **absent** means the runner predates it, and only then does
+ *   the blueprint derivation stand.
+ *
+ * A JSON body cannot produce an own property holding `undefined`, so reading the
+ * field is the whole absence test.
+ */
+function defaultPipeRefOf(report: PipelexValidationReport): string | undefined {
+  const stated: unknown = report.default_pipe_ref;
+  if (stated === undefined) {
+    return mainPipeRefOf(report.bundle_blueprint);
+  }
+  return typeof stated === "string" && stated.length > 0 ? stated : undefined;
+}
+
+/**
  * `domain.main_pipe` from the batch's primary blueprint, or undefined when the
- * blueprint declares no main pipe. Both fields are plain strings on the
+ * blueprint declares no main pipe. The fallback behind `defaultPipeRefOf`, for
+ * a runner that serves no `default_pipe_ref`. Both fields are plain strings on the
  * blueprint; anything else — a blueprint that is not even an object included,
  * since this now runs on every valid verdict rather than only where the
  * contracts already proved the report well-formed — is treated as absent rather

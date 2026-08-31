@@ -11,6 +11,8 @@
 
 import { describe, expect, it } from "vitest";
 
+import type { PipelexValidationReport } from "@pipelex/sdk";
+
 import {
   FIXTURE_BUNDLE,
   FIXTURE_BUNDLE_URI,
@@ -19,6 +21,7 @@ import {
   INVALID_BUNDLE,
   INVALID_BUNDLE_URI,
   liveApiConfig,
+  liveClient,
 } from "./e2e-support.js";
 import { validateMthds } from "./validate.js";
 import type { ValidationContext } from "./validate.js";
@@ -84,6 +87,32 @@ describe("mthds_validate (live)", () => {
     // (No `input_form` containment check: the view KIND in
     // `available_view_specs` is legitimately spelled the same.)
     expect(result.structuredContent).not.toHaveProperty("input_form");
+  });
+
+  // GATED on the API deploy. `default_pipe_ref` landed on pipelex-api's `dev`
+  // (#68, 7a476cd) after its 0.21.0 release, so no released runner serves it
+  // yet and no hosted environment has it. Un-skip once `/v1/version` reports a
+  // hosted implementation built on a pipelex-api past 0.21.0 — the probe IS
+  // this assertion: the field arrives, or it does not.
+  //
+  // Worth un-skipping promptly rather than leaving parked: the projection
+  // prefers the report's `default_pipe_ref` and falls back to the blueprint
+  // derivation when the field is ABSENT, which is exactly what keeps every
+  // assertion above green while a by-address signature quietly goes back to
+  // naming a pipe a run will not execute. This is the one check the fallback
+  // cannot stand in for, and it needs an unseamed client because the capability
+  // returns the projection, not the report.
+  it.skip("serves the effective entry pipe as its own report field (gated)", async () => {
+    const report = await liveClient().validateFiles(
+      [{ content: FIXTURE_BUNDLE, uri: FIXTURE_BUNDLE_URI }],
+      { allowSignatures: true, render: ["markdown"], views: ["input_form"] },
+    );
+
+    expect(report.is_valid).toBe(true);
+    // Inline files carry no manifest, so the effective entry is the closure's
+    // own `main_pipe`, qualified — the same value the blueprint derivation
+    // reaches. The point of the assertion is that the SERVER stated it.
+    expect((report as PipelexValidationReport).default_pipe_ref).toBe(FIXTURE_PIPE_REF);
   });
 
   it("omits the graph when include_graph is false", async () => {
