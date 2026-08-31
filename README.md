@@ -399,7 +399,7 @@ No method source crosses the conversation in this flow.
   is_runnable: boolean;
   pending_signatures: string[];
   available_view_specs: Array<"dry_run_graph" | "input_form">;
-  main_pipe?: {                    // on every valid verdict declaring a main pipe
+  main_pipe?: {                    // on every valid verdict with an effective entry pipe
     pipe_ref: string;              // namespaced domain.pipe_code
     inputs: Array<{                // ordered: authored order when the runner states it
       name: string;
@@ -423,10 +423,12 @@ No method source crosses the conversation in this flow.
 `main_pipe` is the main pipe's typed signature — what an agent needs to write a
 call site against a method whose source it never sees (a `method_ref` or
 `method_id` call), instead of guessing the produced concept. It is present on
-every valid verdict whose bundle declares a main pipe, pending signatures
-included, on the workshop as much as the console — it does not ride the views
-branch. Any malformed member omits the whole signature rather than emitting a
-partial one; the verdict is unaffected. The same thing is rendered as one line
+every valid verdict for which the server settled an effective entry pipe — for
+a published method, the one its manifest names — pending signatures included,
+on the workshop as much as the console: it does not ride the views branch. Its
+absence means no entry pipe was settled, not that the method declares none. Any
+malformed member omits the whole signature rather than emitting a partial one;
+the verdict is unaffected. The same thing is rendered as one line
 of the Markdown summary,
 `demo.main(document: legal.Contract, notes?: native.Text, tags: native.Text[]) -> analysis.Report[2]`
 (`?` may be omitted, `[]` a list, `[N]` exactly N).

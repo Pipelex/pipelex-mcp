@@ -616,6 +616,106 @@ describe("main pipe signature", () => {
   });
 });
 
+describe("effective entry pipe", () => {
+  /**
+   * A `method_ref` package whose manifest entry (`other.shout`) is not the
+   * bundle-level `main_pipe` (`demo.main`) — the divergence the server's
+   * `default_pipe_ref` exists to state, and the only case where the two signals
+   * disagree about the pipe a selector-less run executes.
+   */
+  const divergingContracts: PipeIOContracts = {
+    ...orderedContracts,
+    "other.shout": {
+      inputs: {
+        message: {
+          concept_ref: "native.Text",
+          presence: "plain",
+          multiplicity: "single",
+          item_count: null,
+          json_schema: { type: "string" },
+        },
+      },
+      output: {
+        concept_ref: "native.Text",
+        multiplicity: "single",
+        item_count: null,
+        optional: false,
+      },
+    },
+  };
+
+  const divergingReport: PipelexValidationReport = {
+    ...orderedReport,
+    pipe_io_contracts: divergingContracts,
+  };
+
+  it("prefers the server's stated default over the blueprint's main pipe", () => {
+    // The blueprint still says `demo.main`; the manifest the MCP cannot see
+    // says `other.shout`, and that is the pipe `mthds_run` defaults to.
+    const result = validationResult({ ...divergingReport, default_pipe_ref: "other.shout" }, true);
+
+    expect(result.mainPipeRef).toBe("other.shout");
+    expect(result.structuredContent.main_pipe).toEqual({
+      pipe_ref: "other.shout",
+      inputs: [
+        { name: "message", concept_ref: "native.Text", multiplicity: "single", required: true },
+      ],
+      output: { concept_ref: "native.Text", multiplicity: "single", optional: false },
+    });
+    expect(result.summary).toContain("`other.shout(message: native.Text) -> native.Text`");
+  });
+
+  it("omits the signature when the server states no default, blueprint or not", () => {
+    // `null` is the server saying it determined no entry pipe — a manifest
+    // naming a pipe the closure declares in several domains, say. A
+    // selector-less run would fail to resolve one too, so the blueprint must
+    // not be consulted behind it.
+    const result = validationResult({ ...divergingReport, default_pipe_ref: null }, true);
+
+    expect(result.mainPipeRef).toBeUndefined();
+    expect(result.structuredContent.main_pipe).toBeUndefined();
+    expect(result.summary).not.toContain("## Main pipe");
+    // The verdict is untouched — this is a projection beside it.
+    expect(result.structuredContent.is_valid).toBe(true);
+  });
+
+  it("falls back to the blueprint when the field is absent — the older runner", () => {
+    // No `default_pipe_ref` own property at all: the runner predates the
+    // field, and the blueprint derivation is the only signal there is.
+    expect(divergingReport).not.toHaveProperty("default_pipe_ref");
+    const result = validationResult(divergingReport, true);
+
+    expect(result.mainPipeRef).toBe("demo.main");
+    expect(result.structuredContent.main_pipe?.inputs).toEqual(ORDERED_INPUTS);
+  });
+
+  it("treats a drifting field value as no default rather than as absence", () => {
+    // A server carrying the field but sending something unreadable has an
+    // opinion we cannot read; naming the blueprint's pipe behind it would be
+    // the guess this module refuses everywhere else.
+    for (const stated of [42, "", { pipe_ref: "demo.main" }]) {
+      // Cast because the drift is the point: a newer SDK types this field, and
+      // a fixture that could not express a value it forbids would stop testing
+      // what arrives on the wire.
+      const result = validationResult(
+        { ...divergingReport, default_pipe_ref: stated } as unknown as PipelexValidationReport,
+        true,
+      );
+
+      expect(result.mainPipeRef, JSON.stringify(stated)).toBeUndefined();
+      expect(result.structuredContent.main_pipe, JSON.stringify(stated)).toBeUndefined();
+    }
+  });
+
+  it("carries the stated default on _meta, where the view reads the pipe in play", () => {
+    const result = toolResult(
+      validationResult({ ...divergingReport, default_pipe_ref: "other.shout" }, true),
+    );
+
+    expect(result._meta.main_pipe_ref).toBe("other.shout");
+  });
+});
+
 describe("toolResult", () => {
   it("delivers the graph on _meta, never on structuredContent", () => {
     const result = toolResult(validationResult(validReport, true));
