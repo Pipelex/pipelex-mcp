@@ -339,6 +339,30 @@ async function checkValidate(client: Client): Promise<void> {
     `expected true, got ${describe(structured.is_runnable)} (pending: ${describe(structured.pending_signatures)})`,
   );
 
+  // The main pipe's signature — the field an agent types a call site from, and
+  // a projection over a wire shape (`pipe_io_contracts`) no mocked test sees.
+  // The canonical bundle declares no inputs, so only the output half proves
+  // anything here; that declared inputs survive the wire is what the second
+  // fixture's `inputs.topic` check below is for.
+  const mainPipe = structured.main_pipe;
+  if (
+    expect(
+      isRecord(mainPipe),
+      "main_pipe",
+      `the main pipe signature is missing: ${describe(mainPipe)}`,
+    ) &&
+    isRecord(mainPipe)
+  ) {
+    const output = mainPipe.output;
+    const conceptRef = isRecord(output) ? output.concept_ref : undefined;
+    expect(
+      typeof conceptRef === "string" && conceptRef.length > 0,
+      "main_pipe.output.concept_ref",
+      `expected the produced concept, got ${describe(conceptRef)}`,
+      describe(conceptRef),
+    );
+  }
+
   const summary = summaryText(result);
   expect(
     summary.trim() !== "",

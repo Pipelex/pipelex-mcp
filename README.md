@@ -399,10 +399,37 @@ No method source crosses the conversation in this flow.
   is_runnable: boolean;
   pending_signatures: string[];
   available_view_specs: Array<"dry_run_graph" | "input_form">;
+  main_pipe?: {                    // on every valid verdict declaring a main pipe
+    pipe_ref: string;              // namespaced domain.pipe_code
+    inputs: Array<{                // ordered: authored order when the runner states it
+      name: string;
+      concept_ref: string;         // fully-qualified, multiplicity suffix stripped
+      multiplicity: "single" | "variable" | "fixed";
+      item_count?: number;         // only on the fixed arm
+      required: boolean;
+    }>;
+    output: {
+      concept_ref: string;
+      multiplicity: "single" | "variable" | "fixed";
+      item_count?: number;
+      optional: boolean;
+    };
+  };
   validation_errors?: unknown[];
   errors?: ToolError[];
 }
 ```
+
+`main_pipe` is the main pipe's typed signature — what an agent needs to write a
+call site against a method whose source it never sees (a `method_ref` or
+`method_id` call), instead of guessing the produced concept. It is present on
+every valid verdict whose bundle declares a main pipe, pending signatures
+included, on the workshop as much as the console — it does not ride the views
+branch. Any malformed member omits the whole signature rather than emitting a
+partial one; the verdict is unaffected. The same thing is rendered as one line
+of the Markdown summary,
+`demo.main(document: legal.Contract, notes?: native.Text[]) -> analysis.Report[]`
+(`?` may be omitted, `[]` a list, `[N]` exactly N).
 
 The graph (`graph_spec`) and the form's per-pipe artifact pair — the IO
 contracts (`pipe_io_contracts`) and the input-form descriptor (`input_form`,
