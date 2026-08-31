@@ -414,6 +414,19 @@ describe("main pipe signature", () => {
     ]);
   });
 
+  it("reports a slot once when the descriptor names it twice", () => {
+    // A repeated field is producer drift like any other, and the ordered half
+    // would otherwise carry the name twice — a duplicated slot renders a call
+    // site that is wrong in the plausible way this module refuses to be.
+    const [document, notes, tags] = orderedInputForm["demo.main"].fields;
+    const inputForm: InputForm = {
+      "demo.main": { fields: [document, notes, document, tags] },
+    };
+    const result = validationResult({ ...orderedReport, input_form: inputForm }, true);
+
+    expect(result.structuredContent.main_pipe?.inputs).toEqual(ORDERED_INPUTS);
+  });
+
   it("projects the signature on a pending-signature verdict", () => {
     // Not runnable, so no form is advertised — but the shape is fully
     // determined before the signatures resolve, and knowing it is what lets an

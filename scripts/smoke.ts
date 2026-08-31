@@ -73,10 +73,12 @@ Write a haiku about Hello World.
 const VALID_BUNDLE_URI = "smoke/quick_start.mthds";
 
 /**
- * A second fixture, for `mthds_inputs_template` only: the canonical bundle above
- * declares no inputs, so its template is `{}` and an assertion on it would pass
- * just as happily if the projection dropped every field. This one declares one,
- * so the template check proves the field actually survives the wire.
+ * A second fixture, because the canonical bundle above declares no inputs: its
+ * template is `{}` and its signature has an empty input list, so an assertion
+ * on either would pass just as happily if the projection dropped every field.
+ * This one declares an input, so `mthds_inputs_template`'s template check and
+ * `mthds_validate`'s `main_pipe.inputs` check both prove a declared input
+ * actually survives the wire.
  */
 const INPUTS_BUNDLE = `domain      = "smoke_inputs"
 description = "pipelex-mcp smoke fixture with one declared input"
@@ -342,8 +344,8 @@ async function checkValidate(client: Client): Promise<void> {
   // The main pipe's signature — the field an agent types a call site from, and
   // a projection over a wire shape (`pipe_io_contracts`) no mocked test sees.
   // The canonical bundle declares no inputs, so only the output half proves
-  // anything here; that declared inputs survive the wire is what the second
-  // fixture's `inputs.topic` check below is for.
+  // anything here; the input half is covered by the second pass below, over a
+  // fixture that declares one.
   const mainPipe = structured.main_pipe;
   if (
     expect(
@@ -370,6 +372,55 @@ async function checkValidate(client: Client): Promise<void> {
     "the API report carried no rendered_markdown",
     `${summary.length} characters`,
   );
+
+  await checkMainPipeInputs(client);
+}
+
+/**
+ * The input half of the signature, over the fixture that declares one. It needs
+ * its own call: the canonical bundle declares no inputs, so an assertion on its
+ * empty list cannot tell a working projection from one that drops every slot —
+ * and the contract's `inputs` map is exactly the wire shape no mocked test
+ * sees. Stays under the `mthds_validate` section it belongs to.
+ */
+async function checkMainPipeInputs(client: Client): Promise<void> {
+  let result: ToolCallResult;
+  try {
+    result = await callTool(client, "mthds_validate", {
+      files: [{ content: INPUTS_BUNDLE, uri: INPUTS_BUNDLE_URI }],
+    });
+  } catch (err) {
+    fail("main_pipe.inputs call", errorMessage(err));
+    return;
+  }
+
+  if (result.isError === true) {
+    reportToolFailure("main_pipe.inputs verdict", result);
+    return;
+  }
+
+  const structured = result.structuredContent;
+  const mainPipe = isRecord(structured) ? structured.main_pipe : undefined;
+  const inputs = isRecord(mainPipe) ? mainPipe.inputs : undefined;
+  const topic = Array.isArray(inputs)
+    ? inputs.find((input) => isRecord(input) && input.name === "topic")
+    : undefined;
+
+  if (
+    expect(
+      isRecord(topic),
+      "main_pipe.inputs",
+      `the declared input did not survive into the signature: ${describe(inputs)}`,
+    ) &&
+    isRecord(topic)
+  ) {
+    expect(
+      typeof topic.concept_ref === "string" && topic.concept_ref.length > 0,
+      "main_pipe.inputs[topic].concept_ref",
+      `expected the concept the slot takes, got ${describe(topic.concept_ref)}`,
+      describe(topic.concept_ref),
+    );
+  }
 }
 
 async function checkInputsTemplate(client: Client): Promise<void> {

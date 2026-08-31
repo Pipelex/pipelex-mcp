@@ -98,6 +98,21 @@ const MULTIPLICITY_SUFFIX: Record<IOMultiplicity, (itemCount?: number) => string
   fixed: (itemCount) => `[${itemCount}]`,
 };
 
+/**
+ * Whether a caller must supply a slot carrying each marker. The three-valued
+ * vocabulary collapses the way the standard itself recommends for a consumer
+ * that only needs "may this be absent?" — the plain/force distinction is lint-
+ * and graph-facing and does not bear on a call site. A `Record` rather than a
+ * `!== "optional"` comparison for `MULTIPLICITY_SUFFIX`'s reason: a marker the
+ * standard ADDS fails the build here and forces the question to be answered,
+ * where the comparison would silently rule it required.
+ */
+const PRESENCE_IS_REQUIRED: Record<PresenceMarker, boolean> = {
+  plain: true,
+  force: true,
+  optional: false,
+};
+
 const ioMultiplicitySchema = z
   .enum(IO_MULTIPLICITIES)
   .describe(
@@ -641,7 +656,7 @@ export function mainPipeSignatureOf(
  * Names the descriptor lists but the contract does not declare are ignored,
  * and names the contract declares but the descriptor omits keep map order
  * behind them — a disagreement between the two artifacts costs ordering, never
- * an input.
+ * an input, and never a duplicated one.
  */
 function narrowInputContracts(
   value: unknown,
@@ -652,9 +667,17 @@ function narrowInputContracts(
     return undefined;
   }
   const declared = Object.keys(record);
+  // The descriptor is a producer artifact like any other, so it may name the
+  // same field twice; `Object.keys` cannot. Deduplicating (first occurrence
+  // wins, which is what `Set` keeps) is the ordering half of the same
+  // whole-signature-or-nothing rule the narrowing below enforces — a repeated
+  // slot would render `main(topic: native.Text, topic: native.Text)`, a call
+  // site wrong in exactly the plausible way a partial signature is.
   const names = [
-    ...order.filter((name) => declared.includes(name)),
-    ...declared.filter((name) => !order.includes(name)),
+    ...new Set([
+      ...order.filter((name) => declared.includes(name)),
+      ...declared.filter((name) => !order.includes(name)),
+    ]),
   ];
 
   const inputs: MainPipeInputSignature[] = [];
@@ -669,10 +692,12 @@ function narrowInputContracts(
     if (conceptRef === undefined || plurality === undefined || !isPresenceMarker(presence)) {
       return undefined;
     }
-    // The three-valued marker collapses the way the standard itself recommends
-    // for a consumer that only needs "may this be absent?" — the plain/force
-    // distinction is lint- and graph-facing, and does not bear on a call site.
-    inputs.push({ name, concept_ref: conceptRef, ...plurality, required: presence !== "optional" });
+    inputs.push({
+      name,
+      concept_ref: conceptRef,
+      ...plurality,
+      required: PRESENCE_IS_REQUIRED[presence],
+    });
   }
   return inputs;
 }
@@ -736,9 +761,12 @@ function orderedInputNames(inputForm: unknown, pipeRef: string): string[] {
 
 /**
  * The signature as one line of MTHDS-flavoured notation, e.g.
- * `demo.main(document: legal.Contract, notes?: native.Text[]) -> analysis.Report[]`:
+ * `demo.main(document: legal.Contract, notes?: native.Text, tags: native.Text[]) -> analysis.Report[2]`:
  * `?` marks an input the caller may omit (and an output a successful run may
- * resolve as a recorded absence), `[]` a variable list, `[N]` a fixed one.
+ * resolve as a recorded absence), `[]` a variable list, `[N]` a fixed one. The
+ * two never meet on an input: the standard pins a plural slot to
+ * `presence: "plain"`, so an optional list is not a shape a caller can be
+ * offered, and only the output can carry both marks.
  */
 function signatureLine(signature: MainPipeSignature): string {
   const inputs = signature.inputs

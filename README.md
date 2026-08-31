@@ -428,7 +428,7 @@ included, on the workshop as much as the console — it does not ride the views
 branch. Any malformed member omits the whole signature rather than emitting a
 partial one; the verdict is unaffected. The same thing is rendered as one line
 of the Markdown summary,
-`demo.main(document: legal.Contract, notes?: native.Text[]) -> analysis.Report[]`
+`demo.main(document: legal.Contract, notes?: native.Text, tags: native.Text[]) -> analysis.Report[2]`
 (`?` may be omitted, `[]` a list, `[N]` exactly N).
 
 The graph (`graph_spec`) and the form's per-pipe artifact pair — the IO

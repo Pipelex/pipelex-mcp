@@ -14,6 +14,8 @@ import { describe, expect, it } from "vitest";
 import {
   FIXTURE_BUNDLE,
   FIXTURE_BUNDLE_URI,
+  FIXTURE_INPUT_NAME,
+  FIXTURE_PIPE_REF,
   INVALID_BUNDLE,
   INVALID_BUNDLE_URI,
   liveApiConfig,
@@ -61,10 +63,10 @@ describe("mthds_validate (live)", () => {
     // `topic` and produces text, so both halves are asserted against what the
     // bundle actually says rather than against "something non-empty".
     const mainPipe = result.structuredContent.main_pipe;
-    expect(mainPipe?.pipe_ref).toBe("mcp_e2e_fixture.name_one_word");
+    expect(mainPipe?.pipe_ref).toBe(FIXTURE_PIPE_REF);
     expect(mainPipe?.inputs).toEqual([
       {
-        name: "topic",
+        name: FIXTURE_INPUT_NAME,
         concept_ref: "native.Text",
         multiplicity: "single",
         required: true,
@@ -75,7 +77,7 @@ describe("mthds_validate (live)", () => {
     // The rendered line is the channel a ChatGPT install with a cached tool
     // list still receives, so it must survive the wire too.
     expect(result.summary).toContain(
-      "`mcp_e2e_fixture.name_one_word(topic: native.Text) -> native.Text`",
+      `\`${FIXTURE_PIPE_REF}(${FIXTURE_INPUT_NAME}: native.Text) -> native.Text\``,
     );
     expect(JSON.stringify(result.structuredContent)).not.toContain("graph_spec");
     expect(JSON.stringify(result.structuredContent)).not.toContain("pipe_io_contracts");
