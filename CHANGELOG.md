@@ -8,6 +8,10 @@
   - *Note: this is a tool-schema change. ChatGPT caches a connector's tool list at add-time, so console users must remove and re-add the connector before results carrying `main_pipe` are accepted. The rendered summary line reaches cached installs regardless — it rides the text stream, which has no schema.*
 - **Per-environment Alpic deploy targets**: `make deploy-dev` and `make deploy-staging` ship the working tree to the Dev and Staging consoles, and `make deploy-envs` lists the project's environments with their URLs. `make deploy` still means Production and keeps its release guards (clean `main`), so the target name is now the whole decision of where a deploy goes. The two new targets restore `.alpic/project.json` from a shell `trap` — the Alpic CLI relinks that tracked file to whatever environment it deployed, and it is what `release.yml` reads to find Production.
 
+### Changed
+
+- **The live suite's by-selector legs are gated on the API, not on a date**: every `*.e2e.ts` leg that needs the platform to resolve a `method_id` or a `method_ref` server-side now asks `GET /v1/version` whether the deployment advertises `method_ref` and skips itself where it does not, replacing a row of hardcoded skips that named a checkpoint in a plan document. One suite therefore covers every environment — it exercises the selector legs where they are served and stays green where they are not — and `make test-e2e-run` now also runs a published package by address end to end, asserting the reported provenance down to the commit its tag resolved to.
+
 ## [0.13.0] - 2026-08-30
 
 ### Added

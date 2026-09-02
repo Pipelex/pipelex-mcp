@@ -44,6 +44,51 @@ export function liveClient(): PipelexApiClient {
 }
 
 /**
+ * The extension names the configured API advertises on `GET /v1/version`.
+ *
+ * This is the gate the by-selector legs hang on, and it exists because the
+ * hardcoded `it.skip("… (gated)")` that preceded it was a gate nobody re-reads:
+ * it named a checkpoint in a plan document, so the day an environment started
+ * serving the surface the tests stayed dark and said nothing. Asking the API
+ * instead means one suite covers every environment — it exercises the legs
+ * where they are served and skips them where they are not, and the skip line
+ * itself is then a live statement about the deployment rather than a stale
+ * comment.
+ *
+ * `method_ref` is the marker to gate on for the whole three-selector surface:
+ * the platform build that forwards an address to the runner is the same one
+ * that started accepting selector bodies on the tooling routes, so an API
+ * advertising it serves `method_ref` AND `method_id` on validate, build and
+ * codegen. (An environment on the previous build advertises `[runs,
+ * method_id]` and serves selector bodies on neither.)
+ *
+ * One `/v1/version` read per suite process, cached — including the negative,
+ * so a suite whose legs are all skipped still costs exactly one request.
+ */
+export async function apiAdvertisesExtension(name: string): Promise<boolean> {
+  cachedExtensions ??= readAdvertisedExtensions();
+  return (await cachedExtensions).has(name);
+}
+
+let cachedExtensions: Promise<Set<string>> | undefined;
+
+/**
+ * `extensions` is an implementation extension field on `VersionInfo`, so it
+ * arrives through the untyped index signature: narrow what actually came back
+ * rather than casting, or a reshaped field would gate the suite silently open
+ * or silently shut.
+ */
+async function readAdvertisedExtensions(): Promise<Set<string>> {
+  const info: Record<string, unknown> = await liveClient().version();
+  const advertised = info.extensions;
+  return new Set(
+    Array.isArray(advertised)
+      ? advertised.filter((item): item is string => typeof item === "string")
+      : [],
+  );
+}
+
+/**
  * The durable fixture method's name, and the whole reason it is durable: the
  * SDK exposes `createMethod` / `updateMethod` and NO delete of any kind, so a
  * create-per-run suite would leak a method into the organization on every run.

@@ -20,6 +20,7 @@ import {
   FIXTURE_PIPE_REF,
   INVALID_BUNDLE,
   INVALID_BUNDLE_URI,
+  apiAdvertisesExtension,
   liveApiConfig,
   liveClient,
 } from "./e2e-support.js";
@@ -28,6 +29,9 @@ import type { ValidationContext } from "./validate.js";
 
 // No `client` seam and no `resolver`: the real client, inline files only.
 const context: ValidationContext = liveApiConfig();
+
+/** Does this deployment resolve `method_id` / `method_ref` server-side? */
+const SERVES_SELECTORS = await apiAdvertisesExtension("method_ref");
 
 describe("mthds_validate (live)", () => {
   it("returns a runnable verdict, a Markdown summary, and a graph on the view-only channel", async () => {
@@ -162,16 +166,14 @@ describe("mthds_validate (live)", () => {
 });
 
 /**
- * GATED on the hosted deploy — Checkpoint 3 of `wip/addressing-methods/plan.md`.
- *
- * `mthds_validate`'s `method_id` and `method_ref` legs are server pass-throughs
- * (`POST /v1/validate` with a selector body), and api.pipelex.com does not
- * serve selector bodies until the platform deploy that checkpoint gates on has
- * happened. Un-skip once it lands; against a current hosted API these calls
- * come back as request-shape errors, which would fail the suite for a reason
- * that is not drift.
+ * GATED on the live API, not on a date: `mthds_validate`'s `method_id` and
+ * `method_ref` legs are server pass-throughs (`POST /v1/validate` with a
+ * selector body), which an environment on the pre-selector platform build
+ * answers as a request-shape error — a failure that is not drift. The probe
+ * asks `/v1/version` whether this deployment serves them; see
+ * `apiAdvertisesExtension`.
  */
-describe.skip("mthds_validate by selector (live, gated)", () => {
+describe.skipIf(!SERVES_SELECTORS)("mthds_validate by selector (live)", () => {
   it("validates a stored method from its id alone (server-side resolution)", async () => {
     const { fixtureMethodId } = await import("./e2e-support.js");
     const result = await validateMthds({ method_id: await fixtureMethodId() }, context);

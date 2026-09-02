@@ -18,10 +18,27 @@ import {
   FIXTURE_BUNDLE_URI,
   FIXTURE_INPUT_NAME,
   FIXTURE_PIPE_REF,
+  apiAdvertisesExtension,
   liveApiConfig,
 } from "./e2e-support.js";
 
 const context: InputsContext = liveApiConfig();
+
+/** Does this deployment resolve `method_ref` server-side on the build routes? */
+const SERVES_SELECTORS = await apiAdvertisesExtension("method_ref");
+
+/**
+ * The published package the by-address leg projects, pinned at a tag.
+ *
+ * Deliberately a package whose BUNDLE declares `main_pipe`. The build route
+ * defaults its entry pipe from the closure alone and does not read the
+ * package manifest, so `documents@v0.1.0` — whose `main_pipe` lives only in
+ * `METHODS.toml` — is refused here for lack of one while `POST /v1/start`
+ * accepts the very same address with no `pipe_ref` at all. That asymmetry is a
+ * server-side defect, filed against the runner; it is not this suite's to
+ * assert, so the fixture avoids it rather than encoding it.
+ */
+const PUBLISHED_METHOD_REF = "github.com/Pipelex/methods/text_stats@v0.1.1";
 
 const fixtureFiles = [{ content: FIXTURE_BUNDLE, uri: FIXTURE_BUNDLE_URI }];
 
@@ -97,18 +114,22 @@ describe("mthds_inputs_template (live)", () => {
     expect(error?.retryable).toBe(false);
   });
 
-  // GATED on the hosted deploy — Checkpoint 3 of `wip/addressing-methods/plan.md`.
-  // `method_ref` rides the build envelope (`POST /v1/build/inputs`) and is
-  // resolved server-side; api.pipelex.com does not serve it until that deploy,
-  // so running this today fails for a reason that is not drift. Un-skip once it
-  // lands.
-  it.skip("projects a published method's template by address (gated)", async () => {
-    const result = await buildMthdsInputs(
-      { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
-      context,
-    );
+  // GATED on the live API, not on a date: `method_ref` rides the build envelope
+  // (`POST /v1/build/inputs`) and is resolved server-side, which an environment
+  // on the pre-selector platform build answers as a request-shape error — a
+  // failure that is not drift. See `apiAdvertisesExtension`.
+  //
+  // The package is pinned at a tag so the assertions below can be exact: a
+  // published address is only a stable fixture at an immutable ref.
+  it.skipIf(!SERVES_SELECTORS)("projects a published method's template by address", async () => {
+    const result = await buildMthdsInputs({ method_ref: PUBLISHED_METHOD_REF }, context);
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);
+    // Named, not merely non-empty: the entry pipe came from the package rather
+    // than from anything this repo sent, and its declared input survived the
+    // projection — a template that lost every field would pass a bare `is_valid`.
+    expect(result.structuredContent.pipe_ref).toBe("text_stats.analyze_text");
+    expect(Object.keys(result.structuredContent.inputs ?? {})).toEqual(["text"]);
   });
 });

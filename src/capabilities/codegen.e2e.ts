@@ -26,11 +26,15 @@ import {
   FIXTURE_BUNDLE_URI,
   INVALID_BUNDLE,
   INVALID_BUNDLE_URI,
+  apiAdvertisesExtension,
   liveApiConfig,
 } from "./e2e-support.js";
 
 // No `client` seam and no `resolver`: the real client, inline files only.
 const context: CodegenContext = liveApiConfig();
+
+/** Does this deployment resolve `method_id` / `method_ref` server-side? */
+const SERVES_SELECTORS = await apiAdvertisesExtension("method_ref");
 
 const fixtureFiles = [{ content: FIXTURE_BUNDLE, uri: FIXTURE_BUNDLE_URI }];
 
@@ -219,26 +223,14 @@ describe("mthds_codegen output_dir (live)", () => {
 });
 
 /**
- * GATED on the hosted deploy — Checkpoint 3 of `wip/addressing-methods/plan.md`.
- *
- * Both selectors are server pass-throughs on `POST /v1/codegen` (the runner
- * resolves the address, the hosted platform resolves the id), and the hosted
- * API does not serve selector bodies until the platform deploy that checkpoint
- * gates on has happened. Un-skip once it lands; against a hosted API that
- * predates it these calls come back as request-shape errors, which would fail
- * the suite for a reason that is not drift.
- *
- * Probed on 2026-08-29 to keep this gate honest. The local stack already
- * serves both, so the capability's mapping is exercised there by hand: an
- * address returns a stamped `is_valid` report, and so does a catalog id. The
- * hosted API is the half that is behind — `method_ref` answers `501`
- * `MethodRefNotSupported` ("no method registry is wired"), and `method_id` is
- * not yet in its request schema at all, so it answers `422` "provide exactly
- * one of `files` or `method_ref`". That second body is the one to re-probe
- * before un-skipping: it means the hosted route rejects the field rather than
- * failing to resolve it.
+ * GATED on the live API, not on a date: both selectors are server pass-throughs
+ * on `POST /v1/codegen` (the runner resolves the address, the hosted platform
+ * resolves the id), which an environment on the pre-selector platform build
+ * answers as a request-shape error — a failure that is not drift. The probe
+ * asks `/v1/version` whether this deployment serves them; see
+ * `apiAdvertisesExtension`.
  */
-describe.skip("mthds_codegen by selector (live, gated)", () => {
+describe.skipIf(!SERVES_SELECTORS)("mthds_codegen by selector (live)", () => {
   it("generates from a stored method by id alone (server-side resolution)", async () => {
     const { fixtureMethodId } = await import("./e2e-support.js");
     const result = await generateMthdsCode(

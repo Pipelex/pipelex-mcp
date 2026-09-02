@@ -21,6 +21,7 @@ import {
   FIXTURE_BUNDLE,
   FIXTURE_BUNDLE_URI,
   FIXTURE_INPUT_NAME,
+  apiAdvertisesExtension,
   fixtureMethodId,
   liveApiConfig,
 } from "./e2e-support.js";
@@ -28,6 +29,23 @@ import { getMthdsRunResults, getMthdsRunStatus, startMthdsRun } from "./run.js";
 import type { RunContext } from "./run.js";
 
 const context: RunContext = liveApiConfig();
+
+/** Does this deployment resolve `method_ref` server-side on `/v1/start`? */
+const SERVES_SELECTORS = await apiAdvertisesExtension("method_ref");
+
+/**
+ * The published package the by-address legs use, pinned at a tag: a public
+ * library method whose pipe is a sandboxed Python function, so executing it
+ * proves the fetch-and-run path without buying a model call.
+ */
+const PUBLISHED_METHOD_REF = "github.com/Pipelex/methods/text_stats@v0.1.1";
+
+/** The commit `v0.1.1` points at — a tag resolves to it, and the run says so. */
+const PUBLISHED_METHOD_COMMIT = "af0da07ac83e30e58443c88ec9ed4174131800a1";
+
+/** Long enough that the report has something to count. */
+const PUBLISHED_METHOD_INPUT =
+  "A method is a set of pipes declared in plain text files. Some pipes call a language model, and some run deterministic Python functions in a sandbox. How many sentences is that?";
 
 /** A syntactically plausible id that no run answers to. */
 const UNKNOWN_RUN_ID = "00000000-0000-4000-8000-000000000000";
@@ -90,24 +108,26 @@ describe("run lifecycle reads (live, free)", () => {
     expect(result.structuredContent.run_id).toBeUndefined();
   });
 
-  // GATED on the hosted deploy — Checkpoint 3 of `wip/addressing-methods/plan.md`.
-  // `method_ref` on `/v1/start` needs the platform to forward it to the runner
-  // (run-by-address Phase 3); until that deploy, api.pipelex.com rejects the
-  // field as request shape, which would fail this for a reason that is not
-  // drift. Un-skip once it lands: a bad address on a live platform is a 404/422
-  // refused before anything executes, so the leg stays free.
-  it.skip("reaches the platform with method_ref as the run source, and is refused on an unknown address (gated)", async () => {
-    const result = await startMthdsRun(
-      { method_ref: "github.com/Pipelex/methods/does-not-exist@v0.0.0" },
-      context,
-    );
+  // GATED on the live API, not on a date: `method_ref` on `/v1/start` needs the
+  // platform to forward it to the runner, and an environment on the
+  // pre-selector build rejects the field as request shape — a failure that is
+  // not drift. See `apiAdvertisesExtension`. The leg stays free of inference
+  // credit either way: a bad address is refused before anything executes.
+  it.skipIf(!SERVES_SELECTORS)(
+    "reaches the platform with method_ref as the run source, and is refused on an unknown address",
+    async () => {
+      const result = await startMthdsRun(
+        { method_ref: "github.com/Pipelex/methods/does-not-exist@v0.0.0" },
+        context,
+      );
 
-    expect(result.structuredContent.status).toBe("error");
-    const error = result.structuredContent.errors?.[0];
-    expect(error?.class).toBe("input_domain");
-    expect(error?.location).toBe("method_ref");
-    expect(result.structuredContent.run_id).toBeUndefined();
-  });
+      expect(result.structuredContent.status).toBe("error");
+      const error = result.structuredContent.errors?.[0];
+      expect(error?.class).toBe("input_domain");
+      expect(error?.location).toBe("method_ref");
+      expect(result.structuredContent.run_id).toBeUndefined();
+    },
+  );
 });
 
 /**
@@ -193,4 +213,47 @@ describe.runIf(RUN_ENABLED)("mthds_run (live, SPENDS INFERENCE CREDIT)", () => {
     // differently: `is_terminal` false means the poll deadline expired.
     expect(status.structuredContent.run_status).toBe("COMPLETED");
   });
+
+  /**
+   * The by-address leg, executed rather than merely refused — this is the one
+   * assertion that a published package really runs on the platform, and that
+   * the provenance an agent explains the run with is the commit that ran.
+   *
+   * It sits in the paid tier even though the package it runs is deterministic
+   * (a PipeFunc method, no model call, no inference credit): the tier is about
+   * EXECUTING, not about the bill, and `make test-e2e` stays a suite that
+   * starts nothing. The package is pinned at a tag, so the resolved commit is a
+   * constant the assertion can name.
+   */
+  it.skipIf(!SERVES_SELECTORS)(
+    "runs a published method by address, and reports the commit it resolved",
+    async () => {
+      const started = await startMthdsRun(
+        { method_ref: PUBLISHED_METHOD_REF, inputs: { text: PUBLISHED_METHOD_INPUT } },
+        context,
+      );
+
+      expect(started.structuredContent.status).toBe("ok");
+      const runId = started.structuredContent.run_id;
+      expect(typeof runId).toBe("string");
+      if (typeof runId !== "string") return;
+
+      // Provenance is what keeps a run explainable when a tag moves, so it is
+      // asserted down to the SHA the tag pointed at — not merely present.
+      expect(started.structuredContent.method_provenance).toEqual({
+        address: "github.com/Pipelex/methods/text_stats",
+        tag: "v0.1.1",
+        commit_sha: PUBLISHED_METHOD_COMMIT,
+      });
+
+      const status = await pollToTerminal(runId);
+      expect(status.structuredContent.is_terminal).toBe(true);
+      // Terminal is not success — see the by-id leg above.
+      expect(status.structuredContent.run_status).toBe("COMPLETED");
+
+      const results = await getMthdsRunResults({ run_id: runId }, context);
+      expect(results.structuredContent.state).toBe("completed");
+      expect(results.structuredContent.truncated).toBe(false);
+    },
+  );
 });
