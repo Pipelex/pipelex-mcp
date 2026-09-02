@@ -20,6 +20,7 @@ import {
   FIXTURE_PIPE_REF,
   INVALID_BUNDLE,
   INVALID_BUNDLE_URI,
+  apiAdvertisesExtension,
   liveApiConfig,
   liveClient,
 } from "./e2e-support.js";
@@ -28,6 +29,9 @@ import type { ValidationContext } from "./validate.js";
 
 // No `client` seam and no `resolver`: the real client, inline files only.
 const context: ValidationContext = liveApiConfig();
+
+/** Does this deployment resolve `method_id` / `method_ref` server-side? */
+const SERVES_SELECTORS = await apiAdvertisesExtension("method_ref");
 
 describe("mthds_validate (live)", () => {
   it("returns a runnable verdict, a Markdown summary, and a graph on the view-only channel", async () => {
@@ -162,16 +166,14 @@ describe("mthds_validate (live)", () => {
 });
 
 /**
- * GATED on the hosted deploy — Checkpoint 3 of `wip/addressing-methods/plan.md`.
- *
- * `mthds_validate`'s `method_id` and `method_ref` legs are server pass-throughs
- * (`POST /v1/validate` with a selector body), and api.pipelex.com does not
- * serve selector bodies until the platform deploy that checkpoint gates on has
- * happened. Un-skip once it lands; against a current hosted API these calls
- * come back as request-shape errors, which would fail the suite for a reason
- * that is not drift.
+ * GATED on the live API, not on a date: `mthds_validate`'s `method_id` and
+ * `method_ref` legs are server pass-throughs (`POST /v1/validate` with a
+ * selector body), which an environment on the pre-selector platform build
+ * answers as a request-shape error — a failure that is not drift. The probe
+ * asks `/v1/version` whether this deployment serves them; see
+ * `apiAdvertisesExtension`.
  */
-describe.skip("mthds_validate by selector (live, gated)", () => {
+describe.skipIf(!SERVES_SELECTORS)("mthds_validate by selector (live)", () => {
   it("validates a stored method from its id alone (server-side resolution)", async () => {
     const { fixtureMethodId } = await import("./e2e-support.js");
     const result = await validateMthds({ method_id: await fixtureMethodId() }, context);
@@ -179,8 +181,19 @@ describe.skip("mthds_validate by selector (live, gated)", () => {
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);
     expect(result.structuredContent.is_runnable).toBe(true);
+    // Names the fixture, because "a valid verdict" is what ANY method returns:
+    // the specific failure of a server-side id resolver is resolving the WRONG
+    // method, and a verdict alone cannot see it.
+    expect(result.structuredContent.main_pipe?.pipe_ref).toBe(FIXTURE_PIPE_REF);
   });
 
+  // Deliberately NOT the shared `PUBLISHED_METHOD_REF`, and do not "harmonize"
+  // it onto one: `/v1/validate` resolves an address through `fetched_method_source`,
+  // which applies the execution-locus gate, so a fetched package shipping ANY `.py`
+  // is a 403 `CustomCodeRequiresSandbox` on a deployment that is not sandbox-hosted.
+  // `text_stats` ships `text_stats_funcs.py`; `documents` is Python-free. The other
+  // suites reach the tooling routes through `fetch_method_mthds_files`, which does
+  // not apply that gate, which is why they can share the constant and this cannot.
   it("validates a published method by address (server-side git resolution)", async () => {
     const result = await validateMthds(
       { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
@@ -189,5 +202,16 @@ describe.skip("mthds_validate by selector (live, gated)", () => {
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);
+    // The package names itself, and this is the only channel that says so here:
+    // `documents` declares no bundle `main_pipe` (its manifest carries it, and
+    // /v1/validate does not read manifests), so `main_pipe` is absent by design
+    // and the IO contracts are what prove the server fetched THIS address
+    // rather than serving any other valid source.
+    const contractRefs = Object.keys(result.pipeIoContracts ?? {});
+    expect(contractRefs.length).toBeGreaterThan(0);
+    expect(contractRefs).toContain("documents.extract_document_markdown");
+    for (const ref of contractRefs) {
+      expect(ref.startsWith("documents.")).toBe(true);
+    }
   });
 });
