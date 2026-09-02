@@ -62,8 +62,10 @@ export function liveClient(): PipelexApiClient {
  * codegen. (An environment on the previous build advertises `[runs,
  * method_id]` and serves selector bodies on neither.)
  *
- * One `/v1/version` read per suite process, cached — including the negative,
- * so a suite whose legs are all skipped still costs exactly one request.
+ * Cached per module instance, the negative included, so repeated asks inside
+ * one file cost one request. Vitest isolates test files, so a full
+ * `make test-e2e` issues one `/v1/version` read per suite file that asks —
+ * not one for the whole run.
  */
 export async function apiAdvertisesExtension(name: string): Promise<boolean> {
   cachedExtensions ??= readAdvertisedExtensions();
@@ -72,21 +74,112 @@ export async function apiAdvertisesExtension(name: string): Promise<boolean> {
 
 let cachedExtensions: Promise<Set<string>> | undefined;
 
+/** What `implementation` a hosted deployment calls itself — see the note below. */
+const HOSTED_IMPLEMENTATION = "pipelex-hosted";
+
+/**
+ * The extension every hosted deployment has advertised since before the
+ * addressing campaign, and therefore the one safe to treat as a postcondition
+ * rather than as a capability under test.
+ */
+const BASELINE_EXTENSION = "runs";
+
 /**
  * `extensions` is an implementation extension field on `VersionInfo`, so it
- * arrives through the untyped index signature: narrow what actually came back
- * rather than casting, or a reshaped field would gate the suite silently open
- * or silently shut.
+ * arrives through the untyped index signature and nothing types it anywhere:
+ * a rename breaks no build in any repo. That makes the shape a thing to ASSERT,
+ * not merely to narrow — because every unexpected shape reduces to "advertises
+ * nothing", which is indistinguishable from a deployment that legitimately
+ * serves no selectors, and the suite would skip its way to green through the
+ * exact wire drift it exists to catch.
+ *
+ * So the deployment says which rules apply. A hosted platform declares
+ * `extensions` unconditionally (it is a `list[str]` with a list default, and it
+ * always contains `runs`), so on a hosted `implementation` an absent, non-array
+ * or `runs`-less value is drift and throws. A bare runner declares no
+ * `extensions` at all — the protocol's documented "protocol only" answer — so
+ * there its absence is a fact about the runner and yields an empty set, while a
+ * malformed value still throws.
  */
 async function readAdvertisedExtensions(): Promise<Set<string>> {
   const info: Record<string, unknown> = await liveClient().version();
   const advertised = info.extensions;
-  return new Set(
-    Array.isArray(advertised)
-      ? advertised.filter((item): item is string => typeof item === "string")
-      : [],
-  );
+  const isHosted = info.implementation === HOSTED_IMPLEMENTATION;
+
+  if (advertised === undefined) {
+    if (isHosted) {
+      throw new Error(
+        `${HOSTED_IMPLEMENTATION} answered GET /v1/version with no \`extensions\` field. A hosted ` +
+          "deployment always declares one, so the field has been renamed or dropped — the probe cannot " +
+          "tell a deployment that serves the selectors from one that does not, and every by-selector leg " +
+          "would skip silently. Fix the probe against the new shape rather than letting the suite go green.",
+      );
+    }
+    return new Set();
+  }
+
+  if (!Array.isArray(advertised) || advertised.some((item) => typeof item !== "string")) {
+    throw new Error(
+      "GET /v1/version answered with an `extensions` field that is not an array of strings " +
+        `(got ${JSON.stringify(advertised)}). The wire shape changed; the by-selector legs would skip ` +
+        "silently rather than report it.",
+    );
+  }
+
+  const parsed = new Set(advertised as string[]);
+  if (isHosted && !parsed.has(BASELINE_EXTENSION)) {
+    throw new Error(
+      `${HOSTED_IMPLEMENTATION} advertises ${JSON.stringify(advertised)}, which omits the baseline ` +
+        `\`${BASELINE_EXTENSION}\` extension. The contents of the list have drifted, so an absent ` +
+        "`method_ref` means nothing — a skip here would be a statement about the probe, not the deployment.",
+    );
+  }
+  return parsed;
 }
+
+/**
+ * The published package the by-address legs use, pinned at a tag.
+ *
+ * One address, shared, because three suites submit it and a tag bump that
+ * reached two of them would be worse than no pin at all. A tag rather than a
+ * branch because the address grammar accepts nothing else, and a package
+ * whose BUNDLE declares `main_pipe` so a template-by-address leg exercises the
+ * projection rather than the deployment (a package declaring it only in
+ * `METHODS.toml` — `documents@v0.1.0` — is refused a template by a deployment
+ * whose pin predates `pipelex-api` 26c4eee, the commit that taught the build
+ * routes to read the manifest; `L-260902-3b8971` moves that pin).
+ *
+ * NOT usable from `validate.e2e.ts`: this package ships `text_stats_funcs.py`,
+ * and `/v1/validate`'s address path applies the execution-locus gate, so a
+ * fetched package carrying Python is a 403 there on any deployment that is not
+ * sandbox-hosted. That leg keeps its own Python-free address on purpose.
+ */
+export const PUBLISHED_METHOD_REF = "github.com/Pipelex/methods/text_stats@v0.1.1";
+
+/** The commit `v0.1.1` points at — a tag resolves to it, and a run says so. */
+export const PUBLISHED_METHOD_COMMIT = "af0da07ac83e30e58443c88ec9ed4174131800a1";
+
+/** The pipe this package's bundle declares, qualified. */
+export const PUBLISHED_METHOD_PIPE_REF = "text_stats.analyze_text";
+
+/** The one input that pipe declares. */
+export const PUBLISHED_METHOD_INPUT_NAME = "text";
+
+/** Long enough that the report has something to count. */
+export const PUBLISHED_METHOD_INPUT =
+  "A method is a set of pipes declared in plain text files. Some pipes call a language model, and some run deterministic Python functions in a sandbox. How many sentences is that?";
+
+/**
+ * What the package's PipeFunc counts in {@link PUBLISHED_METHOD_INPUT}.
+ *
+ * The pipe is a pure function, so these are constants rather than a range —
+ * which is what lets a by-address run assert that the RIGHT pipe ran on the
+ * RIGHT input, instead of merely that something terminal came back. Change the
+ * input and these change with it; that they must be edited together is the
+ * point, not an inconvenience.
+ */
+export const PUBLISHED_METHOD_EXPECTED_WORDS = 32;
+export const PUBLISHED_METHOD_EXPECTED_SENTENCES = 3;
 
 /**
  * The durable fixture method's name, and the whole reason it is durable: the

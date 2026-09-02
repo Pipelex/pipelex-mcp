@@ -21,6 +21,12 @@ import {
   FIXTURE_BUNDLE,
   FIXTURE_BUNDLE_URI,
   FIXTURE_INPUT_NAME,
+  PUBLISHED_METHOD_COMMIT,
+  PUBLISHED_METHOD_EXPECTED_SENTENCES,
+  PUBLISHED_METHOD_EXPECTED_WORDS,
+  PUBLISHED_METHOD_INPUT,
+  PUBLISHED_METHOD_INPUT_NAME,
+  PUBLISHED_METHOD_REF,
   apiAdvertisesExtension,
   fixtureMethodId,
   liveApiConfig,
@@ -32,20 +38,6 @@ const context: RunContext = liveApiConfig();
 
 /** Does this deployment resolve `method_ref` server-side on `/v1/start`? */
 const SERVES_SELECTORS = await apiAdvertisesExtension("method_ref");
-
-/**
- * The published package the by-address legs use, pinned at a tag: a public
- * library method whose pipe is a sandboxed Python function, so executing it
- * proves the fetch-and-run path without buying a model call.
- */
-const PUBLISHED_METHOD_REF = "github.com/Pipelex/methods/text_stats@v0.1.1";
-
-/** The commit `v0.1.1` points at — a tag resolves to it, and the run says so. */
-const PUBLISHED_METHOD_COMMIT = "af0da07ac83e30e58443c88ec9ed4174131800a1";
-
-/** Long enough that the report has something to count. */
-const PUBLISHED_METHOD_INPUT =
-  "A method is a set of pipes declared in plain text files. Some pipes call a language model, and some run deterministic Python functions in a sandbox. How many sentences is that?";
 
 /** A syntactically plausible id that no run answers to. */
 const UNKNOWN_RUN_ID = "00000000-0000-4000-8000-000000000000";
@@ -229,7 +221,10 @@ describe.runIf(RUN_ENABLED)("mthds_run (live, SPENDS INFERENCE CREDIT)", () => {
     "runs a published method by address, and reports the commit it resolved",
     async () => {
       const started = await startMthdsRun(
-        { method_ref: PUBLISHED_METHOD_REF, inputs: { text: PUBLISHED_METHOD_INPUT } },
+        {
+          method_ref: PUBLISHED_METHOD_REF,
+          inputs: { [PUBLISHED_METHOD_INPUT_NAME]: PUBLISHED_METHOD_INPUT },
+        },
         context,
       );
 
@@ -254,6 +249,15 @@ describe.runIf(RUN_ENABLED)("mthds_run (live, SPENDS INFERENCE CREDIT)", () => {
       const results = await getMthdsRunResults({ run_id: runId }, context);
       expect(results.structuredContent.state).toBe("completed");
       expect(results.structuredContent.truncated).toBe(false);
+
+      // Read the output, not just the envelope. COMPLETED says the platform
+      // finished something; it does not say the right pipe ran on the input we
+      // sent. The pipe is a pure function, so its report is exact — a run that
+      // executed a different pipe, or dropped the input, cannot produce these.
+      const mainStuff = results.structuredContent.main_stuff as { text?: string } | undefined;
+      expect(typeof mainStuff?.text).toBe("string");
+      expect(mainStuff?.text).toContain(`| Words | ${PUBLISHED_METHOD_EXPECTED_WORDS} |`);
+      expect(mainStuff?.text).toContain(`| Sentences | ${PUBLISHED_METHOD_EXPECTED_SENTENCES} |`);
     },
   );
 });

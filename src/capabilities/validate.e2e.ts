@@ -181,8 +181,19 @@ describe.skipIf(!SERVES_SELECTORS)("mthds_validate by selector (live)", () => {
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);
     expect(result.structuredContent.is_runnable).toBe(true);
+    // Names the fixture, because "a valid verdict" is what ANY method returns:
+    // the specific failure of a server-side id resolver is resolving the WRONG
+    // method, and a verdict alone cannot see it.
+    expect(result.structuredContent.main_pipe?.pipe_ref).toBe(FIXTURE_PIPE_REF);
   });
 
+  // Deliberately NOT the shared `PUBLISHED_METHOD_REF`, and do not "harmonize"
+  // it onto one: `/v1/validate` resolves an address through `fetched_method_source`,
+  // which applies the execution-locus gate, so a fetched package shipping ANY `.py`
+  // is a 403 `CustomCodeRequiresSandbox` on a deployment that is not sandbox-hosted.
+  // `text_stats` ships `text_stats_funcs.py`; `documents` is Python-free. The other
+  // suites reach the tooling routes through `fetch_method_mthds_files`, which does
+  // not apply that gate, which is why they can share the constant and this cannot.
   it("validates a published method by address (server-side git resolution)", async () => {
     const result = await validateMthds(
       { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
@@ -191,5 +202,16 @@ describe.skipIf(!SERVES_SELECTORS)("mthds_validate by selector (live)", () => {
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);
+    // The package names itself, and this is the only channel that says so here:
+    // `documents` declares no bundle `main_pipe` (its manifest carries it, and
+    // /v1/validate does not read manifests), so `main_pipe` is absent by design
+    // and the IO contracts are what prove the server fetched THIS address
+    // rather than serving any other valid source.
+    const contractRefs = Object.keys(result.pipeIoContracts ?? {});
+    expect(contractRefs.length).toBeGreaterThan(0);
+    expect(contractRefs).toContain("documents.extract_document_markdown");
+    for (const ref of contractRefs) {
+      expect(ref.startsWith("documents.")).toBe(true);
+    }
   });
 });

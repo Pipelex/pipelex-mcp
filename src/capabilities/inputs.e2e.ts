@@ -18,6 +18,9 @@ import {
   FIXTURE_BUNDLE_URI,
   FIXTURE_INPUT_NAME,
   FIXTURE_PIPE_REF,
+  PUBLISHED_METHOD_INPUT_NAME,
+  PUBLISHED_METHOD_PIPE_REF,
+  PUBLISHED_METHOD_REF,
   apiAdvertisesExtension,
   liveApiConfig,
 } from "./e2e-support.js";
@@ -26,19 +29,6 @@ const context: InputsContext = liveApiConfig();
 
 /** Does this deployment resolve `method_ref` server-side on the build routes? */
 const SERVES_SELECTORS = await apiAdvertisesExtension("method_ref");
-
-/**
- * The published package the by-address leg projects, pinned at a tag.
- *
- * Deliberately a package whose BUNDLE declares `main_pipe`. The build route
- * defaults its entry pipe from the closure alone and does not read the
- * package manifest, so `documents@v0.1.0` — whose `main_pipe` lives only in
- * `METHODS.toml` — is refused here for lack of one while `POST /v1/start`
- * accepts the very same address with no `pipe_ref` at all. That asymmetry is a
- * server-side defect, filed against the runner; it is not this suite's to
- * assert, so the fixture avoids it rather than encoding it.
- */
-const PUBLISHED_METHOD_REF = "github.com/Pipelex/methods/text_stats@v0.1.1";
 
 const fixtureFiles = [{ content: FIXTURE_BUNDLE, uri: FIXTURE_BUNDLE_URI }];
 
@@ -129,7 +119,9 @@ describe("mthds_inputs_template (live)", () => {
     // Named, not merely non-empty: the entry pipe came from the package rather
     // than from anything this repo sent, and its declared input survived the
     // projection — a template that lost every field would pass a bare `is_valid`.
-    expect(result.structuredContent.pipe_ref).toBe("text_stats.analyze_text");
-    expect(Object.keys(result.structuredContent.inputs ?? {})).toEqual(["text"]);
+    expect(result.structuredContent.pipe_ref).toBe(PUBLISHED_METHOD_PIPE_REF);
+    expect(Object.keys(result.structuredContent.inputs ?? {})).toEqual([
+      PUBLISHED_METHOD_INPUT_NAME,
+    ]);
   });
 });

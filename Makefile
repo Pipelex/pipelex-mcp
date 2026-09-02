@@ -140,12 +140,20 @@ agent-test:
 # The target and its key are resolved ONCE here and exported, so the URL these
 # targets preflight is the URL the suites call. Precedence follows the dotenv
 # convention: the shell environment (or a `make smoke PIPELEX_BASE_URL=...`
-# override) wins, then `.env`, then the hosted API. `?=` is what enforces it — it
-# only reaches for `.env` when the variable is not already set, and Node's
+# override) wins, then `.env`, then the default below. `?=` is what enforces it —
+# it only reaches for `.env` when the variable is not already set, and Node's
 # `--env-file` in the npm script cannot override an inherited variable either.
+#
+# The default is DEV, not production, and that is a statement about what these
+# targets are for. The by-selector legs gate on what the deployment advertises,
+# and production does not advertise `method_ref` — so defaulting there made the
+# suite's headline coverage skip on every default invocation, indefinitely.
+# Dev is the hosted plane the addressing campaign ships to. Note this is the
+# LIVE TARGETS' default only: the server's own `PIPELEX_BASE_URL` default (in
+# `buildApiConfig`) is still production, which is what a workshop user gets.
 DOTENV = set -a; [ -f .env ] && . ./.env; set +a;
 LIVE_TARGETS = smoke test-e2e test-e2e-run seed-e2e-fixture live-preflight
-$(LIVE_TARGETS): export PIPELEX_BASE_URL ?= $(shell $(DOTENV) printf '%s' "$${PIPELEX_BASE_URL:-https://api.pipelex.com}")
+$(LIVE_TARGETS): export PIPELEX_BASE_URL ?= $(shell $(DOTENV) printf '%s' "$${PIPELEX_BASE_URL:-https://api-dev.pipelex.com}")
 $(LIVE_TARGETS): export PIPELEX_API_KEY ?= $(shell $(DOTENV) printf '%s' "$$PIPELEX_API_KEY")
 
 # Trailing slashes are stripped the way the SDK normalizes `baseUrl`, so a value

@@ -26,6 +26,7 @@ import {
   FIXTURE_BUNDLE_URI,
   INVALID_BUNDLE,
   INVALID_BUNDLE_URI,
+  PUBLISHED_METHOD_REF,
   apiAdvertisesExtension,
   liveApiConfig,
 } from "./e2e-support.js";
@@ -231,25 +232,45 @@ describe("mthds_codegen output_dir (live)", () => {
  * `apiAdvertisesExtension`.
  */
 describe.skipIf(!SERVES_SELECTORS)("mthds_codegen by selector (live)", () => {
+  // `crate_fingerprint` is the ONLY thing that distinguishes these two legs, and
+  // that is not a stylistic preference. Both methods project to byte-identical
+  // `types.ts` and `binder.ts` — each declares only native `Text`, so the emitted
+  // code carries no name from either method. Asserting on artifact paths or
+  // content therefore cannot tell a correctly-resolved selector from a server
+  // that ignored it, which is exactly the failure a server-side resolver has.
   it("generates from a stored method by id alone (server-side resolution)", async () => {
     const { fixtureMethodId } = await import("./e2e-support.js");
-    const result = await generateMthdsCode(
-      { method_id: await fixtureMethodId(), target: "ts-zod" },
-      context,
-    );
+    const [fromFiles, fromId] = await Promise.all([
+      generateMthdsCode({ files: fixtureFiles, target: "ts-zod" }, context),
+      generateMthdsCode({ method_id: await fixtureMethodId(), target: "ts-zod" }, context),
+    ]);
 
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.is_valid).toBe(true);
-    expect(result.structuredContent.lock?.filename).toBe("codegen.lock");
+    expect(fromId.structuredContent.status).toBe("ok");
+    expect(fromId.structuredContent.is_valid).toBe(true);
+    expect(fromId.structuredContent.lock?.filename).toBe("codegen.lock");
+    // Derived, never hardcoded: the stored fixture IS `FIXTURE_BUNDLE`, so the
+    // id must resolve to the same crate the files do. A stale stored method or a
+    // resolver that returned someone else's method breaks this and nothing else.
+    expect(typeof fromFiles.structuredContent.crate_fingerprint).toBe("string");
+    expect(fromId.structuredContent.crate_fingerprint).toBe(
+      fromFiles.structuredContent.crate_fingerprint,
+    );
   });
 
   it("generates from a published method by address (server-side git resolution)", async () => {
-    const result = await generateMthdsCode(
-      { method_ref: "github.com/Pipelex/methods/text_stats@v0.1.1", target: "ts-zod" },
-      context,
-    );
+    const [fromFiles, fromRef] = await Promise.all([
+      generateMthdsCode({ files: fixtureFiles, target: "ts-zod" }, context),
+      generateMthdsCode({ method_ref: PUBLISHED_METHOD_REF, target: "ts-zod" }, context),
+    ]);
 
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.is_valid).toBe(true);
+    expect(fromRef.structuredContent.status).toBe("ok");
+    expect(fromRef.structuredContent.is_valid).toBe(true);
+    // The address resolved to its OWN crate. Without this the leg passes on a
+    // server that ignored `method_ref` and projected the request's other source
+    // — or any cached crate — since the emitted bytes are identical either way.
+    expect(typeof fromRef.structuredContent.crate_fingerprint).toBe("string");
+    expect(fromRef.structuredContent.crate_fingerprint).not.toBe(
+      fromFiles.structuredContent.crate_fingerprint,
+    );
   });
 });
