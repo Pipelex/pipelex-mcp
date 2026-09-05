@@ -168,7 +168,7 @@ Read the result as a whole rather than the exit code alone:
 
 Worth running **before** the bump too when the user reports a live failure: a check that fails on the old version and passes on the new one turns "we upgraded" into "we fixed it", and gives Step 8 something concrete to write.
 
-If Step 4c flagged a `GraphSpec` change, the graph view needs eyes on it as well — `make dev` serves the DevTools UI at `http://localhost:3000` where `mthds_validate` renders the run-graph view. That one needs `WORKOS_AUTHKIT_DOMAIN` and `PIPELEX_MCP_RESOURCE_INDICATOR` set, so offer it, but do not treat it as blocking.
+If Step 4c flagged a `GraphSpec` change, the graph view needs eyes on it as well — `make dev` serves the DevTools UI at `http://localhost:6843` where `mthds_validate` renders the run-graph view. That one needs `WORKOS_AUTHKIT_DOMAIN` and `PIPELEX_MCP_RESOURCE_INDICATOR` set, so offer it, but do not treat it as blocking.
 
 ## Step 8 — Sync the docs to any contract you changed
 

@@ -737,7 +737,7 @@ posture, so the server throws at startup unless both are set:
 | Variable | Value |
 | --- | --- |
 | `WORKOS_AUTHKIT_DOMAIN` | the AuthKit domain, e.g. `<tenant>.authkit.app` |
-| `PIPELEX_MCP_RESOURCE_INDICATOR` | the server **origin with a trailing slash** — `http://localhost:3000/`, not `.../mcp` |
+| `PIPELEX_MCP_RESOURCE_INDICATOR` | the server **origin with a trailing slash** — `http://localhost:6843/`, not `.../mcp` |
 
 The Resource Indicator must also be registered in the WorkOS dashboard (Connect
 → Configuration), along with Dynamic Client Registration. It becomes the issued
@@ -762,7 +762,7 @@ make dev                               # sources .env ahead of the shell, then `
 ```env
 # .env at the repo root (gitignored)
 WORKOS_AUTHKIT_DOMAIN=<tenant>.authkit.app
-PIPELEX_MCP_RESOURCE_INDICATOR=http://localhost:3000/
+PIPELEX_MCP_RESOURCE_INDICATOR=http://localhost:6843/
 PIPELEX_BASE_URL=http://localhost:8081
 ```
 
@@ -775,12 +775,12 @@ after editing it.
 
 Start it with `make dev` rather than `npm run dev` whenever your shell already exports one of these variables: Node's `--env-file` never overrides an inherited variable, so a profile-level `export PIPELEX_BASE_URL=…` would silently win over `.env`. `make dev` (and `make dev-tunnel`) sources `.env` first so the file wins, prints the API target it resolved, and still lets `make dev PIPELEX_BASE_URL=http://localhost:8080` override it for one run.
 
-If port 3000 is taken, Skybridge falls back to another port and prints it — the
-Resource Indicator then has to match that port too, both in `.env` and in the
-WorkOS dashboard.
+The console runs on a **pinned port, `6843`**, not Skybridge's default 3000. Skybridge would otherwise walk up to the next free port when 3000 is busy (it is, whenever a Next.js app is running), and the Resource Indicator names the port — so a console that drifted to 3001 booted fine and then failed every tool call at audience verification. `make dev` and `make dev-tunnel` pass `--port` to turn that fallback off, and refuse to start, naming the fix, when the port is held by another process or when a localhost Resource Indicator names a different port. Register `http://localhost:6843/` as the Resource Indicator in the WorkOS dashboard and put the DevTools origin `http://localhost:6843` on its CORS list; `make dev CONSOLE_PORT=<n>` overrides the port for one run if you registered another.
 
-The MCP endpoint is at `http://localhost:3000/mcp`, with Skybridge DevTools at
-`http://localhost:3000`.
+**A DevTools session lives as long as its WorkOS access token, and only a page reload renews it.** DevTools obtains a token when it connects and never refreshes it mid-session: once the token expires, every tool call gets the console's 401 (`"exp" claim timestamp check failed`), the MCP client throws instead of refreshing, and DevTools shows nothing — the call looks like it ran and delivered nothing. Reload the tab (F5) and it reconnects with a fresh token. Do not restart `make dev` for this: it fixes nothing, and a tab connected to the console you just killed stays on "Connecting to server…" until it is reloaded. The lifetime is the WorkOS application's "Access token duration" (dashboard → the application's Sessions tab). The default is five minutes, which makes DevTools unusable for anything longer than a short burst, so the dev tenant's is set to one hour. Skybridge prints nothing for a tool call in dev, so an empty Logs pane is not evidence either way.
+
+The MCP endpoint is at `http://localhost:6843/mcp`, with Skybridge DevTools at
+`http://localhost:6843`.
 
 To poke the **local workshop** stdio server during development:
 
