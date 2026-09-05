@@ -11,10 +11,10 @@ Manage pipelex-mcp located in $(CURDIR).
 Usage:
 
 make install        - Install dependencies
-make dev            - Start Skybridge dev server
+make dev            - Start Skybridge dev server (configured by .env; make dev VAR=... overrides)
 make dev-local      - Start the local stdio server from TypeScript
 make inspect-local  - Open MCP Inspector against the local stdio server
-make dev-tunnel     - Start Skybridge dev server with tunnel
+make dev-tunnel     - Start Skybridge dev server with tunnel (same .env rule as dev)
 make start          - Start the built app
 make deploy         - Deploy the hosted console to Alpic Production (from a clean main)
 make deploy-prod    - Same as deploy
@@ -247,8 +247,31 @@ all: clean check test
 clean:
 	rm -rf dist coverage *.tsbuildinfo
 
+# --- The console dev loop ---
+# `make dev` runs THIS checkout's console, so `.env` is its configuration and
+# the ambient shell is not: the recipe sources `.env` ahead of `npm run dev`,
+# which lets a value in the file win over one the shell already exports. That
+# is the inverse of the live targets' precedence above, on purpose. Those are
+# aimed at an API from outside, so the shell is the override there. Here,
+# Node's `--env-file-if-exists` in `nodemon.json` cannot override an inherited
+# variable, and a `PIPELEX_BASE_URL` exported in a shell profile for other
+# tools was silently sending the console to a different deployment than the
+# one `.env` named. A variable given on the make command line
+# (`make dev PIPELEX_BASE_URL=http://localhost:8080`) is the one explicit
+# gesture and is re-exported after `.env`, so it still wins over both; the
+# env-prefix form (`PIPELEX_BASE_URL=... make dev`) is just the shell and
+# loses to `.env`. Precedence: make command line > .env > shell > the server's
+# own default. The recipe prints the effective API target so a wrong one is
+# visible at startup rather than at the first failing tool call.
+#
+# `dev-local` / `inspect-local` are left as they were: their npm scripts never
+# read `.env`, and the workshop is documented to run keyless from the
+# environment. `npm run dev` on its own keeps the plain `--env-file` behavior.
+MAKE_CLI_OVERRIDES = $(foreach o,$(MAKEOVERRIDES),export '$(o)';)
+CONSOLE_DEV_ENV = $(DOTENV) $(MAKE_CLI_OVERRIDES) echo "-> console API target: $${PIPELEX_BASE_URL:-https://api.pipelex.com (the server default)}";
+
 dev:
-	npm run dev
+	@$(CONSOLE_DEV_ENV) npm run dev
 
 dev-local:
 	npm run dev:local
@@ -257,7 +280,7 @@ inspect-local:
 	npm run inspect:local
 
 dev-tunnel:
-	npm run dev:tunnel
+	@$(CONSOLE_DEV_ENV) npm run dev:tunnel
 
 start:
 	npm run start

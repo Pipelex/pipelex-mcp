@@ -756,7 +756,7 @@ Install dependencies, start the API, then the Skybridge dev server:
 npm install
 
 cd ../pipelex-api && make run          # serves http://localhost:8081
-npm run dev
+make dev                               # sources .env ahead of the shell, then `npm run dev`
 ```
 
 ```env
@@ -772,6 +772,8 @@ PIPELEX_BASE_URL=http://localhost:8081
 it. `.env` is dev-only and loaded via `nodemon.json`
 (`tsx --env-file-if-exists=.env`); it is not watched, so restart the dev server
 after editing it.
+
+Start it with `make dev` rather than `npm run dev` whenever your shell already exports one of these variables: Node's `--env-file` never overrides an inherited variable, so a profile-level `export PIPELEX_BASE_URL=…` would silently win over `.env`. `make dev` (and `make dev-tunnel`) sources `.env` first so the file wins, prints the API target it resolved, and still lets `make dev PIPELEX_BASE_URL=http://localhost:8080` override it for one run.
 
 If port 3000 is taken, Skybridge falls back to another port and prints it — the
 Resource Indicator then has to match that port too, both in `.env` and in the
