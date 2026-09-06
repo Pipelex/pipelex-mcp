@@ -6,15 +6,34 @@
 MTHDS_UI_DIR := ../mthds-ui
 PIPELEX_SDK_DIR := ../pipelex-sdk-js
 
+# The port the hosted console's dev server listens on. Skybridge defaults to
+# 3000 and, finding it busy, walks up to the next free port. That reflex is
+# exactly wrong for this console: the WorkOS Resource Indicator names the port
+# (`http://localhost:<port>/` becomes the token's `aud`), so a console that
+# drifted to 3001 booted cleanly and then failed every tool call at audience
+# verification — and 3000 is busy whenever any Next.js app in the workspace is
+# running. `dev` / `dev-tunnel` pass `--port`, which turns the fallback off, and
+# the number is one nothing else in the workspace listens on ("MTHD" on a phone
+# keypad). It is the port to register in the WorkOS dashboard — the Resource
+# Indicator and the DevTools origin on the CORS list — and to name in `.env`'s
+# PIPELEX_MCP_RESOURCE_INDICATOR.
+#
+# It is exported, and the console recipes read it back from the shell rather
+# than from make, so it follows the same precedence as every other console
+# variable (see "The console dev loop" below): `make dev CONSOLE_PORT=<n>`
+# overrides it for one run, a `CONSOLE_PORT=<n>` line in `.env` sets it for
+# the checkout, and the shell environment or this default stands otherwise.
+export CONSOLE_PORT ?= 6843
+
 define HELP
 Manage pipelex-mcp located in $(CURDIR).
 Usage:
 
 make install        - Install dependencies
-make dev            - Start Skybridge dev server
+make dev            - Start Skybridge dev server on port $(CONSOLE_PORT) unless .env sets CONSOLE_PORT (make dev VAR=... overrides both)
 make dev-local      - Start the local stdio server from TypeScript
 make inspect-local  - Open MCP Inspector against the local stdio server
-make dev-tunnel     - Start Skybridge dev server with tunnel
+make dev-tunnel     - Start Skybridge dev server with tunnel (same port and .env rules as dev)
 make start          - Start the built app
 make deploy         - Deploy the hosted console to Alpic Production (from a clean main)
 make deploy-prod    - Same as deploy
@@ -247,8 +266,95 @@ all: clean check test
 clean:
 	rm -rf dist coverage *.tsbuildinfo
 
+# --- The console dev loop ---
+# `make dev` runs THIS checkout's console, so `.env` is its configuration and
+# the ambient shell is not: the recipe sources `.env` ahead of `npm run dev`,
+# which lets a value in the file win over one the shell already exports. That
+# is the inverse of the live targets' precedence above, on purpose. Those are
+# aimed at an API from outside, so the shell is the override there. Here,
+# Node's `--env-file-if-exists` in `nodemon.json` cannot override an inherited
+# variable, and a `PIPELEX_BASE_URL` exported in a shell profile for other
+# tools was silently sending the console to a different deployment than the
+# one `.env` named. A variable given on the make command line
+# (`make dev PIPELEX_BASE_URL=http://localhost:8080`) is the one explicit
+# gesture and is put back after `.env`, so it still wins over both; the
+# env-prefix form (`PIPELEX_BASE_URL=... make dev`) is just the shell and
+# loses to `.env`. Precedence: make command line > .env > shell > the server's
+# own default — for CONSOLE_PORT too, which is why the recipes read the port
+# from the shell as `$CONSOLE_PORT` rather than from make. The recipe prints
+# the effective API target so a wrong one is visible at startup rather than
+# at the first failing tool call.
+#
+# The command-line overrides are put back by NAME, from the environment make
+# already exported them into: `_cli_X="$X"` before `.env` is sourced, then
+# `X="$_cli_X"; export X` after it. Only the names pass through make —
+# `$(MAKEOVERRIDES)` is a whitespace-split, escaped serialization, so a value
+# with a space or a quote cannot survive a trip through it — and a name cannot
+# contain whitespace, so any value survives.
+#
+# `.env` is read here by `sh`, before Node's `--env-file` ever sees it, and
+# Node never overrides an inherited value, so sh's reading is the one the
+# server gets. Keep the file to plain `KEY=value` lines (no `$`, `#`, spaces or
+# backticks inside a value; none of the console's keys carry any), because that
+# is where the two parsers agree. `set -a` exports the whole file to every
+# process under `npm run dev` — Skybridge, nodemon, tsc, Vite and, on
+# `dev-tunnel`, the `alpic tunnel` CLI — where before only the server process
+# read it. The file is dev-only and gitignored; that reach is the accepted cost
+# of the precedence.
+#
+# `dev-local` / `inspect-local` are left as they were: their npm scripts never
+# read `.env`, and the workshop is documented to run keyless from the
+# environment. `npm run dev` on its own keeps the plain `--env-file` behavior
+# and Skybridge's default port with its fallback.
+MAKE_CLI_VARS = $(sort $(foreach o,$(MAKEOVERRIDES),$(if $(findstring =,$(o)),$(firstword $(subst =, ,$(o))))))
+CONSOLE_DEV_ENV = $(foreach v,$(MAKE_CLI_VARS),_cli_$(v)="$$$(v)";) $(DOTENV) $(foreach v,$(MAKE_CLI_VARS),$(v)="$$_cli_$(v)"; export $(v);) echo "-> console API target: $${PIPELEX_BASE_URL:-https://api.pipelex.com (the server default)}";
+
+# Three refusals before the server starts, for the mistakes that would
+# otherwise surface only at the first tool call as "reconnect the connector and
+# sign in again" — or, for a held port, as Skybridge painting its UI while the
+# server underneath died on EADDRINUSE (a pinned port does not fall back).
+#
+#   - the port is not a number in range: named as such, rather than as "in use";
+#   - the port is held: `lsof` sees every listener on the port whatever address
+#     it bound, and the node probe behind it (a wildcard bind) covers a machine
+#     without `lsof`;
+#   - the Resource Indicator is a localhost origin that cannot match: either the
+#     port is right but the shape is wrong (no trailing slash, or a path such as
+#     `/mcp`), which gets its own message because the server's more exact one
+#     would otherwise be buried under Skybridge's UI, or the port differs — an
+#     indicator with no port means 80, and `[::1]` counts as localhost.
+#
+# The checks run in the shell that sourced `.env` and put the command-line
+# overrides back, so they see the port and the indicator the server will see.
+# A non-localhost indicator (a tunnel URL) is left alone: the tunnel forwards
+# to whatever port the console runs on.
+define CONSOLE_PORT_GUARD
+case "$$CONSOLE_PORT" in ''|*[!0-9]*) \
+	echo "error: CONSOLE_PORT must be a port number, got '$$CONSOLE_PORT'." >&2; exit 1 ;; \
+esac; \
+if [ "$$CONSOLE_PORT" -lt 1 ] || [ "$$CONSOLE_PORT" -gt 65535 ]; then \
+	echo "error: CONSOLE_PORT must be between 1 and 65535, got $$CONSOLE_PORT." >&2; exit 1; \
+fi; \
+if lsof -nP -iTCP:$$CONSOLE_PORT -sTCP:LISTEN >/dev/null 2>&1 || ! node -e 'const s=require("node:net").createServer();s.once("error",()=>process.exit(1));s.listen(Number(process.env.CONSOLE_PORT),()=>s.close(()=>process.exit(0)))'; then \
+	echo "error: port $$CONSOLE_PORT is already in use:" >&2; \
+	lsof -nP -iTCP:$$CONSOLE_PORT -sTCP:LISTEN >&2 2>/dev/null || true; \
+	echo "The console is pinned to $$CONSOLE_PORT because the WorkOS Resource Indicator names it, so it does not fall back to another port. Stop that process, or pass CONSOLE_PORT=<port> for a port registered in WorkOS." >&2; \
+	exit 1; \
+fi; \
+case "$${PIPELEX_MCP_RESOURCE_INDICATOR:-}" in \
+	http://localhost:$$CONSOLE_PORT/|http://127.0.0.1:$$CONSOLE_PORT/|http://\[::1\]:$$CONSOLE_PORT/|"") ;; \
+	http://localhost:$$CONSOLE_PORT|http://localhost:$$CONSOLE_PORT/*|http://127.0.0.1:$$CONSOLE_PORT|http://127.0.0.1:$$CONSOLE_PORT/*|http://\[::1\]:$$CONSOLE_PORT|http://\[::1\]:$$CONSOLE_PORT/*) \
+		echo "error: PIPELEX_MCP_RESOURCE_INDICATOR is $$PIPELEX_MCP_RESOURCE_INDICATOR: the port is right, but the indicator must be exactly the origin with a trailing slash and no path, http://localhost:$$CONSOLE_PORT/, because it has to byte-match the token's audience." >&2; \
+		exit 1 ;; \
+	http://localhost|http://localhost/*|http://localhost:*|http://127.0.0.1|http://127.0.0.1/*|http://127.0.0.1:*|http://\[::1\]*) \
+		echo "error: PIPELEX_MCP_RESOURCE_INDICATOR is $$PIPELEX_MCP_RESOURCE_INDICATOR, but the console listens on port $$CONSOLE_PORT (an indicator with no port means 80)." >&2; \
+		echo "The indicator becomes the token's audience, so every tool call would fail at audience verification. Set it to http://localhost:$$CONSOLE_PORT/ in .env (and register that port in the WorkOS dashboard), or pass CONSOLE_PORT=<port> to match it." >&2; \
+		exit 1 ;; \
+esac
+endef
+
 dev:
-	npm run dev
+	@$(CONSOLE_DEV_ENV) $(CONSOLE_PORT_GUARD); npm run dev -- --port "$$CONSOLE_PORT"
 
 dev-local:
 	npm run dev:local
@@ -257,7 +363,7 @@ inspect-local:
 	npm run inspect:local
 
 dev-tunnel:
-	npm run dev:tunnel
+	@$(CONSOLE_DEV_ENV) $(CONSOLE_PORT_GUARD); npm run dev:tunnel -- --port "$$CONSOLE_PORT"
 
 start:
 	npm run start
