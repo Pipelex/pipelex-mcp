@@ -13,11 +13,16 @@
 # `main`'s `package.json` version must have a matching `## [X.Y.Z]` heading in
 # `CHANGELOG.md`, the whole `make all` gate is re-run on the merge commit
 # rather than trusted from the pull request, and `npm view` is asked whether
-# that version is already on the registry. A push to `main` that is not a
-# release therefore carries a version that has already shipped, and ends green
-# with both legs skipped. A dispatch answers to one check more — the typed
-# `version` must equal `main`'s `package.json` — which is what refuses a run
-# fired before the release pull request merged, or fired at the wrong bump.
+# that version is already on the registry — an answer the registry could not
+# give fails the run rather than being guessed at. A push to `main` that is not
+# a release therefore carries a version that has already shipped, and ends green
+# with both legs skipped. That argument holds only while every version on `main`
+# has reached npm: a release run that died before publishing leaves `main` at an
+# unpublished version, and the next push to `main` — whatever it is — is then
+# taken for the release. Finish a failed release rather than pushing past it. A
+# dispatch answers to one check more — the typed `version` must equal `main`'s
+# `package.json` — which is what refuses a run fired before the release pull
+# request merged, or fired at the wrong bump.
 #
 # A dispatch always checks out `main` whatever ref it was fired from, so it
 # cannot ship a feature branch by accident. A push checks out its own
@@ -141,16 +146,29 @@ jobs:
       - name: Run quality checks and tests
         run: make all
 
+      # On a push this answer is what decides whether the commit is a release
+      # at all, so it must never be a guess. `npm view` reports `E404` when the
+      # version is genuinely absent, and some other code — a rate limit, a 5xx,
+      # a DNS failure — when it could not find out; only the first of those is
+      # an answer. An inconclusive lookup therefore fails the whole guard rather
+      # than reading as "not published", which on a push would publish a commit
+      # nobody released and deploy it to the Production console.
       - name: Check whether this version is already on npm
         id: published
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if npm view "@pipelex/mcp@$VERSION" version >/dev/null 2>&1; then
+          if LOOKUP=$(npm view "@pipelex/mcp@$VERSION" version --json 2>&1); then
             echo "already_published=true" >> "$GITHUB_OUTPUT"
             echo "@pipelex/mcp@$VERSION is already on npm — the publish step will be skipped."
-          else
+          elif printf '%s' "$LOOKUP" | grep -q 'E404'; then
             echo "already_published=false" >> "$GITHUB_OUTPUT"
+            echo "@pipelex/mcp@$VERSION is not on npm yet."
+          else
+            printf '%s\n' "$LOOKUP"
+            echo "::error::Could not establish whether @pipelex/mcp@$VERSION is on npm —" \
+                 "npm view failed without a 404. Refusing to guess; re-run once the registry answers."
+            exit 1
           fi
 
   publish:
@@ -260,6 +278,8 @@ jobs:
     needs: [guard, publish, deploy]
     # Only when both surfaces shipped in this run — a single-target retry is by
     # definition finishing a release whose tag either exists or is not yet earned.
+    # On a non-release push this condition reads true and the job still does not
+    # run: both shipping legs skipped, and a skip propagates down `needs`.
     if: needs.guard.outputs.target == 'both'
     runs-on: ubuntu-latest
     permissions:
