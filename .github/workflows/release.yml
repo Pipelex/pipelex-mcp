@@ -1,21 +1,37 @@
 # Ships the two release surfaces from `main`: the public `@pipelex/mcp` npm
 # package (local workshop) and the Skybridge server on Alpic (hosted console).
 #
-# MANUAL TRIGGER ONLY — `workflow_dispatch`, never `push`. Merging to `main`
-# does not ship anything; a human runs this from the Actions tab once the
-# release PR is merged. That is deliberate: publishing to npm is effectively
-# irreversible, and the two surfaces must go out together from one reviewed
-# commit rather than from whatever lands on `main`.
+# It fires on the push to `main` — the merge of a `release/vX.Y.Z` pull
+# request — so a release ships from the merge itself, the way every other
+# library in this workspace publishes, and the landing gesture can verify the
+# run keyed to the merge SHA. `workflow_dispatch` stays beside it for the
+# one-leg retry after a partial failure, and is the only trigger that takes a
+# typed `version`.
 #
-# The workflow always checks out `main` regardless of the ref the dispatch was
-# fired from, so it cannot ship a feature branch by accident. `version` must be
-# typed to match `package.json` on `main` — that is the guard against running
-# before the release PR merged, or against the wrong bump.
+# What makes an unconditional on-merge trigger safe is the `guard` job, whose
+# checks are also what decide whether a given push is a release at all:
+# `main`'s `package.json` version must have a matching `## [X.Y.Z]` heading in
+# `CHANGELOG.md`, the whole `make all` gate is re-run on the merge commit
+# rather than trusted from the pull request, and `npm view` is asked whether
+# that version is already on the registry. A push to `main` that is not a
+# release therefore carries a version that has already shipped, and ends green
+# with both legs skipped. A dispatch answers to one check more — the typed
+# `version` must equal `main`'s `package.json` — which is what refuses a run
+# fired before the release pull request merged, or fired at the wrong bump.
+#
+# A dispatch always checks out `main` whatever ref it was fired from, so it
+# cannot ship a feature branch by accident. A push checks out its own
+# `github.sha`, so the tree that ships, the provenance npm records and the
+# `vX.Y.Z` tag all name the merge commit that triggered the run rather than
+# whatever else has reached `main` since.
 #
 # Both surfaces are re-runnable at the same version: an npm publish is skipped
 # when that version already exists, and Alpic deploys are idempotent per commit.
-# Use `target` to retry one leg after a partial failure without re-shipping the
-# other (the /release skill's "retry at the same version" rule).
+# Finish a partial failure with a dispatch that names the leg (`-f target=npm`
+# or `-f target=alpic`, same version) rather than by re-running the push —
+# once npm holds the version, a push-triggered run skips both legs, which is
+# the very rule that keeps a non-release push quiet. This is the /release
+# skill's "retry at the same version" rule.
 #
 # One-time external setup:
 #   - npm: register `@pipelex/mcp` as a trusted publisher on npmjs.com
@@ -29,6 +45,13 @@
 name: Release (publish + deploy)
 
 on:
+  # The merge of a release pull request. `version` is then whatever `main`'s
+  # `package.json` says and both surfaces ship together.
+  push:
+    branches:
+      - main
+
+  # The retry door: one leg at a time, at a version typed by hand.
   workflow_dispatch:
     inputs:
       version:
@@ -59,21 +82,33 @@ jobs:
     permissions:
       contents: read
     outputs:
+      # The commit the whole run ships: its own merge commit on a push, the tip
+      # of `main` on a dispatch — which is what keeps a dispatch from shipping
+      # the branch it was fired from.
+      ref: ${{ github.event_name == 'push' && github.sha || 'main' }}
+      # A merge ships both surfaces; only a dispatch may narrow to one leg.
+      target: ${{ github.event_name == 'push' && 'both' || inputs.target }}
       version: ${{ steps.version.outputs.version }}
       already_published: ${{ steps.published.outputs.already_published }}
 
     steps:
-      - name: Checkout main
+      - name: Checkout the commit to ship
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.event_name == 'push' && github.sha || 'main' }}
 
-      - name: Verify the requested version matches package.json on main
+      - name: Resolve the version and verify it matches package.json
         id: version
         env:
+          EVENT_NAME: ${{ github.event_name }}
           REQUESTED: ${{ inputs.version }}
         run: |
           ACTUAL=$(node -p "require('./package.json').version")
+          if [ "$EVENT_NAME" = "push" ]; then
+            # A merge ships the version the release pull request brought with
+            # it, so there is no typed number that could disagree with it.
+            REQUESTED="$ACTUAL"
+          fi
           if [ "$ACTUAL" != "$REQUESTED" ]; then
             echo "::error::Requested $REQUESTED but main's package.json is $ACTUAL." \
                  "Did the release PR merge? Never edit the version here — cut it with the /release skill."
@@ -121,18 +156,23 @@ jobs:
   publish:
     name: Publish @pipelex/mcp to npm
     needs: guard
-    if: inputs.target != 'alpic'
+    # A dispatch may narrow the target; a push skips the leg outright when the
+    # version it carries is already on npm, which is what turns a push to
+    # `main` that is not a release into a green no-op.
+    if: >-
+      needs.guard.outputs.target != 'alpic'
+      && (github.event_name != 'push' || needs.guard.outputs.already_published == 'false')
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write # mints the OIDC token npm trusted publishing verifies
 
     steps:
-      - name: Checkout main
+      - name: Checkout the commit to ship
         if: needs.guard.outputs.already_published == 'false'
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ needs.guard.outputs.ref }}
 
       - name: Setup Node.js
         if: needs.guard.outputs.already_published == 'false'
@@ -172,16 +212,21 @@ jobs:
   deploy:
     name: Deploy the hosted console to Alpic
     needs: guard
-    if: inputs.target != 'npm'
+    # The same shape as the npm leg: a dispatch may narrow, and on a push an
+    # already-published version is the signal that this commit is not a release
+    # and there is nothing new to deploy.
+    if: >-
+      needs.guard.outputs.target != 'npm'
+      && (github.event_name != 'push' || needs.guard.outputs.already_published == 'false')
     runs-on: ubuntu-latest
     permissions:
       contents: read
 
     steps:
-      - name: Checkout main
+      - name: Checkout the commit to ship
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ needs.guard.outputs.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -215,16 +260,16 @@ jobs:
     needs: [guard, publish, deploy]
     # Only when both surfaces shipped in this run — a single-target retry is by
     # definition finishing a release whose tag either exists or is not yet earned.
-    if: inputs.target == 'both'
+    if: needs.guard.outputs.target == 'both'
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Checkout main
+      - name: Checkout the commit to ship
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ needs.guard.outputs.ref }}
 
       - name: Create and push the tag
         env:
