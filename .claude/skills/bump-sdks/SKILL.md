@@ -32,12 +32,14 @@ Show the user, for both packages, the declared range, what is actually installed
 ```bash
 for p in sdk mthds-ui; do
   echo "@pipelex/$p"
-  echo "  range:     $(node -p "require('./package.json').dependencies['@pipelex/$p']")"
+  echo "  range:     $(node -p "const m=require('./package.json'); m.dependencies['@pipelex/$p'] ?? m.devDependencies['@pipelex/$p']")"
   echo "  installed: $(node -p "require('./node_modules/@pipelex/$p/package.json').version" 2>/dev/null || echo 'not installed')"
   echo "  npm latest: $(npm view @pipelex/$p version)"
 done
 git status --short
 ```
+
+**The two packages live in different blocks, and the bump must keep them there.** `@pipelex/sdk` is a runtime `dependencies` entry — every capability imports it, and an `--omit=dev` install needs it on disk. `@pipelex/mthds-ui` is a `devDependencies` entry: only the console's views import it, Vite bundles them into client assets, and a runtime entry would make every `npx @pipelex/mcp` user download React's whole view tree. That is why the Makefile's UI targets pass `--save-dev`: npm infers the block from an entry that is already there, so while the `devDependencies` entry exists a bare `npm install @pipelex/mthds-ui@…` updates it in place, but the flag is what keeps a fresh add — or a re-add once the entry is gone — out of `dependencies`. Use `make use-npm-ui`. No test catches a bump that crosses the line, so read the `package.json` diff in Step 9 instead of trusting the suite to object.
 
 **If either range reads `file:` / `link:` / `portal:`**, the repo is mid local-SDK development (`make use-local-sdk` / `make use-local-ui`). A bump targets the *published* package, so this must be undone first — and `make check` will refuse to run until it is, via the `check-no-local-deps` guard. Tell the user and offer to run `make use-npm-sdk` / `make use-npm-ui` to get back to a clean baseline before bumping.
 

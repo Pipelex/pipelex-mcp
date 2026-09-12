@@ -446,6 +446,17 @@ te: test-e2e
 # --- Switch the source of our npm dependencies ---
 # use-local / use-npm act on BOTH @pipelex/mthds-ui and @pipelex/sdk.
 # The per-package targets act on one, and take VERSION=x.y.z to pin an npm version.
+#
+# The UI targets pass `--save-dev` and the SDK targets do not, and that
+# asymmetry is the dependency boundary, not a slip: @pipelex/mthds-ui is
+# imported by the console's views alone, which Vite bundles into client assets,
+# while @pipelex/sdk is imported by every capability and must be on disk in an
+# `--omit=dev` install. npm infers the block from where a package already sits,
+# so a bare `npm install @pipelex/mthds-ui` updates the existing devDependencies
+# entry in place; the flag is what keeps a fresh add — or a re-add once the entry
+# is gone — out of `dependencies`, where it would put React's whole view tree
+# back into every `npx @pipelex/mcp` install. No test catches it either way, so
+# read the `package.json` diff before committing a bump.
 
 use-local: use-local-ui use-local-sdk
 
@@ -454,13 +465,13 @@ use-npm: use-npm-ui use-npm-sdk
 use-local-ui:
 	@if [ ! -d $(MTHDS_UI_DIR) ]; then echo "ERROR: $(MTHDS_UI_DIR) not found. Clone it next to pipelex-mcp."; exit 1; fi
 	cd $(MTHDS_UI_DIR) && npm install && npm run build
-	npm install @pipelex/mthds-ui@file:$(MTHDS_UI_DIR)
+	npm install --save-dev @pipelex/mthds-ui@file:$(MTHDS_UI_DIR)
 	@echo "Switched to local mthds-ui (file link). Run 'make use-npm-ui' to switch back."
 
 use-npm-ui:
 	@VERSION="$${VERSION:-latest}" && \
 	echo "Installing @pipelex/mthds-ui@$$VERSION from npm" && \
-	npm install @pipelex/mthds-ui@$$VERSION && \
+	npm install --save-dev @pipelex/mthds-ui@$$VERSION && \
 	echo "Switched to npm @pipelex/mthds-ui@$$VERSION. Review the diff, then commit package.json + package-lock.json."
 
 use-local-sdk:
