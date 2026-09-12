@@ -207,6 +207,14 @@ describe.skipIf(!SERVES_SELECTORS)("mthds_validate by selector (live)", () => {
     // /v1/validate does not read manifests), so `main_pipe` is absent by design
     // and the IO contracts are what prove the server fetched THIS address
     // rather than serving any other valid source.
+    //
+    // This leg is therefore the live proof that the form's artifacts ride on
+    // the RUNNABLE gate and not on the entry-pipe gate: no released runner
+    // serves `default_pipe_ref` (see the parked assertion above) and the
+    // blueprint declares no main pipe, so this package settles no entry pipe
+    // at all. Gating the pair on one emptied `pipeIoContracts` here and broke
+    // this assertion. If it ever fails with an empty map, read the advert gate
+    // in `validate.ts` before touching the expectation.
     const contractRefs = Object.keys(result.pipeIoContracts ?? {});
     expect(contractRefs.length).toBeGreaterThan(0);
     expect(contractRefs).toContain("documents.extract_document_markdown");

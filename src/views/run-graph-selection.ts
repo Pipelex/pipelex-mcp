@@ -26,8 +26,10 @@ export function parsePipeRef(ref: string): SelectedPipe {
  * fail to resolve a pipe too, and `structuredContent.main_pipe` is simply
  * absent. The view used to reach for whichever pipe came first in the contract
  * map there, which put a fill-in form and a Run button in front of the user for
- * a pipe nobody chose. No form is the honest rendering; a pipe the user picks
- * in the graph is the only way one appears.
+ * a pipe nobody chose. No form is the honest rendering until somebody chooses:
+ * the capability still ships the artifact pair on such a verdict (it only
+ * withholds the *advert*), so a pipe the user picks in the graph is the one
+ * way a form appears — and this function is what keeps it the only one.
  */
 export function selectedPipeFor(
   pickedPipe: SelectedPipe | null,

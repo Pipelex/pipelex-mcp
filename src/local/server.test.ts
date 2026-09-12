@@ -416,7 +416,15 @@ describe("local stdio server", () => {
         available_view_specs: [],
       });
       expect(result._meta?.graph_spec).toBeUndefined();
-      expect(result.content).toEqual([{ type: "text", text: "# Valid" }]);
+      // The signature DOES ride the workshop — it is deliberately not on the
+      // views branch, since this is the shell an integrating agent uses — so
+      // the summary carries its `## Main pipe` section and no `## Views` note.
+      // That contrast is what this asserts: no view advert, but the signature.
+      expect(result.content).toEqual([
+        { type: "text", text: "# Valid\n\n## Main pipe\n\n`demo.main() -> native.Text`" },
+      ]);
+      expect(result._meta?.pipe_io_contracts).toBeUndefined();
+      expect(result._meta?.input_form).toBeUndefined();
     } finally {
       await close();
     }
@@ -455,10 +463,14 @@ describe("local stdio server", () => {
 
 // Carries both per-pipe artifacts (typed since sdk 0.15.0) so the workshop
 // test above proves the shell advertises nothing even on a report that has
-// everything a form needs.
+// everything a form needs. The blueprint states its `domain` on purpose: the
+// artifacts are keyed `demo.main`, so a domainless blueprint would derive the
+// bare ref `main`, miss both maps, and withhold the form on the key mismatch
+// alone — the test would then pass even if the shell DID register views,
+// proving nothing about the shell gate it exists for.
 const validReport: PipelexValidationReport = {
   is_valid: true,
-  bundle_blueprint: { main_pipe: "main" },
+  bundle_blueprint: { domain: "demo", main_pipe: "main" },
   pipe_io_contracts: {
     "demo.main": {
       inputs: {},

@@ -40,9 +40,10 @@ const TOOLBAR_POSITION_FOR_VIEW: ToolbarPosition = TOOLBAR_POSITION.TOP_LEFT;
  * per-pipe IO contracts (`responseMetadata.pipe_io_contracts`) co-walked
  * beside it. The form is for the effective entry pipe
  * (`responseMetadata.main_pipe_ref`); clicking a pipe node in the graph
- * switches it. With no entry pipe settled there is no form — the capability
- * withholds the pair, and `selectedPipeFor` never substitutes a pipe of the
- * view's own choosing. Run starts the method through `mthds_run` with the same
+ * switches it. With no entry pipe settled no form opens on its own —
+ * `selectedPipeFor` never substitutes a pipe of the view's own choosing — but
+ * the artifacts still ride, so clicking a pipe node still produces its form.
+ * Run starts the method through `mthds_run` with the same
  * `files` / `method_ref` / `method_id` the validation was called with, then follows the run
  * by polling `mthds_run_status` and hands the conversation back to the model
  * on the terminal outcome, exactly as `run-follow` does.

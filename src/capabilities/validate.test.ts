@@ -166,15 +166,18 @@ describe("validationResult", () => {
     const result = validationResult(report, true);
 
     expect(result.mainPipeRef).toBe("main");
-    // ...and the contracts, keyed by the namespaced ref, then hold no entry for
-    // it — a missing entry omits the signature rather than guessing at a key,
-    // and withholds the form the same way: the view looks the pipe up under
-    // the same key set, so a form advertised here would never render.
+    // ...and the contracts, keyed by the namespaced ref, then hold no entry
+    // under that key — a missing entry omits the signature rather than guessing
+    // at a key, and withholds the form's ADVERT the same way.
     expect(result.structuredContent.main_pipe).toBeUndefined();
     expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
-    expect(result.pipeIoContracts).toBeUndefined();
-    expect(result.inputForm).toBeUndefined();
     expect(result.summary).toBe("# Valid" + VIEWS_NOTE_GRAPH_ONLY);
+    // The artifacts themselves still ride: the advert speaks for the entry
+    // pipe, the maps are just what the view looks a pipe up in. The kernel's
+    // selectors also try the bare code, so this very map is reachable by a
+    // click — withholding it would make that click dead for every pipe.
+    expect(result.pipeIoContracts).toEqual(validReport.pipe_io_contracts);
+    expect(result.inputForm).toEqual(validReport.input_form);
   });
 
   it("does not advertise a form when the report carries no contracts", () => {
@@ -619,6 +622,31 @@ describe("main pipe signature", () => {
       expect(result.structuredContent.status, label).toBe("ok");
     }
   });
+
+  it("still advertises the form when a plain-object contract fails to narrow", () => {
+    // The advert and `main_pipe` answer two different questions, and this is
+    // where they diverge: the form derives its fields from the DESCRIPTOR, so
+    // it renders whatever the contract's `optional` flag says, while the
+    // signature refuses to emit a half-narrowed call site. A non-boolean
+    // `optional` therefore advertises a form that genuinely works and no
+    // signature — so the schema description must not promise the form's pipe
+    // is "the same pipe `main_pipe` names".
+    const result = validationResult(
+      reportWithContract({
+        inputs: {},
+        output: {
+          concept_ref: "analysis.Report",
+          multiplicity: "single",
+          item_count: null,
+          optional: "no",
+        },
+      }),
+      true,
+    );
+
+    expect(result.structuredContent.main_pipe).toBeUndefined();
+    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph", "input_form"]);
+  });
 });
 
 describe("effective entry pipe", () => {
@@ -720,41 +748,45 @@ describe("effective entry pipe", () => {
     expect(result._meta.main_pipe_ref).toBe("other.shout");
   });
 
-  it("withholds the form and its advert when the server states no default", () => {
-    // Runnable, views on, both artifacts populated — everything the form used
-    // to be advertised on — but no entry pipe was settled. The view used to
-    // fall through to the first pipe in the contract map and offer a Run
-    // button for it; now the pair stays off `_meta`, the model is told no
-    // form exists, and the verdict reads the same on every stream: the graph
-    // alone, no `main_pipe`, no form.
+  it("withholds the form's advert, but not its artifacts, when the server states no default", () => {
+    // Runnable, views on, both artifacts populated — but no entry pipe was
+    // settled. The view used to fall through to the first pipe in the contract
+    // map and offer a Run button for it. Now the model is told no form exists
+    // and the view opens none, so the verdict reads the same on every stream:
+    // the graph, no `main_pipe`, no advertised form.
     const result = validationResult({ ...divergingReport, default_pipe_ref: null }, true);
 
     expect(result.structuredContent.is_runnable).toBe(true);
     expect(result.structuredContent.main_pipe).toBeUndefined();
     expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
-    expect(result.pipeIoContracts).toBeUndefined();
-    expect(result.inputForm).toBeUndefined();
     expect(result.summary).toBe("# Valid" + VIEWS_NOTE_GRAPH_ONLY);
 
     const wire = toolResult(result);
     expect(wire._meta.main_pipe_ref).toBeUndefined();
-    expect(wire._meta.pipe_io_contracts).toBeUndefined();
-    expect(wire._meta.input_form).toBeUndefined();
     // The graph still rides: withholding the form is not withholding the view.
     expect(wire._meta.graph_spec).toEqual(validReport.graph_spec);
+    // ...and so do the form's artifacts, which is the whole point of the
+    // split. `_meta` never reaches the model, so shipping them tells it
+    // nothing; withholding them made a click on a graph node dead, because
+    // the view's selectors would then miss for EVERY pipe. This verdict is
+    // exactly the one where a click is the only route to a form.
+    expect(wire._meta.pipe_io_contracts).toEqual(divergingContracts);
+    expect(wire._meta.input_form).toEqual(orderedInputForm);
   });
 
-  it("withholds the form when the descriptor has no entry for the entry pipe", () => {
+  it("withholds the form's advert when the descriptor has no entry for the entry pipe", () => {
     // The contracts know `other.shout`; the descriptor (still `demo.main`
     // only) does not. The kernel derives the fields from the descriptor, so
     // the view could not render a form for the entry pipe — a non-empty map
-    // is not the presence test, the entry pipe's own entry is.
+    // is not the advert's test, the entry pipe's own entry is.
     const result = validationResult({ ...divergingReport, default_pipe_ref: "other.shout" }, true);
 
     expect(result.structuredContent.main_pipe?.pipe_ref).toBe("other.shout");
     expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
-    expect(result.pipeIoContracts).toBeUndefined();
-    expect(result.inputForm).toBeUndefined();
+    // The pair still rides, so `demo.main` — which DOES carry both entries —
+    // is still reachable by a click even though the entry pipe is not.
+    expect(result.pipeIoContracts).toEqual(divergingContracts);
+    expect(result.inputForm).toEqual(orderedInputForm);
   });
 
   it("advertises the form for the stated default once both artifacts carry it", () => {
