@@ -132,12 +132,20 @@ jobs:
           ref: ${{ github.event_name == 'push' && github.sha || 'main' }}
           fetch-depth: 2
 
-      # The version must RISE, not merely differ. A revert that lowers it would
-      # otherwise read as a release: the changelog heading for the old version
-      # is still there, `npm view` finds the version published and skips the npm
-      # leg, and the console leg — which no longer reads the registry — would
-      # push the reverted tree to Production under a version already tagged.
-      # `version-check.yml` cannot cover that: it runs on pull requests only.
+      # Two comparisons, and each one closes a way of shipping a stale tree to
+      # the Production console under a version that is already out.
+      #
+      # Against the PARENT, the version must RISE rather than merely differ. A
+      # revert that lowers it would otherwise read as a release: the changelog
+      # heading for the old version is still there, `npm view` finds the version
+      # published and skips the npm leg, and the console leg — which no longer
+      # reads the registry — would push the reverted tree to Production under a
+      # version already tagged. `version-check.yml` cannot cover that: it runs
+      # on pull requests only.
+      #
+      # Against `main`'s CURRENT tip, the version must not have been left
+      # behind. That one is about re-runs rather than about merges, and it is
+      # explained where it is made.
       - name: Compare the version it brings with the one it replaces
         id: commit
         env:
@@ -152,8 +160,31 @@ jobs:
 
           HIGHEST=$(printf '%s\n%s\n' "$PARENT" "$VERSION" | sort -V | tail -1)
           if [ "$VERSION" != "$PARENT" ] && [ "$HIGHEST" = "$VERSION" ]; then
+            # A run is pinned to its own commit, which is what lets a re-run
+            # finish a release after `main` has moved on. It must not let one
+            # finish a release `main` has moved PAST. Re-running an older
+            # release run would otherwise deploy that older tree to the
+            # Production console — the npm leg skipping on a version already
+            # published, the tag leg leaving the existing tag alone — and end
+            # green having rolled the console back. The console leg is the only
+            # one with no such property of its own, and the only one that is
+            # hard to undo, so the refusal belongs here rather than on it.
+            # Equal is the ordinary case: `main`'s tip either IS this commit, or
+            # has taken only commits that carry no bump. Only a LOWER version is
+            # refused, and the cure is a new release rather than a retry.
+            git fetch --depth=1 origin main
+            git show FETCH_HEAD:package.json > "$RUNNER_TEMP/main-package.json"
+            CURRENT=$(node -p "require('$RUNNER_TEMP/main-package.json').version")
+            NEWEST=$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -1)
+            if [ "$NEWEST" != "$VERSION" ]; then
+              echo "::error::$SHA carries $VERSION but main is already at $CURRENT." \
+                   "Shipping it would roll the Production console back to an older tree." \
+                   "A release main has moved past is finished by cutting a new version, never by re-running its run."
+              exit 1
+            fi
+
             echo "is_release=true" >> "$GITHUB_OUTPUT"
-            echo "Shipping $VERSION from $SHA — main was at $PARENT."
+            echo "Shipping $VERSION from $SHA — main was at $PARENT, and is at $CURRENT now."
             exit 0
           fi
 
@@ -321,9 +352,12 @@ jobs:
   deploy:
     name: Deploy the hosted console to Alpic
     needs: [detect, guard]
-    # A dispatch may narrow the target; nothing else gates this leg. A release
-    # deploys the console whatever npm already holds — the two surfaces go out
-    # in lockstep at the same commit, and the registry has no say in it.
+    # A dispatch may narrow the target; the registry does not gate this leg at
+    # all. A release deploys the console whatever npm already holds — the two
+    # surfaces go out in lockstep at the same commit. What keeps that from
+    # becoming a rollback door is `detect`, which refuses a commit carrying a
+    # version `main` has already moved past, so this leg never needs a guard of
+    # its own and never has one to forget.
     if: needs.detect.outputs.target != 'npm'
     runs-on: ubuntu-latest
     permissions:
