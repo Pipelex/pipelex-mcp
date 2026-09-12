@@ -416,7 +416,15 @@ describe("local stdio server", () => {
         available_view_specs: [],
       });
       expect(result._meta?.graph_spec).toBeUndefined();
-      expect(result.content).toEqual([{ type: "text", text: "# Valid" }]);
+      // The signature DOES ride the workshop — it is deliberately not on the
+      // views branch, since this is the shell an integrating agent uses — so
+      // the summary carries its `## Main pipe` section and no `## Views` note.
+      // That contrast is what this asserts: no view advert, but the signature.
+      expect(result.content).toEqual([
+        { type: "text", text: "# Valid\n\n## Main pipe\n\n`demo.main() -> native.Text`" },
+      ]);
+      expect(result._meta?.pipe_io_contracts).toBeUndefined();
+      expect(result._meta?.input_form).toBeUndefined();
     } finally {
       await close();
     }
@@ -456,9 +464,23 @@ describe("local stdio server", () => {
 // Carries both per-pipe artifacts (typed since sdk 0.15.0) so the workshop
 // test above proves the shell advertises nothing even on a report that has
 // everything a form needs.
+//
+// The blueprint states its `domain` so the SIGNATURE projects. The artifacts
+// are keyed `demo.main`, so a domainless blueprint derives the bare ref `main`,
+// misses the contract map, and emits no `main_pipe` — which the summary
+// assertion above reads as a missing `## Main pipe` section. Measured rather
+// than argued: drop the domain and leave the shell gate alone, and that is the
+// assertion that fails, on `"# Valid"` against the expected
+// `"# Valid\n\n## Main pipe\n\n..."`.
+//
+// The domain is NOT what makes this test non-vacuous, and must not be read that
+// way: the GRAPH advert alone does that, since `dry_run_graph` rides on the
+// shell gate and on nothing else. A shell that registered views turns
+// `available_view_specs` into `["dry_run_graph"]` — the very first assertion —
+// with the domain or without it.
 const validReport: PipelexValidationReport = {
   is_valid: true,
-  bundle_blueprint: { main_pipe: "main" },
+  bundle_blueprint: { domain: "demo", main_pipe: "main" },
   pipe_io_contracts: {
     "demo.main": {
       inputs: {},

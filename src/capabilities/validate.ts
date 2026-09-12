@@ -57,12 +57,19 @@ export const mthdsValidateInputSchema = {
  * sees `_meta`, so this list is how it learns a view is available to surface.
  * `"dry_run_graph"` is the method graph produced by a `/validate` dry run,
  * whose spec rides the tool result's `_meta.graph_spec`; `"input_form"` is the
- * fill-in form for the main pipe's declared inputs, driven by the wire
+ * fill-in form for the entry pipe's declared inputs, driven by the wire
  * input-form descriptor riding `_meta.input_form` with the per-pipe IO
- * contracts beside it on `_meta.pipe_io_contracts` (only on a runnable verdict
- * that carries both — a form that cannot submit, or cannot derive its fields,
- * is not a view worth advertising). Extend the enum when a new view kind
- * ships.
+ * contracts beside it on `_meta.pipe_io_contracts`.
+ *
+ * `"input_form"` is advertised only on a runnable verdict that settled an entry
+ * pipe that both artifacts carry an entry for — a form that cannot submit, cannot
+ * derive its fields, or has no pipe to be for, is not a view worth advertising.
+ * That is narrower than the condition under which the artifacts themselves
+ * ride: the pair is view-only data, so it travels whenever the method can run
+ * and both maps carry something, which is what lets the view render a form for
+ * a pipe the USER picks in the graph. Advertising and shipping are two
+ * decisions, and only the advert speaks for the entry pipe. Extend the enum
+ * when a new view kind ships.
  */
 const viewSpecSchema = z.enum(["dry_run_graph", "input_form"]);
 
@@ -184,7 +191,7 @@ const validationStructuredContentSchema = z.object({
   available_view_specs: z
     .array(viewSpecSchema)
     .describe(
-      'Renderable views available for this result. Contains "dry_run_graph" when an interactive method graph (from the validation dry run) is available to display, and "input_form" when a fill-in form for the main pipe\'s inputs (with a Run button) is available on a runnable verdict; empty otherwise.',
+      'Renderable views available for this result. Contains "dry_run_graph" when an interactive method graph (from the validation dry run) is available to display, and "input_form" when a fill-in form for the entry pipe\'s inputs (with a Run button) is available — a runnable verdict that settled an entry pipe and carries that pipe\'s entry in both per-pipe form artifacts; empty otherwise. main_pipe names that same entry pipe whenever its contract also narrows cleanly, so the two can differ on a malformed contract.',
     ),
   main_pipe: mainPipeSignatureSchema
     .optional()
@@ -268,8 +275,13 @@ export interface ValidationResult {
    * `pipe_ref` (`domain.code`) — what `@pipelex/mthds-ui`'s `RunPanel` needs
    * to render the input form. Same channel discipline as `graphSpec`: rides
    * `_meta`, never `structuredContent`. Opaque here; `@pipelex/mthds-form`
-   * owns the type. Populated only on a valid **and runnable** verdict when the
-   * invoking shell has a registered view.
+   * owns the type. Populated on a valid **and runnable** verdict whose two
+   * form artifacts both carry at least one entry, when the invoking shell has
+   * a registered view — deliberately NOT gated on the entry pipe. The map is
+   * what the view looks a pipe up in, so gating it on `mainPipeRef` would make
+   * the user's click on a graph node dead (every selector would miss) on
+   * exactly the verdicts where clicking is the only way to reach a form.
+   * `available_view_specs` carries the narrower entry-pipe gate instead.
    */
   pipeIoContracts?: unknown;
   /**
@@ -277,16 +289,22 @@ export interface ValidationResult {
    * `views: ["input_form"]`) — the contracts' ordered sibling artifact. Since
    * kernel 0.5.0 the descriptor IS the form derivation (`RunPanel` requires
    * it and renders nothing without it), so it is populated together with
-   * `pipeIoContracts` and the form view is advertised only when both arrived.
-   * Same channel discipline: rides `_meta`, never `structuredContent`; opaque
-   * here, `mthds/protocol` owns the type.
+   * `pipeIoContracts`, under the same gate, and the form view is *advertised*
+   * only when the settled entry pipe has an entry in both. Same channel
+   * discipline: rides `_meta`, never `structuredContent`; opaque here,
+   * `mthds/protocol` owns the type.
    */
   inputForm?: unknown;
   /**
-   * The bundle's main pipe as a namespaced `pipe_ref`, derived from
-   * `bundle_blueprint`, so the view can pick the default contract without
-   * parsing the blueprint itself. Absent when the blueprint declares no
-   * `main_pipe` (the API returns no graph in that case either).
+   * The effective entry pipe as a namespaced `pipe_ref` (`defaultPipeRefOf`:
+   * the report's `default_pipe_ref`, the blueprint's `domain.main_pipe` only
+   * behind an absent field), so the view can pick the form's pipe without
+   * parsing the report itself. Rides every valid verdict that settles one, the
+   * signature's ref being the same. Absent when nothing settled an entry pipe —
+   * and then no form is advertised and the view opens none of its own accord,
+   * since a form has to be FOR a pipe and the view must not pick one on the
+   * user's behalf. The artifacts above still ride, so a pipe the user picks in
+   * the graph is the one thing that can still produce a form.
    */
   mainPipeRef?: string;
 }
@@ -528,6 +546,9 @@ export function validationResult(
   let pipeIoContracts: unknown;
   let inputForm: unknown;
   let mainPipeRef: string | undefined;
+  // Whether the model is told a form exists — the entry-pipe gate. Narrower
+  // than `inputForm != null`, which only says the artifacts rode.
+  let formAdvertised = false;
   if (report.is_valid) {
     const validReport = report as PipelexValidationReport;
     // Hoisted out of the views branch below: the signature needs the main pipe
@@ -546,13 +567,30 @@ export function validationResult(
     if (includeGraph && viewsAvailable) {
       graphSpec = validReport.graph_spec;
     }
-    // The input form is only worth advertising when the method can actually
-    // run: a pending-signature verdict would render a form whose Run button
-    // can only fail. It also needs BOTH artifacts — since kernel 0.5.0 the
-    // wire descriptor drives the derivation and `RunPanel` renders nothing
-    // without it — so a runner that ignored the `views` token (no `input_form`
-    // on the report) advertises no form rather than a dead one. Independent of
-    // `include_graph`.
+    // Two decisions, deliberately separate: whether the form's artifacts ride
+    // `_meta` at all, and whether the model is TOLD a form exists.
+    //
+    // The artifacts ride whenever the method can actually run and both maps
+    // carry something. A pending-signature verdict is excluded — it would
+    // render a form whose Run button can only fail — and a runner that ignored
+    // the `views` token returns no descriptor, so there is nothing to ship and
+    // nothing to derive fields from (since kernel 0.5.0 the wire descriptor IS
+    // the derivation and `RunPanel` renders nothing without it). They are NOT
+    // gated on the entry pipe: `_meta` never reaches the model, so shipping
+    // them costs no context, and they are the maps the view looks a pipe up
+    // in. Gating them on `mainPipeRef` made a click on a graph node dead —
+    // every selector missed, for every pipe — on exactly the verdicts where a
+    // click is the only route to a form. Independent of `include_graph`.
+    //
+    // The ADVERT is narrower, and it is what "no form for a pipe nobody chose"
+    // actually means: `input_form` joins `available_view_specs` only when an
+    // entry pipe was settled and both artifacts carry that pipe's entry, so
+    // the model is never told a form exists for a pipe nothing chose. With no
+    // entry pipe (a stated `default_pipe_ref: null`, or a blueprint ref no
+    // artifact keys) nothing is advertised and the view opens no form of its
+    // own either — `selectedPipeFor` has no fall-through arm, so it never
+    // substitutes a pipe nobody chose. A pipe the user picks in the graph
+    // remains the one way a form appears there.
     if (
       viewsAvailable &&
       report.is_runnable &&
@@ -561,6 +599,10 @@ export function validationResult(
     ) {
       pipeIoContracts = validReport.pipe_io_contracts;
       inputForm = validReport.input_form;
+      formAdvertised =
+        mainPipeRef !== undefined &&
+        hasEntryFor(validReport.pipe_io_contracts, mainPipeRef) &&
+        hasEntryFor(validReport.input_form, mainPipeRef);
     }
   } else {
     const invalidReport = report as PipelexInvalidReport;
@@ -581,7 +623,7 @@ export function validationResult(
   if (graphSpec != null) {
     structuredContent.available_view_specs.push("dry_run_graph");
   }
-  if (inputForm != null) {
+  if (formAdvertised) {
     structuredContent.available_view_specs.push("input_form");
   }
   // Prose, because agents read the summary more reliably than the structured
@@ -807,9 +849,31 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-/** A non-empty record — the presence test for both per-pipe artifacts. */
+/**
+ * A non-empty record — the test for whether a per-pipe artifact map is worth
+ * shipping to the view at all. The view looks pipes up in it, so an empty map
+ * can drive nothing.
+ */
 function hasEntries(artifact: unknown): boolean {
-  return typeof artifact === "object" && artifact !== null && Object.keys(artifact).length > 0;
+  const map = asRecord(artifact);
+  return map !== undefined && Object.keys(map).length > 0;
+}
+
+/**
+ * Whether a per-pipe artifact map carries an entry for `pipeRef` — the test
+ * behind the form ADVERT, keyed by the namespaced ref the artifacts are keyed
+ * on. An entry that is not a plain object is no entry: the view's selectors
+ * would miss it, and a form advertised on it would never render.
+ *
+ * Narrower than the view's own lookups, which try the namespaced ref and then
+ * fall back to the bare pipe code (`@pipelex/mthds-form`'s `getPipeIOContract`
+ * / `getPipeInputForm`). A bare-keyed map therefore goes unadvertised though a
+ * click would still reach it — the safe direction, since withholding an advert
+ * costs a hint while a false one costs the model a view that cannot render.
+ */
+function hasEntryFor(artifact: unknown, pipeRef: string): boolean {
+  const map = asRecord(artifact);
+  return map !== undefined && asRecord(map[pipeRef]) !== undefined;
 }
 
 /**
