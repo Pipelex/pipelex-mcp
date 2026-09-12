@@ -463,11 +463,21 @@ describe("local stdio server", () => {
 
 // Carries both per-pipe artifacts (typed since sdk 0.15.0) so the workshop
 // test above proves the shell advertises nothing even on a report that has
-// everything a form needs. The blueprint states its `domain` on purpose: the
-// artifacts are keyed `demo.main`, so a domainless blueprint would derive the
-// bare ref `main`, miss both maps, and withhold the form on the key mismatch
-// alone — the test would then pass even if the shell DID register views,
-// proving nothing about the shell gate it exists for.
+// everything a form needs.
+//
+// The blueprint states its `domain` so the SIGNATURE projects. The artifacts
+// are keyed `demo.main`, so a domainless blueprint derives the bare ref `main`,
+// misses the contract map, and emits no `main_pipe` — which the summary
+// assertion above reads as a missing `## Main pipe` section. Measured rather
+// than argued: drop the domain and leave the shell gate alone, and that is the
+// assertion that fails, on `"# Valid"` against the expected
+// `"# Valid\n\n## Main pipe\n\n..."`.
+//
+// The domain is NOT what makes this test non-vacuous, and must not be read that
+// way: the GRAPH advert alone does that, since `dry_run_graph` rides on the
+// shell gate and on nothing else. A shell that registered views turns
+// `available_view_specs` into `["dry_run_graph"]` — the very first assertion —
+// with the domain or without it.
 const validReport: PipelexValidationReport = {
   is_valid: true,
   bundle_blueprint: { domain: "demo", main_pipe: "main" },

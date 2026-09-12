@@ -647,6 +647,23 @@ describe("main pipe signature", () => {
     expect(result.structuredContent.main_pipe).toBeUndefined();
     expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph", "input_form"]);
   });
+
+  it("withholds the form's advert when the contract entry is not an object", () => {
+    // The twin of the test above, and the boundary between them. A plain object
+    // that fails to narrow still derives a working form from the descriptor, so
+    // it is advertised; an entry that is no object at all is no entry, and the
+    // advert does not speak for it. What the VIEW then does with such an entry
+    // is a separate question, and not a settled one — see L-260912-445e9b.
+    // Without this case the "plain object" half of `hasEntryFor` is unpinned:
+    // relax it to a bare `!== undefined` and the whole suite stays green.
+    const result = validationResult(reportWithContract("demo.main"), true);
+
+    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
+    expect(result.structuredContent.main_pipe).toBeUndefined();
+    // The verdict and the artifacts are untouched: only the advert is withheld.
+    expect(result.structuredContent.is_valid).toBe(true);
+    expect(result.pipeIoContracts).toBeDefined();
+  });
 });
 
 describe("effective entry pipe", () => {
@@ -787,6 +804,44 @@ describe("effective entry pipe", () => {
     // is still reachable by a click even though the entry pipe is not.
     expect(result.pipeIoContracts).toEqual(divergingContracts);
     expect(result.inputForm).toEqual(orderedInputForm);
+  });
+
+  it("withholds the form's advert when the contract has no entry for the entry pipe", () => {
+    // The mirror of the test above, and the reason the advert names BOTH
+    // artifacts rather than either: here the DESCRIPTOR knows `other.shout`
+    // while the contracts (still `demo.main` only) do not. `RunPanel` co-walks
+    // the pair and the view mounts only once both resolve, so an advert riding
+    // the descriptor alone would be exactly the false advert this gate exists
+    // to prevent. Without this case the contracts conjunct is unpinned: delete
+    // it from the gate and the whole suite stays green.
+    const inputForm: InputForm = {
+      ...orderedInputForm,
+      "other.shout": {
+        fields: [
+          {
+            name: "message",
+            kind: "prose",
+            concept_ref: "native.Text",
+            required: true,
+            presence: "plain",
+            gating: true,
+          },
+        ],
+      },
+    };
+    const result = validationResult(
+      { ...orderedReport, input_form: inputForm, default_pipe_ref: "other.shout" },
+      true,
+    );
+
+    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
+    // No signature either, and for the same missing entry: the contract is what
+    // the signature narrows from.
+    expect(result.structuredContent.main_pipe).toBeUndefined();
+    // The pair still rides, so `demo.main` stays reachable by a click.
+    expect(result.pipeIoContracts).toEqual(orderedContracts);
+    expect(result.inputForm).toEqual(inputForm);
+    expect(result.mainPipeRef).toBe("other.shout");
   });
 
   it("advertises the form for the stated default once both artifacts carry it", () => {

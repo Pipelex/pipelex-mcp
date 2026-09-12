@@ -62,7 +62,7 @@ export const mthdsValidateInputSchema = {
  * contracts beside it on `_meta.pipe_io_contracts`.
  *
  * `"input_form"` is advertised only on a runnable verdict that settled an entry
- * pipe both artifacts carry an entry for — a form that cannot submit, cannot
+ * pipe that both artifacts carry an entry for — a form that cannot submit, cannot
  * derive its fields, or has no pipe to be for, is not a view worth advertising.
  * That is narrower than the condition under which the artifacts themselves
  * ride: the pair is view-only data, so it travels whenever the method can run
