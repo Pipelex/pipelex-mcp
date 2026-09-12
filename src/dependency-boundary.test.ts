@@ -72,9 +72,15 @@ const SPECIFIER = /(?:\bfrom\s*|\bimport\s*|\bimport\s*\(\s*)["']([^"']+)["']/g;
  * anywhere in that span left every assertion here green while being
  * `ERR_MODULE_NOT_FOUND` in the pruned image. `src/server.ts` ends with such
  * an alias too, and was one added import away from the same blindness.
+ *
+ * The `\b` after `type` is load-bearing in the other direction, and its
+ * absence was the same bug wearing different clothes: `type` would otherwise
+ * match the first four characters of a default import's local name and `\w+`
+ * would take the rest, so `import typeSafeToast from "sonner"` elided as
+ * though it were type-only and the runtime dependency it names went unseen.
  */
 const TYPE_ONLY =
-  /\b(?:import|export)\s+type\s*(?:\*(?:\s+as\s+\w+)?|\{[^{}]*\}|\w+)\s*\bfrom\s*["'][^"']+["']/g;
+  /\b(?:import|export)\s+type\b\s*(?:\*(?:\s+as\s+\w+)?|\{[^{}]*\}|\w+)\s*\bfrom\s*["'][^"']+["']/g;
 
 /**
  * An interpolation can never be an import specifier, and prose can put one
@@ -239,13 +245,18 @@ describe("the dependency boundary", () => {
     expect(valuesOf(`export type { A } from "types-only";\nimport "sonner";`)).toEqual(["sonner"]);
     // An inline `type` specifier keeps the statement, so the package is a value import.
     expect(valuesOf(`import { type A, b } from "sonner";`)).toEqual(["sonner"]);
+    // A default import whose local name merely begins with "type" is a value
+    // import, and the `\b` after `type` is the whole reason it stays one.
+    expect(valuesOf(`import typeSafeToast from "sonner";`)).toEqual(["sonner"]);
+    expect(valuesOf(`import types from "sonner";`)).toEqual(["sonner"]);
   });
 
   it("never resolves a specifier to a directory, so no subtree can leave the walk unnoticed", () => {
     // `src/capabilities` is a real directory with no index, so the honest
-    // answer is "unresolved". Returning the directory instead satisfied the
-    // walk's `toBeDefined` check, then failed its `\.tsx?$` test, and dropped
-    // the subtree silently — 22 files became 10.
+    // answer is "unresolved". Returning the directory instead would satisfy the
+    // walk's `toBeDefined` check, then fail its `\.tsx?$` test, and drop the
+    // whole subtree silently. No source import spells a bare directory today,
+    // so this pins the resolver against that collapse rather than recording one.
     expect(resolveLocal(path.join(REPO_ROOT, "src", "tools.ts"), "./capabilities")).toBeUndefined();
     // A file specifier still resolves, extensionless and via the ESM `.js` form.
     expect(resolveLocal(path.join(REPO_ROOT, "src", "server.ts"), "./tools.js")).toBe(
