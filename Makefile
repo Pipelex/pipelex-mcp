@@ -451,10 +451,12 @@ te: test-e2e
 # asymmetry is the dependency boundary, not a slip: @pipelex/mthds-ui is
 # imported by the console's views alone, which Vite bundles into client assets,
 # while @pipelex/sdk is imported by every capability and must be on disk in an
-# `--omit=dev` install. A bare `npm install <pkg>` writes to `dependencies`, so
-# without the flag the next UI bump would quietly put React's whole view tree
-# back into every `npx @pipelex/mcp` install. `src/dependency-boundary.test.ts`
-# is what catches it if it happens anyway.
+# `--omit=dev` install. npm infers the block from where a package already sits,
+# so a bare `npm install @pipelex/mthds-ui` updates the existing devDependencies
+# entry in place; the flag is what keeps a fresh add — or a re-add once the entry
+# is gone — out of `dependencies`, where it would put React's whole view tree
+# back into every `npx @pipelex/mcp` install. No test catches it either way, so
+# read the `package.json` diff before committing a bump.
 
 use-local: use-local-ui use-local-sdk
 
