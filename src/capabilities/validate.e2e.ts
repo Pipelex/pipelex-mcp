@@ -202,19 +202,28 @@ describe.skipIf(!SERVES_SELECTORS)("mthds_validate by selector (live)", () => {
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);
-    // The package names itself, and this is the only channel that says so here:
-    // `documents` declares no bundle `main_pipe` (its manifest carries it, and
-    // /v1/validate does not read manifests), so `main_pipe` is absent by design
-    // and the IO contracts are what prove the server fetched THIS address
-    // rather than serving any other valid source.
+    // This package DOES settle an entry pipe, and it is the report's own
+    // `default_pipe_ref` that settles it — NOT the blueprint fallback, whose
+    // `main_pipe` is null here. Naming the pipe is the point: "a valid verdict"
+    // is what ANY method returns, so the ref is what proves the server resolved
+    // THIS address rather than some other valid source, and a by-address
+    // signature naming a pipe a run would not execute is exactly the drift this
+    // pins. (The parked assertion above reads the raw field directly; it is
+    // still `it.skip`, so it says nothing about what this deployment serves.)
+    expect(result.structuredContent.main_pipe?.pipe_ref).toBe(
+      "documents.extract_document_markdown",
+    );
+    // This leg does NOT discriminate the artifact gate from the advert gate, and
+    // must not be read as doing so. Because the entry pipe is settled AND keyed
+    // in both artifacts, putting the pair back on the entry-pipe gate leaves
+    // every assertion here green — established by mutation, not by argument.
+    // That discrimination is hermetic, in `validate.test.ts` ("withholds the
+    // form's advert, but not its artifacts, when the server states no default"):
+    // it needs a STATED `default_pipe_ref: null`, which no method reachable from
+    // here produces.
     //
-    // This leg is therefore the live proof that the form's artifacts ride on
-    // the RUNNABLE gate and not on the entry-pipe gate: no released runner
-    // serves `default_pipe_ref` (see the parked assertion above) and the
-    // blueprint declares no main pipe, so this package settles no entry pipe
-    // at all. Gating the pair on one emptied `pipeIoContracts` here and broke
-    // this assertion. If it ever fails with an empty map, read the advert gate
-    // in `validate.ts` before touching the expectation.
+    // What the keys below do prove is the address resolution: they are the
+    // report's own per-pipe map, so their namespace identifies the package.
     const contractRefs = Object.keys(result.pipeIoContracts ?? {});
     expect(contractRefs.length).toBeGreaterThan(0);
     expect(contractRefs).toContain("documents.extract_document_markdown");
