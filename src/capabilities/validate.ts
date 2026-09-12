@@ -1,9 +1,11 @@
 import { PipelexApiClient } from "@pipelex/sdk";
 import type {
+  IOMultiplicity,
   MthdsFile,
   PipelexValidationResult,
   PipelexValidationReport,
   PipelexInvalidReport,
+  PresenceMarker,
   ValidateFilesOptions,
   ValidateMethodSelector,
 } from "@pipelex/sdk";
@@ -55,14 +57,131 @@ export const mthdsValidateInputSchema = {
  * sees `_meta`, so this list is how it learns a view is available to surface.
  * `"dry_run_graph"` is the method graph produced by a `/validate` dry run,
  * whose spec rides the tool result's `_meta.graph_spec`; `"input_form"` is the
- * fill-in form for the main pipe's declared inputs, driven by the wire
+ * fill-in form for the entry pipe's declared inputs, driven by the wire
  * input-form descriptor riding `_meta.input_form` with the per-pipe IO
- * contracts beside it on `_meta.pipe_io_contracts` (only on a runnable verdict
- * that carries both — a form that cannot submit, or cannot derive its fields,
- * is not a view worth advertising). Extend the enum when a new view kind
- * ships.
+ * contracts beside it on `_meta.pipe_io_contracts`.
+ *
+ * `"input_form"` is advertised only on a runnable verdict that settled an entry
+ * pipe that both artifacts carry an entry for — a form that cannot submit, cannot
+ * derive its fields, or has no pipe to be for, is not a view worth advertising.
+ * That is narrower than the condition under which the artifacts themselves
+ * ride: the pair is view-only data, so it travels whenever the method can run
+ * and both maps carry something, which is what lets the view render a form for
+ * a pipe the USER picks in the graph. Advertising and shipping are two
+ * decisions, and only the advert speaks for the entry pipe. Extend the enum
+ * when a new view kind ships.
  */
 const viewSpecSchema = z.enum(["dry_run_graph", "input_form"]);
+
+/**
+ * The MTHDS standard's multiplicity vocabulary (`IOMultiplicity`), as a runtime
+ * tuple: the narrowing needs it as a membership test and the output schema
+ * needs it as an enum, and `satisfies` keeps both pinned to the imported type,
+ * so a member the standard drops fails the build here.
+ */
+const IO_MULTIPLICITIES = [
+  "single",
+  "variable",
+  "fixed",
+] as const satisfies readonly IOMultiplicity[];
+
+/** The standard's three-valued input presence marker, same discipline. */
+const PRESENCE_MARKERS = [
+  "plain",
+  "optional",
+  "force",
+] as const satisfies readonly PresenceMarker[];
+
+/**
+ * How each multiplicity is written in the rendered signature line: nothing for
+ * a single item, `[]` for a variable list, `[N]` for a fixed one. A `Record`
+ * over the standard's union rather than a switch, so a multiplicity the
+ * standard ADDS fails the build here — the direction `IO_MULTIPLICITIES`'
+ * `satisfies` cannot catch.
+ */
+const MULTIPLICITY_SUFFIX: Record<IOMultiplicity, (itemCount?: number) => string> = {
+  single: () => "",
+  variable: () => "[]",
+  fixed: (itemCount) => `[${itemCount}]`,
+};
+
+/**
+ * Whether a caller must supply a slot carrying each marker. The three-valued
+ * vocabulary collapses the way the standard itself recommends for a consumer
+ * that only needs "may this be absent?" — the plain/force distinction is lint-
+ * and graph-facing and does not bear on a call site. A `Record` rather than a
+ * `!== "optional"` comparison for `MULTIPLICITY_SUFFIX`'s reason: a marker the
+ * standard ADDS fails the build here and forces the question to be answered,
+ * where the comparison would silently rule it required.
+ */
+const PRESENCE_IS_REQUIRED: Record<PresenceMarker, boolean> = {
+  plain: true,
+  force: true,
+  optional: false,
+};
+
+const ioMultiplicitySchema = z
+  .enum(IO_MULTIPLICITIES)
+  .describe(
+    'How many items the slot carries: "single" for one, "variable" for a list of any length, "fixed" for exactly item_count items.',
+  );
+
+/**
+ * The main pipe's typed signature — what an agent needs to write a call site
+ * against a method it cannot read (a `method_ref` or `method_id` source), and
+ * the reason it rides `structuredContent` rather than the view-only `_meta`
+ * channel the full per-pipe artifacts use. Names follow the standard's own
+ * artifact (`concept_ref`, the `IOMultiplicity` vocabulary): these are MTHDS
+ * concepts inside a Pipelex envelope. Per-slot JSON Schemas stay out — that is
+ * the token-heavy part, and `mthds_inputs_template` / `mthds_codegen` are where
+ * it belongs.
+ */
+const mainPipeSignatureSchema = z.object({
+  pipe_ref: z
+    .string()
+    .describe("Namespaced ref (domain.pipe_code) of the pipe a run executes by default."),
+  inputs: z
+    .array(
+      z.object({
+        name: z
+          .string()
+          .describe("Authored name of the input slot — the key a run's inputs object must use."),
+        concept_ref: z
+          .string()
+          .describe(
+            "Fully-qualified concept the slot expects, with any multiplicity suffix stripped.",
+          ),
+        multiplicity: ioMultiplicitySchema,
+        item_count: z
+          .number()
+          .optional()
+          .describe('Number of items the slot takes; present only when multiplicity is "fixed".'),
+        required: z
+          .boolean()
+          .describe(
+            "Whether the caller must supply this input; false when the slot is declared optional.",
+          ),
+      }),
+    )
+    .describe("The main pipe's declared input slots, in authored order."),
+  output: z
+    .object({
+      concept_ref: z
+        .string()
+        .describe(
+          "Fully-qualified concept the pipe produces, with any multiplicity suffix stripped.",
+        ),
+      multiplicity: ioMultiplicitySchema,
+      item_count: z
+        .number()
+        .optional()
+        .describe('Number of items produced; present only when multiplicity is "fixed".'),
+      optional: z
+        .boolean()
+        .describe("Whether a successful run may resolve the output as a recorded absence."),
+    })
+    .describe("What the main pipe produces."),
+});
 
 const validationStructuredContentSchema = z.object({
   status: z.enum(["ok", "error"]),
@@ -72,7 +191,12 @@ const validationStructuredContentSchema = z.object({
   available_view_specs: z
     .array(viewSpecSchema)
     .describe(
-      'Renderable views available for this result. Contains "dry_run_graph" when an interactive method graph (from the validation dry run) is available to display, and "input_form" when a fill-in form for the main pipe\'s inputs (with a Run button) is available on a runnable verdict; empty otherwise.',
+      'Renderable views available for this result. Contains "dry_run_graph" when an interactive method graph (from the validation dry run) is available to display, and "input_form" when a fill-in form for the entry pipe\'s inputs (with a Run button) is available — a runnable verdict that settled an entry pipe and carries that pipe\'s entry in both per-pipe form artifacts; empty otherwise. main_pipe names that same entry pipe whenever its contract also narrows cleanly, so the two can differ on a malformed contract.',
+    ),
+  main_pipe: mainPipeSignatureSchema
+    .optional()
+    .describe(
+      "The main pipe's signature: its ref, each declared input with the concept it expects, and the concept it produces. Present on every valid verdict for which the server settled an effective entry pipe — for a published method, the one its manifest names. Absent means no entry pipe was settled, not that the method declares none. Type a call site from this instead of guessing the shapes.",
     ),
   validation_errors: z.array(z.unknown()).optional(),
   errors: z.array(toolErrorSchema).optional(),
@@ -97,12 +221,39 @@ interface ResolvedValidateRequest {
 
 export type ViewSpec = z.infer<typeof viewSpecSchema>;
 
+/** One declared input slot of the main pipe, as the signature reports it. */
+export interface MainPipeInputSignature {
+  name: string;
+  concept_ref: string;
+  multiplicity: IOMultiplicity;
+  /** Present exactly on the fixed arm — the unused field is absent, per this repo's convention. */
+  item_count?: number;
+  /** `presence !== "optional"`: the plain/force distinction has no bearing on typing a call site. */
+  required: boolean;
+}
+
+/** What the main pipe produces, as the signature reports it. */
+export interface MainPipeOutputSignature {
+  concept_ref: string;
+  multiplicity: IOMultiplicity;
+  item_count?: number;
+  optional: boolean;
+}
+
+export interface MainPipeSignature {
+  pipe_ref: string;
+  /** Authored order when the input-form descriptor states it, contract map order otherwise. */
+  inputs: MainPipeInputSignature[];
+  output: MainPipeOutputSignature;
+}
+
 export interface ValidationStructuredContent {
   status: "ok" | "error";
   is_valid: boolean;
   is_runnable: boolean;
   pending_signatures: string[];
   available_view_specs: ViewSpec[];
+  main_pipe?: MainPipeSignature;
   validation_errors?: unknown[];
   errors?: ToolError[];
 }
@@ -124,8 +275,13 @@ export interface ValidationResult {
    * `pipe_ref` (`domain.code`) — what `@pipelex/mthds-ui`'s `RunPanel` needs
    * to render the input form. Same channel discipline as `graphSpec`: rides
    * `_meta`, never `structuredContent`. Opaque here; `@pipelex/mthds-form`
-   * owns the type. Populated only on a valid **and runnable** verdict when the
-   * invoking shell has a registered view.
+   * owns the type. Populated on a valid **and runnable** verdict whose two
+   * form artifacts both carry at least one entry, when the invoking shell has
+   * a registered view — deliberately NOT gated on the entry pipe. The map is
+   * what the view looks a pipe up in, so gating it on `mainPipeRef` would make
+   * the user's click on a graph node dead (every selector would miss) on
+   * exactly the verdicts where clicking is the only way to reach a form.
+   * `available_view_specs` carries the narrower entry-pipe gate instead.
    */
   pipeIoContracts?: unknown;
   /**
@@ -133,16 +289,22 @@ export interface ValidationResult {
    * `views: ["input_form"]`) — the contracts' ordered sibling artifact. Since
    * kernel 0.5.0 the descriptor IS the form derivation (`RunPanel` requires
    * it and renders nothing without it), so it is populated together with
-   * `pipeIoContracts` and the form view is advertised only when both arrived.
-   * Same channel discipline: rides `_meta`, never `structuredContent`; opaque
-   * here, `mthds/protocol` owns the type.
+   * `pipeIoContracts`, under the same gate, and the form view is *advertised*
+   * only when the settled entry pipe has an entry in both. Same channel
+   * discipline: rides `_meta`, never `structuredContent`; opaque here,
+   * `mthds/protocol` owns the type.
    */
   inputForm?: unknown;
   /**
-   * The bundle's main pipe as a namespaced `pipe_ref`, derived from
-   * `bundle_blueprint`, so the view can pick the default contract without
-   * parsing the blueprint itself. Absent when the blueprint declares no
-   * `main_pipe` (the API returns no graph in that case either).
+   * The effective entry pipe as a namespaced `pipe_ref` (`defaultPipeRefOf`:
+   * the report's `default_pipe_ref`, the blueprint's `domain.main_pipe` only
+   * behind an absent field), so the view can pick the form's pipe without
+   * parsing the report itself. Rides every valid verdict that settles one, the
+   * signature's ref being the same. Absent when nothing settled an entry pipe —
+   * and then no form is advertised and the view opens none of its own accord,
+   * since a form has to be FOR a pipe and the view must not pick one on the
+   * user's behalf. The artifacts above still ride, so a pipe the user picks in
+   * the graph is the one thing that can still produce a form.
    */
   mainPipeRef?: string;
 }
@@ -384,18 +546,51 @@ export function validationResult(
   let pipeIoContracts: unknown;
   let inputForm: unknown;
   let mainPipeRef: string | undefined;
+  // Whether the model is told a form exists — the entry-pipe gate. Narrower
+  // than `inputForm != null`, which only says the artifacts rode.
+  let formAdvertised = false;
   if (report.is_valid) {
     const validReport = report as PipelexValidationReport;
+    // Hoisted out of the views branch below: the signature needs the main pipe
+    // ref on EVERY valid verdict, views or not. The side effect is that
+    // `_meta.main_pipe_ref` now also rides a valid non-runnable verdict, which
+    // the view ignores.
+    mainPipeRef = defaultPipeRefOf(validReport);
+    // The signature is the workshop's deliverable as much as the console's, so
+    // it is independent of `viewsAvailable` and of `include_graph`, and a
+    // pending-signature verdict carries it too — the shape is fully determined
+    // before the signatures resolve.
+    const mainPipe = mainPipeSignatureOf(validReport, mainPipeRef);
+    if (mainPipe !== undefined) {
+      structuredContent.main_pipe = mainPipe;
+    }
     if (includeGraph && viewsAvailable) {
       graphSpec = validReport.graph_spec;
     }
-    // The input form is only worth advertising when the method can actually
-    // run: a pending-signature verdict would render a form whose Run button
-    // can only fail. It also needs BOTH artifacts — since kernel 0.5.0 the
-    // wire descriptor drives the derivation and `RunPanel` renders nothing
-    // without it — so a runner that ignored the `views` token (no `input_form`
-    // on the report) advertises no form rather than a dead one. Independent of
-    // `include_graph`.
+    // Two decisions, deliberately separate: whether the form's artifacts ride
+    // `_meta` at all, and whether the model is TOLD a form exists.
+    //
+    // The artifacts ride whenever the method can actually run and both maps
+    // carry something. A pending-signature verdict is excluded — it would
+    // render a form whose Run button can only fail — and a runner that ignored
+    // the `views` token returns no descriptor, so there is nothing to ship and
+    // nothing to derive fields from (since kernel 0.5.0 the wire descriptor IS
+    // the derivation and `RunPanel` renders nothing without it). They are NOT
+    // gated on the entry pipe: `_meta` never reaches the model, so shipping
+    // them costs no context, and they are the maps the view looks a pipe up
+    // in. Gating them on `mainPipeRef` made a click on a graph node dead —
+    // every selector missed, for every pipe — on exactly the verdicts where a
+    // click is the only route to a form. Independent of `include_graph`.
+    //
+    // The ADVERT is narrower, and it is what "no form for a pipe nobody chose"
+    // actually means: `input_form` joins `available_view_specs` only when an
+    // entry pipe was settled and both artifacts carry that pipe's entry, so
+    // the model is never told a form exists for a pipe nothing chose. With no
+    // entry pipe (a stated `default_pipe_ref: null`, or a blueprint ref no
+    // artifact keys) nothing is advertised and the view opens no form of its
+    // own either — `selectedPipeFor` has no fall-through arm, so it never
+    // substitutes a pipe nobody chose. A pipe the user picks in the graph
+    // remains the one way a form appears there.
     if (
       viewsAvailable &&
       report.is_runnable &&
@@ -404,7 +599,10 @@ export function validationResult(
     ) {
       pipeIoContracts = validReport.pipe_io_contracts;
       inputForm = validReport.input_form;
-      mainPipeRef = mainPipeRefOf(validReport.bundle_blueprint);
+      formAdvertised =
+        mainPipeRef !== undefined &&
+        hasEntryFor(validReport.pipe_io_contracts, mainPipeRef) &&
+        hasEntryFor(validReport.input_form, mainPipeRef);
     }
   } else {
     const invalidReport = report as PipelexInvalidReport;
@@ -425,8 +623,14 @@ export function validationResult(
   if (graphSpec != null) {
     structuredContent.available_view_specs.push("dry_run_graph");
   }
-  if (inputForm != null) {
+  if (formAdvertised) {
     structuredContent.available_view_specs.push("input_form");
+  }
+  // Prose, because agents read the summary more reliably than the structured
+  // fields — and because the summary is the one channel that reaches a ChatGPT
+  // install whose cached tool list predates the schema change.
+  if (structuredContent.main_pipe !== undefined) {
+    summary += `\n\n## Main pipe\n\n\`${signatureLine(structuredContent.main_pipe)}\``;
   }
   if (structuredContent.available_view_specs.length > 0) {
     summary += `\n\n## Views\n\n${viewsNote(structuredContent.available_view_specs)}`;
@@ -455,19 +659,271 @@ function viewsNote(specs: ViewSpec[]): string {
   return "The validation result includes a graph view of the method (dry run).";
 }
 
-/** A non-empty record — the presence test for both per-pipe artifacts. */
+/**
+ * The main pipe's signature, or `undefined` when the report carries no usable
+ * one. Defensive on purpose (`narrowMethodProvenance` in `run.ts` is the
+ * model): the SDK's declared type is not proof of what arrived, and this is
+ * what an agent types a call site against, so every member is checked and ANY
+ * malformed one omits the WHOLE signature — half a signature actively misleads
+ * where an absent one just sends the agent to `mthds_inputs_template`. The
+ * verdict itself is never affected.
+ */
+export function mainPipeSignatureOf(
+  report: PipelexValidationReport,
+  mainPipeRef: string | undefined,
+): MainPipeSignature | undefined {
+  if (mainPipeRef === undefined) {
+    return undefined;
+  }
+  const contracts = asRecord(report.pipe_io_contracts);
+  const contract = contracts === undefined ? undefined : asRecord(contracts[mainPipeRef]);
+  if (contract === undefined) {
+    return undefined;
+  }
+
+  const output = narrowOutputContract(contract.output);
+  const inputs = narrowInputContracts(
+    contract.inputs,
+    orderedInputNames(report.input_form, mainPipeRef),
+  );
+  if (output === undefined || inputs === undefined) {
+    return undefined;
+  }
+
+  return { pipe_ref: mainPipeRef, inputs, output };
+}
+
+/**
+ * The declared input slots, in authored order where the descriptor states one.
+ * Names the descriptor lists but the contract does not declare are ignored,
+ * and names the contract declares but the descriptor omits keep map order
+ * behind them — a disagreement between the two artifacts costs ordering, never
+ * an input, and never a duplicated one.
+ */
+function narrowInputContracts(
+  value: unknown,
+  order: string[],
+): MainPipeInputSignature[] | undefined {
+  const record = asRecord(value);
+  if (record === undefined) {
+    return undefined;
+  }
+  const declared = Object.keys(record);
+  // The descriptor is a producer artifact like any other, so it may name the
+  // same field twice; `Object.keys` cannot. Deduplicating (first occurrence
+  // wins, which is what `Set` keeps) is the ordering half of the same
+  // whole-signature-or-nothing rule the narrowing below enforces — a repeated
+  // slot would render `main(topic: native.Text, topic: native.Text)`, a call
+  // site wrong in exactly the plausible way a partial signature is.
+  const names = [
+    ...new Set([
+      ...order.filter((name) => declared.includes(name)),
+      ...declared.filter((name) => !order.includes(name)),
+    ]),
+  ];
+
+  const inputs: MainPipeInputSignature[] = [];
+  for (const name of names) {
+    const slot = asRecord(record[name]);
+    if (slot === undefined || name.length === 0) {
+      return undefined;
+    }
+    const conceptRef = narrowConceptRef(slot.concept_ref);
+    const plurality = narrowPlurality(slot.multiplicity, slot.item_count);
+    const presence = slot.presence;
+    if (conceptRef === undefined || plurality === undefined || !isPresenceMarker(presence)) {
+      return undefined;
+    }
+    inputs.push({
+      name,
+      concept_ref: conceptRef,
+      ...plurality,
+      required: PRESENCE_IS_REQUIRED[presence],
+    });
+  }
+  return inputs;
+}
+
+function narrowOutputContract(value: unknown): MainPipeOutputSignature | undefined {
+  const record = asRecord(value);
+  if (record === undefined) {
+    return undefined;
+  }
+  const conceptRef = narrowConceptRef(record.concept_ref);
+  const plurality = narrowPlurality(record.multiplicity, record.item_count);
+  if (conceptRef === undefined || plurality === undefined || typeof record.optional !== "boolean") {
+    return undefined;
+  }
+  return { concept_ref: conceptRef, ...plurality, optional: record.optional };
+}
+
+/** The multiplicity pair, with `item_count` present exactly on the fixed arm. */
+function narrowPlurality(
+  multiplicity: unknown,
+  itemCount: unknown,
+): { multiplicity: IOMultiplicity; item_count?: number } | undefined {
+  if (!isMultiplicity(multiplicity)) {
+    return undefined;
+  }
+  if (multiplicity === "fixed") {
+    // A fixed count is always at least two — the language says `Concept[1]` is
+    // a way of writing `Concept` and reports `"single"`, so a fixed arm
+    // carrying 1 is a producer violation, not an alternate spelling.
+    return typeof itemCount === "number" && Number.isInteger(itemCount) && itemCount > 1
+      ? { multiplicity, item_count: itemCount }
+      : undefined;
+  }
+  // Off the fixed arm the artifact states `item_count: null` — literally, and
+  // always on the wire. Anything else (a number contradicting the multiplicity
+  // beside it, a string, an omitted member) is drift.
+  return itemCount === null ? { multiplicity } : undefined;
+}
+
+/**
+ * Authored input order for one pipe, read from the input-form descriptor — the
+ * one thing the descriptor is consulted for here. The contract's `inputs` map
+ * deliberately carries no order, and the descriptor is the artifact that states
+ * it; when it is absent (an older runner, or a verdict the `views` token never
+ * reached) the map's own iteration order stands. The signature never depends on
+ * the descriptor being present.
+ */
+function orderedInputNames(inputForm: unknown, pipeRef: string): string[] {
+  const forms = asRecord(inputForm);
+  const descriptor = forms === undefined ? undefined : asRecord(forms[pipeRef]);
+  if (descriptor === undefined || !Array.isArray(descriptor.fields)) {
+    return [];
+  }
+  return descriptor.fields
+    .map((field) => {
+      const record = asRecord(field);
+      return record !== undefined && typeof record.name === "string" ? record.name : undefined;
+    })
+    .filter((name): name is string => name !== undefined);
+}
+
+/**
+ * The signature as one line of MTHDS-flavoured notation, e.g.
+ * `demo.main(document: legal.Contract, notes?: native.Text, tags: native.Text[]) -> analysis.Report[2]`:
+ * `?` marks an input the caller may omit (and an output a successful run may
+ * resolve as a recorded absence), `[]` a variable list, `[N]` a fixed one. The
+ * two never meet on an input: the standard pins a plural slot to
+ * `presence: "plain"`, so an optional list is not a shape a caller can be
+ * offered, and only the output can carry both marks.
+ */
+function signatureLine(signature: MainPipeSignature): string {
+  const inputs = signature.inputs
+    .map(
+      (input) =>
+        `${input.name}${input.required ? "" : "?"}: ${conceptNotation(input.concept_ref, input.multiplicity, input.item_count)}`,
+    )
+    .join(", ");
+  const { concept_ref, multiplicity, item_count, optional } = signature.output;
+  const output = `${conceptNotation(concept_ref, multiplicity, item_count)}${optional ? "?" : ""}`;
+  return `${signature.pipe_ref}(${inputs}) -> ${output}`;
+}
+
+function conceptNotation(
+  conceptRef: string,
+  multiplicity: IOMultiplicity,
+  itemCount?: number,
+): string {
+  return `${conceptRef}${MULTIPLICITY_SUFFIX[multiplicity](itemCount)}`;
+}
+
+function narrowConceptRef(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function isMultiplicity(value: unknown): value is IOMultiplicity {
+  return typeof value === "string" && (IO_MULTIPLICITIES as readonly string[]).includes(value);
+}
+
+function isPresenceMarker(value: unknown): value is PresenceMarker {
+  return typeof value === "string" && (PRESENCE_MARKERS as readonly string[]).includes(value);
+}
+
+/** A plain object, or `undefined` — the one narrowing step every check above starts from. */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * A non-empty record — the test for whether a per-pipe artifact map is worth
+ * shipping to the view at all. The view looks pipes up in it, so an empty map
+ * can drive nothing.
+ */
 function hasEntries(artifact: unknown): boolean {
-  return typeof artifact === "object" && artifact !== null && Object.keys(artifact).length > 0;
+  const map = asRecord(artifact);
+  return map !== undefined && Object.keys(map).length > 0;
+}
+
+/**
+ * Whether a per-pipe artifact map carries an entry for `pipeRef` — the test
+ * behind the form ADVERT, keyed by the namespaced ref the artifacts are keyed
+ * on. An entry that is not a plain object is no entry: the view's selectors
+ * would miss it, and a form advertised on it would never render.
+ *
+ * Narrower than the view's own lookups, which try the namespaced ref and then
+ * fall back to the bare pipe code (`@pipelex/mthds-form`'s `getPipeIOContract`
+ * / `getPipeInputForm`). A bare-keyed map therefore goes unadvertised though a
+ * click would still reach it — the safe direction, since withholding an advert
+ * costs a hint while a false one costs the model a view that cannot render.
+ */
+function hasEntryFor(artifact: unknown, pipeRef: string): boolean {
+  const map = asRecord(artifact);
+  return map !== undefined && asRecord(map[pipeRef]) !== undefined;
+}
+
+/**
+ * The pipe a selector-less run of this same request would execute, or undefined
+ * when nothing settles one.
+ *
+ * The server's own `default_pipe_ref` wins unconditionally: it is the only
+ * signal that knows a `method_ref` package's manifest (`METHODS.toml`), whose
+ * `main_pipe` outranks the bundle-level declaration on the run and build
+ * routes, so a package where the two differ would otherwise get a signature
+ * typing a call site `mthds_run` will not run.
+ *
+ * The three arms are distinct on purpose, and `null` is not `undefined` here:
+ *
+ * - a non-empty string is the stated default;
+ * - `null` — or any other value the field carries — is the server saying it
+ *   determined **no** default (no `main_pipe` anywhere, or a manifest naming a
+ *   pipe the closure does not declare or declares in several domains), which is
+ *   exactly when a selector-less `mthds_run` would fail to resolve one too, so
+ *   the blueprint must NOT be consulted behind it;
+ * - the field being **absent** means the runner predates it, and only then does
+ *   the blueprint derivation stand.
+ *
+ * A JSON body cannot produce an own property holding `undefined`, so reading the
+ * field is the whole absence test.
+ */
+function defaultPipeRefOf(report: PipelexValidationReport): string | undefined {
+  const stated: unknown = report.default_pipe_ref;
+  if (stated === undefined) {
+    return mainPipeRefOf(report.bundle_blueprint);
+  }
+  return typeof stated === "string" && stated.length > 0 ? stated : undefined;
 }
 
 /**
  * `domain.main_pipe` from the batch's primary blueprint, or undefined when the
- * blueprint declares no main pipe. Both fields are plain strings on the
- * blueprint; anything else is treated as absent rather than guessed at.
+ * blueprint declares no main pipe. The fallback behind `defaultPipeRefOf`, for
+ * a runner that serves no `default_pipe_ref`. Both fields are plain strings on the
+ * blueprint; anything else — a blueprint that is not even an object included,
+ * since this now runs on every valid verdict rather than only where the
+ * contracts already proved the report well-formed — is treated as absent rather
+ * than guessed at.
  */
-function mainPipeRefOf(blueprint: Record<string, unknown>): string | undefined {
-  const domain = blueprint.domain;
-  const mainPipe = blueprint.main_pipe;
+function mainPipeRefOf(blueprint: unknown): string | undefined {
+  const record = asRecord(blueprint);
+  if (record === undefined) {
+    return undefined;
+  }
+  const domain = record.domain;
+  const mainPipe = record.main_pipe;
   if (typeof mainPipe !== "string" || mainPipe.length === 0) {
     return undefined;
   }

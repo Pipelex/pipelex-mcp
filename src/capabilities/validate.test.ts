@@ -71,7 +71,10 @@ const demoInputForm: InputForm = {
 
 const validReport: PipelexValidationReport = {
   is_valid: true,
-  bundle_blueprint: { main_pipe: "main" },
+  // Namespaced, matching the `demo.main` key the contracts and the descriptor
+  // are stored under — a real report keys both artifacts by the ref the
+  // blueprint produces, and the signature's contract lookup depends on it.
+  bundle_blueprint: { domain: "demo", main_pipe: "main" },
   pipe_io_contracts: demoContracts,
   input_form: demoInputForm,
   graph_spec: { nodes: [{ id: "demo.main" }] },
@@ -89,6 +92,10 @@ const pendingReport: PipelexValidationReport = {
   pending_signatures: ["demo.todo"],
   is_runnable: false,
 };
+
+// Appended to the API's rendered markdown on every valid verdict that carries a
+// signature, ahead of the Views note. Kept in sync with `signatureLine`.
+const MAIN_PIPE_NOTE = "\n\n## Main pipe\n\n`demo.main(topic: native.Text) -> native.Text`";
 
 // Appended to the API's rendered markdown whenever a view is available. Kept
 // in sync with `viewsNote` in validate.ts: a runnable verdict advertises the
@@ -120,8 +127,9 @@ describe("validationResult", () => {
     const result = validationResult(validReport, true);
 
     expect(result.structuredContent.status).toBe("ok");
-    // The summary is the API markdown plus the appended Views note.
-    expect(result.summary).toBe("# Valid" + VIEWS_NOTE);
+    // The summary is the API markdown plus the appended signature line and
+    // Views note, in that order.
+    expect(result.summary).toBe("# Valid" + MAIN_PIPE_NOTE + VIEWS_NOTE);
     // The graph rides the view-only `graphSpec` field (delivered on `_meta`),
     // never `structuredContent` — the model reads the lean verdict only.
     expect(result.graphSpec).toEqual(validReport.graph_spec);
@@ -131,7 +139,7 @@ describe("validationResult", () => {
     // channel, same discipline.
     expect(result.pipeIoContracts).toEqual(validReport.pipe_io_contracts);
     expect(result.inputForm).toEqual(validReport.input_form);
-    expect(result.mainPipeRef).toBe("main");
+    expect(result.mainPipeRef).toBe("demo.main");
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
     expect(result.structuredContent).not.toHaveProperty("pipe_io_contracts");
     expect(result.structuredContent).not.toHaveProperty("rendered_markdown");
@@ -145,18 +153,31 @@ describe("validationResult", () => {
     // No graph produced → no graph view advertised; the form does not depend on it.
     expect(result.structuredContent.available_view_specs).toEqual(["input_form"]);
     expect(result.pipeIoContracts).toEqual(validReport.pipe_io_contracts);
-    expect(result.summary).toBe("# Valid" + VIEWS_NOTE_FORM_ONLY);
+    // The signature does not ride the graph either.
+    expect(result.summary).toBe("# Valid" + MAIN_PIPE_NOTE + VIEWS_NOTE_FORM_ONLY);
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
   });
 
-  it("namespaces the main pipe ref with the blueprint's domain", () => {
+  it("falls back to the bare main pipe name when the blueprint states no domain", () => {
     const report: PipelexValidationReport = {
       ...validReport,
-      bundle_blueprint: { domain: "demo", main_pipe: "main" },
+      bundle_blueprint: { main_pipe: "main" },
     };
     const result = validationResult(report, true);
 
-    expect(result.mainPipeRef).toBe("demo.main");
+    expect(result.mainPipeRef).toBe("main");
+    // ...and the contracts, keyed by the namespaced ref, then hold no entry
+    // under that key — a missing entry omits the signature rather than guessing
+    // at a key, and withholds the form's ADVERT the same way.
+    expect(result.structuredContent.main_pipe).toBeUndefined();
+    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
+    expect(result.summary).toBe("# Valid" + VIEWS_NOTE_GRAPH_ONLY);
+    // The artifacts themselves still ride: the advert speaks for the entry
+    // pipe, the maps are just what the view looks a pipe up in. The kernel's
+    // selectors also try the bare code, so this very map is reachable by a
+    // click — withholding it would make that click dead for every pipe.
+    expect(result.pipeIoContracts).toEqual(validReport.pipe_io_contracts);
+    expect(result.inputForm).toEqual(validReport.input_form);
   });
 
   it("does not advertise a form when the report carries no contracts", () => {
@@ -166,7 +187,10 @@ describe("validationResult", () => {
     expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
     expect(result.pipeIoContracts).toBeUndefined();
     expect(result.inputForm).toBeUndefined();
-    expect(result.mainPipeRef).toBeUndefined();
+    // The ref is still derived (it is the blueprint's, not the contracts'), but
+    // an empty contract map leaves the signature nothing to project.
+    expect(result.mainPipeRef).toBe("demo.main");
+    expect(result.structuredContent.main_pipe).toBeUndefined();
     expect(result.summary).toBe("# Valid" + VIEWS_NOTE_GRAPH_ONLY);
   });
 
@@ -181,8 +205,10 @@ describe("validationResult", () => {
     expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
     expect(result.pipeIoContracts).toBeUndefined();
     expect(result.inputForm).toBeUndefined();
-    expect(result.mainPipeRef).toBeUndefined();
-    expect(result.summary).toBe("# Valid" + VIEWS_NOTE_GRAPH_ONLY);
+    expect(result.mainPipeRef).toBe("demo.main");
+    // The signature reads the contracts, which are still there — it never
+    // depended on the descriptor beyond input order.
+    expect(result.summary).toBe("# Valid" + MAIN_PIPE_NOTE + VIEWS_NOTE_GRAPH_ONLY);
   });
 
   it("does not advertise or emit a graph when the invoking shell has no views", () => {
@@ -191,7 +217,9 @@ describe("validationResult", () => {
     expect(result.structuredContent.available_view_specs).toEqual([]);
     expect(result.graphSpec).toBeUndefined();
     expect(result.pipeIoContracts).toBeUndefined();
-    expect(result.summary).toBe("# Valid");
+    // The workshop is precisely the shell the signature exists for, so it is
+    // NOT on the views branch.
+    expect(result.summary).toBe("# Valid" + MAIN_PIPE_NOTE);
   });
 
   it("projects pending signatures as valid but not runnable", () => {
@@ -205,7 +233,7 @@ describe("validationResult", () => {
     // cannot run, so no input form is advertised for it.
     expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
     expect(result.pipeIoContracts).toBeUndefined();
-    expect(result.summary).toBe("# Valid" + VIEWS_NOTE_GRAPH_ONLY);
+    expect(result.summary).toBe("# Valid" + MAIN_PIPE_NOTE + VIEWS_NOTE_GRAPH_ONLY);
   });
 
   it("projects invalid produced verdicts as ok with validation errors", () => {
@@ -231,6 +259,619 @@ describe("validationResult", () => {
   });
 });
 
+/**
+ * A three-input contract whose MAP order (`notes`, `document`, `tags`) is
+ * deliberately not the authored order the descriptor states (`document`,
+ * `notes`, `tags`) — ordering is the one thing the descriptor is consulted for,
+ * and a fixture whose two orders agree would prove nothing. It also carries the
+ * three shapes the rendered line has notation for: an optional slot, a variable
+ * list, and a fixed output.
+ */
+const orderedContracts: PipeIOContracts = {
+  "demo.main": {
+    inputs: {
+      notes: {
+        concept_ref: "native.Text",
+        presence: "optional",
+        multiplicity: "single",
+        item_count: null,
+        json_schema: { type: "string" },
+      },
+      document: {
+        concept_ref: "legal.Contract",
+        presence: "force",
+        multiplicity: "single",
+        item_count: null,
+        json_schema: { type: "object" },
+      },
+      tags: {
+        concept_ref: "native.Text",
+        presence: "plain",
+        multiplicity: "variable",
+        item_count: null,
+        json_schema: { type: "array", items: { type: "string" } },
+      },
+    },
+    output: {
+      concept_ref: "analysis.Report",
+      multiplicity: "fixed",
+      item_count: 2,
+      optional: false,
+    },
+  },
+};
+
+const orderedInputForm: InputForm = {
+  "demo.main": {
+    fields: [
+      {
+        name: "document",
+        kind: "object",
+        concept_ref: "legal.Contract",
+        required: true,
+        presence: "force",
+        gating: true,
+        fields: [],
+      },
+      {
+        name: "notes",
+        kind: "prose",
+        concept_ref: "native.Text",
+        required: false,
+        presence: "optional",
+        gating: false,
+      },
+      {
+        name: "tags",
+        kind: "list",
+        concept_ref: "native.Text",
+        required: true,
+        presence: "plain",
+        gating: false,
+        item: { kind: "prose", concept_ref: "native.Text", required: true },
+      },
+    ],
+  },
+};
+
+const orderedReport: PipelexValidationReport = {
+  ...validReport,
+  pipe_io_contracts: orderedContracts,
+  input_form: orderedInputForm,
+};
+
+/** The three ordered inputs, as the signature reports them. */
+const ORDERED_INPUTS = [
+  { name: "document", concept_ref: "legal.Contract", multiplicity: "single", required: true },
+  { name: "notes", concept_ref: "native.Text", multiplicity: "single", required: false },
+  { name: "tags", concept_ref: "native.Text", multiplicity: "variable", required: true },
+];
+
+/** Build a report whose main pipe carries exactly this (possibly malformed) contract. */
+function reportWithContract(contract: unknown): PipelexValidationReport {
+  return {
+    ...validReport,
+    pipe_io_contracts: { "demo.main": contract } as unknown as PipeIOContracts,
+  };
+}
+
+describe("main pipe signature", () => {
+  it("projects the main pipe's signature in the authored order the descriptor states", () => {
+    const result = validationResult(orderedReport, true);
+
+    // toEqual pins the field set as well as the values: an extra member would
+    // be a token the model pays for and a schema the host may reject.
+    expect(result.structuredContent.main_pipe).toEqual({
+      pipe_ref: "demo.main",
+      inputs: ORDERED_INPUTS,
+      output: {
+        concept_ref: "analysis.Report",
+        multiplicity: "fixed",
+        item_count: 2,
+        optional: false,
+      },
+    });
+    // `?` for an input the caller may omit, `[]` for a variable list, `[N]` for
+    // a fixed one.
+    expect(result.summary).toContain(
+      "`demo.main(document: legal.Contract, notes?: native.Text, tags: native.Text[]) -> analysis.Report[2]`",
+    );
+  });
+
+  it("falls back to the contract map's own order when no descriptor arrived", () => {
+    const result = validationResult({ ...orderedReport, input_form: undefined }, true);
+
+    expect(result.structuredContent.main_pipe?.inputs.map((input) => input.name)).toEqual([
+      "notes",
+      "document",
+      "tags",
+    ]);
+  });
+
+  it("keeps every declared input when the descriptor and the contract disagree", () => {
+    // A descriptor naming a slot the contract does not declare, and silent
+    // about one it does: ordering degrades, an input is never dropped.
+    const inputForm: InputForm = {
+      "demo.main": {
+        fields: [
+          {
+            name: "ghost",
+            kind: "prose",
+            required: true,
+            presence: "plain",
+            gating: true,
+          },
+          {
+            name: "tags",
+            kind: "list",
+            concept_ref: "native.Text",
+            required: true,
+            presence: "plain",
+            gating: false,
+            item: { kind: "prose", concept_ref: "native.Text", required: true },
+          },
+        ],
+      },
+    };
+    const result = validationResult({ ...orderedReport, input_form: inputForm }, true);
+
+    expect(result.structuredContent.main_pipe?.inputs.map((input) => input.name)).toEqual([
+      "tags",
+      "notes",
+      "document",
+    ]);
+  });
+
+  it("reports a slot once when the descriptor names it twice", () => {
+    // A repeated field is producer drift like any other, and the ordered half
+    // would otherwise carry the name twice — a duplicated slot renders a call
+    // site that is wrong in the plausible way this module refuses to be.
+    const [document, notes, tags] = orderedInputForm["demo.main"].fields;
+    const inputForm: InputForm = {
+      "demo.main": { fields: [document, notes, document, tags] },
+    };
+    const result = validationResult({ ...orderedReport, input_form: inputForm }, true);
+
+    expect(result.structuredContent.main_pipe?.inputs).toEqual(ORDERED_INPUTS);
+  });
+
+  it("projects the signature on a pending-signature verdict", () => {
+    // Not runnable, so no form is advertised — but the shape is fully
+    // determined before the signatures resolve, and knowing it is what lets an
+    // agent write the call site it is about to fill in.
+    const result = validationResult(
+      { ...orderedReport, pending_signatures: ["demo.todo"], is_runnable: false },
+      true,
+    );
+
+    expect(result.structuredContent.is_runnable).toBe(false);
+    expect(result.structuredContent.main_pipe?.pipe_ref).toBe("demo.main");
+  });
+
+  it("projects the signature on a shell with no views — the workshop case", () => {
+    const result = validationResult(orderedReport, true, false);
+
+    expect(result.structuredContent.available_view_specs).toEqual([]);
+    expect(result.structuredContent.main_pipe?.inputs).toEqual(ORDERED_INPUTS);
+    expect(result.summary).toContain("## Main pipe");
+  });
+
+  it("projects the signature when the graph was not requested", () => {
+    const result = validationResult(orderedReport, false);
+
+    expect(result.graphSpec).toBeUndefined();
+    expect(result.structuredContent.main_pipe?.inputs).toEqual(ORDERED_INPUTS);
+  });
+
+  it("marks an optional output with a trailing ? in the rendered line", () => {
+    const result = validationResult(
+      reportWithContract({
+        inputs: {},
+        output: {
+          concept_ref: "analysis.Report",
+          multiplicity: "single",
+          item_count: null,
+          optional: true,
+        },
+      }),
+      true,
+    );
+
+    expect(result.structuredContent.main_pipe?.output.optional).toBe(true);
+    expect(result.summary).toContain("`demo.main() -> analysis.Report?`");
+  });
+
+  it("omits the signature when the blueprint declares no main pipe", () => {
+    const result = validationResult(
+      { ...orderedReport, bundle_blueprint: { domain: "demo" } },
+      true,
+    );
+
+    expect(result.structuredContent.main_pipe).toBeUndefined();
+    expect(result.summary).not.toContain("## Main pipe");
+  });
+
+  it("omits the whole signature rather than emitting a partial one", () => {
+    // Each of these is a well-formed report in every other respect: the verdict
+    // must survive untouched, and half a signature must never reach the agent
+    // typing a call site against it.
+    const malformed: Array<[string, unknown]> = [
+      ["a contract that is not an object", "demo.main"],
+      [
+        "an unknown multiplicity",
+        {
+          inputs: {},
+          output: { concept_ref: "analysis.Report", multiplicity: "many", item_count: null },
+        },
+      ],
+      [
+        "a fixed arm with no item_count",
+        {
+          inputs: {},
+          output: {
+            concept_ref: "analysis.Report",
+            multiplicity: "fixed",
+            item_count: null,
+            optional: false,
+          },
+        },
+      ],
+      [
+        "an item_count off the fixed arm",
+        {
+          inputs: {},
+          output: {
+            concept_ref: "analysis.Report",
+            multiplicity: "single",
+            item_count: 3,
+            optional: false,
+          },
+        },
+      ],
+      [
+        // `Concept[1]` is the language's way of writing `Concept` and reports
+        // "single" — a fixed arm carrying 1 is a producer violation.
+        "a fixed count of one",
+        {
+          inputs: {},
+          output: {
+            concept_ref: "analysis.Report",
+            multiplicity: "fixed",
+            item_count: 1,
+            optional: false,
+          },
+        },
+      ],
+      [
+        // The contract states `item_count: null` on every non-fixed arm,
+        // literally and always on the wire — an omitted member is drift.
+        "an omitted item_count off the fixed arm",
+        {
+          inputs: {},
+          output: { concept_ref: "analysis.Report", multiplicity: "single", optional: false },
+        },
+      ],
+      [
+        "a non-null non-number item_count off the fixed arm",
+        {
+          inputs: {},
+          output: {
+            concept_ref: "analysis.Report",
+            multiplicity: "variable",
+            item_count: "3",
+            optional: false,
+          },
+        },
+      ],
+      [
+        "an output with no optional flag",
+        {
+          inputs: {},
+          output: { concept_ref: "analysis.Report", multiplicity: "single", item_count: null },
+        },
+      ],
+      [
+        "an empty concept ref on an input",
+        {
+          inputs: {
+            topic: {
+              concept_ref: "",
+              presence: "plain",
+              multiplicity: "single",
+              item_count: null,
+              json_schema: {},
+            },
+          },
+          output: {
+            concept_ref: "analysis.Report",
+            multiplicity: "single",
+            item_count: null,
+            optional: false,
+          },
+        },
+      ],
+      [
+        "an unknown presence marker on an input",
+        {
+          inputs: {
+            topic: {
+              concept_ref: "native.Text",
+              presence: "maybe",
+              multiplicity: "single",
+              item_count: null,
+              json_schema: {},
+            },
+          },
+          output: {
+            concept_ref: "analysis.Report",
+            multiplicity: "single",
+            item_count: null,
+            optional: false,
+          },
+        },
+      ],
+    ];
+
+    for (const [label, contract] of malformed) {
+      const result = validationResult(reportWithContract(contract), true);
+
+      expect(result.structuredContent.main_pipe, label).toBeUndefined();
+      expect(result.summary, label).not.toContain("## Main pipe");
+      // The verdict is unaffected — the signature is a projection beside it.
+      expect(result.structuredContent.is_valid, label).toBe(true);
+      expect(result.structuredContent.status, label).toBe("ok");
+    }
+  });
+
+  it("still advertises the form when a plain-object contract fails to narrow", () => {
+    // The advert and `main_pipe` answer two different questions, and this is
+    // where they diverge: the form derives its fields from the DESCRIPTOR, so
+    // it renders whatever the contract's `optional` flag says, while the
+    // signature refuses to emit a half-narrowed call site. A non-boolean
+    // `optional` therefore advertises a form that genuinely works and no
+    // signature — so the schema description must not promise the form's pipe
+    // is "the same pipe `main_pipe` names".
+    const result = validationResult(
+      reportWithContract({
+        inputs: {},
+        output: {
+          concept_ref: "analysis.Report",
+          multiplicity: "single",
+          item_count: null,
+          optional: "no",
+        },
+      }),
+      true,
+    );
+
+    expect(result.structuredContent.main_pipe).toBeUndefined();
+    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph", "input_form"]);
+  });
+
+  it("withholds the form's advert when the contract entry is not an object", () => {
+    // The twin of the test above, and the boundary between them. A plain object
+    // that fails to narrow still derives a working form from the descriptor, so
+    // it is advertised; an entry that is no object at all is no entry, and the
+    // advert does not speak for it. What the VIEW then does with such an entry
+    // is a separate question, and not a settled one — see L-260912-445e9b.
+    // Without this case the "plain object" half of `hasEntryFor` is unpinned:
+    // relax it to a bare `!== undefined` and the whole suite stays green.
+    const result = validationResult(reportWithContract("demo.main"), true);
+
+    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
+    expect(result.structuredContent.main_pipe).toBeUndefined();
+    // The verdict and the artifacts are untouched: only the advert is withheld.
+    expect(result.structuredContent.is_valid).toBe(true);
+    expect(result.pipeIoContracts).toBeDefined();
+  });
+});
+
+describe("effective entry pipe", () => {
+  /**
+   * A `method_ref` package whose manifest entry (`other.shout`) is not the
+   * bundle-level `main_pipe` (`demo.main`) — the divergence the server's
+   * `default_pipe_ref` exists to state, and the only case where the two signals
+   * disagree about the pipe a selector-less run executes.
+   */
+  const divergingContracts: PipeIOContracts = {
+    ...orderedContracts,
+    "other.shout": {
+      inputs: {
+        message: {
+          concept_ref: "native.Text",
+          presence: "plain",
+          multiplicity: "single",
+          item_count: null,
+          json_schema: { type: "string" },
+        },
+      },
+      output: {
+        concept_ref: "native.Text",
+        multiplicity: "single",
+        item_count: null,
+        optional: false,
+      },
+    },
+  };
+
+  const divergingReport: PipelexValidationReport = {
+    ...orderedReport,
+    pipe_io_contracts: divergingContracts,
+  };
+
+  it("prefers the server's stated default over the blueprint's main pipe", () => {
+    // The blueprint still says `demo.main`; the manifest the MCP cannot see
+    // says `other.shout`, and that is the pipe `mthds_run` defaults to.
+    const result = validationResult({ ...divergingReport, default_pipe_ref: "other.shout" }, true);
+
+    expect(result.mainPipeRef).toBe("other.shout");
+    expect(result.structuredContent.main_pipe).toEqual({
+      pipe_ref: "other.shout",
+      inputs: [
+        { name: "message", concept_ref: "native.Text", multiplicity: "single", required: true },
+      ],
+      output: { concept_ref: "native.Text", multiplicity: "single", optional: false },
+    });
+    expect(result.summary).toContain("`other.shout(message: native.Text) -> native.Text`");
+  });
+
+  it("omits the signature when the server states no default, blueprint or not", () => {
+    // `null` is the server saying it determined no entry pipe — a manifest
+    // naming a pipe the closure declares in several domains, say. A
+    // selector-less run would fail to resolve one too, so the blueprint must
+    // not be consulted behind it.
+    const result = validationResult({ ...divergingReport, default_pipe_ref: null }, true);
+
+    expect(result.mainPipeRef).toBeUndefined();
+    expect(result.structuredContent.main_pipe).toBeUndefined();
+    expect(result.summary).not.toContain("## Main pipe");
+    // The verdict is untouched — this is a projection beside it.
+    expect(result.structuredContent.is_valid).toBe(true);
+  });
+
+  it("falls back to the blueprint when the field is absent — the older runner", () => {
+    // No `default_pipe_ref` own property at all: the runner predates the
+    // field, and the blueprint derivation is the only signal there is.
+    expect(divergingReport).not.toHaveProperty("default_pipe_ref");
+    const result = validationResult(divergingReport, true);
+
+    expect(result.mainPipeRef).toBe("demo.main");
+    expect(result.structuredContent.main_pipe?.inputs).toEqual(ORDERED_INPUTS);
+  });
+
+  it("treats a drifting field value as no default rather than as absence", () => {
+    // A server carrying the field but sending something unreadable has an
+    // opinion we cannot read; naming the blueprint's pipe behind it would be
+    // the guess this module refuses everywhere else.
+    for (const stated of [42, "", { pipe_ref: "demo.main" }]) {
+      // Cast because the drift is the point: a newer SDK types this field, and
+      // a fixture that could not express a value it forbids would stop testing
+      // what arrives on the wire.
+      const result = validationResult(
+        { ...divergingReport, default_pipe_ref: stated } as unknown as PipelexValidationReport,
+        true,
+      );
+
+      expect(result.mainPipeRef, JSON.stringify(stated)).toBeUndefined();
+      expect(result.structuredContent.main_pipe, JSON.stringify(stated)).toBeUndefined();
+    }
+  });
+
+  it("carries the stated default on _meta, where the view reads the pipe in play", () => {
+    const result = toolResult(
+      validationResult({ ...divergingReport, default_pipe_ref: "other.shout" }, true),
+    );
+
+    expect(result._meta.main_pipe_ref).toBe("other.shout");
+  });
+
+  it("withholds the form's advert, but not its artifacts, when the server states no default", () => {
+    // Runnable, views on, both artifacts populated — but no entry pipe was
+    // settled. The view used to fall through to the first pipe in the contract
+    // map and offer a Run button for it. Now the model is told no form exists
+    // and the view opens none, so the verdict reads the same on every stream:
+    // the graph, no `main_pipe`, no advertised form.
+    const result = validationResult({ ...divergingReport, default_pipe_ref: null }, true);
+
+    expect(result.structuredContent.is_runnable).toBe(true);
+    expect(result.structuredContent.main_pipe).toBeUndefined();
+    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
+    expect(result.summary).toBe("# Valid" + VIEWS_NOTE_GRAPH_ONLY);
+
+    const wire = toolResult(result);
+    expect(wire._meta.main_pipe_ref).toBeUndefined();
+    // The graph still rides: withholding the form is not withholding the view.
+    expect(wire._meta.graph_spec).toEqual(validReport.graph_spec);
+    // ...and so do the form's artifacts, which is the whole point of the
+    // split. `_meta` never reaches the model, so shipping them tells it
+    // nothing; withholding them made a click on a graph node dead, because
+    // the view's selectors would then miss for EVERY pipe. This verdict is
+    // exactly the one where a click is the only route to a form.
+    expect(wire._meta.pipe_io_contracts).toEqual(divergingContracts);
+    expect(wire._meta.input_form).toEqual(orderedInputForm);
+  });
+
+  it("withholds the form's advert when the descriptor has no entry for the entry pipe", () => {
+    // The contracts know `other.shout`; the descriptor (still `demo.main`
+    // only) does not. The kernel derives the fields from the descriptor, so
+    // the view could not render a form for the entry pipe — a non-empty map
+    // is not the advert's test, the entry pipe's own entry is.
+    const result = validationResult({ ...divergingReport, default_pipe_ref: "other.shout" }, true);
+
+    expect(result.structuredContent.main_pipe?.pipe_ref).toBe("other.shout");
+    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
+    // The pair still rides, so `demo.main` — which DOES carry both entries —
+    // is still reachable by a click even though the entry pipe is not.
+    expect(result.pipeIoContracts).toEqual(divergingContracts);
+    expect(result.inputForm).toEqual(orderedInputForm);
+  });
+
+  it("withholds the form's advert when the contract has no entry for the entry pipe", () => {
+    // The mirror of the test above, and the reason the advert names BOTH
+    // artifacts rather than either: here the DESCRIPTOR knows `other.shout`
+    // while the contracts (still `demo.main` only) do not. `RunPanel` co-walks
+    // the pair and the view mounts only once both resolve, so an advert riding
+    // the descriptor alone would be exactly the false advert this gate exists
+    // to prevent. Without this case the contracts conjunct is unpinned: delete
+    // it from the gate and the whole suite stays green.
+    const inputForm: InputForm = {
+      ...orderedInputForm,
+      "other.shout": {
+        fields: [
+          {
+            name: "message",
+            kind: "prose",
+            concept_ref: "native.Text",
+            required: true,
+            presence: "plain",
+            gating: true,
+          },
+        ],
+      },
+    };
+    const result = validationResult(
+      { ...orderedReport, input_form: inputForm, default_pipe_ref: "other.shout" },
+      true,
+    );
+
+    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
+    // No signature either, and for the same missing entry: the contract is what
+    // the signature narrows from.
+    expect(result.structuredContent.main_pipe).toBeUndefined();
+    // The pair still rides, so `demo.main` stays reachable by a click.
+    expect(result.pipeIoContracts).toEqual(orderedContracts);
+    expect(result.inputForm).toEqual(inputForm);
+    expect(result.mainPipeRef).toBe("other.shout");
+  });
+
+  it("advertises the form for the stated default once both artifacts carry it", () => {
+    const inputForm: InputForm = {
+      ...orderedInputForm,
+      "other.shout": {
+        fields: [
+          {
+            name: "message",
+            kind: "prose",
+            concept_ref: "native.Text",
+            required: true,
+            presence: "plain",
+            gating: true,
+          },
+        ],
+      },
+    };
+    const result = validationResult(
+      { ...divergingReport, input_form: inputForm, default_pipe_ref: "other.shout" },
+      true,
+    );
+
+    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph", "input_form"]);
+    expect(result.pipeIoContracts).toEqual(divergingContracts);
+    expect(result.inputForm).toEqual(inputForm);
+    expect(result.mainPipeRef).toBe("other.shout");
+  });
+});
+
 describe("toolResult", () => {
   it("delivers the graph on _meta, never on structuredContent", () => {
     const result = toolResult(validationResult(validReport, true));
@@ -238,11 +879,13 @@ describe("toolResult", () => {
     expect(result._meta.graph_spec).toEqual(validReport.graph_spec);
     expect(result._meta.pipe_io_contracts).toEqual(validReport.pipe_io_contracts);
     expect(result._meta.input_form).toEqual(validReport.input_form);
-    expect(result._meta.main_pipe_ref).toBe("main");
+    expect(result._meta.main_pipe_ref).toBe("demo.main");
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
     expect(result.structuredContent).not.toHaveProperty("pipe_io_contracts");
     expect(result.isError).toBe(false);
-    expect(result.content).toEqual([{ type: "text", text: "# Valid" + VIEWS_NOTE }]);
+    expect(result.content).toEqual([
+      { type: "text", text: "# Valid" + MAIN_PIPE_NOTE + VIEWS_NOTE },
+    ]);
   });
 
   it("carries an undefined graph on _meta for verdicts without one", () => {

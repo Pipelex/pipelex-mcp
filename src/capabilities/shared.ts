@@ -16,6 +16,7 @@ import {
 import type { MthdsFileItem } from "@pipelex/sdk";
 import { z } from "zod";
 
+// The Makefile's console dev banner (CONSOLE_DEV_ENV) prints this same URL as "the server default" — keep the two in step.
 export const DEFAULT_API_URL = "https://api.pipelex.com";
 
 /**

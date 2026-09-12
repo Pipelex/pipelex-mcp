@@ -218,7 +218,9 @@ export const mthdsValidateTool = defineTool({
     "or from a registered method's catalog id (mt_…) passed as method_id. " +
     "Supply exactly ONE of files / method_ref / method_id — never several. " +
     "Addresses and ids are resolved server-side, so no bundle enters the conversation; " +
-    "a by-id call validates the method's CURRENT stored content and requires an API key, since the catalog is org-scoped.",
+    "a by-id call validates the method's CURRENT stored content and requires an API key, since the catalog is org-scoped. " +
+    "A valid verdict carries the main pipe's typed signature (main_pipe): its ref, each declared input with the concept it expects and how many items, and the concept it produces — " +
+    "type a call site from that instead of guessing the shapes of a method you cannot read.",
   inputSchema: mthdsValidateInputSchema,
   outputSchema: mthdsValidateOutputSchema,
   annotations: {

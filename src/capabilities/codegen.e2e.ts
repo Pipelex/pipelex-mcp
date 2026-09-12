@@ -26,11 +26,16 @@ import {
   FIXTURE_BUNDLE_URI,
   INVALID_BUNDLE,
   INVALID_BUNDLE_URI,
+  PUBLISHED_METHOD_REF,
+  apiAdvertisesExtension,
   liveApiConfig,
 } from "./e2e-support.js";
 
 // No `client` seam and no `resolver`: the real client, inline files only.
 const context: CodegenContext = liveApiConfig();
+
+/** Does this deployment resolve `method_id` / `method_ref` server-side? */
+const SERVES_SELECTORS = await apiAdvertisesExtension("method_ref");
 
 const fixtureFiles = [{ content: FIXTURE_BUNDLE, uri: FIXTURE_BUNDLE_URI }];
 
@@ -219,45 +224,53 @@ describe("mthds_codegen output_dir (live)", () => {
 });
 
 /**
- * GATED on the hosted deploy — Checkpoint 3 of `wip/addressing-methods/plan.md`.
- *
- * Both selectors are server pass-throughs on `POST /v1/codegen` (the runner
- * resolves the address, the hosted platform resolves the id), and the hosted
- * API does not serve selector bodies until the platform deploy that checkpoint
- * gates on has happened. Un-skip once it lands; against a hosted API that
- * predates it these calls come back as request-shape errors, which would fail
- * the suite for a reason that is not drift.
- *
- * Probed on 2026-08-29 to keep this gate honest. The local stack already
- * serves both, so the capability's mapping is exercised there by hand: an
- * address returns a stamped `is_valid` report, and so does a catalog id. The
- * hosted API is the half that is behind — `method_ref` answers `501`
- * `MethodRefNotSupported` ("no method registry is wired"), and `method_id` is
- * not yet in its request schema at all, so it answers `422` "provide exactly
- * one of `files` or `method_ref`". That second body is the one to re-probe
- * before un-skipping: it means the hosted route rejects the field rather than
- * failing to resolve it.
+ * GATED on the live API, not on a date: both selectors are server pass-throughs
+ * on `POST /v1/codegen` (the runner resolves the address, the hosted platform
+ * resolves the id), which an environment on the pre-selector platform build
+ * answers as a request-shape error — a failure that is not drift. The probe
+ * asks `/v1/version` whether this deployment serves them; see
+ * `apiAdvertisesExtension`.
  */
-describe.skip("mthds_codegen by selector (live, gated)", () => {
+describe.skipIf(!SERVES_SELECTORS)("mthds_codegen by selector (live)", () => {
+  // `crate_fingerprint` is the ONLY thing that distinguishes these two legs, and
+  // that is not a stylistic preference. Both methods project to byte-identical
+  // `types.ts` and `binder.ts` — each declares only native `Text`, so the emitted
+  // code carries no name from either method. Asserting on artifact paths or
+  // content therefore cannot tell a correctly-resolved selector from a server
+  // that ignored it, which is exactly the failure a server-side resolver has.
   it("generates from a stored method by id alone (server-side resolution)", async () => {
     const { fixtureMethodId } = await import("./e2e-support.js");
-    const result = await generateMthdsCode(
-      { method_id: await fixtureMethodId(), target: "ts-zod" },
-      context,
-    );
+    const [fromFiles, fromId] = await Promise.all([
+      generateMthdsCode({ files: fixtureFiles, target: "ts-zod" }, context),
+      generateMthdsCode({ method_id: await fixtureMethodId(), target: "ts-zod" }, context),
+    ]);
 
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.is_valid).toBe(true);
-    expect(result.structuredContent.lock?.filename).toBe("codegen.lock");
+    expect(fromId.structuredContent.status).toBe("ok");
+    expect(fromId.structuredContent.is_valid).toBe(true);
+    expect(fromId.structuredContent.lock?.filename).toBe("codegen.lock");
+    // Derived, never hardcoded: the stored fixture IS `FIXTURE_BUNDLE`, so the
+    // id must resolve to the same crate the files do. A stale stored method or a
+    // resolver that returned someone else's method breaks this and nothing else.
+    expect(typeof fromFiles.structuredContent.crate_fingerprint).toBe("string");
+    expect(fromId.structuredContent.crate_fingerprint).toBe(
+      fromFiles.structuredContent.crate_fingerprint,
+    );
   });
 
   it("generates from a published method by address (server-side git resolution)", async () => {
-    const result = await generateMthdsCode(
-      { method_ref: "github.com/Pipelex/methods/text_stats@v0.1.1", target: "ts-zod" },
-      context,
-    );
+    const [fromFiles, fromRef] = await Promise.all([
+      generateMthdsCode({ files: fixtureFiles, target: "ts-zod" }, context),
+      generateMthdsCode({ method_ref: PUBLISHED_METHOD_REF, target: "ts-zod" }, context),
+    ]);
 
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.is_valid).toBe(true);
+    expect(fromRef.structuredContent.status).toBe("ok");
+    expect(fromRef.structuredContent.is_valid).toBe(true);
+    // The address resolved to its OWN crate. Without this the leg passes on a
+    // server that ignored `method_ref` and projected the request's other source
+    // — or any cached crate — since the emitted bytes are identical either way.
+    expect(typeof fromRef.structuredContent.crate_fingerprint).toBe("string");
+    expect(fromRef.structuredContent.crate_fingerprint).not.toBe(
+      fromFiles.structuredContent.crate_fingerprint,
+    );
   });
 });

@@ -12,6 +12,8 @@ import { useDisplayMode, useLayout, useSendFollowUpMessage } from "skybridge/web
 
 import { useCallTool, useToolInfo } from "../helpers.js";
 import { ToolbarButton } from "./components/toolbar-button.js";
+import { graphCaptionFor, graphPipeRefOf, selectedPipeFor } from "./run-graph-selection.js";
+import type { SelectedPipe } from "./run-graph-selection.js";
 import { terminalFollowUpPrompt } from "./run-notify.js";
 import { useRunPolling } from "./use-run-polling.js";
 
@@ -20,18 +22,6 @@ import { useRunPolling } from "./use-run-polling.js";
  * `top-right`, but this view owns the choice. Pinned to `top-left` for now.
  */
 const TOOLBAR_POSITION_FOR_VIEW: ToolbarPosition = TOOLBAR_POSITION.TOP_LEFT;
-
-/** A pipe picked for the form: the bare code `mthds_run` takes, plus its domain for the contract lookup. */
-interface SelectedPipe {
-  domain?: string;
-  code: string;
-}
-
-/** `domain.code` → `{ domain, code }`. Pipe codes carry no dots, so the last one splits. */
-function parsePipeRef(ref: string): SelectedPipe {
-  const dot = ref.lastIndexOf(".");
-  return dot === -1 ? { code: ref } : { domain: ref.slice(0, dot), code: ref.slice(dot + 1) };
-}
 
 /**
  * The run-graph Skybridge view. A view is a tool with a UI, so this renders a
@@ -48,9 +38,16 @@ function parsePipeRef(ref: string): SelectedPipe {
  * graph — mthds-ui's `RunPanel` over the wire input-form descriptor riding
  * `responseMetadata.input_form` (the derivation, since kernel 0.5.0), with the
  * per-pipe IO contracts (`responseMetadata.pipe_io_contracts`) co-walked
- * beside it. The form defaults to the main pipe
+ * beside it. The form is for the effective entry pipe
  * (`responseMetadata.main_pipe_ref`); clicking a pipe node in the graph
- * switches it. Run starts the method through `mthds_run` with the same
+ * switches it. With no entry pipe settled no form opens on its own —
+ * `selectedPipeFor` never substitutes a pipe of the view's own choosing — but
+ * the artifacts still ride, so clicking a pipe node still produces its form.
+ * The graph is the bundle's declared main pipe, which a `method_ref` package's
+ * manifest can override as the entry pipe: when the two differ the graph stays
+ * and a caption under it names both (`graphCaptionFor`), so the diagram is
+ * never silently of a different pipe from the form below it.
+ * Run starts the method through `mthds_run` with the same
  * `files` / `method_ref` / `method_id` the validation was called with, then follows the run
  * by polling `mthds_run_status` and hands the conversation back to the model
  * on the terminal outcome, exactly as `run-follow` does.
@@ -74,12 +71,12 @@ export default function RunGraphView() {
     typeof responseMetadata?.main_pipe_ref === "string" ? responseMetadata.main_pipe_ref : null;
 
   const [pickedPipe, setPickedPipe] = useState<SelectedPipe | null>(null);
-  const selectedPipe = useMemo<SelectedPipe | null>(() => {
-    if (pickedPipe) return pickedPipe;
-    if (mainPipeRef) return parsePipeRef(mainPipeRef);
-    const firstRef = contracts ? Object.keys(contracts)[0] : undefined;
-    return firstRef ? parsePipeRef(firstRef) : null;
-  }, [pickedPipe, mainPipeRef, contracts]);
+  // Clicked node, else the entry pipe, else nothing — never the first pipe the
+  // contract map happens to hold (see `selectedPipeFor`).
+  const selectedPipe = useMemo<SelectedPipe | null>(
+    () => selectedPipeFor(pickedPipe, mainPipeRef),
+    [pickedPipe, mainPipeRef],
+  );
   // `RunPanel` treats `contract` as referentially significant (uploads in
   // flight are abandoned on a new reference), so look it up once per selection.
   const contract = useMemo(
@@ -203,8 +200,14 @@ export default function RunGraphView() {
       ? `${selectedPipe.domain}.${selectedPipe.code}`
       : selectedPipe.code
     : undefined;
+  // The graph is built for the bundle's declared main pipe; the form defaults
+  // to the entry pipe. Say so when they are not the same pipe.
+  const graphCaption = hasGraph
+    ? graphCaptionFor(graphPipeRefOf(graphSpec), mainPipeRef, hasForm ? (pipeLabel ?? null) : null)
+    : null;
   const llmSummary = [
     hasGraph ? `Showing the dry-run graph of the method: ${graphSpec?.nodes.length} nodes` : null,
+    graphCaption,
     `runnable=${output.is_runnable}`,
     hasForm ? `input form shown for pipe ${pipeLabel}` : null,
     runId ? `run ${runId} ${polling.runStatus ?? "starting"}` : null,
@@ -243,6 +246,11 @@ export default function RunGraphView() {
             onNodeSelect={handleNodeSelect}
           />
         </div>
+      ) : null}
+      {graphCaption ? (
+        <p className="mt-2 px-1 text-xs" style={{ color: "#6b7280" }}>
+          {graphCaption}
+        </p>
       ) : null}
       {contract && descriptor && selectedPipe ? (
         <div className="mt-3">

@@ -11,18 +11,27 @@
 
 import { describe, expect, it } from "vitest";
 
+import type { PipelexValidationReport } from "@pipelex/sdk";
+
 import {
   FIXTURE_BUNDLE,
   FIXTURE_BUNDLE_URI,
+  FIXTURE_INPUT_NAME,
+  FIXTURE_PIPE_REF,
   INVALID_BUNDLE,
   INVALID_BUNDLE_URI,
+  apiAdvertisesExtension,
   liveApiConfig,
+  liveClient,
 } from "./e2e-support.js";
 import { validateMthds } from "./validate.js";
 import type { ValidationContext } from "./validate.js";
 
 // No `client` seam and no `resolver`: the real client, inline files only.
 const context: ValidationContext = liveApiConfig();
+
+/** Does this deployment resolve `method_id` / `method_ref` server-side? */
+const SERVES_SELECTORS = await apiAdvertisesExtension("method_ref");
 
 describe("mthds_validate (live)", () => {
   it("returns a runnable verdict, a Markdown summary, and a graph on the view-only channel", async () => {
@@ -55,11 +64,59 @@ describe("mthds_validate (live)", () => {
     // the live proof the token still works.
     expect(typeof result.inputForm).toBe("object");
     expect(typeof result.mainPipeRef).toBe("string");
+
+    // The main pipe's signature — the wire shape the projection narrows, and
+    // the one field here a mocked suite cannot vouch for. The fixture declares
+    // `topic` and produces text, so both halves are asserted against what the
+    // bundle actually says rather than against "something non-empty".
+    const mainPipe = result.structuredContent.main_pipe;
+    expect(mainPipe?.pipe_ref).toBe(FIXTURE_PIPE_REF);
+    expect(mainPipe?.inputs).toEqual([
+      {
+        name: FIXTURE_INPUT_NAME,
+        concept_ref: "native.Text",
+        multiplicity: "single",
+        required: true,
+      },
+    ]);
+    expect(mainPipe?.output.concept_ref).toBe("native.Text");
+    expect(mainPipe?.output.multiplicity).toBe("single");
+    // The rendered line is the channel a ChatGPT install with a cached tool
+    // list still receives, so it must survive the wire too.
+    expect(result.summary).toContain(
+      `\`${FIXTURE_PIPE_REF}(${FIXTURE_INPUT_NAME}: native.Text) -> native.Text\``,
+    );
     expect(JSON.stringify(result.structuredContent)).not.toContain("graph_spec");
     expect(JSON.stringify(result.structuredContent)).not.toContain("pipe_io_contracts");
     // (No `input_form` containment check: the view KIND in
     // `available_view_specs` is legitimately spelled the same.)
     expect(result.structuredContent).not.toHaveProperty("input_form");
+  });
+
+  // GATED on the API deploy. `default_pipe_ref` landed on pipelex-api's `dev`
+  // (#68, 7a476cd) after its 0.21.0 release, so no released runner serves it
+  // yet and no hosted environment has it. Un-skip once `/v1/version` reports a
+  // hosted implementation built on a pipelex-api past 0.21.0 — the probe IS
+  // this assertion: the field arrives, or it does not.
+  //
+  // Worth un-skipping promptly rather than leaving parked: the projection
+  // prefers the report's `default_pipe_ref` and falls back to the blueprint
+  // derivation when the field is ABSENT, which is exactly what keeps every
+  // assertion above green while a by-address signature quietly goes back to
+  // naming a pipe a run will not execute. This is the one check the fallback
+  // cannot stand in for, and it needs an unseamed client because the capability
+  // returns the projection, not the report.
+  it.skip("serves the effective entry pipe as its own report field (gated)", async () => {
+    const report = await liveClient().validateFiles(
+      [{ content: FIXTURE_BUNDLE, uri: FIXTURE_BUNDLE_URI }],
+      { allowSignatures: true, render: ["markdown"], views: ["input_form"] },
+    );
+
+    expect(report.is_valid).toBe(true);
+    // Inline files carry no manifest, so the effective entry is the closure's
+    // own `main_pipe`, qualified — the same value the blueprint derivation
+    // reaches. The point of the assertion is that the SERVER stated it.
+    expect((report as PipelexValidationReport).default_pipe_ref).toBe(FIXTURE_PIPE_REF);
   });
 
   it("omits the graph when include_graph is false", async () => {
@@ -71,8 +128,9 @@ describe("mthds_validate (live)", () => {
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);
     expect(result.graphSpec).toBeUndefined();
-    // The form does not depend on the graph.
+    // The form does not depend on the graph, and neither does the signature.
     expect(result.structuredContent.available_view_specs).toEqual(["input_form"]);
+    expect(result.structuredContent.main_pipe?.output.concept_ref).toBe("native.Text");
   });
 
   it("reports an invalid bundle as a PRODUCED verdict, not an error", async () => {
@@ -96,6 +154,7 @@ describe("mthds_validate (live)", () => {
     // leave it nothing to explain.
     expect(result.summary.trim()).not.toBe("");
     expect(result.structuredContent.available_view_specs).toEqual([]);
+    expect(result.structuredContent.main_pipe).toBeUndefined();
   });
 
   it("rejects a request carrying no selector at all", async () => {
@@ -107,16 +166,14 @@ describe("mthds_validate (live)", () => {
 });
 
 /**
- * GATED on the hosted deploy — Checkpoint 3 of `wip/addressing-methods/plan.md`.
- *
- * `mthds_validate`'s `method_id` and `method_ref` legs are server pass-throughs
- * (`POST /v1/validate` with a selector body), and api.pipelex.com does not
- * serve selector bodies until the platform deploy that checkpoint gates on has
- * happened. Un-skip once it lands; against a current hosted API these calls
- * come back as request-shape errors, which would fail the suite for a reason
- * that is not drift.
+ * GATED on the live API, not on a date: `mthds_validate`'s `method_id` and
+ * `method_ref` legs are server pass-throughs (`POST /v1/validate` with a
+ * selector body), which an environment on the pre-selector platform build
+ * answers as a request-shape error — a failure that is not drift. The probe
+ * asks `/v1/version` whether this deployment serves them; see
+ * `apiAdvertisesExtension`.
  */
-describe.skip("mthds_validate by selector (live, gated)", () => {
+describe.skipIf(!SERVES_SELECTORS)("mthds_validate by selector (live)", () => {
   it("validates a stored method from its id alone (server-side resolution)", async () => {
     const { fixtureMethodId } = await import("./e2e-support.js");
     const result = await validateMthds({ method_id: await fixtureMethodId() }, context);
@@ -124,8 +181,19 @@ describe.skip("mthds_validate by selector (live, gated)", () => {
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);
     expect(result.structuredContent.is_runnable).toBe(true);
+    // Names the fixture, because "a valid verdict" is what ANY method returns:
+    // the specific failure of a server-side id resolver is resolving the WRONG
+    // method, and a verdict alone cannot see it.
+    expect(result.structuredContent.main_pipe?.pipe_ref).toBe(FIXTURE_PIPE_REF);
   });
 
+  // Deliberately NOT the shared `PUBLISHED_METHOD_REF`, and do not "harmonize"
+  // it onto one: `/v1/validate` resolves an address through `fetched_method_source`,
+  // which applies the execution-locus gate, so a fetched package shipping ANY `.py`
+  // is a 403 `CustomCodeRequiresSandbox` on a deployment that is not sandbox-hosted.
+  // `text_stats` ships `text_stats_funcs.py`; `documents` is Python-free. The other
+  // suites reach the tooling routes through `fetch_method_mthds_files`, which does
+  // not apply that gate, which is why they can share the constant and this cannot.
   it("validates a published method by address (server-side git resolution)", async () => {
     const result = await validateMthds(
       { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
@@ -134,5 +202,33 @@ describe.skip("mthds_validate by selector (live, gated)", () => {
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);
+    // This package DOES settle an entry pipe, and it is the report's own
+    // `default_pipe_ref` that settles it — NOT the blueprint fallback, whose
+    // `main_pipe` is null here. Naming the pipe is the point: "a valid verdict"
+    // is what ANY method returns, so the ref is what proves the server resolved
+    // THIS address rather than some other valid source, and a by-address
+    // signature naming a pipe a run would not execute is exactly the drift this
+    // pins. (The parked assertion above reads the raw field directly; it is
+    // still `it.skip`, so it says nothing about what this deployment serves.)
+    expect(result.structuredContent.main_pipe?.pipe_ref).toBe(
+      "documents.extract_document_markdown",
+    );
+    // This leg does NOT discriminate the artifact gate from the advert gate, and
+    // must not be read as doing so. Because the entry pipe is settled AND keyed
+    // in both artifacts, putting the pair back on the entry-pipe gate leaves
+    // every assertion here green — established by mutation, not by argument.
+    // That discrimination is hermetic, in `validate.test.ts` ("withholds the
+    // form's advert, but not its artifacts, when the server states no default"):
+    // it needs a STATED `default_pipe_ref: null`, which no method reachable from
+    // here produces.
+    //
+    // What the keys below do prove is the address resolution: they are the
+    // report's own per-pipe map, so their namespace identifies the package.
+    const contractRefs = Object.keys(result.pipeIoContracts ?? {});
+    expect(contractRefs.length).toBeGreaterThan(0);
+    expect(contractRefs).toContain("documents.extract_document_markdown");
+    for (const ref of contractRefs) {
+      expect(ref.startsWith("documents.")).toBe(true);
+    }
   });
 });
