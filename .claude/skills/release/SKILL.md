@@ -4,8 +4,8 @@ description: >
   Cut a release of pipelex-mcp, the MCP servers over the hosted Pipelex API: the
   release/vX.Y.Z worktree, the package.json bump and the package-lock.json that
   follows, the changelog entry whose heading carries no `v`, the quality gates,
-  one commit, and a pull request to main — after which a human dispatches
-  release.yml, because the merge itself ships nothing. Use when the user says
+  one commit, and a pull request to main, whose merge is what publishes to npm
+  and deploys the hosted console. Use when the user says
   "release", "cut a release", "bump version", "prepare a release", "make a
   release", "ship it", "create release branch", "promote dev to main", "publish
   to npm", or any variation of shipping a new version of pipelex-mcp. Changelog
@@ -19,27 +19,27 @@ The procedure is the workspace release play, [`docs/releasing.md`](../../../../d
 
 ## What ships
 
-**The merge to `main` publishes nothing.** Both surfaces go out through `.github/workflows/release.yml`, which is `workflow_dispatch` only — the file carries no `push` and no `pull_request` trigger — so shipping is a separate, deliberate act a human fires once the release pull request has merged:
+**The merge to `main` ships both surfaces.** `.github/workflows/release.yml` fires on the push to `main`, so the merge of the release pull request *is* the release: nothing is dispatched, and the run to watch is the one keyed to the merge SHA. The workflow keeps its `workflow_dispatch` trigger for one purpose only — retrying a single leg after a partial failure, at the same version:
 
 ```bash
-gh workflow run release.yml -f version=X.Y.Z -f target=both     # version with no `v`
+gh workflow run release.yml -f version=X.Y.Z -f target=npm     # or alpic; version with no `v`
 ```
 
-The workflow always checks out `main` whatever ref it was dispatched from, and its `guard` job refuses to go on unless `main`'s `package.json` is exactly the requested version and `CHANGELOG.md` carries a `## [X.Y.Z]` heading — that pair is the guard against dispatching before the merge landed. It then re-runs `make all` on the merge commit rather than trusting the pull request's own run. From there:
+On the push the run checks out its own merge commit, and its `guard` job refuses to go on unless `CHANGELOG.md` carries a `## [X.Y.Z]` heading for the version `main`'s `package.json` names. It then re-runs `make all` on that commit rather than trusting the pull request's own run, and asks `npm view` whether the version is already published, failing the run outright when the registry cannot answer rather than guessing at it — which is what also makes a push to `main` that is not a release a green no-op, with both legs and the tag skipped. A dispatch answers to one check more, that the typed `version` equals `main`'s `package.json`, and it checks out `main` whatever ref it was fired from, so it can neither ship a branch nor ship the wrong bump. From there:
 
-- **The `@pipelex/mcp` package on npm** — the local workshop shell, whose `files` list publishes `dist/local`, `README.md` and `LICENSE`, with `prepack` rebuilding `dist/local` so the tarball is built from the commit being shipped. It goes out as `npm publish --access public --provenance` under npm trusted publishing, so no npm token exists anywhere; **the registration is bound to the filename `release.yml`**, and renaming or moving that workflow breaks publishing until the trusted publisher is re-registered. The `guard` job asks `npm view @pipelex/mcp@X.Y.Z` first and the publish step is skipped when the version is already there, so a re-dispatch at the same version is safe.
+- **The `@pipelex/mcp` package on npm** — the local workshop shell, whose `files` list publishes `dist/local`, `README.md` and `LICENSE`, with `prepack` rebuilding `dist/local` so the tarball is built from the commit being shipped. It goes out as `npm publish --access public --provenance` under npm trusted publishing, so no npm token exists anywhere; **the registration is bound to the filename `release.yml`**, and renaming or moving that workflow breaks publishing until the trusted publisher is re-registered. The `guard` job asks `npm view @pipelex/mcp@X.Y.Z` first and the publish step is skipped when the version is already there, so neither a re-run of the merge's run nor a dispatch at the same version can publish twice.
 - **The hosted console on Alpic** — `npx alpic deploy --non-interactive`, authenticated by the `ALPIC_API_KEY` repo secret. The workflow passes no ids of its own: the project, team and environment come from the tracked `.alpic/project.json`, which pins Production and is the only thing telling a release where to go. `make deploy-dev` and `make deploy-staging` relink that file and restore it from a `trap`, so a leftover link is what would silently ship a release to the wrong console.
-- **The `vX.Y.Z` tag** — the `tag` job, which needs `guard`, `publish` and `deploy` and runs only when `target` is `both`. It creates the tag with `git tag`, so the tags here are **lightweight**, and it leaves an existing tag alone.
+- **The `vX.Y.Z` tag** — the `tag` job, which needs `guard`, `publish` and `deploy` and runs only when the run is shipping both surfaces, which a merge always is and a one-leg dispatch never is. It creates the tag with `git tag`, so the tags here are **lightweight**, and it leaves an existing tag alone.
 
-The landing verifies the dispatched run, not a run on the merge SHA: where the play says "the publish workflow's run on the merge SHA", read it here as the `release.yml` run dispatched after the merge, and keep the release item open until that run is green.
+The landing verifies the `release.yml` run on the merge SHA, which is the play's default reading, so keep the release item open until that run is green.
 
 ```bash
-gh run list --workflow=release.yml --limit 3 --json conclusion,event,url,createdAt   # the dispatched run: success
-npm view @pipelex/mcp version                                                        # the registry's answer: X.Y.Z
-git fetch --tags --prune origin && git tag --list vX.Y.Z                             # the tag
+gh run list --workflow=release.yml --limit 3 --json conclusion,event,headSha,url,createdAt   # the run whose headSha is the merge: success
+npm view @pipelex/mcp version                                                                # the registry's answer: X.Y.Z
+git fetch --tags --prune origin && git tag --list vX.Y.Z                                     # the tag
 ```
 
-The console leg is verified from that run's *Deploy the hosted console to Alpic* job, which writes what it shipped into the run summary; the endpoint the README publishes is <https://pipelex-mcp-a3c6a115.alpic.live/mcp>. A partial failure is retried one leg at a time — `-f target=npm` or `-f target=alpic`, same version — and never by bumping the version. A release finished that way carries no tag, because the `tag` job runs only for `both`: re-dispatch `both` at the same version to reach it, which is safe by the workflow's own guards, since the publish step skips a version already on npm and the tag step leaves an existing tag alone.
+The console leg is verified from that run's *Deploy the hosted console to Alpic* job, which writes what it shipped into the run summary; the endpoint the README publishes is <https://pipelex-mcp-a3c6a115.alpic.live/mcp>. A partial failure is retried one leg at a time — `-f target=npm` or `-f target=alpic`, same version — and never by bumping the version. A release finished that way carries no tag, because the `tag` job runs only for a both-surface run: dispatch `-f target=both` at the same version to reach it, which is safe by the workflow's own guards, since the publish step skips a version already on npm, an Alpic deploy is idempotent per commit, and the tag step leaves an existing tag alone. That recovery is only valid while `main`'s tip is still the release merge, because a dispatch checks out `main` and not the commit the release shipped from: anything landed on `main` since would be what the console receives and what the tag names. Re-running the merge's own run is not the way: once npm holds the version, a push-triggered run skips both legs by design, which is the same rule that keeps a non-release push quiet. The dispatch is the retry door precisely because it ignores that skip.
 
 ## Version files and the lock
 
@@ -67,7 +67,7 @@ Neither rewrites a tracked file — `npm run check` only checks formatting, and 
 - **`changelog-check.yml`** — on a pull request into `main` whose head starts with `release/v`: `CHANGELOG.md` must carry a `## [X.Y.Z]` heading, with **no `v`**. It asserts nothing about `[Unreleased]`; leaving none behind is the play's rule, not CI's.
 - **`quality-checks.yml`** — `npm ci` then `make all` on Node 24, on every pull request, with a concurrency group that cancels a superseded run for the same ref. Its comment states the intent that this status be the one the branch-protection ruleset requires before anything merges.
 
-`release.yml` is not among them: it has no pull-request trigger and gates nothing here.
+`release.yml` is not among them: it has no pull-request trigger and gates nothing here — it fires afterwards, on the push the merge makes.
 
 ## Particulars
 
@@ -75,7 +75,7 @@ Neither rewrites a tracked file — `npm run check` only checks formatting, and 
 - **No pre-release form.** `guard-branches.yml` refuses a head like `release/v0.14.0-rc.1` into `main` outright, and `changelog-check.yml` fires on any head starting with `release/v` and then demands the exact three-number form — so such a branch fails that check rather than skipping it the way it would elsewhere. Ship a plain `X.Y.Z`.
 - **The two surfaces go out in lockstep**, at the same `package.json` version from the same `main` commit, so "what is live?" has one answer. Publishing is deliberately not transactional: retry a transient failure at the same version and commit, and when a permanent defect makes a published commit unshippable, deprecate the published npm version and fix forward with one new version for both surfaces.
 - **The tags are lightweight**, created by `git tag` in the workflow rather than `git tag -a`, so always pass `--tags` when reading them, as the play's own `git describe --tags --abbrev=0` does. A bare `git describe` does not fail here, which is the trap: an annotated tag left over from before the release workflow existed still sits in the history, so a tags-less read answers with that stale one and silently skips every version released since.
-- **`make publish` and `make deploy` are break-glass only**, for the case where CI itself is unavailable. Both are guarded by `check-no-local-deps` and `check-release-ready`, and the latter demands a checkout sitting on `main` with a clean tree — which the main-checkout invariant does not give you. Prefer the dispatch, which ships from a verified `main` rather than from someone's working tree.
+- **`make publish` and `make deploy` are break-glass only**, for the case where CI itself is unavailable. Both are guarded by `check-no-local-deps` and `check-release-ready`, and the latter demands a checkout sitting on `main` with a clean tree — which the main-checkout invariant does not give you. Prefer the merge, which ships from a verified `main` rather than from someone's working tree.
 - **The live drift detectors are not a release gate.** `make smoke`, `make test-e2e`, `make test-e2e-run` and `make seed-e2e-fixture` sit outside `make all` and `make check` on purpose so the local gate and CI stay hermetic; they need `PIPELEX_API_KEY`, touch the network, default to `https://api-dev.pipelex.com` rather than production, and `make test-e2e-run` spends inference credit. They exist because every capability reaches `@pipelex/sdk` through a hand-written narrow interface the unit tests fake, so an API wire-shape change fails nothing hermetic. Running one before a release is a judgment call, not a step of it.
 - **A dependency bump is its own gesture, not part of the release commit.** `@pipelex/sdk` and `@pipelex/mthds-ui` move through this repo's `bump-sdks` skill, which reads their changelogs and maps the breaking bullets onto the seams this repo declares.
 - **A tool-schema change needs a line in the release notes telling console users to remove and re-add the connector.** ChatGPT caches a connector's tool list at add-time and never refreshes it, so a changed tool schema reaches existing installations no other way. The changelog entry is where that is said, and past entries carry it as an italic note.
