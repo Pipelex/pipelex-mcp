@@ -24,13 +24,17 @@
 # the merge commit rather than trusted from the pull request, and `npm view` is
 # asked whether the version is already on the registry — an answer the registry
 # could not give fails the run rather than being guessed at. That lookup is now
-# only what its name says, a double-publish guard on the npm leg: it decides
-# nothing about the console or the tag, so a release whose version reached npm
-# by another route — the documented break-glass `make publish`, or a re-run of
-# a run that published before it failed — still deploys the console and still
-# cuts the tag instead of ending green having shipped nothing. A dispatch
-# answers to one check more, that the typed `version` equals what the commit
-# carries, which is what refuses a run fired at the wrong bump.
+# only what its name says, a double-publish guard on the npm leg. Its *answer*
+# gates the npm leg and nothing else, so a release whose version reached npm by
+# another route — the documented break-glass `make publish`, or a re-run of a
+# run that published before it failed — still deploys the console and still
+# cuts the tag instead of ending green having shipped nothing. Its *failure*
+# still stops a run that includes the npm leg, because a run that cannot know
+# whether it would double-publish must not try; the console-only retry door is
+# what is kept clear of it, by skipping the lookup outright on `-f target=alpic`
+# so an unreachable registry cannot block the leg it has no say over. A
+# dispatch answers to one check more, that the typed `version` equals what the
+# commit carries, which is what refuses a run fired at the wrong bump.
 #
 # The commit the whole run ships is resolved once, by `detect`, and passed down
 # as a SHA rather than as a branch name, so every job checks out what `detect`
@@ -85,14 +89,17 @@ on:
 permissions: {}
 
 # One release at a time: a half-published run is worse than a queued one, and
-# two overlapping releases would race for npm's `latest` tag. `cancel-in-progress`
-# protects the run in flight but not a run still pending — a group holds one of
-# each, and a third arrival cancels the pending one without anything turning
-# red. That is accepted deliberately rather than keyed per commit: reaching it
-# now takes three release merges inside one run's lifetime, since every other
-# push to `main` leaves the group within seconds (`detect` alone), and an
-# evicted merge is caught by the landing, which requires a successful run keyed
-# to the merge SHA and the tag it pushed — never merely a green newest run.
+# two overlapping releases would race for npm's `latest` tag, which is why the
+# group is not keyed per commit. `cancel-in-progress` protects the run in
+# flight but not a run still pending — a group holds one of each, and a third
+# arrival cancels the pending one without anything turning red. So while a
+# release run is in flight, a release merge queued behind it is evicted by the
+# next push to `main`, whatever that push is: a queued run has not started, so
+# it occupies the pending slot rather than passing through `detect` and
+# leaving. That is accepted deliberately, and the acceptance rests on the
+# landing rather than on the odds: it requires a successful run keyed to the
+# merge SHA and the tag that run pushed, never merely a green newest run, so an
+# evicted merge stops the landing instead of passing as a release.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -125,6 +132,12 @@ jobs:
           ref: ${{ github.event_name == 'push' && github.sha || 'main' }}
           fetch-depth: 2
 
+      # The version must RISE, not merely differ. A revert that lowers it would
+      # otherwise read as a release: the changelog heading for the old version
+      # is still there, `npm view` finds the version published and skips the npm
+      # leg, and the console leg — which no longer reads the registry — would
+      # push the reverted tree to Production under a version already tagged.
+      # `version-check.yml` cannot cover that: it runs on pull requests only.
       - name: Compare the version it brings with the one it replaces
         id: commit
         env:
@@ -137,7 +150,8 @@ jobs:
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-          if [ "$VERSION" != "$PARENT" ]; then
+          HIGHEST=$(printf '%s\n%s\n' "$PARENT" "$VERSION" | sort -V | tail -1)
+          if [ "$VERSION" != "$PARENT" ] && [ "$HIGHEST" = "$VERSION" ]; then
             echo "is_release=true" >> "$GITHUB_OUTPUT"
             echo "Shipping $VERSION from $SHA — main was at $PARENT."
             exit 0
@@ -145,11 +159,11 @@ jobs:
 
           echo "is_release=false" >> "$GITHUB_OUTPUT"
           if [ "$EVENT_NAME" = "push" ]; then
-            echo "$SHA brings no new version — $PARENT was already on main — so this push is not a release." \
+            echo "$SHA does not raise the version above $PARENT, so this push is not a release." \
                  "Nothing to publish, deploy or tag." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          echo "::error::main's tip $SHA brings no new version: $PARENT was already there before it." \
+          echo "::error::main's tip $SHA does not raise the version above $PARENT." \
                "A dispatch ships main's tip, and that tip is not a release commit — something landed on main" \
                "after the release merge, or no release has been cut. Fix main rather than shipping from it."
           exit 1
@@ -163,6 +177,9 @@ jobs:
       contents: read
     outputs:
       already_published: ${{ steps.published.outputs.already_published }}
+      # Read from `package.json` beside the lookup, so the run summary the
+      # release play reads names whatever was actually published.
+      package: ${{ steps.published.outputs.package }}
 
     steps:
       - name: Checkout the commit to ship
@@ -218,12 +235,20 @@ jobs:
       # lookup therefore fails the guard rather than reading as "not published".
       # The package is read from `package.json` rather than typed, so the lookup
       # cannot come to name something other than what `npm publish` ships.
+      # Skipped outright when the run does not include the npm leg, so that an
+      # unreachable registry cannot fail the guard and take the console leg and
+      # the tag down with it — which would break the one retry door (`-f
+      # target=alpic`) whose whole purpose is to ship the console when npm is
+      # what went wrong. The `publish` job is skipped for that target, so
+      # nothing reads the output this leaves empty.
       - name: Check whether this version is already on npm
         id: published
+        if: needs.detect.outputs.target != 'alpic'
         env:
           VERSION: ${{ needs.detect.outputs.version }}
         run: |
           PACKAGE=$(node -p "require('./package.json').name")
+          echo "package=$PACKAGE" >> "$GITHUB_OUTPUT"
           if LOOKUP=$(npm view "$PACKAGE@$VERSION" version --json 2>&1); then
             echo "already_published=true" >> "$GITHUB_OUTPUT"
             echo "$PACKAGE@$VERSION is already on npm — the publish step will be skipped."
@@ -285,11 +310,12 @@ jobs:
         env:
           VERSION: ${{ needs.detect.outputs.version }}
           SKIPPED: ${{ needs.guard.outputs.already_published }}
+          PACKAGE: ${{ needs.guard.outputs.package }}
         run: |
           if [ "$SKIPPED" = "true" ]; then
-            echo "Skipped: @pipelex/mcp@$VERSION was already published." >> "$GITHUB_STEP_SUMMARY"
+            echo "Skipped: $PACKAGE@$VERSION was already published." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Published @pipelex/mcp@$VERSION to npm." >> "$GITHUB_STEP_SUMMARY"
+            echo "Published $PACKAGE@$VERSION to npm." >> "$GITHUB_STEP_SUMMARY"
           fi
 
   deploy:
