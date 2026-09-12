@@ -33,7 +33,7 @@
  * does: the hermetic suite's `include` and the TypeScript root are both
  * `src/`, and it is about the package, not a module.
  */
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -52,8 +52,29 @@ const ENTRYPOINTS = ["src/local/main.ts", "src/server.ts"] as const;
 /** Matches `from "x"`, `import "x"` and `import("x")`. */
 const SPECIFIER = /(?:\bfrom\s*|\bimport\s*|\bimport\s*\(\s*)["']([^"']+)["']/g;
 
-/** `import type … from "x"` / `export type … from "x"` — elided at runtime. */
-const TYPE_ONLY = /\b(?:import|export)\s+type\b[\s\S]*?\bfrom\s*["'][^"']+["']/g;
+/**
+ * `import type … from "x"` / `export type … from "x"` — elided at runtime, so
+ * they are removed before the value pass below.
+ *
+ * The clause between `type` and `from` is spelled out — a namespace, a brace
+ * list, or a single identifier — rather than left as an unbounded `[\s\S]*?`.
+ * An unbounded match is this file's own vacuity hole, because a bare type
+ * *alias* (`export type Foo = …;`) and a local re-export (`export type
+ * { Foo };`) carry no `from` of their own: the lazy match then runs on to the
+ * next `from "…"` anywhere in the file and deletes every value import in
+ * between, which hides exactly the missing runtime dependency the first check
+ * below exists to catch.
+ *
+ * That was live, not hypothetical. `export type AttachmentFetchResult` at
+ * `src/capabilities/attachment-fetch.ts:113` matched forward to the prose
+ * `attachments from "${url.hostname}"` at :232 and deleted 120 lines of
+ * runtime code from the scan, so a runtime `import { toast } from "sonner"`
+ * anywhere in that span left every assertion here green while being
+ * `ERR_MODULE_NOT_FOUND` in the pruned image. `src/server.ts` ends with such
+ * an alias too, and was one added import away from the same blindness.
+ */
+const TYPE_ONLY =
+  /\b(?:import|export)\s+type\s*(?:\*(?:\s+as\s+\w+)?|\{[^{}]*\}|\w+)\s*\bfrom\s*["'][^"']+["']/g;
 
 /**
  * An interpolation can never be an import specifier, and prose can put one
@@ -70,6 +91,9 @@ function isPackage(specifier: string): boolean {
     return false;
   return !specifier.startsWith("node:");
 }
+
+/** A published `files` entry under `dist/` — so `distribution.md` is not one. */
+const UNDER_DIST = /^dist(?![\w-])/;
 
 /** `@scope/name/deep/path` -> `@scope/name`; `name/deep` -> `name`. */
 function packageOf(specifier: string): string {
@@ -88,16 +112,24 @@ function resolveLocal(fromFile: string, specifier: string): string | undefined {
     : path.resolve(path.dirname(fromFile), specifier);
   const candidates = base.endsWith(".js")
     ? [base.slice(0, -3) + ".ts", base.slice(0, -3) + ".tsx"]
-    : // `resolveJsonModule` is on, so a `.json` specifier is a real import; it
-      // carries no imports of its own and is only resolved to prove it exists.
-      [base];
+    : [base + ".ts", base + ".tsx"];
   candidates.push(
-    base + ".ts",
-    base + ".tsx",
+    // A directory has to resolve to its index rather than to itself, so the
+    // index candidates come before bare `base`. With `base` first, and with a
+    // guard that never fired, an extensionless directory specifier resolved to
+    // the directory, failed the `\.tsx?$` test in the walk and took its whole
+    // subtree out of the graph with no error — the vacuous pass the first test
+    // in this file is written to prevent.
     path.join(base, "index.ts"),
     path.join(base, "index.tsx"),
+    // `resolveJsonModule` is on, so a `.json` specifier is a real import; it
+    // carries no imports of its own and is only resolved to prove it exists.
+    base,
   );
-  return candidates.find((candidate) => existsSync(candidate) && !candidate.endsWith(path.sep));
+  // `isFile`, not merely `existsSync`: the previous `!endsWith(path.sep)` test
+  // was dead code, because neither `path.resolve` nor `path.join` ever emits a
+  // trailing separator, so it excluded nothing a directory could match.
+  return candidates.find((candidate) => existsSync(candidate) && statSync(candidate).isFile());
 }
 
 interface Graph {
@@ -178,6 +210,63 @@ describe("the dependency boundary", () => {
     expect(graph.files.length).toBeGreaterThan(15);
   });
 
+  it("elides a type-only import without swallowing the value imports after it", () => {
+    // The vacuity guard for the crash direction, and the reason `TYPE_ONLY`
+    // spells its clause out. A bare type alias and a local re-export carry no
+    // `from`, so an unbounded elision ran forward to the next `from "…"` in
+    // the file and deleted the value imports in between — leaving a runtime
+    // package that is only a devDependency invisible here and absent in the
+    // pruned image. Both shapes below are real: `src/server.ts` ends with the
+    // alias, `src/capabilities/attachment-fetch.ts` has one mid-file.
+    const valuesOf = (source: string) =>
+      [...source.replace(TYPE_ONLY, "").matchAll(SPECIFIER)].map(([, specifier]) => specifier);
+
+    expect(
+      valuesOf(`export type AppType = typeof server;\nimport { toast } from "sonner";`),
+    ).toEqual(["sonner"]);
+    expect(valuesOf(`export type { Foo };\nimport { toast } from "sonner";`)).toEqual(["sonner"]);
+    expect(
+      valuesOf(`export type R =\n  | { ok: true }\n  | { ok: false };\nimport "sonner";`),
+    ).toEqual(["sonner"]);
+
+    // …while every genuine type-only form is still elided.
+    expect(valuesOf(`import type { A } from "types-only";\nimport "sonner";`)).toEqual(["sonner"]);
+    expect(valuesOf(`import type A from "types-only";\nimport "sonner";`)).toEqual(["sonner"]);
+    expect(valuesOf(`import type * as A from "types-only";\nimport "sonner";`)).toEqual(["sonner"]);
+    expect(valuesOf(`import type {\n  A,\n} from "types-only";\nimport "sonner";`)).toEqual([
+      "sonner",
+    ]);
+    expect(valuesOf(`export type { A } from "types-only";\nimport "sonner";`)).toEqual(["sonner"]);
+    // An inline `type` specifier keeps the statement, so the package is a value import.
+    expect(valuesOf(`import { type A, b } from "sonner";`)).toEqual(["sonner"]);
+  });
+
+  it("never resolves a specifier to a directory, so no subtree can leave the walk unnoticed", () => {
+    // `src/capabilities` is a real directory with no index, so the honest
+    // answer is "unresolved". Returning the directory instead satisfied the
+    // walk's `toBeDefined` check, then failed its `\.tsx?$` test, and dropped
+    // the subtree silently — 22 files became 10.
+    expect(resolveLocal(path.join(REPO_ROOT, "src", "tools.ts"), "./capabilities")).toBeUndefined();
+    // A file specifier still resolves, extensionless and via the ESM `.js` form.
+    expect(resolveLocal(path.join(REPO_ROOT, "src", "server.ts"), "./tools.js")).toBe(
+      path.join(REPO_ROOT, "src", "tools.ts"),
+    );
+    expect(resolveLocal(path.join(REPO_ROOT, "src", "server.ts"), "./tools")).toBe(
+      path.join(REPO_ROOT, "src", "tools.ts"),
+    );
+  });
+
+  it("refuses a published dist entry other than the workshop bundle", () => {
+    // The premise the whole devDependency argument rests on. The refused set
+    // has to be structural: a single refused literal let `dist/assets`,
+    // `dist/server.js`, `dist/` and `dist/**` through, each of which ships the
+    // console and makes its runtime imports the tarball's problem.
+    for (const entry of ["dist", "dist/", "dist/**", "dist/assets", "dist/server.js"])
+      expect(UNDER_DIST.test(entry), `${entry} should count as a dist entry`).toBe(true);
+    for (const entry of ["README.md", "LICENSE", "distribution.md", "dist-info.txt"])
+      expect(UNDER_DIST.test(entry), `${entry} should not count as a dist entry`).toBe(false);
+  });
+
   it("declares every package the shipped entrypoints import at runtime", () => {
     // The production-crash direction: an `--omit=dev` install (what `npx` does
     // for the workshop, and what the console's Dockerfile prunes to) has only
@@ -191,8 +280,13 @@ describe("the dependency boundary", () => {
   it("declares nothing in dependencies that the entrypoints never import", () => {
     // The install-weight direction: anything here is downloaded by every
     // `npx @pipelex/mcp` user, whose tarball ships `dist/local` alone.
+    // `valuePackages`, not `allPackages`: a package the graph reaches only
+    // through `import type` is erased at compile time, and `tsup.config.ts`
+    // sets no `dts`, so the tarball publishes no declarations that could need
+    // it either. Such an entry is pure install weight — the very bug this file
+    // was written for — and must not be able to justify itself with a type.
     const unreachable = Object.keys(manifest.dependencies).filter(
-      (pkg) => !graph.allPackages.has(pkg),
+      (pkg) => !graph.valuePackages.has(pkg),
     );
     expect(unreachable).toEqual([]);
   });
@@ -213,10 +307,14 @@ describe("the dependency boundary", () => {
       "tw-animate-css",
       "vite",
     ]) {
+      // Only absence from `dependencies` is the invariant. Where such a
+      // package lives otherwise is not: one that stops being used altogether
+      // should be deleted, and asserting its presence in `devDependencies`
+      // would fail that legitimate removal with a message blaming this
+      // boundary for it.
       expect(manifest.dependencies, `${pkg} should not be a runtime dependency`).not.toHaveProperty(
         pkg,
       );
-      expect(manifest.devDependencies, `${pkg} should be a devDependency`).toHaveProperty(pkg);
     }
   });
 
@@ -247,6 +345,11 @@ describe("the dependency boundary", () => {
     // the console's `dist/` were published too, its runtime imports would
     // become the tarball's problem and this boundary would have to move.
     expect(manifest.files).toContain("dist/local");
-    expect(manifest.files).not.toContain("dist");
+    // Structural rather than one refused literal: `not.toContain("dist")` let
+    // `dist/assets`, `dist/server.js`, `dist/` and `dist/**` through, any of
+    // which ships the console and collapses the argument this assertion
+    // exists to protect.
+    const underDist = manifest.files.filter((entry) => UNDER_DIST.test(entry));
+    expect(underDist).toEqual(["dist/local"]);
   });
 });
