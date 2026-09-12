@@ -12,7 +12,7 @@ import { useDisplayMode, useLayout, useSendFollowUpMessage } from "skybridge/web
 
 import { useCallTool, useToolInfo } from "../helpers.js";
 import { ToolbarButton } from "./components/toolbar-button.js";
-import { selectedPipeFor } from "./run-graph-selection.js";
+import { graphCaptionFor, graphPipeRefOf, selectedPipeFor } from "./run-graph-selection.js";
 import type { SelectedPipe } from "./run-graph-selection.js";
 import { terminalFollowUpPrompt } from "./run-notify.js";
 import { useRunPolling } from "./use-run-polling.js";
@@ -43,6 +43,10 @@ const TOOLBAR_POSITION_FOR_VIEW: ToolbarPosition = TOOLBAR_POSITION.TOP_LEFT;
  * switches it. With no entry pipe settled no form opens on its own —
  * `selectedPipeFor` never substitutes a pipe of the view's own choosing — but
  * the artifacts still ride, so clicking a pipe node still produces its form.
+ * The graph is the bundle's declared main pipe, which a `method_ref` package's
+ * manifest can override as the entry pipe: when the two differ the graph stays
+ * and a caption under it names both (`graphCaptionFor`), so the diagram is
+ * never silently of a different pipe from the form below it.
  * Run starts the method through `mthds_run` with the same
  * `files` / `method_ref` / `method_id` the validation was called with, then follows the run
  * by polling `mthds_run_status` and hands the conversation back to the model
@@ -196,8 +200,14 @@ export default function RunGraphView() {
       ? `${selectedPipe.domain}.${selectedPipe.code}`
       : selectedPipe.code
     : undefined;
+  // The graph is built for the bundle's declared main pipe; the form defaults
+  // to the entry pipe. Say so when they are not the same pipe.
+  const graphCaption = hasGraph
+    ? graphCaptionFor(graphPipeRefOf(graphSpec), mainPipeRef, hasForm ? (pipeLabel ?? null) : null)
+    : null;
   const llmSummary = [
     hasGraph ? `Showing the dry-run graph of the method: ${graphSpec?.nodes.length} nodes` : null,
+    graphCaption,
     `runnable=${output.is_runnable}`,
     hasForm ? `input form shown for pipe ${pipeLabel}` : null,
     runId ? `run ${runId} ${polling.runStatus ?? "starting"}` : null,
@@ -236,6 +246,11 @@ export default function RunGraphView() {
             onNodeSelect={handleNodeSelect}
           />
         </div>
+      ) : null}
+      {graphCaption ? (
+        <p className="mt-2 px-1 text-xs" style={{ color: "#6b7280" }}>
+          {graphCaption}
+        </p>
       ) : null}
       {contract && descriptor && selectedPipe ? (
         <div className="mt-3">

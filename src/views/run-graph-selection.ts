@@ -39,3 +39,52 @@ export function selectedPipeFor(
   if (mainPipeRef) return parsePipeRef(mainPipeRef);
   return null;
 }
+
+/**
+ * The pipe the graph was built for, as a namespaced `pipe_ref`, read off the
+ * graph itself: the dry run stamps `pipeline_ref.domain` and
+ * `pipeline_ref.main_pipe` with the pipe it traced. On `mthds_validate` that is
+ * the bundle blueprint's declared `main_pipe` — the report's graph is
+ * manifest-blind — so for a `method_ref` package whose `METHODS.toml` names a
+ * different entry pipe it is NOT the pipe `_meta.main_pipe_ref` names.
+ *
+ * Both halves must be non-empty strings, the same test pipelex applies when it
+ * reads the ref back; anything less is `null`, and the view then says nothing
+ * about the graph rather than guessing which pipe it shows.
+ */
+export function graphPipeRefOf(graphSpec: unknown): string | null {
+  if (typeof graphSpec !== "object" || graphSpec === null) return null;
+  const pipelineRef = (graphSpec as { pipeline_ref?: unknown }).pipeline_ref;
+  if (typeof pipelineRef !== "object" || pipelineRef === null) return null;
+  const { domain, main_pipe: mainPipe } = pipelineRef as { domain?: unknown; main_pipe?: unknown };
+  if (typeof domain !== "string" || domain.length === 0) return null;
+  if (typeof mainPipe !== "string" || mainPipe.length === 0) return null;
+  return `${domain}.${mainPipe}`;
+}
+
+/**
+ * The caption under the graph when it shows a different pipe from the entry
+ * pipe, or `null` when there is nothing to say.
+ *
+ * The graph is the bundle's declared main pipe; the entry pipe
+ * (`_meta.main_pipe_ref`) is what a selector-less run executes and what the
+ * form opens on. When the two agree — every bundle without a manifest that
+ * overrides its entry — nothing is rendered. When they differ the graph is kept
+ * and labelled rather than withheld, and both refs are spelled out.
+ *
+ * The second sentence follows the form actually on screen, so the caption stays
+ * true after a click: it says the form runs the entry pipe only while it does
+ * (`formPipeRef` is the ref of the pipe the rendered form is for, `null` when no
+ * form is shown), and otherwise just names the entry pipe.
+ */
+export function graphCaptionFor(
+  graphPipeRef: string | null,
+  mainPipeRef: string | null,
+  formPipeRef: string | null,
+): string | null {
+  if (!graphPipeRef || !mainPipeRef || graphPipeRef === mainPipeRef) return null;
+  const graphSentence = `The graph above shows ${graphPipeRef}, the bundle's declared main pipe.`;
+  return formPipeRef === mainPipeRef
+    ? `${graphSentence} The form below runs ${mainPipeRef}, the method's entry pipe.`
+    : `${graphSentence} The method's entry pipe is ${mainPipeRef}.`;
+}
