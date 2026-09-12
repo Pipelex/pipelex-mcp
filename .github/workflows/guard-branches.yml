@@ -2,11 +2,12 @@
 # Catches wrong-target PRs early. This is convention enforcement, not security —
 # real protection comes from the branch-protection ruleset on main.
 #
-# pipelex-mcp is a private, Alpic-deployed app with no npm publish, but it still
-# promotes to main through a release/vX.Y.Z branch so the version bump + changelog
-# land in one reviewable PR and the version/changelog CI checks have a branch name
-# to validate against (see version-check.yml and changelog-check.yml). The
-# `/release` skill (.claude/skills/release/) drives this flow.
+# pipelex-mcp promotes to main through a release/vX.Y.Z branch so the version bump
+# and the changelog land in one reviewable PR, and so the version/changelog CI
+# checks have a branch name to validate against (see version-check.yml and
+# changelog-check.yml). The merge into main is what publishes @pipelex/mcp and
+# deploys the hosted console (release.yml), which is why only that branch shape
+# may target it. The `/release` skill (.claude/skills/release/) drives this flow.
 #
 # All PR refs flow through env: (never interpolated into the shell) so an
 # attacker-controlled branch name can't inject commands.
