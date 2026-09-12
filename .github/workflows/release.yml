@@ -44,6 +44,19 @@
 # that does not is no longer the release commit, and a retry must not ship a
 # tree that landed on `main` after the release.
 #
+# Pinning a run to its own commit is what lets a re-run finish a release after
+# `main` has moved on, and it must not let one finish a release `main` has moved
+# PAST. That refusal — `.github/scripts/assert-not-behind-main.sh` — therefore
+# runs inside each shipping leg and not only in `detect`: GitHub's "Re-run
+# failed jobs" re-runs the jobs that failed and the jobs below them, so a job
+# that succeeded is never re-executed and its outputs reach the re-run as the
+# values it wrote before the newer release existed. `detect`'s own call is the
+# cheap refusal on the ordinary path; the legs' calls are what protect them.
+# Both legs need it, and neither can borrow the other's property: `npm publish`
+# carries no `--tag` and so writes the `latest` dist-tag, and the Alpic deploy
+# ships whatever tree it is handed. Only `tag` needs nothing, because it leaves
+# an existing tag alone.
+#
 # Both surfaces are re-runnable at the same version: an npm publish is skipped
 # when that version already exists, and Alpic deploys are idempotent per commit.
 # Finish a partial failure with a dispatch that names the leg (`-f target=npm`
@@ -144,8 +157,9 @@ jobs:
       # on pull requests only.
       #
       # Against `main`'s CURRENT tip, the version must not have been left
-      # behind. That one is about re-runs rather than about merges, and it is
-      # explained where it is made.
+      # behind. That one is about re-runs rather than about merges, it is shared
+      # with the two shipping legs, and it is explained in the script all three
+      # call: `.github/scripts/assert-not-behind-main.sh`.
       - name: Compare the version it brings with the one it replaces
         id: commit
         env:
@@ -162,29 +176,17 @@ jobs:
           if [ "$VERSION" != "$PARENT" ] && [ "$HIGHEST" = "$VERSION" ]; then
             # A run is pinned to its own commit, which is what lets a re-run
             # finish a release after `main` has moved on. It must not let one
-            # finish a release `main` has moved PAST. Re-running an older
-            # release run would otherwise deploy that older tree to the
-            # Production console — the npm leg skipping on a version already
-            # published, the tag leg leaving the existing tag alone — and end
-            # green having rolled the console back. The console leg is the only
-            # one with no such property of its own, and the only one that is
-            # hard to undo, so the refusal belongs here rather than on it.
-            # Equal is the ordinary case: `main`'s tip either IS this commit, or
-            # has taken only commits that carry no bump. Only a LOWER version is
-            # refused, and the cure is a new release rather than a retry.
-            git fetch --depth=1 origin main
-            git show FETCH_HEAD:package.json > "$RUNNER_TEMP/main-package.json"
-            CURRENT=$(node -p "require('$RUNNER_TEMP/main-package.json').version")
-            NEWEST=$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -1)
-            if [ "$NEWEST" != "$VERSION" ]; then
-              echo "::error::$SHA carries $VERSION but main is already at $CURRENT." \
-                   "Shipping it would roll the Production console back to an older tree." \
-                   "A release main has moved past is finished by cutting a new version, never by re-running its run."
-              exit 1
-            fi
+            # finish a release `main` has moved PAST, so the same refusal runs
+            # here and again inside each shipping leg. It has to be in the legs:
+            # this job's verdict is a cached `needs.detect.outputs` value to any
+            # partial re-run, since GitHub re-runs only the jobs that failed and
+            # the jobs below them. The refusal here is the cheap one, on the
+            # ordinary path, and is not what protects the legs — see
+            # `.github/scripts/assert-not-behind-main.sh`.
+            bash .github/scripts/assert-not-behind-main.sh "$VERSION"
 
             echo "is_release=true" >> "$GITHUB_OUTPUT"
-            echo "Shipping $VERSION from $SHA — main was at $PARENT, and is at $CURRENT now."
+            echo "Shipping $VERSION from $SHA — its first parent was at $PARENT."
             exit 0
           fi
 
@@ -299,7 +301,8 @@ jobs:
     # Only a dispatch may narrow the target. Whether the version is already on
     # npm gates the steps rather than the job, so a release that reached the
     # registry by another route still reports the skip and still lets the
-    # console and the tag go out.
+    # console and the tag go out. What keeps this leg from publishing a version
+    # `main` has moved past is its own freshness step below, not `detect`'s.
     if: needs.detect.outputs.target != 'alpic'
     runs-on: ubuntu-latest
     permissions:
@@ -320,6 +323,19 @@ jobs:
           node-version: '24'
           cache: 'npm'
           registry-url: 'https://registry.npmjs.org'
+
+      # `npm publish` is run without `--tag`, so it writes the `latest`
+      # dist-tag: publishing 0.14.0 after 0.15.0 has shipped would point every
+      # `npx @pipelex/mcp` at the older workshop. `detect` made this same
+      # comparison, but a job that succeeded is not re-run by "Re-run failed
+      # jobs", so its verdict reaches a partial re-run as a cached output that
+      # predates the newer release. This leg asks for itself, before anything
+      # reaches the registry.
+      - name: Refuse a version main has already moved past
+        if: needs.guard.outputs.already_published == 'false'
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: bash .github/scripts/assert-not-behind-main.sh "$VERSION"
 
       - name: Update npm to support trusted publishing
         if: needs.guard.outputs.already_published == 'false'
@@ -355,9 +371,12 @@ jobs:
     # A dispatch may narrow the target; the registry does not gate this leg at
     # all. A release deploys the console whatever npm already holds — the two
     # surfaces go out in lockstep at the same commit. What keeps that from
-    # becoming a rollback door is `detect`, which refuses a commit carrying a
-    # version `main` has already moved past, so this leg never needs a guard of
-    # its own and never has one to forget.
+    # becoming a rollback door is this leg's own freshness step below. It cannot
+    # be `detect`'s: a job that succeeded is not re-run by "Re-run failed jobs",
+    # so a verdict it reached before a newer release shipped is still what a
+    # partial re-run reads. This is the surface with no ordering property of its
+    # own — it ships whatever tree it is handed — and the one that is hard to
+    # undo, so it asks for itself.
     if: needs.detect.outputs.target != 'npm'
     runs-on: ubuntu-latest
     permissions:
@@ -374,6 +393,11 @@ jobs:
         with:
           node-version: '24'
           cache: 'npm'
+
+      - name: Refuse a version main has already moved past
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: bash .github/scripts/assert-not-behind-main.sh "$VERSION"
 
       - name: Install dependencies
         run: npm ci
