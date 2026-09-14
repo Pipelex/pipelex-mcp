@@ -199,6 +199,8 @@ OAuth Resource Indicator registered with WorkOS is pinned to it, so it moves
 only behind a deliberate migration — if it ever does, every existing
 connector has to be re-added anyway.
 
+You may run this server for your own team or company, on your own infrastructure or in your own cloud account. What the Elastic License 2.0 rules out is offering others a remote MCP server through which they run the methods of their choice, their own or a catalog's. See [LICENSE](LICENSE) for the full terms, including notices and redistribution, and the [license page](https://docs.pipelex.com/latest/license/) for how Pipelex reads them.
+
 Sign-in is OAuth through WorkOS AuthKit, which the console's MCP host drives
 for you — ChatGPT, claude.ai, Claude Desktop/Cowork and Cursor all handle the
 handshake themselves, including picking the organization you want to work in.
@@ -827,3 +829,7 @@ The by-id paths need one durable fixture method in the API key's organization; `
 `package.json` is tagged (`vX.Y.Z`) on release, and npm publish and the Alpic
 deploy ship together at one version. See [`CHANGELOG.md`](CHANGELOG.md) for what
 has shipped. `0.1.0` is the first tagged release.
+
+## License
+
+`@pipelex/mcp` is licensed under the Elastic License 2.0 (ELv2), a source-available license. See [LICENSE](LICENSE) for the full terms and the [license page](https://docs.pipelex.com/latest/license/) for how Pipelex reads them.

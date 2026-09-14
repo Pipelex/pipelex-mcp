@@ -1,8 +1,8 @@
 {
   "name": "@pipelex/mcp",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Pipelex MCP servers for validating, preparing, and running MTHDS methods",
-  "license": "MIT",
+  "license": "Elastic-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/Pipelex/pipelex-mcp"
