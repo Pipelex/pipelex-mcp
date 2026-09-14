@@ -4,7 +4,7 @@
 
 ### Changed
 
-- **License (Breaking)**: `@pipelex/mcp` is now licensed under the Elastic License 2.0 (ELv2) instead of MIT, with `LICENSE` naming Evotis S.A.S. as the copyright holder and `package.json` declaring the SPDX identifier `Elastic-2.0`. ELv2 is source-available: its main limitation is that the software may not be provided to third parties as a hosted or managed service giving users access to a substantial set of its features, and `LICENSE` carries the full terms, including its conditions on notices and redistribution, while the [license page](https://docs.pipelex.com/latest/license/) explains how Pipelex reads them. Every earlier npm version, up to and including 0.14.0, stays under MIT.
+- **License (Breaking)**: `@pipelex/mcp` is now licensed under the Elastic License 2.0 (ELv2) instead of MIT, with `LICENSE` naming Evotis S.A.S. as the copyright holder and `package.json` declaring the SPDX identifier `Elastic-2.0`; every earlier npm version, up to and including 0.14.0, stays under MIT. ELv2 is source-available: you may run the MCP server for your own team or company, on your own infrastructure or in your own cloud account, while its main limitation rules out offering others a remote MCP server through which they run the methods of their choice, their own or a catalog's. `LICENSE` carries the full terms, including its conditions on notices and redistribution, and the [license page](https://docs.pipelex.com/latest/license/) explains how Pipelex reads them.
 
 ## [0.14.0] - 2026-09-13
 

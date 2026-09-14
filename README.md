@@ -199,7 +199,7 @@ OAuth Resource Indicator registered with WorkOS is pinned to it, so it moves
 only behind a deliberate migration — if it ever does, every existing
 connector has to be re-added anyway.
 
-Running this server as a hosted or managed service for third parties is what the license reserves: under the Elastic License 2.0, the software may not be provided to third parties as a hosted or managed service giving users access to a substantial set of its features. See [LICENSE](LICENSE) for the full terms, including notices and redistribution, and the [license page](https://docs.pipelex.com/latest/license/) for how Pipelex reads them.
+You may run this server for your own team or company, on your own infrastructure or in your own cloud account. What the Elastic License 2.0 rules out is offering others a remote MCP server through which they run the methods of their choice, their own or a catalog's. See [LICENSE](LICENSE) for the full terms, including notices and redistribution, and the [license page](https://docs.pipelex.com/latest/license/) for how Pipelex reads them.
 
 Sign-in is OAuth through WorkOS AuthKit, which the console's MCP host drives
 for you — ChatGPT, claude.ai, Claude Desktop/Cowork and Cursor all handle the
