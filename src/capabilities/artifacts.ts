@@ -529,6 +529,25 @@ const ITEM_ERROR_TEXTURES: Record<string, ItemErrorTexture> = {
   },
 };
 
+/**
+ * The wire's `detail`, when it really is one. It is typed by the SDK and, like
+ * the code beside it, relayed verbatim from the bulk resolve route without
+ * validation — and `message` is required on this tool's own error schema, so a
+ * missing one would fail the result and turn a single file's failure into a
+ * failed call, which is the failure the code's own lookup was hardened against.
+ */
+function wireDetail(detail: string): string | undefined {
+  const value: unknown = detail;
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+/** What a per-item failure reads as when the route named no detail for it. */
+function unnamedItemFailure(code: string): string {
+  const named: unknown = code;
+  const suffix = typeof named === "string" && named.trim() !== "" ? ` (${named})` : "";
+  return `This file could not be saved, and the API gave no reason${suffix}.`;
+}
+
 /** A code the SDK adds later reads as an unnamed fault, which stays retryable. */
 const UNKNOWN_ITEM_ERROR: ItemErrorTexture = {
   class: "runtime",
@@ -552,7 +571,7 @@ export function itemToolError(error: ArtifactItemError, index: number): ToolErro
   return {
     class: texture.class,
     location: `artifacts[${index}].uri`,
-    message: texture.message ?? error.detail,
+    message: texture.message ?? wireDetail(error.detail) ?? unnamedItemFailure(error.code),
     hint: texture.hint,
     retryable: texture.retryable,
   };

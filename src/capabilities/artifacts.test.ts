@@ -104,14 +104,18 @@ function fakeClient(
   ) => Promise<DownloadArtifactsResult> = savingDownload(BOTH_FILES),
 ) {
   const requests: DownloadArtifactsRequest[] = [];
+  const reads: string[] = [];
   const client: ArtifactClient = {
-    getRunResult: () => Promise.resolve(state),
+    getRunResult(runId) {
+      reads.push(runId);
+      return Promise.resolve(state);
+    },
     downloadArtifacts(request) {
       requests.push(request);
       return download(request);
     },
   };
-  return { client, requests };
+  return { client, requests, reads };
 }
 
 function apiError(route: string, status: number, message: string): ApiResponseError {
@@ -241,6 +245,18 @@ describe("itemToolError", () => {
       message: "new failure",
       retryable: true,
     });
+  });
+
+  it("still names a failure when the route sent no detail with it", () => {
+    // `detail` is typed but arrives verbatim off the wire, like the code, and
+    // `message` is required on this tool's error schema.
+    const missing = itemToolError({ code: "not_found", detail: undefined as unknown as string }, 0);
+    expect(missing.message).toContain("gave no reason");
+    expect(missing.message).toContain("not_found");
+    expect(missing.class).toBe("input_domain");
+
+    const blank = itemToolError({ code: "store_refused", detail: "   " }, 1);
+    expect(blank.message).toContain("gave no reason");
   });
 
   it("reads a code naming an Object.prototype member as an unknown code, not as its member", () => {
@@ -558,7 +574,7 @@ describe("downloadMthdsArtifacts", () => {
 
   it("refuses a climbing dir on a run that references no file, rather than reporting it saved", async () => {
     const root = await makeTempDir();
-    const { client, requests } = fakeClient(completedState({ answer: 42 }));
+    const { client, requests, reads } = fakeClient(completedState({ answer: 42 }));
 
     const result = await downloadMthdsArtifacts(
       { run_id: RUN_ID, dir: "../elsewhere" },
@@ -570,6 +586,9 @@ describe("downloadMthdsArtifacts", () => {
       class: "input_domain",
       location: "dir",
     });
+    // The refusal is on the request itself: the run is never even read, so a
+    // check moved back inside the download path would fail this.
+    expect(reads).toEqual([]);
     expect(requests).toEqual([]);
   });
 
