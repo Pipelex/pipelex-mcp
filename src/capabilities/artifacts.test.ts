@@ -151,6 +151,15 @@ describe("validateArtifactsRequest", () => {
     expect(absolute[0]?.message).toContain("relative");
   });
 
+  it("rejects a dir that climbs out of the working directory, on its own text", () => {
+    const climbing = validateArtifactsRequest({ run_id: RUN_ID, dir: "../elsewhere" });
+
+    expect(climbing).toHaveLength(1);
+    expect(climbing[0]?.location).toBe("dir");
+    expect(climbing[0]?.message).toContain("outside the server's working directory");
+    expect(validateArtifactsRequest({ run_id: RUN_ID, dir: "out/../assets" })).toEqual([]);
+  });
+
   it("accepts a run id alone or with a relative dir", () => {
     expect(validateArtifactsRequest({ run_id: RUN_ID })).toEqual([]);
     expect(validateArtifactsRequest({ run_id: RUN_ID, dir: "assets/run-1" })).toEqual([]);
@@ -232,6 +241,17 @@ describe("itemToolError", () => {
       message: "new failure",
       retryable: true,
     });
+  });
+
+  it("reads a code naming an Object.prototype member as an unknown code, not as its member", () => {
+    for (const code of ["constructor", "toString", "valueOf", "__proto__"]) {
+      expect(itemToolError({ code, detail: "off the wire" }, 0)).toMatchObject({
+        class: "runtime",
+        location: "artifacts[0].uri",
+        message: "off the wire",
+        retryable: true,
+      });
+    }
   });
 });
 
@@ -519,6 +539,38 @@ describe("downloadMthdsArtifacts", () => {
     });
     expect(result.summary).toContain("Before the refusal, 1 file(s) were saved");
     expect(result.summary).toContain("- `illustration.png`");
+    // The files are on the caller's disk, so a machine consumer reads them
+    // from the structured result rather than out of the prose — and calling
+    // again would write suffixed copies beside them, not overwrite them.
+    expect(result.structuredContent.saved_paths).toEqual(["illustration.png"]);
+    expect(result.structuredContent.artifacts).toEqual([
+      { uri: PICTURE_URI, path: "illustration.png", content_type: "image/png", size: 4 },
+      {
+        uri: REPORT_URI,
+        content_type: null,
+        error: expect.objectContaining({ class: "runtime", location: "artifacts[1].uri" }),
+      },
+    ]);
+    // No verdict was produced, so nothing here may read as one.
+    expect(result.structuredContent.state).toBeUndefined();
+    expect(result.structuredContent.all_saved).toBeUndefined();
+  });
+
+  it("refuses a climbing dir on a run that references no file, rather than reporting it saved", async () => {
+    const root = await makeTempDir();
+    const { client, requests } = fakeClient(completedState({ answer: 42 }));
+
+    const result = await downloadMthdsArtifacts(
+      { run_id: RUN_ID, dir: "../elsewhere" },
+      contextIn(root, client),
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "dir",
+    });
+    expect(requests).toEqual([]);
   });
 
   it("classifies a deployment without the bulk resolve route as config at PIPELEX_BASE_URL", async () => {

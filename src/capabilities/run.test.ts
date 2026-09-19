@@ -628,6 +628,22 @@ describe("projectRunUsage", () => {
     expect(projectRunUsage(summary({ tokens: { input: 0, output: 0 } })).tokens).toBe(0);
   });
 
+  it("reads a blank assembly error as no error", () => {
+    // The SDK relays the runner's field verbatim; a non-null value here means
+    // "assembly failed", so a runner reporting an empty string must not be
+    // reported as a run whose usage assembly broke.
+    expect(
+      projectRunUsage(summary({ state: "unavailable", assembly_error: "" })).assembly_error,
+    ).toBeNull();
+    expect(
+      projectRunUsage(summary({ state: "unavailable", assembly_error: "   " })).assembly_error,
+    ).toBeNull();
+    expect(
+      projectRunUsage(summary({ state: "unavailable", assembly_error: "collector timed out" }))
+        .assembly_error,
+    ).toBe("collector timed out");
+  });
+
   it("carries cost_partial only when it is true", () => {
     expect(projectRunUsage(summary({ cost_partial: true })).cost_partial).toBe(true);
     expect(projectRunUsage(summary())).not.toHaveProperty("cost_partial");

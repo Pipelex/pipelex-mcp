@@ -119,13 +119,13 @@ const artifactsStructuredContentSchema = z.object({
     .array(savedArtifactSchema)
     .optional()
     .describe(
-      'State "completed" only — one entry per stored file the main output references, in discovery order.',
+      'One entry per stored file the main output references, in discovery order — on state "completed", and on a credential refused part-way through a download, where it carries the files saved before the refusal.',
     ),
   saved_paths: z
     .array(z.string())
     .optional()
     .describe(
-      'State "completed" only — the paths that were saved, relative to the server\'s working directory.',
+      "The paths that were saved, relative to the server's working directory — present wherever artifacts is.",
     ),
   all_saved: z
     .boolean()
@@ -272,6 +272,18 @@ function artifactClient(context: ArtifactsContext): ArtifactClient {
   );
 }
 
+/**
+ * Whether `dir` climbs out of the working directory on its own text. The real
+ * containment check is `resolveSaveDir`'s — real paths, symlinks followed —
+ * and it runs only once there is something to save; this lexical half runs on
+ * every call, so a run whose output references no file still refuses an
+ * escaping `dir` rather than reporting the save as fine.
+ */
+function escapesLexically(dir: string): boolean {
+  const normalized = path.normalize(dir);
+  return normalized === ".." || normalized.startsWith(`..${path.sep}`);
+}
+
 export function validateArtifactsRequest(input: MthdsDownloadArtifactsInput): ToolError[] {
   const errors = validateRunIdRequest(input.run_id);
 
@@ -290,6 +302,14 @@ export function validateArtifactsRequest(input: MthdsDownloadArtifactsInput): To
         location: "dir",
         message: "dir must be relative to the server's working directory, not absolute.",
         hint: "Files are saved under the directory the host started this server in. Pass a relative directory such as `assets` or `out/run-1`.",
+        retryable: false,
+      });
+    } else if (escapesLexically(input.dir)) {
+      errors.push({
+        class: "input_domain",
+        location: "dir",
+        message: `dir resolves outside the server's working directory: ${input.dir}`,
+        hint: "Files stay inside the directory the host started this server in. Pass a relative directory that stays inside it.",
         retryable: false,
       });
     }
@@ -376,7 +396,7 @@ export async function downloadMthdsArtifacts(
     });
   } catch (err) {
     const error = classifyError(err, { ...BULK_RESOLVE_ERROR_OPTIONS, auth: context.authError });
-    return errorResult(downloadRefusalSummary(error, err, target.root), [error]);
+    return refusedResult(error, err, target.root);
   }
 
   return completedResult(
@@ -388,18 +408,28 @@ export async function downloadMthdsArtifacts(
 }
 
 /**
- * The headline of a download the SDK could not produce a verdict for. A
- * credential refused part-way through leaves the files saved before it on
- * disk, and the SDK hands them back on the error: they are real, so the prose
- * names them even though the result is a no-verdict error.
+ * A download the SDK could not produce a verdict for. A credential refused
+ * part-way through leaves the files saved before it on disk, and the SDK hands
+ * them back on the error: those files are real, so they ride the structured
+ * result as well as the prose. `state` and `all_saved` stay absent — no
+ * verdict was produced, and a consumer branching on `status` must not read one
+ * here — but `artifacts` and `saved_paths` let it find what is already on its
+ * disk instead of parsing the summary for it, and calling again would not
+ * overwrite those files, it would write suffixed copies beside them.
  */
-function downloadRefusalSummary(error: ToolError, err: unknown, root: string): string {
+function refusedResult(error: ToolError, err: unknown, root: string): ArtifactsResult {
   const summary = summaryForToolError(error, ERROR_SUMMARIES);
-  if (!(err instanceof ArtifactAuthenticationError) || err.verdict.saved_paths.length === 0) {
-    return summary;
-  }
-  const saved = err.verdict.saved_paths.map((absolute) => `- \`${path.relative(root, absolute)}\``);
-  return `${summary}\n\nBefore the refusal, ${saved.length} file(s) were saved under \`${root}\`:\n${saved.join("\n")}`;
+  if (!(err instanceof ArtifactAuthenticationError)) return errorResult(summary, [error]);
+
+  const artifacts = err.verdict.artifacts.map((item, index) => projectItem(item, index, root));
+  const savedPaths = artifacts.flatMap((item) => (item.path === undefined ? [] : [item.path]));
+  if (savedPaths.length === 0) return errorResult(summary, [error]);
+
+  const lines = savedPaths.map((saved) => `- \`${saved}\``);
+  return {
+    structuredContent: { status: "error", errors: [error], artifacts, saved_paths: savedPaths },
+    summary: `${summary}\n\nBefore the refusal, ${savedPaths.length} file(s) were saved under \`${root}\`:\n${lines.join("\n")}`,
+  };
 }
 
 // ── the verdict's items ─────────────────────────────────────────────
@@ -506,9 +536,19 @@ const UNKNOWN_ITEM_ERROR: ItemErrorTexture = {
   retryable: true,
 };
 
-/** Classify one per-item error, located at the artifact's own entry. */
+/**
+ * Classify one per-item error, located at the artifact's own entry.
+ *
+ * The code comes verbatim off the bulk resolve route's wire, so the table is
+ * read by own key only: a code of `constructor` or `toString` would otherwise
+ * find `Object.prototype`'s member instead of falling back, and produce a
+ * `ToolError` with no `class` — failing this tool's own schema and turning one
+ * file's failure into a failed call.
+ */
 export function itemToolError(error: ArtifactItemError, index: number): ToolError {
-  const texture = ITEM_ERROR_TEXTURES[error.code] ?? UNKNOWN_ITEM_ERROR;
+  const texture = Object.hasOwn(ITEM_ERROR_TEXTURES, error.code)
+    ? ITEM_ERROR_TEXTURES[error.code]
+    : UNKNOWN_ITEM_ERROR;
   return {
     class: texture.class,
     location: `artifacts[${index}].uri`,

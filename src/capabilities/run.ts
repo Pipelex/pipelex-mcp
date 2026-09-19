@@ -652,6 +652,18 @@ function tokenFigure(tokens: UsageTokenTotals): number | null {
   return (tokens.input ?? 0) + (tokens.output ?? 0);
 }
 
+/**
+ * A blank assembly error is no error. The SDK relays the runner's
+ * `usage_assembly_error` verbatim, while this tool's schema and SPEC both
+ * define a non-null `assembly_error` as "usage assembly failed for this run" —
+ * so a runner reporting `""` would be read here as a failure that never
+ * happened. The MCP's own `summarizeUsage` narrowed it before this tool went
+ * thin over the SDK, and the narrowing stays on this side of the projection.
+ */
+function narrowAssemblyError(value: string | null): string | null {
+  return value === null || value.trim() === "" ? null : value;
+}
+
 /** Project the SDK's run-level `UsageSummary` onto `structuredContent.usage`. */
 export function projectRunUsage(summary: UsageSummary): RunUsage {
   const usage: RunUsage = {
@@ -659,7 +671,7 @@ export function projectRunUsage(summary: UsageSummary): RunUsage {
     cost_usd: summary.total_cost_usd,
     tokens: tokenFigure(summary.tokens),
     calls: summary.calls,
-    assembly_error: summary.assembly_error,
+    assembly_error: narrowAssemblyError(summary.assembly_error),
   };
   if (summary.cost_partial) usage.cost_partial = true;
   return usage;
