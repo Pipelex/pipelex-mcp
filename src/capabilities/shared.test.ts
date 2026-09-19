@@ -3,18 +3,20 @@ import { describe, expect, it } from "vitest";
 import {
   ApiResponseError,
   ApiUnreachableError,
+  ArtifactAuthenticationError,
+  ArtifactOperationError,
   ClientAuthenticationError,
   EmptyMethodSourceError,
   MissingMainStuffError,
   PipelineRequestError,
   RunLifecycleUnavailableError,
+  ScopeUnavailableError,
 } from "@pipelex/sdk";
 import type { MthdsFileItem } from "@pipelex/sdk";
 
 import {
   buildApiConfig,
   classifyError,
-  collectStorageUris,
   DEFAULT_API_URL,
   fetchMethodFiles,
   filesInputSchema,
@@ -24,37 +26,6 @@ import {
   validateMethodSelectorRequest,
   validateRunIdRequest,
 } from "./shared.js";
-
-describe("collectStorageUris", () => {
-  it("finds every pipelex-storage:// string in a JSON-shaped value, once each, in discovery order", () => {
-    const value = {
-      image: { url: "pipelex-storage://a/one.png", public_url: "https://signed.example/one.png" },
-      pages: [
-        { url: "pipelex-storage://a/one.png" },
-        { deeper: { url: "pipelex-storage://b/two.pdf" } },
-        "pipelex-storage://c/three",
-      ],
-      text: "not a reference",
-      count: 3,
-      nothing: null,
-    };
-
-    expect(collectStorageUris(value)).toEqual([
-      "pipelex-storage://a/one.png",
-      "pipelex-storage://b/two.pdf",
-      "pipelex-storage://c/three",
-    ]);
-  });
-
-  it("ignores the bare scheme, other schemes, and non-JSON values", () => {
-    expect(collectStorageUris("pipelex-storage://")).toEqual([]);
-    expect(collectStorageUris(["https://example.com/x.png", "data:image/png;base64,AAAA"])).toEqual(
-      [],
-    );
-    expect(collectStorageUris(undefined)).toEqual([]);
-    expect(collectStorageUris(42)).toEqual([]);
-  });
-});
 import type { ErrorSummaries, FileResolver, MethodFetchClient, ToolError } from "./shared.js";
 
 describe("buildApiConfig", () => {
@@ -770,6 +741,44 @@ describe("classifyError", () => {
     expect(error.class).toBe("runtime");
     expect(error.message).toMatch(/main stuff/i);
     expect(error.retryable).toBe(false);
+  });
+
+  it("classifies the artifact family ahead of the generic PipelineRequestError arm", () => {
+    const verdict = {
+      scope: "main_stuff" as const,
+      artifacts: [],
+      saved_paths: [],
+      all_saved: true,
+    };
+    const auth = classifyError(
+      new ArtifactAuthenticationError(
+        "The resolve route refused the credential (401).",
+        401,
+        verdict,
+      ),
+      { auth: { location: "connector", hint: "Reconnect." } },
+    );
+    expect(auth).toMatchObject({
+      class: "config",
+      location: "connector",
+      hint: "Reconnect.",
+      retryable: false,
+    });
+    expect(classifyError(new ArtifactAuthenticationError("refused", 403, verdict))).toMatchObject({
+      class: "config",
+      location: "PIPELEX_API_KEY",
+    });
+
+    // A scope with no artifact on a completed run reads like a missing main output.
+    expect(classifyError(new ScopeUnavailableError("main_stuff", "run-1"))).toMatchObject({
+      class: "runtime",
+      retryable: false,
+    });
+
+    // The base class is never the caller's input, and never the base-URL config arm.
+    const operation = classifyError(new ArtifactOperationError("malformed bulk answer"));
+    expect(operation).toMatchObject({ class: "runtime", retryable: false });
+    expect(operation.location).toBeUndefined();
   });
 
   it("overrides the 404 arm to input_domain when the route says so", () => {

@@ -1,17 +1,21 @@
 import path from "node:path";
 
-import { PipelexApiClient } from "@pipelex/sdk";
-import type { ResolvedStorageUrl, RunResultState, RunStatus } from "@pipelex/sdk";
+import { ArtifactAuthenticationError, PipelexApiClient, collectArtifacts } from "@pipelex/sdk";
+import type {
+  ArtifactItemError,
+  ArtifactScope,
+  DownloadArtifactsRequest,
+  DownloadArtifactsResult,
+  DownloadedArtifact,
+  RunResultState,
+  RunStatus,
+} from "@pipelex/sdk";
 import { z } from "zod";
 
-import { httpArtifactDownloader } from "./artifact-download.js";
-import type { ArtifactDownloader } from "./artifact-download.js";
 import { RUN_RESULTS_ERROR_OPTIONS, runStatusSchema } from "./run.js";
 import {
-  PIPELEX_STORAGE_SCHEME,
   buildApiConfig,
   classifyError,
-  collectStorageUris,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
@@ -20,6 +24,7 @@ import {
 import type {
   AuthErrorTexture,
   ClassifyErrorOptions,
+  ErrorClass,
   ErrorSummaries,
   ToolError,
 } from "./shared.js";
@@ -32,14 +37,32 @@ import { resolveSaveDir } from "./workspace-boundary.js";
  * server's working directory — which is where the user is.
  *
  * It is keyed on the run id, the durable handle the whole run family already
- * uses, rather than on a list of storage URIs: the agent never has to copy
- * references out of a bounded result, and every `pipelex-storage://` reference
- * in the run's FULL main output is found and resolved to a FRESH presigned link
- * through the API (`resolveStorageUrl`), so the hour-long life of the
- * `public_url` embedded in the results never matters — days later the same
- * call still works. See SPEC.md → Artifact Download Scope for why this is a
- * companion tool and not an option on `mthds_run_results`.
+ * uses, rather than on a list of storage URIs. The walk, the fresh links, the
+ * filenames, the never-overwrite rule and the download bounds are the SDK's
+ * artifact stack (`collectArtifacts` / `downloadArtifacts`, which resolves
+ * through `resolveArtifacts`), so this capability owns only what is the
+ * workshop's: the tool envelope, the `dir` containment against the working
+ * directory, the deployment gate, the plain-http policy, the classification
+ * of every failure into `ToolError`s, and the prose summary. See SPEC.md →
+ * Artifact Download Scope for why this is a companion tool and not an option
+ * on `mthds_run_results`.
  */
+
+/**
+ * The scope this tool walks: always the run's main output. The tool takes no
+ * `scope` input; the value is named here, rather than left to the SDK's
+ * default, so the empty-walk check and the download agree on what was walked.
+ */
+export const DOWNLOAD_SCOPE: ArtifactScope = "main_stuff";
+
+/**
+ * The explicit override of the plain-http rule. Unset, a plain `http:`
+ * download link is accepted exactly when `PIPELEX_BASE_URL` is itself `http:`
+ * (the local compose stack, whose object store mints plain-http links);
+ * `true` / `1` accepts one from any deployment, `false` / `0` refuses one from
+ * every deployment. Any other value refuses, so a typo fails closed.
+ */
+export const ALLOW_HTTP_ENV = "PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP";
 
 export const mthdsDownloadArtifactsInputSchema = {
   run_id: z
@@ -59,7 +82,11 @@ const savedArtifactSchema = z.object({
     .string()
     .optional()
     .describe("Where the file was saved, relative to the server's working directory — on success."),
-  content_type: z.string().nullable().optional().describe("The stored object's content type."),
+  content_type: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("The platform's content type for the stored object; null when it has none."),
   size: z.number().optional().describe("Bytes written."),
   error: toolErrorSchema.optional().describe("Present when this file could not be saved."),
 });
@@ -82,6 +109,12 @@ const artifactsStructuredContentSchema = z.object({
     .optional()
     .describe('State "failed" only — the terminal lifecycle status.'),
   failure_message: z.string().optional().describe('State "failed" only.'),
+  scope: z
+    .enum(["main_stuff", "working_memory"])
+    .optional()
+    .describe(
+      'State "completed" only — which of the run\'s outputs was walked for stored-file references. Always "main_stuff", the run\'s main output: artifacts.length is the count of references found there.',
+    ),
   artifacts: z
     .array(savedArtifactSchema)
     .optional()
@@ -125,6 +158,7 @@ export interface ArtifactsStructuredContent {
   retry_after_seconds?: number | null;
   run_status?: RunStatus;
   failure_message?: string;
+  scope?: ArtifactScope;
   artifacts?: SavedArtifactEntry[];
   saved_paths?: string[];
   all_saved?: boolean;
@@ -139,7 +173,7 @@ export interface ArtifactsResult {
 /** The slice of `PipelexApiClient` this capability calls (test seam). */
 export interface ArtifactClient {
   getRunResult(runId: string): Promise<RunResultState>;
-  resolveStorageUrl(input: { uri: string }): Promise<ResolvedStorageUrl>;
+  downloadArtifacts(request: DownloadArtifactsRequest): Promise<DownloadArtifactsResult>;
 }
 
 export interface ArtifactsContext {
@@ -154,36 +188,76 @@ export interface ArtifactsContext {
    * posture.
    */
   saveRoot?: string;
-  /** The download boundary; the real http downloader unless a test injects one. */
-  downloader?: ArtifactDownloader;
+  /**
+   * The explicit plain-http override, read from {@link ALLOW_HTTP_ENV}. Absent,
+   * {@link allowsPlainHttp} derives the answer from `baseUrl`'s scheme.
+   */
+  allowHttp?: boolean;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
 
-export function buildArtifactsContext(env = process.env): ArtifactsContext {
-  return buildApiConfig(env);
+interface ArtifactsEnv {
+  PIPELEX_BASE_URL?: string;
+  PIPELEX_API_KEY?: string;
+  [ALLOW_HTTP_ENV]?: string;
+}
+
+export function buildArtifactsContext(env: ArtifactsEnv = process.env): ArtifactsContext {
+  const allowHttp = parseAllowHttpOverride(env[ALLOW_HTTP_ENV]);
+  return { ...buildApiConfig(env), ...(allowHttp === undefined ? {} : { allowHttp }) };
 }
 
 /**
- * Classify options for the per-artifact `POST /v1/resolve-storage-url` leg.
- * Both request-domain arms locate at the artifact's own entry: the URI came
- * out of the run's output, so a rejection is about that reference, not about
- * anything the caller typed.
+ * Read {@link ALLOW_HTTP_ENV}: `undefined` when unset or blank (derive from
+ * the base URL), otherwise the override. An unrecognized value refuses rather
+ * than falling back to the derivation, so a misspelled override can only ever
+ * make the tool stricter.
  */
-export function resolveStorageUrlErrorOptions(index: number): ClassifyErrorOptions {
-  const location = `artifacts[${index}].uri`;
-  return {
-    route: "/v1/resolve-storage-url",
-    badRequest: {
-      location,
-      hint: "The API rejected this storage reference as found in the run output; it may belong to another organization than the API key's.",
-    },
-    notFound: {
-      location,
-      hint: "No stored object answers to this reference — it may have been deleted, or belong to another organization. If PIPELEX_BASE_URL points at a deployment without /v1/resolve-storage-url, use the hosted Pipelex API.",
-    },
-  };
+export function parseAllowHttpOverride(value: string | undefined): boolean | undefined {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === undefined || normalized === "") return undefined;
+  return normalized === "true" || normalized === "1";
 }
+
+/**
+ * Whether a plain `http:` download link is fetched: the explicit override when
+ * one is set, otherwise exactly when the configured API is itself plain http —
+ * the local compose stack, whose object store mints plain-http presigned links.
+ * A deployment reached over https gets https links, so a plain-http one there
+ * is refused rather than followed silently. A malformed base URL refuses; the
+ * client constructor then reports it as the config error it is.
+ */
+export function allowsPlainHttp(context: Pick<ArtifactsContext, "baseUrl" | "allowHttp">): boolean {
+  if (context.allowHttp !== undefined) return context.allowHttp;
+  try {
+    return new URL(context.baseUrl).protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Classify options for the SDK's download leg, whose only request is the bulk
+ * resolve route. Its whole-request refusals are about the caller or the
+ * deployment, never about the caller's input: a 400 is a key acting for no
+ * organization and a 422 a request this server built, a 404 a deployment
+ * without the route (the default `config` arm names it), a 5xx the platform
+ * failing to sign. A 401/403 never reaches these options — the SDK raises it
+ * as `ArtifactAuthenticationError`, which `classifyError` maps to the auth arm.
+ * Per-reference refusals are values on the verdict's items, classified by
+ * {@link itemToolError}.
+ */
+export const BULK_RESOLVE_ERROR_OPTIONS: ClassifyErrorOptions = {
+  route: "/v1/resolve-storage-url/bulk",
+  badRequest: {
+    class: "config",
+    hint: "The API refused to resolve this run's stored files as a whole. If the message names an organization, the API key acts for none: use a key minted in the run's organization.",
+  },
+  serverError: {
+    hint: "The platform could not sign download links for this run's stored files; retrying this tool resolves them again.",
+  },
+};
 
 // Constructed inside the caught block (mirroring the sibling capabilities): the
 // SDK constructor throws PipelineRequestError on a malformed base URL, and that
@@ -245,6 +319,9 @@ export async function downloadMthdsArtifacts(
     ]);
   }
 
+  // The run is read here rather than by the SDK's run_id arm, so a run that is
+  // still running, failed, or references nothing touches no directory: the
+  // target is created only once there is something to save in it.
   let client: ArtifactClient;
   let state: RunResultState;
   try {
@@ -267,6 +344,7 @@ export async function downloadMthdsArtifacts(
   // The SDK guarantees a non-null main_stuff on a completed run (it throws
   // MissingMainStuffError otherwise); reaching here without one is a contract
   // violation, surfaced as a runtime no-verdict like mthds_run_results does.
+  // Checked before the walk, which would read a null output as "no files".
   if (state.result.main_stuff == null) {
     return errorResult("No artifacts were saved: the Pipelex API returned a malformed report.", [
       {
@@ -279,9 +357,8 @@ export async function downloadMthdsArtifacts(
   }
 
   const runId = state.pipeline_run_id;
-  const uris = collectStorageUris(state.result.main_stuff);
-  if (uris.length === 0) {
-    return completedResult(runId, [], context.saveRoot);
+  if (collectArtifacts(state.result.main_stuff).length === 0) {
+    return completedResult(runId, DOWNLOAD_SCOPE, [], context.saveRoot);
   }
 
   const target = await resolveSaveDir(context.saveRoot, input.dir, "dir");
@@ -289,146 +366,156 @@ export async function downloadMthdsArtifacts(
     return errorResult("No artifacts were saved: the target directory is invalid.", [target.error]);
   }
 
-  const downloader = context.downloader ?? httpArtifactDownloader;
-  const artifacts: SavedArtifactEntry[] = [];
-
-  // Sequential rather than concurrent: each download streams to disk on its
-  // own, and one-at-a-time keeps the collision suffixes deterministic.
-  for (const [index, uri] of uris.entries()) {
-    artifacts.push(await saveOne(uri, index, target.dir, target.root, client, downloader, context));
+  let verdict: DownloadArtifactsResult;
+  try {
+    verdict = await client.downloadArtifacts({
+      results: state.result,
+      dir: target.dir,
+      scope: DOWNLOAD_SCOPE,
+      allowHttp: allowsPlainHttp(context),
+    });
+  } catch (err) {
+    const error = classifyError(err, { ...BULK_RESOLVE_ERROR_OPTIONS, auth: context.authError });
+    return errorResult(downloadRefusalSummary(error, err, target.root), [error]);
   }
 
-  return completedResult(runId, artifacts, target.root);
+  return completedResult(
+    runId,
+    verdict.scope,
+    verdict.artifacts.map((item, index) => projectItem(item, index, target.root)),
+    target.root,
+  );
 }
 
-async function saveOne(
-  uri: string,
-  index: number,
-  dir: string,
-  root: string,
-  client: ArtifactClient,
-  downloader: ArtifactDownloader,
-  context: ArtifactsContext,
-): Promise<SavedArtifactEntry> {
-  let resolved: ResolvedStorageUrl;
-  try {
-    resolved = await client.resolveStorageUrl({ uri });
-  } catch (err) {
+/**
+ * The headline of a download the SDK could not produce a verdict for. A
+ * credential refused part-way through leaves the files saved before it on
+ * disk, and the SDK hands them back on the error: they are real, so the prose
+ * names them even though the result is a no-verdict error.
+ */
+function downloadRefusalSummary(error: ToolError, err: unknown, root: string): string {
+  const summary = summaryForToolError(error, ERROR_SUMMARIES);
+  if (!(err instanceof ArtifactAuthenticationError) || err.verdict.saved_paths.length === 0) {
+    return summary;
+  }
+  const saved = err.verdict.saved_paths.map((absolute) => `- \`${path.relative(root, absolute)}\``);
+  return `${summary}\n\nBefore the refusal, ${saved.length} file(s) were saved under \`${root}\`:\n${saved.join("\n")}`;
+}
+
+// ── the verdict's items ─────────────────────────────────────────────
+
+/** One SDK verdict entry, with its path made relative and its error classified. */
+function projectItem(item: DownloadedArtifact, index: number, root: string): SavedArtifactEntry {
+  if (item.error === null) {
     return {
-      uri,
-      error: classifyError(err, {
-        ...resolveStorageUrlErrorOptions(index),
-        auth: context.authError,
-      }),
+      uri: item.uri,
+      path: path.relative(root, item.path),
+      content_type: item.content_type,
+      size: item.size,
     };
   }
-
-  const contentType = resolved.content_type ?? null;
-  const baseName = artifactFilename(uri, contentType, index);
-  const download = await downloader.download(resolved.url, dir, baseName);
-  if (!download.ok) {
-    return {
-      uri,
-      content_type: contentType,
-      error: { ...download.failure, location: `artifacts[${index}].uri` },
-    };
-  }
-
   return {
-    uri,
-    path: path.relative(root, download.saved.path),
-    content_type: contentType,
-    size: download.saved.size,
+    uri: item.uri,
+    content_type: item.content_type,
+    error: itemToolError(item.error, index),
   };
 }
 
-// ── the filename ────────────────────────────────────────────────────
+const RESOLVE_AGAIN_HINT =
+  "The download link is minted fresh on every call, so retrying this tool resolves a new one.";
 
-/** Longest filename this tool writes, extension included. */
-const MAX_FILENAME_LENGTH = 128;
+interface ItemErrorTexture {
+  class: ErrorClass;
+  hint: string;
+  retryable: boolean;
+  /** Replaces the SDK's `detail` where that sentence speaks to an SDK caller, not to the agent. */
+  message?: string;
+}
 
 /**
- * The extension to add when the storage key has none and the stored object's
- * content type is one of the artifact types a run produces. Deliberately
- * short: an unknown type simply gets no extension, never a guessed one.
+ * How each per-item code the SDK's verdict carries reads as a `ToolError`. The
+ * codes are the SDK's closed vocabulary: the resolve route's per-reference
+ * refusals, the fetch boundary's, and the download's own. A vanished or
+ * oversized object is a permanent `input_domain` refusal; a store or network
+ * fault is a retryable `runtime` one, since every call mints fresh links.
  */
-const EXTENSION_BY_CONTENT_TYPE: Record<string, string> = {
-  "image/png": ".png",
-  "image/jpeg": ".jpg",
-  "image/webp": ".webp",
-  "image/gif": ".gif",
-  "image/svg+xml": ".svg",
-  "application/pdf": ".pdf",
-  "text/plain": ".txt",
-  "text/markdown": ".md",
-  "text/html": ".html",
-  "text/csv": ".csv",
-  "application/json": ".json",
+const ITEM_ERROR_TEXTURES: Record<string, ItemErrorTexture> = {
+  invalid_storage_uri: {
+    class: "input_domain",
+    hint: "The API rejected this storage reference as found in the run output.",
+    retryable: false,
+  },
+  forbidden: {
+    class: "input_domain",
+    hint: "The reference belongs to another organization than the API key's. Use a key minted in the run's organization.",
+    retryable: false,
+  },
+  unsupported_url: {
+    class: "runtime",
+    hint: "The configured deployment's storage resolved to a link this server does not fetch — not http(s), or carrying credentials. A deployment backed by local-filesystem storage hands out file:// links, which cannot be fetched here.",
+    retryable: false,
+  },
+  plain_http_refused: {
+    class: "config",
+    message:
+      "The platform resolved this reference to a plain http link, which this server refuses.",
+    hint: `A plain http link is accepted only when PIPELEX_BASE_URL is itself http (the local stack). Set ${ALLOW_HTTP_ENV}=true to accept one from this deployment anyway.`,
+    retryable: false,
+  },
+  redirect_refused: {
+    class: "runtime",
+    hint: "A presigned object link should answer directly. Inspect the configured deployment's storage.",
+    retryable: false,
+  },
+  store_refused: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
+  not_found: {
+    class: "input_domain",
+    hint: "The object behind this storage reference is gone; re-run the method to produce it again.",
+    retryable: false,
+  },
+  store_error: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
+  too_large: {
+    class: "input_domain",
+    hint: "The limit is an accident guard against filling the disk. Fetch the file another way — its presigned public_url in mthds_run_results works for about an hour.",
+    retryable: false,
+  },
+  timeout: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
+  network: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
+  resolve_failed: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
+  total_limit_exceeded: {
+    class: "input_domain",
+    hint: "The call's total byte limit is an accident guard against filling the disk. The files listed as saved are on disk; fetch this one through its presigned public_url in mthds_run_results, which works for about an hour.",
+    retryable: false,
+  },
+  write_failed: {
+    class: "runtime",
+    hint: "Check that the target directory under the server's working directory is writable.",
+    retryable: false,
+  },
+  aborted: {
+    class: "runtime",
+    hint: "The download stopped before this file was saved; call the tool again.",
+    retryable: true,
+  },
 };
 
-/**
- * The bare filename a storage reference is saved under: the last segment of
- * the storage key, reduced to a conservative character set so it can never
- * name anything but a regular file directly inside the target directory. Path
- * separators are the split point, so no traversal survives; leading dots are
- * stripped, so no hidden file and no `..`; everything outside
- * `[A-Za-z0-9._-]` becomes `_`; an empty result falls back to a numbered
- * `artifact-N`. Length is capped with the extension preserved, and an
- * extension is added from the content type when the key carries none.
- */
-export function artifactFilename(
-  uri: string,
-  contentType: string | null | undefined,
-  index: number,
-): string {
-  const key = uri.startsWith(PIPELEX_STORAGE_SCHEME)
-    ? uri.slice(PIPELEX_STORAGE_SCHEME.length)
-    : uri;
-  const segment =
-    (key.split(/[?#]/)[0] ?? "")
-      .split(/[\\/]/)
-      .filter((part) => part !== "")
-      .pop() ?? "";
+/** A code the SDK adds later reads as an unnamed fault, which stays retryable. */
+const UNKNOWN_ITEM_ERROR: ItemErrorTexture = {
+  class: "runtime",
+  hint: "Inspect the MCP server logs.",
+  retryable: true,
+};
 
-  let decoded = segment;
-  try {
-    decoded = decodeURIComponent(segment);
-  } catch {
-    // A malformed escape sequence is kept as typed; sanitization handles it.
-  }
-
-  let name = decoded
-    .replace(/[^A-Za-z0-9._-]/g, "_")
-    .replace(/^[._-]+/, "")
-    .replace(/[._-]+$/, "");
-
-  if (name === "") {
-    name = `artifact-${index + 1}`;
-  }
-
-  if (name.length > MAX_FILENAME_LENGTH) {
-    const ext = path.extname(name);
-    // The extension is kept only if there is room left for a stem. An
-    // extension at least as long as the cap would give `slice` a negative
-    // start, which counts from the END and yields a name LONGER than the cap
-    // — so a pathological extension is dropped rather than preserved.
-    name =
-      ext.length < MAX_FILENAME_LENGTH
-        ? name.slice(0, MAX_FILENAME_LENGTH - ext.length) + ext
-        : name.slice(0, MAX_FILENAME_LENGTH);
-  }
-
-  if (path.extname(name) === "") {
-    const ext =
-      contentType == null
-        ? undefined
-        : EXTENSION_BY_CONTENT_TYPE[contentType.split(";")[0]!.trim().toLowerCase()];
-    if (ext !== undefined) {
-      name += ext;
-    }
-  }
-
-  return name;
+/** Classify one per-item error, located at the artifact's own entry. */
+export function itemToolError(error: ArtifactItemError, index: number): ToolError {
+  const texture = ITEM_ERROR_TEXTURES[error.code] ?? UNKNOWN_ITEM_ERROR;
+  return {
+    class: texture.class,
+    location: `artifacts[${index}].uri`,
+    message: texture.message ?? error.detail,
+    hint: texture.hint,
+    retryable: texture.retryable,
+  };
 }
 
 // ── projections ─────────────────────────────────────────────────────
@@ -475,6 +562,7 @@ function failedResult(runId: string, status: RunStatus, message: string): Artifa
  */
 export function completedResult(
   runId: string,
+  scope: ArtifactScope,
   artifacts: SavedArtifactEntry[],
   root: string,
 ): ArtifactsResult {
@@ -487,6 +575,7 @@ export function completedResult(
       status: "ok",
       run_id: runId,
       state: "completed",
+      scope,
       artifacts,
       saved_paths: savedPaths,
       all_saved: savedPaths.length === artifacts.length,

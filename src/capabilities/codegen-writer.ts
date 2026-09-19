@@ -207,8 +207,9 @@ export async function writeCodegenTree(request: CodegenWriteRequest): Promise<Co
   }
 
   // 4. Create the sub-directories step 2 contained, then write — verbatim,
-  //    with the default overwriting flag, deliberately the inverse of
-  //    `openUniqueFile`'s `wx`.
+  //    with the default overwriting flag, deliberately the inverse of the
+  //    exclusive `wx` create the SDK's `downloadArtifacts` uses for
+  //    mthds_download_artifacts.
   const written: WrittenArtifact[] = [];
   const landed: string[] = [];
   for (const destination of destinations) {

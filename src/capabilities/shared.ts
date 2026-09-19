@@ -1,6 +1,8 @@
 import {
   ApiResponseError,
   ApiUnreachableError,
+  ArtifactAuthenticationError,
+  ArtifactOperationError,
   ClientAuthenticationError,
   EmptyMethodSourceError,
   InputPreparationError,
@@ -9,6 +11,7 @@ import {
   PipelineRequestError,
   RejectedAssetError,
   RunLifecycleUnavailableError,
+  ScopeUnavailableError,
   UnsupportedUploadCapabilityError,
   UploadAuthenticationError,
   UploadTransportError,
@@ -465,44 +468,6 @@ function validateFileItems(files: SubmittedFile[]): ToolError[] {
   return errors;
 }
 
-/** The scheme of a Pipelex storage reference, as the runtime and the SDK spell it. */
-export const PIPELEX_STORAGE_SCHEME = "pipelex-storage://";
-
-/**
- * Every `pipelex-storage://` reference inside a JSON-shaped value, in discovery
- * order and deduplicated. This is how a run's produced files are found: the
- * runtime serializes an image or document output as content carrying its
- * storage reference in `url` (beside an expiring presigned `public_url`), and
- * the scheme is unambiguous, so a walk for scheme-prefixed strings is a
- * contract, not a heuristic. Shared by `mthds_run_results` (to say the files
- * exist) and `mthds_download_artifacts` (to save them).
- */
-export function collectStorageUris(value: unknown): string[] {
-  const found = new Set<string>();
-  walkStorageUris(value, found);
-  return [...found];
-}
-
-function walkStorageUris(value: unknown, found: Set<string>): void {
-  if (typeof value === "string") {
-    if (value.startsWith(PIPELEX_STORAGE_SCHEME) && value.length > PIPELEX_STORAGE_SCHEME.length) {
-      found.add(value);
-    }
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      walkStorageUris(item, found);
-    }
-    return;
-  }
-  if (typeof value === "object" && value !== null) {
-    for (const entry of Object.values(value)) {
-      walkStorageUris(entry, found);
-    }
-  }
-}
-
 /** Request-shape check on a run id (format stays server-owned). */
 export function validateRunIdRequest(runId: string): ToolError[] {
   if (runId.trim() === "") {
@@ -746,6 +711,46 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
       ...(inputBadRequest.location === undefined ? {} : { location: inputBadRequest.location }),
       message: err.message,
       hint: inputBadRequest.hint,
+      retryable: false,
+    };
+  }
+
+  // ── Artifact family (mthds_download_artifacts) ──
+  // The SDK's artifact operations throw only when no verdict can be produced;
+  // per-reference failures are values on the verdict. These derive from
+  // PipelineRequestError too, so they MUST be classified here, ahead of the
+  // generic arm below. Most-specific first: subclasses before the base.
+
+  // The resolve route refused the credential (401/403) — the auth arm, like
+  // UploadAuthenticationError on the upload leg.
+  if (err instanceof ArtifactAuthenticationError) {
+    return {
+      class: "config",
+      location: options.auth?.location ?? "PIPELEX_API_KEY",
+      message: err.message,
+      hint: options.auth?.hint ?? DEFAULT_AUTH_HINT,
+      retryable: false,
+    };
+  }
+
+  // The scope walked carries no artifact on a completed run: the API answered,
+  // but its report is malformed — the MissingMainStuffError reading.
+  if (err instanceof ScopeUnavailableError) {
+    return {
+      class: "runtime",
+      message: err.message,
+      hint: "The API reported the run completed but its results carry no output to walk for files; inspect the run on the platform.",
+      retryable: false,
+    };
+  }
+
+  // The base class: a malformed bulk-resolve answer or a directory the download
+  // could not use after containment approved it. Neither is the caller's input.
+  if (err instanceof ArtifactOperationError) {
+    return {
+      class: "runtime",
+      message: err.message,
+      hint: "The download could not proceed; inspect the MCP server logs and the API.",
       retryable: false,
     };
   }
