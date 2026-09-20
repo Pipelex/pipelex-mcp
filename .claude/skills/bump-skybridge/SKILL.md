@@ -58,14 +58,17 @@ A dirty tree is not a blocker, but if `package.json`, `package-lock.json` or `CH
 
 ## Step 2 — Decide the target
 
-Default to latest for `skybridge`, then let its peer pin decide `@skybridge/devtools` — do not pick two versions independently:
+Default to latest for `skybridge`, then resolve `@skybridge/devtools` **against** its peer pin — do not pick two versions independently:
 
 ```bash
 npm view skybridge@latest peerDependencies
 npm view "skybridge@$(node -p "require('./node_modules/skybridge/package.json').version")" peerDependencies
+npm view @skybridge/devtools version          # the concrete version to aim at
 ```
 
-Diff those two peer sets and show the user. A peer that **appeared** may force another bump in this repo (a new `vite` floor, say); a peer that **vanished** is usually harmless but tells you the framework stopped owning something. Check each surviving peer against what this repo declares — `react`, `react-dom`, `vite` and `@modelcontextprotocol/sdk` are all declared here, while `nodemon` is left to npm's automatic peer install. `@modelcontextprotocol/sdk` is the one to watch: this repo declares its own floor for it (`^1.29.0`) in `dependencies`, so a Skybridge release that raises that peer is the realistic way this bump forces a second one. `zod` is **not** a peer of either package — it is a plain dependency of `@skybridge/devtools`, so nothing Skybridge declares can force it, and checking it here proves nothing.
+**The peer pin is a range, not a version — it constrains the devtools target, it does not name it.** `skybridge@1.4.1` pins `@skybridge/devtools: ^1.1.0`, so "what the pin says" is a floor that `1.1.0` and `1.4.1` both satisfy; substituting it into Step 5 would write `^1.1.0` into `package.json` and silently lower the declared floor. So resolve a **concrete** `<devtools-target>`: take the newest published `@skybridge/devtools` that satisfies the pin and does not cross past `<target>`'s major — in practice the same version number as `<target>`, since the two ship together — and say out loud which version you settled on. If the newest devtools does **not** satisfy the pin, stop and show the user: the lockstep assumption has broken and a version has to be chosen by hand.
+
+Diff those two peer sets and show the user. A peer that **appeared** may force another bump in this repo (a new `vite` floor, say); a peer that **vanished** is usually harmless but tells you the framework stopped owning something. Check each surviving peer against what this repo declares, and **work from the diff you just computed rather than from any list written here** — the peer set is version-specific and a major rewrites it. `react`, `react-dom` and `vite` are declared here and have been peers throughout; `nodemon` is a peer this repo leaves to npm's automatic peer install. The two that move are the lesson: at `1.4.1` the peers include `@modelcontextprotocol/sdk >=1.27.0` and **not** `zod`, while at `2.0.0` that inverts — `zod ^4.2.0` is added as a peer of `skybridge` itself and `@modelcontextprotocol/sdk` drops out of the peer set into Skybridge's own dependencies. This repo declares its own floor for both (`@modelcontextprotocol/sdk ^1.29.0`, `zod ^4.3.6`, each in `dependencies`), so either can be the one that forces a second bump depending on which version you are moving to. None of the peers is optional — neither release declares `peerDependenciesMeta` — so every one of them binds.
 
 If the user named a version, honour it exactly and still resolve the devtools pin from *that* version's peers. Record versions without a `v` prefix (`2.0.0`); the `v` belongs to git tags and the upstream release names only.
 
@@ -144,14 +147,21 @@ Behavior changes, a changed per-request lifecycle, new defaults, and anything to
 
 ## Step 5 — Apply the bump
 
-There is no Makefile switch for these two (the `use-npm-*` targets are `@pipelex`-only), so install them directly — and pass the flag that keeps each in its block, because npm infers the block from the entry that is already there and the flag is what survives a re-add:
+There is no Makefile switch for these two (the `use-npm-*` targets are `@pipelex`-only). **Edit both version strings in `package.json` first, then resolve once** — `skybridge` under `dependencies` and `@skybridge/devtools` under `devDependencies`, each left in the block it is already in:
 
-```bash
-npm install --save-prod skybridge@<target>
-npm install --save-dev  @skybridge/devtools@<devtools-target>
+```jsonc
+// package.json — two edits, in place, blocks untouched
+"dependencies":    { "skybridge": "^<target>" }
+"devDependencies": { "@skybridge/devtools": "^<devtools-target>" }
 ```
 
-Those are two resolved versions, not one string used twice: `<target>` is what Step 2 settled on and `<devtools-target>` is what that version's peer pin named, which is why Step 2 says not to pick them independently. Never type a literal major here — `2.0.0` is a real published release, so a copied command succeeds and silently performs the migration Step 2 says to put to the user first.
+```bash
+npm install
+```
+
+**Two edits then one resolve, rather than two `npm install` commands — and that ordering is the point.** The packages are peer-coupled: `skybridge@2.0.0` peers `@skybridge/devtools@^2.0.0`, non-optionally. So `npm install --save-prod skybridge@2.0.0` run on its own, while the old `@skybridge/devtools@^1.4.1` is still declared at the root, asks npm to place a package whose peer contradicts a root dependency — which is the canonical `ERESOLVE` shape, and it aborts before the second command ever runs. Editing both entries first means npm sees one consistent manifest and resolves it in a single pass. It also makes the block question moot: nothing is being re-added, so nothing can infer the wrong block.
+
+`<target>` is what Step 2 settled on and `<devtools-target>` is the concrete version Step 2 resolved against the peer pin — never the pin's own range, and never a literal typed from this document. `2.0.0` is a real published release, so a copied literal succeeds and silently performs the migration Step 2 says to put to the user first.
 
 Then confirm both landed, and that npm is not quietly unhappy about a peer:
 
@@ -184,8 +194,12 @@ And remember what green means here: the console compiled. It has not run.
 This is the step that carries the bump. Nothing before it has started the server.
 
 ```bash
-make dev
+make dev    # run it in the background — it is a watch server and never exits
 ```
+
+**`make dev` does not return, so never run it in the foreground**: it is `skybridge dev` under nodemon, and a foreground call simply burns the Bash timeout and is killed with the console still unexamined. Start it in the background, then read its log to learn whether it booted.
+
+**Items 2 and 3 below are browser work, and an agent cannot do them.** Driving DevTools means an authenticated WorkOS session in a real browser. So an agent does what it can reach from a shell — the server boots, the port is listening, `/.well-known/oauth-protected-resource` serves the right resource indicator, and an unauthenticated `tools/list` is refused with a well-formed challenge, which together prove the entrypoint's refusals passed and `workosProvider` completed discovery — and then **hands items 2 and 3 to the user**, saying plainly which checks are still outstanding rather than reporting the step as done. Leave the server running for them, and say where it is.
 
 It needs `WORKOS_AUTHKIT_DOMAIN` and `PIPELEX_MCP_RESOURCE_INDICATOR` in `.env` — the console has no keyless mode and refuses to boot without them. `wt` copies `.env` into a new worktree, so it is usually already there; if it is not, say so rather than working around it, because there is no substitute for this step.
 
