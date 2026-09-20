@@ -1,5 +1,6 @@
-import { PipelexApiClient } from "@pipelex/sdk";
+import { FIELD_KINDS, PipelexApiClient } from "@pipelex/sdk";
 import type {
+  FieldKind,
   IOMultiplicity,
   MthdsFile,
   PipelexValidationResult,
@@ -72,6 +73,17 @@ export const mthdsValidateInputSchema = {
  * when a new view kind ships.
  */
 const viewSpecSchema = z.enum(["dry_run_graph", "input_form"]);
+
+/**
+ * The structured-view opt-in sent on every `/validate` call, whatever the
+ * selector. `"input_form"` drives the console's form; `"output_form"` is its
+ * twin for the other half of the contract, and is what `main_pipe.output.images`
+ * is read from. Tokens are lenient on the server, so a runner that predates one
+ * simply returns no descriptor for it and the members that depend on it stay
+ * absent — which is why "no images" and "unknown" have to be distinguishable
+ * downstream.
+ */
+const VALIDATE_VIEW_TOKENS = ["input_form", "output_form"] as const;
 
 /**
  * The MTHDS standard's multiplicity vocabulary (`IOMultiplicity`), as a runtime
@@ -179,6 +191,12 @@ const mainPipeSignatureSchema = z.object({
       optional: z
         .boolean()
         .describe("Whether a successful run may resolve the output as a recorded absence."),
+      images: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Where images sit inside the produced output, as paths from its root: "$" is the output itself, "$.name" a field of it, "$[]" an element of a list, "$[].name" a field of one. A top-level Image output is ["$"] and an Image[] is ["$[]"], so "this method produces pictures" is images.length > 0. An empty array means the server described the output and it contains none; an ABSENT member means the server described nothing, which is unknown rather than none.',
+        ),
     })
     .describe("What the main pipe produces."),
 });
@@ -238,6 +256,13 @@ export interface MainPipeOutputSignature {
   multiplicity: IOMultiplicity;
   item_count?: number;
   optional: boolean;
+  /**
+   * Image field paths within the output, in `$` notation — see the schema's
+   * `.describe()`. Absent when no output-form descriptor arrived (an older
+   * runner, or a verdict whose entry in it did not narrow), which is how
+   * "unknown" stays distinguishable from the empty array's "none".
+   */
+  images?: string[];
 }
 
 export interface MainPipeSignature {
@@ -295,6 +320,17 @@ export interface ValidationResult {
    * `mthds/protocol` owns the type.
    */
   inputForm?: unknown;
+  /**
+   * The wire output-form descriptor (the report's `output_form`, requested via
+   * the same `views` token list) — the input form's twin for the other half of
+   * the contract, stating what each pipe RESOLVES TO. Nothing renders it yet;
+   * it rides now so that a later result-rendering view costs a view change and
+   * not a capability change. Same channel discipline and the same gate as
+   * `inputForm`; opaque here, `mthds/protocol` owns the type. The model-facing
+   * half of this artifact is `main_pipe.output.images`, which is read from it
+   * and does reach `structuredContent`.
+   */
+  outputForm?: unknown;
   /**
    * The effective entry pipe as a namespaced `pipe_ref` (`defaultPipeRefOf`:
    * the report's `default_pipe_ref`, the blueprint's `domain.main_pipe` only
@@ -447,7 +483,7 @@ export async function validateMthds(
       report = await client.validateFiles(toMthdsFiles(request.files), {
         allowSignatures: true,
         render: ["markdown"],
-        views: ["input_form"],
+        views: [...VALIDATE_VIEW_TOKENS],
       });
     } else if (request.method_ref !== undefined) {
       report = await client.validate(
@@ -455,11 +491,11 @@ export async function validateMthds(
         true,
         undefined,
         undefined,
-        ["input_form"],
+        [...VALIDATE_VIEW_TOKENS],
       );
     } else if (request.method_id !== undefined) {
       report = await client.validate({ method_id: request.method_id }, true, undefined, undefined, [
-        "input_form",
+        ...VALIDATE_VIEW_TOKENS,
       ]);
     } else {
       // Unreachable: the selector checks above guarantee a source.
@@ -524,6 +560,7 @@ export function toolResult(result: ValidationResult) {
       graph_spec: result.graphSpec,
       pipe_io_contracts: result.pipeIoContracts,
       input_form: result.inputForm,
+      output_form: result.outputForm,
       main_pipe_ref: result.mainPipeRef,
     },
   };
@@ -545,6 +582,7 @@ export function validationResult(
   let graphSpec: unknown;
   let pipeIoContracts: unknown;
   let inputForm: unknown;
+  let outputForm: unknown;
   let mainPipeRef: string | undefined;
   // Whether the model is told a form exists — the entry-pipe gate. Narrower
   // than `inputForm != null`, which only says the artifacts rode.
@@ -599,6 +637,11 @@ export function validationResult(
     ) {
       pipeIoContracts = validReport.pipe_io_contracts;
       inputForm = validReport.input_form;
+      // The output form has no consumer yet; it rides beside its twin so the
+      // view that will render a result costs no capability change. Its
+      // model-facing projection, `main_pipe.output.images`, is derived above
+      // and does NOT depend on this branch.
+      outputForm = validReport.output_form;
       formAdvertised =
         mainPipeRef !== undefined &&
         hasEntryFor(validReport.pipe_io_contracts, mainPipeRef) &&
@@ -642,6 +685,7 @@ export function validationResult(
     graphSpec,
     pipeIoContracts,
     inputForm,
+    outputForm,
     mainPipeRef,
   };
 }
@@ -690,7 +734,108 @@ export function mainPipeSignatureOf(
     return undefined;
   }
 
+  // Where the pictures are, from the output-form descriptor — the one thing it
+  // is consulted for here. A descriptor that did not arrive, or an entry that
+  // does not narrow, leaves `images` ABSENT rather than empty, so "this output
+  // holds no image" and "nobody said" stay different answers. The signature is
+  // never withheld for a bad descriptor: the contract is its source of truth,
+  // and this is presentation riding beside it.
+  const outputNode = outputFormFieldOf(report.output_form, mainPipeRef);
+  if (outputNode !== undefined) {
+    output.images = imageFieldPaths(outputNode);
+  }
+
   return { pipe_ref: mainPipeRef, inputs, output };
+}
+
+/**
+ * What the walk does with a node of each kind. Written as a total map over the
+ * standard's own `FIELD_KINDS` rather than a `switch` with a `default`, so a
+ * kind a later version of the standard adds fails the BUILD here instead of
+ * silently reading as "no images in there".
+ */
+const IMAGE_WALK: Record<FieldKind, "yield" | "fields" | "item" | "opaque"> = {
+  text: "opaque",
+  prose: "opaque",
+  date: "opaque",
+  number: "opaque",
+  boolean: "opaque",
+  enum: "opaque",
+  // Deliberate: documents are not pictures and are not inlined anywhere in this
+  // server. A `documents` member is a later increment, not a silent inclusion.
+  document: "opaque",
+  image: "yield",
+  object: "fields",
+  list: "item",
+  // The standard's escape hatch — a producer that could not map a node honestly.
+  // Opaque is the only truthful reading: there may be an image inside and there
+  // is no way to know.
+  unknown: "opaque",
+};
+
+/**
+ * A ceiling on how deep the walk will follow a descriptor. The artifact comes
+ * off the wire, so its depth is not this repo's to assume; a method's real
+ * output nests a handful of levels at most, and the cap only ever costs a
+ * pathological descriptor the paths below it.
+ */
+const MAX_OUTPUT_FORM_DEPTH = 32;
+
+/**
+ * Every position an image sits at within one output-form node, as paths from
+ * the output's root: `$` is the output itself, `$.name` a field of it, `$[]` an
+ * element of a list, `$[].name` a field of one. A top-level `Image` output is
+ * therefore `["$"]` and an `Image[]` is `["$[]"]` — the plural wrap is already
+ * performed on the descriptor, so the walk never consults the contract for it.
+ *
+ * Typed `unknown` rather than `InputFormField` on purpose, like every other
+ * narrowing in this file: the SDK's declared type is what the wire is supposed
+ * to carry, not proof of what arrived, and a malformed node must cost its own
+ * subtree and nothing else.
+ */
+export function imageFieldPaths(field: unknown, path = "$", depth = 0): string[] {
+  const node = asRecord(field);
+  if (node === undefined || !isFieldKind(node.kind) || depth >= MAX_OUTPUT_FORM_DEPTH) {
+    return [];
+  }
+  switch (IMAGE_WALK[node.kind]) {
+    case "yield":
+      return [path];
+    case "fields":
+      return Array.isArray(node.fields)
+        ? node.fields.flatMap((child) => {
+            const record = asRecord(child);
+            const name =
+              record !== undefined && typeof record.name === "string" && record.name.length > 0
+                ? record.name
+                : undefined;
+            return name === undefined ? [] : imageFieldPaths(child, `${path}.${name}`, depth + 1);
+          })
+        : [];
+    case "item":
+      return imageFieldPaths(node.item, `${path}[]`, depth + 1);
+    case "opaque":
+      return [];
+  }
+}
+
+/**
+ * The single output node one pipe's output-form descriptor carries, or
+ * `undefined` when no descriptor arrived, the pipe has no entry in it, or the
+ * entry is not the shape the standard defines (`{ field }`, one node, never a
+ * list — a pipe has exactly one output).
+ */
+function outputFormFieldOf(outputForm: unknown, pipeRef: string): unknown {
+  const forms = asRecord(outputForm);
+  const descriptor = forms === undefined ? undefined : asRecord(forms[pipeRef]);
+  if (descriptor === undefined) {
+    return undefined;
+  }
+  return asRecord(descriptor.field) === undefined ? undefined : descriptor.field;
+}
+
+function isFieldKind(value: unknown): value is FieldKind {
+  return typeof value === "string" && (FIELD_KINDS as readonly string[]).includes(value);
 }
 
 /**
@@ -817,9 +962,14 @@ function signatureLine(signature: MainPipeSignature): string {
         `${input.name}${input.required ? "" : "?"}: ${conceptNotation(input.concept_ref, input.multiplicity, input.item_count)}`,
     )
     .join(", ");
-  const { concept_ref, multiplicity, item_count, optional } = signature.output;
+  const { concept_ref, multiplicity, item_count, optional, images } = signature.output;
   const output = `${conceptNotation(concept_ref, multiplicity, item_count)}${optional ? "?" : ""}`;
-  return `${signature.pipe_ref}(${inputs}) -> ${output}`;
+  // Prose for the same reason the whole `## Main pipe` section is prose: some
+  // agents read the summary more reliably than the structured fields, and it is
+  // the one channel that reaches a ChatGPT install whose cached tool list
+  // predates the schema change.
+  const produces = images !== undefined && images.length > 0 ? " (produces images)" : "";
+  return `${signature.pipe_ref}(${inputs}) -> ${output}${produces}`;
 }
 
 function conceptNotation(

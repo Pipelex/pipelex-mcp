@@ -420,6 +420,7 @@ No method source crosses the conversation in this flow.
       multiplicity: "single" | "variable" | "fixed";
       item_count?: number;
       optional: boolean;
+      images?: string[];           // where images sit; [] = none, absent = unknown
     };
   };
   validation_errors?: unknown[];
@@ -440,9 +441,21 @@ of the Markdown summary,
 `demo.main(document: legal.Contract, notes?: native.Text, tags: native.Text[]) -> analysis.Report[2]`
 (`?` may be omitted, `[]` a list, `[N]` exactly N).
 
+`output.images` answers "will this method produce pictures?" before anything
+runs. It lists where images sit inside the produced output, as paths from its
+root: `$` is the output itself, `$.name` a field of it, `$[]` an element of a
+list, `$[].name` a field of one — so a top-level `Image` output is `["$"]`, an
+`Image[]` is `["$[]"]`, and the question is `images.length > 0`. It is read
+from the MTHDS standard's output-form descriptor, which the capability requests
+from the API, so it costs nothing at run time. An empty array and an absent
+member are **different answers**: `[]` means the output was described and holds
+no image, while absence means nothing described it — unknown, not none. The
+rendered summary line says it too, as a trailing ` (produces images)`.
+
 The graph (`graph_spec`) and the form's per-pipe artifact pair — the IO
 contracts (`pipe_io_contracts`) and the input-form descriptor (`input_form`,
-requested from the API via the opt-in `views: ["input_form"]` token) — ride the
+requested from the API via the opt-in `views` token, which also brings
+`output_form` for a later result-rendering view) — ride the
 tool result's view-only `_meta` channel for the `run-graph` view — never
 `structuredContent`, so the model never pays their tokens. On the hosted
 console that view renders the method graph and, on a runnable verdict that

@@ -363,6 +363,18 @@ async function checkValidate(client: Client): Promise<void> {
       `expected the produced concept, got ${describe(conceptRef)}`,
       describe(conceptRef),
     );
+    // The produces-images signal, read from the `output_form` descriptor the
+    // capability opts into. An ARRAY is the assertion, not a particular
+    // content: this bundle produces text, so the array is empty, and an absent
+    // member would mean the `views` token stopped round-tripping — which is
+    // exactly the drift a mocked suite cannot see.
+    const images = isRecord(output) ? output.images : undefined;
+    expect(
+      Array.isArray(images),
+      "main_pipe.output.images",
+      `expected an array of image paths, got ${describe(images)}`,
+      describe(images),
+    );
   }
 
   const summary = summaryText(result);

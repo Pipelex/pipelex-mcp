@@ -18,6 +18,10 @@ import {
   FIXTURE_BUNDLE_URI,
   FIXTURE_INPUT_NAME,
   FIXTURE_PIPE_REF,
+  IMAGE_OUTPUT_BUNDLE,
+  IMAGE_OUTPUT_BUNDLE_URI,
+  IMAGE_OUTPUT_LIST_BUNDLE,
+  IMAGE_OUTPUT_LIST_BUNDLE_URI,
   INVALID_BUNDLE,
   INVALID_BUNDLE_URI,
   apiAdvertisesExtension,
@@ -81,6 +85,11 @@ describe("mthds_validate (live)", () => {
     ]);
     expect(mainPipe?.output.concept_ref).toBe("native.Text");
     expect(mainPipe?.output.multiplicity).toBe("single");
+    // The EMPTY array, not an absent member: this fixture produces text, so
+    // the only way to read `[]` here is for the `output_form` descriptor to
+    // have arrived and been walked. An absent member would mean the token did
+    // not round-trip, which is the drift this leg exists to catch.
+    expect(mainPipe?.output.images).toEqual([]);
     // The rendered line is the channel a ChatGPT install with a cached tool
     // list still receives, so it must survive the wire too.
     expect(result.summary).toContain(
@@ -91,6 +100,40 @@ describe("mthds_validate (live)", () => {
     // (No `input_form` containment check: the view KIND in
     // `available_view_specs` is legitimately spelled the same.)
     expect(result.structuredContent).not.toHaveProperty("input_form");
+  });
+
+  it("says the main pipe produces an image, without generating one", async () => {
+    // A `PipeImgGen` main pipe. Validation dry-runs the graph and executes
+    // nothing, so this costs no image-generation credit and belongs in the free
+    // tier — the whole point of reading the answer from the descriptor rather
+    // than from a run.
+    const result = await validateMthds(
+      { files: [{ content: IMAGE_OUTPUT_BUNDLE, uri: IMAGE_OUTPUT_BUNDLE_URI }] },
+      context,
+    );
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.is_valid).toBe(true);
+    expect(result.structuredContent.main_pipe?.output.concept_ref).toBe("native.Image");
+    expect(result.structuredContent.main_pipe?.output.images).toEqual(["$"]);
+    expect(result.summary).toContain("-> native.Image (produces images)");
+  });
+
+  it("spells a plural image output through the descriptor's own list wrap", async () => {
+    // `Image[]`. The concept ref is the ELEMENT on both sides of the contract,
+    // so the plural fact lives only on the descriptor — a `list` node whose
+    // `item` is the image. Reading `["$[]"]` here is what proves the walk takes
+    // it from there and never from the contract's multiplicity.
+    const result = await validateMthds(
+      { files: [{ content: IMAGE_OUTPUT_LIST_BUNDLE, uri: IMAGE_OUTPUT_LIST_BUNDLE_URI }] },
+      context,
+    );
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.is_valid).toBe(true);
+    expect(result.structuredContent.main_pipe?.output.concept_ref).toBe("native.Image");
+    expect(result.structuredContent.main_pipe?.output.multiplicity).toBe("variable");
+    expect(result.structuredContent.main_pipe?.output.images).toEqual(["$[]"]);
   });
 
   // GATED on the API deploy. `default_pipe_ref` landed on pipelex-api's `dev`

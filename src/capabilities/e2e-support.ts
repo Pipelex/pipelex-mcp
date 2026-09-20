@@ -284,6 +284,57 @@ export const IMAGE_INPUT_NAME = "picture";
 export const IMAGE_PIPE_REF = "mcp_e2e_image.describe_picture";
 
 /**
+ * A bundle whose main pipe PRODUCES an image — the free half of the
+ * produces-images signal. Validation dry-runs the graph and executes nothing,
+ * so asserting `main_pipe.output.images` against a real API costs no image
+ * generation credit at all.
+ */
+export const IMAGE_OUTPUT_BUNDLE = `domain      = "mcp_e2e_imggen"
+description = "pipelex-mcp live e2e fixture whose main pipe produces an image."
+main_pipe   = "draw_picture"
+
+[pipe.draw_picture]
+type        = "PipeImgGen"
+description = "Draw a picture of a subject."
+inputs      = { subject = "Text" }
+output      = "Image"
+prompt      = "$subject"
+model       = "@default-small"
+`;
+
+export const IMAGE_OUTPUT_BUNDLE_URI = "e2e/mcp_e2e_imggen.mthds";
+
+/**
+ * The plural sibling: a main pipe producing `Image[]`. The plural wrap is
+ * performed on the output-form descriptor rather than on the concept, so this
+ * is what proves the walk reads the wrap instead of the contract's
+ * multiplicity.
+ */
+export const IMAGE_OUTPUT_LIST_BUNDLE = `domain      = "mcp_e2e_imggen_many"
+description = "pipelex-mcp live e2e fixture whose main pipe produces several images."
+main_pipe   = "draw_pictures"
+
+[pipe.draw_pictures]
+type        = "PipeSequence"
+description = "Draw one picture per subject."
+inputs      = { subjects = "Text[]" }
+output      = "Image[]"
+steps = [
+  { pipe = "draw_picture", batch_over = "subjects", batch_as = "subject", result = "pictures" },
+]
+
+[pipe.draw_picture]
+type        = "PipeImgGen"
+description = "Draw a picture of a subject."
+inputs      = { subject = "Text" }
+output      = "Image"
+prompt      = "$subject"
+model       = "@default-small"
+`;
+
+export const IMAGE_OUTPUT_LIST_BUNDLE_URI = "e2e/mcp_e2e_imggen_many.mthds";
+
+/**
  * A 1x1 transparent PNG. Real bytes rather than a placeholder string, because
  * the workshop arm uploads it for real — and tiny, because the point is to
  * exercise the upload walk, not to move data.
