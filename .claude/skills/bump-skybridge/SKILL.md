@@ -50,7 +50,7 @@ git status --short
 
 Two things to read carefully in that output.
 
-**The declared range and the installed version can differ, and that changes what "bump" means.** Skybridge is past 1.0, so `^1.3.5` floats every minor and patch — a plain `npm install` has been quietly pulling in `1.4.x` all along. This is *not* the `0.x` situation the `bump-sdks` skill deals with, where the leading zero makes npm treat a minor as a major and pins it. So say plainly which of the two you are moving: the **installed** version (already floating, a bump just re-locks it) or the **declared floor** (a deliberate edit, and the only way across a major). A major always needs the floor moved.
+**The declared range and the installed version can differ, and that changes what "bump" means.** Skybridge is past 1.0, so `^1.3.5` *admits* every later minor and patch — but admitting is not installing. `package-lock.json` is committed here and CI installs with `npm ci`, so the tree sits at exactly what the lock pins and a plain `npm install` leaves it there; only `npm update`, or naming a version explicitly the way Step 5 does, moves it. This is *not* the `0.x` situation the `bump-sdks` skill deals with, where the leading zero makes npm treat a minor as a major and pins it in the range itself. So say plainly which of the two you are moving: the **installed** version (what the lock pins, which an explicit install re-pins) or the **declared floor** (a deliberate edit, and the only way across a major). A major always needs the floor moved.
 
 **The blocks are not interchangeable and the bump must keep them where they are.** `skybridge` is a runtime `dependencies` entry because `dist/__entry.js` and `dist/server.js` import `skybridge/server` at run time and the Dockerfile's runtime stage carries only the `npm prune --omit=dev` tree — demote it and the image starts, then dies on the first import. `@skybridge/devtools` is build-and-dev only. Nothing in the repo tests this boundary in either direction, so read the `package.json` diff in Step 11 rather than trusting the suite to object.
 
@@ -65,7 +65,7 @@ npm view skybridge@latest peerDependencies
 npm view "skybridge@$(node -p "require('./node_modules/skybridge/package.json').version")" peerDependencies
 ```
 
-Diff those two peer sets and show the user. A peer that **appeared** may force another bump in this repo (a new `vite` floor, say); a peer that **vanished** is usually harmless but tells you the framework stopped owning something. Check each surviving peer against what this repo declares — `react`, `react-dom`, `vite` and `zod` are all declared here, while `nodemon` is left to npm's automatic peer install.
+Diff those two peer sets and show the user. A peer that **appeared** may force another bump in this repo (a new `vite` floor, say); a peer that **vanished** is usually harmless but tells you the framework stopped owning something. Check each surviving peer against what this repo declares — `react`, `react-dom`, `vite` and `@modelcontextprotocol/sdk` are all declared here, while `nodemon` is left to npm's automatic peer install. `@modelcontextprotocol/sdk` is the one to watch: this repo declares its own floor for it (`^1.29.0`) in `dependencies`, so a Skybridge release that raises that peer is the realistic way this bump forces a second one. `zod` is **not** a peer of either package — it is a plain dependency of `@skybridge/devtools`, so nothing Skybridge declares can force it, and checking it here proves nothing.
 
 If the user named a version, honour it exactly and still resolve the devtools pin from *that* version's peers. Record versions without a `v` prefix (`2.0.0`); the `v` belongs to git tags and the upstream release names only.
 
@@ -77,7 +77,7 @@ If this is a **major**, say so before going further and let the user decide whet
 
 ```bash
 gh release list --repo alpic-ai/skybridge --limit 15
-gh release view v2.0.0 --repo alpic-ai/skybridge
+gh release view v<version> --repo alpic-ai/skybridge   # once per release in the range, oldest first
 ```
 
 Read every release strictly after the current version through the target, oldest to newest — a two-minor jump can contain a deprecation in the first and its removal in the second, and only the pair explains what you are looking at. Without `gh`, the same content is at `https://api.github.com/repos/alpic-ai/skybridge/releases` (unauthenticated is fine for this public repo). The API reference behind the prose is `https://docs.skybridge.tech`.
@@ -89,8 +89,10 @@ Present the releases to the user newest first, calling out every breaking item. 
 This is the step that matters. For each breaking item, answer one question: *does this repo touch that surface?* Work from what the repo declares. The whole surface is small enough to enumerate, so enumerate it:
 
 ```bash
-grep -rn "skybridge" src/ vite.config.ts nodemon.json Dockerfile package.json Makefile --include="*.ts" --include="*.tsx" 2>/dev/null | grep -v node_modules
+grep -rni "skybridge" src/ vite.config.ts nodemon.json Dockerfile package.json Makefile 2>/dev/null | grep -v node_modules
 ```
+
+**No `--include` filter, and `-i` rather than `-n` alone — both deliberate.** `--include` applies to the explicitly named operands too, not only to what `-r` walks, so `--include="*.ts"` drops `package.json`, `Dockerfile`, `Makefile` and `nodemon.json` from the very command that lists them: the enumeration comes back source-only and the two version declarations the bump has to edit never appear. And the wiring points spell the name capitalized in prose (`Dockerfile`, `Makefile`), which a lowercase pattern misses.
 
 ### 4a — The console entrypoint and the tool-registration shell
 
@@ -118,7 +120,7 @@ What `tsc` cannot catch is the runtime side of the same contract: `responseMetad
 Four wiring points, none of them in `src/`, and each fails in its own quiet way:
 
 - **`vite.config.ts`** imports `skybridge()` from `skybridge/vite`. A plugin option change surfaces at build time, so `make all` covers it.
-- **`.skybridge/views.d.ts`** is gitignored and regenerated as `skybridge build`'s first step. If a stale one is confusing a typecheck, `make all` already cleans; `rm -rf .skybridge dist` if you need to force it by hand.
+- **`.skybridge/views.d.ts`** is gitignored and regenerated as `skybridge build`'s first step. No Make target removes it — `make clean` takes `dist`, `coverage` and `*.tsbuildinfo` only — but `skybridge build` rewrites it, so `make all` refreshes it in passing. `rm -rf .skybridge dist` is how to force it by hand.
 - **`nodemon.json`** overrides Skybridge's default dev exec with `tsx --env-file-if-exists=.env src/server.ts`. Two hazards: a `nodemon.json` **replaces** Skybridge's watch defaults rather than extending them, so a change to what Skybridge watches never reaches us; and if a major splits the entrypoint (app definition in one file, `run()` in another), this `exec` must be repointed at whichever file actually runs.
 - **The Makefile's `dev` and `dev-tunnel` recipes append `--port "$CONSOLE_PORT"`** to pin the console to 6843, because the WorkOS Resource Indicator names the port and Skybridge's default walks up from 3000 when it is busy. `src/make-dev-recipe.test.ts` asserts the recipe *text* and executes only its guard prelude under `sh` — it never invokes the Skybridge CLI. So a renamed or removed `--port` flag leaves that test green and breaks `make dev` for everyone.
 
@@ -145,9 +147,11 @@ Behavior changes, a changed per-request lifecycle, new defaults, and anything to
 There is no Makefile switch for these two (the `use-npm-*` targets are `@pipelex`-only), so install them directly — and pass the flag that keeps each in its block, because npm infers the block from the entry that is already there and the flag is what survives a re-add:
 
 ```bash
-npm install --save-prod skybridge@2.0.0
-npm install --save-dev  @skybridge/devtools@2.0.0
+npm install --save-prod skybridge@<target>
+npm install --save-dev  @skybridge/devtools@<devtools-target>
 ```
+
+Those are two resolved versions, not one string used twice: `<target>` is what Step 2 settled on and `<devtools-target>` is what that version's peer pin named, which is why Step 2 says not to pick them independently. Never type a literal major here — `2.0.0` is a real published release, so a copied command succeeds and silently performs the migration Step 2 says to put to the user first.
 
 Then confirm both landed, and that npm is not quietly unhappy about a peer:
 
