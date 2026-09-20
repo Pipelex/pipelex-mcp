@@ -489,6 +489,11 @@ const validReport: PipelexValidationReport = {
         multiplicity: "single",
         item_count: null,
         optional: false,
+        json_schema: {
+          type: "object",
+          properties: { text: { type: "string" } },
+          required: ["text"],
+        },
       },
     },
   },

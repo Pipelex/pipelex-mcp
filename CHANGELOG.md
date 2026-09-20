@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **The download verdict names its `scope`**: A completed `mthds_download_artifacts` verdict now carries `scope: "main_stuff"` beside `artifacts`, whose length is the count of references walked, so an empty list reads as "the run's main output references no stored file".
+
+### Changed
+
+- **`mthds_download_artifacts` is thin over the SDK's artifact stack (Breaking)**: The reference walk, the fresh links, the filenames, the never-overwrite rule and the download bounds now come from `@pipelex/sdk`'s `collectArtifacts` and `downloadArtifacts`, which resolve the whole set in one call to `POST /v1/resolve-storage-url/bulk`, download a few files at a time, and add a 4 GiB cap on the whole call beside the 1 GiB one per file. The tool therefore needs a Pipelex platform that serves the bulk route, and a deployment without it answers a `config` error naming the route. Which of two same-named files takes the numeric suffix is no longer fixed, since they may download at once.
+- **Plain-http download links follow the base URL (Breaking)**: `mthds_download_artifacts` accepts a plain `http:` link only when `PIPELEX_BASE_URL` is itself `http:` (the local compose stack, whose object store mints such links), and refuses one from an `https:` deployment, where it used to accept both. `PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP=true` accepts them from any deployment and `false` refuses them everywhere; any other value refuses.
+- **Run usage is a projection of the SDK's `summarizeUsage` (Breaking)**: `structuredContent.usage` on `mthds_run_results` is now present on every completed result, with a new `state` (`records`, `no_inference` or `unavailable`) and an `assembly_error` that is `null` unless usage assembly broke, where a run that reported neither usage nor an assembly error used to omit `usage` altogether; `tokens` stays one number, now the SDK's input and output totals added, and takes the same values as before. On a tie in cost and calls, `_meta.usage_by_pipe` now sorts the unattributed calls after the named pipes instead of before them. The output schema changed, so console users must remove and re-add a ChatGPT connector, whose tool list is cached at add-time, before results carrying the new fields are accepted.
+
 ## [0.15.0] - 2026-09-14
 
 ### Changed

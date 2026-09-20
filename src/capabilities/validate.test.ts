@@ -50,6 +50,7 @@ const demoContracts: PipeIOContracts = {
       multiplicity: "single",
       item_count: null,
       optional: false,
+      json_schema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
     },
   },
 };
@@ -297,6 +298,12 @@ const orderedContracts: PipeIOContracts = {
       multiplicity: "fixed",
       item_count: 2,
       optional: false,
+      json_schema: {
+        type: "object",
+        properties: {
+          items: { type: "array", minItems: 2, maxItems: 2, items: { type: "object" } },
+        },
+      },
     },
   },
 };
@@ -690,6 +697,11 @@ describe("effective entry pipe", () => {
         multiplicity: "single",
         item_count: null,
         optional: false,
+        json_schema: {
+          type: "object",
+          properties: { text: { type: "string" } },
+          required: ["text"],
+        },
       },
     },
   };

@@ -1,13 +1,22 @@
-import { isTerminalRunStatus, PipelexApiClient } from "@pipelex/sdk";
+import {
+  collectArtifacts,
+  isTerminalRunStatus,
+  PipelexApiClient,
+  summarizeUsage,
+} from "@pipelex/sdk";
 import type {
   MethodProvenance,
   PipelexRunResultStart,
   PipelexStartOptions,
+  PipeUsageSummary,
   RunRead,
   RunResults,
   RunResultState,
   RunStatus,
   TokensUsageRecord,
+  UsageSummary,
+  UsageSummaryState,
+  UsageTokenTotals,
 } from "@pipelex/sdk";
 import { z } from "zod";
 
@@ -15,7 +24,6 @@ import {
   METHOD_REF_GRAMMAR,
   buildApiConfig,
   classifyError,
-  collectStorageUris,
   summaryForToolError,
   filesInputSchema,
   resolveSubmittedFiles,
@@ -165,15 +173,21 @@ const runStatusStructuredContentSchema = z.object({
 
 export const mthdsRunStatusOutputSchema = runStatusStructuredContentSchema;
 
-// Run-level usage only. The per-pipe breakdown is deliberately NOT in this
-// model-facing schema — it is computed and carried on the view-only
-// `_meta.usage_by_pipe` for a future detailed-cost surface (see completedResult).
+// Run-level usage only — a projection of the SDK's `summarizeUsage`. The
+// per-pipe breakdown is deliberately NOT in this model-facing schema — it rides
+// the view-only `_meta.usage_by_pipe` for a future detailed-cost surface (see
+// completedResult).
 const runUsageSchema = z.object({
+  state: z
+    .enum(["records", "no_inference", "unavailable"])
+    .describe(
+      'Which reading the totals describe — read it first: "records" (inference calls were recorded), "no_inference" (the run made no inference, so the cost is 0), "unavailable" (the run reported no usage; the totals are null and assembly_error says whether that is because usage assembly broke).',
+    ),
   cost_usd: z
     .number()
     .nullable()
     .describe(
-      "Σ per-call USD cost across the run, null-aware: null when NO call was priced (own-GPU / mock / dry run) — distinct from 0, which means the run made no inference.",
+      'Σ per-call USD cost across the run, null-aware: under state "records", null when NO call was priced (own-GPU / mock / dry run); 0 under "no_inference"; null under "unavailable", where nothing is known.',
     ),
   cost_partial: z
     .boolean()
@@ -185,14 +199,14 @@ const runUsageSchema = z.object({
     .number()
     .nullable()
     .describe(
-      "Σ (input + output) tokens across the run; null when no call reported counts. Cached-input and reasoning subsets are excluded to avoid double-counting.",
+      "The run's input tokens plus its output tokens; null when no call reported either. Cached-input and reasoning subsets are excluded to avoid double-counting.",
     ),
   calls: z.number().describe("Number of inference calls recorded (0 → the run did no inference)."),
   assembly_error: z
     .string()
-    .optional()
+    .nullable()
     .describe(
-      "Present when the runner's usage assembly failed for this run (the SDK's usage_assembly_error).",
+      "The runner's usage-assembly failure for this run (the SDK's usage_assembly_error); null when assembly did not fail.",
     ),
 });
 
@@ -227,7 +241,7 @@ const runResultsStructuredContentSchema = z.object({
   usage: runUsageSchema
     .optional()
     .describe(
-      'State "completed" only — token and USD-cost aggregates for the run; the full per-call record list rides the view-only _meta.tokens_usages. Omitted when the run reported no usage information.',
+      'State "completed" only — token and USD-cost aggregates for the run, always present: read its state first. The full per-call record list rides the view-only _meta.tokens_usages.',
     ),
   available_view_specs: z
     .array(resultsViewSpecSchema)
@@ -286,6 +300,7 @@ export interface RunStatusStructuredContent {
   errors?: ToolError[];
 }
 
+/** One `_meta.usage_by_pipe` row — a projection of the SDK's `PipeUsageSummary`. */
 export interface PipeUsage {
   pipe_code: string | null;
   cost_usd: number | null;
@@ -293,13 +308,14 @@ export interface PipeUsage {
   calls: number;
 }
 
-/** Run-level usage totals — the model-facing projection in `structuredContent`. */
+/** Run-level usage totals — the model-facing projection of the SDK's `UsageSummary`. */
 export interface RunUsage {
+  state: UsageSummaryState;
   cost_usd: number | null;
   cost_partial?: boolean;
   tokens: number | null;
   calls: number;
-  assembly_error?: string;
+  assembly_error: string | null;
 }
 
 export interface RunResultsStructuredContent {
@@ -354,7 +370,8 @@ export interface RunResultsResult {
   tokensUsages?: TokensUsageRecord[];
   /**
    * The per-pipe usage rollup on raw MCP response metadata (rides
-   * `_meta.usage_by_pipe`). Deliberately kept off the model-facing
+   * `_meta.usage_by_pipe`), projected from the SDK summary's `by_pipe` in its
+   * order. Deliberately kept off the model-facing
    * `structuredContent.usage` (which is run-level only) so a future
    * detailed-cost tool/view can display per-pipe attribution without spending
    * model tokens on it now. Ungated by views, like `tokensUsages`. Absent when
@@ -615,137 +632,59 @@ function headTail(text: string, cap: number): string {
   return text.slice(0, headLength) + marker + text.slice(text.length - tailLength);
 }
 
-// ── usage aggregation ───────────────────────────────────────────────
+// ── usage projection ────────────────────────────────────────────────
 
-interface CostTokenTotals {
-  cost_usd: number | null;
-  cost_partial: boolean;
-  tokens: number | null;
+/*
+ * The usage arithmetic is the SDK's `summarizeUsage` — null-aware cost, the
+ * `input` / `output` token totals, the three states told apart on
+ * `usage_assembly_error`, the per-pipe rollup and its order. What follows only
+ * reshapes its answer into this tool's established fields: the model-facing
+ * `structuredContent.usage` and the view-only `_meta.usage_by_pipe` rows.
+ */
+
+/**
+ * The model-facing token figure: the SDK's two additive totals added, `null`
+ * when neither was reported. The SDK keeps the pair apart; the model has always
+ * been given one number, and a category no call reported counts as none here.
+ */
+function tokenFigure(tokens: UsageTokenTotals): number | null {
+  if (tokens.input === null && tokens.output === null) return null;
+  return (tokens.input ?? 0) + (tokens.output ?? 0);
 }
 
 /**
- * Sum cost and tokens across a set of usage records.
- *
- * Cost is null-aware: `null` per-call `cost` means the model had no rate table
- * (own-GPU / mock / dry run), `0` means it was priced at zero, and there is no
- * run-level aggregate on the wire — so the total is `null` only when NOTHING was
- * priced, and `cost_partial` flags a priced/unpriced mix. An empty set is a run
- * that did no inference: cost and tokens are both `0`, not `null`.
- *
- * Tokens sum ONLY the two documented joined totals (`input`, `output`) from
- * `nb_tokens_by_category`; `input_cached` / `output_reasoning` and any unknown
- * categories are subsets or non-additive and would double-count, so they are
- * excluded. `null` when no record reported an `input` or `output` count.
+ * A blank assembly error is no error. The SDK relays the runner's
+ * `usage_assembly_error` verbatim, while this tool's schema and SPEC both
+ * define a non-null `assembly_error` as "usage assembly failed for this run" —
+ * so a runner reporting `""` would be read here as a failure that never
+ * happened. The MCP's own `summarizeUsage` narrowed it before this tool went
+ * thin over the SDK, and the narrowing stays on this side of the projection.
  */
-function totalUsage(records: TokensUsageRecord[]): CostTokenTotals {
-  if (records.length === 0) {
-    return { cost_usd: 0, cost_partial: false, tokens: 0 };
-  }
-
-  let pricedSum = 0;
-  let anyPriced = false;
-  let anyUnpriced = false;
-  let tokenSum = 0;
-  let anyTokens = false;
-
-  for (const record of records) {
-    if (typeof record.cost === "number") {
-      pricedSum += record.cost;
-      anyPriced = true;
-    } else {
-      anyUnpriced = true;
-    }
-
-    const byCategory = record.nb_tokens_by_category;
-    if (byCategory != null) {
-      const input = typeof byCategory.input === "number" ? byCategory.input : undefined;
-      const output = typeof byCategory.output === "number" ? byCategory.output : undefined;
-      if (input !== undefined || output !== undefined) {
-        tokenSum += (input ?? 0) + (output ?? 0);
-        anyTokens = true;
-      }
-    }
-  }
-
-  return {
-    cost_usd: anyPriced ? pricedSum : null,
-    cost_partial: anyPriced && anyUnpriced,
-    tokens: anyTokens ? tokenSum : null,
-  };
+function narrowAssemblyError(value: string | null): string | null {
+  return value === null || value.trim() === "" ? null : value;
 }
 
-/**
- * Aggregate usage per `pipe_code`, sorted by cost desc (nulls last) then calls
- * desc. Kept for the system/off-model channel only: its output rides
- * `_meta.usage_by_pipe` for a future detailed-cost surface and is deliberately
- * absent from the model-facing `structuredContent.usage` (run-level only).
- * A `null` `pipe_code` (calls the runtime did not attribute) groups together —
- * a `Map` keys `null` directly, so no string sentinel is needed.
- */
-export function computeUsageByPipe(records: TokensUsageRecord[]): PipeUsage[] {
-  const groups = new Map<string | null, TokensUsageRecord[]>();
-  for (const record of records) {
-    const pipeCode = typeof record.pipe_code === "string" ? record.pipe_code : null;
-    const group = groups.get(pipeCode);
-    if (group === undefined) {
-      groups.set(pipeCode, [record]);
-    } else {
-      group.push(record);
-    }
-  }
-
-  const rows: PipeUsage[] = [];
-  for (const [pipe_code, pipeRecords] of groups) {
-    const totals = totalUsage(pipeRecords);
-    rows.push({
-      pipe_code,
-      cost_usd: totals.cost_usd,
-      tokens: totals.tokens,
-      calls: pipeRecords.length,
-    });
-  }
-
-  rows.sort((a, b) => {
-    const aCost = a.cost_usd ?? -Infinity;
-    const bCost = b.cost_usd ?? -Infinity;
-    if (bCost !== aCost) return bCost - aCost;
-    if (b.calls !== a.calls) return b.calls - a.calls;
-    return (a.pipe_code ?? "").localeCompare(b.pipe_code ?? "");
-  });
-
-  return rows;
-}
-
-/**
- * Project the SDK's `RunResults` usage fields into the run-level `RunUsage` —
- * the model-facing totals only (no per-pipe; that rides `_meta.usage_by_pipe`).
- *
- * Branches on `usage_assembly_error`, NOT on the list being null — "off",
- * "broke", and "pre-artifact run" all leave `tokens_usages` null, and only the
- * error field separates them:
- * - a list (possibly `[]`)         → totals (`[]` = zero totals, a run with no inference);
- * - null + `usage_assembly_error`  → null totals carrying the `assembly_error`;
- * - null + no error                → `undefined` (usage off / run predates the artifact — nothing to report).
- */
-export function summarizeUsage(result: RunResults): RunUsage | undefined {
-  const records = result.tokens_usages;
-  const assemblyError = narrowString(result.usage_assembly_error ?? undefined);
-
-  if (records == null) {
-    if (assemblyError === undefined) {
-      return undefined;
-    }
-    return { cost_usd: null, tokens: null, calls: 0, assembly_error: assemblyError };
-  }
-
-  const totals = totalUsage(records);
+/** Project the SDK's run-level `UsageSummary` onto `structuredContent.usage`. */
+export function projectRunUsage(summary: UsageSummary): RunUsage {
   const usage: RunUsage = {
-    cost_usd: totals.cost_usd,
-    tokens: totals.tokens,
-    calls: records.length,
+    state: summary.state,
+    cost_usd: summary.total_cost_usd,
+    tokens: tokenFigure(summary.tokens),
+    calls: summary.calls,
+    assembly_error: narrowAssemblyError(summary.assembly_error),
   };
-  if (totals.cost_partial) usage.cost_partial = true;
+  if (summary.cost_partial) usage.cost_partial = true;
   return usage;
+}
+
+/** Project the SDK's `by_pipe` rollup onto the `_meta.usage_by_pipe` rows, keeping its order. */
+export function projectUsageByPipe(rows: PipeUsageSummary[]): PipeUsage[] {
+  return rows.map((row) => ({
+    pipe_code: row.pipe_code,
+    cost_usd: row.total_cost_usd,
+    tokens: tokenFigure(row.tokens),
+    calls: row.calls,
+  }));
 }
 
 // ── projections ─────────────────────────────────────────────────────
@@ -938,7 +877,7 @@ function completedResult(
     state: "completed",
     main_stuff: bounded,
     truncated,
-    ...(usage === undefined ? {} : { usage }),
+    usage: projectRunUsage(usage),
     available_view_specs: graphSpec === undefined ? [] : ["run_graph"],
   };
 
@@ -953,18 +892,19 @@ function completedResult(
       viewsAvailable,
       // Counted on the FULL output, not the bounded copy: a reference pruned
       // out of the model-facing copy is still a file the workshop can save.
-      artifactDownloadAvailable ? collectStorageUris(result.main_stuff).length : 0,
+      artifactDownloadAvailable ? collectArtifacts(result.main_stuff).length : 0,
     ),
     graphSpec,
     mainStuff: result.main_stuff,
     // Both ride `_meta` ungated by views (like mainStuff): the full per-call
     // list, and the per-pipe rollup for a future detailed-cost surface. Kept off
-    // the model-facing channels so they cost no model tokens now.
+    // the model-facing channels so they cost no model tokens now. Absent when
+    // the run reported no usage list (state "unavailable").
     ...(result.tokens_usages == null
       ? {}
       : {
           tokensUsages: result.tokens_usages,
-          usageByPipe: computeUsageByPipe(result.tokens_usages),
+          usageByPipe: projectUsageByPipe(usage.by_pipe),
         }),
   };
 }
@@ -1244,7 +1184,8 @@ export function runResultsToolResult(result: RunResultsResult) {
     // and the per-pipe usage rollup ride `_meta`, never structuredContent, so the
     // model never pays their tokens. Views consume it on the hosted shell; raw
     // MCP consumers can still retain it on the tools-only local shell. Keys
-    // mirror the API field names (usage_by_pipe is our own rollup).
+    // mirror the API field names (usage_by_pipe is the SDK's per-pipe rollup,
+    // projected onto this tool's row shape).
     _meta: {
       graph_spec: result.graphSpec,
       main_stuff: result.mainStuff,

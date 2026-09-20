@@ -176,6 +176,11 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }
   (`https://api.pipelex.com`). Set it to `http://localhost:8081` to develop
   against a local OSS `pipelex-api` runner. Durable runs need the hosted API; a
   bare runner has no run lifecycle.
+- `PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP` — optional. `mthds_download_artifacts`
+  accepts a plain `http:` download link only when `PIPELEX_BASE_URL` is itself
+  `http:` (the local compose stack, whose object store mints such links). Set
+  it to `true` to accept them from any deployment, or `false` to refuse them
+  everywhere; any other value refuses.
 
 **The working directory matters.** The host spawns the workshop in your
 project, and that directory is the boundary for everything the server touches
@@ -648,8 +653,10 @@ method's catalog id (`method_id?`, mt_…) — and returns a durable
 `run_id` immediately (never blocks); `mthds_run_status` is a cheap read of the
 coarse lifecycle state; `mthds_run_results` fetches the terminal outcome (main
 output on success, failure message otherwise) along with a compact run-level
-`usage` object — total USD cost (null-aware), tokens, and inference-call count.
-The per-pipe rollup and the full per-call record list ride the view-only `_meta`
+`usage` object — its `state` (`records`, `no_inference` or `unavailable`),
+total USD cost (null-aware), tokens, inference-call count and any usage-assembly
+error — projected from the SDK's `summarizeUsage`. The per-pipe rollup and the
+full per-call record list ride the view-only `_meta`
 (`_meta.usage_by_pipe` / `_meta.tokens_usages`) for a future detailed-cost
 surface, and usage never appears in the prose. A by-id run executes the method's
 **current** stored content (methods are not versioned) and requires an API key;
@@ -685,6 +692,7 @@ produced files back *out*, onto disk.
   status: "ok";
   run_id: string;
   state: "completed";
+  scope: "main_stuff";     // what was walked: the run's main output
   artifacts: Array<{ uri: string; path?: string; content_type?: string | null; size?: number; error?: ToolError }>;
   saved_paths: string[];   // relative to the working directory
   all_saved: boolean;      // every referenced file saved
@@ -696,11 +704,17 @@ A completed run's results carry a produced image, PDF or document with a
 within the hour. Pass the run id here instead of racing that link: every
 reference in the run's full output is resolved to a *fresh* link through the
 API and streamed into a file under the working directory — so the same call
-still works days later. Filenames come from the storage key, sanitized; files
-are **never overwritten** (a collision gets a numeric suffix); `dir` cannot
-escape the working directory (no absolute paths, no `..`, no symlink out). A
-`running` or `failed` run is a produced verdict with nothing to save; partial
-success is a produced verdict with the failures on their items. On the
+still works days later. The walk, the links and the download are
+`@pipelex/sdk`'s artifact stack (`collectArtifacts`, `downloadArtifacts`), so
+the tool needs a Pipelex platform serving the bulk resolve route
+(`POST /v1/resolve-storage-url/bulk`); a bare `pipelex-api` runner has none.
+Filenames come from the storage key, sanitized; files are **never overwritten**
+(a collision gets a numeric suffix); `dir` cannot escape the working directory
+(no absolute paths, no `..`, no symlink out). Plain `http:` links are accepted
+only against a plain-http `PIPELEX_BASE_URL` unless
+`PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP` says otherwise. A `running` or `failed` run
+is a produced verdict with nothing to save; partial success is a produced
+verdict with the failures on their items. On the
 workshop, a `mthds_run_results` summary whose output references stored files
 names this tool. See `SPEC.md` → "Artifact Download Scope" for the full
 contract and the reasoning behind a companion tool rather than a flag on

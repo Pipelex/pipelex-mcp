@@ -175,6 +175,7 @@ describe.runIf(RUN_ENABLED)("mthds_run (live, SPENDS INFERENCE CREDIT)", () => {
     // model-facing surface and rides `_meta`.
     const usage = results.structuredContent.usage;
     expect(usage).toBeDefined();
+    expect(["records", "no_inference", "unavailable"]).toContain(usage?.state);
     expect(usage?.cost_usd === null || typeof usage?.cost_usd === "number").toBe(true);
     expect(usage?.tokens === null || typeof usage?.tokens === "number").toBe(true);
     expect(typeof usage?.calls).toBe("number");
