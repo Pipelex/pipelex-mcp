@@ -548,17 +548,25 @@ async function fetchSignature(
 
 /**
  * Pick the pipe whose descriptor guides the walk, in the SDK's documented
- * order: an explicit qualified `pipe_ref`, then the report's typed resolved
- * default, then the bundle's declared `main_pipe`, then the single pipe — else
- * an error naming the candidates.
+ * order: an explicit qualified `pipe_ref`, then the report's resolved default
+ * — read on the field's PRESENCE, never on its truthiness — and, behind an
+ * ABSENT field only, the bundle's declared `main_pipe` then the single pipe.
  *
- * Note this deliberately differs from `validate.ts`'s `defaultPipeRefOf`, which
- * treats a **stated** `default_pipe_ref: null` as "the server determined no
- * entry pipe" and refuses to consult the blueprint behind it. The SDK falls
- * through, and here the SDK wins: the console must land on the same pipe the
- * workshop's delegated call lands on, and a shell-dependent answer is the one
- * outcome this tool cannot have. Which of the two stances is right is a
- * question for `@pipelex/sdk`, not something to settle by diverging here.
+ * The divergence this function used to carry is gone: it followed the SDK
+ * through a **stated** `default_pipe_ref: null` into the blueprint, against
+ * `validate.ts`'s stricter reading, on the grounds that the two shells must
+ * land on the same pipe and that the stance was `@pipelex/sdk`'s to settle.
+ * `@pipelex/sdk` 0.19.0 settled it the other way, so this mirror follows it
+ * there: a stated `null` is the server's answer — no entry pipe was determined,
+ * and the run route refuses such a run — so falling through would prepare a
+ * pipe the run will not execute. Only a field the report does not carry at all
+ * (a runner predating it) leaves the two fallbacks standing. A JSON body cannot
+ * carry an own property holding `undefined`, so strict `=== undefined` is the
+ * whole absence test.
+ *
+ * Keep this in step with `selectPipeRef` in the SDK's `prepare-inputs.ts`: one
+ * tool name preparing two different pipes depending on the shell is the one
+ * outcome this tool cannot have.
  */
 function selectPipeRef(
   report: PipelexValidationReport,
@@ -583,11 +591,34 @@ function selectPipeRef(
     return requested;
   }
 
-  const typedDefault = nonEmptyString(report.default_pipe_ref);
-  if (typedDefault !== undefined && typedDefault in inputForm) {
-    return typedDefault;
+  // The resolved default, when the runner serves the field at all (manifest-aware
+  // for a `method_ref` package, which is why it outranks the blueprint read below).
+  if (report.default_pipe_ref !== undefined) {
+    const statedDefault = nonEmptyString(report.default_pipe_ref);
+    if (statedDefault === undefined) {
+      // A stated `null` — or anything else that is not a non-empty string — is the
+      // server's verdict, not a gap: no entry pipe was determined, so a run naming
+      // no pipe would not resolve one either. Neither fallback stands behind it.
+      throw new InputPreparationError(
+        "Cannot prepare inputs: the server determined no entry pipe for this method, so a run that " +
+          "names no pipe would not resolve one (no `main_pipe` is declared, or the package manifest " +
+          "names a pipe the closure does not declare or declares in several domains). Pass " +
+          `\`pipe_ref\`. It declares: ${candidates}.`,
+      );
+    }
+    if (!(statedDefault in inputForm)) {
+      // The default and the descriptor come from one report keyed by one pipe set, so
+      // a miss is the report contradicting itself — falling through would silently
+      // prepare a different pipe than the one the run would execute.
+      throw new InputPreparationError(
+        `Cannot prepare inputs: the validate report names "${statedDefault}" as the default pipe, but ` +
+          `its \`input_form\` descriptor does not describe it. Pass \`pipe_ref\`. It declares: ${candidates}.`,
+      );
+    }
+    return statedDefault;
   }
 
+  // Behind an ABSENT field only.
   const blueprintDefault = blueprintMainPipeRefOf(report.bundle_blueprint);
   if (blueprintDefault !== undefined && blueprintDefault in inputForm) {
     return blueprintDefault;

@@ -4,9 +4,56 @@
 @import "@alpic-ai/ui/theme";
 
 @source "../node_modules/@alpic-ai/ui/src";
-/* The form kernel's controls are Tailwind classes; without this glob the build
-   purges the ones nothing else uses (focus ring, placeholder, dropzone state). */
-@source "../node_modules/@pipelex/mthds-form/dist";
+/* The form kernel's controls are shadcn-themed: since mthds-ui 0.23.0 they ship as
+   a PREBUILT Tailwind 4 stylesheet that reads the bare semantic tokens
+   (`var(--primary)`, `var(--background)`, …). This app's theme is
+   `@alpic-ai/ui/theme`, which defines the Tailwind 4 `--color-*` names instead, so
+   none of the kernel's tokens resolve on their own.
+
+   That used to be covered accidentally: while `src/index.css` scanned the kernel's
+   `dist/` with `@source`, OUR Tailwind generated its utilities against OUR theme,
+   so `bg-background` compiled to `var(--color-background)` and the question never
+   arose. The prebuilt sheet hardcodes the bare names, so the bridge has to be
+   explicit — and getting it wrong is SILENT in the way mthds-ui 0.23.0 warns about:
+   an undefined custom property makes the browser DISCARD the declaration, so the
+   control falls back to `transparent` or the initial `canvastext`. The build stays
+   green, the tokens inspect correctly in devtools, and what you see is a panel with
+   no surface colour and unreadable labels — which reads as a contrast bug and sends
+   you looking anywhere except at a stylesheet.
+
+   Aliasing through `var(--color-*)` rather than copying the literals keeps one
+   source of truth: re-theming alpic moves these with it. `.dark` is listed so the
+   aliases re-resolve against alpic's dark block wherever that class is applied
+   (these views theme by prop today and set it nowhere, which is unchanged here).
+   `--input` and `--radius` have no `--color-*` counterpart: shadcn's `--input` is an
+   input's border colour, and `--radius` is the base the kernel derives its corners
+   from. */
+:root,
+.dark {
+  --background: var(--color-background);
+  --foreground: var(--color-foreground);
+  --border: var(--color-border);
+  --input: var(--color-border);
+  --ring: var(--color-ring);
+  --primary: var(--color-primary);
+  --accent: var(--color-accent);
+  --accent-foreground: var(--color-accent-foreground);
+  --muted: var(--color-muted);
+  --muted-foreground: var(--color-muted-foreground);
+  --card: var(--color-card);
+  --popover: var(--color-popover);
+  --popover-foreground: var(--color-popover-foreground);
+  --destructive: var(--color-destructive);
+  --radius: var(--radius-md);
+}
+
+/* No `@source` glob for the form kernel. It used to be required — the controls are
+   Tailwind classes and the build purged the ones nothing else used — but since
+   mthds-ui 0.21.0 the kernel's own prebuilt stylesheet arrives inside a cascade
+   layer (`@pipelex/mthds-ui/form/react` imports it), so scanning the kernel here
+   would emit a SECOND, unlayered copy of those utilities: exactly the state the
+   layer exists to prevent, where a bare `.hidden` outranks the host's `.sm:inline`
+   and the kernel's preflight overrides our border colour. Add nothing. */
 
 @theme {
   --font-mozilla: "Mozilla Text", serif;
