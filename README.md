@@ -55,6 +55,8 @@ contracts — with one documented exception per shell, marked below:
 | `mthds_run_results` | Fetch a durable run's terminal outcome by `run_id`, and list for free which of its stored files look like images. Never returns a picture. |
 | `mthds_show_images` | Show the pictures a completed run produced, as MCP image content blocks — the deliberate gesture, on both deployments, because a shown picture stays in the conversation. |
 | `mthds_download_artifacts` | **Local workshop only.** Save the files a completed run produced (images, PDFs, documents) under the directory the server was started in — see [Saving run artifacts](#saving-run-artifacts-local-workshop-only). |
+| `mthds_save_method` | **Local workshop only.** Validate a bundle and save it to the organization's catalog — a create without `method_id`, an update with one — writing `pipelex-method.json` beside the files so a later save from that directory updates the same method instead of creating a second one. |
+| `mthds_get_method` | **Local workshop only.** Bring a saved method's sources back: with `output_dir`, written to disk with the link file beside them and no source through the conversation; without it, inline, for reading a method you cannot see on disk. It refuses rather than overwrite work it does not own. |
 
 The two exceptions mirror each other. `mthds_upload_attachments` takes a
 host-substituted attachment reference, and the host gates that substitution on
