@@ -87,7 +87,7 @@ export function localFileResolver(
         if (!stats.isFile()) {
           return failure(
             `Path is not a regular file: ${submitted}`,
-            `Submit the path of a .mthds file, ${INLINE_FALLBACK}`,
+            `Submit the path of a ${extension} file, ${INLINE_FALLBACK}`,
           );
         }
         return { ok: true, content: await fs.readFile(real, "utf8") };

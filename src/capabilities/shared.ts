@@ -125,7 +125,10 @@ export async function resolveSubmittedFiles(
         class: "input_domain",
         location: `files[${index}].path`,
         message: "File path must not be empty.",
-        hint: "Submit the path of a .mthds file, or inline the contents as { content, uri? }.",
+        // Extension-neutral: this routine serves every files-taking argument,
+        // and `mthds_save_method`'s `python` arm reads `.py`. Naming `.mthds`
+        // here told that caller to submit the one thing the argument refuses.
+        hint: "Submit a file path, or inline the contents as { content, uri? }.",
         retryable: false,
       });
       continue;
