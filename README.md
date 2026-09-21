@@ -581,9 +581,10 @@ are reserved first, so the trust anchor always rides). No Skybridge view.
 ### `mthds_prepare_inputs`
 
 ```ts
-// input — exactly ONE of files / method_id, plus the filled inputs (no method_ref — see below)
+// input — exactly ONE of files / method_ref / method_id, plus the filled inputs
 {
   files?: SubmittedFileInput[];
+  method_ref?: string;              // published method address — github.com/<owner>/<repo>[/<selector>][@<tag>]
   method_id?: string;               // catalog id (mt_…) of a registered method
   pipe_ref?: string;
   inputs: Record<string, unknown>;  // the FILLED mthds_inputs_template output
@@ -602,10 +603,15 @@ are reserved first, so the trust anchor always rides). No Skybridge view.
 
 Sits between `mthds_inputs_template` (produces the empty template) and `mthds_run`
 (executes the filled inputs): it makes file-bearing inputs run-ready. The pipe's
-declared signature identifies which values are assets; each is uploaded to Pipelex
-storage and rewritten to `pipelex-storage://`. `http(s)` URLs and existing
+declared signature identifies which values are assets — read from the MTHDS
+standard's **input-form descriptor**, which states the kind of every input at
+every depth, so an optional nested file field prepares like a required one and a
+text field merely *named* `url` stays untouched. Each asset is uploaded to
+Pipelex storage and rewritten to `pipelex-storage://`. `http(s)` URLs and existing
 `pipelex-storage://` references pass through unchanged, so an inputs set that is
-already all pass-through can skip this step. **Per-deployment asset boundary:** the
+already all pass-through can skip this step. All three selectors are resolved
+server-side, on both shells, by the one `POST /v1/validate` the signature comes
+from. **Per-deployment asset boundary:** the
 **local workshop** uploads local paths, `data:` URLs, and inline bytes with your
 API key; the **hosted console is pass-through only** and refuses any upload-needing
 input up front with an `input_domain` error at `inputs`, naming the workshop. No

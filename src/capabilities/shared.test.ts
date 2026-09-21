@@ -17,6 +17,7 @@ import type { MthdsFileItem } from "@pipelex/sdk";
 import {
   ALLOW_HTTP_ENV,
   allowsPlainHttp,
+  blueprintMainPipeRefOf,
   buildApiConfig,
   buildArtifactFetchConfig,
   classifyError,
@@ -285,18 +286,6 @@ describe("validateMethodSelectorRequest", () => {
     expect(errors[0]?.location).toBe("files");
     expect(errors[0]?.message).toBe("Provide MTHDS files, a method_ref address, or a method_id.");
     expect(errors[0]?.hint).toContain("github.com/");
-  });
-
-  it("omits method_ref from the no-selector teaching text when the tool does not accept it", () => {
-    const errors = validateMethodSelectorRequest(
-      [],
-      {},
-      { rule: "one_selector", acceptsMethodRef: false },
-    );
-
-    expect(errors).toHaveLength(1);
-    expect(errors[0]?.message).toBe("Provide MTHDS files or a method_id.");
-    expect(errors[0]?.hint).not.toContain("method_ref");
   });
 
   it("rejects a blank method_id at method_id, with or without files", () => {
@@ -1123,5 +1112,35 @@ describe("the image-candidate prefilter", () => {
 
   it("answers nothing for an output that references no stored file", () => {
     expect(imageCandidatesOf({ text: "no files here" })).toEqual([]);
+  });
+});
+
+describe("blueprintMainPipeRefOf", () => {
+  it("qualifies a bare main_pipe with the blueprint's domain", () => {
+    expect(blueprintMainPipeRefOf({ domain: "demo", main_pipe: "main" })).toBe("demo.main");
+  });
+
+  it("leaves an already-qualified main_pipe alone", () => {
+    // The regression this function exists to hold: prefixing unconditionally
+    // turned a cross-domain main_pipe into `demo.other.shout`, a ref that keys
+    // neither pipe_io_contracts nor input_form, so the signature went missing
+    // rather than being found.
+    expect(blueprintMainPipeRefOf({ domain: "demo", main_pipe: "other.shout" })).toBe(
+      "other.shout",
+    );
+  });
+
+  it("answers nothing for a blueprint that declares no usable main pipe", () => {
+    expect(blueprintMainPipeRefOf({ domain: "demo" })).toBeUndefined();
+    expect(blueprintMainPipeRefOf({ domain: "demo", main_pipe: "" })).toBeUndefined();
+    expect(blueprintMainPipeRefOf({ domain: "demo", main_pipe: 7 })).toBeUndefined();
+    // A bare main_pipe with no domain to qualify it cannot key either map.
+    expect(blueprintMainPipeRefOf({ main_pipe: "main" })).toBeUndefined();
+  });
+
+  it("treats a blueprint that is not an object as declaring nothing", () => {
+    for (const blueprint of [undefined, null, "demo.main", 7, ["demo.main"]]) {
+      expect(blueprintMainPipeRefOf(blueprint)).toBeUndefined();
+    }
   });
 });

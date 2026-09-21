@@ -14,6 +14,7 @@ import { z } from "zod";
 
 import {
   METHOD_REF_GRAMMAR,
+  blueprintMainPipeRefOf,
   buildApiConfig,
   classifyError,
   summaryForToolError,
@@ -1102,31 +1103,9 @@ function hasEntryFor(artifact: unknown, pipeRef: string): boolean {
 function defaultPipeRefOf(report: PipelexValidationReport): string | undefined {
   const stated: unknown = report.default_pipe_ref;
   if (stated === undefined) {
-    return mainPipeRefOf(report.bundle_blueprint);
+    return blueprintMainPipeRefOf(report.bundle_blueprint);
   }
   return typeof stated === "string" && stated.length > 0 ? stated : undefined;
-}
-
-/**
- * `domain.main_pipe` from the batch's primary blueprint, or undefined when the
- * blueprint declares no main pipe. The fallback behind `defaultPipeRefOf`, for
- * a runner that serves no `default_pipe_ref`. Both fields are plain strings on the
- * blueprint; anything else — a blueprint that is not even an object included,
- * since this now runs on every valid verdict rather than only where the
- * contracts already proved the report well-formed — is treated as absent rather
- * than guessed at.
- */
-function mainPipeRefOf(blueprint: unknown): string | undefined {
-  const record = asRecord(blueprint);
-  if (record === undefined) {
-    return undefined;
-  }
-  const domain = record.domain;
-  const mainPipe = record.main_pipe;
-  if (typeof mainPipe !== "string" || mainPipe.length === 0) {
-    return undefined;
-  }
-  return typeof domain === "string" && domain.length > 0 ? `${domain}.${mainPipe}` : mainPipe;
 }
 
 function toMthdsFiles(files: SubmittedFile[]): MthdsFile[] {

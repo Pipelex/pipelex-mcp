@@ -176,17 +176,18 @@ describe("validationResult", () => {
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
   });
 
-  it("falls back to the bare main pipe name when the blueprint states no domain", () => {
+  it("settles no entry pipe when the blueprint states a bare main pipe and no domain", () => {
     const report: PipelexValidationReport = {
       ...validReport,
       bundle_blueprint: { main_pipe: "main" },
     };
     const result = validationResult(report, true);
 
-    expect(result.mainPipeRef).toBe("main");
-    // ...and the contracts, keyed by the namespaced ref, then hold no entry
-    // under that key — a missing entry omits the signature rather than guessing
-    // at a key, and withholds the form's ADVERT the same way.
+    // A bare code cannot key either artifact — both are keyed by the qualified
+    // ref — so there is nothing to qualify it with and nothing to find.
+    expect(result.mainPipeRef).toBeUndefined();
+    // A missing entry omits the signature rather than guessing at a key, and
+    // withholds the form's ADVERT the same way.
     expect(result.structuredContent.main_pipe).toBeUndefined();
     expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
     expect(result.summary).toBe("# Valid" + VIEWS_NOTE_GRAPH_ONLY);
@@ -196,6 +197,18 @@ describe("validationResult", () => {
     // click — withholding it would make that click dead for every pipe.
     expect(result.pipeIoContracts).toEqual(validReport.pipe_io_contracts);
     expect(result.inputForm).toEqual(validReport.input_form);
+  });
+
+  it("leaves an already-qualified blueprint main_pipe alone instead of prefixing the domain", () => {
+    // A cross-domain `main_pipe` used to be prefixed unconditionally into
+    // `demo.other.shout`, which keys neither artifact, so the signature went
+    // missing on every runner old enough to serve no `default_pipe_ref`.
+    const report: PipelexValidationReport = {
+      ...validReport,
+      bundle_blueprint: { domain: "demo", main_pipe: "other.shout" },
+    };
+
+    expect(validationResult(report, true).mainPipeRef).toBe("other.shout");
   });
 
   it("does not advertise a form when the report carries no contracts", () => {
