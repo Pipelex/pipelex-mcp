@@ -470,7 +470,11 @@ export async function saveMthdsMethod(
           classifyError(err, { ...CREATE_ERROR_OPTIONS, auth: context.authError }),
           SAVE_ERROR_SUMMARIES,
         ),
-        [notRetryableCreate(classifyError(err, { ...CREATE_ERROR_OPTIONS, auth: context.authError }))],
+        [
+          notRetryableCreate(
+            classifyError(err, { ...CREATE_ERROR_OPTIONS, auth: context.authError }),
+          ),
+        ],
       );
     }
     stored = created;
