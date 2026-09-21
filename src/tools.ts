@@ -181,11 +181,11 @@ export function buildToolContexts(options: ToolContextOptions = {}): ToolContext
       validation,
       ...(workspaceRoot === undefined ? {} : { saveRoot: workspaceRoot }),
     },
-    validation: {
-      ...buildValidationContext(env),
-      resolver,
-      viewsAvailable,
-    },
+    // The same object mthds_save_method's validation leg gets, not a second one
+    // built from the same parts: two hand-synced copies diverge the moment a
+    // field is added to one, and `hosted/contexts.ts` already has to override
+    // both separately.
+    validation,
     inputs: {
       ...buildInputsContext(env),
       resolver,
@@ -613,10 +613,11 @@ export const mthdsGetMethodTool = defineTool({
     title: "Fetch a saved MTHDS method",
     // The written arm puts files under the working directory.
     readOnlyHint: false,
-    // It refuses a directory it does not own rather than overwriting it, and
-    // `overwrite` is the caller's explicit, user-asked exception — which is the
-    // opposite posture from mthds_codegen's writer.
-    destructiveHint: false,
+    // It writes the user's own files, and `overwrite: true` replaces them
+    // outright. `destructiveHint: false` means "additive updates only", which
+    // is not what this tool does — and a host that gates its confirmation on
+    // this hint would not have asked before a pull replaced local work.
+    destructiveHint: true,
     openWorldHint: false,
   },
   async handler(input: MthdsGetMethodInput, contexts: ToolContexts) {

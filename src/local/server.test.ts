@@ -160,6 +160,14 @@ describe("local stdio server", () => {
     const local = buildLocalToolContexts({ PIPELEX_BASE_URL: "http://127.0.0.1:8081" }, rootDir);
     const hosted = buildToolContexts({ env: { PIPELEX_BASE_URL: "http://127.0.0.1:8081" } });
 
+    // One validation context, shared — not a second one built from the same
+    // parts. Two hand-synced copies diverge the moment a field is added to
+    // one, and `hosted/contexts.ts` already has to override both separately,
+    // so `mthds_save_method`'s validation leg would quietly stop agreeing with
+    // `mthds_validate`.
+    expect(local.catalogWrite.validation).toBe(local.validation);
+    expect(hosted.catalogWrite.validation).toBe(hosted.validation);
+
     // One `workspaceRoot` option, three consumers — the download tool's save
     // root, codegen's `output_dir` root, and the results summary's nudge.
     expect(local.artifacts.saveRoot).toBe(rootDir);
