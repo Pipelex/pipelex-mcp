@@ -19,7 +19,10 @@ import { errorMessage, isInsideRoot, isMissingPathError } from "./workspace-boun
  * method that vanished.
  *
  * It records NO source hashes, deliberately, and the cost is stated rather
- * than hidden — see {@link comparePulledFiles}.
+ * than hidden — see `guardOutputDir` in `catalog-write.ts`, whose three-outcome
+ * rule can tell "the stored method moved" from "this directory moved" only by
+ * the recorded `synced_updated_at`, and so cannot say which side a difference
+ * came from once both have moved.
  */
 
 export const LINK_FILE_NAME = "pipelex-method.json";
@@ -38,6 +41,17 @@ export interface MethodLink {
   name: string;
   /** The saved method's `updated_at` as of the last save or pull through this directory. */
   synced_updated_at: string;
+  /**
+   * Set while a pull is landing files, cleared when it finishes.
+   *
+   * A pull writes several files and can fail between two of them. Without this
+   * the half-written directory holds `.mthds` files and no link, which the
+   * ownership guard reads as somebody else's bundle — so the retry the failure
+   * advertises is refused and the caller has nowhere to go. The marker says
+   * "these files are an interrupted pull of this same method", which is the one
+   * state where writing over them destroys nothing the catalog does not hold.
+   */
+  partial_pull?: boolean;
 }
 
 export interface LinkFileReport {
@@ -52,6 +66,7 @@ export function buildMethodLink(fields: {
   methodId: string;
   name: string;
   syncedUpdatedAt: string;
+  partialPull?: boolean;
 }): MethodLink {
   return {
     comment: LINK_COMMENT,
@@ -60,6 +75,7 @@ export function buildMethodLink(fields: {
     method_id: fields.methodId,
     name: fields.name,
     synced_updated_at: fields.syncedUpdatedAt,
+    ...(fields.partialPull === true ? { partial_pull: true } : {}),
   };
 }
 
@@ -95,12 +111,44 @@ export async function writeMethodLink(
 ): Promise<LinkFileReport> {
   const absolute = path.join(dir, LINK_FILE_NAME);
   const relative = path.relative(root, absolute);
+  // Containing the DIRECTORY does not contain the leaf: a `pipelex-method.json`
+  // that is already a symlink sends this write wherever it points, which on the
+  // save path replaces a file the user owns with link JSON. The refusal lives
+  // here rather than at either call site so both inherit it.
+  const foreign = await foreignEntryReason(absolute);
+  if (foreign !== undefined) {
+    return { path: relative, written: false, reason: foreign };
+  }
   try {
     await fs.writeFile(absolute, `${JSON.stringify(link, null, 2)}\n`, "utf8");
     return { path: relative, written: true };
   } catch (err) {
     return { path: relative, written: false, reason: errorMessage(err) };
   }
+}
+
+/**
+ * Why this existing entry may not be written through, or `undefined` when it is
+ * absent or an ordinary file.
+ *
+ * `lstat`, never `stat`: a write through a symlink lands at the link's target,
+ * so a symlink is foreign by construction however contained its own path looks.
+ * This is `codegen-writer.ts`'s rule, applied to the files a pull lands.
+ */
+export async function foreignEntryReason(absolute: string): Promise<string | undefined> {
+  let entry;
+  try {
+    entry = await fs.lstat(absolute);
+  } catch (err) {
+    return isMissingPathError(err) ? undefined : errorMessage(err);
+  }
+  if (entry.isSymbolicLink()) {
+    return "it is a symlink, and writing through it would land outside this directory";
+  }
+  if (!entry.isFile()) {
+    return "it is not a regular file";
+  }
+  return undefined;
 }
 
 export type LinkRead =
@@ -117,9 +165,18 @@ export type LinkRead =
  * directory, which is exactly when writing over it is wrong.
  */
 export async function readMethodLink(dir: string): Promise<LinkRead> {
+  const absolute = path.join(dir, LINK_FILE_NAME);
+  // A symlinked link file is `unreadable`, not `none`: something else claims
+  // this directory, and following it would let a foreign file decide ownership
+  // — and then be overwritten by the link write that follows.
+  const foreign = await foreignEntryReason(absolute);
+  if (foreign !== undefined) {
+    return { kind: "unreadable", reason: foreign };
+  }
+
   let text: string;
   try {
-    text = await fs.readFile(path.join(dir, LINK_FILE_NAME), "utf8");
+    text = await fs.readFile(absolute, "utf8");
   } catch (err) {
     if (isMissingPathError(err)) {
       return { kind: "none" };
@@ -153,18 +210,35 @@ export async function readMethodLink(dir: string): Promise<LinkRead> {
       method_id: row.method_id as string,
       name: row.name as string,
       synced_updated_at: row.synced_updated_at as string,
+      ...(row.partial_pull === true ? { partial_pull: true } : {}),
     },
   };
 }
 
-/** Whether `dir` holds any `.mthds` file at its top level — "somebody's bundle lives here". */
-export async function holdsBundleFiles(dir: string): Promise<boolean> {
-  try {
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    return entries.some((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".mthds"));
-  } catch {
-    return false;
+/**
+ * Which of these destinations already exist — "is anything this pull would land
+ * on already here".
+ *
+ * This deliberately replaces a top-level `.mthds` scan. The question the guard
+ * has to answer is about the set the write loop lands, which includes `.py`
+ * files and nested paths; a directory holding the user's own `helpers.py`, or a
+ * `nested/other.mthds`, has no top-level `.mthds` file and so read as empty
+ * while the loop overwrote it. Asking each destination is the same question the
+ * action asks.
+ */
+export async function existingDestinations(
+  destinations: readonly { name: string; absolute: string }[],
+): Promise<string[]> {
+  const present: string[] = [];
+  for (const destination of destinations) {
+    try {
+      await fs.lstat(destination.absolute);
+      present.push(destination.name);
+    } catch {
+      // Absent (or unstattable, which the write itself will report).
+    }
   }
+  return present;
 }
 
 /** The joined destination when it stays inside `dir`; `undefined` when it escapes. */

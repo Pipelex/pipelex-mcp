@@ -729,3 +729,313 @@ describe("buildCatalogWriteContext", () => {
     expect(context.validation.baseUrl).toBe(context.baseUrl);
   });
 });
+
+// ── the guard and the action, over one write set ────────────────────
+//
+// Every test here reproduces a defect four reviewers found and a verifier
+// confirmed on disk, all of them one mistake: the guard reasoned about a
+// narrower set than the write loop landed. The suite was green over all of
+// them, which is why they are written against the filesystem rather than
+// against a projection.
+
+describe("the pull writes only what it may", () => {
+  const reading = (stored: MethodData): CatalogWriteClient => ({
+    ...clientNotCalled,
+    async getMethod() {
+      return stored;
+    },
+  });
+
+  const pythonMethod = () =>
+    storedMethod({
+      python: [{ name: "helpers.py", content: "# from the catalog\n" }],
+    });
+
+  async function linkInto(dir: string, synced: string, methodId = "mt_one"): Promise<void> {
+    await fs.mkdir(path.join(root, dir), { recursive: true });
+    await fs.writeFile(
+      path.join(root, dir, LINK_FILE_NAME),
+      JSON.stringify({
+        method_id: methodId,
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: synced,
+      }),
+      "utf8",
+    );
+  }
+
+  it("refuses a linked directory whose .py file carries unsaved edits", async () => {
+    // The `.mthds` files are byte-identical, so a guard that compares only the
+    // sources sees no difference at all — and the loop then overwrites the one
+    // file that had changed.
+    const stored = pythonMethod();
+    await writeBundle("py", { "bundle.mthds": 'domain = "demo"' });
+    await fs.writeFile(path.join(root, "py", "helpers.py"), "# MY LOCAL EDIT\n", "utf8");
+    await linkInto("py", stored.updated_at);
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "py" },
+      contextFor(reading(stored), validationAnswering(validReport)),
+    );
+
+    expect(errorsOf(result.structuredContent)[0]?.message).toContain("helpers.py");
+    expect(await fs.readFile(path.join(root, "py", "helpers.py"), "utf8")).toBe(
+      "# MY LOCAL EDIT\n",
+    );
+  });
+
+  it("refuses an unlinked directory holding a .py file the pull would land on", async () => {
+    // No top-level `.mthds` file, so the old emptiness scan read this as empty.
+    const stored = pythonMethod();
+    await fs.mkdir(path.join(root, "occupied"), { recursive: true });
+    await fs.writeFile(path.join(root, "occupied", "helpers.py"), "# THE USER'S\n", "utf8");
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "occupied" },
+      contextFor(reading(stored), validationAnswering(validReport)),
+    );
+
+    expect(errorsOf(result.structuredContent)[0]?.message).toContain("helpers.py");
+    expect(await fs.readFile(path.join(root, "occupied", "helpers.py"), "utf8")).toBe(
+      "# THE USER'S\n",
+    );
+  });
+
+  it("refuses an unlinked directory holding a nested .mthds the pull would land on", async () => {
+    const stored = storedMethod({
+      mthds: JSON.stringify([{ name: "nested/other.mthds", content: 'domain = "demo"' }]),
+    });
+    await fs.mkdir(path.join(root, "nest", "nested"), { recursive: true });
+    await fs.writeFile(path.join(root, "nest", "nested", "other.mthds"), "theirs", "utf8");
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "nest" },
+      contextFor(reading(stored), validationAnswering(validReport)),
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(await fs.readFile(path.join(root, "nest", "nested", "other.mthds"), "utf8")).toBe(
+      "theirs",
+    );
+  });
+
+  it("refuses a symlinked destination instead of writing through it", async () => {
+    // `containedInDir` is lexical, so the joined path looks contained while
+    // `writeFile` lands at the link's target — outside the workspace entirely.
+    // The link's target holds exactly what the pull would write, so the
+    // ownership guard finds nothing differing and passes — which is the only
+    // state in which the write loop is ever reached, and so the only state in
+    // which this escape could happen. The symlink check is what stops it.
+    const outside = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), "catalog-outside-")));
+    const victim = path.join(outside, "victim.mthds");
+    await fs.writeFile(victim, 'domain = "demo"', "utf8");
+
+    const stored = storedMethod();
+    await linkInto("linkdest", stored.updated_at);
+    await fs.symlink(victim, path.join(root, "linkdest", "bundle.mthds"));
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "linkdest" },
+      contextFor(reading(stored), validationAnswering(validReport)),
+    );
+
+    expect(errorsOf(result.structuredContent)[0]?.message).toContain("symlink");
+    // Still a symlink: nothing was written through it, and nothing replaced it.
+    expect((await fs.lstat(path.join(root, "linkdest", "bundle.mthds"))).isSymbolicLink()).toBe(
+      true,
+    );
+    await fs.rm(outside, { recursive: true, force: true });
+  });
+
+  it("refuses a stored file whose parent directory is a symlink out of the workspace", async () => {
+    const outside = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), "catalog-escape-")));
+    const stored = storedMethod({
+      mthds: JSON.stringify([{ name: "sub/x.mthds", content: 'domain = "demo"' }]),
+    });
+    await fs.mkdir(path.join(root, "escape"), { recursive: true });
+    await fs.symlink(outside, path.join(root, "escape", "sub"));
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "escape" },
+      contextFor(reading(stored), validationAnswering(validReport)),
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(await fs.readdir(outside)).toEqual([]);
+    await fs.rm(outside, { recursive: true, force: true });
+  });
+
+  it("refuses a symlinked link file rather than overwriting what it points at", async () => {
+    const outside = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), "catalog-linkfile-")));
+    const victim = path.join(outside, "theirs.json");
+    await fs.writeFile(victim, "SOMETHING THE USER OWNS\n", "utf8");
+
+    await fs.mkdir(path.join(root, "symlink"), { recursive: true });
+    await fs.symlink(victim, path.join(root, "symlink", LINK_FILE_NAME));
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "symlink" },
+      contextFor(reading(storedMethod()), validationAnswering(validReport)),
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(await fs.readFile(victim, "utf8")).toBe("SOMETHING THE USER OWNS\n");
+    await fs.rm(outside, { recursive: true, force: true });
+  });
+
+  it("leaves an interrupted pull owned, so the retry it advertises is permitted", async () => {
+    // The second file needs a `sub/` directory and `sub` is an ordinary file,
+    // so its creation fails after the first file has landed. (A destination
+    // that merely exists would be refused by the occupancy guard before the
+    // loop, which is the point of that guard.) The link went down first,
+    // marked `partial_pull`, which is what lets the retry through instead of
+    // reading as somebody else's bundle.
+    const stored = storedMethod({
+      mthds: JSON.stringify([
+        { name: "bundle.mthds", content: 'domain = "demo"' },
+        { name: "sub/second.mthds", content: "second" },
+      ]),
+    });
+    await fs.mkdir(path.join(root, "partial"), { recursive: true });
+    await fs.writeFile(path.join(root, "partial", "sub"), "in the way", "utf8");
+
+    const failed = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "partial" },
+      contextFor(reading(stored), validationAnswering(validReport)),
+    );
+    expect(failed.structuredContent.status).toBe("error");
+    expect(errorsOf(failed.structuredContent)[0]?.retryable).toBe(true);
+
+    const link = await readMethodLink(path.join(root, "partial"));
+    expect(link.kind === "link" && link.link.partial_pull).toBe(true);
+
+    await fs.rm(path.join(root, "partial", "sub"));
+    const retried = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "partial" },
+      contextFor(reading(stored), validationAnswering(validReport)),
+    );
+
+    expect(retried.structuredContent.status).toBe("ok");
+    expect(await fs.readFile(path.join(root, "partial", "sub", "second.mthds"), "utf8")).toBe(
+      "second",
+    );
+    const settled = await readMethodLink(path.join(root, "partial"));
+    expect(settled.kind === "link" && settled.link.partial_pull).toBeUndefined();
+  });
+
+  it("states only what it measured when the stored method has moved", async () => {
+    // The routine teammate-update pull: nothing local was edited, and no source
+    // hashes are recorded, so the tool must not assert that the directory
+    // changed.
+    const stored = storedMethod({
+      updated_at: "2026-09-21T09:00:00Z",
+      mthds: JSON.stringify([{ name: "bundle.mthds", content: "theirs" }]),
+    });
+    await writeBundle("team", { "bundle.mthds": 'domain = "demo"' });
+    await linkInto("team", "2026-09-20T12:00:00Z");
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "team" },
+      contextFor(reading(stored), validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error.message).not.toContain("both this directory and the stored method have changed");
+    expect(error.message).toContain("differs from the stored one");
+    expect(error.hint).toContain("overwrite: true");
+  });
+});
+
+describe("the save writes a link only where one belongs", () => {
+  /** The link report off either arm of the union, which only the ok arm declares. */
+  function linkFileOf(structured: {
+    status: string;
+  }): { written: boolean; reason?: string } | undefined {
+    return (structured as { link_file?: { written: boolean; reason?: string } }).link_file;
+  }
+
+  const creating = (name = "Demo"): CatalogWriteClient => ({
+    ...clientNotCalled,
+    async createMethod() {
+      return storedMethod({ name });
+    },
+  });
+
+  it("writes no link for an inline submission, whatever its provenance uri says", async () => {
+    // `uri` is provenance for diagnostics and may be any label. Treating it as
+    // a directory created one called `memory:` in the user's workspace.
+    const result = await saveMthdsMethod(
+      {
+        files: [{ content: 'domain = "demo"', uri: "memory://draft.mthds" }],
+        name: "Demo",
+      },
+      contextFor(creating(), validationAnswering(validReport)),
+    );
+
+    expect(result.structuredContent).toMatchObject({ status: "ok", saved: "created" });
+    expect(linkFileOf(result.structuredContent)?.written).toBe(false);
+    expect(await fs.readdir(root)).toEqual([]);
+  });
+
+  it("writes no link at the workspace root for a bare inline uri", async () => {
+    // `path.dirname("bundle.mthds")` is `.`, which put the link at the root
+    // where it could replace an unrelated one.
+    const result = await saveMthdsMethod(
+      { files: [{ content: 'domain = "demo"', uri: "bundle.mthds" }], name: "Demo" },
+      contextFor(creating(), validationAnswering(validReport)),
+    );
+
+    expect(linkFileOf(result.structuredContent)?.written).toBe(false);
+    expect(await readMethodLink(root)).toEqual({ kind: "none" });
+  });
+
+  it("refuses to re-point a directory linked to a different method", async () => {
+    // The link file is committed and shared, so a silent takeover would send a
+    // teammate's next save to this method instead of theirs.
+    await writeBundle("theirs", { "bundle.mthds": 'domain = "demo"' });
+    await fs.writeFile(
+      path.join(root, "theirs", LINK_FILE_NAME),
+      JSON.stringify({
+        method_id: "mt_teammate",
+        name: "The teammate's method",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "2026-09-20T12:00:00Z",
+      }),
+      "utf8",
+    );
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "theirs/bundle.mthds" }], name: "Mine" },
+      contextFor(creating("Mine"), validationAnswering(validReport)),
+    );
+
+    // The method IS saved — it is stored by the time the link is written, and
+    // saying otherwise would be the one thing that is certainly untrue.
+    expect(result.structuredContent).toMatchObject({ status: "ok", saved: "created" });
+    expect(linkFileOf(result.structuredContent)?.written).toBe(false);
+    expect(linkFileOf(result.structuredContent)?.reason).toContain("mt_teammate");
+    const link = await readMethodLink(path.join(root, "theirs"));
+    expect(link.kind === "link" && link.link.method_id).toBe("mt_teammate");
+  });
+
+  it("blames `python` for a .py file outside the bundle directory, not `files`", async () => {
+    await writeBundle("bundle", { "main.mthds": 'domain = "demo"' });
+    await writeBundle("elsewhere", {});
+    await fs.writeFile(path.join(root, "elsewhere", "helpers.py"), "x = 1", "utf8");
+
+    const result = await saveMthdsMethod(
+      {
+        files: [{ path: "bundle/main.mthds" }],
+        python: [{ path: "elsewhere/helpers.py" }],
+        name: "Demo",
+      },
+      contextFor(clientNotCalled, validationAnswering(validReport)),
+    );
+
+    expect(errorsOf(result.structuredContent)[0]).toMatchObject({
+      class: "input_domain",
+      location: "python",
+    });
+  });
+});
