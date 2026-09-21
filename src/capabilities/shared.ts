@@ -125,7 +125,10 @@ export async function resolveSubmittedFiles(
         class: "input_domain",
         location: `files[${index}].path`,
         message: "File path must not be empty.",
-        hint: "Submit the path of a .mthds file, or inline the contents as { content, uri? }.",
+        // Extension-neutral: this routine serves every files-taking argument,
+        // and `mthds_save_method`'s `python` arm reads `.py`. Naming `.mthds`
+        // here told that caller to submit the one thing the argument refuses.
+        hint: "Submit a file path, or inline the contents as { content, uri? }.",
         retryable: false,
       });
       continue;
@@ -1399,6 +1402,25 @@ export function itemToolError(
  * and above roughly a megabyte every host measured re-encodes the image to a
  * fraction of what was sent, so bytes past that buy nothing.
  */
+/**
+ * Directories a misaimed `output_dir` would otherwise drag in wholesale.
+ *
+ * Shared by the two walks that descend a user's directory — the codegen
+ * writer's orphan walk and the catalog pull's unmanaged-source walk — because
+ * they ask the same question of the same kind of tree, and a set that lived in
+ * one of them was a set the other silently did without.
+ */
+export const PRUNED_DIRECTORIES = new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  "target",
+  ".next",
+  ".venv",
+  "__pycache__",
+]);
+
 export const MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024;
 
 /**

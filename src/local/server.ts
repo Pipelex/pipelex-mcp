@@ -22,6 +22,15 @@ export const LOCAL_SERVER_INSTRUCTIONS = [
   "Call `mthds_list_methods` when the user asks what saved methods exist or names one without its",
   "mt_ id; choose or disambiguate by name and description, then pass the returned id into the",
   "current-content validate, inputs-template, and run flow.",
+  "The catalog is writable from here. `mthds_save_method` sends a bundle on disk to it — one call",
+  "validates the files and saves those same bytes — with the ROOT .mthds file first, because the",
+  "platform derives the method's listed description from it. Absent `method_id` creates, present",
+  "updates: read it from `pipelex-method.json` beside the bundle when that file is there, which is",
+  "what makes a second save an update instead of a duplicate, and tell the user to commit that file",
+  "so a teammate updates the same method. `mthds_get_method` brings a saved method's files back —",
+  "pass `output_dir` to write them to disk with the link file beside them, and use the inline arm",
+  "only to read a method you cannot see on disk. It refuses a directory it does not own rather than",
+  "overwriting it, and `overwrite` is for after you have asked the user.",
   "Use `mthds_validate` for a structured validation verdict and `mthds_inputs_template` for a pipe's",
   "fill-in input template — both take files, a method_ref address, or a method_id.",
   "Use `mthds_codegen` to project a method's concepts into typed code for the project you are in —",
@@ -58,6 +67,10 @@ export function buildLocalToolContexts(
   return buildToolContexts({
     env,
     resolver: localFileResolver(rootDir),
+    // A second resolver, gated on `.py`, for mthds_save_method's `python`. The
+    // extension IS the read boundary, so one resolver serving both arguments
+    // would let each read the other's files.
+    pythonResolver: localFileResolver(rootDir, ".py"),
     viewsAvailable: false,
     // The workshop is co-located with the user's files, so it uploads
     // file-bearing inputs (local paths, data: URLs, bytes) for mthds_prepare_inputs.

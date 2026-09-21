@@ -19,19 +19,31 @@ const INLINE_FALLBACK = "or inline the contents as { content, uri? }.";
  * `rootDir` subtree. Escapes, missing files, non-regular files, and read
  * failures are reported as {@link FileResolution} failures, never thrown —
  * the seam turns them into `input_domain` errors at `files[i].path`.
+ *
+ * `extension` is the ONE thing a caller chooses, and it is chosen per argument
+ * rather than per call: every bundle argument is `.mthds`, and
+ * `mthds_save_method`'s `python` is `.py`. It is deliberately not reachable
+ * from the MCP surface — a tool input that named the extension would turn the
+ * read boundary into something the model picks, which is the opposite of what
+ * it is for.
  */
-export function localFileResolver(rootDir: string = process.cwd()): FileResolver {
+export function localFileResolver(
+  rootDir: string = process.cwd(),
+  extension: string = MTHDS_EXTENSION,
+): FileResolver {
   return {
     async resolve(submitted: string): Promise<FileResolution> {
-      // The `{ path }` arm is contracted to .mthds files (see filesInputSchema).
-      // Enforce that before any filesystem access, so a path pointing at an
-      // unrelated local file — a prompt-injected `.env`, `.git/config`, key
-      // material — is refused without ever being opened. Containment below only
-      // bounds *where* we read; this bounds *what* we read.
-      if (path.extname(submitted).toLowerCase() !== MTHDS_EXTENSION) {
+      // Each `{ path }` arm is contracted to one extension — `.mthds` for every
+      // bundle argument, `.py` for `mthds_save_method`'s `python`. Enforce it
+      // before any filesystem access, so a path pointing at an unrelated local
+      // file — a prompt-injected `.env`, `.git/config`, key material — is refused
+      // without ever being opened. Containment below only bounds *where* we read;
+      // this bounds *what* we read, and a caller that could choose the extension
+      // would have neither bound.
+      if (path.extname(submitted).toLowerCase() !== extension) {
         return failure(
-          `Path is not a .mthds file: ${submitted}`,
-          `The local workshop reads only .mthds files. Point at a .mthds file, ${INLINE_FALLBACK}`,
+          `Path is not a ${extension} file: ${submitted}`,
+          `This argument reads only ${extension} files. Point at a ${extension} file, ${INLINE_FALLBACK}`,
         );
       }
 
@@ -75,7 +87,7 @@ export function localFileResolver(rootDir: string = process.cwd()): FileResolver
         if (!stats.isFile()) {
           return failure(
             `Path is not a regular file: ${submitted}`,
-            `Submit the path of a .mthds file, ${INLINE_FALLBACK}`,
+            `Submit the path of a ${extension} file, ${INLINE_FALLBACK}`,
           );
         }
         return { ok: true, content: await fs.readFile(real, "utf8") };
