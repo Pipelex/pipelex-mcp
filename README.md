@@ -52,7 +52,8 @@ contracts — with one documented exception per shell, marked below:
 | `mthds_upload_attachments` | **Hosted console only.** Turn a file the user attached in the chat into a run-ready `pipelex-storage://` reference (ChatGPT only — see [Chat attachments](#chat-attachments-chatgpt-only)). |
 | `mthds_run` | Start a durable run on the hosted Pipelex API; returns a durable `run_id` immediately. |
 | `mthds_run_status` | Check a durable run's coarse lifecycle state by `run_id`. |
-| `mthds_run_results` | Fetch a durable run's terminal outcome by `run_id`. |
+| `mthds_run_results` | Fetch a durable run's terminal outcome by `run_id`, and list for free which of its stored files look like images. Never returns a picture. |
+| `mthds_show_images` | Show the pictures a completed run produced, as MCP image content blocks — the deliberate gesture, on both deployments, because a shown picture stays in the conversation. |
 | `mthds_download_artifacts` | **Local workshop only.** Save the files a completed run produced (images, PDFs, documents) under the directory the server was started in — see [Saving run artifacts](#saving-run-artifacts-local-workshop-only). |
 
 The two exceptions mirror each other. `mthds_upload_attachments` takes a
@@ -420,6 +421,7 @@ No method source crosses the conversation in this flow.
       multiplicity: "single" | "variable" | "fixed";
       item_count?: number;
       optional: boolean;
+      images?: string[];           // where images sit; [] = none, absent = unknown
     };
   };
   validation_errors?: unknown[];
@@ -440,9 +442,21 @@ of the Markdown summary,
 `demo.main(document: legal.Contract, notes?: native.Text, tags: native.Text[]) -> analysis.Report[2]`
 (`?` may be omitted, `[]` a list, `[N]` exactly N).
 
+`output.images` answers "will this method produce pictures?" before anything
+runs. It lists where images sit inside the produced output, as paths from its
+root: `$` is the output itself, `$.name` a field of it, `$[]` an element of a
+list, `$[].name` a field of one — so a top-level `Image` output is `["$"]`, an
+`Image[]` is `["$[]"]`, and the question is `images.length > 0`. It is read
+from the MTHDS standard's output-form descriptor, which the capability requests
+from the API, so it costs nothing at run time. An empty array and an absent
+member are **different answers**: `[]` means the output was described and holds
+no image, while absence means nothing described it — unknown, not none. The
+rendered summary line says it too, as a trailing ` (produces images)`.
+
 The graph (`graph_spec`) and the form's per-pipe artifact pair — the IO
 contracts (`pipe_io_contracts`) and the input-form descriptor (`input_form`,
-requested from the API via the opt-in `views: ["input_form"]` token) — ride the
+requested from the API via the opt-in `views` token, which also brings
+`output_form` for a later result-rendering view) — ride the
 tool result's view-only `_meta` channel for the `run-graph` view — never
 `structuredContent`, so the model never pays their tokens. On the hosted
 console that view renders the method graph and, on a runnable verdict that
@@ -673,6 +687,94 @@ The pipe selector is `pipe_code` here and `pipe_ref` on `mthds_inputs_template`
 / `mthds_prepare_inputs` — the same qualified `domain.pipe_code` value under the
 name each underlying route uses; each description names the other, so copying
 the value across the two calls is expected.
+
+A completed `mthds_run_results` also reports, for free, what the run **stored**:
+`image_candidates` lists the `pipelex-storage://` references whose key looks
+like an image, and the prose says how many stored files there are and what can
+be done with them. Nothing is fetched to produce it — the walk is in memory over
+the full output, so a reference pruned out of the bounded `main_stuff` still
+appears. The list is capped at 32 entries, with any remainder counted in
+`image_candidates_omitted`; the cap is a prefix, so an index into it still means
+the same thing to `mthds_show_images`, which walks the whole set. **The results tool never returns an image itself,
+and takes no flag that would make it**; showing a picture is `mthds_show_images`
+below.
+
+### `mthds_show_images`
+
+Put the pictures a completed run produced in front of the model, as MCP **image
+content blocks**. Registered on **both** deployments.
+
+```ts
+// input
+{
+  run_id: string;        // the durable run id from mthds_run
+  images?: string[];     // optional selection: pipelex-storage:// references from image_candidates
+  indices?: number[];    // optional selection: their zero-based positions instead
+}
+
+// structuredContent (state = "completed")
+{
+  status: "ok";
+  run_id: string;
+  state: "completed";
+  images: Array<{
+    uri: string;
+    mime_type?: string;   // the object store's own content type
+    bytes?: number;
+    inlined: boolean;     // true ⟺ this picture is one of the image blocks in content
+    withheld?: "size" | "budget" | "count" | "type" | "deadline" | "empty";
+    error?: ToolError;
+  }>;
+  omitted?: number;       // of the candidates THIS CALL considered, how many are past the 32 listed
+  all_inlined: boolean;   // about the RUN: false when a narrowed call left one of its pictures unconsidered
+}
+```
+
+Entries come back **in the order considered**: the order you named them when
+`images` or `indices` was given, and discovery order only when neither was. A
+repeated reference is deduplicated rather than refused — a shown picture is
+permanent, so buying the same one twice is never what was meant.
+
+**Why it is a tool and not an option on `mthds_run_results`.** An image block is
+cheap to send and permanent to keep: it costs the model's own native vision
+price — its base64 size is free — but once it is in a conversation it is in
+every prompt that follows, and nothing takes it back. One picture is a rounding
+error; a loop that generates twenty is twenty images of context nobody chose. So
+nothing inlines by default, and seeing a picture is a gesture with a name.
+
+Each inlined picture is fetched through `@pipelex/sdk`'s bounded `fetchArtifact`
+(fresh presigned link, redirects refused, no credentials forwarded, the byte cap
+checked before and during the read), gated on the object store's own
+`content-type` — `image/png`, `image/jpeg`, `image/gif`, `image/webp`, and
+nothing else. Five bounds hold a call: **4 MiB** per picture, **6 MiB** across
+the call, **6 attempts**, a **60-second deadline** over the whole walk, and at
+most **32 candidates** enumerated. The deadline exists because the per-image
+timeout is per image and the walk is sequential: without it, stalled objects
+accumulated into a call of three minutes and more, and a host with a shorter
+deadline lost the whole thing — pictures already fetched included. It is
+carried both as a per-fetch timeout and as an abort signal, because the SDK
+resolves a reference before arming its timeout and only the signal reaches that
+half; with the timeout alone a call could still reach 90 seconds. A picture
+that does not fit is reported as `withheld` with its reason rather than resized
+or dropped silently — as is a stored object that declares an image type and
+holds no bytes, which would otherwise become an empty, unrenderable block that
+never leaves the conversation; a per-reference failure rides its entry as an `error`;
+pictures that arrived are never discarded because a sibling failed. A
+whole-request refusal — a plan limit, a rejected credential, an unreachable host
+— that stopped the walk before any picture arrived is a `status: "error"`
+no-verdict naming the cause, rather than a success with nothing in it. The same
+`PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP` rule as the download tool applies. A
+`running` or `failed` run, and a run whose output holds no image candidate, are
+produced verdicts that fetch nothing. See `SPEC.md` → "Image Display Scope".
+
+**What your host does with an image block** (measured, 2026-09-21 — the study is
+`wip/mcp-image-results/host-probe.md` in the Pipelex workspace):
+
+| Host | Model sees the picture | Person sees the picture | Notes |
+|---|---|---|---|
+| Claude Code | Yes | **No** — the terminal renders nothing | Priced at the model's native vision cost; the base64 size is free. Ask for a description if you want one in the transcript. |
+| Codex (ChatGPT desktop) | Yes | Not measured | **Refuses a block carrying `annotations`** with `Unexpected response type` — which is why ours carries none. Accepts the block-level `_meta` ours does carry; that was measured too, not assumed. |
+| Cursor | Not measured | Not measured | Tracked as its own follow-up. |
 
 ### Saving run artifacts (local workshop only)
 

@@ -4,6 +4,7 @@ import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
 import type {
   InputForm,
   MthdsFile,
+  OutputForm,
   PipeIOContracts,
   PipelexInvalidReport,
   PipelexValidationReport,
@@ -14,7 +15,7 @@ import type {
 
 import { DEFAULT_API_URL } from "./shared.js";
 import type { FileResolver } from "./shared.js";
-import { toolResult, validateMthds, validationResult } from "./validate.js";
+import { imageFieldPaths, toolResult, validateMthds, validationResult } from "./validate.js";
 
 /** Fake selector arm for tests whose request must never reach the selector leg. */
 const selectorValidateNotCalled = {
@@ -69,6 +70,22 @@ const demoInputForm: InputForm = {
     ],
   },
 };
+
+/**
+ * The input form's twin for the other half of the contract: one node saying
+ * what the pipe RESOLVES TO. `demo.main` produces text, so the default fixture
+ * holds no image and the projection reports the empty array.
+ */
+const demoOutputForm: OutputForm = {
+  "demo.main": {
+    field: { name: "output", kind: "prose", concept_ref: "native.Text", required: true },
+  },
+};
+
+/** One output-form descriptor for `demo.main`, around whatever node is under test. */
+function outputFormOf(field: unknown): OutputForm {
+  return { "demo.main": { field } } as OutputForm;
+}
 
 const validReport: PipelexValidationReport = {
   is_valid: true,
@@ -673,6 +690,317 @@ describe("main pipe signature", () => {
   });
 });
 
+describe("the produces-images signal", () => {
+  describe("imageFieldPaths", () => {
+    it("reads a top-level image as the output's own root", () => {
+      expect(imageFieldPaths({ name: "output", kind: "image", required: true })).toEqual({
+        paths: ["$"],
+        complete: true,
+      });
+    });
+
+    it("reads a plural image output through the descriptor's own list wrap", () => {
+      // The plural wrap is performed on the descriptor, so the walk never
+      // consults the contract's multiplicity for it.
+      expect(
+        imageFieldPaths({
+          name: "output",
+          kind: "list",
+          concept_ref: "native.Image",
+          required: true,
+          item: { kind: "image", concept_ref: "native.Image", required: true },
+        }),
+      ).toEqual({ paths: ["$[]"], complete: true });
+    });
+
+    it("names each image field of a structured output, and skips the rest", () => {
+      expect(
+        imageFieldPaths({
+          name: "output",
+          kind: "object",
+          concept_ref: "report.Page",
+          required: true,
+          fields: [
+            { name: "caption", kind: "prose", required: true },
+            { name: "picture", kind: "image", required: true },
+            { name: "attachment", kind: "document", required: false },
+            { name: "thumbnail", kind: "image", required: false },
+          ],
+        }),
+        // Complete: prose and document are kinds the walk fully understands and
+        // that hold no picture, so the set below is known to be exhaustive.
+      ).toEqual({ paths: ["$.picture", "$.thumbnail"], complete: true });
+    });
+
+    it("walks into a list of structured outputs", () => {
+      expect(
+        imageFieldPaths({
+          name: "output",
+          kind: "list",
+          concept_ref: "report.Page",
+          required: true,
+          item: {
+            kind: "object",
+            concept_ref: "report.Page",
+            required: true,
+            fields: [{ name: "picture", kind: "image", required: true }],
+          },
+        }),
+      ).toEqual({ paths: ["$[].picture"], complete: true });
+    });
+
+    it("treats an unknown node as opaque, and says the walk was incomplete", () => {
+      // The standard's escape hatch: a producer that could not map the node
+      // honestly. There may be an image in there and there is no way to know,
+      // so the empty list MUST be reported as "could not tell" — the caller
+      // withholds the member on it rather than publishing a confident none.
+      expect(imageFieldPaths({ name: "output", kind: "unknown", required: true })).toEqual({
+        paths: [],
+        complete: false,
+      });
+    });
+
+    it("stays complete through kinds that are understood and hold no picture", () => {
+      // A document is deliberately not a picture. That is an ANSWER, not a
+      // failure to look, so it must not poison the walk's completeness.
+      for (const kind of ["text", "prose", "date", "number", "boolean", "enum", "document"]) {
+        expect(imageFieldPaths({ name: "output", kind, required: true })).toEqual({
+          paths: [],
+          complete: true,
+        });
+      }
+    });
+
+    it("reports incomplete for a kind this build does not know", () => {
+      // A kind a later version of the standard adds. Reading it as "no images"
+      // is the exact false negative the completeness flag exists to prevent.
+      expect(imageFieldPaths({ name: "output", kind: "hologram", required: true })).toEqual({
+        paths: [],
+        complete: false,
+      });
+    });
+
+    it("reports incomplete past the depth ceiling", () => {
+      let node: unknown = { name: "output", kind: "image", required: true };
+      for (let i = 0; i < 40; i += 1) {
+        node = { name: "output", kind: "list", required: true, item: node };
+      }
+      expect(imageFieldPaths(node)).toEqual({ paths: [], complete: false });
+    });
+
+    it("keeps a found image while reporting the walk incomplete beside it", () => {
+      // The mixed case: one subtree is opaque, another really does hold a
+      // picture. The paths are still true; the set is just not exhaustive.
+      expect(
+        imageFieldPaths({
+          name: "output",
+          kind: "object",
+          required: true,
+          fields: [
+            { name: "picture", kind: "image", required: true },
+            { name: "extra", kind: "unknown", required: false },
+          ],
+        }),
+      ).toEqual({ paths: ["$.picture"], complete: false });
+    });
+
+    it("costs a malformed node its own subtree and nothing else", () => {
+      expect(
+        imageFieldPaths({
+          name: "output",
+          kind: "object",
+          required: true,
+          fields: [
+            { name: "broken", kind: "not_a_kind", required: true },
+            "not even an object",
+            { kind: "image", required: true },
+            { name: "picture", kind: "image", required: true },
+          ],
+        }),
+        // The nameless image is skipped too: a path needs a name to be a path.
+        // Each skipped child is a subtree nobody walked, so the set is not
+        // known to be exhaustive.
+      ).toEqual({ paths: ["$.picture"], complete: false });
+    });
+
+    it("answers nothing for a node that is not a node at all", () => {
+      expect(imageFieldPaths(undefined)).toEqual({ paths: [], complete: false });
+      expect(imageFieldPaths("a string")).toEqual({ paths: [], complete: false });
+      expect(imageFieldPaths({ name: "output", required: true })).toEqual({
+        paths: [],
+        complete: false,
+      });
+    });
+  });
+
+  describe("projection onto main_pipe.output", () => {
+    it("reports the empty array when the descriptor arrived and holds no image", () => {
+      const result = validationResult({ ...validReport, output_form: demoOutputForm }, true);
+
+      expect(result.structuredContent.main_pipe?.output.images).toEqual([]);
+      // Nothing is said in prose when nothing is produced.
+      expect(result.summary).not.toContain("produces images");
+    });
+
+    it("reports the path and says so in prose when the output is an image", () => {
+      const result = validationResult(
+        {
+          ...validReport,
+          output_form: outputFormOf({
+            name: "output",
+            kind: "image",
+            concept_ref: "native.Image",
+            required: true,
+          }),
+        },
+        true,
+      );
+
+      expect(result.structuredContent.main_pipe?.output.images).toEqual(["$"]);
+      expect(result.summary).toContain("-> native.Text (produces images)");
+    });
+
+    it("leaves the member ABSENT when the walk could not see the whole output", () => {
+      // The four-reviewer finding of round 1. `[]` is contracted to mean "the
+      // server described the WHOLE output and it holds no image", so emitting
+      // it off a node the walk could not read is a confident false negative —
+      // a consumer applying the documented `images.length > 0` rule would skip
+      // the image workflow on a method that may well produce pictures.
+      for (const field of [
+        { name: "output", kind: "unknown", required: true },
+        { name: "output", kind: "not_a_kind", required: true },
+        { name: "output", required: true },
+        {
+          name: "output",
+          kind: "object",
+          required: true,
+          fields: [{ name: "inner", kind: "unknown", required: true }],
+        },
+      ]) {
+        const result = validationResult({ ...validReport, output_form: outputFormOf(field) }, true);
+
+        expect(result.structuredContent.main_pipe?.output).not.toHaveProperty("images");
+        expect(result.summary).not.toContain("produces images");
+      }
+    });
+
+    it("still reports an image the walk DID find, though the rest was opaque", () => {
+      // Downgrading a known yes to "unknown" would lose the very signal the
+      // member exists for, so a non-empty list rides even when incomplete.
+      const result = validationResult(
+        {
+          ...validReport,
+          output_form: outputFormOf({
+            name: "output",
+            kind: "object",
+            required: true,
+            fields: [
+              { name: "picture", kind: "image", required: true },
+              { name: "extra", kind: "unknown", required: false },
+            ],
+          }),
+        },
+        true,
+      );
+
+      expect(result.structuredContent.main_pipe?.output.images).toEqual(["$.picture"]);
+      expect(result.summary).toContain("(produces images)");
+    });
+
+    it("leaves the member ABSENT when no descriptor arrived, which is unknown and not none", () => {
+      const result = validationResult(validReport, true);
+
+      expect(result.structuredContent.main_pipe?.output).not.toHaveProperty("images");
+      expect(result.summary).not.toContain("produces images");
+    });
+
+    it("leaves the member absent when the descriptor carries no entry for the entry pipe", () => {
+      const result = validationResult(
+        { ...validReport, output_form: { "demo.other": demoOutputForm["demo.main"] } },
+        true,
+      );
+
+      expect(result.structuredContent.main_pipe?.output).not.toHaveProperty("images");
+    });
+
+    it("keeps the whole signature when the descriptor's entry is malformed", () => {
+      // The contract is the signature's source of truth; the descriptor is
+      // presentation riding beside it, so a bad one costs the images member and
+      // never the signature.
+      const result = validationResult(
+        {
+          ...validReport,
+          output_form: { "demo.main": { field: "not a node" } } as unknown as OutputForm,
+        },
+        true,
+      );
+
+      expect(result.structuredContent.main_pipe).toEqual({
+        pipe_ref: "demo.main",
+        inputs: [
+          {
+            name: "topic",
+            concept_ref: "native.Text",
+            multiplicity: "single",
+            required: true,
+          },
+        ],
+        output: {
+          concept_ref: "native.Text",
+          multiplicity: "single",
+          optional: false,
+        },
+      });
+    });
+
+    it("rides a valid verdict whose signatures are still pending", () => {
+      // Independent of `is_runnable` and of `include_graph`, like the rest of
+      // the signature: the output's shape is settled before the signatures are.
+      const result = validationResult(
+        {
+          ...pendingReport,
+          output_form: outputFormOf({ name: "output", kind: "image", required: true }),
+        },
+        false,
+      );
+
+      expect(result.structuredContent.main_pipe?.output.images).toEqual(["$"]);
+    });
+  });
+
+  describe("the descriptor on the view-only channel", () => {
+    it("rides _meta beside its twin, and reaches structuredContent never", () => {
+      const result = toolResult(
+        validationResult({ ...validReport, output_form: demoOutputForm }, true),
+      );
+
+      expect(result._meta.output_form).toEqual(demoOutputForm);
+      expect(result.structuredContent).not.toHaveProperty("output_form");
+      // No new view kind is minted until a view consumes it.
+      expect(result.structuredContent.available_view_specs).toEqual([
+        "dry_run_graph",
+        "input_form",
+      ]);
+    });
+
+    it("stays off _meta on a shell with no views, while the images member still rides", () => {
+      const result = validationResult(
+        {
+          ...validReport,
+          output_form: outputFormOf({ name: "output", kind: "image", required: true }),
+        },
+        true,
+        false,
+      );
+
+      expect(result.outputForm).toBeUndefined();
+      // The workshop is the shell an integrating agent uses, so the
+      // model-facing half is deliberately not on the views branch.
+      expect(result.structuredContent.main_pipe?.output.images).toEqual(["$"]);
+    });
+  });
+});
+
 describe("effective entry pipe", () => {
   /**
    * A `method_ref` package whose manifest entry (`other.shout`) is not the
@@ -945,7 +1273,7 @@ describe("validateMthds", () => {
     expect(capturedOptions).toEqual({
       allowSignatures: true,
       render: ["markdown"],
-      views: ["input_form"],
+      views: ["input_form", "output_form"],
     });
     expect(result.structuredContent.status).toBe("ok");
     // include_graph: false drops the graph view only; the form stays.
@@ -1200,7 +1528,7 @@ describe("validateMthds by selector (server pass-through)", () => {
     // diagnostics from the stored method's real file names); the descriptor
     // opt-in rides `views`. `render` stays undefined — the SDK always adds
     // markdown itself.
-    expect(capturedArgs).toEqual([true, undefined, undefined, ["input_form"]]);
+    expect(capturedArgs).toEqual([true, undefined, undefined, ["input_form", "output_form"]]);
     expect(result.structuredContent.status).toBe("ok");
     // The views work the same whichever selector supplied the content.
     expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph", "input_form"]);

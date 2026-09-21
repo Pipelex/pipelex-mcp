@@ -40,6 +40,14 @@ import {
 } from "./capabilities/codegen.js";
 import type { CodegenContext, MthdsCodegenInput } from "./capabilities/codegen.js";
 import {
+  buildImagesContext,
+  mthdsShowImagesInputSchema,
+  mthdsShowImagesOutputSchema,
+  showImagesToolResult,
+  showMthdsRunImages,
+} from "./capabilities/images.js";
+import type { ImagesContext, MthdsShowImagesInput } from "./capabilities/images.js";
+import {
   buildInputsContext,
   buildMthdsInputs,
   inputsToolResult,
@@ -96,6 +104,8 @@ export interface ToolContexts {
   codegen: CodegenContext;
   prepare: PrepareContext;
   run: RunContext;
+  /** Consumed by mthds_show_images, which both shells register — nothing in it touches a filesystem. */
+  images: ImagesContext;
   /** Consumed by the console-only mthds_upload_attachments; built on both shells so one builder serves both. */
   attachments: AttachmentsContext;
   /** Consumed by the workshop-only mthds_download_artifacts; built on both shells so one builder serves both. */
@@ -152,6 +162,12 @@ export function buildToolContexts(options: ToolContextOptions = {}): ToolContext
       resolver,
       viewsAvailable,
       // The results summary names the download tool only where it exists.
+      artifactDownloadAvailable: workspaceRoot !== undefined,
+    },
+    images: {
+      ...buildImagesContext(env),
+      // Same prose-only flag as the run context's: the structured contract of
+      // mthds_show_images is identical on both shells.
       artifactDownloadAvailable: workspaceRoot !== undefined,
     },
     attachments: buildAttachmentsContext(env),
@@ -381,6 +397,43 @@ export const mthdsRunResultsTool = defineTool({
 });
 
 /**
+ * The description says what the call does to the CONVERSATION, not only what it
+ * returns, because that is the cost the caller is choosing to pay. An image
+ * block is cheap once — the model's native vision price, with its byte size
+ * free — and permanent: it rides every prompt that follows. This tool exists
+ * precisely so that cost is chosen rather than incurred, so a description that
+ * described only the output would defeat the design.
+ */
+const SHOW_IMAGES_DESCRIPTION = [
+  "Show the pictures a completed MTHDS run produced: each one is fetched from Pipelex storage and returned as an image content block, so you can actually see it.",
+  "Pass the run id from mthds_run. Optionally narrow it with images (pipelex-storage:// references from mthds_run_results' image_candidates) or indices (their positions in that list); omit both to show every candidate.",
+  "Call it when someone wants to look at a result — not as a routine follow-up to every run. A picture you show becomes part of this conversation and is re-sent with every later turn, so showing twenty of them costs twenty images of context for the rest of the session.",
+  "mthds_run_results never does this on its own: it lists the candidates for free and fetches nothing.",
+  "A picture too large to show, or a stored object that turns out not to be an image, is reported as withheld with its reason rather than failing the call.",
+].join(" ");
+
+export const mthdsShowImagesTool = defineTool({
+  name: "mthds_show_images",
+  description: SHOW_IMAGES_DESCRIPTION,
+  inputSchema: mthdsShowImagesInputSchema,
+  outputSchema: mthdsShowImagesOutputSchema,
+  annotations: {
+    title: "Show a run's images",
+    // A read that fetches — like the download tool's resolve step. It writes
+    // nothing anywhere; what it changes is the conversation, which the
+    // description is what says.
+    readOnlyHint: true,
+    destructiveHint: false,
+    // The link it fetches is the configured Pipelex API's own answer, never a
+    // caller-supplied URL.
+    openWorldHint: false,
+  },
+  async handler(input: MthdsShowImagesInput, contexts: ToolContexts) {
+    return showImagesToolResult(await showMthdsRunImages(input, contexts.images));
+  },
+});
+
+/**
  * The tool description is load-bearing MECHANISM, not documentation, and it is
  * effectively un-hotfixable — treat it with the same review rigour as the schema.
  *
@@ -458,6 +511,7 @@ export const toolDefinitions = [
   mthdsRunTool,
   mthdsRunStatusTool,
   mthdsRunResultsTool,
+  mthdsShowImagesTool,
 ] as const;
 
 /**

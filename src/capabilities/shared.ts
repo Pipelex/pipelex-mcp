@@ -8,6 +8,7 @@ import {
   InputPreparationError,
   InvalidLocalSourceError,
   MissingMainStuffError,
+  PIPELEX_STORAGE_SCHEME,
   PipelineRequestError,
   RejectedAssetError,
   RunLifecycleUnavailableError,
@@ -15,6 +16,7 @@ import {
   UnsupportedUploadCapabilityError,
   UploadAuthenticationError,
   UploadTransportError,
+  collectArtifacts,
 } from "@pipelex/sdk";
 import type { MthdsFileItem } from "@pipelex/sdk";
 import { z } from "zod";
@@ -234,6 +236,26 @@ export function summaryForToolError(error: ToolError, summaries: ErrorSummaries)
 
 /** One MCP `content` item — the human/LLM-readable text stream. */
 export type ContentText = { type: "text"; text: string };
+
+/**
+ * One MCP `image` content item — base64 bytes the host puts in front of the
+ * model as a picture. `_meta.uri` is the storage reference the bytes came
+ * from, so a programmatic consumer can correlate a block with the `main_stuff`
+ * value that produced it; it is the tool result's own `_meta` channel, so the
+ * model never pays for it.
+ *
+ * **No `annotations`, ever.** The MCP standard's `annotations` hint (audience,
+ * priority) is optional and looks harmless, but the host probe found that Codex
+ * refuses an annotated image block outright with `Unexpected response type`,
+ * against a control proving the identical block without them is accepted. See
+ * `wip/mcp-image-results/host-probe.md`.
+ */
+export type ContentImage = {
+  type: "image";
+  data: string;
+  mimeType: string;
+  _meta: { uri: string };
+};
 
 /**
  * Compose a tool result's `content` text stream. On success (no `errors`) the
@@ -994,4 +1016,346 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     hint: `The Pipelex API returned HTTP ${err.status}.`,
     retryable: false,
   };
+}
+
+// ── the artifact fetch boundary, shared by the two tools that cross it ──
+
+/**
+ * The explicit override of the plain-http rule, read by every capability that
+ * fetches a stored artifact — `mthds_download_artifacts` on the workshop and
+ * `mthds_show_images` on both shells. Unset, a plain `http:` link is accepted
+ * exactly when `PIPELEX_BASE_URL` is itself `http:` (the local compose stack,
+ * whose object store mints plain-http links); `true` / `1` accepts one from any
+ * deployment, `false` / `0` refuses one from every deployment. Any other value
+ * refuses, so a typo fails closed.
+ */
+export const ALLOW_HTTP_ENV = "PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP";
+
+/**
+ * Read {@link ALLOW_HTTP_ENV}: `undefined` when unset or blank (derive from
+ * the base URL), otherwise the override. An unrecognized value refuses rather
+ * than falling back to the derivation, so a misspelled override can only ever
+ * make the fetch stricter.
+ */
+export function parseAllowHttpOverride(value: string | undefined): boolean | undefined {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === undefined || normalized === "") return undefined;
+  return normalized === "true" || normalized === "1";
+}
+
+/** The env-derived coordinates plus the plain-http override, for a fetching capability. */
+export interface ArtifactFetchConfig extends ApiConfig {
+  allowHttp?: boolean;
+}
+
+interface ArtifactFetchEnv extends ApiEnv {
+  [ALLOW_HTTP_ENV]?: string;
+}
+
+export function buildArtifactFetchConfig(env: ArtifactFetchEnv = process.env): ArtifactFetchConfig {
+  const allowHttp = parseAllowHttpOverride(env[ALLOW_HTTP_ENV]);
+  return { ...buildApiConfig(env), ...(allowHttp === undefined ? {} : { allowHttp }) };
+}
+
+/**
+ * Whether a plain `http:` download link is fetched: the explicit override when
+ * one is set, otherwise exactly when the configured API is itself plain http —
+ * the local compose stack, whose object store mints plain-http presigned links.
+ * A deployment reached over https gets https links, so a plain-http one there
+ * is refused rather than followed silently. A malformed base URL refuses; the
+ * client constructor then reports it as the config error it is.
+ */
+export function allowsPlainHttp(context: ArtifactFetchConfig): boolean {
+  if (context.allowHttp !== undefined) return context.allowHttp;
+  try {
+    return new URL(context.baseUrl).protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Classify options for the bulk resolve route, the one request both fetching
+ * capabilities make on the caller's behalf. Its whole-request refusals are
+ * about the caller or the deployment, never about the caller's input: a 400 is
+ * a key acting for no organization and a 422 a request this server built, a 404
+ * a deployment without the route (the default `config` arm names it), a 5xx the
+ * platform failing to sign. A 401/403 never reaches these options — the SDK
+ * raises it as `ArtifactAuthenticationError`, which {@link classifyError} maps
+ * to the auth arm. Per-reference refusals are values on the verdict's items,
+ * classified by {@link itemToolError}.
+ */
+export const BULK_RESOLVE_ERROR_OPTIONS: ClassifyErrorOptions = {
+  route: "/v1/resolve-storage-url/bulk",
+  badRequest: {
+    class: "config",
+    hint: "The API refused to resolve this run's stored files as a whole. If the message names an organization, the API key acts for none: use a key minted in the run's organization.",
+  },
+  serverError: {
+    hint: "The platform could not sign download links for this run's stored files; retrying this tool resolves them again.",
+  },
+};
+
+const RESOLVE_AGAIN_HINT =
+  "The download link is minted fresh on every call, so retrying this tool resolves a new one.";
+
+interface ItemErrorTexture {
+  class: ErrorClass;
+  hint: string;
+  retryable: boolean;
+  /** Replaces the SDK's `detail` where that sentence speaks to an SDK caller, not to the agent. */
+  message?: string;
+}
+
+/**
+ * How each per-reference code the SDK carries reads as a `ToolError`. The codes
+ * are the SDK's closed vocabulary, shared by the download verdict's
+ * `ArtifactItemError.code` and by the thrown `ArtifactFetchError.code`: the
+ * resolve route's per-reference refusals, the fetch boundary's, and the
+ * download's own. A vanished or oversized object is a permanent `input_domain`
+ * refusal; a store or network fault is a retryable `runtime` one, since every
+ * call mints fresh links.
+ *
+ * It lives here rather than in `artifacts.ts` because both fetching
+ * capabilities need it, and `mthds_show_images` — which both shells register —
+ * must not import the workshop-only download tool to get it.
+ */
+const ITEM_ERROR_TEXTURES: Record<string, ItemErrorTexture> = {
+  invalid_storage_uri: {
+    class: "input_domain",
+    hint: "The API rejected this storage reference as found in the run output.",
+    retryable: false,
+  },
+  forbidden: {
+    class: "input_domain",
+    hint: "The reference belongs to another organization than the API key's. Use a key minted in the run's organization.",
+    retryable: false,
+  },
+  unsupported_url: {
+    class: "runtime",
+    hint: "The configured deployment's storage resolved to a link this server does not fetch — not http(s), or carrying credentials. A deployment backed by local-filesystem storage hands out file:// links, which cannot be fetched here.",
+    retryable: false,
+  },
+  plain_http_refused: {
+    class: "config",
+    message:
+      "The platform resolved this reference to a plain http link, which this server refuses.",
+    hint: `A plain http link is accepted only when PIPELEX_BASE_URL is itself http (the local stack). Set ${ALLOW_HTTP_ENV}=true to accept one from this deployment anyway.`,
+    retryable: false,
+  },
+  redirect_refused: {
+    class: "runtime",
+    hint: "A presigned object link should answer directly. Inspect the configured deployment's storage.",
+    retryable: false,
+  },
+  store_refused: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
+  not_found: {
+    class: "input_domain",
+    hint: "The object behind this storage reference is gone; re-run the method to produce it again.",
+    retryable: false,
+  },
+  store_error: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
+  too_large: {
+    class: "input_domain",
+    hint: "The limit is an accident guard against filling the disk. Fetch the file another way — its presigned public_url in mthds_run_results works for about an hour.",
+    retryable: false,
+  },
+  timeout: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
+  network: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
+  resolve_failed: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
+  total_limit_exceeded: {
+    class: "input_domain",
+    hint: "The call's total byte limit is an accident guard against filling the disk. The files listed as saved are on disk; fetch this one through its presigned public_url in mthds_run_results, which works for about an hour.",
+    retryable: false,
+  },
+  write_failed: {
+    class: "runtime",
+    hint: "Check that the target directory under the server's working directory is writable.",
+    retryable: false,
+  },
+  aborted: {
+    class: "runtime",
+    hint: "The download stopped before this file was saved; call the tool again.",
+    retryable: true,
+  },
+};
+
+/**
+ * The wire's `detail`, when it really is one. It is typed by the SDK and, like
+ * the code beside it, relayed verbatim from the bulk resolve route without
+ * validation — and `message` is required on the tools' own error schemas, so a
+ * missing one would fail the result and turn a single file's failure into a
+ * failed call, which is the failure the code's own lookup was hardened against.
+ */
+function wireDetail(detail: string): string | undefined {
+  const value: unknown = detail;
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+/** What a per-reference failure reads as when the route named no detail for it. */
+function unnamedItemFailure(code: string): string {
+  const named: unknown = code;
+  const suffix = typeof named === "string" && named.trim() !== "" ? ` (${named})` : "";
+  return `This file could not be read, and the API gave no reason${suffix}.`;
+}
+
+/** A code the SDK adds later reads as an unnamed fault, which stays retryable. */
+const UNKNOWN_ITEM_ERROR: ItemErrorTexture = {
+  class: "runtime",
+  hint: "Inspect the MCP server logs.",
+  retryable: true,
+};
+
+/**
+ * Classify one per-reference error, located at the caller's own entry —
+ * `artifacts[i].uri` on the download tool, `images[i].uri` on the image tool,
+ * which is why the locator is a parameter rather than a constant here. The
+ * `{ code, detail }` shape is the SDK's `ArtifactItemError`; a thrown
+ * `ArtifactFetchError` is adapted to it by its caller, since the two carry the
+ * same closed `code` vocabulary.
+ *
+ * The code comes verbatim off the bulk resolve route's wire, so the table is
+ * read by own key only: a code of `constructor` or `toString` would otherwise
+ * find `Object.prototype`'s member instead of falling back, and produce a
+ * `ToolError` with no `class` — failing the tool's own schema and turning one
+ * file's failure into a failed call.
+ */
+export function itemToolError(
+  error: { code: string; detail: string },
+  location: string,
+): ToolError {
+  const texture = Object.hasOwn(ITEM_ERROR_TEXTURES, error.code)
+    ? ITEM_ERROR_TEXTURES[error.code]
+    : UNKNOWN_ITEM_ERROR;
+  return {
+    class: texture.class,
+    location,
+    message: texture.message ?? wireDetail(error.detail) ?? unnamedItemFailure(error.code),
+    hint: texture.hint,
+    retryable: texture.retryable,
+  };
+}
+
+// ── the image-inlining boundary (mthds_show_images) ─────────────────
+
+/**
+ * The per-image byte cap. NOT a cost control: the host probe
+ * (`wip/mcp-image-results/host-probe.md`) established that a host bills an
+ * image block at the model's native vision price, derived from its pixel
+ * dimensions, and that its base64 size costs nothing. This is a transport
+ * guard and a point of diminishing returns — Claude Code's stdio transport
+ * carried an 8 MiB PNG and died on a 12 MiB one with `Connection closed`,
+ * and above roughly a megabyte every host measured re-encodes the image to a
+ * fraction of what was sent, so bytes past that buy nothing.
+ */
+export const MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * The total bytes one `mthds_show_images` call inlines. Chosen so a whole tool
+ * result stays well under the JSON-RPC message size that killed the probe's
+ * 12 MiB rung while its 8 MiB rung passed.
+ */
+export const INLINE_IMAGES_BUDGET = 6 * 1024 * 1024;
+
+/**
+ * How many candidates one call may *attempt* — so one call makes at most this
+ * many network exchanges whatever the run produced, and buys at most this much
+ * permanent context (about eight thousand tokens at the worst per-picture price
+ * the probe observed, and far less in practice).
+ */
+export const MAX_INLINE_IMAGES = 6;
+
+/**
+ * How many image candidates one tool result may ENUMERATE — the bound on the
+ * inventory itself, as distinct from {@link MAX_INLINE_IMAGES}, which bounds
+ * how many are fetched.
+ *
+ * The two tools that publish the inventory were both unbounded: a completed
+ * run walks its FULL output for candidates (deliberately — a reference pruned
+ * out of the bounded `main_stuff` is still a real picture), so a method
+ * emitting a large `Image[]` put an arbitrarily long list of references into
+ * model-facing `structuredContent`, outside the `MAIN_STUFF_CAP` discipline
+ * the output beside it obeys. `mthds_show_images` compounded it, emitting one
+ * entry and one prose line per candidate however few it fetched.
+ *
+ * Generous against the cap that matters: a caller can only fetch six per call,
+ * so this is about being able to SEE what a run produced and page through it
+ * by naming references, not about fetching. A run with more than this many
+ * pictures reports the remainder as a count.
+ */
+export const MAX_IMAGE_CANDIDATE_ENTRIES = 32;
+
+/**
+ * The response content types that may be emitted as an MCP image block. The
+ * object store answers with the type the runtime stored, which is the
+ * authority — the resolve route's `content_type` is only a guess from the
+ * reference's extension. No SVG: it is not a model-accepted image type, and it
+ * is a script-bearing document in a renderer.
+ */
+export const INLINE_IMAGE_MIME_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+] as const;
+
+export type InlineImageMimeType = (typeof INLINE_IMAGE_MIME_TYPES)[number];
+
+/**
+ * The storage-key extensions that make a reference an image *candidate* — a
+ * free prefilter over the key alone, never a verdict. Keep it in step with the
+ * SDK's `artifactFilename` extension table, which is what decides the key a
+ * produced file is stored under. A key with no extension at all is a candidate
+ * too: the runtime does store such keys, and only the fetched response's
+ * content type can settle them.
+ */
+export const INLINE_IMAGE_KEY_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp"] as const;
+
+/** One stored reference that might be an image, as the prefilter found it. */
+export interface ImageCandidate {
+  /** The `pipelex-storage://` reference, exactly as it appears in the run output. */
+  uri: string;
+  /** The reference's storage key — everything after the scheme. */
+  key: string;
+}
+
+/** The storage key of a reference: everything after `pipelex-storage://`. */
+export function storageKeyOf(uri: string): string {
+  return uri.startsWith(PIPELEX_STORAGE_SCHEME) ? uri.slice(PIPELEX_STORAGE_SCHEME.length) : uri;
+}
+
+/**
+ * Whether a storage key looks like an image: a known image extension, or no
+ * extension at all on the key's last segment. Case-insensitive, and anything
+ * after a `?` or `#` is ignored — a key is not a URL, but a stored one has been
+ * seen to carry a query-looking tail.
+ */
+export function looksLikeImageKey(key: string): boolean {
+  const name = key.split(/[?#]/, 1)[0].split("/").pop() ?? "";
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return true; // no extension (a leading dot is not one either)
+  const extension = name.slice(dot).toLowerCase();
+  return (INLINE_IMAGE_KEY_EXTENSIONS as readonly string[]).includes(extension);
+}
+
+/**
+ * Every stored reference in a run's main output that passes the key prefilter,
+ * in the SDK's discovery order. Pure — `collectArtifacts` is an in-memory walk,
+ * so this costs no network call and is safe on every completed result.
+ */
+export function imageCandidatesOf(mainStuff: unknown): ImageCandidate[] {
+  const seen = new Set<string>();
+  return collectArtifacts(mainStuff)
+    .filter((uri) => {
+      // One reference is one picture, however many times the output names it.
+      // An output that carries the same stored file in two places would
+      // otherwise be fetched twice, billed twice, and shown twice — and, since
+      // `indices` are positions in this list, would give the same picture two
+      // positions.
+      if (seen.has(uri)) return false;
+      seen.add(uri);
+      return true;
+    })
+    .map((uri) => ({ uri, key: storageKeyOf(uri) }))
+    .filter((candidate) => looksLikeImageKey(candidate.key));
 }

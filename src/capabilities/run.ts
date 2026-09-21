@@ -26,6 +26,8 @@ import {
   classifyError,
   summaryForToolError,
   filesInputSchema,
+  imageCandidatesOf,
+  MAX_IMAGE_CANDIDATE_ENTRIES,
   resolveSubmittedFiles,
   toolErrorSchema,
   toolResultContent,
@@ -238,6 +240,18 @@ const runResultsStructuredContentSchema = z.object({
     .boolean()
     .optional()
     .describe("True when main_stuff was bounded down; the full output rides the view-only _meta."),
+  image_candidates: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'State "completed" only, and only when the output references stored files — the pipelex-storage:// references whose storage key looks like an image, as they appear in the output. A free in-memory prefilter over the FULL output, so a reference pruned out of main_stuff still appears here; nothing was fetched and nothing was read, so this is a shortlist, not a verdict. Bounded — see image_candidates_omitted. Pass one of these (or its index in this list) to mthds_show_images to see the picture.',
+    ),
+  image_candidates_omitted: z
+    .number()
+    .optional()
+    .describe(
+      'State "completed" only, and only when something was left out — how many image candidates past the listed ones this result does not enumerate. They are still on the run: mthds_show_images walks the full set.',
+    ),
   usage: runUsageSchema
     .optional()
     .describe(
@@ -327,6 +341,8 @@ export interface RunResultsStructuredContent {
   failure_message?: string;
   main_stuff?: unknown;
   truncated?: boolean;
+  image_candidates?: string[];
+  image_candidates_omitted?: number;
   usage?: RunUsage;
   available_view_specs: ResultsViewSpec[];
   errors?: ToolError[];
@@ -871,12 +887,39 @@ function completedResult(
   const graphSpec = viewsAvailable ? (result.graph_spec ?? undefined) : undefined;
   const usage = summarizeUsage(result);
 
+  // Both walks read the FULL output, not the bounded copy: a reference pruned
+  // out of the model-facing copy is still a file the workshop can save and a
+  // picture mthds_show_images can fetch. Both are in-memory, so a completed
+  // result pays no network call for either, on either shell.
+  const stored = collectArtifacts(result.main_stuff);
+  const candidates = imageCandidatesOf(result.main_stuff);
+  const listedCandidates = candidates.slice(0, MAX_IMAGE_CANDIDATE_ENTRIES);
+
   const structuredContent: RunResultsStructuredContent = {
     status: "ok",
     run_id: runId,
     state: "completed",
     main_stuff: bounded,
     truncated,
+    // Absent — not empty — when the output references no stored file at all,
+    // so a consumer can tell "nothing was produced" from "nothing looked like
+    // an image", and a run with no files costs no field.
+    //
+    // Bounded, and bare references rather than `{ uri, key }` pairs. The walk
+    // deliberately reads the FULL output, so an unbounded projection of it was
+    // model-facing content outside the `MAIN_STUFF_CAP` discipline `main_stuff`
+    // obeys two lines above — a method emitting a large `Image[]` could put
+    // more here than the whole output budget. The key was a fixed-prefix strip
+    // of the reference beside it, so it doubled the cost of the list and told
+    // nobody anything the reference did not.
+    ...(stored.length === 0
+      ? {}
+      : {
+          image_candidates: listedCandidates.map((candidate) => candidate.uri),
+          ...(candidates.length === listedCandidates.length
+            ? {}
+            : { image_candidates_omitted: candidates.length - listedCandidates.length }),
+        }),
     usage: projectRunUsage(usage),
     available_view_specs: graphSpec === undefined ? [] : ["run_graph"],
   };
@@ -890,9 +933,9 @@ function completedResult(
       bounded,
       truncated,
       viewsAvailable,
-      // Counted on the FULL output, not the bounded copy: a reference pruned
-      // out of the model-facing copy is still a file the workshop can save.
-      artifactDownloadAvailable ? collectArtifacts(result.main_stuff).length : 0,
+      stored.length,
+      candidates.length,
+      artifactDownloadAvailable,
     ),
     graphSpec,
     mainStuff: result.main_stuff,
@@ -918,7 +961,9 @@ function completedSummary(
   bounded: unknown,
   truncated: boolean,
   viewsAvailable: boolean,
-  downloadableArtifacts: number,
+  storedFiles: number,
+  imageCandidates: number,
+  artifactDownloadAvailable: boolean,
 ): string {
   const fence =
     typeof bounded === "string"
@@ -933,15 +978,47 @@ function completedSummary(
         : "The output shown above was truncated to fit the response.",
     );
   }
-  // Only on a shell that registers the download tool (the workshop): the
-  // presigned `public_url` links inside the output expire within the hour, so
-  // the moment the results land is the moment to say the files can be saved.
-  if (downloadableArtifacts > 0) {
+  const stored = storedFilesNote(storedFiles, imageCandidates, artifactDownloadAvailable);
+  if (stored !== undefined) parts.push(stored);
+  return parts.join("\n\n");
+}
+
+/**
+ * One merged sentence on the run's stored files: how many there are, how many
+ * look like images, and what can be done with them. The moment the results
+ * land is the moment to say it, because the presigned `public_url` links
+ * inside the output expire within the hour — but this tool itself never
+ * fetches a byte and never puts a picture in the conversation, which is the
+ * whole point of naming `mthds_show_images` here instead.
+ *
+ * The download half is only said on a shell that registers the download tool
+ * (the workshop); the image half is said on both, since `mthds_show_images` is
+ * registered on both. Nothing is said at all when the output references no
+ * stored file.
+ */
+function storedFilesNote(
+  storedFiles: number,
+  imageCandidates: number,
+  artifactDownloadAvailable: boolean,
+): string | undefined {
+  if (storedFiles === 0) return undefined;
+
+  const parts = [
+    imageCandidates === 0
+      ? `The output references ${storedFiles} stored file(s) (\`pipelex-storage://\` references); none of them looks like an image.`
+      : `The output references ${storedFiles} stored file(s) (\`pipelex-storage://\` references), ${imageCandidates} of which look like images (listed as \`image_candidates\`).`,
+  ];
+  if (imageCandidates > 0) {
     parts.push(
-      `The output references ${downloadableArtifacts} stored file(s) (\`pipelex-storage://\` references). To save them under the working directory, call \`mthds_download_artifacts\` with this run id — the presigned \`public_url\` links in the output expire within the hour.`,
+      "To see one, call `mthds_show_images` with this run id — it returns the picture itself, which then stays in this conversation for every turn that follows, so ask for it when someone wants to look at it rather than by reflex.",
     );
   }
-  return parts.join("\n\n");
+  if (artifactDownloadAvailable) {
+    parts.push(
+      "To save the full files under the working directory, call `mthds_download_artifacts` with this run id — the presigned `public_url` links in the output expire within the hour, where that tool resolves a fresh one every time.",
+    );
+  }
+  return parts.join(" ");
 }
 
 function failedResult(runId: string, status: RunStatus, message: string): RunResultsResult {

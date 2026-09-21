@@ -15,12 +15,20 @@ import {
 import type { MthdsFileItem } from "@pipelex/sdk";
 
 import {
+  ALLOW_HTTP_ENV,
+  allowsPlainHttp,
   buildApiConfig,
+  buildArtifactFetchConfig,
   classifyError,
   DEFAULT_API_URL,
   fetchMethodFiles,
   filesInputSchema,
+  imageCandidatesOf,
+  itemToolError,
+  looksLikeImageKey,
+  parseAllowHttpOverride,
   resolveSubmittedFiles,
+  storageKeyOf,
   summaryForToolError,
   toolResultContent,
   validateMethodSelectorRequest,
@@ -937,5 +945,183 @@ describe("fetchMethodFiles", () => {
       expect(result.error.class).toBe("config");
       expect(result.error.location).toBe("PIPELEX_BASE_URL");
     }
+  });
+});
+
+describe("the plain-http rule", () => {
+  it("accepts plain http exactly when the configured API is itself plain http", () => {
+    expect(allowsPlainHttp({ baseUrl: "http://localhost:8081" })).toBe(true);
+    expect(allowsPlainHttp({ baseUrl: DEFAULT_API_URL })).toBe(false);
+    // A malformed base URL refuses; the client constructor reports it as config.
+    expect(allowsPlainHttp({ baseUrl: "not a url" })).toBe(false);
+  });
+
+  it("lets the explicit override win in both directions", () => {
+    expect(allowsPlainHttp({ baseUrl: DEFAULT_API_URL, allowHttp: true })).toBe(true);
+    expect(allowsPlainHttp({ baseUrl: "http://localhost:8081", allowHttp: false })).toBe(false);
+  });
+
+  it("reads the override from the environment, failing closed on an unrecognized value", () => {
+    expect(parseAllowHttpOverride(undefined)).toBeUndefined();
+    expect(parseAllowHttpOverride("  ")).toBeUndefined();
+    expect(parseAllowHttpOverride("true")).toBe(true);
+    expect(parseAllowHttpOverride(" TRUE ")).toBe(true);
+    expect(parseAllowHttpOverride("1")).toBe(true);
+    expect(parseAllowHttpOverride("false")).toBe(false);
+    expect(parseAllowHttpOverride("0")).toBe(false);
+    expect(parseAllowHttpOverride("yes")).toBe(false);
+
+    expect(buildArtifactFetchConfig({ [ALLOW_HTTP_ENV]: "true" }).allowHttp).toBe(true);
+    expect(buildArtifactFetchConfig({})).not.toHaveProperty("allowHttp");
+    expect(buildArtifactFetchConfig({}).baseUrl).toBe(DEFAULT_API_URL);
+  });
+});
+
+describe("itemToolError", () => {
+  it("classifies the SDK's per-item codes and locates each where its caller says", () => {
+    expect(
+      itemToolError({ code: "not_found", detail: "gone (HTTP 404)." }, "artifacts[1].uri"),
+    ).toMatchObject({
+      class: "input_domain",
+      location: "artifacts[1].uri",
+      message: "gone (HTTP 404).",
+      retryable: false,
+    });
+    expect(
+      itemToolError({ code: "too_large", detail: "over the cap" }, "artifacts[0].uri"),
+    ).toMatchObject({
+      class: "input_domain",
+      retryable: false,
+    });
+    expect(
+      itemToolError({ code: "forbidden", detail: "another org" }, "artifacts[0].uri"),
+    ).toMatchObject({
+      class: "input_domain",
+      retryable: false,
+    });
+    for (const code of ["store_refused", "store_error", "timeout", "network", "resolve_failed"]) {
+      expect(itemToolError({ code, detail: "x" }, "artifacts[0].uri")).toMatchObject({
+        class: "runtime",
+        retryable: true,
+      });
+    }
+    expect(
+      itemToolError({ code: "write_failed", detail: "EACCES" }, "artifacts[0].uri"),
+    ).toMatchObject({
+      class: "runtime",
+      retryable: false,
+    });
+  });
+
+  // The locator is a parameter precisely because the table now serves two
+  // tools: the download tool locates at `artifacts[i].uri`, mthds_show_images
+  // at `images[i].uri`, and everything else about the classification is shared.
+  it("carries whichever locator the calling tool names", () => {
+    expect(
+      itemToolError({ code: "not_found", detail: "gone (HTTP 404)." }, "images[2].uri"),
+    ).toMatchObject({
+      class: "input_domain",
+      location: "images[2].uri",
+      message: "gone (HTTP 404).",
+    });
+  });
+
+  it("points a plain-http refusal at the override instead of the SDK option", () => {
+    const error = itemToolError(
+      { code: "plain_http_refused", detail: "pass allowHttp: true to accept it" },
+      "artifacts[0].uri",
+    );
+
+    expect(error.class).toBe("config");
+    expect(error.message).not.toContain("allowHttp");
+    expect(error.hint).toContain(`${ALLOW_HTTP_ENV}=true`);
+  });
+
+  it("reads a code it does not know as a retryable runtime fault", () => {
+    expect(
+      itemToolError({ code: "something_new", detail: "new failure" }, "artifacts[2].uri"),
+    ).toMatchObject({
+      class: "runtime",
+      location: "artifacts[2].uri",
+      message: "new failure",
+      retryable: true,
+    });
+  });
+
+  it("still names a failure when the route sent no detail with it", () => {
+    // `detail` is typed but arrives verbatim off the wire, like the code, and
+    // `message` is required on both tools' error schemas.
+    const missing = itemToolError(
+      { code: "not_found", detail: undefined as unknown as string },
+      "artifacts[0].uri",
+    );
+    expect(missing.message).toContain("gave no reason");
+    expect(missing.message).toContain("not_found");
+    expect(missing.class).toBe("input_domain");
+
+    const blank = itemToolError({ code: "store_refused", detail: "   " }, "artifacts[1].uri");
+    expect(blank.message).toContain("gave no reason");
+  });
+
+  it("reads a code naming an Object.prototype member as an unknown code, not as its member", () => {
+    for (const code of ["constructor", "toString", "valueOf", "__proto__"]) {
+      expect(itemToolError({ code, detail: "off the wire" }, "artifacts[0].uri")).toMatchObject({
+        class: "runtime",
+        location: "artifacts[0].uri",
+        message: "off the wire",
+        retryable: true,
+      });
+    }
+  });
+});
+
+describe("the image-candidate prefilter", () => {
+  const PICTURE = "pipelex-storage://runs/01JRUN/outputs/illustration.png";
+  const REPORT = "pipelex-storage://runs/01JRUN/outputs/report.pdf";
+  const UNTYPED = "pipelex-storage://runs/01JRUN/outputs/blob";
+
+  it("reads a reference's storage key as everything after the scheme", () => {
+    expect(storageKeyOf(PICTURE)).toBe("runs/01JRUN/outputs/illustration.png");
+    // Not a reference at all: answered as-is rather than silently truncated.
+    expect(storageKeyOf("illustration.png")).toBe("illustration.png");
+  });
+
+  it("takes every known image extension, in any case", () => {
+    for (const extension of [".png", ".jpg", ".jpeg", ".gif", ".webp", ".PNG", ".JPeG"]) {
+      expect(looksLikeImageKey(`runs/01JRUN/outputs/picture${extension}`)).toBe(true);
+    }
+  });
+
+  it("takes a key with no extension, because only the fetched type can settle it", () => {
+    expect(looksLikeImageKey("runs/01JRUN/outputs/blob")).toBe(true);
+    // A leading dot is not an extension.
+    expect(looksLikeImageKey("runs/01JRUN/outputs/.hidden")).toBe(true);
+  });
+
+  it("refuses an extension that is plainly not an image", () => {
+    for (const key of ["out/report.pdf", "out/data.json", "out/notes.txt", "out/logo.svg"]) {
+      expect(looksLikeImageKey(key)).toBe(false);
+    }
+  });
+
+  it("ignores a query- or fragment-looking tail on the key", () => {
+    expect(looksLikeImageKey("out/picture.png?v=2")).toBe(true);
+    expect(looksLikeImageKey("out/report.pdf?v=2")).toBe(false);
+  });
+
+  it("walks a whole output and keeps only the candidates, in discovery order", () => {
+    const mainStuff = {
+      cover: { url: PICTURE, public_url: "https://store.example/x" },
+      attachments: [{ url: REPORT }, { url: UNTYPED }],
+    };
+
+    expect(imageCandidatesOf(mainStuff)).toEqual([
+      { uri: PICTURE, key: "runs/01JRUN/outputs/illustration.png" },
+      { uri: UNTYPED, key: "runs/01JRUN/outputs/blob" },
+    ]);
+  });
+
+  it("answers nothing for an output that references no stored file", () => {
+    expect(imageCandidatesOf({ text: "no files here" })).toEqual([]);
   });
 });
