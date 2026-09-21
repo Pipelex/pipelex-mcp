@@ -386,10 +386,12 @@ export interface RunResultsResult {
    */
   outputForm?: unknown;
   /**
-   * The run's `input_form`. Optional even to the renderer, and rides on its own
-   * terms: it is what lets the method's own INPUTS show their value, since no
-   * pipe produced them and so no output descriptor describes them. Absent
-   * changes nothing but those nodes.
+   * The run's `input_form`. It is what lets the method's own INPUTS show their
+   * value, since no pipe produced them and so no output descriptor describes
+   * them, and its absence changes nothing but those nodes. Optional to the
+   * renderer — but optional *given* the pair rather than independent of it, so
+   * it rides only when the pair does. `completedResult` is where that holds,
+   * and says why.
    */
   inputForm?: unknown;
   /**
@@ -923,10 +925,14 @@ function completedResult(
     hasArtifactEntries(result.output_form);
   const pipeIoContracts = artifactsRide ? result.pipe_io_contracts : undefined;
   const outputForm = artifactsRide ? result.output_form : undefined;
-  // Third and independent: the input form is optional to the renderer, and it
-  // answers for the method's own inputs alone — nodes no pipe produced, which
-  // no output descriptor describes. It rides when it has entries and the pair
-  // does, and its absence costs those nodes their value and nothing else.
+  // Third, and optional GIVEN the pair rather than independent of it: the input
+  // form answers for the method's own inputs alone — nodes no pipe produced,
+  // which no output descriptor describes — and its absence costs those nodes
+  // their value and nothing else. It rides when it has entries and the pair
+  // does, because the renderer consults it only inside the gate the pair opens:
+  // shipping it without them renders identically and costs the wire. Should a
+  // later mthds-ui open that gate on the contracts alone, this conjunction
+  // starts costing real input-node values and has to be loosened with it.
   const inputForm =
     artifactsRide && hasArtifactEntries(result.input_form) ? result.input_form : undefined;
   const usage = summarizeUsage(result);
