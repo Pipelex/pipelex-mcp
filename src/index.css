@@ -1,3 +1,28 @@
+/* This one line is what makes the form kernel's cascade layer LOSE to ours, and it
+   has to come first. Layer precedence follows the order the layer NAMES are first
+   declared, never the order the blocks appear — and the kernel's prebuilt sheet
+   (`@layer mthds-form`, imported as a side effect by `@pipelex/mthds-ui/form/react`
+   since mthds-ui 0.21.0) is bundled after this file. Left alone it is therefore
+   declared LAST and outranks `theme`, `base`, `components` and `utilities` — the
+   exact inversion of what the layer is advertised to do. That is not a worry, it is
+   a measurement: before this line, the built stylesheet had the kernel's
+   `.rounded-md` beating the host's (6px where alpic means 8px), its nested `theme`
+   sublayer replacing `--font-sans` and `--font-mono` for the whole console (Inter
+   and JetBrains Mono silently became the generic system stacks), and its `.hidden`
+   beating our `.sm:inline` — the precise bug the layer exists to prevent, happening
+   THROUGH the layer.
+
+   The rule worth carrying away: a cascade layer only protects an UNLAYERED host,
+   which is the assumption mthds-ui's changelog makes. Tailwind 4's host is layered,
+   so the protection never applied here and had to be stated. Naming `mthds-form`
+   before `@import "tailwindcss"` declares it first and puts it under everything.
+
+   Checking it is mechanical, and eyeballing the console is not a substitute: run
+   `npm run build`, then confirm `@layer mthds-form` is named at a LOWER byte offset
+   than `@layer theme` in the stylesheet emitted under `dist/assets`, with
+   `grep -bo` over the layer names. */
+@layer mthds-form;
+
 @import url("https://fonts.googleapis.com/css2?family=Mozilla+Text:wght@400..700&display=swap");
 @import "tailwindcss";
 @import "tw-animate-css";
@@ -27,7 +52,20 @@
    (these views theme by prop today and set it nowhere, which is unchanged here).
    `--input` and `--radius` have no `--color-*` counterpart: shadcn's `--input` is an
    input's border colour, and `--radius` is the base the kernel derives its corners
-   from. */
+   from. `--radius` is load-bearing beyond theming: the kernel's own `.rounded-md`
+   reads `calc(var(--radius) - 2px)`, so where that rule wins an undefined `--radius`
+   collapses the corner to 0 rather than falling back to the host's value.
+
+   ONE COLLISION to know about, measured and currently harmless. `RunPanel` puts the
+   class `dark` AND an inline graph palette on the same element, and that palette
+   defines `--color-accent: #8BE9FD`. An inline declaration beats any stylesheet, so
+   on that element the `.dark` alias below resolves `--accent` to the graph's cyan
+   while `--accent-foreground` stays alpic's white. Nothing reads the pair there
+   today — the kernel's `SelectItem` portals to `document.body`, outside the `.dark`
+   element, and `EnumField` overrides the accent classes through tailwind-merge — but
+   a control that stops overriding them, or a `SelectContent` given a `container`,
+   would render white-on-cyan. `--color-accent` is the only name the graph palette
+   and this bridge both claim; if a second one appears, this stops being latent. */
 :root,
 .dark {
   --background: var(--color-background);
@@ -47,13 +85,16 @@
   --radius: var(--radius-md);
 }
 
-/* No `@source` glob for the form kernel. It used to be required — the controls are
-   Tailwind classes and the build purged the ones nothing else used — but since
-   mthds-ui 0.21.0 the kernel's own prebuilt stylesheet arrives inside a cascade
-   layer (`@pipelex/mthds-ui/form/react` imports it), so scanning the kernel here
-   would emit a SECOND, unlayered copy of those utilities: exactly the state the
-   layer exists to prevent, where a bare `.hidden` outranks the host's `.sm:inline`
-   and the kernel's preflight overrides our border colour. Add nothing. */
+/* No `@source` glob for the form kernel — though not for the reason mthds-ui's
+   changelog gives, which is worth spelling out because the wrong version of it is
+   what shipped here first. The glob used to be required: the controls are Tailwind
+   classes and the build purged the ones nothing else used. Since mthds-ui 0.21.0 the
+   kernel ships a prebuilt sheet that `@pipelex/mthds-ui/form/react` imports itself,
+   so a glob would only duplicate those utilities — into our own `@layer utilities`,
+   note, NOT unlayered as the changelog's framing implies — buying nothing but bytes.
+   Precedence is not this comment's business at all: it is settled by the `@layer`
+   statement at the top of this file. Add nothing here; if the form looks wrong, read
+   the layer order in the built stylesheet before reaching for a glob. */
 
 @theme {
   --font-mozilla: "Mozilla Text", serif;
