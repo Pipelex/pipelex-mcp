@@ -159,13 +159,13 @@ const showImagesStructuredContentSchema = z.object({
     .number()
     .optional()
     .describe(
-      'State "completed" only, and only when something was left out — how many candidates past the listed ones this result does not enumerate, so a run holding a great many pictures cannot flood the response. Name one explicitly in images to reach it.',
+      "State \"completed\" only, and only when something was left out — how many of the candidates THIS CALL considered are past the listed ones and so not enumerated here, so a call cannot flood the response. It counts this listing's truncation, not the run's surplus: a narrowed call that named more than the listing holds reports its own excess here. Reach one by its position with indices, which are positions in the run's full candidate list and not in this listing.",
     ),
   all_inlined: z
     .boolean()
     .optional()
     .describe(
-      'State "completed" only — true when every candidate this run produced became an image block: nothing withheld, nothing failed, and nothing omitted (vacuously true when there was no candidate).',
+      'State "completed" only — true when every candidate THIS RUN produced became an image block: nothing withheld, nothing failed, nothing omitted from the listing, and nothing left unconsidered by a narrowed images/indices selection (vacuously true when the run produced no candidate). So a narrowed call reports false whenever the run holds a picture it did not ask for, and this member keeps answering "is everything this run produced now in front of me" rather than "did what I asked for arrive".',
     ),
   errors: z.array(toolErrorSchema).optional(),
 });
@@ -347,7 +347,7 @@ export async function showMthdsRunImages(
     return emptyWalkResult(runId, context.artifactDownloadAvailable === true);
   }
 
-  const walk = await walkCandidates(client, context, selection.selected);
+  const walk = await walkCandidates(client, context, selection.selected, candidates.length);
 
   // A whole-request refusal — the resolve route rejecting the credential, a
   // plan limit, an unreachable host — is not about one picture, and when it
@@ -446,8 +446,24 @@ export function selectCandidates(
 interface Walk {
   entries: ShownImageEntry[];
   blocks: ContentImage[];
-  /** Candidates past {@link MAX_IMAGE_CANDIDATE_ENTRIES} that this result does not enumerate. */
+  /**
+   * Candidates this call CONSIDERED that are past
+   * {@link MAX_IMAGE_CANDIDATE_ENTRIES} and so are not enumerated. This is the
+   * listing's own truncation; what the caller's selection left out of the run
+   * entirely is {@link Walk.unselected}.
+   */
   omitted: number;
+  /**
+   * Candidates the run produced that this call never considered, because
+   * `images` or `indices` named others. Zero for a call that narrowed nothing.
+   *
+   * It exists so `all_inlined` can keep the meaning it is documented with. The
+   * walk only ever sees the selection, so a five-picture run asked for one
+   * picture had `omitted === 0` and every entry inlined, and reported
+   * `all_inlined: true` — telling a consumer that everything the run produced
+   * was on screen while four pictures had never been fetched.
+   */
+  unselected: number;
   /**
    * The failure that was not about any one picture and ended the walk, when
    * one occurred. It rides its own entry as well; this copy is what lets the
@@ -487,6 +503,7 @@ async function walkCandidates(
   client: ImagesClient,
   context: ImagesContext,
   selected: ImageCandidate[],
+  produced: number,
 ): Promise<Walk> {
   const entries: ShownImageEntry[] = [];
   const blocks: ContentImage[] = [];
@@ -656,6 +673,7 @@ async function walkCandidates(
     entries,
     blocks,
     omitted: selected.length - listed.length,
+    unselected: produced - selected.length,
     ...(wholeRequestError === undefined ? {} : { wholeRequestError }),
   };
 }
@@ -783,10 +801,14 @@ export function completedResult(
       images: walk.entries,
       // Absent rather than zero, like every other "nothing to say" member here.
       ...(walk.omitted === 0 ? {} : { omitted: walk.omitted }),
-      // Omission counts against it: "everything this run produced is now in
-      // front of you" is the question this member answers, and a candidate the
-      // result never enumerated is not in front of anybody.
-      all_inlined: walk.omitted === 0 && walk.entries.every((entry) => entry.inlined),
+      // "Everything this run produced is now in front of you" is the question
+      // this member answers, so every way a candidate can fail to be in front
+      // of the caller counts against it: withheld, failed, past the listing's
+      // cap — and, the one that was missing, never selected at all. The walk
+      // sees only the selection, so a narrowed call answered for the selection
+      // and claimed the run.
+      all_inlined:
+        walk.omitted === 0 && walk.unselected === 0 && walk.entries.every((entry) => entry.inlined),
     },
     summary: completedSummary(runId, walk, artifactDownloadAvailable),
     imageBlocks: walk.blocks,
@@ -816,8 +838,21 @@ function completedSummary(runId: string, walk: Walk, artifactDownloadAvailable: 
   );
 
   if (walk.omitted > 0) {
+    // What this counts is the listing's truncation, which equals the run's
+    // surplus only when the call considered the whole run. Saying "this run
+    // produced N further" was therefore wrong for every narrowed call, and
+    // `images` is the wrong instrument besides: the references past the cap
+    // are exactly the ones no tool enumerates, so there is nothing to name.
+    // `indices` is positional over the run's full list and always reaches them.
+    const considered = walk.entries.length + walk.omitted;
     parts.push(
-      `This run produced ${walk.omitted} further picture(s) that this result does not list; name one in \`images\` to reach it.`,
+      `This call considered ${considered} picture(s) and lists the first ${walk.entries.length}; the other ${walk.omitted} are not enumerated here. Reach one with \`indices\` — positions run over this run's full candidate list, not over this listing.`,
+    );
+  }
+
+  if (walk.unselected > 0) {
+    parts.push(
+      `The run holds ${walk.unselected} further picture(s) this call did not consider, because \`images\`/\`indices\` named others — so \`all_inlined\` is false even though everything named arrived.`,
     );
   }
 

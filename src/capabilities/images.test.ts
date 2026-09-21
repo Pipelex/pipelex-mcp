@@ -637,7 +637,69 @@ describe("showMthdsRunImages", () => {
     expect(result.structuredContent.omitted).toBe(5);
     // Omission counts against it: a candidate nobody enumerated is not shown.
     expect(result.structuredContent.all_inlined).toBe(false);
-    expect(result.summary).toContain("5 further picture(s)");
+    expect(result.summary).toContain("the other 5 are not enumerated here");
+    // `indices` is the route that reaches them; `images` cannot, because the
+    // references past the cap are exactly the ones nothing enumerates.
+    expect(result.summary).toContain("`indices`");
+  });
+
+  it("reports all_inlined false when a narrowed call left a run candidate unconsidered", async () => {
+    // The walk only ever sees the selection, so `all_inlined` used to answer
+    // "did what I asked for arrive" while the schema and SPEC both promise it
+    // answers "is everything this run produced now in front of me". A
+    // consumer branching on the documented meaning concluded the whole run was
+    // on screen and never showed the rest.
+    const { client } = fakeClient({ [COVER]: { response: () => imageResponse(TINY_PNG) } });
+
+    const result = await showMthdsRunImages({ run_id: RUN_ID, images: [COVER] }, context(client));
+
+    expect(result.structuredContent.images).toEqual([
+      { uri: COVER, mime_type: "image/png", bytes: TINY_PNG.length, inlined: true },
+    ]);
+    // Everything asked for arrived, and the run still holds two more.
+    expect(result.structuredContent.all_inlined).toBe(false);
+    expect(result.summary).toContain("2 further picture(s) this call did not consider");
+  });
+
+  it("keeps all_inlined true when the call considered every candidate the run produced", async () => {
+    const { client } = fakeClient({
+      [COVER]: { response: () => imageResponse(TINY_PNG) },
+      [THUMB]: { response: () => imageResponse(TINY_PNG, "image/jpeg") },
+      [UNTYPED]: { response: () => imageResponse(TINY_PNG) },
+    });
+
+    const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
+
+    expect(result.structuredContent.all_inlined).toBe(true);
+    expect(result.summary).not.toContain("did not consider");
+  });
+
+  it("counts omitted as this listing's truncation, never as the run's surplus", async () => {
+    // A hundred candidates, forty of them named. The listing truncates at 32,
+    // so `omitted` is 8 — the call's own excess — while the run holds 60 more
+    // the call never considered. The old prose called those 8 "further
+    // picture(s) this run produced", which is a different and wrong number.
+    const pictures = Array.from(
+      { length: 100 },
+      (_unused, index) => `pipelex-storage://runs/01JRUN/outputs/frame-${index}.png`,
+    );
+    const named = pictures.slice(0, 40);
+    const answers = Object.fromEntries(
+      pictures
+        .slice(0, MAX_INLINE_IMAGES)
+        .map((uri) => [uri, { response: () => imageResponse(TINY_PNG) }]),
+    );
+    const { client } = fakeClient(answers, completedRun(pictures.map((url) => ({ url }))));
+
+    const result = await showMthdsRunImages({ run_id: RUN_ID, images: named }, context(client));
+
+    expect(result.structuredContent.omitted).toBe(8);
+    expect(result.summary).toContain("This call considered 40 picture(s) and lists the first 32");
+    expect(result.summary).toContain("the other 8 are not enumerated here");
+    expect(result.summary).toContain(
+      "The run holds 60 further picture(s) this call did not consider",
+    );
+    expect(result.structuredContent.all_inlined).toBe(false);
   });
 
   it("produces a verdict, not an error, for a run that is still running", async () => {
