@@ -195,7 +195,7 @@ const mainPipeSignatureSchema = z.object({
         .array(z.string())
         .optional()
         .describe(
-          'Where images sit inside the produced output, as paths from its root: "$" is the output itself, "$.name" a field of it, "$[]" an element of a list, "$[].name" a field of one. A top-level Image output is ["$"] and an Image[] is ["$[]"], so "this method produces pictures" is images.length > 0. An empty array means the server described the output and it contains none; an ABSENT member means the server described nothing, which is unknown rather than none.',
+          'Where images sit inside the produced output, as paths from its root: "$" is the output itself, "$.name" a field of it, "$[]" an element of a list, "$[].name" a field of one. A top-level Image output is ["$"] and an Image[] is ["$[]"], so "this method produces pictures" is images.length > 0. An empty array means the server described the WHOLE output and it holds no image; an ABSENT member means the answer is unknown, which is never to be read as none. A non-empty array names positions that really do hold images, and is exhaustive unless part of the description was opaque.',
         ),
     })
     .describe("What the main pipe produces."),
@@ -742,7 +742,19 @@ export function mainPipeSignatureOf(
   // and this is presentation riding beside it.
   const outputNode = outputFormFieldOf(report.output_form, mainPipeRef);
   if (outputNode !== undefined) {
-    output.images = imageFieldPaths(outputNode);
+    const walked = imageFieldPaths(outputNode);
+    // The member rides only when it is a truthful answer, which is the whole
+    // reason the walk reports its own completeness. An incomplete walk that
+    // found nothing would otherwise emit `[]` — "the server described the
+    // output and it holds no image" — for a descriptor that said no such
+    // thing, and a consumer applying the documented `images.length > 0` rule
+    // would read a confident no off an opaque node. An incomplete walk that
+    // DID find an image still rides: those positions do hold pictures, and
+    // downgrading a known yes to "unknown" would lose the signal this member
+    // exists for.
+    if (walked.paths.length > 0 || walked.complete) {
+      output.images = walked.paths;
+    }
   }
 
   return { pipe_ref: mainPipeRef, inputs, output };
@@ -754,22 +766,24 @@ export function mainPipeSignatureOf(
  * kind a later version of the standard adds fails the BUILD here instead of
  * silently reading as "no images in there".
  */
-const IMAGE_WALK: Record<FieldKind, "yield" | "fields" | "item" | "opaque"> = {
-  text: "opaque",
-  prose: "opaque",
-  date: "opaque",
-  number: "opaque",
-  boolean: "opaque",
-  enum: "opaque",
+const IMAGE_WALK: Record<FieldKind, "yield" | "fields" | "item" | "none" | "opaque"> = {
+  text: "none",
+  prose: "none",
+  date: "none",
+  number: "none",
+  boolean: "none",
+  enum: "none",
   // Deliberate: documents are not pictures and are not inlined anywhere in this
   // server. A `documents` member is a later increment, not a silent inclusion.
-  document: "opaque",
+  // "none" and not "opaque": a document is a node the walk fully understood and
+  // that holds no picture, which is a complete answer.
+  document: "none",
   image: "yield",
   object: "fields",
   list: "item",
   // The standard's escape hatch — a producer that could not map a node honestly.
-  // Opaque is the only truthful reading: there may be an image inside and there
-  // is no way to know.
+  // The ONLY opaque member, because it is the only one where "no image here"
+  // would be a guess: there may be an image inside and no way to know.
   unknown: "opaque",
 };
 
@@ -792,31 +806,66 @@ const MAX_OUTPUT_FORM_DEPTH = 32;
  * narrowing in this file: the SDK's declared type is what the wire is supposed
  * to carry, not proof of what arrived, and a malformed node must cost its own
  * subtree and nothing else.
+ *
+ * The walk reports whether it was **complete** beside the paths it found,
+ * because `[]` and "nobody said" are different answers and only the walk knows
+ * which one it is holding. An opaque node (`kind: "unknown"`), a kind this
+ * build does not know, a node that is not a record, a field with no usable
+ * name, and the depth ceiling each mean a subtree was never looked into — so
+ * the empty list they produce is "could not tell", never "there are none".
  */
-export function imageFieldPaths(field: unknown, path = "$", depth = 0): string[] {
+export function imageFieldPaths(field: unknown, path = "$", depth = 0): ImageWalk {
   const node = asRecord(field);
   if (node === undefined || !isFieldKind(node.kind) || depth >= MAX_OUTPUT_FORM_DEPTH) {
-    return [];
+    // Not a record, a kind this build does not know, or too deep to follow —
+    // three ways of not having looked, and none of them is "there are none".
+    return { paths: [], complete: false };
   }
   switch (IMAGE_WALK[node.kind]) {
     case "yield":
-      return [path];
-    case "fields":
-      return Array.isArray(node.fields)
-        ? node.fields.flatMap((child) => {
-            const record = asRecord(child);
-            const name =
-              record !== undefined && typeof record.name === "string" && record.name.length > 0
-                ? record.name
-                : undefined;
-            return name === undefined ? [] : imageFieldPaths(child, `${path}.${name}`, depth + 1);
-          })
-        : [];
+      return { paths: [path], complete: true };
+    case "none":
+      return { paths: [], complete: true };
+    case "opaque":
+      return { paths: [], complete: false };
+    case "fields": {
+      if (!Array.isArray(node.fields)) {
+        return { paths: [], complete: false };
+      }
+      const paths: string[] = [];
+      let complete = true;
+      for (const child of node.fields) {
+        const record = asRecord(child);
+        const name =
+          record !== undefined && typeof record.name === "string" && record.name.length > 0
+            ? record.name
+            : undefined;
+        if (name === undefined) {
+          // A field with no usable name is a subtree that was never walked, so
+          // what lies below this node is not known to be complete.
+          complete = false;
+          continue;
+        }
+        const walked = imageFieldPaths(child, `${path}.${name}`, depth + 1);
+        paths.push(...walked.paths);
+        complete &&= walked.complete;
+      }
+      return { paths, complete };
+    }
     case "item":
       return imageFieldPaths(node.item, `${path}[]`, depth + 1);
-    case "opaque":
-      return [];
   }
+}
+
+/**
+ * What {@link imageFieldPaths} found, and whether it saw the whole output.
+ * `complete: false` means some subtree was opaque or unreadable, so an empty
+ * `paths` is "could not tell" rather than "there are none" — the distinction
+ * `main_pipe.output.images` is contracted on.
+ */
+export interface ImageWalk {
+  paths: string[];
+  complete: boolean;
 }
 
 /**

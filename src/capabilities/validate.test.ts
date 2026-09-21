@@ -693,7 +693,10 @@ describe("main pipe signature", () => {
 describe("the produces-images signal", () => {
   describe("imageFieldPaths", () => {
     it("reads a top-level image as the output's own root", () => {
-      expect(imageFieldPaths({ name: "output", kind: "image", required: true })).toEqual(["$"]);
+      expect(imageFieldPaths({ name: "output", kind: "image", required: true })).toEqual({
+        paths: ["$"],
+        complete: true,
+      });
     });
 
     it("reads a plural image output through the descriptor's own list wrap", () => {
@@ -707,7 +710,7 @@ describe("the produces-images signal", () => {
           required: true,
           item: { kind: "image", concept_ref: "native.Image", required: true },
         }),
-      ).toEqual(["$[]"]);
+      ).toEqual({ paths: ["$[]"], complete: true });
     });
 
     it("names each image field of a structured output, and skips the rest", () => {
@@ -724,7 +727,9 @@ describe("the produces-images signal", () => {
             { name: "thumbnail", kind: "image", required: false },
           ],
         }),
-      ).toEqual(["$.picture", "$.thumbnail"]);
+        // Complete: prose and document are kinds the walk fully understands and
+        // that hold no picture, so the set below is known to be exhaustive.
+      ).toEqual({ paths: ["$.picture", "$.thumbnail"], complete: true });
     });
 
     it("walks into a list of structured outputs", () => {
@@ -741,14 +746,62 @@ describe("the produces-images signal", () => {
             fields: [{ name: "picture", kind: "image", required: true }],
           },
         }),
-      ).toEqual(["$[].picture"]);
+      ).toEqual({ paths: ["$[].picture"], complete: true });
     });
 
-    it("treats an unknown node as opaque rather than guessing what is inside", () => {
+    it("treats an unknown node as opaque, and says the walk was incomplete", () => {
       // The standard's escape hatch: a producer that could not map the node
       // honestly. There may be an image in there and there is no way to know,
-      // so the only truthful answer is to report none.
-      expect(imageFieldPaths({ name: "output", kind: "unknown", required: true })).toEqual([]);
+      // so the empty list MUST be reported as "could not tell" — the caller
+      // withholds the member on it rather than publishing a confident none.
+      expect(imageFieldPaths({ name: "output", kind: "unknown", required: true })).toEqual({
+        paths: [],
+        complete: false,
+      });
+    });
+
+    it("stays complete through kinds that are understood and hold no picture", () => {
+      // A document is deliberately not a picture. That is an ANSWER, not a
+      // failure to look, so it must not poison the walk's completeness.
+      for (const kind of ["text", "prose", "date", "number", "boolean", "enum", "document"]) {
+        expect(imageFieldPaths({ name: "output", kind, required: true })).toEqual({
+          paths: [],
+          complete: true,
+        });
+      }
+    });
+
+    it("reports incomplete for a kind this build does not know", () => {
+      // A kind a later version of the standard adds. Reading it as "no images"
+      // is the exact false negative the completeness flag exists to prevent.
+      expect(imageFieldPaths({ name: "output", kind: "hologram", required: true })).toEqual({
+        paths: [],
+        complete: false,
+      });
+    });
+
+    it("reports incomplete past the depth ceiling", () => {
+      let node: unknown = { name: "output", kind: "image", required: true };
+      for (let i = 0; i < 40; i += 1) {
+        node = { name: "output", kind: "list", required: true, item: node };
+      }
+      expect(imageFieldPaths(node)).toEqual({ paths: [], complete: false });
+    });
+
+    it("keeps a found image while reporting the walk incomplete beside it", () => {
+      // The mixed case: one subtree is opaque, another really does hold a
+      // picture. The paths are still true; the set is just not exhaustive.
+      expect(
+        imageFieldPaths({
+          name: "output",
+          kind: "object",
+          required: true,
+          fields: [
+            { name: "picture", kind: "image", required: true },
+            { name: "extra", kind: "unknown", required: false },
+          ],
+        }),
+      ).toEqual({ paths: ["$.picture"], complete: false });
     });
 
     it("costs a malformed node its own subtree and nothing else", () => {
@@ -765,13 +818,18 @@ describe("the produces-images signal", () => {
           ],
         }),
         // The nameless image is skipped too: a path needs a name to be a path.
-      ).toEqual(["$.picture"]);
+        // Each skipped child is a subtree nobody walked, so the set is not
+        // known to be exhaustive.
+      ).toEqual({ paths: ["$.picture"], complete: false });
     });
 
     it("answers nothing for a node that is not a node at all", () => {
-      expect(imageFieldPaths(undefined)).toEqual([]);
-      expect(imageFieldPaths("a string")).toEqual([]);
-      expect(imageFieldPaths({ name: "output", required: true })).toEqual([]);
+      expect(imageFieldPaths(undefined)).toEqual({ paths: [], complete: false });
+      expect(imageFieldPaths("a string")).toEqual({ paths: [], complete: false });
+      expect(imageFieldPaths({ name: "output", required: true })).toEqual({
+        paths: [],
+        complete: false,
+      });
     });
   });
 
@@ -800,6 +858,53 @@ describe("the produces-images signal", () => {
 
       expect(result.structuredContent.main_pipe?.output.images).toEqual(["$"]);
       expect(result.summary).toContain("-> native.Text (produces images)");
+    });
+
+    it("leaves the member ABSENT when the walk could not see the whole output", () => {
+      // The four-reviewer finding of round 1. `[]` is contracted to mean "the
+      // server described the WHOLE output and it holds no image", so emitting
+      // it off a node the walk could not read is a confident false negative —
+      // a consumer applying the documented `images.length > 0` rule would skip
+      // the image workflow on a method that may well produce pictures.
+      for (const field of [
+        { name: "output", kind: "unknown", required: true },
+        { name: "output", kind: "not_a_kind", required: true },
+        { name: "output", required: true },
+        {
+          name: "output",
+          kind: "object",
+          required: true,
+          fields: [{ name: "inner", kind: "unknown", required: true }],
+        },
+      ]) {
+        const result = validationResult({ ...validReport, output_form: outputFormOf(field) }, true);
+
+        expect(result.structuredContent.main_pipe?.output).not.toHaveProperty("images");
+        expect(result.summary).not.toContain("produces images");
+      }
+    });
+
+    it("still reports an image the walk DID find, though the rest was opaque", () => {
+      // Downgrading a known yes to "unknown" would lose the very signal the
+      // member exists for, so a non-empty list rides even when incomplete.
+      const result = validationResult(
+        {
+          ...validReport,
+          output_form: outputFormOf({
+            name: "output",
+            kind: "object",
+            required: true,
+            fields: [
+              { name: "picture", kind: "image", required: true },
+              { name: "extra", kind: "unknown", required: false },
+            ],
+          }),
+        },
+        true,
+      );
+
+      expect(result.structuredContent.main_pipe?.output.images).toEqual(["$.picture"]);
+      expect(result.summary).toContain("(produces images)");
     });
 
     it("leaves the member ABSENT when no descriptor arrived, which is unknown and not none", () => {
