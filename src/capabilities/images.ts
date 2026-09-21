@@ -76,10 +76,17 @@ export const INLINE_IMAGE_TIMEOUT_MS = 30_000;
  * pictures that had already arrived and the reasons for the ones that had
  * not, which is the one outcome partial success exists to prevent.
  *
- * So the walk carries its own deadline: each fetch gets whichever is smaller,
- * its own timeout or the time left, and a candidate the deadline has already
- * passed is withheld as `deadline` without being attempted. Chosen well under
- * the accumulated worst case and generous for six fetches of objects capped at
+ * So the walk carries its own deadline — and it carries it TWO ways, because
+ * `timeoutMs` alone does not hold it. The SDK resolves the storage reference
+ * before arming that timer, and the resolve runs under a fixed budget of its
+ * own, so a stalled resolve adds a whole further timeout to the candidate
+ * being started: 90s of walk against this 60s, and ~120s of tool call once the
+ * run lookup ahead of it is counted. Each fetch therefore gets whichever
+ * timeout is smaller, its own or the time left, AND an `AbortSignal` for the
+ * time left, which is the only thing reaching the resolve as well as the body.
+ * A candidate the deadline has already passed is withheld as `deadline`
+ * without being attempted. Chosen well under the accumulated worst case and
+ * generous for six fetches of objects capped at
  * {@link MAX_INLINE_IMAGE_BYTES}.
  */
 export const INLINE_IMAGES_DEADLINE_MS = 60_000;
@@ -460,7 +467,8 @@ interface Walk {
  * It is bounded a fourth way, in time: {@link INLINE_IMAGES_DEADLINE_MS} caps
  * the whole walk, because the per-image timeout is per image and a sequential
  * walk of stalled objects would otherwise accumulate them into a call no host
- * will wait for.
+ * will wait for. The cap is applied as a timeout AND as an abort signal, since
+ * the SDK's timeout starts only after it has resolved the reference.
  *
  * And it is bounded a fifth way, in length: at most
  * {@link MAX_IMAGE_CANDIDATE_ENTRIES} candidates are enumerated at all, the
@@ -506,14 +514,33 @@ async function walkCandidates(
     }
     attempts += 1;
 
+    // `timeoutMs` bounds the body fetch alone — the SDK resolves the reference
+    // first, under a budget of its own, and only a signal reaches that half.
+    // Without this the walk could spend a whole extra resolve past its own
+    // deadline on the candidate it was starting.
+    const deadline = AbortSignal.timeout(remaining);
+
     let response: Response;
     try {
       response = await client.fetchArtifact(candidate.uri, {
         maxBytes: MAX_INLINE_IMAGE_BYTES,
         timeoutMs: Math.min(INLINE_IMAGE_TIMEOUT_MS, remaining),
         allowHttp,
+        signal: deadline,
       });
     } catch (err) {
+      // This tool's OWN deadline, which is a withholding and not a fault. The
+      // SDK re-throws a caller's abort untouched, so it arrives as a raw
+      // DOMException rather than an ArtifactFetchError and would otherwise
+      // fall through to the whole-request arm below — reporting this tool's
+      // time budget as a failure of the request, and as a no-verdict when
+      // nothing had yet been inlined. `stopped` is deliberately not set: the
+      // next candidate reads `remaining <= 0` and is withheld the same way,
+      // which is the truthful reason, where `count` would not be.
+      if (deadline.aborted) {
+        entries.push({ uri: candidate.uri, inlined: false, withheld: "deadline" });
+        continue;
+      }
       if (err instanceof ArtifactFetchError) {
         // `too_large` is this tool's OWN cap refusing a declared size, not a
         // fault: it is a withholding with a reason, so the caller reads "too
@@ -570,6 +597,16 @@ async function walkCandidates(
     try {
       bytes = Buffer.from(await response.arrayBuffer());
     } catch (err) {
+      // The deadline can fire mid-body too, and reads the same way there.
+      if (deadline.aborted) {
+        entries.push({
+          uri: candidate.uri,
+          mime_type: mimeType,
+          inlined: false,
+          withheld: "deadline",
+        });
+        continue;
+      }
       // The cap is also enforced per chunk, so a lying `Content-Length` errors
       // the stream here with the same code the declared-size refusal used.
       if (err instanceof ArtifactFetchError && err.code === "too_large") {

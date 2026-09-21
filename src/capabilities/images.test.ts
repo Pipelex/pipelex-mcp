@@ -1,6 +1,6 @@
 import { ApiResponseError, ApiUnreachableError, ArtifactFetchError } from "@pipelex/sdk";
 import type { FetchArtifactOptions, RunResultState } from "@pipelex/sdk";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   INLINE_IMAGES_DEADLINE_MS,
@@ -107,6 +107,23 @@ function fakeClient(
 
 function context(client: ImagesClient, overrides: Partial<ImagesContext> = {}): ImagesContext {
   return { baseUrl: DEFAULT_API_URL, apiKey: "plx_sk_test", client, ...overrides };
+}
+
+/**
+ * Drive `Date.now` through a fixed script, so the deadline's arithmetic can be
+ * exercised at its boundaries without a test that really waits a minute. The
+ * walk reads the clock once for `startedAt` and once per candidate it reaches,
+ * so the script is `[start, atCandidate0, atCandidate1, ...]`; the last value
+ * is held for any further read.
+ */
+function scriptedClock(times: number[]): () => void {
+  let next = 0;
+  const spy = vi.spyOn(Date, "now").mockImplementation(() => {
+    const value = times[Math.min(next, times.length - 1)];
+    next += 1;
+    return value;
+  });
+  return () => spy.mockRestore();
 }
 
 function apiError(route: string, status: number, message: string): ApiResponseError {
@@ -257,11 +274,20 @@ describe("showMthdsRunImages", () => {
 
     await showMthdsRunImages({ run_id: RUN_ID, images: [COVER] }, context(client));
 
-    expect(fetches[0].options).toEqual({
+    expect(fetches[0].options).toMatchObject({
       maxBytes: MAX_INLINE_IMAGE_BYTES,
       timeoutMs: INLINE_IMAGE_TIMEOUT_MS,
       allowHttp: false,
     });
+    // The signal is not decoration: `timeoutMs` starts only once the SDK has
+    // resolved the reference, so the signal is the only bound on the resolve.
+    expect(fetches[0].options?.signal).toBeInstanceOf(AbortSignal);
+    expect(Object.keys(fetches[0].options ?? {}).sort()).toEqual([
+      "allowHttp",
+      "maxBytes",
+      "signal",
+      "timeoutMs",
+    ]);
   });
 
   it("derives the plain-http rule from the configured API, like the download tool", async () => {
@@ -499,26 +525,97 @@ describe("showMthdsRunImages", () => {
     expect(result.structuredContent.all_inlined).toBe(false);
   });
 
-  it("gives each fetch what is left of the call's total budget, not its own timeout", async () => {
+  it("clamps a later fetch to what is left of the call's budget, not its own timeout", async () => {
     // The per-image timeout is per image and the walk is sequential, so
     // without a shared deadline six stalled objects held one call for three
     // minutes and more — and a host with a shorter deadline lost the whole
     // call, pictures already fetched included.
+    //
+    // This asserts the clamp ITSELF, with a number only the clamp can produce.
+    // An assertion that each timeout is merely <= INLINE_IMAGE_TIMEOUT_MS and
+    // <= INLINE_IMAGES_DEADLINE_MS holds just as well when every fetch gets
+    // the flat per-image timeout, so it passed with the deadline deleted.
     const { client, fetches } = fakeClient({
       [COVER]: { response: () => imageResponse(TINY_PNG) },
       [THUMB]: { response: () => imageResponse(TINY_PNG, "image/jpeg") },
-      [UNTYPED]: { response: () => imageResponse(TINY_PNG) },
     });
 
-    await showMthdsRunImages({ run_id: RUN_ID }, context(client));
-
-    for (const fetch of fetches) {
-      const timeout = fetch.options?.timeoutMs ?? 0;
-      expect(timeout).toBeLessThanOrEqual(INLINE_IMAGE_TIMEOUT_MS);
-      expect(timeout).toBeGreaterThan(0);
-      // The deadline is the ceiling the per-image timeout is clamped against.
-      expect(timeout).toBeLessThanOrEqual(INLINE_IMAGES_DEADLINE_MS);
+    // 50s of the 60s budget is gone by the time the second candidate starts.
+    const restore = scriptedClock([0, 0, 50_000]);
+    try {
+      await showMthdsRunImages({ run_id: RUN_ID, images: [COVER, THUMB] }, context(client));
+    } finally {
+      restore();
     }
+
+    expect(fetches).toHaveLength(2);
+    expect(fetches[0].options?.timeoutMs).toBe(INLINE_IMAGE_TIMEOUT_MS);
+    expect(fetches[1].options?.timeoutMs).toBe(INLINE_IMAGES_DEADLINE_MS - 50_000);
+    expect(fetches[1].options?.timeoutMs).toBeLessThan(INLINE_IMAGE_TIMEOUT_MS);
+  });
+
+  it("withholds a candidate the deadline has already passed, without attempting it", async () => {
+    const { client, fetches } = fakeClient({
+      [COVER]: { response: () => imageResponse(TINY_PNG) },
+      [THUMB]: { response: () => imageResponse(TINY_PNG, "image/jpeg") },
+    });
+
+    // The budget is spent before the second candidate is reached.
+    const restore = scriptedClock([0, 0, INLINE_IMAGES_DEADLINE_MS + 1_000]);
+    let result;
+    try {
+      result = await showMthdsRunImages(
+        { run_id: RUN_ID, images: [COVER, THUMB] },
+        context(client),
+      );
+    } finally {
+      restore();
+    }
+
+    expect(fetches.map((fetch) => fetch.uri)).toEqual([COVER]);
+    expect(result.structuredContent.images?.[1]).toEqual({
+      uri: THUMB,
+      inlined: false,
+      withheld: "deadline",
+    });
+    // Withheld, not failed — and the picture that did arrive is still shown.
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.imageBlocks).toHaveLength(1);
+  });
+
+  it("reads its own deadline abort as a withholding, never as a whole-request failure", async () => {
+    // The SDK re-throws a caller's abort untouched, so the deadline arrives as
+    // a raw DOMException rather than an ArtifactFetchError. Left to the
+    // whole-request arm it would end the walk AND — with nothing yet inlined —
+    // turn this tool's own time budget into a `status: "error"` no-verdict.
+    const fetches: string[] = [];
+    const client: ImagesClient = {
+      getRunResult: () => Promise.resolve(completedRun()),
+      fetchArtifact: (uri, options) => {
+        fetches.push(uri);
+        return new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener("abort", () => {
+            reject((options.signal as AbortSignal).reason);
+          });
+        });
+      },
+    };
+
+    // 10ms left of the budget, so the signal really fires, quickly.
+    const restore = scriptedClock([0, INLINE_IMAGES_DEADLINE_MS - 10]);
+    let result;
+    try {
+      result = await showMthdsRunImages({ run_id: RUN_ID, images: [COVER] }, context(client));
+    } finally {
+      restore();
+    }
+
+    expect(fetches).toEqual([COVER]);
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.errors).toBeUndefined();
+    expect(result.structuredContent.images).toEqual([
+      { uri: COVER, inlined: false, withheld: "deadline" },
+    ]);
   });
 
   it("enumerates at most the entry cap, and counts the rest as omitted", async () => {
