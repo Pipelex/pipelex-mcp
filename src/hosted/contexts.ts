@@ -79,6 +79,16 @@ function overrideContexts(
 ): ToolContexts {
   return {
     catalog: { ...base.catalog, apiKey, authError },
+    // Overridden although the console registers neither catalog-write tool: the
+    // override is a property of the context table, and a context left un-keyed
+    // here would be a latent bug the day the console serves one of the inline
+    // halves.
+    catalogWrite: {
+      ...base.catalogWrite,
+      apiKey,
+      authError,
+      validation: { ...base.catalogWrite.validation, apiKey, authError },
+    },
     validation: { ...base.validation, apiKey, authError },
     inputs: { ...base.inputs, apiKey, authError },
     codegen: { ...base.codegen, apiKey, authError },

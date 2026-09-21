@@ -31,6 +31,22 @@ import {
 } from "./capabilities/catalog.js";
 import type { CatalogContext, MthdsListMethodsInput } from "./capabilities/catalog.js";
 import {
+  buildCatalogWriteContext,
+  getMethodToolResult,
+  getMthdsMethod,
+  mthdsGetMethodInputSchema,
+  mthdsGetMethodOutputSchema,
+  mthdsSaveMethodInputSchema,
+  mthdsSaveMethodOutputSchema,
+  saveMethodToolResult,
+  saveMthdsMethod,
+} from "./capabilities/catalog-write.js";
+import type {
+  CatalogWriteContext,
+  MthdsGetMethodInput,
+  MthdsSaveMethodInput,
+} from "./capabilities/catalog-write.js";
+import {
   CODEGEN_TARGET_RULE,
   buildCodegenContext,
   codegenToolResult,
@@ -99,6 +115,12 @@ export const PIPELEX_MCP_SERVER_INFO = {
 
 export interface ToolContexts {
   catalog: CatalogContext;
+  /**
+   * Consumed by the workshop-only mthds_save_method / mthds_get_method. Built on
+   * both shells so one builder serves both; the console registers neither tool,
+   * and neither would work there — both need a filesystem.
+   */
+  catalogWrite: CatalogWriteContext;
   validation: ValidationContext;
   inputs: InputsContext;
   codegen: CodegenContext;
@@ -115,6 +137,13 @@ export interface ToolContexts {
 interface ToolContextOptions {
   env?: NodeJS.ProcessEnv;
   resolver?: FileResolver;
+  /**
+   * Resolves `{ path }` items of `mthds_save_method`'s `python`, gated on `.py`
+   * where `resolver` is gated on `.mthds`. Separate because the extension IS the
+   * read boundary: one resolver taking both would let a `.mthds` argument read a
+   * `.py` file and the other way round.
+   */
+  pythonResolver?: FileResolver;
   viewsAvailable?: boolean;
   /** The per-deployment asset boundary for mthds_prepare_inputs (workshop uploads; console pass-through only). */
   allowUpload?: boolean;
@@ -132,12 +161,26 @@ interface ToolContextOptions {
 export function buildToolContexts(options: ToolContextOptions = {}): ToolContexts {
   const env = options.env ?? process.env;
   const resolver = options.resolver;
+  const pythonResolver = options.pythonResolver;
   const viewsAvailable = options.viewsAvailable ?? true;
   const allowUpload = options.allowUpload ?? false;
   const workspaceRoot = options.workspaceRoot;
 
+  const validation = {
+    ...buildValidationContext(env),
+    resolver,
+    viewsAvailable,
+  };
+
   return {
     catalog: buildCatalogContext(env),
+    catalogWrite: {
+      ...buildCatalogWriteContext(env),
+      resolver,
+      pythonResolver,
+      validation,
+      ...(workspaceRoot === undefined ? {} : { saveRoot: workspaceRoot }),
+    },
     validation: {
       ...buildValidationContext(env),
       resolver,
@@ -510,6 +553,77 @@ export const mthdsDownloadArtifactsTool = defineTool({
   },
 });
 
+/**
+ * The order rule is the load-bearing part of this description, and it is stated
+ * rather than inferred: the platform derives a method's LISTED description from
+ * the first file, so a bundle sent root-file-last is saved with a sub-file's
+ * description and reads wrong in every catalog listing afterwards. The tool does
+ * not reorder and does not guess which file is the root, because guessing would
+ * be wrong silently; the caller orders them and the description says so.
+ *
+ * The second load-bearing sentence is the `method_id` discriminator. Without it
+ * a model that means to update calls without the id, and a create is the one
+ * gesture here that cannot be taken back by calling again.
+ */
+const SAVE_METHOD_DESCRIPTION = [
+  "Save an MTHDS bundle from disk to the organization's method catalog — one call validates the files and saves those same bytes.",
+  "files is the bundle's .mthds files with the ROOT FILE FIRST (the one carrying the bundle's `domain`): the platform derives the method's listed description from the first file, and this tool neither reorders them nor guesses which is the root.",
+  "method_id is the discriminator: absent CREATES a new method, present UPDATES that one. There is no create/update flag. Read it from pipelex-method.json in the bundle's directory when that file is there — it is what makes a second save an update instead of a duplicate.",
+  "name is required either way, because the save rewrites the whole catalog row; on an update a name different from the stored one IS the rename.",
+  "python replaces the bundle's custom-PipeFunc .py files as a SET — omit it to preserve what is stored, send [] to clear it. It is never merged.",
+  "Pass expected_updated_at (from pipelex-method.json's synced_updated_at) to refuse the save if somebody else has changed the method since this directory synced; without it you are knowingly overwriting.",
+  "An invalid bundle is a verdict, not an error: nothing is saved and the validation errors come back to fix. A valid bundle with pending signatures IS saved, and the summary says it does not run yet.",
+  "After a successful save the directory is linked by pipelex-method.json — tell the user to commit it, so a teammate updates this method instead of creating a second one.",
+].join(" ");
+
+export const mthdsSaveMethodTool = defineTool({
+  name: "mthds_save_method",
+  description: SAVE_METHOD_DESCRIPTION,
+  inputSchema: mthdsSaveMethodInputSchema,
+  outputSchema: mthdsSaveMethodOutputSchema,
+  annotations: {
+    title: "Save an MTHDS method to the catalog",
+    readOnlyHint: false,
+    // An update REPLACES the stored row — the bundle, the name, and `python`
+    // when it is sent — so a save aimed at the wrong method_id overwrites
+    // somebody's work. That is what this annotation is for: it is the one thing
+    // a host reads to decide whether to confirm before calling.
+    destructiveHint: true,
+    openWorldHint: false,
+  },
+  async handler(input: MthdsSaveMethodInput, contexts: ToolContexts) {
+    return saveMethodToolResult(await saveMthdsMethod(input, contexts.catalogWrite));
+  },
+});
+
+const GET_METHOD_DESCRIPTION = [
+  "Bring a saved method's source files back from the organization's catalog.",
+  "Pass output_dir (a directory of its own, relative to the working directory) to write the .mthds and .py files to disk with pipelex-method.json beside them — no source passes through the conversation, and the directory is then linked, so a later mthds_save_method from it updates this same method.",
+  "Without output_dir the sources come back inline. Use that arm only to READ a method you cannot see on disk; to work on one, write it out.",
+  "It refuses rather than overwrite: a directory holding .mthds files that is not linked to this method is somebody else's bundle, and a linked directory whose files differ is only overwritten after you have asked the user and passed overwrite: true. Every refusal writes nothing at all.",
+  "A method that exists but has no MTHDS source yet is reported as such — a different answer from an unknown id.",
+].join(" ");
+
+export const mthdsGetMethodTool = defineTool({
+  name: "mthds_get_method",
+  description: GET_METHOD_DESCRIPTION,
+  inputSchema: mthdsGetMethodInputSchema,
+  outputSchema: mthdsGetMethodOutputSchema,
+  annotations: {
+    title: "Fetch a saved MTHDS method",
+    // The written arm puts files under the working directory.
+    readOnlyHint: false,
+    // It refuses a directory it does not own rather than overwriting it, and
+    // `overwrite` is the caller's explicit, user-asked exception — which is the
+    // opposite posture from mthds_codegen's writer.
+    destructiveHint: false,
+    openWorldHint: false,
+  },
+  async handler(input: MthdsGetMethodInput, contexts: ToolContexts) {
+    return getMethodToolResult(await getMthdsMethod(input, contexts.catalogWrite));
+  },
+});
+
 /** The cross-shell MCP contract, in registration order. Both shells register all of these. */
 export const toolDefinitions = [
   mthdsListMethodsTool,
@@ -554,10 +668,27 @@ export const consoleOnlyToolDefinitions = [mthdsUploadAttachmentsTool] as const;
  * place to save. Registering it would spend every console user's tokens on
  * every `tools/list` advertising a capability that cannot fire.
  *
+ * `mthds_save_method` and `mthds_get_method` are here for the same reason and
+ * NOT as the `output_dir` precedent widened. `mthds_codegen` advertises its
+ * write argument on both shells because writing is *optional* there — the
+ * inline arm is the whole contract and the console refuses one argument
+ * instructively. Here the filesystem is not optional on either side: the save
+ * submits the bundle as `files` in the `{ path }` form the console rejects
+ * outright and finishes by writing the link file that makes the next save an
+ * update rather than a duplicate, so a console save would be a materially
+ * different act under the same name; and the pull's write arm would have
+ * nowhere to write. The console's users reach both gestures in the webapp's
+ * editor, which is where the catalog's human surface lives. Serving the inline
+ * halves there later is additive and needs no change here.
+ *
  * The invariant that still holds: no tool NAME means different things on the
  * two shells. One definition per tool, one registration site per shell.
  */
-export const workshopOnlyToolDefinitions = [mthdsDownloadArtifactsTool] as const;
+export const workshopOnlyToolDefinitions = [
+  mthdsDownloadArtifactsTool,
+  mthdsSaveMethodTool,
+  mthdsGetMethodTool,
+] as const;
 
 export type AnyToolDefinition =
   | (typeof toolDefinitions)[number]
