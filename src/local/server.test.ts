@@ -343,6 +343,68 @@ describe("local stdio server", () => {
     }
   });
 
+  it("names every source form each selector-taking tool accepts, in both shells' instructions", async () => {
+    const { client: hosted, close: closeHosted } = await connectClient(
+      createHostedServer(TEST_OAUTH),
+    );
+    const { client: local, close: closeLocal } = await connectClient(createLocalServer());
+
+    try {
+      const shells = [
+        ["console", hosted.getInstructions() ?? ""],
+        ["workshop", local.getInstructions() ?? ""],
+      ] as const;
+
+      for (const [shell, instructions] of shells) {
+        for (const tool of SELECTOR_TOOLS) {
+          const sentences = sentencesAbout(instructions, tool);
+
+          expect(sentences, `${shell}: no instruction sentence mentions ${tool}`).not.toEqual("");
+          // A sentence that named method_id and left out method_ref told the
+          // model a published method could not be validated, templated,
+          // prepared or run — so the by-address flow was never offered,
+          // although every one of these tools resolves an address server-side.
+          expect(sentences, `${shell}: the ${tool} sentence must name method_ref`).toContain(
+            "method_ref",
+          );
+          expect(sentences, `${shell}: the ${tool} sentence must name method_id`).toContain(
+            "method_id",
+          );
+        }
+      }
+    } finally {
+      await closeHosted();
+      await closeLocal();
+    }
+  });
+
+  it("prompts a proactive catalog search in the console instructions only", async () => {
+    const { client: hosted, close: closeHosted } = await connectClient(
+      createHostedServer(TEST_OAUTH),
+    );
+    const { client: local, close: closeLocal } = await connectClient(createLocalServer());
+
+    try {
+      const consoleCatalog = sentencesAbout(hosted.getInstructions() ?? "", "mthds_list_methods");
+      const workshopCatalog = sentencesAbout(local.getInstructions() ?? "", "mthds_list_methods");
+
+      // Both shells keep the reactive triggers: the user asked, or named a
+      // saved method without its id.
+      for (const sentence of [consoleCatalog, workshopCatalog]) {
+        expect(sentence).toContain("asks what saved methods exist");
+        expect(sentence).toContain("without its mt_ id");
+      }
+      // The proactive one is the console's alone. A workshop session is driven
+      // by skills, and this clause had it leaving unrelated work to search the
+      // catalog because a saved method might have fit.
+      expect(consoleCatalog).toContain("may fit the task");
+      expect(workshopCatalog).not.toContain("may fit the task");
+    } finally {
+      await closeHosted();
+      await closeLocal();
+    }
+  });
+
   it("advertises the attachment channel in the hosted instructions only", async () => {
     const { client: hosted, close: closeHosted } = await connectClient(
       createHostedServer(TEST_OAUTH),
@@ -563,6 +625,37 @@ const catalogMethod: MethodPage["items"][number] = {
   description: "Extract invoice data",
   created_at: "2026-01-01T00:00:00Z",
 };
+
+/**
+ * The tools that take a method selector, and whose instruction sentences must
+ * therefore name every form they accept. `mthds_list_methods` is not one: it
+ * takes no method, it answers with ids. Nor is a tool that takes an id to write
+ * or read one stored method, which accepts no address — a new tool joins this
+ * list only when it takes the one-of `files` / `method_ref` / `method_id`.
+ */
+const SELECTOR_TOOLS = [
+  "mthds_validate",
+  "mthds_inputs_template",
+  "mthds_codegen",
+  "mthds_prepare_inputs",
+  "mthds_run",
+] as const;
+
+/**
+ * The instruction sentences that name one tool, joined.
+ *
+ * Sentence-level rather than over the whole string, so an assertion about one
+ * tool cannot be satisfied by a neighbour's prose; joined rather than asserted
+ * per sentence, because a tool may be named twice — once for its selectors and
+ * once for something else. The tool name is matched inside its backticks, so
+ * `mthds_run` does not match `mthds_run_status`.
+ */
+function sentencesAbout(instructions: string, tool: string): string {
+  return instructions
+    .split(/(?<=\.)\s+/)
+    .filter((sentence) => sentence.includes(`\`${tool}\``))
+    .join(" ");
+}
 
 function sharedContract(tool: Awaited<ReturnType<Client["listTools"]>>["tools"][number]) {
   return {
