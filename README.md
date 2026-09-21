@@ -40,7 +40,8 @@ register](#local-workshop-install--register), and which server belongs on which
 host is the [Host → server matrix](#host--server-matrix).
 
 Both servers register the same MCP tools, with identical names, schemas, and
-contracts — with one documented exception per shell, marked below:
+contracts — apart from the per-shell tools marked below: one on the console,
+three on the workshop.
 
 | Tool | What it does |
 |---|---|
@@ -58,9 +59,11 @@ contracts — with one documented exception per shell, marked below:
 | `mthds_save_method` | **Local workshop only.** Validate a bundle and save it to the organization's catalog — a create without `method_id`, an update with one — writing `pipelex-method.json` beside the files so a later save from that directory updates the same method instead of creating a second one. |
 | `mthds_get_method` | **Local workshop only.** Bring a saved method's sources back: with `output_dir`, written to disk with the link file beside them and no source through the conversation; without it, inline, for reading a method you cannot see on disk. It refuses rather than overwrite work it does not own. |
 
-The two exceptions mirror each other. `mthds_upload_attachments` takes a
-host-substituted attachment reference, and the host gates that substitution on
-the declared JSON Schema, so on the workshop the tool would be *structurally
+The exceptions mirror each other across the two shells, and every one of them
+turns on something the other shell does not have. `mthds_upload_attachments`
+takes a host-substituted attachment reference, and the host gates that
+substitution on the declared JSON Schema, so on the workshop the tool would be
+*structurally
 unreachable* rather than merely unused. `mthds_download_artifacts` writes files
 under the server's working directory, which the console does not have — its
 users download run outputs from the app's UI. The invariant that still holds is
