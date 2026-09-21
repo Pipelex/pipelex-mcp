@@ -88,13 +88,22 @@ type FillName = (typeof FILLS)[number];
 
 /**
  * The shape of the result itself, so a host that refuses the call can be asked
- * *what* it refused. `full` is the block this repo means to ship — an image
- * block carrying the standard's `annotations` hint. `bare` drops the
- * annotations, and `text` omits the image block entirely, which is the control:
- * a host that fails `bare` and passes `text` fails on image blocks as such, and
- * one that fails `full` but passes `bare` fails only on the annotations.
+ * *what* it refused. `full` carries the standard's `annotations` hint, `meta`
+ * carries a block-level `_meta`, `bare` carries neither, and `text` omits the
+ * image block entirely, which is the control: a host that fails `bare` and
+ * passes `text` fails on image blocks as such, and one that fails a decorated
+ * variant but passes `bare` fails only on that decoration.
+ *
+ * `meta` is the shape this repo actually ships (`{ type, data, mimeType,
+ * _meta: { uri } }`), and it was added after the fact — the first run of this
+ * probe measured `full` and `bare` and nothing else, so the shipped block had
+ * never been sent to any host. That gap is exactly the one the probe exists to
+ * close: `annotations` is an optional field the MCP standard permits and Codex
+ * refuses outright, and `_meta` is an optional field the MCP standard permits.
+ * Whether a host tolerates the second does not follow from anything; it has to
+ * be measured.
  */
-const VARIANTS = ["full", "bare", "text"] as const;
+const VARIANTS = ["full", "meta", "bare", "text"] as const;
 
 type VariantName = (typeof VARIANTS)[number];
 
@@ -461,6 +470,12 @@ export function createProbeServer(): McpServer {
                 priority: 0.8,
               },
             }
+          : {}),
+        // The shipped shape: a storage reference on the block's own `_meta`,
+        // which the standard's `ImageContentSchema` declares optional and
+        // which never reaches the model.
+        ...(variant === "meta"
+          ? { _meta: { uri: `pipelex-storage://probe/${drawing.fill}-${png.length}.png` } }
           : {}),
       };
       return { content: [text, image] };
