@@ -149,12 +149,32 @@ async function readAdvertisedExtensions(): Promise<Set<string>> {
  * whose pin predates `pipelex-api` 26c4eee, the commit that taught the build
  * routes to read the manifest; `L-260902-3b8971` moves that pin).
  *
- * NOT usable from `validate.e2e.ts`: this package ships `text_stats_funcs.py`,
- * and `/v1/validate`'s address path applies the execution-locus gate, so a
- * fetched package carrying Python is a 403 there on any deployment that is not
- * sandbox-hosted. That leg keeps its own Python-free address on purpose.
+ * NOT usable from a leg that resolves through `/v1/validate`: this package
+ * ships `text_stats_funcs.py`, and that route's address path applies the
+ * execution-locus gate, so a fetched package carrying Python is a 403 there on
+ * any deployment that is not sandbox-hosted. Those legs take
+ * {@link PYTHON_FREE_METHOD_REF} instead.
  */
 export const PUBLISHED_METHOD_REF = "github.com/Pipelex/methods/text_stats@v0.1.1";
+
+/**
+ * The published package the by-address legs that resolve through
+ * `POST /v1/validate` use — `mthds_validate`'s own leg and
+ * `mthds_prepare_inputs`', which reads its signature from that route.
+ *
+ * Deliberately a different package from {@link PUBLISHED_METHOD_REF}, and do
+ * not "harmonize" the two onto one: `/v1/validate` resolves an address through
+ * `fetched_method_source`, which applies the execution-locus gate, so a fetched
+ * package shipping ANY `.py` is a 403 `CustomCodeRequiresSandbox` off a
+ * deployment that is not sandbox-hosted. `text_stats` ships
+ * `text_stats_funcs.py`; `documents` is Python-free. The tooling routes reach
+ * their crate through `fetch_method_mthds_files`, which applies no such gate,
+ * which is why those suites can share the other constant and these cannot.
+ *
+ * Shared for the same reason the other one is: two suites submit it, and a tag
+ * bump that reached one of them would be worse than no pin at all.
+ */
+export const PYTHON_FREE_METHOD_REF = "github.com/Pipelex/methods/documents@v0.1.0";
 
 /** The commit `v0.1.1` points at — a tag resolves to it, and a run says so. */
 export const PUBLISHED_METHOD_COMMIT = "af0da07ac83e30e58443c88ec9ed4174131800a1";

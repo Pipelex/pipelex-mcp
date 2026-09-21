@@ -317,6 +317,57 @@ export function buildApiConfig(env: ApiEnv = process.env): ApiConfig {
   };
 }
 
+/**
+ * The bundle blueprint's declared `main_pipe`, qualified by the blueprint's
+ * `domain` when it is authored bare — the fallback pipe both `mthds_validate`
+ * and `mthds_prepare_inputs`'s console walk consult behind the runner's own
+ * `default_pipe_ref`.
+ *
+ * Every read is defensive: `bundle_blueprint` is opaque transport (its schema
+ * is the runtime's, not this server's), so a blueprint that is not an object,
+ * a non-string `main_pipe` and a non-string `domain` are all "the blueprint
+ * declares none" rather than something to guess at.
+ *
+ * **A `main_pipe` that already carries a domain is returned untouched**, which
+ * is the rule `@pipelex/sdk`'s own `readBlueprintMainPipeRef` applies and which
+ * this repo used to get wrong by always prefixing: a cross-domain
+ * `main_pipe = "other.shout"` became `demo.other.shout`, a ref that keys
+ * neither `pipe_io_contracts` nor `input_form`, so the signature silently went
+ * missing instead of being found. Only reachable on a runner old enough to
+ * serve no `default_pipe_ref`, which is why it went unseen.
+ *
+ * **Both members are trimmed before use**, which is not cosmetic: the SDK reads
+ * them through its own `nonEmptyString`, and `mthds_prepare_inputs` mirrors the
+ * SDK's pipe selection on the console while delegating to it on the workshop.
+ * Without the trim a padded `main_pipe` keyed nothing here and `domain.main`
+ * there, so one method prepared on one shell and was refused on the other —
+ * the one outcome `selectPipeRef` says this tool cannot have. Nothing upstream
+ * strips it: `pipelex`'s `DomainBlueprint.main_pipe` is a bare `str` with no
+ * validator, so a padded TOML value reaches the wire intact.
+ */
+export function blueprintMainPipeRefOf(blueprint: unknown): string | undefined {
+  if (blueprint === null || typeof blueprint !== "object" || Array.isArray(blueprint)) {
+    return undefined;
+  }
+  const record = blueprint as Record<string, unknown>;
+  const mainPipe = trimmedNonEmpty(record.main_pipe);
+  if (mainPipe === undefined) {
+    return undefined;
+  }
+  if (mainPipe.includes(".")) {
+    return mainPipe;
+  }
+  const domain = trimmedNonEmpty(record.domain);
+  return domain === undefined ? undefined : `${domain}.${mainPipe}`;
+}
+
+/** A trimmed non-empty string, or `undefined` — the SDK's `nonEmptyString` rule. */
+function trimmedNonEmpty(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 /** The shared `<address>[@<tag>]` grammar sentence, reused by schema descriptions and hints. */
 export const METHOD_REF_GRAMMAR =
   "github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0";
@@ -353,17 +404,19 @@ export type SelectorRule = "one_selector" | "run_source";
  * before anything reaches the wire (mirroring the API's own 422s). Selector
  * format beyond non-blank stays server-owned (the `run_id` stance).
  *
- * A tool that does not expose `method_ref` (`mthds_prepare_inputs`) simply
- * never passes one; the "no selector" teaching text adapts to which selectors
- * the caller's schema actually carries via `acceptsMethodRef`.
+ * Every method-taking tool exposes all three selectors, so the teaching text is
+ * unconditional. It was not always: `mthds_prepare_inputs` withheld
+ * `method_ref` while the SDK's `prepareInputs` took inline files only, and this
+ * function took an `acceptsMethodRef` flag to keep the "no selector" message
+ * honest for it. The flag went out with the exception rather than surviving as
+ * a parameter with one reachable value.
  */
 export function validateMethodSelectorRequest(
   files: SubmittedFile[],
   selectors: MethodSelectors,
-  options: { rule: SelectorRule; acceptsMethodRef?: boolean },
+  options: { rule: SelectorRule },
 ): ToolError[] {
   const errors: ToolError[] = [];
-  const acceptsMethodRef = options.acceptsMethodRef !== false;
 
   if (selectors.method_ref !== undefined && selectors.method_ref.trim() === "") {
     errors.push({
@@ -393,12 +446,8 @@ export function validateMethodSelectorRequest(
     errors.push({
       class: "input_domain",
       location: "files",
-      message: acceptsMethodRef
-        ? "Provide MTHDS files, a method_ref address, or a method_id."
-        : "Provide MTHDS files or a method_id.",
-      hint: acceptsMethodRef
-        ? `Submit files as [{ content, uri? }], a published method's address (${METHOD_REF_GRAMMAR}) as method_ref, or the catalog id (mt_…) of a registered method as method_id.`
-        : "Submit files as [{ content, uri? }], or pass the catalog id (mt_…) of a registered method as method_id.",
+      message: "Provide MTHDS files, a method_ref address, or a method_id.",
+      hint: `Submit files as [{ content, uri? }], a published method's address (${METHOD_REF_GRAMMAR}) as method_ref, or the catalog id (mt_…) of a registered method as method_id.`,
       retryable: false,
     });
   }
@@ -581,6 +630,46 @@ export interface ClassifyErrorOptions {
     hint: string;
   };
   /**
+   * Per-route texture for the **input-preparation family's base error** — the
+   * SDK's `InputPreparationError` raised client-side, before any request, when
+   * the signature does not resolve, `pipe_ref` is unqualified or unknown, or the
+   * closure settles no single default pipe. Defaults to {@link badRequest}, but
+   * the two are not the same question and `mthds_prepare_inputs` separates them:
+   * its `badRequest` follows the request's SELECTOR shape, because a real 400/422
+   * from the route is about the selector the caller typed, while a client-side
+   * signature failure is always about the pipe, whatever named the method. Without
+   * this, a by-address request with a bad `pipe_ref` reported the address as the
+   * problem.
+   */
+  preparation?: {
+    location?: string;
+    hint: string;
+  };
+  /**
+   * Per-route texture for {@link MissingInputFormError} — the deployment served
+   * a report with no usable `input_form` descriptor. Classified `config`, not
+   * `input_domain`: no request the caller can write works around it, so
+   * reporting it against one of their fields sent them editing a request that
+   * was never the problem. Defaults to `PIPELEX_BASE_URL`, the knob that
+   * actually selects the deployment.
+   */
+  missingDescriptor?: {
+    location?: string;
+    hint: string;
+  };
+  /**
+   * Per-route texture for {@link UnresolvableClosureError} — the method's own
+   * bundle did not validate, so no signature could be read from it. It locates
+   * at whatever NAMED the method (the files, the address, the id) and never at
+   * `pipe_ref`, which is why it is separate from {@link preparation}: that
+   * texture answers "which pipe?", and this one answers "which method?".
+   * Defaults to {@link badRequest}, whose locator already follows the selector.
+   */
+  closure?: {
+    location?: string;
+    hint: string;
+  };
+  /**
    * Per-route texture for a refused or unreadable asset on the upload leg.
    * `location` covers both arms (`RejectedAssetError` /
    * `InvalidLocalSourceError`) and defaults to `inputs` — right for
@@ -606,6 +695,33 @@ const DEFAULT_BAD_REQUEST: NonNullable<ClassifyErrorOptions["badRequest"]> = {
 
 /** The env-var auth wording a 401/403 carries when no deployment texture overrides it. */
 export const DEFAULT_AUTH_HINT = "Check PIPELEX_API_KEY for the configured API.";
+
+/**
+ * The deployment served a validation report with no usable `input_form`
+ * descriptor. Derives from the SDK's `InputPreparationError` so a caller
+ * catching the family still catches it, but {@link classifyError} pulls it out
+ * ahead of the base arm: it is a deployment fault, not a request the caller can
+ * repair.
+ */
+export class MissingInputFormError extends InputPreparationError {
+  constructor(message: string) {
+    super(message);
+    this.name = "MissingInputFormError";
+  }
+}
+
+/**
+ * The method's own closure did not validate, so no signature could be read.
+ * Separated from the preparation family for the locator alone: left in it, a
+ * caller who named a broken published package by `method_ref` was told to fix
+ * their `pipe_ref` — a field they had left empty, on a bundle they do not own.
+ */
+export class UnresolvableClosureError extends InputPreparationError {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnresolvableClosureError";
+  }
+}
 
 export function classifyError(err: unknown, options: ClassifyErrorOptions = {}): ToolError {
   if (err instanceof ApiUnreachableError) {
@@ -722,17 +838,53 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
     };
   }
 
-  // The base class: the method signature did not resolve (invalid closure), or
-  // a caller value at a file position was malformed/unsupported. All are
-  // request-domain problems; locate at the route's bad-request field (pipe_ref
-  // for the prepare route).
-  if (err instanceof InputPreparationError) {
-    const inputBadRequest = options.badRequest ?? DEFAULT_BAD_REQUEST;
+  // Two subclasses first, because both derive from InputPreparationError and
+  // the base arm below would otherwise swallow them — which is exactly what it
+  // used to do, reporting each against the caller's `pipe_ref`.
+
+  // The deployment served no usable descriptor. A `config` condition: the
+  // message and the hint used to contradict each other, one naming the
+  // deployment and the other telling the caller to qualify a pipe.
+  if (err instanceof MissingInputFormError) {
+    const texture = options.missingDescriptor;
+    return {
+      class: "config",
+      location: texture?.location ?? "PIPELEX_BASE_URL",
+      message: err.message,
+      hint:
+        texture?.hint ??
+        "Point the API at a deployment that serves the input-form descriptor (pipelex-api >= 0.18.0).",
+      retryable: false,
+    };
+  }
+
+  // The closure itself is broken — a question about whatever named the method,
+  // so it takes the selector's own locator rather than the pipe's.
+  if (err instanceof UnresolvableClosureError) {
+    const texture = options.closure ?? options.badRequest ?? DEFAULT_BAD_REQUEST;
     return {
       class: "input_domain",
-      ...(inputBadRequest.location === undefined ? {} : { location: inputBadRequest.location }),
+      ...(texture.location === undefined ? {} : { location: texture.location }),
       message: err.message,
-      hint: inputBadRequest.hint,
+      hint: texture.hint,
+      retryable: false,
+    };
+  }
+
+  // The base class: an unqualified or unknown pipe_ref, no single default pipe,
+  // or a caller value at a file position that was malformed/unsupported. All are
+  // request-domain problems, and all are raised CLIENT-SIDE — so they locate at
+  // `preparation`,
+  // which a route separates from `badRequest` when its 400/422 is about a
+  // different field. `badRequest` remains the fallback for a route that has no
+  // such distinction to draw.
+  if (err instanceof InputPreparationError) {
+    const texture = options.preparation ?? options.badRequest ?? DEFAULT_BAD_REQUEST;
+    return {
+      class: "input_domain",
+      ...(texture.location === undefined ? {} : { location: texture.location }),
+      message: err.message,
+      hint: texture.hint,
       retryable: false,
     };
   }
@@ -813,11 +965,11 @@ export interface MethodFetchClient {
 
 /**
  * Classify options for the by-id expansion leg (`getMethodClosure`, itself a
- * `getMethod` + parse under the hood), shared by the two capabilities whose
- * surfaces the platform's tooling `method_id` selector deliberately excludes
- * (`mthds_inputs_template` over `/v1/build/inputs`, `mthds_prepare_inputs`
- * over the SDK's client-side `prepareInputs` walk) — `mthds_validate` no
- * longer uses it, its `method_id` being a server pass-through. Unlike
+ * `getMethod` + parse under the hood), used by the one capability whose
+ * surface the platform's tooling `method_id` selector deliberately excludes:
+ * `mthds_inputs_template`, over `/v1/build/inputs`. Every other method-taking
+ * tool forwards `method_id` server-side — `mthds_prepare_inputs` since
+ * `@pipelex/sdk` 0.17.0 gave `prepareInputs` all three selectors. Unlike
  * `/v1/start`, the SDK does not intercept a missing-route 404 on
  * `/v1/methods/{id}` (no `RunLifecycleUnavailableError` equivalent), so a
  * bare-runner base URL and a genuinely unknown method read the same here —
@@ -851,11 +1003,10 @@ export type MethodFetchResult =
  * Resolve a stored method's current closure and forward it as submitted files,
  * each labeled with the method id as provenance (`uri`) — the SDK-canonical
  * by-id expansion (`buildInputs({ files: await getMethodClosure(methodId) })`
- * is the SDK's own documented pattern) behind the id-only paths of the two
- * tools whose surfaces the hosted `method_id` selector deliberately excludes:
- * `mthds_inputs_template` (the build routes take no `method_id`) and
- * `mthds_prepare_inputs` (a client-side signature walk with no server leg).
- * `mthds_validate` forwards its selectors server-side and does not use this.
+ * is the SDK's own documented pattern) behind the id-only path of the one tool
+ * whose surface the hosted `method_id` selector deliberately excludes:
+ * `mthds_inputs_template` (the build routes take no `method_id`). Every other
+ * method-taking tool forwards its selectors server-side and does not use this.
  * `getMethodClosure` (the SDK's canonical fetch-and-parse over `getMethod` +
  * `methodSourceToContents`) already labels each file's `source` with the
  * method id; the MCP surface spells provenance `uri`, so we relabel.
