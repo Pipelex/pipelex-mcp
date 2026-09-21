@@ -137,20 +137,25 @@ describe("mthds_validate (live)", () => {
     expect(result.structuredContent.main_pipe?.output.images).toEqual(["$[]"]);
   });
 
-  // GATED on the API deploy. `default_pipe_ref` landed on pipelex-api's `dev`
-  // (#68, 7a476cd) after its 0.21.0 release, so no released runner serves it
-  // yet and no hosted environment has it. Un-skip once `/v1/version` reports a
-  // hosted implementation built on a pipelex-api past 0.21.0 — the probe IS
-  // this assertion: the field arrives, or it does not.
+  // No longer gated. `default_pipe_ref` landed on pipelex-api's `dev` (#68,
+  // 7a476cd) after its 0.21.0 release, and this assertion sat skipped waiting
+  // for a deployment to serve it; measured against the suite's default target
+  // on 2026-09-21, `https://api-dev.pipelex.com` returns it, carrying exactly
+  // this fixture's ref. (Production could not be measured in the same pass —
+  // `api.pipelex.com` answers this key with a 403 — so if this fails against a
+  // deployment predating the field, that IS the finding, which is the design:
+  // the probe is the assertion, the field arrives or it does not.)
   //
-  // Worth un-skipping promptly rather than leaving parked: the projection
-  // prefers the report's `default_pipe_ref` and falls back to the blueprint
-  // derivation when the field is ABSENT, which is exactly what keeps every
-  // assertion above green while a by-address signature quietly goes back to
-  // naming a pipe a run will not execute. This is the one check the fallback
-  // cannot stand in for, and it needs an unseamed client because the capability
+  // It matters more now than when it was parked. The projection prefers the
+  // report's `default_pipe_ref` and falls back to the blueprint derivation only
+  // when the field is ABSENT, which is what keeps every assertion above green
+  // while a by-address signature quietly goes back to naming a pipe a run will
+  // not execute — and since `@pipelex/sdk` 0.19.0 a STATED null is a refusal
+  // rather than a fall-through, so the field's presence now changes behaviour
+  // rather than only sharpening it. This is the one check the fallback cannot
+  // stand in for, and it needs an unseamed client because the capability
   // returns the projection, not the report.
-  it.skip("serves the effective entry pipe as its own report field (gated)", async () => {
+  it("serves the effective entry pipe as its own report field", async () => {
     const report = await liveClient().validateFiles(
       [{ content: FIXTURE_BUNDLE, uri: FIXTURE_BUNDLE_URI }],
       { allowSignatures: true, render: ["markdown"], views: ["input_form"] },

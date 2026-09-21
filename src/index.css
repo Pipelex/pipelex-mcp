@@ -1,12 +1,125 @@
+/* The order EVERY layer in this build sits in, declared up front because the default
+   is wrong in both directions and both failures are invisible.
+
+   Layer precedence follows the order the names are first declared; earlier means
+   weaker. Two constraints fix the order below, and neither is discretionary.
+
+   `mthds-form` is the form kernel's prebuilt sheet, imported as a side effect by
+   `@pipelex/mthds-ui/form/react`. It is bundled AFTER this file, so by default it is
+   declared last and outranks everything.
+     - It must sit ABOVE `base`, which is Tailwind's preflight. `bg-input`, `border-input`
+       and eight spacing utilities exist ONLY inside that layer — the host theme defines
+       no `--color-input`, so our own Tailwind cannot generate them — and layer rank is
+       compared BEFORE specificity. So preflight's `button,input{background-color:#0000}`
+       at specificity 1 beats `.bg-input` at specificity 100, and `*{margin:0;padding:0}`
+       beats `.p-2.5`. Get this wrong and every control in RunPanel renders with no
+       surface and no padding, inside a panel whose own chrome is unlayered and still
+       looks right. That is measured, not feared: it is what shipped for one commit.
+     - It must sit BELOW `utilities`, so the host wins the classes both sides define —
+       our `.sm:inline` over the kernel's `.hidden`, our radius over the kernel's.
+
+   `properties` holds Tailwind's `@property` fallback for engines without native support
+   (older Safari, Firefox). It must stay at the BOTTOM. Promote it and every `--tw-*` is
+   reset on those engines, breaking shadows, rings and transforms — a failure no amount
+   of looking at a modern browser will ever show, which is why it is named here rather
+   than left to fall where it may.
+
+   The two font tokens are why this is a full declaration and not a single name: the
+   kernel redefines `--font-sans` and `--font-mono` in a `theme` sublayer that rides
+   wherever `mthds-form` goes. They are pinned unlayered below, which outranks every
+   layer and is therefore independent of this line.
+
+   DO NOT verify this by reading the order back out of the build. lightningcss deletes
+   this statement and honours it by hoisting the blocks, so these names never reach the
+   output — and an order check passes in the state where every control is invisible.
+   That mistake is why the regression above shipped. The check is `npm run check:cascade`,
+   which resolves the winning declaration for each property that actually matters. */
+@layer properties, theme, base, components, mthds-form, utilities;
+
 @import url("https://fonts.googleapis.com/css2?family=Mozilla+Text:wght@400..700&display=swap");
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "@alpic-ai/ui/theme";
 
 @source "../node_modules/@alpic-ai/ui/src";
-/* The form kernel's controls are Tailwind classes; without this glob the build
-   purges the ones nothing else uses (focus ring, placeholder, dropzone state). */
-@source "../node_modules/@pipelex/mthds-form/dist";
+/* The form kernel's controls are shadcn-themed: since mthds-ui 0.23.0 they ship as
+   a PREBUILT Tailwind 4 stylesheet that reads the bare semantic tokens
+   (`var(--primary)`, `var(--background)`, …). This app's theme is
+   `@alpic-ai/ui/theme`, which defines the Tailwind 4 `--color-*` names instead, so
+   none of the kernel's tokens resolve on their own.
+
+   That used to be covered accidentally: while `src/index.css` scanned the kernel's
+   `dist/` with `@source`, OUR Tailwind generated its utilities against OUR theme,
+   so `bg-background` compiled to `var(--color-background)` and the question never
+   arose. The prebuilt sheet hardcodes the bare names, so the bridge has to be
+   explicit — and getting it wrong is SILENT in the way mthds-ui 0.23.0 warns about:
+   an undefined custom property makes the browser DISCARD the declaration, so the
+   control falls back to `transparent` or the initial `canvastext`. The build stays
+   green, the tokens inspect correctly in devtools, and what you see is a panel with
+   no surface colour and unreadable labels — which reads as a contrast bug and sends
+   you looking anywhere except at a stylesheet.
+
+   Aliasing through `var(--color-*)` rather than copying the literals keeps one
+   source of truth: re-theming alpic moves these with it. `.dark` is listed so the
+   aliases re-resolve against alpic's dark block wherever that class is applied
+   (these views theme by prop today and set it nowhere, which is unchanged here).
+   `--input` and `--radius` have no `--color-*` counterpart: shadcn's `--input` is an
+   input's border colour, and `--radius` is the base the kernel derives its corners
+   from. `--radius` is load-bearing beyond theming: the kernel's own `.rounded-md`
+   reads `calc(var(--radius) - 2px)`, so where that rule wins an undefined `--radius`
+   collapses the corner to 0 rather than falling back to the host's value.
+
+   ONE COLLISION to know about, measured and currently harmless. `RunPanel` puts the
+   class `dark` AND an inline graph palette on the same element, and that palette
+   defines `--color-accent: #8BE9FD`. An inline declaration beats any stylesheet, so
+   on that element the `.dark` alias below resolves `--accent` to the graph's cyan
+   while `--accent-foreground` stays alpic's white. Nothing reads the pair there
+   today — the kernel's `SelectItem` portals to `document.body`, outside the `.dark`
+   element, and `EnumField` overrides the accent classes through tailwind-merge — but
+   a control that stops overriding them, or a `SelectContent` given a `container`,
+   would render white-on-cyan. `--color-accent` is the only name the graph palette
+   and this bridge both claim; if a second one appears, this stops being latent. */
+:root,
+.dark {
+  --background: var(--color-background);
+  --foreground: var(--color-foreground);
+  --border: var(--color-border);
+  --input: var(--color-border);
+  --ring: var(--color-ring);
+  --primary: var(--color-primary);
+  --accent: var(--color-accent);
+  --accent-foreground: var(--color-accent-foreground);
+  --muted: var(--color-muted);
+  --muted-foreground: var(--color-muted-foreground);
+  --card: var(--color-card);
+  --popover: var(--color-popover);
+  --popover-foreground: var(--color-popover-foreground);
+  --destructive: var(--color-destructive);
+  --radius: var(--radius-md);
+
+  /* Pinned rather than aliased, which the rest of this block would otherwise forbid: a
+     custom property cannot reference itself, and the kernel's `theme` sublayer redefines
+     both of these wherever `mthds-form` lands in the layer order. Unlayered beats every
+     layer, so pinning them here settles it independently of that order — which is what
+     lets `mthds-form` sit where the controls need it. Copied literals go stale in
+     silence, so `npm run check:cascade` asserts these still match `@alpic-ai/ui`'s own
+     `tokens.css` and fails when alpic moves. */
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* No `@source` glob for the form kernel — though not for the reason mthds-ui's
+   changelog gives, which is worth spelling out because the wrong version of it is
+   what shipped here first. The glob used to be required: the controls are Tailwind
+   classes and the build purged the ones nothing else used. Since mthds-ui 0.21.0 the
+   kernel ships a prebuilt sheet that `@pipelex/mthds-ui/form/react` imports itself,
+   so a glob would only duplicate those utilities — into our own `@layer utilities`,
+   note, NOT unlayered as the changelog's framing implies — buying nothing but bytes.
+   Precedence is not this comment's business at all: it is settled by the `@layer`
+   statement at the top of this file. Add nothing here; if the form looks wrong, run
+   `npm run check:cascade` before reaching for a glob. Note a glob could not fix the
+   control surfaces anyway — the host theme has no `--color-input`, so our Tailwind
+   cannot generate `.bg-input` at all, whatever it is pointed at. */
 
 @theme {
   --font-mozilla: "Mozilla Text", serif;

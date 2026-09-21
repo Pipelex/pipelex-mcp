@@ -945,6 +945,41 @@ describe("prepareMthdsInputs — console pipe selection (SDK parity)", () => {
     });
   });
 
+  it("refuses a stated default_pipe_ref: null rather than falling through to the blueprint", async () => {
+    // The blueprint names `demo.main`, whose descriptor WOULD have guided a walk —
+    // this is the exact case the pre-0.19.0 ladder fell through on. A stated null is
+    // the server saying it determined no entry pipe, so the run route would refuse
+    // such a run, and preparing one would prepare a pipe the run will not execute.
+    const report = reportWith(demoInputForm, { default_pipe_ref: null });
+
+    const result = await prepareMthdsInputs(
+      { files, inputs: { photo: "https://cdn.example.com/a.png" } },
+      { baseUrl: DEFAULT_API_URL, client: validateWith(report) },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
+    expect(result.structuredContent.errors?.[0]?.message).toContain("no entry pipe");
+    // Named, so the caller can pass one.
+    expect(result.structuredContent.errors?.[0]?.message).toContain("demo.main");
+  });
+
+  it("refuses a stated default_pipe_ref the input_form descriptor does not describe", async () => {
+    // One report, one pipe set, keyed both ways — a miss is the report contradicting
+    // itself, and falling through would silently prepare a different pipe.
+    const report = reportWith(demoInputForm, { default_pipe_ref: "demo.absent" });
+
+    const result = await prepareMthdsInputs(
+      { files, inputs: {} },
+      { baseUrl: DEFAULT_API_URL, client: validateWith(report) },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
+    expect(result.structuredContent.errors?.[0]?.message).toContain("demo.absent");
+    expect(result.structuredContent.errors?.[0]?.message).toContain("does not describe it");
+  });
+
   it("falls back to the blueprint's main_pipe when no default is stated", async () => {
     const result = await prepareMthdsInputs(
       { files, inputs: { photo: "https://cdn.example.com/a.png" } },
