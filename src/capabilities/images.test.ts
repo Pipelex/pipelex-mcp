@@ -643,6 +643,34 @@ describe("showMthdsRunImages", () => {
     expect(result.summary).toContain("`indices`");
   });
 
+  it("withholds a stored object that declares an image type but holds no bytes", async () => {
+    // Every gate above passes for nothing: the type is right, and no cap can
+    // be crossed by zero bytes. Emitted, it is `data: ""` — which a host
+    // refuses, and which would sit in every later prompt, because an image
+    // block is permanent.
+    const { client } = fakeClient({
+      [COVER]: { response: () => imageResponse(Buffer.alloc(0)) },
+      [THUMB]: { response: () => imageResponse(TINY_PNG, "image/jpeg") },
+      [UNTYPED]: { response: () => imageResponse(TINY_PNG) },
+    });
+
+    const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
+
+    expect(result.structuredContent.images?.[0]).toEqual({
+      uri: COVER,
+      mime_type: "image/png",
+      bytes: 0,
+      inlined: false,
+      withheld: "empty",
+    });
+    // Withheld, not failed — and it never becomes a block.
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.imageBlocks).toHaveLength(2);
+    expect(result.imageBlocks.every((block) => block.data.length > 0)).toBe(true);
+    expect(result.structuredContent.all_inlined).toBe(false);
+    expect(result.summary).toContain("holds no bytes");
+  });
+
   it("reports all_inlined false when a narrowed call left a run candidate unconsidered", async () => {
     // The walk only ever sees the selection, so `all_inlined` used to answer
     // "did what I asked for arrive" while the schema and SPEC both promise it

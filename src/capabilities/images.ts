@@ -109,7 +109,7 @@ export const mthdsShowImagesInputSchema = {
     ),
 };
 
-const withheldReasonSchema = z.enum(["size", "budget", "count", "type", "deadline"]);
+const withheldReasonSchema = z.enum(["size", "budget", "count", "type", "deadline", "empty"]);
 
 const shownImageSchema = z.object({
   uri: z.string().describe("The pipelex-storage:// reference this entry is about."),
@@ -126,7 +126,7 @@ const shownImageSchema = z.object({
   withheld: withheldReasonSchema
     .optional()
     .describe(
-      'Why a picture was not inlined, when no error occurred: "size" (over the per-image cap), "budget" (would cross this call\'s total), "count" (past the per-call attempt cap — not fetched), "type" (the stored object is not an inlineable image type), "deadline" (this call ran out of its total time budget before reaching it — not fetched).',
+      'Why a picture was not inlined, when no error occurred: "size" (over the per-image cap), "budget" (would cross this call\'s total), "count" (past the per-call attempt cap — not fetched), "type" (the stored object is not an inlineable image type), "deadline" (this call ran out of its total time budget before reaching it — not fetched), "empty" (the stored object declares an image type but holds no bytes).',
     ),
   error: toolErrorSchema.optional().describe("Present when this picture could not be read at all."),
 });
@@ -642,6 +642,27 @@ async function walkCandidates(
       continue;
     }
 
+    // A zero-byte object clears every gate above — its declared type is an
+    // image type and no cap can be crossed by nothing — and would be emitted
+    // as `data: ""`. Hosts and model APIs refuse an empty image, and an image
+    // block is PERMANENT: a block that can never render would sit in every
+    // later prompt of the conversation. It is reachable rather than
+    // theoretical, because nothing between an upload and a stored object
+    // enforces a minimum length: `/v1/upload` declares a maximum only, the
+    // SDK derives the content type from the filename, and the runtime's
+    // storage interface takes the bytes as given. So it is withheld with a
+    // reason, like every other picture that cannot be shown.
+    if (bytes.length === 0) {
+      entries.push({
+        uri: candidate.uri,
+        mime_type: mimeType,
+        bytes: 0,
+        inlined: false,
+        withheld: "empty",
+      });
+      continue;
+    }
+
     if (spent + bytes.length > INLINE_IMAGES_BUDGET) {
       entries.push({
         uri: candidate.uri,
@@ -823,6 +844,7 @@ const WITHHELD_REASONS: Record<WithheldReason, string> = {
   // whole-request failure that stopped the walk before reaching this one.
   count: `this call stopped attempting before reaching it — a call fetches at most ${MAX_INLINE_IMAGES} picture(s), and a failure that is not about one picture ends the walk`,
   type: "the stored object is not an image type that can be shown",
+  empty: "the stored object declares an image type but holds no bytes",
   deadline: `this call used up its ${Math.round(INLINE_IMAGES_DEADLINE_MS / 1000)}s total time budget before reaching it`,
 };
 
