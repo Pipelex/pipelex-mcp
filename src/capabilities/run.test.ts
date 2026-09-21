@@ -32,7 +32,7 @@ import {
   validateRunRequest,
 } from "./run.js";
 import type { RunContext } from "./run.js";
-import { classifyError, DEFAULT_API_URL } from "./shared.js";
+import { classifyError, DEFAULT_API_URL, MAX_IMAGE_CANDIDATE_ENTRIES } from "./shared.js";
 
 const RUN_ID = "01JRUN0000000000000000TEST";
 
@@ -432,9 +432,10 @@ describe("resultsResult", () => {
 
     // The console (no download tool) gets the same structured list as the workshop.
     for (const result of [resultsResult(state, true, false), resultsResult(state, false, true)]) {
-      expect(result.structuredContent.image_candidates).toEqual([
-        { uri: picture, key: "runs/x/illustration.png" },
-      ]);
+      // Bare references: the key beside them was a fixed-prefix strip of the
+      // reference itself, so it doubled the list's cost and said nothing new.
+      expect(result.structuredContent.image_candidates).toEqual([picture]);
+      expect(result.structuredContent).not.toHaveProperty("image_candidates_omitted");
     }
 
     const summary = resultsResult(state, true, false).summary;
@@ -461,9 +462,35 @@ describe("resultsResult", () => {
     const result = resultsResult(state, false, true);
 
     expect(result.structuredContent.truncated).toBe(true);
-    expect(result.structuredContent.image_candidates).toEqual([
-      { uri: picture, key: "runs/x/illustration.png" },
-    ]);
+    expect(result.structuredContent.image_candidates).toEqual([picture]);
+  });
+
+  it("bounds the candidate inventory and counts what it left out", () => {
+    // The walk reads the FULL output deliberately, so an unbounded projection
+    // of it was model-facing content outside the MAIN_STUFF_CAP discipline
+    // main_stuff obeys beside it — round 1's three-reviewer finding.
+    const pictures = Array.from(
+      { length: MAX_IMAGE_CANDIDATE_ENTRIES + 9 },
+      (_unused, index) => `pipelex-storage://runs/x/frame-${index}.png`,
+    );
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: pictures.map((url) => ({ url })),
+      },
+    };
+
+    const result = resultsResult(state, false, true);
+
+    expect(result.structuredContent.image_candidates).toHaveLength(MAX_IMAGE_CANDIDATE_ENTRIES);
+    // A prefix, so an index into this list means the same thing it means to
+    // mthds_show_images, which still walks the whole set.
+    expect(result.structuredContent.image_candidates).toEqual(
+      pictures.slice(0, MAX_IMAGE_CANDIDATE_ENTRIES),
+    );
+    expect(result.structuredContent.image_candidates_omitted).toBe(9);
   });
 
   it("says nothing, and omits the member, when the output references no stored file", () => {

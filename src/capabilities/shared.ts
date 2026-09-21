@@ -1266,6 +1266,26 @@ export const INLINE_IMAGES_BUDGET = 6 * 1024 * 1024;
 export const MAX_INLINE_IMAGES = 6;
 
 /**
+ * How many image candidates one tool result may ENUMERATE — the bound on the
+ * inventory itself, as distinct from {@link MAX_INLINE_IMAGES}, which bounds
+ * how many are fetched.
+ *
+ * The two tools that publish the inventory were both unbounded: a completed
+ * run walks its FULL output for candidates (deliberately — a reference pruned
+ * out of the bounded `main_stuff` is still a real picture), so a method
+ * emitting a large `Image[]` put an arbitrarily long list of references into
+ * model-facing `structuredContent`, outside the `MAIN_STUFF_CAP` discipline
+ * the output beside it obeys. `mthds_show_images` compounded it, emitting one
+ * entry and one prose line per candidate however few it fetched.
+ *
+ * Generous against the cap that matters: a caller can only fetch six per call,
+ * so this is about being able to SEE what a run produced and page through it
+ * by naming references, not about fetching. A run with more than this many
+ * pictures reports the remainder as a count.
+ */
+export const MAX_IMAGE_CANDIDATE_ENTRIES = 32;
+
+/**
  * The response content types that may be emitted as an MCP image block. The
  * object store answers with the type the runtime stored, which is the
  * authority — the resolve route's `content_type` is only a guess from the
@@ -1324,7 +1344,18 @@ export function looksLikeImageKey(key: string): boolean {
  * so this costs no network call and is safe on every completed result.
  */
 export function imageCandidatesOf(mainStuff: unknown): ImageCandidate[] {
+  const seen = new Set<string>();
   return collectArtifacts(mainStuff)
+    .filter((uri) => {
+      // One reference is one picture, however many times the output names it.
+      // An output that carries the same stored file in two places would
+      // otherwise be fetched twice, billed twice, and shown twice — and, since
+      // `indices` are positions in this list, would give the same picture two
+      // positions.
+      if (seen.has(uri)) return false;
+      seen.add(uri);
+      return true;
+    })
     .map((uri) => ({ uri, key: storageKeyOf(uri) }))
     .filter((candidate) => looksLikeImageKey(candidate.key));
 }

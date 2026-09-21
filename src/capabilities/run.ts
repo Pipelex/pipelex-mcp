@@ -27,6 +27,7 @@ import {
   summaryForToolError,
   filesInputSchema,
   imageCandidatesOf,
+  MAX_IMAGE_CANDIDATE_ENTRIES,
   resolveSubmittedFiles,
   toolErrorSchema,
   toolResultContent,
@@ -37,7 +38,6 @@ import type {
   AuthErrorTexture,
   ClassifyErrorOptions,
   FileResolver,
-  ImageCandidate,
   SubmittedFile,
   SubmittedFileInput,
   ErrorSummaries,
@@ -241,15 +241,16 @@ const runResultsStructuredContentSchema = z.object({
     .optional()
     .describe("True when main_stuff was bounded down; the full output rides the view-only _meta."),
   image_candidates: z
-    .array(
-      z.object({
-        uri: z.string().describe("The pipelex-storage:// reference, as it appears in the output."),
-        key: z.string().describe("The reference's storage key — everything after the scheme."),
-      }),
-    )
+    .array(z.string())
     .optional()
     .describe(
-      'State "completed" only, and only when the output references stored files — the references whose storage key looks like an image. A free in-memory prefilter over the FULL output, so a reference pruned out of main_stuff still appears here; nothing was fetched and nothing was read, so this is a shortlist, not a verdict. Pass a uri (or its index in this list) to mthds_show_images to see the picture.',
+      'State "completed" only, and only when the output references stored files — the pipelex-storage:// references whose storage key looks like an image, as they appear in the output. A free in-memory prefilter over the FULL output, so a reference pruned out of main_stuff still appears here; nothing was fetched and nothing was read, so this is a shortlist, not a verdict. Bounded — see image_candidates_omitted. Pass one of these (or its index in this list) to mthds_show_images to see the picture.',
+    ),
+  image_candidates_omitted: z
+    .number()
+    .optional()
+    .describe(
+      'State "completed" only, and only when something was left out — how many image candidates past the listed ones this result does not enumerate. They are still on the run: mthds_show_images walks the full set.',
     ),
   usage: runUsageSchema
     .optional()
@@ -340,7 +341,8 @@ export interface RunResultsStructuredContent {
   failure_message?: string;
   main_stuff?: unknown;
   truncated?: boolean;
-  image_candidates?: ImageCandidate[];
+  image_candidates?: string[];
+  image_candidates_omitted?: number;
   usage?: RunUsage;
   available_view_specs: ResultsViewSpec[];
   errors?: ToolError[];
@@ -891,6 +893,7 @@ function completedResult(
   // result pays no network call for either, on either shell.
   const stored = collectArtifacts(result.main_stuff);
   const candidates = imageCandidatesOf(result.main_stuff);
+  const listedCandidates = candidates.slice(0, MAX_IMAGE_CANDIDATE_ENTRIES);
 
   const structuredContent: RunResultsStructuredContent = {
     status: "ok",
@@ -901,7 +904,22 @@ function completedResult(
     // Absent — not empty — when the output references no stored file at all,
     // so a consumer can tell "nothing was produced" from "nothing looked like
     // an image", and a run with no files costs no field.
-    ...(stored.length === 0 ? {} : { image_candidates: candidates }),
+    //
+    // Bounded, and bare references rather than `{ uri, key }` pairs. The walk
+    // deliberately reads the FULL output, so an unbounded projection of it was
+    // model-facing content outside the `MAIN_STUFF_CAP` discipline `main_stuff`
+    // obeys two lines above — a method emitting a large `Image[]` could put
+    // more here than the whole output budget. The key was a fixed-prefix strip
+    // of the reference beside it, so it doubled the cost of the list and told
+    // nobody anything the reference did not.
+    ...(stored.length === 0
+      ? {}
+      : {
+          image_candidates: listedCandidates.map((candidate) => candidate.uri),
+          ...(candidates.length === listedCandidates.length
+            ? {}
+            : { image_candidates_omitted: candidates.length - listedCandidates.length }),
+        }),
     usage: projectRunUsage(usage),
     available_view_specs: graphSpec === undefined ? [] : ["run_graph"],
   };

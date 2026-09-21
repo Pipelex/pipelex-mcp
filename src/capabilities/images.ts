@@ -7,6 +7,7 @@ import {
   BULK_RESOLVE_ERROR_OPTIONS,
   INLINE_IMAGES_BUDGET,
   INLINE_IMAGE_MIME_TYPES,
+  MAX_IMAGE_CANDIDATE_ENTRIES,
   MAX_INLINE_IMAGES,
   MAX_INLINE_IMAGE_BYTES,
   allowsPlainHttp,
@@ -64,6 +65,25 @@ import type {
  */
 export const INLINE_IMAGE_TIMEOUT_MS = 30_000;
 
+/**
+ * The wall-clock budget for ONE call's fetches, all of them together.
+ *
+ * {@link INLINE_IMAGE_TIMEOUT_MS} bounds a single fetch and nothing else, and
+ * the walk is sequential, so without this the per-image timeouts ACCUMULATE:
+ * six stalled objects held one tool call for three minutes and more, since
+ * each fetch also pays a resolve round-trip before its own timer starts. A
+ * host whose deadline is shorter then fails the whole call — losing the
+ * pictures that had already arrived and the reasons for the ones that had
+ * not, which is the one outcome partial success exists to prevent.
+ *
+ * So the walk carries its own deadline: each fetch gets whichever is smaller,
+ * its own timeout or the time left, and a candidate the deadline has already
+ * passed is withheld as `deadline` without being attempted. Chosen well under
+ * the accumulated worst case and generous for six fetches of objects capped at
+ * {@link MAX_INLINE_IMAGE_BYTES}.
+ */
+export const INLINE_IMAGES_DEADLINE_MS = 60_000;
+
 export const mthdsShowImagesInputSchema = {
   run_id: z
     .string()
@@ -82,7 +102,7 @@ export const mthdsShowImagesInputSchema = {
     ),
 };
 
-const withheldReasonSchema = z.enum(["size", "budget", "count", "type"]);
+const withheldReasonSchema = z.enum(["size", "budget", "count", "type", "deadline"]);
 
 const shownImageSchema = z.object({
   uri: z.string().describe("The pipelex-storage:// reference this entry is about."),
@@ -99,7 +119,7 @@ const shownImageSchema = z.object({
   withheld: withheldReasonSchema
     .optional()
     .describe(
-      'Why a picture was not inlined, when no error occurred: "size" (over the per-image cap), "budget" (would cross this call\'s total), "count" (past the per-call attempt cap — not fetched), "type" (the stored object is not an inlineable image type).',
+      'Why a picture was not inlined, when no error occurred: "size" (over the per-image cap), "budget" (would cross this call\'s total), "count" (past the per-call attempt cap — not fetched), "type" (the stored object is not an inlineable image type), "deadline" (this call ran out of its total time budget before reaching it — not fetched).',
     ),
   error: toolErrorSchema.optional().describe("Present when this picture could not be read at all."),
 });
@@ -126,13 +146,19 @@ const showImagesStructuredContentSchema = z.object({
     .array(shownImageSchema)
     .optional()
     .describe(
-      'State "completed" only — one entry per candidate considered, in discovery order. Branch on inlined, never on the presence of an image block.',
+      'State "completed" only — one entry per candidate considered, in the order they were considered: the order you named them when images or indices was given, else discovery order. Bounded — see omitted. Branch on inlined, never on the presence of an image block.',
+    ),
+  omitted: z
+    .number()
+    .optional()
+    .describe(
+      'State "completed" only, and only when something was left out — how many candidates past the listed ones this result does not enumerate, so a run holding a great many pictures cannot flood the response. Name one explicitly in images to reach it.',
     ),
   all_inlined: z
     .boolean()
     .optional()
     .describe(
-      'State "completed" only — true when every considered candidate became an image block (vacuously true when there was no candidate).',
+      'State "completed" only — true when every candidate this run produced became an image block: nothing withheld, nothing failed, and nothing omitted (vacuously true when there was no candidate).',
     ),
   errors: z.array(toolErrorSchema).optional(),
 });
@@ -164,6 +190,7 @@ export interface ShowImagesStructuredContent {
   run_status?: RunStatus;
   failure_message?: string;
   images?: ShownImageEntry[];
+  omitted?: number;
   all_inlined?: boolean;
   errors?: ToolError[];
 }
@@ -314,6 +341,22 @@ export async function showMthdsRunImages(
   }
 
   const walk = await walkCandidates(client, context, selection.selected);
+
+  // A whole-request refusal — the resolve route rejecting the credential, a
+  // plan limit, an unreachable host — is not about one picture, and when it
+  // stopped the walk before ANY picture was shown there is no partial answer
+  // to report: nothing was produced. Reporting `status: "ok"` there told a
+  // consumer the call had succeeded on a deployment where every call fails
+  // deterministically, and it buried the classified cause (the `paywall`
+  // headline above all) under a generic "no picture could be shown" line.
+  // Once a picture HAS arrived, partial success is a produced verdict as
+  // before and the error rides its own entry.
+  if (walk.wholeRequestError !== undefined && walk.blocks.length === 0) {
+    return errorResult(summaryForToolError(walk.wholeRequestError, ERROR_SUMMARIES), [
+      walk.wholeRequestError,
+    ]);
+  }
+
   return completedResult(runId, walk, context.artifactDownloadAvailable === true);
 }
 
@@ -327,6 +370,13 @@ type Selection = { ok: true; selected: ImageCandidate[] } | { ok: false; error: 
  * call rather than fetched and reported as missing. A selection is answered in
  * the caller's own order; an absent selection is every candidate, in discovery
  * order.
+ *
+ * A repeat is dropped rather than refused. Naming the same picture twice is a
+ * plausible slip and refusing the whole call over it helps nobody, but obeying
+ * it literally is worse than either: this tool's entire rationale is that a
+ * shown picture is PERMANENT context the caller chose to buy, so a duplicate
+ * would spend two of the six attempts, two shares of the byte budget and two
+ * identical blocks in every prompt that follows, for one picture.
  */
 export function selectCandidates(
   candidates: ImageCandidate[],
@@ -335,6 +385,7 @@ export function selectCandidates(
   if (input.images !== undefined) {
     const known = new Map(candidates.map((candidate) => [candidate.uri, candidate]));
     const selected: ImageCandidate[] = [];
+    const seen = new Set<string>();
     for (const uri of input.images) {
       const candidate = known.get(uri);
       if (candidate === undefined) {
@@ -349,6 +400,8 @@ export function selectCandidates(
           },
         };
       }
+      if (seen.has(candidate.uri)) continue;
+      seen.add(candidate.uri);
       selected.push(candidate);
     }
     return { ok: true, selected };
@@ -356,6 +409,7 @@ export function selectCandidates(
 
   if (input.indices !== undefined) {
     const selected: ImageCandidate[] = [];
+    const seen = new Set<string>();
     for (const index of input.indices) {
       const candidate = candidates[index];
       if (index < 0 || candidate === undefined) {
@@ -370,6 +424,8 @@ export function selectCandidates(
           },
         };
       }
+      if (seen.has(candidate.uri)) continue;
+      seen.add(candidate.uri);
       selected.push(candidate);
     }
     return { ok: true, selected };
@@ -383,6 +439,15 @@ export function selectCandidates(
 interface Walk {
   entries: ShownImageEntry[];
   blocks: ContentImage[];
+  /** Candidates past {@link MAX_IMAGE_CANDIDATE_ENTRIES} that this result does not enumerate. */
+  omitted: number;
+  /**
+   * The failure that was not about any one picture and ended the walk, when
+   * one occurred. It rides its own entry as well; this copy is what lets the
+   * caller tell a call that produced a partial answer from one that produced
+   * nothing at all.
+   */
+  wholeRequestError?: ToolError;
 }
 
 /**
@@ -392,12 +457,23 @@ interface Walk {
  * {@link MAX_INLINE_IMAGE_BYTES} per picture, and at most
  * {@link INLINE_IMAGES_BUDGET} across the call.
  *
+ * It is bounded a fourth way, in time: {@link INLINE_IMAGES_DEADLINE_MS} caps
+ * the whole walk, because the per-image timeout is per image and a sequential
+ * walk of stalled objects would otherwise accumulate them into a call no host
+ * will wait for.
+ *
+ * And it is bounded a fifth way, in length: at most
+ * {@link MAX_IMAGE_CANDIDATE_ENTRIES} candidates are enumerated at all, the
+ * rest counted in `omitted`. One entry per candidate was itself unbounded
+ * output on a run that produced hundreds of pictures.
+ *
  * Nothing here throws. A per-reference failure is a value on its entry, and a
  * whole-request failure — the resolve route refusing the credential, say —
  * lands on the entry being worked and stops the walk, the untouched rest
  * reported as `count` since no call was made for them. Partial success is a
  * produced verdict: pictures that arrived are never discarded because a
- * sibling failed.
+ * sibling failed. The caller turns a whole-request failure that showed
+ * NOTHING into a no-verdict; see `showMthdsRunImages`.
  */
 async function walkCandidates(
   client: ImagesClient,
@@ -407,14 +483,25 @@ async function walkCandidates(
   const entries: ShownImageEntry[] = [];
   const blocks: ContentImage[] = [];
   const allowHttp = allowsPlainHttp(context);
+  const listed = selected.slice(0, MAX_IMAGE_CANDIDATE_ENTRIES);
+  const startedAt = Date.now();
   let attempts = 0;
   let spent = 0;
   let stopped = false;
+  let wholeRequestError: ToolError | undefined;
 
-  for (const candidate of selected) {
+  for (const candidate of listed) {
     const location = `images[${entries.length}].uri`;
     if (stopped || attempts >= MAX_INLINE_IMAGES) {
       entries.push({ uri: candidate.uri, inlined: false, withheld: "count" });
+      continue;
+    }
+    // Whatever is left of the call's total budget. A candidate reached with
+    // none left is withheld without an attempt, so the walk always returns
+    // what it has rather than running past a host's own deadline.
+    const remaining = INLINE_IMAGES_DEADLINE_MS - (Date.now() - startedAt);
+    if (remaining <= 0) {
+      entries.push({ uri: candidate.uri, inlined: false, withheld: "deadline" });
       continue;
     }
     attempts += 1;
@@ -423,7 +510,7 @@ async function walkCandidates(
     try {
       response = await client.fetchArtifact(candidate.uri, {
         maxBytes: MAX_INLINE_IMAGE_BYTES,
-        timeoutMs: INLINE_IMAGE_TIMEOUT_MS,
+        timeoutMs: Math.min(INLINE_IMAGE_TIMEOUT_MS, remaining),
         allowHttp,
       });
     } catch (err) {
@@ -446,6 +533,7 @@ async function walkCandidates(
       // or the host is unreachable. Nothing after it can succeed either.
       const error = classifyError(err, { ...BULK_RESOLVE_ERROR_OPTIONS, auth: context.authError });
       entries.push({ uri: candidate.uri, inlined: false, error });
+      wholeRequestError = error;
       stopped = true;
       continue;
     }
@@ -527,7 +615,12 @@ async function walkCandidates(
     });
   }
 
-  return { entries, blocks };
+  return {
+    entries,
+    blocks,
+    omitted: selected.length - listed.length,
+    ...(wholeRequestError === undefined ? {} : { wholeRequestError }),
+  };
 }
 
 /**
@@ -651,7 +744,12 @@ export function completedResult(
       run_id: runId,
       state: "completed",
       images: walk.entries,
-      all_inlined: walk.entries.every((entry) => entry.inlined),
+      // Absent rather than zero, like every other "nothing to say" member here.
+      ...(walk.omitted === 0 ? {} : { omitted: walk.omitted }),
+      // Omission counts against it: "everything this run produced is now in
+      // front of you" is the question this member answers, and a candidate the
+      // result never enumerated is not in front of anybody.
+      all_inlined: walk.omitted === 0 && walk.entries.every((entry) => entry.inlined),
     },
     summary: completedSummary(runId, walk, artifactDownloadAvailable),
     imageBlocks: walk.blocks,
@@ -666,6 +764,7 @@ const WITHHELD_REASONS: Record<WithheldReason, string> = {
   // whole-request failure that stopped the walk before reaching this one.
   count: `this call stopped attempting before reaching it — a call fetches at most ${MAX_INLINE_IMAGES} picture(s), and a failure that is not about one picture ends the walk`,
   type: "the stored object is not an image type that can be shown",
+  deadline: `this call used up its ${Math.round(INLINE_IMAGES_DEADLINE_MS / 1000)}s total time budget before reaching it`,
 };
 
 function completedSummary(runId: string, walk: Walk, artifactDownloadAvailable: boolean): string {
@@ -678,6 +777,12 @@ function completedSummary(runId: string, walk: Walk, artifactDownloadAvailable: 
       ? `No picture from run \`${runId}\` could be shown; each candidate is listed below with why.`
       : `${inlined} picture(s) from run \`${runId}\` follow this message as image content. Each one is now part of this conversation and stays in every later prompt.`,
   );
+
+  if (walk.omitted > 0) {
+    parts.push(
+      `This run produced ${walk.omitted} further picture(s) that this result does not list; name one in \`images\` to reach it.`,
+    );
+  }
 
   if (withheld.length > 0) {
     const lines = withheld.map((entry) => {

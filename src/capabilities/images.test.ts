@@ -3,6 +3,7 @@ import type { FetchArtifactOptions, RunResultState } from "@pipelex/sdk";
 import { describe, expect, it } from "vitest";
 
 import {
+  INLINE_IMAGES_DEADLINE_MS,
   INLINE_IMAGE_TIMEOUT_MS,
   buildImagesContext,
   selectCandidates,
@@ -14,6 +15,7 @@ import type { ImagesClient, ImagesContext } from "./images.js";
 import {
   DEFAULT_API_URL,
   INLINE_IMAGES_BUDGET,
+  MAX_IMAGE_CANDIDATE_ENTRIES,
   MAX_INLINE_IMAGES,
   MAX_INLINE_IMAGE_BYTES,
 } from "./shared.js";
@@ -437,7 +439,12 @@ describe("showMthdsRunImages", () => {
     expect(result.summary).toContain("failed: object is gone");
   });
 
-  it("ends the walk on a whole-request refusal and reports the untouched rest", async () => {
+  it("is a NO-VERDICT when a whole-request refusal showed nothing at all", async () => {
+    // Round 1's finding: a deployment where the resolve route rejects the
+    // credential, or where a plan limit refuses it, failed every call
+    // deterministically and answered `status: "ok"` — a consumer branching on
+    // status read a success, and the classified cause was buried under a
+    // generic "no picture could be shown" line.
     const { client, fetches } = fakeClient({
       [COVER]: { throws: () => apiError("/v1/resolve-storage-url/bulk", 400, "no active org") },
     });
@@ -445,16 +452,95 @@ describe("showMthdsRunImages", () => {
     const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
 
     expect(fetches).toHaveLength(1);
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]).toMatchObject({ class: "config" });
+    expect(result.structuredContent).not.toHaveProperty("images");
+    expect(showImagesToolResult(result).isError).toBe(true);
+  });
+
+  it("names the plan in the headline when the refusal is a paywall", async () => {
+    // The whole point of routing a no-verdict through summaryForToolError: on
+    // a host that shows the agent only the top content line, the generic
+    // connectivity headline WAS the entire message for a billing refusal.
+    const { client } = fakeClient({
+      [COVER]: { throws: () => apiError("/v1/resolve-storage-url/bulk", 402, "plan limit") },
+    });
+
+    const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]).toMatchObject({ kind: "paywall" });
+    expect(result.summary).toContain("plan does not cover this call");
+  });
+
+  it("stays a PRODUCED verdict when a picture had already arrived", async () => {
+    // Partial success is still partial success: the refusal rides its own
+    // entry, the pictures that arrived are never discarded, and the untouched
+    // rest is reported as `count`.
+    const { client, fetches } = fakeClient({
+      [COVER]: { response: () => imageResponse(TINY_PNG) },
+      [THUMB]: { throws: () => apiError("/v1/resolve-storage-url/bulk", 400, "no active org") },
+    });
+
+    const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
+
+    expect(fetches).toHaveLength(2);
     expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.images?.[0]).toMatchObject({
-      uri: COVER,
+    expect(result.imageBlocks).toHaveLength(1);
+    expect(result.structuredContent.images?.[0]).toMatchObject({ uri: COVER, inlined: true });
+    expect(result.structuredContent.images?.[1]).toMatchObject({
+      uri: THUMB,
       inlined: false,
       error: { class: "config" },
     });
-    expect(result.structuredContent.images?.slice(1)).toEqual([
-      { uri: THUMB, inlined: false, withheld: "count" },
+    expect(result.structuredContent.images?.slice(2)).toEqual([
       { uri: UNTYPED, inlined: false, withheld: "count" },
     ]);
+    expect(result.structuredContent.all_inlined).toBe(false);
+  });
+
+  it("gives each fetch what is left of the call's total budget, not its own timeout", async () => {
+    // The per-image timeout is per image and the walk is sequential, so
+    // without a shared deadline six stalled objects held one call for three
+    // minutes and more — and a host with a shorter deadline lost the whole
+    // call, pictures already fetched included.
+    const { client, fetches } = fakeClient({
+      [COVER]: { response: () => imageResponse(TINY_PNG) },
+      [THUMB]: { response: () => imageResponse(TINY_PNG, "image/jpeg") },
+      [UNTYPED]: { response: () => imageResponse(TINY_PNG) },
+    });
+
+    await showMthdsRunImages({ run_id: RUN_ID }, context(client));
+
+    for (const fetch of fetches) {
+      const timeout = fetch.options?.timeoutMs ?? 0;
+      expect(timeout).toBeLessThanOrEqual(INLINE_IMAGE_TIMEOUT_MS);
+      expect(timeout).toBeGreaterThan(0);
+      // The deadline is the ceiling the per-image timeout is clamped against.
+      expect(timeout).toBeLessThanOrEqual(INLINE_IMAGES_DEADLINE_MS);
+    }
+  });
+
+  it("enumerates at most the entry cap, and counts the rest as omitted", async () => {
+    // One entry and one prose line per candidate was itself unbounded output:
+    // a run with hundreds of pictures put hundreds of `withheld: "count"`
+    // entries into a result that fetches six.
+    const pictures = Array.from(
+      { length: MAX_IMAGE_CANDIDATE_ENTRIES + 5 },
+      (_unused, index) => `pipelex-storage://runs/01JRUN/outputs/frame-${index}.png`,
+    );
+    const { client } = fakeClient(
+      { [pictures[0]]: { response: () => imageResponse(TINY_PNG) } },
+      completedRun(pictures.map((url) => ({ url }))),
+    );
+
+    const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
+
+    expect(result.structuredContent.images).toHaveLength(MAX_IMAGE_CANDIDATE_ENTRIES);
+    expect(result.structuredContent.omitted).toBe(5);
+    // Omission counts against it: a candidate nobody enumerated is not shown.
+    expect(result.structuredContent.all_inlined).toBe(false);
+    expect(result.summary).toContain("5 further picture(s)");
   });
 
   it("produces a verdict, not an error, for a run that is still running", async () => {
