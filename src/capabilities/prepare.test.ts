@@ -215,6 +215,11 @@ describe("prepareInputsResult", () => {
     });
     expect(result.summary).toContain("Uploaded 1 asset(s)");
     expect(result.summary).toContain("pipelex-storage://abc");
+    // The resolved pipe and the fenced block are the payload the model carries
+    // to `mthds_run`, which is why the summary duplicates what
+    // `structuredContent` already holds. Pinned here because nothing else does.
+    expect(result.summary).toContain("Resolved pipe: `demo.main`");
+    expect(result.summary).toContain("```json");
   });
 
   it("omits pipe_ref when the caller did not supply it and notes an all-pass-through result", () => {
@@ -226,6 +231,10 @@ describe("prepareInputsResult", () => {
     expect(result.structuredContent).not.toHaveProperty("pipe_ref");
     expect(result.structuredContent.uploads).toEqual([]);
     expect(result.summary).toContain("No assets required uploading");
+    expect(result.summary).toContain("```json");
+    // The console-selected default is deliberately NOT echoed, so the summary
+    // must not claim one either.
+    expect(result.summary).not.toContain("Resolved pipe");
   });
 });
 
@@ -257,12 +266,12 @@ describe("validatePrepareInputsRequest", () => {
 
   it("rejects a blank pipe_ref", () => {
     const errors = validatePrepareInputsRequest({ files, pipe_ref: "  ", inputs: {} });
-    expect(errors.some((error) => error.location === "pipe_ref")).toBe(true);
+    expect(errors.map((error) => error.location)).toEqual(["pipe_ref"]);
   });
 
   it("rejects a blank method_id", () => {
     const errors = validatePrepareInputsRequest({ files: [], method_id: " ", inputs: {} });
-    expect(errors.some((error) => error.location === "method_id")).toBe(true);
+    expect(errors.map((error) => error.location)).toEqual(["method_id"]);
   });
 
   it("accepts each selector on its own", () => {
@@ -285,7 +294,7 @@ describe("validatePrepareInputsRequest", () => {
       method_ref: "github.com/Pipelex/methods/documents@v0.1.0",
       inputs: {},
     });
-    expect(beside.some((error) => error.location === "method_ref")).toBe(true);
+    expect(beside.map((error) => error.location)).toEqual(["method_ref"]);
 
     const both = validatePrepareInputsRequest({
       files: [],
@@ -293,7 +302,7 @@ describe("validatePrepareInputsRequest", () => {
       method_id: "mt_123",
       inputs: {},
     });
-    expect(both).not.toHaveLength(0);
+    expect(both.map((error) => error.location)).toEqual(["method_id"]);
   });
 });
 
@@ -761,7 +770,7 @@ describe("prepareMthdsInputs — console (pass-through only)", () => {
     expect(result.structuredContent.errors?.[0]?.message).toContain("local file path");
   });
 
-  it("surfaces an invalid closure as a no-verdict input_domain at pipe_ref (no produced-invalid arm)", async () => {
+  it("surfaces an invalid closure as a no-verdict input_domain at the SELECTOR (no produced-invalid arm)", async () => {
     const result = await prepareMthdsInputs(
       { files, inputs: {} },
       { baseUrl: DEFAULT_API_URL, client: validateWith(invalidReport) },
@@ -770,11 +779,25 @@ describe("prepareMthdsInputs — console (pass-through only)", () => {
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.is_valid).toBe(false);
     expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
+    // Not `pipe_ref`: the closure is broken, which is a question about whatever
+    // named the method and never about a field the caller left empty.
+    expect(result.structuredContent.errors?.[0]?.location).toBe("files");
+    expect(result.structuredContent.errors?.[0]?.hint).toContain("mthds_validate");
     expect(result.structuredContent).not.toHaveProperty("validation_errors");
   });
 
-  it("refuses a report with no input_form rather than degrading to no refusals", async () => {
+  it("locates an invalid closure at method_ref when an address named the method", async () => {
+    const result = await prepareMthdsInputs(
+      { files: [], method_ref: PUBLISHED_REF, inputs: {} },
+      { baseUrl: DEFAULT_API_URL, client: validateWith(invalidReport) },
+    );
+
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+    // The hint must not send them to a `pipe_ref` they never typed.
+    expect(result.structuredContent.errors?.[0]?.hint).not.toContain("pipe_ref");
+  });
+
+  it("refuses a report with no input_form as a deployment fault, not the caller's", async () => {
     // Without the descriptor every value would pass through unchecked, which on
     // this arm means an upload refusal that never fires — the failure mode the
     // whole boundary exists to prevent.
@@ -784,8 +807,97 @@ describe("prepareMthdsInputs — console (pass-through only)", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    // `config`, because no request the caller can write works around it. It used
+    // to be `input_domain`@`pipe_ref`, under a hint that contradicted the
+    // message beside it.
+    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
     expect(result.structuredContent.errors?.[0]?.message).toContain("input_form");
+  });
+
+  it("refuses a wire input_form of null the same way, rather than dying on Object.keys", async () => {
+    // The report is extension-open transport nothing validates at runtime, so a
+    // `null` really can arrive where the type says the slot is absent. Tested
+    // for the CLASS: as a raw TypeError this surfaced as a retryable `runtime`
+    // fault, which is the one reading the refusal exists to prevent.
+    const result = await prepareMthdsInputs(
+      { files, inputs: { photo: "/tmp/a.png" } },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: validateWith(
+          reportWith(undefined, {
+            input_form: null,
+          } as unknown as Partial<PipelexValidationReport>),
+        ),
+      },
+    );
+
+    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
+  });
+
+  it("refuses a descriptor entry whose field list is unreadable", async () => {
+    const result = await prepareMthdsInputs(
+      { files, inputs: { photo: "/tmp/a.png" } },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: validateWith(
+          reportWith({ "demo.main": { fields: "nope" } } as unknown as InputForm),
+        ),
+      },
+    );
+
+    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.message).toContain("field list");
+  });
+
+  it("passes a malformed NESTED node through instead of throwing out of the walk", async () => {
+    // The walk's own contract: a malformed node falls to the pass-through arm.
+    // A stated `item: null` used to pass the `!== undefined` test and then have
+    // `.kind` read off it, and a null element of `fields` had `.name` read off
+    // it — both surfaced as a generic `runtime` fault.
+    const malformed = {
+      "demo.main": {
+        fields: [
+          { name: "gallery", kind: "list", item: null },
+          { name: "meta", kind: "object", fields: [null] },
+        ],
+      },
+    } as unknown as InputForm;
+
+    const result = await prepareMthdsInputs(
+      {
+        files,
+        inputs: { gallery: ["https://cdn.example.com/a.png"], meta: { title: "t" } },
+      },
+      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(malformed)) },
+    );
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.inputs).toEqual({
+      gallery: ["https://cdn.example.com/a.png"],
+      meta: { title: "t" },
+    });
+  });
+
+  it("names an unusable value for what it is instead of calling it inline bytes", async () => {
+    const result = await prepareMthdsInputs(
+      { files, inputs: { photo: 42 } },
+      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
+    );
+
+    expect(result.structuredContent.errors?.[0]?.location).toBe("inputs");
+    expect(result.structuredContent.errors?.[0]?.message).toContain("a number");
+    expect(result.structuredContent.errors?.[0]?.message).not.toContain("inline bytes");
+  });
+
+  it("still calls real inline bytes inline bytes", async () => {
+    const result = await prepareMthdsInputs(
+      { files, inputs: { photo: new Uint8Array([1, 2, 3]) } },
+      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
+    );
+
+    expect(result.structuredContent.errors?.[0]?.message).toContain("inline bytes");
   });
 });
 

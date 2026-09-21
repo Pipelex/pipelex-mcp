@@ -24,6 +24,7 @@ import {
   IMAGE_OUTPUT_LIST_BUNDLE_URI,
   INVALID_BUNDLE,
   INVALID_BUNDLE_URI,
+  PYTHON_FREE_METHOD_REF,
   apiAdvertisesExtension,
   liveApiConfig,
   liveClient,
@@ -230,18 +231,11 @@ describe.skipIf(!SERVES_SELECTORS)("mthds_validate by selector (live)", () => {
     expect(result.structuredContent.main_pipe?.pipe_ref).toBe(FIXTURE_PIPE_REF);
   });
 
-  // Deliberately NOT the shared `PUBLISHED_METHOD_REF`, and do not "harmonize"
-  // it onto one: `/v1/validate` resolves an address through `fetched_method_source`,
-  // which applies the execution-locus gate, so a fetched package shipping ANY `.py`
-  // is a 403 `CustomCodeRequiresSandbox` on a deployment that is not sandbox-hosted.
-  // `text_stats` ships `text_stats_funcs.py`; `documents` is Python-free. The other
-  // suites reach the tooling routes through `fetch_method_mthds_files`, which does
-  // not apply that gate, which is why they can share the constant and this cannot.
+  // `PYTHON_FREE_METHOD_REF`, not `PUBLISHED_METHOD_REF`: the reason is written
+  // once on the constant in `e2e-support.ts`, and it is a fact about this
+  // route's resolution rather than about this suite.
   it("validates a published method by address (server-side git resolution)", async () => {
-    const result = await validateMthds(
-      { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
-      context,
-    );
+    const result = await validateMthds({ method_ref: PYTHON_FREE_METHOD_REF }, context);
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);

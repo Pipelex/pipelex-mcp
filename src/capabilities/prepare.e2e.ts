@@ -28,24 +28,13 @@ import {
   apiAdvertisesExtension,
   fixtureMethodId,
   liveApiConfig,
+  PYTHON_FREE_METHOD_REF,
 } from "./e2e-support.js";
 import { prepareMthdsInputs } from "./prepare.js";
 import type { PrepareContext } from "./prepare.js";
 
 /** Does this deployment resolve `method_id` / `method_ref` server-side? */
 const SERVES_SELECTORS = await apiAdvertisesExtension("method_ref");
-
-/**
- * Deliberately NOT the shared `PUBLISHED_METHOD_REF`, for the reason
- * `validate.e2e.ts` states about its own by-address leg: `mthds_prepare_inputs`
- * now resolves an address through `POST /v1/validate`, which applies the
- * execution-locus gate, so a fetched package shipping any `.py` is a 403 off a
- * deployment that is not sandbox-hosted. `text_stats` ships
- * `text_stats_funcs.py`; `documents` is Python-free. That difference is a fact
- * about this tool's resolution route, not an accident of the fixture — the two
- * build-surface tools reach their crate another way and can share the constant.
- */
-const PYTHON_FREE_METHOD_REF = "github.com/Pipelex/methods/documents@v0.1.0";
 
 const imageFiles = [{ content: IMAGE_BUNDLE, uri: IMAGE_BUNDLE_URI }];
 

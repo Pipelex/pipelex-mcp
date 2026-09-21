@@ -1138,6 +1138,23 @@ describe("blueprintMainPipeRefOf", () => {
     expect(blueprintMainPipeRefOf({ main_pipe: "main" })).toBeUndefined();
   });
 
+  it("trims both members, so one method cannot resolve on one shell and not the other", () => {
+    // Load-bearing, not cosmetic: the SDK reads both through its own
+    // `nonEmptyString`, and `mthds_prepare_inputs` mirrors this selection on the
+    // console while delegating to the SDK on the workshop. Untrimmed, a padded
+    // `main_pipe` keyed nothing here and `demo.main` there — the same method
+    // prepared on one shell and refused on the other. Nothing upstream strips
+    // it: `DomainBlueprint.main_pipe` is a bare `str` with no validator.
+    expect(blueprintMainPipeRefOf({ domain: "demo", main_pipe: "  main  " })).toBe("demo.main");
+    expect(blueprintMainPipeRefOf({ domain: "  demo  ", main_pipe: "main" })).toBe("demo.main");
+    expect(blueprintMainPipeRefOf({ domain: "demo", main_pipe: "  other.shout  " })).toBe(
+      "other.shout",
+    );
+    // Whitespace-only is still empty, on both members.
+    expect(blueprintMainPipeRefOf({ domain: "demo", main_pipe: "   " })).toBeUndefined();
+    expect(blueprintMainPipeRefOf({ domain: "   ", main_pipe: "main" })).toBeUndefined();
+  });
+
   it("treats a blueprint that is not an object as declaring nothing", () => {
     for (const blueprint of [undefined, null, "demo.main", 7, ["demo.main"]]) {
       expect(blueprintMainPipeRefOf(blueprint)).toBeUndefined();

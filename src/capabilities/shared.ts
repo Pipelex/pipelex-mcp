@@ -335,21 +335,37 @@ export function buildApiConfig(env: ApiEnv = process.env): ApiConfig {
  * neither `pipe_io_contracts` nor `input_form`, so the signature silently went
  * missing instead of being found. Only reachable on a runner old enough to
  * serve no `default_pipe_ref`, which is why it went unseen.
+ *
+ * **Both members are trimmed before use**, which is not cosmetic: the SDK reads
+ * them through its own `nonEmptyString`, and `mthds_prepare_inputs` mirrors the
+ * SDK's pipe selection on the console while delegating to it on the workshop.
+ * Without the trim a padded `main_pipe` keyed nothing here and `domain.main`
+ * there, so one method prepared on one shell and was refused on the other —
+ * the one outcome `selectPipeRef` says this tool cannot have. Nothing upstream
+ * strips it: `pipelex`'s `DomainBlueprint.main_pipe` is a bare `str` with no
+ * validator, so a padded TOML value reaches the wire intact.
  */
 export function blueprintMainPipeRefOf(blueprint: unknown): string | undefined {
   if (blueprint === null || typeof blueprint !== "object" || Array.isArray(blueprint)) {
     return undefined;
   }
   const record = blueprint as Record<string, unknown>;
-  const mainPipe = record.main_pipe;
-  if (typeof mainPipe !== "string" || mainPipe.length === 0) {
+  const mainPipe = trimmedNonEmpty(record.main_pipe);
+  if (mainPipe === undefined) {
     return undefined;
   }
   if (mainPipe.includes(".")) {
     return mainPipe;
   }
-  const domain = record.domain;
-  return typeof domain === "string" && domain.length > 0 ? `${domain}.${mainPipe}` : undefined;
+  const domain = trimmedNonEmpty(record.domain);
+  return domain === undefined ? undefined : `${domain}.${mainPipe}`;
+}
+
+/** A trimmed non-empty string, or `undefined` — the SDK's `nonEmptyString` rule. */
+function trimmedNonEmpty(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 /** The shared `<address>[@<tag>]` grammar sentence, reused by schema descriptions and hints. */
@@ -630,6 +646,30 @@ export interface ClassifyErrorOptions {
     hint: string;
   };
   /**
+   * Per-route texture for {@link MissingInputFormError} — the deployment served
+   * a report with no usable `input_form` descriptor. Classified `config`, not
+   * `input_domain`: no request the caller can write works around it, so
+   * reporting it against one of their fields sent them editing a request that
+   * was never the problem. Defaults to `PIPELEX_BASE_URL`, the knob that
+   * actually selects the deployment.
+   */
+  missingDescriptor?: {
+    location?: string;
+    hint: string;
+  };
+  /**
+   * Per-route texture for {@link UnresolvableClosureError} — the method's own
+   * bundle did not validate, so no signature could be read from it. It locates
+   * at whatever NAMED the method (the files, the address, the id) and never at
+   * `pipe_ref`, which is why it is separate from {@link preparation}: that
+   * texture answers "which pipe?", and this one answers "which method?".
+   * Defaults to {@link badRequest}, whose locator already follows the selector.
+   */
+  closure?: {
+    location?: string;
+    hint: string;
+  };
+  /**
    * Per-route texture for a refused or unreadable asset on the upload leg.
    * `location` covers both arms (`RejectedAssetError` /
    * `InvalidLocalSourceError`) and defaults to `inputs` — right for
@@ -655,6 +695,33 @@ const DEFAULT_BAD_REQUEST: NonNullable<ClassifyErrorOptions["badRequest"]> = {
 
 /** The env-var auth wording a 401/403 carries when no deployment texture overrides it. */
 export const DEFAULT_AUTH_HINT = "Check PIPELEX_API_KEY for the configured API.";
+
+/**
+ * The deployment served a validation report with no usable `input_form`
+ * descriptor. Derives from the SDK's `InputPreparationError` so a caller
+ * catching the family still catches it, but {@link classifyError} pulls it out
+ * ahead of the base arm: it is a deployment fault, not a request the caller can
+ * repair.
+ */
+export class MissingInputFormError extends InputPreparationError {
+  constructor(message: string) {
+    super(message);
+    this.name = "MissingInputFormError";
+  }
+}
+
+/**
+ * The method's own closure did not validate, so no signature could be read.
+ * Separated from the preparation family for the locator alone: left in it, a
+ * caller who named a broken published package by `method_ref` was told to fix
+ * their `pipe_ref` — a field they had left empty, on a bundle they do not own.
+ */
+export class UnresolvableClosureError extends InputPreparationError {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnresolvableClosureError";
+  }
+}
 
 export function classifyError(err: unknown, options: ClassifyErrorOptions = {}): ToolError {
   if (err instanceof ApiUnreachableError) {
@@ -771,10 +838,43 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
     };
   }
 
-  // The base class: the method signature did not resolve (invalid closure), an
-  // unqualified/unknown pipe_ref or no single default pipe, or a caller value
-  // at a file position that was malformed/unsupported. All are request-domain
-  // problems, and all are raised CLIENT-SIDE — so they locate at `preparation`,
+  // Two subclasses first, because both derive from InputPreparationError and
+  // the base arm below would otherwise swallow them — which is exactly what it
+  // used to do, reporting each against the caller's `pipe_ref`.
+
+  // The deployment served no usable descriptor. A `config` condition: the
+  // message and the hint used to contradict each other, one naming the
+  // deployment and the other telling the caller to qualify a pipe.
+  if (err instanceof MissingInputFormError) {
+    const texture = options.missingDescriptor;
+    return {
+      class: "config",
+      location: texture?.location ?? "PIPELEX_BASE_URL",
+      message: err.message,
+      hint:
+        texture?.hint ??
+        "Point the API at a deployment that serves the input-form descriptor (pipelex-api >= 0.18.0).",
+      retryable: false,
+    };
+  }
+
+  // The closure itself is broken — a question about whatever named the method,
+  // so it takes the selector's own locator rather than the pipe's.
+  if (err instanceof UnresolvableClosureError) {
+    const texture = options.closure ?? options.badRequest ?? DEFAULT_BAD_REQUEST;
+    return {
+      class: "input_domain",
+      ...(texture.location === undefined ? {} : { location: texture.location }),
+      message: err.message,
+      hint: texture.hint,
+      retryable: false,
+    };
+  }
+
+  // The base class: an unqualified or unknown pipe_ref, no single default pipe,
+  // or a caller value at a file position that was malformed/unsupported. All are
+  // request-domain problems, and all are raised CLIENT-SIDE — so they locate at
+  // `preparation`,
   // which a route separates from `badRequest` when its 400/422 is about a
   // different field. `badRequest` remains the fallback for a route that has no
   // such distinction to draw.

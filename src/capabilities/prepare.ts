@@ -1,6 +1,7 @@
 import { InputPreparationError } from "@pipelex/sdk";
 import type {
   InputForm,
+  InputFormField,
   InputFormItem,
   MthdsFileItem,
   PipelexValidationResult,
@@ -13,6 +14,8 @@ import { z } from "zod";
 
 import {
   METHOD_REF_GRAMMAR,
+  MissingInputFormError,
+  UnresolvableClosureError,
   blueprintMainPipeRefOf,
   buildApiConfig,
   classifyError,
@@ -173,26 +176,51 @@ const PREPARE_ASSET_TEXTURE: NonNullable<ClassifyErrorOptions["asset"]> = {
 };
 
 /**
- * The signature texture, and the reason every shape carries it unchanged: the
- * SDK refuses an unresolvable closure, an unqualified `pipe_ref`, an unknown
- * one and a closure with no single default pipe **client-side**, as an
- * `InputPreparationError` raised before any request. That is always a question
- * about the pipe, whatever named the method — which is why it rides
- * `preparation` rather than `badRequest`, whose locator follows the selector
- * the caller actually typed.
+ * The signature texture, and the reason every shape carries it unchanged: an
+ * unqualified `pipe_ref`, an unknown one and a closure with no single default
+ * pipe are all refused **client-side**, as an `InputPreparationError` raised
+ * before any request. Each really is a question about the pipe, whatever named
+ * the method — which is why it rides `preparation` rather than `badRequest`,
+ * whose locator follows the selector the caller actually typed.
+ *
+ * Two conditions that used to land here no longer do, because neither is a
+ * question about the pipe: a deployment serving no descriptor
+ * ({@link MissingInputFormError}) and a closure that does not validate
+ * ({@link UnresolvableClosureError}). Both were reported against a `pipe_ref`
+ * the caller had usually left empty.
  */
 const PREPARE_SIGNATURE_TEXTURE: NonNullable<ClassifyErrorOptions["preparation"]> = {
   location: "pipe_ref",
-  hint: "Pass pipe_ref as a qualified domain.pipe_code; omitting it requires the closure to declare exactly one main_pipe. If the bundle itself is invalid, repair it with mthds_validate.",
+  hint: "Pass pipe_ref as a qualified domain.pipe_code; omitting it requires the closure to declare exactly one main_pipe.",
 };
+
+/**
+ * Shared by all three shapes: the deployment, not the request, is what serves
+ * the descriptor, so the locator is the knob that selects the deployment. On
+ * the hosted console that knob belongs to the operator and not to the caller,
+ * which the `config` class is precisely how this repo says so.
+ */
+const PREPARE_MISSING_DESCRIPTOR_TEXTURE: NonNullable<ClassifyErrorOptions["missingDescriptor"]> = {
+  location: "PIPELEX_BASE_URL",
+  hint: "The signature is read from this deployment's /v1/validate, which must serve the input-form descriptor (pipelex-api >= 0.18.0). No change to the request works around it.",
+};
+
+/** The closure-repair hint; the locator is per-shape, being whatever named the method. */
+const PREPARE_CLOSURE_HINT =
+  "The method's own bundle does not validate, so no signature can be read from it. Run mthds_validate on the same method for the diagnostics.";
 
 /** Classify options for a files-shaped request. */
 const PREPARE_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/validate",
-  // A files request has no separate selector field, so a route 400/422 is about
-  // the submitted closure or the pipe just as a client-side failure is.
-  badRequest: PREPARE_SIGNATURE_TEXTURE,
+  // No `badRequest` override on purpose: a files request names no selector
+  // field, so the default `files` locator is already right, and it is the very
+  // texture `mthds_validate` gets for the very same body on the very same
+  // route. It must NOT be the signature texture, which is what it was while
+  // this tool still sent `pipe_ref` to `/v1/build/inputs`: pipe selection is
+  // client-side now, so `/v1/validate` can never be complaining about it.
+  closure: { location: "files", hint: PREPARE_CLOSURE_HINT },
   preparation: PREPARE_SIGNATURE_TEXTURE,
+  missingDescriptor: PREPARE_MISSING_DESCRIPTOR_TEXTURE,
   asset: PREPARE_ASSET_TEXTURE,
 };
 
@@ -213,6 +241,8 @@ const PREPARE_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
     hint: `Check the address and tag — ${METHOD_REF_GRAMMAR}. The tag must be a git tag on the repository (branches do not pin), and the ref must be resolvable by an anonymous clone.`,
   },
   preparation: PREPARE_SIGNATURE_TEXTURE,
+  missingDescriptor: PREPARE_MISSING_DESCRIPTOR_TEXTURE,
+  closure: { location: "method_ref", hint: PREPARE_CLOSURE_HINT },
   notFound: {
     location: "method_ref",
     hint: "The repository was fetched but holds no package matching this address by manifest identity. Check the package selector against the repository's METHODS.toml manifests.",
@@ -239,6 +269,8 @@ const PREPARE_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
     hint: "The stored method may have no MTHDS source yet, or this deployment may not resolve method_id on /v1/validate — the selector is hosted-only (a bare pipelex-api runner has no catalog).",
   },
   preparation: PREPARE_SIGNATURE_TEXTURE,
+  missingDescriptor: PREPARE_MISSING_DESCRIPTOR_TEXTURE,
+  closure: { location: "method_id", hint: PREPARE_CLOSURE_HINT },
   notFound: {
     location: "method_id",
     hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.",
@@ -256,8 +288,8 @@ class UploadNotAllowedError extends Error {
   public readonly inputName: string;
   public readonly kind: string;
 
-  constructor(inputName: string, kind: string) {
-    super(`Input "${inputName}" is ${kind}, which this hosted console cannot upload.`);
+  constructor(inputName: string, kind: string, sentence?: string) {
+    super(sentence ?? `Input "${inputName}" is ${kind}, which this hosted console cannot upload.`);
     this.name = "UploadNotAllowedError";
     this.inputName = inputName;
     this.kind = kind;
@@ -424,19 +456,33 @@ async function preparePassThrough(
   const report = await fetchSignature(client, envelope.selector);
 
   const inputForm = report.input_form;
-  if (inputForm === undefined) {
+  // Tested for a usable RECORD, not merely for `undefined`: the report is
+  // extension-open transport that nothing validates at runtime, so a runner or
+  // an intermediary that materialises the absent slot as `null` used to slip
+  // this guard and die on `Object.keys(null)` two frames down — surfacing as a
+  // generic retryable `runtime` fault, which is the one reading this refusal
+  // exists to prevent.
+  if (!isInputFormRecord(inputForm)) {
     // Never a silent degrade to "no uploads needed": with no descriptor there
     // is no signature to prepare against, and every value would pass through
     // unchecked — which on this arm means a refusal that never fires.
-    throw new InputPreparationError(
+    throw new MissingInputFormError(
       "Cannot prepare inputs: the validate report carries no `input_form` descriptor — the signature " +
-        'preparation reads. The descriptor rides `views: ["input_form"]` on pipelex-api >= 0.18.0; ' +
-        "point PIPELEX_BASE_URL at a deployment that serves it.",
+        'preparation reads. The descriptor rides `views: ["input_form"]` on pipelex-api >= 0.18.0.',
     );
   }
 
   const pipeRef = selectPipeRef(report, inputForm, nonEmptyString(envelope.pipe_ref));
-  const declared = new Map(inputForm[pipeRef].fields.map((field) => [field.name, field]));
+  const fields = topLevelFieldsOf(inputForm[pipeRef]);
+  if (fields === undefined) {
+    // Same refusal, same reason: a descriptor entry with no readable field list
+    // leaves nothing to walk, so every value would pass through unchecked.
+    throw new MissingInputFormError(
+      "Cannot prepare inputs: the validate report's `input_form` descriptor carries no readable " +
+        `field list for "${pipeRef}".`,
+    );
+  }
+  const declared = new Map(fields.map((field) => [field.name, field] as const));
 
   const rewritten: Record<string, unknown> = { ...envelope.inputs };
   for (const [name, callerValue] of Object.entries(envelope.inputs)) {
@@ -489,7 +535,11 @@ async function fetchSignature(
 
   if (!result.is_valid) {
     const first = result.validation_errors[0]?.message ?? result.message;
-    throw new InputPreparationError(
+    // Its own type, so `classifyError` can locate it at whatever named the
+    // method. As the shared preparation error it reported the caller's
+    // `pipe_ref` — a field they had usually left empty — for a published
+    // package they cannot repair.
+    throw new UnresolvableClosureError(
       `Cannot prepare inputs: the method signature did not resolve — ${first}`,
     );
   }
@@ -566,6 +616,35 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * The descriptor predicates, and why they are this repo's and not the SDK's:
+ * the descriptor is wire data reaching a public endpoint, and every shape the
+ * declared type forbids still arrives. Unguarded, each one threw a raw
+ * `TypeError` out of the walk and surfaced as a generic retryable `runtime`
+ * fault — the walk's own doc comment already said a malformed node must fall to
+ * the pass-through arm instead, and these are what make that true at every
+ * depth rather than only at the two it happened to cover.
+ */
+function isInputFormRecord(value: unknown): value is InputForm {
+  return isPlainObject(value);
+}
+
+function isInputFormNode(value: unknown): value is InputFormItem {
+  return isPlainObject(value) && typeof value.kind === "string";
+}
+
+function isInputFormField(value: unknown): value is InputFormField {
+  return isInputFormNode(value) && typeof (value as { name?: unknown }).name === "string";
+}
+
+/** The readable top-level fields of one pipe's descriptor entry, or `undefined` if there are none. */
+function topLevelFieldsOf(entry: unknown): InputFormField[] | undefined {
+  if (!isPlainObject(entry) || !Array.isArray(entry.fields)) {
+    return undefined;
+  }
+  return entry.fields.filter(isInputFormField);
+}
+
+/**
  * The explicit-template envelope: a plain object whose keys are EXACTLY `concept` and
  * `content` (SDK parity, mirroring the runtime's own collision rule) — so a declared
  * structured concept that merely happens to carry both fields is not misread as one.
@@ -602,10 +681,12 @@ function isFileContent(node: unknown): node is Record<string, unknown> {
  *
  * A caller value whose shape disagrees with the node (a scalar at an `object`, a
  * non-array at a `list`) passes through for the run to reject — preparation
- * never second-guesses the signature. The two `Array.isArray` guards on the
- * descriptor's own members are this repo's, not the SDK's: the descriptor is
- * wire data on a public endpoint, and a malformed node must fall to the
- * pass-through arm rather than throw out of the walk.
+ * never second-guesses the signature. The guards on the descriptor's own
+ * members are this repo's, not the SDK's: the descriptor is wire data on a
+ * public endpoint, and a malformed node must fall to the pass-through arm
+ * rather than throw out of the walk. Note the refusal at a file position still
+ * fires either way — a node that falls through carries no declared file, so
+ * nothing upload-bearing escapes unrefused.
  */
 function resolveNodePassThrough(node: InputFormItem, callerValue: unknown, name: string): unknown {
   switch (node.kind) {
@@ -618,17 +699,20 @@ function resolveNodePassThrough(node: InputFormItem, callerValue: unknown, name:
       }
       const result: Record<string, unknown> = { ...callerValue };
       for (const field of node.fields) {
-        if (Object.hasOwn(callerValue, field.name)) {
+        if (isInputFormField(field) && Object.hasOwn(callerValue, field.name)) {
           result[field.name] = resolveNodePassThrough(field, callerValue[field.name], name);
         }
       }
       return result;
     }
     case "list": {
-      if (!Array.isArray(callerValue) || node.item === undefined) {
+      // `isInputFormNode`, not `!== undefined`: a stated `item: null` passed the
+      // old test and then had `.kind` read off it.
+      const item = node.item;
+      if (!Array.isArray(callerValue) || !isInputFormNode(item)) {
         return callerValue;
       }
-      return callerValue.map((element) => resolveNodePassThrough(node.item, element, name));
+      return callerValue.map((element) => resolveNodePassThrough(item, element, name));
     }
     default:
       return callerValue;
@@ -654,7 +738,34 @@ function passThroughSource(source: unknown, name: string): string {
     }
     throw new UploadNotAllowedError(name, "a local file path");
   }
-  throw new UploadNotAllowedError(name, "inline bytes");
+  if (isInlineBytes(source)) {
+    throw new UploadNotAllowedError(name, "inline bytes");
+  }
+  // Anything else is not a byte payload at all, and saying it is sent the caller
+  // hunting one they never sent. The SDK's own arm draws the same distinction.
+  throw new UploadNotAllowedError(
+    name,
+    "an unsupported value",
+    `Input "${name}" carries a value this hosted console cannot read as a file: expected an ` +
+      `http(s) URL or a pipelex-storage:// reference, got ${describeSourceValue(source)}.`,
+  );
+}
+
+/** The byte-carrying values the SDK's file arm accepts — refused here, but named accurately. */
+function isInlineBytes(value: unknown): boolean {
+  return (
+    value instanceof Uint8Array ||
+    value instanceof ArrayBuffer ||
+    (typeof Blob !== "undefined" && value instanceof Blob)
+  );
+}
+
+/** A short description of an unusable value. Never the value itself, which is caller data. */
+function describeSourceValue(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "an array";
+  if (isPlainObject(value)) return "an object with no `url` key";
+  return `a ${typeof value}`;
 }
 
 export function validatePrepareInputsRequest(input: ResolvedPrepareRequest): ToolError[] {
