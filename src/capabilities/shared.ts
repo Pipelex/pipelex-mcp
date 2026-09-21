@@ -371,6 +371,25 @@ function trimmedNonEmpty(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+/** A plain object, or `undefined` — the one narrowing step every artifact check starts from. */
+export function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * A non-empty record — the test for whether a per-pipe artifact map is worth
+ * shipping to a view at all. The view looks pipes up in it, so an empty map can
+ * drive nothing, and a runner that ignored the `views` token returns nothing
+ * rather than an empty map. Shared by `mthds_validate`, which gates the input
+ * form's artifacts on it, and by `mthds_run_results`, which gates the run's.
+ */
+export function hasArtifactEntries(artifact: unknown): boolean {
+  const map = asRecord(artifact);
+  return map !== undefined && Object.keys(map).length > 0;
+}
+
 /** The shared `<address>[@<tag>]` grammar sentence, reused by schema descriptions and hints. */
 export const METHOD_REF_GRAMMAR =
   "github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0";

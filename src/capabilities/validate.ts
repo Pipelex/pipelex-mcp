@@ -14,11 +14,13 @@ import { z } from "zod";
 
 import {
   METHOD_REF_GRAMMAR,
+  asRecord,
   blueprintMainPipeRefOf,
   buildApiConfig,
   classifyError,
   summaryForToolError,
   filesInputSchema,
+  hasArtifactEntries,
   resolveSubmittedFiles,
   toolErrorSchema,
   toolResultContent,
@@ -633,8 +635,8 @@ export function validationResult(
     if (
       viewsAvailable &&
       report.is_runnable &&
-      hasEntries(validReport.pipe_io_contracts) &&
-      hasEntries(validReport.input_form)
+      hasArtifactEntries(validReport.pipe_io_contracts) &&
+      hasArtifactEntries(validReport.input_form)
     ) {
       pipeIoContracts = validReport.pipe_io_contracts;
       inputForm = validReport.input_form;
@@ -1040,23 +1042,6 @@ function isMultiplicity(value: unknown): value is IOMultiplicity {
 
 function isPresenceMarker(value: unknown): value is PresenceMarker {
   return typeof value === "string" && (PRESENCE_MARKERS as readonly string[]).includes(value);
-}
-
-/** A plain object, or `undefined` — the one narrowing step every check above starts from. */
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-/**
- * A non-empty record — the test for whether a per-pipe artifact map is worth
- * shipping to the view at all. The view looks pipes up in it, so an empty map
- * can drive nothing.
- */
-function hasEntries(artifact: unknown): boolean {
-  const map = asRecord(artifact);
-  return map !== undefined && Object.keys(map).length > 0;
 }
 
 /**

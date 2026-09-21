@@ -26,6 +26,7 @@ import {
   classifyError,
   summaryForToolError,
   filesInputSchema,
+  hasArtifactEntries,
   imageCandidatesOf,
   MAX_IMAGE_CANDIDATE_ENTRIES,
   resolveSubmittedFiles,
@@ -368,6 +369,29 @@ export interface RunResultsResult {
    * and the invoking shell has views.
    */
   graphSpec?: unknown;
+  /**
+   * The run's `pipe_io_contracts` — the per-pipe IO contracts for the library
+   * the run executed against, keyed by namespaced `pipe_ref`. It rides
+   * `_meta.pipe_io_contracts` beside the graph, never `structuredContent`.
+   *
+   * It travels as a PAIR with `outputForm` because that is the renderer's own
+   * rule: `GraphViewer` shows a data node's VALUE only when it holds both, and
+   * falls back to the concept's structure table otherwise. Shipping one alone
+   * would buy nothing and cost the wire.
+   */
+  pipeIoContracts?: unknown;
+  /**
+   * The run's `output_form` — the other half of the pair above. The contract
+   * names the payload's shape; the descriptor says what the result IS.
+   */
+  outputForm?: unknown;
+  /**
+   * The run's `input_form`. Optional even to the renderer, and rides on its own
+   * terms: it is what lets the method's own INPUTS show their value, since no
+   * pipe produced them and so no output descriptor describes them. Absent
+   * changes nothing but those nodes.
+   */
+  inputForm?: unknown;
   /**
    * The full, unbounded main output on raw MCP response metadata (rides
    * `_meta.main_stuff`). `structuredContent.main_stuff` is the bounded copy.
@@ -885,6 +909,26 @@ function completedResult(
 
   const { value: bounded, truncated } = boundMainStuff(result.main_stuff);
   const graphSpec = viewsAvailable ? (result.graph_spec ?? undefined) : undefined;
+  // The graph's data artifacts, on the same terms as the graph itself: views
+  // only, `_meta` only. They travel as a PAIR, which is the renderer's rule and
+  // not a convenience — `GraphViewer` reads a data node's value only when it
+  // holds `contracts` and `outputForm` together, and shows the concept's
+  // structure table otherwise, so half the pair renders exactly like neither.
+  // `hasArtifactEntries` is what makes that a real test: the hosted results
+  // relay these keys as `null` for any run whose runner predates them, and an
+  // empty map is a map the view can look nothing up in.
+  const artifactsRide =
+    viewsAvailable &&
+    hasArtifactEntries(result.pipe_io_contracts) &&
+    hasArtifactEntries(result.output_form);
+  const pipeIoContracts = artifactsRide ? result.pipe_io_contracts : undefined;
+  const outputForm = artifactsRide ? result.output_form : undefined;
+  // Third and independent: the input form is optional to the renderer, and it
+  // answers for the method's own inputs alone — nodes no pipe produced, which
+  // no output descriptor describes. It rides when it has entries and the pair
+  // does, and its absence costs those nodes their value and nothing else.
+  const inputForm =
+    artifactsRide && hasArtifactEntries(result.input_form) ? result.input_form : undefined;
   const usage = summarizeUsage(result);
 
   // Both walks read the FULL output, not the bounded copy: a reference pruned
@@ -938,6 +982,9 @@ function completedResult(
       artifactDownloadAvailable,
     ),
     graphSpec,
+    pipeIoContracts,
+    outputForm,
+    inputForm,
     mainStuff: result.main_stuff,
     // Both ride `_meta` ungated by views (like mainStuff): the full per-call
     // list, and the per-pipe rollup for a future detailed-cost surface. Kept off
@@ -1265,6 +1312,12 @@ export function runResultsToolResult(result: RunResultsResult) {
     // projected onto this tool's row shape).
     _meta: {
       graph_spec: result.graphSpec,
+      // Keyed as the API names them, like every other key here. These three are
+      // what turn the graph's data nodes from structure tables into the run's
+      // actual values; see `completedResult` for why the first two are a pair.
+      pipe_io_contracts: result.pipeIoContracts,
+      output_form: result.outputForm,
+      input_form: result.inputForm,
       main_stuff: result.mainStuff,
       tokens_usages: result.tokensUsages,
       usage_by_pipe: result.usageByPipe,
