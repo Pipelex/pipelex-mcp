@@ -5,6 +5,7 @@ import path from "node:path";
 import { CodegenLockError, isStampableArtifactPath, runCodegenCheck } from "@pipelex/sdk";
 import type { CodegenDrift, CodegenTreeFile } from "@pipelex/sdk";
 
+import { PRUNED_DIRECTORIES } from "./shared.js";
 import type { ToolError } from "./shared.js";
 import {
   checkDeepestExistingAncestor,
@@ -83,18 +84,6 @@ export function isCodegenLock(text: string): boolean {
  */
 export const MAX_WALK_CANDIDATES = 400;
 export const MAX_WALK_BYTES = 4 * 1024 * 1024;
-
-/** Directories a misaimed `output_dir` would otherwise drag in wholesale. */
-const PRUNED_DIRECTORIES = new Set([
-  "node_modules",
-  ".git",
-  "dist",
-  "build",
-  "target",
-  ".next",
-  ".venv",
-  "__pycache__",
-]);
 
 /** Enough to hold either ownership marker; a foreign file is never read whole. */
 const HEAD_BYTES = 512;

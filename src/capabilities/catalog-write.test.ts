@@ -1033,9 +1033,37 @@ describe("the save writes a link only where one belongs", () => {
     expect(link.kind === "link" && link.link.method_id).toBe("mt_teammate");
   });
 
-  it("still refuses to re-point the link when the save names another method_id", async () => {
-    // The create is refused up front; an UPDATE of a genuinely different method
-    // still happens, and it is the link write that must not follow it.
+  it("updates normally when the directory is linked to that same method", async () => {
+    // The mismatch check must not cost the ordinary case anything.
+    await writeBundle("mine", { "bundle.mthds": 'domain = "demo"' });
+    await fs.writeFile(
+      path.join(root, "mine", LINK_FILE_NAME),
+      JSON.stringify({
+        method_id: "mt_mine",
+        name: "Mine",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "2026-09-20T12:00:00Z",
+      }),
+      "utf8",
+    );
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "mine/bundle.mthds" }], name: "Mine", method_id: "mt_mine" },
+      contextFor(updating("mt_mine", "Mine"), validationAnswering(validReport)),
+    );
+
+    expect(result.structuredContent).toMatchObject({ status: "ok" });
+    expect(linkFileOf(result.structuredContent)?.written).toBe(true);
+  });
+
+  it("refuses an update whose method_id is not the one the directory is linked to", async () => {
+    // This used to run the PUT and report the mismatch afterwards, on the
+    // grounds that the method really was saved by then. But the save that
+    // "really happened" was a destructive rewrite of a DIFFERENT method with
+    // this directory's bundle and name, the catalog keeps no earlier version,
+    // and the summary then told the caller the directory was NOT linked — whose
+    // advice, followed, overwrote the teammate's method for real. The mismatch
+    // costs one local file read to see, and the create arm already reads it.
     await writeBundle("theirs", { "bundle.mthds": 'domain = "demo"' });
     await fs.writeFile(
       path.join(root, "theirs", LINK_FILE_NAME),
@@ -1048,16 +1076,20 @@ describe("the save writes a link only where one belongs", () => {
       "utf8",
     );
 
+    // `clientNotCalled` throws on every method, so reaching the catalog at all
+    // — even the read — fails this test.
     const result = await saveMthdsMethod(
       { files: [{ path: "theirs/bundle.mthds" }], name: "Mine", method_id: "mt_mine" },
-      contextFor(updating("mt_mine", "Mine"), validationAnswering(validReport)),
+      contextFor(clientNotCalled, validationAnswering(validReport)),
     );
 
-    // The method IS saved — it is stored by the time the link is written, and
-    // saying otherwise would be the one thing that is certainly untrue.
-    expect(result.structuredContent).toMatchObject({ status: "ok" });
-    expect(linkFileOf(result.structuredContent)?.written).toBe(false);
-    expect(linkFileOf(result.structuredContent)?.reason).toContain("mt_teammate");
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "method_id" });
+    expect(error.message).toContain("mt_teammate");
+    expect(error.message).toContain("mt_mine");
+    // `link_dir` is the deliberate fork, and the hint has to name it.
+    expect(error.hint).toContain('method_id: "mt_teammate"');
+    expect(error.hint).toContain("link_dir");
     const link = await readMethodLink(path.join(root, "theirs"));
     expect(link.kind === "link" && link.link.method_id).toBe("mt_teammate");
   });
@@ -1349,23 +1381,193 @@ describe("the save reads only what belongs to the bundle", () => {
     });
   });
 
-  it("refuses to write over a link file nobody can parse", async () => {
-    // The pull path refuses this exact state; the save path truncated it after
-    // the catalog write, destroying whatever it held.
+  it("refuses a .py symlink pointing out of the bundle, before anything reads it", async () => {
+    // The gate compared submitted STRINGS, while the resolver followed symlinks
+    // and contained only against the workspace — so this uploaded the file the
+    // link pointed at, as the method's Python, to the organization's catalog.
+    // Nothing validates Python, so this arm was the live one.
+    await writeBundle("bundle", { "main.mthds": 'domain = "demo"' });
+    await fs.writeFile(path.join(root, ".env"), "OPENAI_API_KEY=sk-super-secret\n", "utf8");
+    await fs.symlink(path.join(root, ".env"), path.join(root, "bundle", "helpers.py"));
+
+    const result = await saveMthdsMethod(
+      {
+        files: [{ path: "bundle/main.mthds" }],
+        python: [{ path: "bundle/helpers.py" }],
+        name: "Demo",
+      },
+      contextFor(clientNotCalled, validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "python[0].path" });
+    expect(error.message).toContain("symlink");
+    // The point of the whole test: the secret is in nothing that came back.
+    expect(JSON.stringify(result)).not.toContain("sk-super-secret");
+  });
+
+  it("refuses a .mthds symlink pointing out of the bundle", async () => {
+    await writeBundle("bundle", { "main.mthds": 'domain = "demo"' });
+    await fs.writeFile(path.join(root, "secrets.txt"), "TOKEN=leaked-token\n", "utf8");
+    await fs.symlink(path.join(root, "secrets.txt"), path.join(root, "bundle", "leak.mthds"));
+
+    const result = await saveMthdsMethod(
+      {
+        files: [{ path: "bundle/main.mthds" }, { path: "bundle/leak.mthds" }],
+        name: "Demo",
+      },
+      contextFor(clientNotCalled, validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "files[1].path" });
+    expect(JSON.stringify(result)).not.toContain("leaked-token");
+  });
+
+  it("allows a symlink that really does stay inside the bundle", async () => {
+    // The boundary is WHERE the bytes are, not whether a link was used to name
+    // them — a bundle that symlinks within itself is still one method's files.
+    await writeBundle("bundle", { "main.mthds": 'domain = "demo"', "real.py": "x = 1" });
+    await fs.symlink(path.join(root, "bundle", "real.py"), path.join(root, "bundle", "alias.py"));
+
+    const result = await saveMthdsMethod(
+      {
+        files: [{ path: "bundle/main.mthds" }],
+        python: [{ path: "bundle/alias.py" }],
+        name: "Demo",
+      },
+      contextFor(creating(), validationAnswering(validReport)),
+    );
+
+    expect(result.structuredContent).toMatchObject({ status: "ok" });
+  });
+
+  it("refuses to CREATE into a directory whose link file nobody can parse", async () => {
+    // A link nobody can parse is not an empty slot: `readMethodLink` calls it
+    // `unreadable` precisely because something claims the directory. That answer
+    // used to be flattened to "no link", so the create ran, minted a second
+    // method the tool cannot delete, and only then did the link write refuse —
+    // the very ordering the create arm's comment says was fixed.
     await writeBundle("garbled", { "bundle.mthds": 'domain = "demo"' });
     await fs.writeFile(path.join(root, "garbled", LINK_FILE_NAME), "not json at all", "utf8");
 
     const result = await saveMthdsMethod(
       { files: [{ path: "garbled/bundle.mthds" }], name: "Demo" },
+      contextFor(clientNotCalled, validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "link_dir" });
+    expect(error.message).toContain("cannot be read");
+    expect(error.message).toContain("SECOND method");
+    // And the file it could not read is still exactly as it was.
+    expect(await fs.readFile(path.join(root, "garbled", LINK_FILE_NAME), "utf8")).toBe(
+      "not json at all",
+    );
+  });
+});
+
+describe("the save refuses a name the pull could never write back", () => {
+  const creating = (name = "Demo"): CatalogWriteClient => ({
+    ...clientNotCalled,
+    async createMethod() {
+      return storedMethod({ name });
+    },
+  });
+
+  it("refuses an inline uri that is neither a .mthds nor a .py file", async () => {
+    // `storedNameReason` refuses this on the way back and there is no flag to
+    // bypass it, so the save that accepted the name stored a method whose
+    // written pull fails outright — and above the inline cap, for good.
+    const result = await saveMthdsMethod(
+      {
+        files: [
+          { content: 'domain = "demo"', uri: "main.mthds" },
+          { content: "notes", uri: "notes.md" },
+        ],
+        name: "Demo",
+      },
+      contextFor(clientNotCalled, validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "files" });
+    expect(error.message).toContain("notes.md");
+    expect(error.message).toContain("could not be pulled back");
+  });
+
+  it("refuses a dot-leading path component, which a plain { path } submission carries", async () => {
+    // No inline trickery needed for this one: the name comes straight off a
+    // real file's path relative to the bundle root.
+    await writeBundle("bundle", {
+      "main.mthds": 'domain = "demo"',
+      ".drafts/x.mthds": 'domain = "draft"',
+    });
+
+    const result = await saveMthdsMethod(
+      {
+        files: [{ path: "bundle/main.mthds" }, { path: "bundle/.drafts/x.mthds" }],
+        name: "Demo",
+      },
+      contextFor(clientNotCalled, validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "files" });
+    expect(error.message).toContain("component beginning with a dot");
+  });
+
+  it("refuses the link file's own name", async () => {
+    const result = await saveMthdsMethod(
+      {
+        files: [
+          { content: 'domain = "demo"', uri: "main.mthds" },
+          { content: "{}", uri: LINK_FILE_NAME },
+        ],
+        name: "Demo",
+      },
+      contextFor(clientNotCalled, validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "files" });
+    expect(error.message).toContain(LINK_FILE_NAME);
+  });
+
+  it("refuses two names differing only in case, across files and python alike", async () => {
+    // The two arms write into ONE directory, so the collision is not per-arm:
+    // on a case-insensitive filesystem these are one destination.
+    const result = await saveMthdsMethod(
+      {
+        files: [{ content: 'domain = "demo"', uri: "main.mthds" }],
+        python: [
+          { content: "x = 1", uri: "Helper.py" },
+          { content: "y = 2", uri: "helper.py" },
+        ],
+        name: "Demo",
+      },
+      contextFor(clientNotCalled, validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "python" });
+    expect(error.message).toContain("differ only in case");
+  });
+
+  it("still saves a bundle whose names the pull would write", async () => {
+    const result = await saveMthdsMethod(
+      {
+        files: [
+          { content: 'domain = "demo"', uri: "main.mthds" },
+          { content: 'domain = "two"', uri: "sub/other.mthds" },
+        ],
+        python: [{ content: "x = 1", uri: "helpers.py" }],
+        name: "Demo",
+      },
       contextFor(creating(), validationAnswering(validReport)),
     );
 
     expect(result.structuredContent).toMatchObject({ status: "ok", saved: "created" });
-    expect(linkFileOf(result.structuredContent)?.written).toBe(false);
-    expect(linkFileOf(result.structuredContent)?.reason).toContain("cannot be read");
-    expect(await fs.readFile(path.join(root, "garbled", LINK_FILE_NAME), "utf8")).toBe(
-      "not json at all",
-    );
   });
 });
 
@@ -1410,6 +1612,100 @@ describe("the pull says what the directory holds that the method does not", () =
     expect(result.summary).toContain("which this method does not");
     // It cannot tell a dropped file from the user's own, so it removes neither.
     expect(await fs.readFile(path.join(root, "drifted/extra.mthds"), "utf8")).toBe("dropped");
+  });
+
+  it("does not descend a vendored or dot directory, and does not call its files sources", async () => {
+    // The walk descended everything: `node_modules` spent the 512-entry budget
+    // and silenced the line altogether, and a `.venv` small enough to fit was
+    // listed as sources "this method does not have". The link file is meant to
+    // be COMMITTED, so a repository at output_dir is the expected case.
+    const stored = storedMethod({
+      mthds: JSON.stringify([{ name: "bundle.mthds", content: 'domain = "demo"' }]),
+    });
+    await writeBundle("proj", {
+      "bundle.mthds": 'domain = "demo"',
+      ".venv/lib/site-packages/_virtualenv.py": "x = 1",
+      ".git/hooks/note.py": "x = 1",
+      "node_modules/pkg/index.py": "x = 1",
+      "__pycache__/cached.py": "x = 1",
+      "mine.py": "x = 1",
+    });
+    await fs.writeFile(
+      path.join(root, "proj", LINK_FILE_NAME),
+      JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "2026-09-20T12:00:00Z",
+      }),
+      "utf8",
+    );
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "proj", overwrite: true },
+      contextFor(readingClient(stored), validationAnswering(validReport)),
+    );
+
+    // The user's own stray source is named; nothing from the vendored trees is.
+    expect(result.structuredContent).toMatchObject({ status: "ok", unmanaged: ["mine.py"] });
+    // And the walk still finished, so the claim it makes is a complete one.
+    expect(
+      (result.structuredContent as { unmanaged_truncated?: boolean }).unmanaged_truncated,
+    ).toBeUndefined();
+  });
+
+  it("says it could not finish rather than reporting a short list as the whole one", async () => {
+    // The depth and budget bounds returned "incomplete"; the readdir catch
+    // returned "complete", so an unreadable subtree shortened the list while
+    // the line above went on claiming it named everything there was.
+    const stored = storedMethod({
+      mthds: JSON.stringify([{ name: "bundle.mthds", content: 'domain = "demo"' }]),
+    });
+    await writeBundle("blocked", { "bundle.mthds": 'domain = "demo"', "seen.py": "x = 1" });
+    await writeBundle("blocked/denied", { "hidden.py": "x = 1" });
+    await fs.writeFile(
+      path.join(root, "blocked", LINK_FILE_NAME),
+      JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "2026-09-20T12:00:00Z",
+      }),
+      "utf8",
+    );
+    await fs.chmod(path.join(root, "blocked/denied"), 0o000);
+
+    // root ignores the mode bits, so the denial this test needs would not
+    // happen and every assertion below would be measuring the wrong thing.
+    // Ask whether the directory is really unreadable rather than assuming it.
+    const denied = await fs
+      .readdir(path.join(root, "blocked/denied"))
+      .then(() => false)
+      .catch(() => true);
+    if (!denied) {
+      await fs.chmod(path.join(root, "blocked/denied"), 0o755);
+      return;
+    }
+
+    try {
+      const result = await getMthdsMethod(
+        { method_id: "mt_one", output_dir: "blocked", overwrite: true },
+        contextFor(readingClient(stored), validationAnswering(validReport)),
+      );
+
+      const structured = result.structuredContent as {
+        unmanaged?: string[];
+        unmanaged_truncated?: boolean;
+      };
+      // Reporting nothing rather than a partial list is the contract...
+      expect(structured.unmanaged).toBeUndefined();
+      // ...and saying so is what keeps it from reading as "there is nothing here".
+      expect(structured.unmanaged_truncated).toBe(true);
+      expect(result.summary).toContain("could not finish reading");
+      expect(result.summary).not.toContain("which this method does not");
+    } finally {
+      await fs.chmod(path.join(root, "blocked/denied"), 0o755);
+    }
   });
 
   it("says nothing when the directory holds only this method's files", async () => {
