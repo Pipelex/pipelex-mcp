@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import { ApiResponseError, ApiUnreachableError, MissingMainStuffError } from "@pipelex/sdk";
 import type {
+  InputForm,
   MethodProvenance,
+  OutputForm,
+  PipeIOContracts,
   RunRead,
   RunResults,
   RunResultStart,
@@ -10,15 +13,17 @@ import type {
   RunStatus,
   PipelexStartOptions,
   TokensUsageRecord,
+  UsageSummary,
 } from "@pipelex/sdk";
 
 import {
   boundMainStuff,
-  computeUsageByPipe,
   ELLIPSIS_MARKER,
   getMthdsRunResults,
   getMthdsRunStatus,
   MAIN_STUFF_CAP,
+  projectRunUsage,
+  projectUsageByPipe,
   resultsResult,
   RUN_RESULTS_ERROR_OPTIONS,
   RUN_START_ERROR_OPTIONS,
@@ -27,11 +32,10 @@ import {
   startMthdsRun,
   startResult,
   statusResult,
-  summarizeUsage,
   validateRunRequest,
 } from "./run.js";
 import type { RunContext } from "./run.js";
-import { classifyError, DEFAULT_API_URL } from "./shared.js";
+import { classifyError, DEFAULT_API_URL, MAX_IMAGE_CANDIDATE_ENTRIES } from "./shared.js";
 
 const RUN_ID = "01JRUN0000000000000000TEST";
 
@@ -44,6 +48,32 @@ function runRead(overrides: Partial<RunRead> = {}): RunRead {
     ...overrides,
   };
 }
+
+/**
+ * A minimal but REAL trio of I/O artifacts for one pipe. The protocol types are
+ * closed shapes, so these are typed rather than cast: a literal that drifts
+ * from the standard fails the build here instead of passing a test the wire
+ * would reject.
+ */
+const FIXTURE_PIPE_REF = "demo.main";
+const CONTRACTS: PipeIOContracts = {
+  [FIXTURE_PIPE_REF]: {
+    inputs: {},
+    output: {
+      concept_ref: "native.Text",
+      json_schema: { type: "object", properties: { text: { type: "string" } } },
+      multiplicity: "single",
+      item_count: null,
+      optional: false,
+    },
+  },
+};
+const OUTPUT_FORM: OutputForm = {
+  [FIXTURE_PIPE_REF]: {
+    field: { name: "result", kind: "text", required: true, concept_ref: "native.Text" },
+  },
+};
+const INPUT_FORM: InputForm = { [FIXTURE_PIPE_REF]: { fields: [] } };
 
 describe("validateRunRequest", () => {
   it("rejects an empty file list", () => {
@@ -417,6 +447,113 @@ describe("resultsResult", () => {
     expect(resultsResult(withFiles).summary).not.toContain("mthds_download_artifacts");
   });
 
+  it("lists the image candidates on both shells, for free, from the FULL output", () => {
+    const picture = "pipelex-storage://runs/x/illustration.png";
+    const report = "pipelex-storage://runs/x/report.pdf";
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: { cover: { url: picture }, appendix: { url: report } },
+      },
+    };
+
+    // The console (no download tool) gets the same structured list as the workshop.
+    for (const result of [resultsResult(state, true, false), resultsResult(state, false, true)]) {
+      // Bare references: the key beside them was a fixed-prefix strip of the
+      // reference itself, so it doubled the list's cost and said nothing new.
+      expect(result.structuredContent.image_candidates).toEqual([picture]);
+      expect(result.structuredContent).not.toHaveProperty("image_candidates_omitted");
+    }
+
+    const summary = resultsResult(state, true, false).summary;
+    expect(summary).toContain("2 stored file(s)");
+    expect(summary).toContain("1 of which look like images");
+    expect(summary).toContain("mthds_show_images");
+    // Nothing was fetched to say it, and nothing is inlined here.
+    expect(summary).not.toContain("mthds_download_artifacts");
+  });
+
+  it("survives a main output bounded away from its references", () => {
+    const picture = "pipelex-storage://runs/x/illustration.png";
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        // Big enough that the prune ladder cuts the reference out of the
+        // model-facing copy; the candidate list still finds it.
+        main_stuff: { filler: "x".repeat(MAIN_STUFF_CAP * 2), cover: { url: picture } },
+      },
+    };
+
+    const result = resultsResult(state, false, true);
+
+    expect(result.structuredContent.truncated).toBe(true);
+    expect(result.structuredContent.image_candidates).toEqual([picture]);
+  });
+
+  it("bounds the candidate inventory and counts what it left out", () => {
+    // The walk reads the FULL output deliberately, so an unbounded projection
+    // of it was model-facing content outside the MAIN_STUFF_CAP discipline
+    // main_stuff obeys beside it — round 1's three-reviewer finding.
+    const pictures = Array.from(
+      { length: MAX_IMAGE_CANDIDATE_ENTRIES + 9 },
+      (_unused, index) => `pipelex-storage://runs/x/frame-${index}.png`,
+    );
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: pictures.map((url) => ({ url })),
+      },
+    };
+
+    const result = resultsResult(state, false, true);
+
+    expect(result.structuredContent.image_candidates).toHaveLength(MAX_IMAGE_CANDIDATE_ENTRIES);
+    // A prefix, so an index into this list means the same thing it means to
+    // mthds_show_images, which still walks the whole set.
+    expect(result.structuredContent.image_candidates).toEqual(
+      pictures.slice(0, MAX_IMAGE_CANDIDATE_ENTRIES),
+    );
+    expect(result.structuredContent.image_candidates_omitted).toBe(9);
+  });
+
+  it("says nothing, and omits the member, when the output references no stored file", () => {
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: { pipeline_run_id: RUN_ID, main_stuff: { answer: 42 } },
+    };
+
+    const result = resultsResult(state, true, true);
+
+    expect(result.structuredContent).not.toHaveProperty("image_candidates");
+    expect(result.summary).not.toContain("mthds_show_images");
+    expect(result.summary).not.toContain("stored file(s)");
+  });
+
+  it("reports stored files that look like nothing without naming the image tool", () => {
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: { doc: { url: "pipelex-storage://runs/x/report.pdf" } },
+      },
+    };
+
+    const result = resultsResult(state, false, true);
+
+    expect(result.structuredContent.image_candidates).toEqual([]);
+    expect(result.summary).toContain("none of them looks like an image");
+    expect(result.summary).not.toContain("mthds_show_images");
+    expect(result.summary).toContain("mthds_download_artifacts");
+  });
+
   it("projects a completed run and carries graph + full output off structuredContent", () => {
     const mainStuff = { answer: 42, items: ["a", "b"] };
     const graphSpec = { nodes: [{ id: "demo.main" }] };
@@ -436,10 +573,126 @@ describe("resultsResult", () => {
     expect(result.mainStuff).toBe(mainStuff);
     expect(result.summary).toContain("```json");
     expect(result.summary).toContain('"answer": 42');
-    // No tokens_usages on the wire → usage omitted, nothing on _meta.
-    expect(result.structuredContent).not.toHaveProperty("usage");
+    // No tokens_usages on the wire → usage reads "unavailable", nothing on _meta.
+    expect(result.structuredContent.usage).toEqual({
+      state: "unavailable",
+      cost_usd: null,
+      tokens: null,
+      calls: 0,
+      assembly_error: null,
+    });
     expect(result.tokensUsages).toBeUndefined();
     expect(result.summary).not.toContain("## Usage");
+  });
+
+  it("carries the graph's data artifacts off structuredContent when both halves have entries", () => {
+    const contracts = CONTRACTS;
+    const outputForm = OUTPUT_FORM;
+    const inputForm = INPUT_FORM;
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: "done",
+        graph_spec: { nodes: [{ id: "demo.main" }] },
+        pipe_io_contracts: contracts,
+        output_form: outputForm,
+        input_form: inputForm,
+      },
+    });
+
+    expect(result.pipeIoContracts).toEqual(contracts);
+    expect(result.outputForm).toEqual(outputForm);
+    expect(result.inputForm).toEqual(inputForm);
+    // Never the model-facing channel — these are view-only, like the graph.
+    expect(result.structuredContent).not.toHaveProperty("pipe_io_contracts");
+    expect(result.structuredContent).not.toHaveProperty("output_form");
+    expect(result.structuredContent).not.toHaveProperty("input_form");
+  });
+
+  it("withholds both halves of the pair when only one arrived", () => {
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: "done",
+        graph_spec: { nodes: [{ id: "demo.main" }] },
+        pipe_io_contracts: CONTRACTS,
+        output_form: null,
+      },
+    });
+
+    // The renderer reads them together or not at all, so half the pair renders
+    // exactly like neither — shipping the contracts alone would only cost wire.
+    expect(result.pipeIoContracts).toBeUndefined();
+    expect(result.outputForm).toBeUndefined();
+    // The graph itself is unaffected: it still rides and is still advertised.
+    expect(result.graphSpec).toEqual({ nodes: [{ id: "demo.main" }] });
+    expect(result.structuredContent.available_view_specs).toEqual(["run_graph"]);
+  });
+
+  it("treats an empty artifact map as no artifact", () => {
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: "done",
+        graph_spec: { nodes: [{ id: "demo.main" }] },
+        pipe_io_contracts: {},
+        output_form: {},
+      },
+    });
+
+    // A map the view can look nothing up in drives nothing.
+    expect(result.pipeIoContracts).toBeUndefined();
+    expect(result.outputForm).toBeUndefined();
+  });
+
+  it("rides the pair without an input form, which is independently optional", () => {
+    const contracts = CONTRACTS;
+    const outputForm = OUTPUT_FORM;
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: "done",
+        graph_spec: { nodes: [{ id: "demo.main" }] },
+        pipe_io_contracts: contracts,
+        output_form: outputForm,
+      },
+    });
+
+    expect(result.pipeIoContracts).toEqual(contracts);
+    expect(result.outputForm).toEqual(outputForm);
+    // Only the method's own input nodes lose their value; the rest still render.
+    expect(result.inputForm).toBeUndefined();
+  });
+
+  it("withholds the data artifacts from a shell with no views", () => {
+    const result = resultsResult(
+      {
+        state: "completed",
+        pipeline_run_id: RUN_ID,
+        result: {
+          pipeline_run_id: RUN_ID,
+          main_stuff: "done",
+          graph_spec: { nodes: [{ id: "demo.main" }] },
+          pipe_io_contracts: CONTRACTS,
+          output_form: OUTPUT_FORM,
+          input_form: INPUT_FORM,
+        },
+      },
+      false,
+    );
+
+    // They exist to feed a renderer this shell does not have.
+    expect(result.pipeIoContracts).toBeUndefined();
+    expect(result.outputForm).toBeUndefined();
+    expect(result.inputForm).toBeUndefined();
   });
 
   it("does not advertise a view but preserves full result metadata when the shell has no views", () => {
@@ -523,11 +776,12 @@ describe("resultsResult", () => {
 
     const usage = result.structuredContent.usage;
     // Run-level totals only; input_cached (a subset of input) is excluded: 9000 + 3500 = 12500.
+    expect(usage?.state).toBe("records");
     expect(usage?.cost_usd).toBeCloseTo(0.023, 10);
     expect(usage?.tokens).toBe(12500);
     expect(usage?.calls).toBe(2);
     expect(usage).not.toHaveProperty("cost_partial");
-    expect(usage).not.toHaveProperty("assembly_error");
+    expect(usage?.assembly_error).toBeNull();
     // Per-pipe is deliberately absent from the model-facing structuredContent.
     expect(usage).not.toHaveProperty("by_pipe");
     expect(usage).not.toHaveProperty("by_pipe_truncated");
@@ -543,14 +797,16 @@ describe("resultsResult", () => {
     expect(result.summary).not.toContain("tokens");
   });
 
-  it("omits usage but keeps the completed result when the run reported no usage", () => {
+  it("reads usage as unavailable, and keeps the completed result, when the run reported none", () => {
     const result = resultsResult({
       state: "completed",
       pipeline_run_id: RUN_ID,
       result: { pipeline_run_id: RUN_ID, main_stuff: "done", tokens_usages: null },
     });
 
-    expect(result.structuredContent).not.toHaveProperty("usage");
+    expect(result.structuredContent.state).toBe("completed");
+    expect(result.structuredContent.usage?.state).toBe("unavailable");
+    expect(result.structuredContent.usage?.assembly_error).toBeNull();
     expect(result.tokensUsages).toBeUndefined();
     expect(result.usageByPipe).toBeUndefined();
   });
@@ -587,9 +843,110 @@ describe("resultsResult", () => {
   });
 });
 
-describe("summarizeUsage", () => {
-  function runResults(overrides: Partial<RunResults>): RunResults {
-    return { pipeline_run_id: RUN_ID, main_stuff: "done", ...overrides };
+describe("projectRunUsage", () => {
+  function summary(overrides: Partial<UsageSummary> = {}): UsageSummary {
+    return {
+      state: "records",
+      total_cost_usd: 0.03,
+      cost_partial: false,
+      tokens: { input: 100, output: 50 },
+      calls: 2,
+      assembly_error: null,
+      by_pipe: [],
+      ...overrides,
+    };
+  }
+
+  it("keeps this tool's field names over the SDK's summary, with the state first", () => {
+    expect(projectRunUsage(summary())).toEqual({
+      state: "records",
+      cost_usd: 0.03,
+      tokens: 150,
+      calls: 2,
+      assembly_error: null,
+    });
+  });
+
+  it("adds the input and output totals into one figure, null only when both are null", () => {
+    expect(projectRunUsage(summary({ tokens: { input: 100, output: null } })).tokens).toBe(100);
+    expect(projectRunUsage(summary({ tokens: { input: null, output: 7 } })).tokens).toBe(7);
+    expect(projectRunUsage(summary({ tokens: { input: null, output: null } })).tokens).toBeNull();
+    expect(projectRunUsage(summary({ tokens: { input: 0, output: 0 } })).tokens).toBe(0);
+  });
+
+  it("reads a blank assembly error as no error", () => {
+    // The SDK relays the runner's field verbatim; a non-null value here means
+    // "assembly failed", so a runner reporting an empty string must not be
+    // reported as a run whose usage assembly broke.
+    expect(
+      projectRunUsage(summary({ state: "unavailable", assembly_error: "" })).assembly_error,
+    ).toBeNull();
+    expect(
+      projectRunUsage(summary({ state: "unavailable", assembly_error: "   " })).assembly_error,
+    ).toBeNull();
+    expect(
+      projectRunUsage(summary({ state: "unavailable", assembly_error: "collector timed out" }))
+        .assembly_error,
+    ).toBe("collector timed out");
+  });
+
+  it("carries cost_partial only when it is true", () => {
+    expect(projectRunUsage(summary({ cost_partial: true })).cost_partial).toBe(true);
+    expect(projectRunUsage(summary())).not.toHaveProperty("cost_partial");
+  });
+
+  it("never carries the per-pipe rollup — that rides _meta only", () => {
+    const usage = projectRunUsage(
+      summary({
+        by_pipe: [
+          {
+            pipe_code: "a",
+            total_cost_usd: 0.03,
+            cost_partial: false,
+            tokens: { input: 100, output: 50 },
+            calls: 2,
+          },
+        ],
+      }),
+    );
+
+    expect(usage).not.toHaveProperty("by_pipe");
+  });
+});
+
+describe("projectUsageByPipe", () => {
+  it("projects each SDK row onto this tool's row shape, keeping the SDK's order", () => {
+    expect(
+      projectUsageByPipe([
+        {
+          pipe_code: "pricey",
+          total_cost_usd: 0.07,
+          cost_partial: false,
+          tokens: { input: 140, output: 60 },
+          calls: 2,
+        },
+        {
+          pipe_code: null,
+          total_cost_usd: null,
+          cost_partial: false,
+          tokens: { input: null, output: null },
+          calls: 1,
+        },
+      ]),
+    ).toEqual([
+      { pipe_code: "pricey", cost_usd: 0.07, tokens: 200, calls: 2 },
+      { pipe_code: null, cost_usd: null, tokens: null, calls: 1 },
+    ]);
+  });
+});
+
+describe("usage through the SDK's summarizeUsage", () => {
+  function completedWith(overrides: Partial<RunResults>) {
+    return resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: { pipeline_run_id: RUN_ID, main_stuff: "done", ...overrides },
+    });
   }
 
   function record(overrides: Partial<TokensUsageRecord> = {}): TokensUsageRecord {
@@ -601,17 +958,27 @@ describe("summarizeUsage", () => {
     };
   }
 
-  it("omits usage when tokens_usages is null and no assembly error (usage off / pre-artifact)", () => {
-    expect(summarizeUsage(runResults({ tokens_usages: null }))).toBeUndefined();
-    expect(summarizeUsage(runResults({}))).toBeUndefined();
+  it("reads an empty list as no inference: zero cost, zero tokens, an empty rollup", () => {
+    const result = completedWith({ tokens_usages: [] });
+
+    expect(result.structuredContent.usage).toEqual({
+      state: "no_inference",
+      cost_usd: 0,
+      tokens: 0,
+      calls: 0,
+      assembly_error: null,
+    });
+    expect(result.usageByPipe).toEqual([]);
   });
 
   it("branches on usage_assembly_error, not the null list, when assembly broke", () => {
-    const usage = summarizeUsage(
-      runResults({ tokens_usages: null, usage_assembly_error: "artifact read failed" }),
-    );
+    const result = completedWith({
+      tokens_usages: null,
+      usage_assembly_error: "artifact read failed",
+    });
 
-    expect(usage).toEqual({
+    expect(result.structuredContent.usage).toEqual({
+      state: "unavailable",
       cost_usd: null,
       tokens: null,
       calls: 0,
@@ -619,128 +986,47 @@ describe("summarizeUsage", () => {
     });
   });
 
-  it("reports zero totals for an empty list (assembly ran, no inference)", () => {
-    const usage = summarizeUsage(runResults({ tokens_usages: [] }));
+  it("returns a null cost (not 0) when calls happened but none were priced", () => {
+    const usage = completedWith({
+      tokens_usages: [record({ cost: null }), record({ cost: undefined })],
+    }).structuredContent.usage;
 
-    expect(usage).toEqual({ cost_usd: 0, tokens: 0, calls: 0 });
-  });
-
-  it("returns null cost (not 0) when calls happened but none were priced", () => {
-    const usage = summarizeUsage(
-      runResults({
-        tokens_usages: [
-          record({ cost: null, nb_tokens_by_category: { input: 10, output: 5 } }),
-          record({ cost: undefined, nb_tokens_by_category: { input: 20, output: 5 } }),
-        ],
-      }),
-    );
-
+    expect(usage?.state).toBe("records");
     expect(usage?.cost_usd).toBeNull();
-    expect(usage?.tokens).toBe(40);
+    expect(usage?.tokens).toBe(300);
     expect(usage).not.toHaveProperty("cost_partial");
   });
 
-  it("flags cost_partial and sums only the priced calls when the run mixes priced and unpriced", () => {
-    const usage = summarizeUsage(
-      runResults({
-        tokens_usages: [record({ cost: 0.02 }), record({ cost: null })],
-      }),
-    );
+  it("flags cost_partial when the run mixes priced and unpriced calls", () => {
+    const usage = completedWith({
+      tokens_usages: [record({ cost: 0.02 }), record({ cost: null })],
+    }).structuredContent.usage;
 
     expect(usage?.cost_usd).toBeCloseTo(0.02, 10);
     expect(usage?.cost_partial).toBe(true);
   });
 
-  it("excludes cached-input and reasoning subsets from the token total", () => {
-    const usage = summarizeUsage(
-      runResults({
-        tokens_usages: [
-          record({
-            nb_tokens_by_category: {
-              input: 1000,
-              input_cached: 400,
-              output: 300,
-              output_reasoning: 120,
-            },
-          }),
-        ],
-      }),
-    );
-
-    // input + output only: 1000 + 300 = 1300 (cached/reasoning are subsets).
-    expect(usage?.tokens).toBe(1300);
-  });
-
   it("returns null tokens when no record reported input or output counts", () => {
-    const usage = summarizeUsage(
-      runResults({
-        tokens_usages: [
-          record({ nb_tokens_by_category: null }),
-          record({ nb_tokens_by_category: {} }),
-        ],
-      }),
-    );
+    const usage = completedWith({
+      tokens_usages: [
+        record({ nb_tokens_by_category: null }),
+        record({ nb_tokens_by_category: {} }),
+      ],
+    }).structuredContent.usage;
 
     expect(usage?.tokens).toBeNull();
   });
 
-  it("does not put per-pipe on the run-level usage — that rides _meta only", () => {
-    const usage = summarizeUsage(
-      runResults({
-        tokens_usages: [
-          record({ pipe_code: "a", cost: 0.01 }),
-          record({ pipe_code: "b", cost: 0.02 }),
-        ],
-      }),
-    );
+  it("orders the per-pipe rollup the SDK's way — unattributed calls last on a tie", () => {
+    const result = completedWith({
+      tokens_usages: [
+        record({ pipe_code: null, cost: 0.01 }),
+        record({ pipe_code: "named", cost: 0.01 }),
+        record({ pipe_code: "pricey", cost: 0.05 }),
+      ],
+    });
 
-    expect(usage?.calls).toBe(2);
-    expect(usage).not.toHaveProperty("by_pipe");
-    expect(usage).not.toHaveProperty("by_pipe_truncated");
-  });
-});
-
-describe("computeUsageByPipe", () => {
-  function record(overrides: Partial<TokensUsageRecord> = {}): TokensUsageRecord {
-    return {
-      pipe_code: "demo",
-      cost: 0.01,
-      nb_tokens_by_category: { input: 100, output: 50 },
-      ...overrides,
-    };
-  }
-
-  it("groups by pipe_code, sorts by cost desc, and groups unattributed calls under null", () => {
-    const rows = computeUsageByPipe([
-      record({ pipe_code: "cheap", cost: 0.001, nb_tokens_by_category: { input: 10, output: 5 } }),
-      record({
-        pipe_code: "pricey",
-        cost: 0.05,
-        nb_tokens_by_category: { input: 100, output: 50 },
-      }),
-      record({ pipe_code: "pricey", cost: 0.02, nb_tokens_by_category: { input: 40, output: 10 } }),
-      record({ pipe_code: null, cost: null, nb_tokens_by_category: null }),
-    ]);
-
-    expect(rows.map((row) => row.pipe_code)).toEqual(["pricey", "cheap", null]);
-    const pricey = rows[0];
-    expect(pricey?.calls).toBe(2);
-    expect(pricey?.cost_usd).toBeCloseTo(0.07, 10);
-    expect(pricey?.tokens).toBe(200);
-    // The unattributed (null-priced) group sorts last with a null cost.
-    expect(rows[2]).toEqual({ pipe_code: null, cost_usd: null, tokens: null, calls: 1 });
-  });
-
-  it("keeps every distinct pipe — the rollup is unbounded (it rides _meta, not model context)", () => {
-    const many = Array.from({ length: 50 }, (_, index) =>
-      record({
-        pipe_code: `pipe_${index}`,
-        cost: 0.001,
-        nb_tokens_by_category: { input: 10, output: 10 },
-      }),
-    );
-
-    expect(computeUsageByPipe(many)).toHaveLength(50);
+    expect(result.usageByPipe?.map((row) => row.pipe_code)).toEqual(["pricey", "named", null]);
   });
 });
 
@@ -1406,6 +1692,31 @@ describe("runResultsToolResult", () => {
     );
   });
 
+  it("delivers the graph's data artifacts on _meta under the API's own key names", async () => {
+    const contracts = CONTRACTS;
+    const outputForm = OUTPUT_FORM;
+    const inputForm = INPUT_FORM;
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: "done",
+        graph_spec: { nodes: [] },
+        pipe_io_contracts: contracts,
+        output_form: outputForm,
+        input_form: inputForm,
+      },
+    };
+    const context = contextWith({ getRunResult: () => Promise.resolve(state) });
+
+    const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
+
+    expect(toolResult._meta.pipe_io_contracts).toEqual(contracts);
+    expect(toolResult._meta.output_form).toEqual(outputForm);
+    expect(toolResult._meta.input_form).toEqual(inputForm);
+  });
+
   it("flags error results as isError with empty _meta", async () => {
     const toolResult = runResultsToolResult(
       await getMthdsRunResults({ run_id: "" }, contextWith({})),
@@ -1413,6 +1724,9 @@ describe("runResultsToolResult", () => {
 
     expect(toolResult.isError).toBe(true);
     expect(toolResult._meta.graph_spec).toBeUndefined();
+    expect(toolResult._meta.pipe_io_contracts).toBeUndefined();
+    expect(toolResult._meta.output_form).toBeUndefined();
+    expect(toolResult._meta.input_form).toBeUndefined();
     expect(toolResult._meta.main_stuff).toBeUndefined();
     expect(toolResult._meta.tokens_usages).toBeUndefined();
     expect(toolResult._meta.usage_by_pipe).toBeUndefined();

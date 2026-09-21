@@ -3,6 +3,9 @@ import "@/index.css";
 import { GraphViewer } from "@pipelex/mthds-ui/graph/react";
 import { TOOLBAR_POSITION } from "@pipelex/mthds-ui";
 import type { GraphSpec, ToolbarPosition } from "@pipelex/mthds-ui";
+// Through `@pipelex/mthds-ui/form`, which re-exports the kernel whole — never
+// `@pipelex/mthds-form` directly, which would put a second copy in the tree.
+import type { InputForm, OutputForm, PipeIOContracts } from "@pipelex/mthds-ui/form";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useDisplayMode, useLayout, useSendFollowUpMessage, useViewState } from "skybridge/web";
 
@@ -44,6 +47,17 @@ const HEALTH_NOTES = {
 interface RunResultsView {
   content: RunResultsStructuredContent;
   graphSpec: GraphSpec | null;
+  /**
+   * The graph's data artifacts, from the results tool's view-only `_meta`.
+   * `contracts` and `outputForm` are a pair by the renderer's own rule — it
+   * shows a data node's VALUE only when it holds both, and the concept's
+   * structure table otherwise — and the capability ships them as one, so a
+   * half-populated pair never reaches here. `inputForm` is independent and
+   * optional: it is what lets the method's own inputs show their value.
+   */
+  contracts: PipeIOContracts | null;
+  outputForm: OutputForm | null;
+  inputForm: InputForm | null;
   mainStuff: unknown;
 }
 
@@ -168,7 +182,13 @@ export default function RunFollowView() {
       done = true;
       setResults({
         content,
+        // All four are opaque on the wire — the standard owns their types and
+        // nothing validates them at runtime, so each is a cast, exactly as the
+        // graph spec has always been.
         graphSpec: (meta?.graph_spec ?? null) as GraphSpec | null,
+        contracts: (meta?.pipe_io_contracts ?? null) as PipeIOContracts | null,
+        outputForm: (meta?.output_form ?? null) as OutputForm | null,
+        inputForm: (meta?.input_form ?? null) as InputForm | null,
         mainStuff: meta?.main_stuff,
       });
     };
@@ -457,6 +477,12 @@ function CompletedCard({
         <div className="relative w-full overflow-hidden" style={{ height: graphHeight }}>
           <GraphViewer
             graphspec={results.graphSpec as GraphSpec}
+            // Without these the panel takes the renderer's no-data floor: the
+            // concept's structure table and no data tab. `contracts` and
+            // `outputForm` are read together or not at all.
+            contracts={results.contracts ?? undefined}
+            outputForm={results.outputForm ?? undefined}
+            inputForm={results.inputForm ?? undefined}
             initialDirection="LR"
             initialShowControllers={true}
             theme={dark ? "dark" : "light"}

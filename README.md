@@ -40,7 +40,8 @@ register](#local-workshop-install--register), and which server belongs on which
 host is the [Host → server matrix](#host--server-matrix).
 
 Both servers register the same MCP tools, with identical names, schemas, and
-contracts — with one documented exception per shell, marked below:
+contracts — apart from the per-shell tools marked below: one on the console,
+three on the workshop.
 
 | Tool | What it does |
 |---|---|
@@ -52,12 +53,17 @@ contracts — with one documented exception per shell, marked below:
 | `mthds_upload_attachments` | **Hosted console only.** Turn a file the user attached in the chat into a run-ready `pipelex-storage://` reference (ChatGPT only — see [Chat attachments](#chat-attachments-chatgpt-only)). |
 | `mthds_run` | Start a durable run on the hosted Pipelex API; returns a durable `run_id` immediately. |
 | `mthds_run_status` | Check a durable run's coarse lifecycle state by `run_id`. |
-| `mthds_run_results` | Fetch a durable run's terminal outcome by `run_id`. |
+| `mthds_run_results` | Fetch a durable run's terminal outcome by `run_id`, and list for free which of its stored files look like images. Never returns a picture. |
+| `mthds_show_images` | Show the pictures a completed run produced, as MCP image content blocks — the deliberate gesture, on both deployments, because a shown picture stays in the conversation. |
 | `mthds_download_artifacts` | **Local workshop only.** Save the files a completed run produced (images, PDFs, documents) under the directory the server was started in — see [Saving run artifacts](#saving-run-artifacts-local-workshop-only). |
+| `mthds_save_method` | **Local workshop only.** Validate a bundle and save it to the organization's catalog — a create without `method_id`, an update with one — writing `pipelex-method.json` beside the files so a later save from that directory updates the same method instead of creating a second one. |
+| `mthds_get_method` | **Local workshop only.** Bring a saved method's sources back: with `output_dir`, written to disk with the link file beside them and no source through the conversation; without it, inline, for reading a method you cannot see on disk. It refuses rather than overwrite work it does not own. |
 
-The two exceptions mirror each other. `mthds_upload_attachments` takes a
-host-substituted attachment reference, and the host gates that substitution on
-the declared JSON Schema, so on the workshop the tool would be *structurally
+The exceptions mirror each other across the two shells, and every one of them
+turns on something the other shell does not have. `mthds_upload_attachments`
+takes a host-substituted attachment reference, and the host gates that
+substitution on the declared JSON Schema, so on the workshop the tool would be
+*structurally
 unreachable* rather than merely unused. `mthds_download_artifacts` writes files
 under the server's working directory, which the console does not have — its
 users download run outputs from the app's UI. The invariant that still holds is
@@ -176,6 +182,11 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }
   (`https://api.pipelex.com`). Set it to `http://localhost:8081` to develop
   against a local OSS `pipelex-api` runner. Durable runs need the hosted API; a
   bare runner has no run lifecycle.
+- `PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP` — optional. `mthds_download_artifacts`
+  accepts a plain `http:` download link only when `PIPELEX_BASE_URL` is itself
+  `http:` (the local compose stack, whose object store mints such links). Set
+  it to `true` to accept them from any deployment, or `false` to refuse them
+  everywhere; any other value refuses.
 
 **The working directory matters.** The host spawns the workshop in your
 project, and that directory is the boundary for everything the server touches
@@ -415,6 +426,7 @@ No method source crosses the conversation in this flow.
       multiplicity: "single" | "variable" | "fixed";
       item_count?: number;
       optional: boolean;
+      images?: string[];           // where images sit; [] = none, absent = unknown
     };
   };
   validation_errors?: unknown[];
@@ -435,9 +447,21 @@ of the Markdown summary,
 `demo.main(document: legal.Contract, notes?: native.Text, tags: native.Text[]) -> analysis.Report[2]`
 (`?` may be omitted, `[]` a list, `[N]` exactly N).
 
+`output.images` answers "will this method produce pictures?" before anything
+runs. It lists where images sit inside the produced output, as paths from its
+root: `$` is the output itself, `$.name` a field of it, `$[]` an element of a
+list, `$[].name` a field of one — so a top-level `Image` output is `["$"]`, an
+`Image[]` is `["$[]"]`, and the question is `images.length > 0`. It is read
+from the MTHDS standard's output-form descriptor, which the capability requests
+from the API, so it costs nothing at run time. An empty array and an absent
+member are **different answers**: `[]` means the output was described and holds
+no image, while absence means nothing described it — unknown, not none. The
+rendered summary line says it too, as a trailing ` (produces images)`.
+
 The graph (`graph_spec`) and the form's per-pipe artifact pair — the IO
 contracts (`pipe_io_contracts`) and the input-form descriptor (`input_form`,
-requested from the API via the opt-in `views: ["input_form"]` token) — ride the
+requested from the API via the opt-in `views` token, which also brings
+`output_form` for a later result-rendering view) — ride the
 tool result's view-only `_meta` channel for the `run-graph` view — never
 `structuredContent`, so the model never pays their tokens. On the hosted
 console that view renders the method graph and, on a runnable verdict that
@@ -562,9 +586,10 @@ are reserved first, so the trust anchor always rides). No Skybridge view.
 ### `mthds_prepare_inputs`
 
 ```ts
-// input — exactly ONE of files / method_id, plus the filled inputs (no method_ref — see below)
+// input — exactly ONE of files / method_ref / method_id, plus the filled inputs
 {
   files?: SubmittedFileInput[];
+  method_ref?: string;              // published method address — github.com/<owner>/<repo>[/<selector>][@<tag>]
   method_id?: string;               // catalog id (mt_…) of a registered method
   pipe_ref?: string;
   inputs: Record<string, unknown>;  // the FILLED mthds_inputs_template output
@@ -583,10 +608,15 @@ are reserved first, so the trust anchor always rides). No Skybridge view.
 
 Sits between `mthds_inputs_template` (produces the empty template) and `mthds_run`
 (executes the filled inputs): it makes file-bearing inputs run-ready. The pipe's
-declared signature identifies which values are assets; each is uploaded to Pipelex
-storage and rewritten to `pipelex-storage://`. `http(s)` URLs and existing
+declared signature identifies which values are assets — read from the MTHDS
+standard's **input-form descriptor**, which states the kind of every input at
+every depth, so an optional nested file field prepares like a required one and a
+text field merely *named* `url` stays untouched. Each asset is uploaded to
+Pipelex storage and rewritten to `pipelex-storage://`. `http(s)` URLs and existing
 `pipelex-storage://` references pass through unchanged, so an inputs set that is
-already all pass-through can skip this step. **Per-deployment asset boundary:** the
+already all pass-through can skip this step. All three selectors are resolved
+server-side, on both shells, by the one `POST /v1/validate` the signature comes
+from. **Per-deployment asset boundary:** the
 **local workshop** uploads local paths, `data:` URLs, and inline bytes with your
 API key; the **hosted console is pass-through only** and refuses any upload-needing
 input up front with an `input_domain` error at `inputs`, naming the workshop. No
@@ -648,10 +678,19 @@ method's catalog id (`method_id?`, mt_…) — and returns a durable
 `run_id` immediately (never blocks); `mthds_run_status` is a cheap read of the
 coarse lifecycle state; `mthds_run_results` fetches the terminal outcome (main
 output on success, failure message otherwise) along with a compact run-level
-`usage` object — total USD cost (null-aware), tokens, and inference-call count.
-The per-pipe rollup and the full per-call record list ride the view-only `_meta`
+`usage` object — its `state` (`records`, `no_inference` or `unavailable`),
+total USD cost (null-aware), tokens, inference-call count and any usage-assembly
+error — projected from the SDK's `summarizeUsage`. The per-pipe rollup and the
+full per-call record list ride the view-only `_meta`
 (`_meta.usage_by_pipe` / `_meta.tokens_usages`) for a future detailed-cost
-surface, and usage never appears in the prose. A by-id run executes the method's
+surface, and usage never appears in the prose. A completed result also carries
+the executed graph and the three artifacts that describe its data on the same
+channel (`_meta.graph_spec`, plus `_meta.pipe_io_contracts` and
+`_meta.output_form` as a pair with `_meta.input_form` beside them), which is
+what lets the hosted console's run card show each node's actual value rather
+than its concept's structure table. The contracts and the output form are read
+together or not at all, so they ride together or not at all; none of the four
+reaches the model. A by-id run executes the method's
 **current** stored content (methods are not versioned) and requires an API key;
 when both `files` and `method_id` are supplied, the files run and the id is
 recorded as run-history linkage on the platform. `method_ref` is a complete run
@@ -666,6 +705,94 @@ The pipe selector is `pipe_code` here and `pipe_ref` on `mthds_inputs_template`
 / `mthds_prepare_inputs` — the same qualified `domain.pipe_code` value under the
 name each underlying route uses; each description names the other, so copying
 the value across the two calls is expected.
+
+A completed `mthds_run_results` also reports, for free, what the run **stored**:
+`image_candidates` lists the `pipelex-storage://` references whose key looks
+like an image, and the prose says how many stored files there are and what can
+be done with them. Nothing is fetched to produce it — the walk is in memory over
+the full output, so a reference pruned out of the bounded `main_stuff` still
+appears. The list is capped at 32 entries, with any remainder counted in
+`image_candidates_omitted`; the cap is a prefix, so an index into it still means
+the same thing to `mthds_show_images`, which walks the whole set. **The results tool never returns an image itself,
+and takes no flag that would make it**; showing a picture is `mthds_show_images`
+below.
+
+### `mthds_show_images`
+
+Put the pictures a completed run produced in front of the model, as MCP **image
+content blocks**. Registered on **both** deployments.
+
+```ts
+// input
+{
+  run_id: string;        // the durable run id from mthds_run
+  images?: string[];     // optional selection: pipelex-storage:// references from image_candidates
+  indices?: number[];    // optional selection: their zero-based positions instead
+}
+
+// structuredContent (state = "completed")
+{
+  status: "ok";
+  run_id: string;
+  state: "completed";
+  images: Array<{
+    uri: string;
+    mime_type?: string;   // the object store's own content type
+    bytes?: number;
+    inlined: boolean;     // true ⟺ this picture is one of the image blocks in content
+    withheld?: "size" | "budget" | "count" | "type" | "deadline" | "empty";
+    error?: ToolError;
+  }>;
+  omitted?: number;       // of the candidates THIS CALL considered, how many are past the 32 listed
+  all_inlined: boolean;   // about the RUN: false when a narrowed call left one of its pictures unconsidered
+}
+```
+
+Entries come back **in the order considered**: the order you named them when
+`images` or `indices` was given, and discovery order only when neither was. A
+repeated reference is deduplicated rather than refused — a shown picture is
+permanent, so buying the same one twice is never what was meant.
+
+**Why it is a tool and not an option on `mthds_run_results`.** An image block is
+cheap to send and permanent to keep: it costs the model's own native vision
+price — its base64 size is free — but once it is in a conversation it is in
+every prompt that follows, and nothing takes it back. One picture is a rounding
+error; a loop that generates twenty is twenty images of context nobody chose. So
+nothing inlines by default, and seeing a picture is a gesture with a name.
+
+Each inlined picture is fetched through `@pipelex/sdk`'s bounded `fetchArtifact`
+(fresh presigned link, redirects refused, no credentials forwarded, the byte cap
+checked before and during the read), gated on the object store's own
+`content-type` — `image/png`, `image/jpeg`, `image/gif`, `image/webp`, and
+nothing else. Five bounds hold a call: **4 MiB** per picture, **6 MiB** across
+the call, **6 attempts**, a **60-second deadline** over the whole walk, and at
+most **32 candidates** enumerated. The deadline exists because the per-image
+timeout is per image and the walk is sequential: without it, stalled objects
+accumulated into a call of three minutes and more, and a host with a shorter
+deadline lost the whole thing — pictures already fetched included. It is
+carried both as a per-fetch timeout and as an abort signal, because the SDK
+resolves a reference before arming its timeout and only the signal reaches that
+half; with the timeout alone a call could still reach 90 seconds. A picture
+that does not fit is reported as `withheld` with its reason rather than resized
+or dropped silently — as is a stored object that declares an image type and
+holds no bytes, which would otherwise become an empty, unrenderable block that
+never leaves the conversation; a per-reference failure rides its entry as an `error`;
+pictures that arrived are never discarded because a sibling failed. A
+whole-request refusal — a plan limit, a rejected credential, an unreachable host
+— that stopped the walk before any picture arrived is a `status: "error"`
+no-verdict naming the cause, rather than a success with nothing in it. The same
+`PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP` rule as the download tool applies. A
+`running` or `failed` run, and a run whose output holds no image candidate, are
+produced verdicts that fetch nothing. See `SPEC.md` → "Image Display Scope".
+
+**What your host does with an image block** (measured, 2026-09-21 — the study is
+`wip/mcp-image-results/host-probe.md` in the Pipelex workspace):
+
+| Host | Model sees the picture | Person sees the picture | Notes |
+|---|---|---|---|
+| Claude Code | Yes | **No** — the terminal renders nothing | Priced at the model's native vision cost; the base64 size is free. Ask for a description if you want one in the transcript. |
+| Codex (ChatGPT desktop) | Yes | Not measured | **Refuses a block carrying `annotations`** with `Unexpected response type` — which is why ours carries none. Accepts the block-level `_meta` ours does carry; that was measured too, not assumed. |
+| Cursor | Not measured | Not measured | Tracked as its own follow-up. |
 
 ### Saving run artifacts (local workshop only)
 
@@ -685,6 +812,7 @@ produced files back *out*, onto disk.
   status: "ok";
   run_id: string;
   state: "completed";
+  scope: "main_stuff";     // what was walked: the run's main output
   artifacts: Array<{ uri: string; path?: string; content_type?: string | null; size?: number; error?: ToolError }>;
   saved_paths: string[];   // relative to the working directory
   all_saved: boolean;      // every referenced file saved
@@ -696,11 +824,17 @@ A completed run's results carry a produced image, PDF or document with a
 within the hour. Pass the run id here instead of racing that link: every
 reference in the run's full output is resolved to a *fresh* link through the
 API and streamed into a file under the working directory — so the same call
-still works days later. Filenames come from the storage key, sanitized; files
-are **never overwritten** (a collision gets a numeric suffix); `dir` cannot
-escape the working directory (no absolute paths, no `..`, no symlink out). A
-`running` or `failed` run is a produced verdict with nothing to save; partial
-success is a produced verdict with the failures on their items. On the
+still works days later. The walk, the links and the download are
+`@pipelex/sdk`'s artifact stack (`collectArtifacts`, `downloadArtifacts`), so
+the tool needs a Pipelex platform serving the bulk resolve route
+(`POST /v1/resolve-storage-url/bulk`); a bare `pipelex-api` runner has none.
+Filenames come from the storage key, sanitized; files are **never overwritten**
+(a collision gets a numeric suffix); `dir` cannot escape the working directory
+(no absolute paths, no `..`, no symlink out). Plain `http:` links are accepted
+only against a plain-http `PIPELEX_BASE_URL` unless
+`PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP` says otherwise. A `running` or `failed` run
+is a produced verdict with nothing to save; partial success is a produced
+verdict with the failures on their items. On the
 workshop, a `mthds_run_results` summary whose output references stored files
 names this tool. See `SPEC.md` → "Artifact Download Scope" for the full
 contract and the reasoning behind a companion tool rather than a flag on

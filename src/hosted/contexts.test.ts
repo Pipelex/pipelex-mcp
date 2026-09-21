@@ -21,6 +21,10 @@ describe("contextsForRequest", () => {
     // The attachment ingest uploads to storage, so the signed-in caller's own
     // identity is what funds it — the console holds no key.
     expect(contexts.attachments.apiKey).toBe("workos_access_token");
+    // The image display RESOLVES and FETCHES caller-scoped stored objects, so
+    // it is the context where a missed override would have the deployment's
+    // key reading another organization's pictures.
+    expect(contexts.images.apiKey).toBe("workos_access_token");
   });
 
   it("takes precedence over a server-held env key", () => {
@@ -45,6 +49,7 @@ describe("contextsForRequest", () => {
     expect(contexts.prepare.authError).toEqual(contexts.validation.authError);
     expect(contexts.run.authError).toEqual(contexts.validation.authError);
     expect(contexts.attachments.authError).toEqual(contexts.validation.authError);
+    expect(contexts.images.authError).toEqual(contexts.validation.authError);
   });
 
   it("clears a server-held env key when no verified token reached the handler", () => {
@@ -64,6 +69,7 @@ describe("contextsForRequest", () => {
     expect(contexts.codegen.apiKey).toBe("");
     expect(contexts.run.apiKey).toBe("");
     expect(contexts.attachments.apiKey).toBe("");
+    expect(contexts.images.apiKey).toBe("");
     expect(contexts.validation.authError?.location).toBe("authorization");
     expect(contexts.validation.authError?.hint).toContain("no verified sign-in");
   });

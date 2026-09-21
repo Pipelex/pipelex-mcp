@@ -18,8 +18,13 @@ import {
   FIXTURE_BUNDLE_URI,
   FIXTURE_INPUT_NAME,
   FIXTURE_PIPE_REF,
+  IMAGE_OUTPUT_BUNDLE,
+  IMAGE_OUTPUT_BUNDLE_URI,
+  IMAGE_OUTPUT_LIST_BUNDLE,
+  IMAGE_OUTPUT_LIST_BUNDLE_URI,
   INVALID_BUNDLE,
   INVALID_BUNDLE_URI,
+  PYTHON_FREE_METHOD_REF,
   apiAdvertisesExtension,
   liveApiConfig,
   liveClient,
@@ -81,6 +86,11 @@ describe("mthds_validate (live)", () => {
     ]);
     expect(mainPipe?.output.concept_ref).toBe("native.Text");
     expect(mainPipe?.output.multiplicity).toBe("single");
+    // The EMPTY array, not an absent member: this fixture produces text, so
+    // the only way to read `[]` here is for the `output_form` descriptor to
+    // have arrived and been walked. An absent member would mean the token did
+    // not round-trip, which is the drift this leg exists to catch.
+    expect(mainPipe?.output.images).toEqual([]);
     // The rendered line is the channel a ChatGPT install with a cached tool
     // list still receives, so it must survive the wire too.
     expect(result.summary).toContain(
@@ -93,20 +103,59 @@ describe("mthds_validate (live)", () => {
     expect(result.structuredContent).not.toHaveProperty("input_form");
   });
 
-  // GATED on the API deploy. `default_pipe_ref` landed on pipelex-api's `dev`
-  // (#68, 7a476cd) after its 0.21.0 release, so no released runner serves it
-  // yet and no hosted environment has it. Un-skip once `/v1/version` reports a
-  // hosted implementation built on a pipelex-api past 0.21.0 — the probe IS
-  // this assertion: the field arrives, or it does not.
+  it("says the main pipe produces an image, without generating one", async () => {
+    // A `PipeImgGen` main pipe. Validation dry-runs the graph and executes
+    // nothing, so this costs no image-generation credit and belongs in the free
+    // tier — the whole point of reading the answer from the descriptor rather
+    // than from a run.
+    const result = await validateMthds(
+      { files: [{ content: IMAGE_OUTPUT_BUNDLE, uri: IMAGE_OUTPUT_BUNDLE_URI }] },
+      context,
+    );
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.is_valid).toBe(true);
+    expect(result.structuredContent.main_pipe?.output.concept_ref).toBe("native.Image");
+    expect(result.structuredContent.main_pipe?.output.images).toEqual(["$"]);
+    expect(result.summary).toContain("-> native.Image (produces images)");
+  });
+
+  it("spells a plural image output through the descriptor's own list wrap", async () => {
+    // `Image[]`. The concept ref is the ELEMENT on both sides of the contract,
+    // so the plural fact lives only on the descriptor — a `list` node whose
+    // `item` is the image. Reading `["$[]"]` here is what proves the walk takes
+    // it from there and never from the contract's multiplicity.
+    const result = await validateMthds(
+      { files: [{ content: IMAGE_OUTPUT_LIST_BUNDLE, uri: IMAGE_OUTPUT_LIST_BUNDLE_URI }] },
+      context,
+    );
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.is_valid).toBe(true);
+    expect(result.structuredContent.main_pipe?.output.concept_ref).toBe("native.Image");
+    expect(result.structuredContent.main_pipe?.output.multiplicity).toBe("variable");
+    expect(result.structuredContent.main_pipe?.output.images).toEqual(["$[]"]);
+  });
+
+  // No longer gated. `default_pipe_ref` landed on pipelex-api's `dev` (#68,
+  // 7a476cd) after its 0.21.0 release, and this assertion sat skipped waiting
+  // for a deployment to serve it; measured against the suite's default target
+  // on 2026-09-21, `https://api-dev.pipelex.com` returns it, carrying exactly
+  // this fixture's ref. (Production could not be measured in the same pass —
+  // `api.pipelex.com` answers this key with a 403 — so if this fails against a
+  // deployment predating the field, that IS the finding, which is the design:
+  // the probe is the assertion, the field arrives or it does not.)
   //
-  // Worth un-skipping promptly rather than leaving parked: the projection
-  // prefers the report's `default_pipe_ref` and falls back to the blueprint
-  // derivation when the field is ABSENT, which is exactly what keeps every
-  // assertion above green while a by-address signature quietly goes back to
-  // naming a pipe a run will not execute. This is the one check the fallback
-  // cannot stand in for, and it needs an unseamed client because the capability
+  // It matters more now than when it was parked. The projection prefers the
+  // report's `default_pipe_ref` and falls back to the blueprint derivation only
+  // when the field is ABSENT, which is what keeps every assertion above green
+  // while a by-address signature quietly goes back to naming a pipe a run will
+  // not execute — and since `@pipelex/sdk` 0.19.0 a STATED null is a refusal
+  // rather than a fall-through, so the field's presence now changes behaviour
+  // rather than only sharpening it. This is the one check the fallback cannot
+  // stand in for, and it needs an unseamed client because the capability
   // returns the projection, not the report.
-  it.skip("serves the effective entry pipe as its own report field (gated)", async () => {
+  it("serves the effective entry pipe as its own report field", async () => {
     const report = await liveClient().validateFiles(
       [{ content: FIXTURE_BUNDLE, uri: FIXTURE_BUNDLE_URI }],
       { allowSignatures: true, render: ["markdown"], views: ["input_form"] },
@@ -187,18 +236,11 @@ describe.skipIf(!SERVES_SELECTORS)("mthds_validate by selector (live)", () => {
     expect(result.structuredContent.main_pipe?.pipe_ref).toBe(FIXTURE_PIPE_REF);
   });
 
-  // Deliberately NOT the shared `PUBLISHED_METHOD_REF`, and do not "harmonize"
-  // it onto one: `/v1/validate` resolves an address through `fetched_method_source`,
-  // which applies the execution-locus gate, so a fetched package shipping ANY `.py`
-  // is a 403 `CustomCodeRequiresSandbox` on a deployment that is not sandbox-hosted.
-  // `text_stats` ships `text_stats_funcs.py`; `documents` is Python-free. The other
-  // suites reach the tooling routes through `fetch_method_mthds_files`, which does
-  // not apply that gate, which is why they can share the constant and this cannot.
+  // `PYTHON_FREE_METHOD_REF`, not `PUBLISHED_METHOD_REF`: the reason is written
+  // once on the constant in `e2e-support.ts`, and it is a fact about this
+  // route's resolution rather than about this suite.
   it("validates a published method by address (server-side git resolution)", async () => {
-    const result = await validateMthds(
-      { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
-      context,
-    );
+    const result = await validateMthds({ method_ref: PYTHON_FREE_METHOD_REF }, context);
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);

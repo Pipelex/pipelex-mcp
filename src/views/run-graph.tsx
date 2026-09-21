@@ -1,8 +1,14 @@
 import "@/index.css";
-import "@pipelex/mthds-ui/form/react/RunPanel.css";
 
-import { getPipeInputForm, getPipeIOContract } from "@pipelex/mthds-form";
-import type { InputForm, PipeIOContracts } from "@pipelex/mthds-form";
+// The form kernel is reached through `@pipelex/mthds-ui/form`, which re-exports it
+// whole, and never as a direct dependency: since mthds-ui 0.20.0 the kernel is an
+// ordinary dependency of it, so a second declaration here would put a second COPY
+// in the tree. The kernel ships React contexts (`FieldStringsProvider`,
+// `FieldPresentationProvider`), so two copies mean a provider mounted above the
+// panel silently fails to resolve inside it — and mthds-ui pins `^0.8.0` while this
+// repo had pinned `^0.5.0`, which a sub-1.0 caret cannot bridge.
+import { getPipeInputForm, getPipeIOContract } from "@pipelex/mthds-ui/form";
+import type { InputForm, PipeIOContracts } from "@pipelex/mthds-ui/form";
 import { RunPanel } from "@pipelex/mthds-ui/form/react";
 import { GraphViewer } from "@pipelex/mthds-ui/graph/react";
 import { TOOLBAR_POSITION } from "@pipelex/mthds-ui";

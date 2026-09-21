@@ -14,10 +14,11 @@ import type { ToolError } from "./shared.js";
  * only that question, lives here.
  *
  * What deliberately does NOT live here is write POLICY. The two writers are
- * inverted on purpose: `mthds_download_artifacts` never overwrites (`wx`, a
- * numeric suffix on collision) because its filenames come from a storage key,
- * while `mthds_codegen` must overwrite its own previous output and only that,
- * because its paths come from the engine and the lock hashes them. One shared
+ * inverted on purpose: `mthds_download_artifacts` never overwrites (the SDK's
+ * `downloadArtifacts` creates with `wx`, a numeric suffix on collision) because
+ * its filenames come from a storage key, while `mthds_codegen` must overwrite
+ * its own previous output and only that, because its paths come from the
+ * engine and the lock hashes them. One shared
  * "write a file" helper would either suffix a regeneration or let a download
  * clobber, so the fold stops at containment.
  */

@@ -149,12 +149,32 @@ async function readAdvertisedExtensions(): Promise<Set<string>> {
  * whose pin predates `pipelex-api` 26c4eee, the commit that taught the build
  * routes to read the manifest; `L-260902-3b8971` moves that pin).
  *
- * NOT usable from `validate.e2e.ts`: this package ships `text_stats_funcs.py`,
- * and `/v1/validate`'s address path applies the execution-locus gate, so a
- * fetched package carrying Python is a 403 there on any deployment that is not
- * sandbox-hosted. That leg keeps its own Python-free address on purpose.
+ * NOT usable from a leg that resolves through `/v1/validate`: this package
+ * ships `text_stats_funcs.py`, and that route's address path applies the
+ * execution-locus gate, so a fetched package carrying Python is a 403 there on
+ * any deployment that is not sandbox-hosted. Those legs take
+ * {@link PYTHON_FREE_METHOD_REF} instead.
  */
 export const PUBLISHED_METHOD_REF = "github.com/Pipelex/methods/text_stats@v0.1.1";
+
+/**
+ * The published package the by-address legs that resolve through
+ * `POST /v1/validate` use — `mthds_validate`'s own leg and
+ * `mthds_prepare_inputs`', which reads its signature from that route.
+ *
+ * Deliberately a different package from {@link PUBLISHED_METHOD_REF}, and do
+ * not "harmonize" the two onto one: `/v1/validate` resolves an address through
+ * `fetched_method_source`, which applies the execution-locus gate, so a fetched
+ * package shipping ANY `.py` is a 403 `CustomCodeRequiresSandbox` off a
+ * deployment that is not sandbox-hosted. `text_stats` ships
+ * `text_stats_funcs.py`; `documents` is Python-free. The tooling routes reach
+ * their crate through `fetch_method_mthds_files`, which applies no such gate,
+ * which is why those suites can share the other constant and these cannot.
+ *
+ * Shared for the same reason the other one is: two suites submit it, and a tag
+ * bump that reached one of them would be worse than no pin at all.
+ */
+export const PYTHON_FREE_METHOD_REF = "github.com/Pipelex/methods/documents@v0.1.0";
 
 /** The commit `v0.1.1` points at — a tag resolves to it, and a run says so. */
 export const PUBLISHED_METHOD_COMMIT = "af0da07ac83e30e58443c88ec9ed4174131800a1";
@@ -282,6 +302,57 @@ export const IMAGE_INPUT_NAME = "picture";
 
 /** The image fixture's pipe, qualified. */
 export const IMAGE_PIPE_REF = "mcp_e2e_image.describe_picture";
+
+/**
+ * A bundle whose main pipe PRODUCES an image — the free half of the
+ * produces-images signal. Validation dry-runs the graph and executes nothing,
+ * so asserting `main_pipe.output.images` against a real API costs no image
+ * generation credit at all.
+ */
+export const IMAGE_OUTPUT_BUNDLE = `domain      = "mcp_e2e_imggen"
+description = "pipelex-mcp live e2e fixture whose main pipe produces an image."
+main_pipe   = "draw_picture"
+
+[pipe.draw_picture]
+type        = "PipeImgGen"
+description = "Draw a picture of a subject."
+inputs      = { subject = "Text" }
+output      = "Image"
+prompt      = "$subject"
+model       = "@default-small"
+`;
+
+export const IMAGE_OUTPUT_BUNDLE_URI = "e2e/mcp_e2e_imggen.mthds";
+
+/**
+ * The plural sibling: a main pipe producing `Image[]`. The plural wrap is
+ * performed on the output-form descriptor rather than on the concept, so this
+ * is what proves the walk reads the wrap instead of the contract's
+ * multiplicity.
+ */
+export const IMAGE_OUTPUT_LIST_BUNDLE = `domain      = "mcp_e2e_imggen_many"
+description = "pipelex-mcp live e2e fixture whose main pipe produces several images."
+main_pipe   = "draw_pictures"
+
+[pipe.draw_pictures]
+type        = "PipeSequence"
+description = "Draw one picture per subject."
+inputs      = { subjects = "Text[]" }
+output      = "Image[]"
+steps = [
+  { pipe = "draw_picture", batch_over = "subjects", batch_as = "subject", result = "pictures" },
+]
+
+[pipe.draw_picture]
+type        = "PipeImgGen"
+description = "Draw a picture of a subject."
+inputs      = { subject = "Text" }
+output      = "Image"
+prompt      = "$subject"
+model       = "@default-small"
+`;
+
+export const IMAGE_OUTPUT_LIST_BUNDLE_URI = "e2e/mcp_e2e_imggen_many.mthds";
 
 /**
  * A 1x1 transparent PNG. Real bytes rather than a placeholder string, because

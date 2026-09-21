@@ -1,28 +1,29 @@
 import path from "node:path";
 
-import { PipelexApiClient } from "@pipelex/sdk";
-import type { ResolvedStorageUrl, RunResultState, RunStatus } from "@pipelex/sdk";
+import { ArtifactAuthenticationError, PipelexApiClient, collectArtifacts } from "@pipelex/sdk";
+import type {
+  ArtifactScope,
+  DownloadArtifactsRequest,
+  DownloadArtifactsResult,
+  DownloadedArtifact,
+  RunResultState,
+  RunStatus,
+} from "@pipelex/sdk";
 import { z } from "zod";
 
-import { httpArtifactDownloader } from "./artifact-download.js";
-import type { ArtifactDownloader } from "./artifact-download.js";
 import { RUN_RESULTS_ERROR_OPTIONS, runStatusSchema } from "./run.js";
 import {
-  PIPELEX_STORAGE_SCHEME,
-  buildApiConfig,
+  BULK_RESOLVE_ERROR_OPTIONS,
+  allowsPlainHttp,
+  buildArtifactFetchConfig,
   classifyError,
-  collectStorageUris,
+  itemToolError,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateRunIdRequest,
 } from "./shared.js";
-import type {
-  AuthErrorTexture,
-  ClassifyErrorOptions,
-  ErrorSummaries,
-  ToolError,
-} from "./shared.js";
+import type { AuthErrorTexture, ErrorSummaries, ToolError } from "./shared.js";
 import { resolveSaveDir } from "./workspace-boundary.js";
 
 /**
@@ -32,14 +33,23 @@ import { resolveSaveDir } from "./workspace-boundary.js";
  * server's working directory — which is where the user is.
  *
  * It is keyed on the run id, the durable handle the whole run family already
- * uses, rather than on a list of storage URIs: the agent never has to copy
- * references out of a bounded result, and every `pipelex-storage://` reference
- * in the run's FULL main output is found and resolved to a FRESH presigned link
- * through the API (`resolveStorageUrl`), so the hour-long life of the
- * `public_url` embedded in the results never matters — days later the same
- * call still works. See SPEC.md → Artifact Download Scope for why this is a
- * companion tool and not an option on `mthds_run_results`.
+ * uses, rather than on a list of storage URIs. The walk, the fresh links, the
+ * filenames, the never-overwrite rule and the download bounds are the SDK's
+ * artifact stack (`collectArtifacts` / `downloadArtifacts`, which resolves
+ * through `resolveArtifacts`), so this capability owns only what is the
+ * workshop's: the tool envelope, the `dir` containment against the working
+ * directory, the deployment gate, the plain-http policy, the classification
+ * of every failure into `ToolError`s, and the prose summary. See SPEC.md →
+ * Artifact Download Scope for why this is a companion tool and not an option
+ * on `mthds_run_results`.
  */
+
+/**
+ * The scope this tool walks: always the run's main output. The tool takes no
+ * `scope` input; the value is named here, rather than left to the SDK's
+ * default, so the empty-walk check and the download agree on what was walked.
+ */
+export const DOWNLOAD_SCOPE: ArtifactScope = "main_stuff";
 
 export const mthdsDownloadArtifactsInputSchema = {
   run_id: z
@@ -59,7 +69,11 @@ const savedArtifactSchema = z.object({
     .string()
     .optional()
     .describe("Where the file was saved, relative to the server's working directory — on success."),
-  content_type: z.string().nullable().optional().describe("The stored object's content type."),
+  content_type: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("The platform's content type for the stored object; null when it has none."),
   size: z.number().optional().describe("Bytes written."),
   error: toolErrorSchema.optional().describe("Present when this file could not be saved."),
 });
@@ -82,17 +96,23 @@ const artifactsStructuredContentSchema = z.object({
     .optional()
     .describe('State "failed" only — the terminal lifecycle status.'),
   failure_message: z.string().optional().describe('State "failed" only.'),
+  scope: z
+    .enum(["main_stuff", "working_memory"])
+    .optional()
+    .describe(
+      'State "completed" only — which of the run\'s outputs was walked for stored-file references. Always "main_stuff", the run\'s main output: artifacts.length is the count of references found there.',
+    ),
   artifacts: z
     .array(savedArtifactSchema)
     .optional()
     .describe(
-      'State "completed" only — one entry per stored file the main output references, in discovery order.',
+      'One entry per stored file the main output references, in discovery order — on state "completed", and on a credential refused part-way through a download, where it carries the files saved before the refusal.',
     ),
   saved_paths: z
     .array(z.string())
     .optional()
     .describe(
-      'State "completed" only — the paths that were saved, relative to the server\'s working directory.',
+      "The paths that were saved, relative to the server's working directory — present wherever artifacts is.",
     ),
   all_saved: z
     .boolean()
@@ -125,6 +145,7 @@ export interface ArtifactsStructuredContent {
   retry_after_seconds?: number | null;
   run_status?: RunStatus;
   failure_message?: string;
+  scope?: ArtifactScope;
   artifacts?: SavedArtifactEntry[];
   saved_paths?: string[];
   all_saved?: boolean;
@@ -139,7 +160,7 @@ export interface ArtifactsResult {
 /** The slice of `PipelexApiClient` this capability calls (test seam). */
 export interface ArtifactClient {
   getRunResult(runId: string): Promise<RunResultState>;
-  resolveStorageUrl(input: { uri: string }): Promise<ResolvedStorageUrl>;
+  downloadArtifacts(request: DownloadArtifactsRequest): Promise<DownloadArtifactsResult>;
 }
 
 export interface ArtifactsContext {
@@ -154,35 +175,18 @@ export interface ArtifactsContext {
    * posture.
    */
   saveRoot?: string;
-  /** The download boundary; the real http downloader unless a test injects one. */
-  downloader?: ArtifactDownloader;
+  /**
+   * The explicit plain-http override, read from `ALLOW_HTTP_ENV` in
+   * `shared.ts`. Absent, `allowsPlainHttp` derives the answer from `baseUrl`'s
+   * scheme.
+   */
+  allowHttp?: boolean;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
 
 export function buildArtifactsContext(env = process.env): ArtifactsContext {
-  return buildApiConfig(env);
-}
-
-/**
- * Classify options for the per-artifact `POST /v1/resolve-storage-url` leg.
- * Both request-domain arms locate at the artifact's own entry: the URI came
- * out of the run's output, so a rejection is about that reference, not about
- * anything the caller typed.
- */
-export function resolveStorageUrlErrorOptions(index: number): ClassifyErrorOptions {
-  const location = `artifacts[${index}].uri`;
-  return {
-    route: "/v1/resolve-storage-url",
-    badRequest: {
-      location,
-      hint: "The API rejected this storage reference as found in the run output; it may belong to another organization than the API key's.",
-    },
-    notFound: {
-      location,
-      hint: "No stored object answers to this reference — it may have been deleted, or belong to another organization. If PIPELEX_BASE_URL points at a deployment without /v1/resolve-storage-url, use the hosted Pipelex API.",
-    },
-  };
+  return buildArtifactFetchConfig(env);
 }
 
 // Constructed inside the caught block (mirroring the sibling capabilities): the
@@ -196,6 +200,18 @@ function artifactClient(context: ArtifactsContext): ArtifactClient {
       apiKey: context.apiKey,
     })
   );
+}
+
+/**
+ * Whether `dir` climbs out of the working directory on its own text. The real
+ * containment check is `resolveSaveDir`'s — real paths, symlinks followed —
+ * and it runs only once there is something to save; this lexical half runs on
+ * every call, so a run whose output references no file still refuses an
+ * escaping `dir` rather than reporting the save as fine.
+ */
+function escapesLexically(dir: string): boolean {
+  const normalized = path.normalize(dir);
+  return normalized === ".." || normalized.startsWith(`..${path.sep}`);
 }
 
 export function validateArtifactsRequest(input: MthdsDownloadArtifactsInput): ToolError[] {
@@ -216,6 +232,14 @@ export function validateArtifactsRequest(input: MthdsDownloadArtifactsInput): To
         location: "dir",
         message: "dir must be relative to the server's working directory, not absolute.",
         hint: "Files are saved under the directory the host started this server in. Pass a relative directory such as `assets` or `out/run-1`.",
+        retryable: false,
+      });
+    } else if (escapesLexically(input.dir)) {
+      errors.push({
+        class: "input_domain",
+        location: "dir",
+        message: `dir resolves outside the server's working directory: ${input.dir}`,
+        hint: "Files stay inside the directory the host started this server in. Pass a relative directory that stays inside it.",
         retryable: false,
       });
     }
@@ -245,6 +269,9 @@ export async function downloadMthdsArtifacts(
     ]);
   }
 
+  // The run is read here rather than by the SDK's run_id arm, so a run that is
+  // still running, failed, or references nothing touches no directory: the
+  // target is created only once there is something to save in it.
   let client: ArtifactClient;
   let state: RunResultState;
   try {
@@ -267,6 +294,7 @@ export async function downloadMthdsArtifacts(
   // The SDK guarantees a non-null main_stuff on a completed run (it throws
   // MissingMainStuffError otherwise); reaching here without one is a contract
   // violation, surfaced as a runtime no-verdict like mthds_run_results does.
+  // Checked before the walk, which would read a null output as "no files".
   if (state.result.main_stuff == null) {
     return errorResult("No artifacts were saved: the Pipelex API returned a malformed report.", [
       {
@@ -279,9 +307,8 @@ export async function downloadMthdsArtifacts(
   }
 
   const runId = state.pipeline_run_id;
-  const uris = collectStorageUris(state.result.main_stuff);
-  if (uris.length === 0) {
-    return completedResult(runId, [], context.saveRoot);
+  if (collectArtifacts(state.result.main_stuff).length === 0) {
+    return completedResult(runId, DOWNLOAD_SCOPE, [], context.saveRoot);
   }
 
   const target = await resolveSaveDir(context.saveRoot, input.dir, "dir");
@@ -289,146 +316,69 @@ export async function downloadMthdsArtifacts(
     return errorResult("No artifacts were saved: the target directory is invalid.", [target.error]);
   }
 
-  const downloader = context.downloader ?? httpArtifactDownloader;
-  const artifacts: SavedArtifactEntry[] = [];
-
-  // Sequential rather than concurrent: each download streams to disk on its
-  // own, and one-at-a-time keeps the collision suffixes deterministic.
-  for (const [index, uri] of uris.entries()) {
-    artifacts.push(await saveOne(uri, index, target.dir, target.root, client, downloader, context));
+  let verdict: DownloadArtifactsResult;
+  try {
+    verdict = await client.downloadArtifacts({
+      results: state.result,
+      dir: target.dir,
+      scope: DOWNLOAD_SCOPE,
+      allowHttp: allowsPlainHttp(context),
+    });
+  } catch (err) {
+    const error = classifyError(err, { ...BULK_RESOLVE_ERROR_OPTIONS, auth: context.authError });
+    return refusedResult(error, err, target.root);
   }
 
-  return completedResult(runId, artifacts, target.root);
+  return completedResult(
+    runId,
+    verdict.scope,
+    verdict.artifacts.map((item, index) => projectItem(item, index, target.root)),
+    target.root,
+  );
 }
 
-async function saveOne(
-  uri: string,
-  index: number,
-  dir: string,
-  root: string,
-  client: ArtifactClient,
-  downloader: ArtifactDownloader,
-  context: ArtifactsContext,
-): Promise<SavedArtifactEntry> {
-  let resolved: ResolvedStorageUrl;
-  try {
-    resolved = await client.resolveStorageUrl({ uri });
-  } catch (err) {
-    return {
-      uri,
-      error: classifyError(err, {
-        ...resolveStorageUrlErrorOptions(index),
-        auth: context.authError,
-      }),
-    };
-  }
+/**
+ * A download the SDK could not produce a verdict for. A credential refused
+ * part-way through leaves the files saved before it on disk, and the SDK hands
+ * them back on the error: those files are real, so they ride the structured
+ * result as well as the prose. `state` and `all_saved` stay absent — no
+ * verdict was produced, and a consumer branching on `status` must not read one
+ * here — but `artifacts` and `saved_paths` let it find what is already on its
+ * disk instead of parsing the summary for it, and calling again would not
+ * overwrite those files, it would write suffixed copies beside them.
+ */
+function refusedResult(error: ToolError, err: unknown, root: string): ArtifactsResult {
+  const summary = summaryForToolError(error, ERROR_SUMMARIES);
+  if (!(err instanceof ArtifactAuthenticationError)) return errorResult(summary, [error]);
 
-  const contentType = resolved.content_type ?? null;
-  const baseName = artifactFilename(uri, contentType, index);
-  const download = await downloader.download(resolved.url, dir, baseName);
-  if (!download.ok) {
-    return {
-      uri,
-      content_type: contentType,
-      error: { ...download.failure, location: `artifacts[${index}].uri` },
-    };
-  }
+  const artifacts = err.verdict.artifacts.map((item, index) => projectItem(item, index, root));
+  const savedPaths = artifacts.flatMap((item) => (item.path === undefined ? [] : [item.path]));
+  if (savedPaths.length === 0) return errorResult(summary, [error]);
 
+  const lines = savedPaths.map((saved) => `- \`${saved}\``);
   return {
-    uri,
-    path: path.relative(root, download.saved.path),
-    content_type: contentType,
-    size: download.saved.size,
+    structuredContent: { status: "error", errors: [error], artifacts, saved_paths: savedPaths },
+    summary: `${summary}\n\nBefore the refusal, ${savedPaths.length} file(s) were saved under \`${root}\`:\n${lines.join("\n")}`,
   };
 }
 
-// ── the filename ────────────────────────────────────────────────────
+// ── the verdict's items ─────────────────────────────────────────────
 
-/** Longest filename this tool writes, extension included. */
-const MAX_FILENAME_LENGTH = 128;
-
-/**
- * The extension to add when the storage key has none and the stored object's
- * content type is one of the artifact types a run produces. Deliberately
- * short: an unknown type simply gets no extension, never a guessed one.
- */
-const EXTENSION_BY_CONTENT_TYPE: Record<string, string> = {
-  "image/png": ".png",
-  "image/jpeg": ".jpg",
-  "image/webp": ".webp",
-  "image/gif": ".gif",
-  "image/svg+xml": ".svg",
-  "application/pdf": ".pdf",
-  "text/plain": ".txt",
-  "text/markdown": ".md",
-  "text/html": ".html",
-  "text/csv": ".csv",
-  "application/json": ".json",
-};
-
-/**
- * The bare filename a storage reference is saved under: the last segment of
- * the storage key, reduced to a conservative character set so it can never
- * name anything but a regular file directly inside the target directory. Path
- * separators are the split point, so no traversal survives; leading dots are
- * stripped, so no hidden file and no `..`; everything outside
- * `[A-Za-z0-9._-]` becomes `_`; an empty result falls back to a numbered
- * `artifact-N`. Length is capped with the extension preserved, and an
- * extension is added from the content type when the key carries none.
- */
-export function artifactFilename(
-  uri: string,
-  contentType: string | null | undefined,
-  index: number,
-): string {
-  const key = uri.startsWith(PIPELEX_STORAGE_SCHEME)
-    ? uri.slice(PIPELEX_STORAGE_SCHEME.length)
-    : uri;
-  const segment =
-    (key.split(/[?#]/)[0] ?? "")
-      .split(/[\\/]/)
-      .filter((part) => part !== "")
-      .pop() ?? "";
-
-  let decoded = segment;
-  try {
-    decoded = decodeURIComponent(segment);
-  } catch {
-    // A malformed escape sequence is kept as typed; sanitization handles it.
+/** One SDK verdict entry, with its path made relative and its error classified. */
+function projectItem(item: DownloadedArtifact, index: number, root: string): SavedArtifactEntry {
+  if (item.error === null) {
+    return {
+      uri: item.uri,
+      path: path.relative(root, item.path),
+      content_type: item.content_type,
+      size: item.size,
+    };
   }
-
-  let name = decoded
-    .replace(/[^A-Za-z0-9._-]/g, "_")
-    .replace(/^[._-]+/, "")
-    .replace(/[._-]+$/, "");
-
-  if (name === "") {
-    name = `artifact-${index + 1}`;
-  }
-
-  if (name.length > MAX_FILENAME_LENGTH) {
-    const ext = path.extname(name);
-    // The extension is kept only if there is room left for a stem. An
-    // extension at least as long as the cap would give `slice` a negative
-    // start, which counts from the END and yields a name LONGER than the cap
-    // — so a pathological extension is dropped rather than preserved.
-    name =
-      ext.length < MAX_FILENAME_LENGTH
-        ? name.slice(0, MAX_FILENAME_LENGTH - ext.length) + ext
-        : name.slice(0, MAX_FILENAME_LENGTH);
-  }
-
-  if (path.extname(name) === "") {
-    const ext =
-      contentType == null
-        ? undefined
-        : EXTENSION_BY_CONTENT_TYPE[contentType.split(";")[0]!.trim().toLowerCase()];
-    if (ext !== undefined) {
-      name += ext;
-    }
-  }
-
-  return name;
+  return {
+    uri: item.uri,
+    content_type: item.content_type,
+    error: itemToolError(item.error, `artifacts[${index}].uri`),
+  };
 }
 
 // ── projections ─────────────────────────────────────────────────────
@@ -475,6 +425,7 @@ function failedResult(runId: string, status: RunStatus, message: string): Artifa
  */
 export function completedResult(
   runId: string,
+  scope: ArtifactScope,
   artifacts: SavedArtifactEntry[],
   root: string,
 ): ArtifactsResult {
@@ -487,6 +438,7 @@ export function completedResult(
       status: "ok",
       run_id: runId,
       state: "completed",
+      scope,
       artifacts,
       saved_paths: savedPaths,
       all_saved: savedPaths.length === artifacts.length,
