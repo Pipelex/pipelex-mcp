@@ -11,13 +11,14 @@ import {
   LINK_FILE_NAME,
   apiHostOf,
   buildMethodLink,
+  bundleFilesIn,
   containedInDir,
   existingDestinations,
   foreignEntryReason,
   readMethodLink,
   writeMethodLink,
 } from "./catalog-link.js";
-import type { LinkFileReport, LinkRead } from "./catalog-link.js";
+import type { LinkFileReport, LinkRead, MethodLink } from "./catalog-link.js";
 import {
   buildApiConfig,
   classifyError,
@@ -42,6 +43,7 @@ import {
   checkDeepestExistingAncestor,
   errorMessage,
   isInsideRoot,
+  isMissingPathError,
   resolveSaveDir,
 } from "./workspace-boundary.js";
 
@@ -375,6 +377,23 @@ export async function saveMthdsMethod(
     );
   }
 
+  // The bundle directory is read off the SUBMITTED items, before a single file
+  // is opened, because it is what bounds where the `{ path }` arms may read
+  // from — see {@link pathsOutsideBundle}.
+  const bundleDir = bundleDirectoryOf(parsed.data.files);
+  // The READ boundary is the directory a real `{ path }` item names, which is
+  // `linkDirectoryOf`'s question and not `bundleDirectoryOf`'s — see
+  // {@link pathsOutsideBundle} for why handing it to an inline `uri` published
+  // a workspace's secrets.
+  const readRoot = linkDirectoryOf(parsed.data.files);
+  const outside = [
+    ...pathsOutsideBundle(parsed.data.files, readRoot, "files"),
+    ...pathsOutsideBundle(parsed.data.python, readRoot, "python"),
+  ];
+  if (outside.length > 0) {
+    return saveError("The method was not saved: request input is invalid.", outside);
+  }
+
   // Resolve ONCE. The bytes that are validated are the bytes that are saved:
   // splitting the two — validate in the skill, save in a second call — would
   // read the files twice and the saved bytes would not be provably the
@@ -412,7 +431,6 @@ export async function saveMthdsMethod(
     );
   }
 
-  const bundleDir = bundleDirectoryOf(bundle.files);
   // Where the link file may go is a different question from what the files are
   // NAMED relative to — see {@link linkDirectoryOf}.
   const linkDir = linkDirectoryOf(parsed.data.files);
@@ -420,6 +438,29 @@ export async function saveMthdsMethod(
   if (!named.ok) {
     return saveError("The method was not saved: request input is invalid.", [named.error]);
   }
+  // `serializeMethodFiles` drops whitespace-only entries, and an all-blank set
+  // serializes to `""` — which is the platform's CLEAR sentinel. So
+  // `python: [{ path: "empty.py" }]` reported "updated" and erased the stored
+  // Python, the exact hazard the omitted-versus-empty rule below exists to
+  // prevent. A blank `.mthds` is already refused in the validation leg; this is
+  // the same refusal for the arm nothing validates.
+  const blankPython = (python?.files ?? []).flatMap((file, index) =>
+    file.content.trim() === ""
+      ? [
+          {
+            class: "input_domain" as const,
+            location: `python[${index}].content`,
+            message: "File content must not be empty.",
+            hint: "An empty .py file is dropped on the way to the catalog, and a set of nothing but empty files would erase the stored Python. Remove it, or give it content.",
+            retryable: false,
+          },
+        ]
+      : [],
+  );
+  if (blankPython.length > 0) {
+    return saveError("The method was not saved: request input is invalid.", blankPython);
+  }
+
   const namedPython =
     python === undefined ? undefined : nameFiles(python.files, bundleDir, "funcs", ".py", "python");
   if (namedPython !== undefined && !namedPython.ok) {
@@ -470,6 +511,24 @@ export async function saveMthdsMethod(
   let saved: "created" | "updated" | "renamed";
 
   if (parsed.data.method_id === undefined) {
+    // Preventing a duplicate is the link file's whole purpose, and it was
+    // consulted too late to serve it: the create ran first, and only afterwards
+    // did the link write refuse to re-point — reporting `link_file.written:
+    // false` about a SECOND method that already existed. Per SPEC.md delete is
+    // admin-only, so that duplicate is not something the caller can undo.
+    const linked = await linkedMethodAt(context, parsed.data.link_dir ?? linkDir);
+    if (linked !== undefined) {
+      return saveError("The method was not saved: that directory is already linked.", [
+        {
+          class: "input_domain",
+          location: "method_id",
+          message: `\`${linked.dir}\` is linked to \`${linked.link.method_id}\` (${linked.link.name} on ${linked.link.api_host}), and this call names no method_id, so it would have created a SECOND method for the same directory.`,
+          hint: `Pass method_id: "${linked.link.method_id}" to update the method this directory is linked to, or point link_dir at a directory of its own to create a genuinely new method.`,
+          retryable: false,
+        },
+      ]);
+    }
+
     let created: MethodData;
     try {
       created = await client.createMethod(writeInput);
@@ -623,6 +682,20 @@ async function writeLinkForSave(
       path: path.relative(target.root, path.join(target.dir, LINK_FILE_NAME)),
       written: false,
       reason: `it is already linked to a different method (\`${existing.link.method_id}\` — ${existing.link.name} on ${existing.link.api_host}), and re-pointing it would send a teammate's next save to this method instead of theirs`,
+    };
+  }
+  // A link nobody can parse is not an empty slot. The pull path already refuses
+  // this exact state — something claims the directory and following it would be
+  // guesswork — while the save path fell through and TRUNCATED the file, after
+  // the catalog write, destroying whatever it held: a hand-edited link, another
+  // tool's file of the same name, a teammate's association. `foreignEntryReason`
+  // stops a symlink or a directory; an ordinary file with the wrong contents
+  // reached `writeFile` unopposed.
+  if (existing.kind === "unreadable") {
+    return {
+      path: path.relative(target.root, path.join(target.dir, LINK_FILE_NAME)),
+      written: false,
+      reason: `it is there but cannot be read (${existing.reason}), and overwriting it would destroy whatever it holds`,
     };
   }
 
@@ -821,26 +894,40 @@ async function writtenResult(
   // guard that inspects a narrower set than the action lands is not a guard.
   const all = [...sources, ...python];
   const destinations: { file: MethodFile; name: string; absolute: string }[] = [];
+  const claimed = new Map<string, string>();
   for (const file of all) {
     const absolute = containedInDir(dir, file.name);
     if (absolute === undefined) {
-      return getError("The method was not written: a stored file name leaves output_dir.", [
-        {
-          class: "runtime",
-          message: `The stored method names a file that leaves the output directory: ${file.name}`,
-          hint: "No files were written. A method's file names come from whoever saved it; fix the name in the webapp editor, or pull without output_dir to read the sources inline.",
-          retryable: false,
-        },
-      ]);
+      return storedNameRefusal(file.name, "it leaves the output directory");
     }
+    const refused = storedNameReason(file.name);
+    if (refused !== undefined) {
+      return storedNameRefusal(file.name, refused);
+    }
+    // Two stored names can resolve to ONE destination — `a.mthds` beside
+    // `./a.mthds`, or `Bundle.mthds` beside `bundle.mthds` on a
+    // case-insensitive filesystem, which this tool's own save produces because
+    // `nameFiles` keeps both as distinct names. Written in sequence one
+    // replaces the other, both are reported as written, and the next pull
+    // refuses the directory for holding changes nobody made. Compare folded, so
+    // the check answers for the filesystem the write lands on.
+    const key = absolute.toLowerCase();
+    const taken = claimed.get(key);
+    if (taken !== undefined) {
+      return storedNameRefusal(
+        file.name,
+        `it lands on the same file as \`${taken}\`, so one would silently replace the other`,
+      );
+    }
+    claimed.set(key, file.name);
     destinations.push({ file, name: file.name, absolute });
   }
 
   const link = await readMethodLink(dir);
-  const guard = await guardOutputDir(stored, destinations, input.overwrite === true, link);
-  if (guard !== undefined) {
+  const plan = await planPull(dir, stored, destinations, input.overwrite === true, link);
+  if (plan.kind === "refuse") {
     return getError("The method was not written: output_dir holds work this pull would lose.", [
-      guard,
+      plan.error,
     ]);
   }
 
@@ -864,42 +951,51 @@ async function writtenResult(
     }
   }
 
-  // The link goes down BEFORE the files, marked `partial_pull`, so that a
-  // failure between two files leaves the directory owned by this method instead
-  // of looking like somebody else's bundle — which is what made the retry this
-  // failure advertises impossible to perform. It is rewritten without the
-  // marker once every file has landed.
-  const provisional = await writeMethodLink(
-    root,
-    dir,
-    buildMethodLink({
-      apiHost,
-      methodId: stored.method_id,
-      name: stored.name,
-      syncedUpdatedAt: link.kind === "link" ? link.link.synced_updated_at : "",
-      partialPull: true,
-    }),
-  );
+  // A pull whose destinations already match writes NOTHING and refreshes the
+  // link alone. Rewriting identical bytes changed every mtime, woke every
+  // watcher, and — where one source file was read-only — turned a pure link
+  // refresh into a mid-write failure that marked the directory as an
+  // interrupted pull having written nothing at all, which the next pull then
+  // read as licence to overwrite.
+  let provisional: LinkFileReport | undefined;
+  if (plan.kind === "write") {
+    // The link goes down BEFORE the files, marked `partial_pull`, so that a
+    // failure between two files leaves the directory owned by this method
+    // instead of looking like somebody else's bundle — which is what made the
+    // retry this failure advertises impossible to perform. It is rewritten
+    // without the marker once every file has landed.
+    provisional = await writeMethodLink(
+      root,
+      dir,
+      buildMethodLink({
+        apiHost,
+        methodId: stored.method_id,
+        name: stored.name,
+        syncedUpdatedAt: link.kind === "link" ? link.link.synced_updated_at : "",
+        partialPull: true,
+      }),
+    );
 
-  const written: string[] = [];
-  for (const destination of destinations) {
-    const parent = path.dirname(destination.absolute);
-    if (parent !== dir) {
-      const escaped = await createSubdirectory(dir, parent);
-      if (escaped !== undefined) {
+    const written: string[] = [];
+    for (const destination of destinations) {
+      const parent = path.dirname(destination.absolute);
+      if (parent !== dir) {
+        const escaped = await createSubdirectory(dir, parent);
+        if (escaped !== undefined) {
+          return getError("The method was only partly written.", [
+            midWriteError(destination.name, escaped, written, provisional.written),
+          ]);
+        }
+      }
+      try {
+        await fs.writeFile(destination.absolute, destination.file.content, "utf8");
+      } catch (err) {
         return getError("The method was only partly written.", [
-          midWriteError(destination.name, escaped, written, provisional.written),
+          midWriteError(destination.name, errorMessage(err), written, provisional.written),
         ]);
       }
+      written.push(destination.name);
     }
-    try {
-      await fs.writeFile(destination.absolute, destination.file.content, "utf8");
-    } catch (err) {
-      return getError("The method was only partly written.", [
-        midWriteError(destination.name, errorMessage(err), written, provisional.written),
-      ]);
-    }
-    written.push(destination.name);
   }
 
   const linkFile = await writeMethodLink(
@@ -941,13 +1037,72 @@ async function writtenResult(
       `The stored method carries no file names — it predates the catalog's named form — so \`${sources[0]?.name}\` is a name this tool invented, not the method's. Rename it if you like, but the next save sends whatever name is on disk.`,
     );
   }
+  // What a failed link write means depends on what is already on disk, and
+  // saying "NOT linked" about a linked directory was the worst of the three: it
+  // told the caller to pass a method_id they did not need, about a directory
+  // that would have updated the right method on its own. A link this pull wrote
+  // provisionally still carries the interrupted-pull marker, and one written by
+  // an earlier pull still carries that pull's synced_updated_at — neither is
+  // the refresh this pull owed, and both leave the directory linked.
+  const linkedAnyway = provisional?.written === true || link.kind === "link";
   lines.push(
     linkFile.written
       ? `Linked by \`${linkFile.path}\` — commit it, so a save from this directory updates this method instead of creating a second one.`
-      : `The directory is NOT linked (${linkFile.reason}), so a save from it would create a SECOND method unless it passes method_id \`${stored.method_id}\`.`,
+      : linkedAnyway
+        ? `The files are written and the directory IS linked to this method, but \`${linkFile.path}\` could not be refreshed (${linkFile.reason}), so it still records an out-of-date synced_updated_at${provisional?.written === true ? " and this pull's interrupted-pull marker" : ""}. Fix that and pull again; a save from here still updates this method.`
+        : `The directory is NOT linked (${linkFile.reason}), so a save from it would create a SECOND method unless it passes method_id \`${stored.method_id}\`.`,
   );
 
   return { structuredContent, summary: lines.join("\n") };
+}
+
+/**
+ * Why this stored file name may not be written here, or `undefined` when it may.
+ *
+ * Containment is not enough, because the catalog is an untrusted source of
+ * paths: a method's names come from whoever saved it, `nameFiles` takes an
+ * inline item's name straight from a caller-supplied `uri`, and `output_dir`
+ * may be the workspace root. The occupancy guard only refuses paths that
+ * already EXIST, so every previously absent path was planted unopposed — a
+ * stored method could leave `.github/workflows/…` or an agent's configuration
+ * file behind it in a workspace that had neither.
+ *
+ * So the pull writes method sources and nothing else:
+ *
+ *  - the extension is `.mthds` or `.py`, the two things a method is made of,
+ *    and the two `nameFiles` stamps on every name it invents;
+ *  - no path component begins with a dot, which is where a workspace keeps the
+ *    files that configure its tools rather than its code;
+ *  - the link file's own name is reserved, because writing it is the pull's
+ *    LAST act: a stored file of that name is overwritten by the link, reported
+ *    as written with contents that are not on disk, and the directory then
+ *    refuses every later pull for holding a change nobody made.
+ */
+function storedNameReason(name: string): string | undefined {
+  const segments = toPosix(name).split("/");
+  if (segments.some((segment) => segment.startsWith("."))) {
+    return "it has a path component beginning with a dot, and a pull writes a method's sources, not a workspace's configuration";
+  }
+  const base = segments[segments.length - 1] ?? "";
+  if (base === LINK_FILE_NAME) {
+    return `\`${LINK_FILE_NAME}\` is the link file this tool writes last, so the pull would overwrite it and report it as written anyway`;
+  }
+  const extension = path.posix.extname(base).toLowerCase();
+  if (extension !== ".mthds" && extension !== ".py") {
+    return "it is neither a `.mthds` nor a `.py` file, and a method is made of those two";
+  }
+  return undefined;
+}
+
+function storedNameRefusal(name: string, reason: string): GetMethodResult {
+  return getError("The method was not written: a stored file name may not be written here.", [
+    {
+      class: "runtime",
+      message: `The stored method names a file this pull will not write: \`${name}\` — ${reason}.`,
+      hint: "No files were written. A method's file names come from whoever saved it, and output_dir may hold more than this method; fix the name in the webapp editor, or pull without output_dir to read the sources inline.",
+      retryable: false,
+    },
+  ]);
 }
 
 /**
@@ -1003,34 +1158,51 @@ function midWriteError(
 }
 
 /**
- * Whether this directory may be written into — the refusal rule, and why it is
- * not the codegen writer's.
+ * What a pull decided to do, rather than merely whether it was allowed to.
+ *
+ * `link-only` is the third answer the old boolean shape could not carry: a
+ * directory whose every destination already matches needs no write at all, and
+ * saying so here is what keeps a pure link refresh out of `writeFile`.
+ */
+type PullPlan = { kind: "refuse"; error: ToolError } | { kind: "write" } | { kind: "link-only" };
+
+/**
+ * What this pull should do with `output_dir` — write, refresh the link alone,
+ * or refuse — and why the rule is not the codegen writer's.
  *
  * `mthds_codegen` overwrites its own stamped output because the engine owns
  * those filenames. A method's sources are the USER's files and carry no stamp,
  * so the only evidence of ownership is the link file. Hence:
  *
- *  - no `.mthds` file at all: written;
- *  - `.mthds` files with no link, or a link naming another method: refused
- *    outright, because it is somebody else's bundle;
- *  - a link naming THIS method: compared file by file, with the three outcomes
- *    of the design's box R — identical writes nothing and only refreshes the
- *    link; different while the stored method has NOT moved means the local
- *    files are work this directory never saved, so the pull is refused and says
- *    it would be lost; different AFTER the stored method has moved means the
- *    tool cannot tell whose change it is looking at, so it refuses unless
- *    `overwrite` was sent — which the caller sends only after asking the user.
+ *  - nothing of this method here and no bundle of anyone else's: written;
+ *  - a bundle with no link, or a link naming another method: refused outright,
+ *    because it is somebody else's work;
+ *  - a link naming THIS method: compared destination by destination, with the
+ *    three outcomes of the design's box R — identical writes nothing and only
+ *    refreshes the link; different while the stored method has NOT moved means
+ *    the local files are work this directory never saved, so the pull is
+ *    refused and says it would be lost; different AFTER the stored method has
+ *    moved means the tool cannot tell whose change it is looking at, so it
+ *    refuses unless `overwrite` was sent — which the caller sends only after
+ *    asking the user.
+ *
+ * A destination that is simply ABSENT is none of those three: writing it
+ * destroys nothing, so it is not compared against anything. Counting it as a
+ * difference told a user who had deleted one file that the directory held
+ * "changes that were never saved", named the file they had deleted, and then
+ * refused every pull that would have restored it, with no flag to open it.
  *
  * Every refusal is `input_domain` at `output_dir` and writes nothing at all.
  */
-async function guardOutputDir(
+async function planPull(
+  dir: string,
   stored: MethodData,
   destinations: readonly { name: string; file: MethodFile; absolute: string }[],
   overwrite: boolean,
   link: LinkRead,
-): Promise<ToolError | undefined> {
+): Promise<PullPlan> {
   if (link.kind === "unreadable") {
-    return refuseOutputDir(
+    return refusePull(
       `\`${LINK_FILE_NAME}\` is there but cannot be read: ${link.reason}.`,
       "Something already claims this directory. Fix or remove that file, or point output_dir at an empty directory.",
     );
@@ -1042,44 +1214,73 @@ async function guardOutputDir(
     // directory holding the user's `helpers.py` or a nested bundle read as
     // empty and was written over.
     const occupied = await existingDestinations(destinations);
-    if (occupied.length === 0) {
-      return undefined;
+    if (occupied.length > 0) {
+      return refusePull(
+        `it already holds ${occupied.map((name) => `\`${name}\``).join(", ")} and no ${LINK_FILE_NAME}, so it is somebody else's work.`,
+        "Point output_dir at an empty or dedicated directory. A directory becomes linked by being saved from, or pulled into, by these tools.",
+      );
     }
-    return refuseOutputDir(
-      `it already holds ${occupied.map((name) => `\`${name}\``).join(", ")} and no ${LINK_FILE_NAME}, so it is somebody else's work.`,
-      "Point output_dir at an empty or dedicated directory. A directory becomes linked by being saved from, or pulled into, by these tools.",
-    );
+    // And the other half of the same question, which asking about the write set
+    // alone does not answer: a directory holding a bundle of its OWN, under
+    // names this method does not use, is still somebody else's work. Landing
+    // beside a stranger's `their_bundle.mthds` and then claiming the whole
+    // directory with a link file is exactly what the link file exists to stop.
+    const foreign = await bundleFilesIn(dir);
+    if (foreign.length > 0) {
+      return refusePull(
+        `it already holds ${foreign.map((name) => `\`${name}\``).join(", ")} and no ${LINK_FILE_NAME}, so it is somebody else's bundle.`,
+        "Point output_dir at an empty or dedicated directory. Writing this method here would leave two bundles in one directory and link it to only one of them.",
+      );
+    }
+    return { kind: "write" };
   }
 
   if (link.link.method_id !== stored.method_id) {
-    return refuseOutputDir(
+    return refusePull(
       `it is linked to a different method (\`${link.link.method_id}\` — ${link.link.name} on ${link.link.api_host}).`,
       "Point output_dir at a directory of its own. Overwriting another method's directory would silently replace the bundle a teammate is working on.",
     );
   }
 
+  const local = await compareDestinations(destinations);
+
   if (link.link.partial_pull === true) {
-    // An earlier pull of THIS method died between two files. Whatever is here
-    // came from the catalog moments ago, so completing it destroys nothing the
-    // catalog does not already hold — and refusing would strand the caller,
-    // since the failure told them to call again.
-    return undefined;
+    // An earlier pull of THIS method died between two files, and the failure
+    // told the caller to call again — so a destination that is absent, or
+    // already byte-identical, is resumed without ceremony: what is there came
+    // from the catalog moments ago and completing it destroys nothing.
+    //
+    // What the marker does NOT license is writing over bytes that have since
+    // CHANGED. It says a pull was interrupted and nothing more, it is persisted
+    // JSON in a file the user is told to commit — so it can be stale or planted
+    // — and read as blanket authority it destroyed an edit made between the
+    // failure and the retry, silently, with no flag and no mention in the
+    // result.
+    if (local.differing.length === 0 || overwrite) {
+      return { kind: "write" };
+    }
+    return refusePull(
+      `an earlier pull of this method was interrupted here, and ${local.differing.map((name) => `\`${name}\``).join(", ")} changed after it landed.`,
+      "Resuming would overwrite those bytes. Save them with mthds_save_method, or move them aside, then pull again — or pass overwrite: true if the stored version wins.",
+    );
   }
 
-  const differing = await differingFiles(destinations);
-  if (differing.length === 0) {
-    // Identical: nothing is written, and only the link's synced_updated_at
-    // moves. Returning undefined re-writes byte-identical files, which is the
-    // same outcome for a fraction of the reasoning.
-    return undefined;
+  if (local.differing.length === 0) {
+    if (local.missing.length === 0) {
+      // Identical: nothing is written, and only the link's synced_updated_at
+      // moves.
+      return { kind: "link-only" };
+    }
+    // Absent destinations only. Nothing here is lost by writing them.
+    return { kind: "write" };
   }
 
   if (link.link.synced_updated_at === stored.updated_at) {
     // The stored method has not moved since this directory synced, so the local
     // differences are work nobody has saved. No flag opens this: `overwrite`
     // answers "whose change is this", and here there is no question.
-    return refuseOutputDir(
-      `it holds changes to ${differing.map((name) => `\`${name}\``).join(", ")} that were never saved — the stored method has not moved since this directory last synced with it.`,
+    return refusePull(
+      `it holds changes to ${local.differing.map((name) => `\`${name}\``).join(", ")} that were never saved — the stored method has not moved since this directory last synced with it.`,
       "Those edits exist only here, so pulling would destroy them. Save them with mthds_save_method, or move them aside, then pull again.",
     );
   }
@@ -1090,13 +1291,17 @@ async function guardOutputDir(
     // checked: with no source hashes recorded, a directory the user never
     // touched looks exactly like this the moment a teammate saves, and the
     // message named files they had not edited as if it knew.
-    return refuseOutputDir(
-      `its copy of ${differing.map((name) => `\`${name}\``).join(", ")} differs from the stored one, and the stored method has moved since this directory last synced (stored updated_at ${stored.updated_at}, last synced ${link.link.synced_updated_at}). That is what a teammate's save looks like, and it is also what a local edit looks like.`,
+    return refusePull(
+      `its copy of ${local.differing.map((name) => `\`${name}\``).join(", ")} differs from the stored one, and the stored method has moved since this directory last synced (stored updated_at ${stored.updated_at}, last synced ${link.link.synced_updated_at}). That is what a teammate's save looks like, and it is also what a local edit looks like.`,
       "This tool records no source hashes, so it cannot tell which of the two it is looking at. Inside a git repository `git status` answers it. Ask the user, and pass overwrite: true only if they say the stored version wins.",
     );
   }
 
-  return undefined;
+  return { kind: "write" };
+}
+
+function refusePull(message: string, hint: string): PullPlan {
+  return { kind: "refuse", error: refuseOutputDir(message, hint) };
 }
 
 function refuseOutputDir(message: string, hint: string): ToolError {
@@ -1110,27 +1315,44 @@ function refuseOutputDir(message: string, hint: string): ToolError {
 }
 
 /**
- * The destinations whose bytes on disk differ from what would be written; a
- * missing or unreadable file counts as differing.
+ * How each destination's bytes on disk stand against what would be written,
+ * told apart three ways rather than two.
  *
- * It takes the destinations the write loop landed — `.py` files included —
+ * It takes the destinations the write loop lands — `.py` files included —
  * rather than the `.mthds` sources alone. A comparison narrower than the write
  * is how an edited `funcs.py` passed a guard that then overwrote it.
+ *
+ * `missing` is separate from `differing` because they lead to opposite
+ * decisions. A file that is not there holds nothing to lose, so writing it is
+ * free; a file that is there and differs is work this tool cannot account for.
+ * Collapsing the two told a user who had deleted one source that the directory
+ * held "changes that were never saved" and then refused every pull, `overwrite`
+ * included. Anything unreadable — a permission error, a directory in its place
+ * — counts as differing, not missing: the bytes cannot be seen, so they must
+ * not be assumed absent.
  */
-async function differingFiles(
+interface LocalComparison {
+  /** Present, and not what the catalog holds. */
+  differing: string[];
+  /** Not there at all. */
+  missing: string[];
+}
+
+async function compareDestinations(
   destinations: readonly { name: string; file: MethodFile; absolute: string }[],
-): Promise<string[]> {
+): Promise<LocalComparison> {
   const differing: string[] = [];
+  const missing: string[] = [];
   for (const destination of destinations) {
     try {
       if ((await fs.readFile(destination.absolute, "utf8")) !== destination.file.content) {
         differing.push(destination.name);
       }
-    } catch {
-      differing.push(destination.name);
+    } catch (err) {
+      (isMissingPathError(err) ? missing : differing).push(destination.name);
     }
   }
-  return differing;
+  return { differing, missing };
 }
 
 function emptySourceError(): GetMethodResult {
@@ -1156,13 +1378,110 @@ function getError(summary: string, errors: ToolError[]): GetMethodResult {
  * `link_dir` defaults to and what every file's catalog name is relative to.
  * `undefined` for an inline-only submission, which has no directory at all.
  */
-export function bundleDirectoryOf(files: readonly SubmittedFile[]): string | undefined {
-  const first = files[0]?.uri;
-  if (first === undefined || first === null || first.trim() === "") {
+export function bundleDirectoryOf(files: readonly SubmittedFileInput[]): string | undefined {
+  const first = files[0];
+  if (first === undefined) {
     return undefined;
   }
-  const dir = path.dirname(first);
+  // First-match union semantics, as `resolveSubmittedFiles` applies them. It
+  // reads the SUBMITTED item rather than the resolved one — the same answer,
+  // since a `{ path }` item resolves to that path as its `uri` — because the
+  // boundary it feeds has to be known BEFORE anything is opened.
+  const label = "content" in first ? first.uri : first.path;
+  if (label === undefined || label === null || label.trim() === "") {
+    return undefined;
+  }
+  const dir = path.dirname(label);
   return dir === "" ? "." : dir;
+}
+
+/**
+ * Which submitted `{ path }` items sit outside the bundle directory — asked
+ * BEFORE the resolver opens any of them.
+ *
+ * `nameFiles` already refuses a file above the bundle directory, but it does so
+ * after the bytes are in hand, which is too late for the `python` arm: that arm
+ * reads a `.py` file and then UPLOADS it to the organization's catalog. The
+ * extension gate bounds WHAT may be opened; this bounds WHERE, and only both
+ * together close the injection vector.
+ *
+ * The directory that bounds a read is {@link linkDirectoryOf}'s, NOT
+ * {@link bundleDirectoryOf}'s, and the difference is the whole fix. A file's
+ * NAME inside the method may legitimately come from an inline item's `uri`,
+ * which is documented as provenance and may be any label at all. Letting that
+ * label bound a READ handed the caller the boundary: `{ content, uri:
+ * "app/config/x.mthds" }` beside `{ path: "app/config/settings.py" }` declared
+ * the secrets' own directory to be the bundle root, and the file went to the
+ * catalog with its keys in it. Only a `{ path }` item names a directory that is
+ * really there, so only a `{ path }` item may establish one — and a bundle
+ * submitted inline establishes none, which makes every `{ path }` beside it a
+ * refusal rather than a read.
+ */
+function pathsOutsideBundle(
+  submitted: readonly SubmittedFileInput[] | undefined,
+  bundleDir: string | undefined,
+  location: "files" | "python",
+): ToolError[] {
+  if (submitted === undefined) {
+    return [];
+  }
+  const errors: ToolError[] = [];
+  for (const [index, item] of submitted.entries()) {
+    // The resolver reports a blank path and an unreadable one for itself.
+    if ("content" in item || item.path.trim() === "") {
+      continue;
+    }
+    if (bundleDir === undefined) {
+      errors.push({
+        class: "input_domain",
+        location: `${location}[${index}].path`,
+        message: `\`${item.path}\` has no bundle directory to sit under: the first submitted file is inline, so nothing names a directory on disk.`,
+        hint: "Submit the bundle's root file as a { path } item, which is what establishes the directory the others are read from — or send this file inline too. A uri is provenance for diagnostics and never decides what may be opened.",
+        retryable: false,
+      });
+      continue;
+    }
+    const relative = toPosix(path.relative(bundleDir, item.path));
+    if (relative === "" || relative.startsWith("../")) {
+      errors.push({
+        class: "input_domain",
+        location: `${location}[${index}].path`,
+        message: `\`${item.path}\` is outside the bundle directory \`${bundleDir}\`, so it is not part of this method.`,
+        hint: "Every submitted file must live at or under the directory of the first one, which is the bundle's root. Move it in, or submit the bundle from its own directory.",
+        retryable: false,
+      });
+    }
+  }
+  return errors;
+}
+
+/**
+ * The method a directory is already linked to, read WITHOUT creating anything.
+ *
+ * `resolveSaveDir` is the write path's routine and it makes the directory it
+ * contains; this question is asked before a create, where making a directory in
+ * order to decide whether to refuse would be a side effect of a refusal. So the
+ * path is contained lexically, what is there is read, and anything that cannot
+ * be resolved answers `undefined` — the link write that follows asks again with
+ * the real routine and reports its own refusal.
+ */
+async function linkedMethodAt(
+  context: CatalogWriteContext,
+  requested: string | undefined,
+): Promise<{ dir: string; link: MethodLink } | undefined> {
+  if (requested === undefined || context.saveRoot === undefined) {
+    return undefined;
+  }
+  const absolute = path.resolve(context.saveRoot, requested);
+  if (absolute !== context.saveRoot && !isInsideRoot(context.saveRoot, absolute)) {
+    return undefined;
+  }
+  const read = await readMethodLink(absolute);
+  if (read.kind !== "link") {
+    return undefined;
+  }
+  const relative = path.relative(context.saveRoot, absolute);
+  return { dir: relative === "" ? "." : relative, link: read.link };
 }
 
 /**

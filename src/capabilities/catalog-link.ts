@@ -241,6 +241,35 @@ export async function existingDestinations(
   return present;
 }
 
+/**
+ * The directory's own top-level `.mthds` files — "does a bundle already live
+ * here at all".
+ *
+ * This is NOT {@link existingDestinations}, and the two are not
+ * interchangeable. That one asks about the write set, which is what keeps a
+ * pull from landing on a file it would replace; this one asks the ownership
+ * question the link file exists for — a directory holding a bundle and no link
+ * is somebody else's work, whatever that bundle's files happen to be called.
+ * Asking only the first let a pull land beside a stranger's `their_bundle.mthds`
+ * and then claim the whole directory with a link file.
+ *
+ * Top level only, and files only: a nested bundle under a directory of its own
+ * is not a claim on this one, and an unreadable directory answers "nothing
+ * here", which the write that follows reports for itself.
+ */
+export async function bundleFilesIn(dir: string): Promise<string[]> {
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".mthds"))
+    .map((entry) => entry.name)
+    .sort();
+}
+
 /** The joined destination when it stays inside `dir`; `undefined` when it escapes. */
 export function containedInDir(dir: string, relative: string): string | undefined {
   const absolute = path.resolve(dir, relative);

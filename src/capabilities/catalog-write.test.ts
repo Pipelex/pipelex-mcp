@@ -63,6 +63,12 @@ function validationAnswering(report: PipelexValidationResult, capture?: { files?
   } as unknown as CatalogWriteContext["validation"];
 }
 
+function linkFileOf(structured: {
+  status: string;
+}): { written: boolean; reason?: string } | undefined {
+  return (structured as { link_file?: { written: boolean; reason?: string } }).link_file;
+}
+
 function storedMethod(overrides: Partial<MethodData> = {}): MethodData {
   return {
     method_id: "mt_one",
@@ -404,7 +410,9 @@ describe("saveMthdsMethod", () => {
     );
 
     const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "input_domain", location: "files" });
+    // Located at the item, and raised before the resolver opens it: the file is
+    // outside the bundle, so it is never read, let alone named.
+    expect(error).toMatchObject({ class: "input_domain", location: "files[1].path" });
     expect(error.message).toContain("outside the bundle directory");
   });
 
@@ -949,16 +957,20 @@ describe("the pull writes only what it may", () => {
 
 describe("the save writes a link only where one belongs", () => {
   /** The link report off either arm of the union, which only the ok arm declares. */
-  function linkFileOf(structured: {
-    status: string;
-  }): { written: boolean; reason?: string } | undefined {
-    return (structured as { link_file?: { written: boolean; reason?: string } }).link_file;
-  }
-
   const creating = (name = "Demo"): CatalogWriteClient => ({
     ...clientNotCalled,
     async createMethod() {
       return storedMethod({ name });
+    },
+  });
+
+  const updating = (methodId: string, name = "Demo"): CatalogWriteClient => ({
+    ...clientNotCalled,
+    async getMethod() {
+      return storedMethod({ method_id: methodId, name });
+    },
+    async updateMethod() {
+      return storedMethod({ method_id: methodId, name });
     },
   });
 
@@ -1010,9 +1022,40 @@ describe("the save writes a link only where one belongs", () => {
       contextFor(creating("Mine"), validationAnswering(validReport)),
     );
 
+    // Nothing is created: the link is read BEFORE the catalog call, because a
+    // duplicate cannot be undone from here — delete is admin-only — and the old
+    // ordering reported the refusal about a second method that already existed.
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "method_id" });
+    expect(error.message).toContain("mt_teammate");
+    expect(error.hint).toContain('method_id: "mt_teammate"');
+    const link = await readMethodLink(path.join(root, "theirs"));
+    expect(link.kind === "link" && link.link.method_id).toBe("mt_teammate");
+  });
+
+  it("still refuses to re-point the link when the save names another method_id", async () => {
+    // The create is refused up front; an UPDATE of a genuinely different method
+    // still happens, and it is the link write that must not follow it.
+    await writeBundle("theirs", { "bundle.mthds": 'domain = "demo"' });
+    await fs.writeFile(
+      path.join(root, "theirs", LINK_FILE_NAME),
+      JSON.stringify({
+        method_id: "mt_teammate",
+        name: "The teammate's method",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "2026-09-20T12:00:00Z",
+      }),
+      "utf8",
+    );
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "theirs/bundle.mthds" }], name: "Mine", method_id: "mt_mine" },
+      contextFor(updating("mt_mine", "Mine"), validationAnswering(validReport)),
+    );
+
     // The method IS saved — it is stored by the time the link is written, and
     // saying otherwise would be the one thing that is certainly untrue.
-    expect(result.structuredContent).toMatchObject({ status: "ok", saved: "created" });
+    expect(result.structuredContent).toMatchObject({ status: "ok" });
     expect(linkFileOf(result.structuredContent)?.written).toBe(false);
     expect(linkFileOf(result.structuredContent)?.reason).toContain("mt_teammate");
     const link = await readMethodLink(path.join(root, "theirs"));
@@ -1035,7 +1078,293 @@ describe("the save writes a link only where one belongs", () => {
 
     expect(errorsOf(result.structuredContent)[0]).toMatchObject({
       class: "input_domain",
-      location: "python",
+      location: "python[0].path",
     });
+  });
+});
+
+// ── round 2: the write set is validated, not merely contained ────────
+
+describe("the pull writes method sources and nothing else", () => {
+  const readingClient = (stored: MethodData): CatalogWriteClient => ({
+    ...clientNotCalled,
+    async getMethod() {
+      return stored;
+    },
+  });
+
+  const storedNamed = (files: { name: string; content: string }[]): MethodData =>
+    storedMethod({ mthds: JSON.stringify(files) });
+
+  const pull = async (stored: MethodData, output_dir = "pulled") =>
+    getMthdsMethod(
+      { method_id: "mt_one", output_dir },
+      contextFor(readingClient(stored), validationAnswering(validReport)),
+    );
+
+  it("refuses a stored name that is not a .mthds or .py file, creating nothing", async () => {
+    // A method's file names come from whoever saved it, and `nameFiles` takes an
+    // inline item's name straight from a caller-supplied `uri` — so the catalog
+    // is an untrusted source of paths. Containment alone let one plant a CI
+    // workflow in a workspace pulled into with `output_dir: "."`.
+    const result = await pull(
+      storedNamed([
+        { name: "bundle.mthds", content: 'domain = "demo"' },
+        { name: "workflows/pwn.yml", content: "on: push" },
+      ]),
+      ".",
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error.message).toContain("workflows/pwn.yml");
+    expect(error.message).toContain("neither a `.mthds` nor a `.py` file");
+    expect(await fs.readdir(root)).toEqual([]);
+  });
+
+  it("refuses a stored name with a dotted path component", async () => {
+    // Where a workspace keeps what configures its tools, not its code.
+    const result = await pull(
+      storedNamed([
+        { name: "bundle.mthds", content: 'domain = "demo"' },
+        { name: ".github/workflows/pwn.mthds", content: "on: push" },
+      ]),
+      ".",
+    );
+
+    expect(errorsOf(result.structuredContent)[0].message).toContain("beginning with a dot");
+    expect(await fs.readdir(root)).toEqual([]);
+  });
+
+  it("refuses a stored file named like the link file", async () => {
+    // The link is written LAST, so this landed, was overwritten by the link,
+    // was reported as written anyway, and left the directory refusing every
+    // later pull for a change nobody had made.
+    const result = await pull(
+      storedNamed([
+        { name: "bundle.mthds", content: 'domain = "demo"' },
+        { name: LINK_FILE_NAME, content: "{}" },
+      ]),
+    );
+
+    expect(errorsOf(result.structuredContent)[0].message).toContain(LINK_FILE_NAME);
+    await expect(fs.readdir(path.join(root, "pulled"))).resolves.toEqual([]);
+  });
+
+  it("refuses two stored names that land on one file, case included", async () => {
+    // `nameFiles` keeps both as distinct names, so this tool's own save
+    // produces the pair; on a case-insensitive filesystem one silently
+    // replaced the other and both were reported written.
+    const result = await pull(
+      storedNamed([
+        { name: "Bundle.mthds", content: "first" },
+        { name: "bundle.mthds", content: "second" },
+      ]),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error.message).toContain("lands on the same file");
+    await expect(fs.readdir(path.join(root, "pulled"))).resolves.toEqual([]);
+  });
+
+  it("refuses an unlinked directory holding a bundle of its own under other names", async () => {
+    // The occupancy test asks about the write set; this asks the ownership
+    // question. Landing beside a stranger's bundle and then claiming the whole
+    // directory with a link file is what the link file exists to stop.
+    await writeBundle("mixed", { "their_bundle.mthds": "theirs" });
+
+    const result = await pull(
+      storedNamed([{ name: "bundle.mthds", content: 'domain = "demo"' }]),
+      "mixed",
+    );
+
+    expect(errorsOf(result.structuredContent)[0].message).toContain("their_bundle.mthds");
+    expect(await fs.readdir(path.join(root, "mixed"))).toEqual(["their_bundle.mthds"]);
+  });
+});
+
+describe("the pull resumes and refreshes without destroying work", () => {
+  const readingClient = (stored: MethodData): CatalogWriteClient => ({
+    ...clientNotCalled,
+    async getMethod() {
+      return stored;
+    },
+  });
+
+  const stored = storedMethod({
+    updated_at: "2026-09-20T12:00:00Z",
+    mthds: JSON.stringify([
+      { name: "bundle.mthds", content: "first v1" },
+      { name: "second.mthds", content: "second v1" },
+    ]),
+  });
+
+  const linkWith = async (dir: string, extra: Record<string, unknown> = {}) =>
+    fs.writeFile(
+      path.join(root, dir, LINK_FILE_NAME),
+      JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "2026-09-20T12:00:00Z",
+        ...extra,
+      }),
+      "utf8",
+    );
+
+  const pull = async (dir: string, overwrite?: boolean) =>
+    getMthdsMethod(
+      { method_id: "mt_one", output_dir: dir, ...(overwrite === undefined ? {} : { overwrite }) },
+      contextFor(readingClient(stored), validationAnswering(validReport)),
+    );
+
+  it("refuses to resume over a file edited since the interrupted pull", async () => {
+    // The marker says a pull was interrupted and NOTHING more. Read as blanket
+    // overwrite authority it destroyed an edit made between the failure and the
+    // retry — silently, with no flag and no mention in the result. It rides in
+    // a file the user is told to commit, so it can be stale or planted too.
+    await writeBundle("resumed", {
+      "bundle.mthds": "first v1",
+      "second.mthds": "MY PRECIOUS LOCAL EDIT",
+    });
+    await linkWith("resumed", { partial_pull: true });
+
+    const result = await pull("resumed");
+
+    expect(errorsOf(result.structuredContent)[0].message).toContain("second.mthds");
+    expect(await fs.readFile(path.join(root, "resumed/second.mthds"), "utf8")).toBe(
+      "MY PRECIOUS LOCAL EDIT",
+    );
+  });
+
+  it("still resumes an interrupted pull whose files are absent or identical", async () => {
+    // The failure told the caller to call again, and this is that call.
+    await writeBundle("resumable", { "bundle.mthds": "first v1" });
+    await linkWith("resumable", { partial_pull: true });
+
+    const result = await pull("resumable");
+
+    expect(result.structuredContent).toMatchObject({ status: "ok" });
+    expect(await fs.readFile(path.join(root, "resumable/second.mthds"), "utf8")).toBe("second v1");
+    const link = await readMethodLink(path.join(root, "resumable"));
+    expect(link.kind === "link" && link.link.partial_pull).toBeUndefined();
+  });
+
+  it("writes nothing when every destination already matches, refreshing the link alone", async () => {
+    // Rewriting identical bytes woke watchers and — with one read-only source —
+    // turned a pure link refresh into a mid-write failure that marked the
+    // directory as an interrupted pull having written nothing at all.
+    await writeBundle("identical", { "bundle.mthds": "first v1", "second.mthds": "second v1" });
+    await linkWith("identical", { synced_updated_at: "2026-09-01T00:00:00Z" });
+    const before = (await fs.stat(path.join(root, "identical/bundle.mthds"))).mtimeMs;
+    await fs.chmod(path.join(root, "identical/bundle.mthds"), 0o444);
+
+    const result = await pull("identical");
+
+    expect(result.structuredContent).toMatchObject({ status: "ok" });
+    expect((await fs.stat(path.join(root, "identical/bundle.mthds"))).mtimeMs).toBe(before);
+    const link = await readMethodLink(path.join(root, "identical"));
+    expect(link.kind === "link" && link.link.synced_updated_at).toBe("2026-09-20T12:00:00Z");
+    await fs.chmod(path.join(root, "identical/bundle.mthds"), 0o644);
+  });
+
+  it("writes a destination the user deleted instead of calling it an unsaved change", async () => {
+    // A file that is not there holds no work. Counting it as a difference named
+    // the file the user had deleted, called it a change they never made, and
+    // refused every pull that would have restored it — `overwrite` included.
+    await writeBundle("gappy", { "bundle.mthds": "first v1" });
+    await linkWith("gappy");
+
+    const result = await pull("gappy");
+
+    expect(result.structuredContent).toMatchObject({ status: "ok" });
+    expect(await fs.readFile(path.join(root, "gappy/second.mthds"), "utf8")).toBe("second v1");
+  });
+
+  it("says the directory IS linked when only the link refresh failed", async () => {
+    // "NOT linked" was the worst of the three readings: it told the caller to
+    // pass a method_id they did not need, about a directory that would have
+    // updated the right method on its own.
+    await writeBundle("readonly-link", { "bundle.mthds": "first v1" });
+    await linkWith("readonly-link", { synced_updated_at: "2026-09-01T00:00:00Z" });
+    await fs.chmod(path.join(root, "readonly-link", LINK_FILE_NAME), 0o444);
+
+    const result = await pull("readonly-link");
+
+    expect(result.structuredContent).toMatchObject({ status: "ok" });
+    expect(linkFileOf(result.structuredContent)?.written).toBe(false);
+    expect(result.summary).toContain("IS linked");
+    expect(result.summary).not.toContain("NOT linked");
+    await fs.chmod(path.join(root, "readonly-link", LINK_FILE_NAME), 0o644);
+  });
+});
+
+describe("the save reads only what belongs to the bundle", () => {
+  const creating = (name = "Demo"): CatalogWriteClient => ({
+    ...clientNotCalled,
+    async createMethod() {
+      return storedMethod({ name });
+    },
+  });
+
+  it("never opens a .py file outside the bundle directory an inline uri declared", async () => {
+    // The `.py` arm reads a file and UPLOADS it to the organization's catalog,
+    // and the bundle directory comes from the first file's label — which an
+    // inline item supplies freely. So this named the secrets' own directory and
+    // had them published. The refusal must beat the read, not follow it.
+    await writeBundle("app/config", {});
+    await fs.writeFile(path.join(root, "app/config/settings.py"), 'AWS_SECRET = "hunter2"', "utf8");
+
+    const result = await saveMthdsMethod(
+      {
+        files: [{ content: 'domain = "demo"', uri: "app/config/x.mthds" }],
+        python: [{ path: "app/config/settings.py" }],
+        name: "Demo",
+      },
+      contextFor(clientNotCalled, validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "python[0].path" });
+    expect(error.message).toContain("no bundle directory");
+  });
+
+  it("refuses a blank .py rather than letting it erase the stored Python", async () => {
+    // An all-blank set serializes to "", which is the platform's CLEAR
+    // sentinel: the save reported "updated" and wiped the stored Python.
+    await writeBundle("bundle", { "main.mthds": 'domain = "demo"' });
+    await fs.writeFile(path.join(root, "bundle/empty.py"), "   \n", "utf8");
+
+    const result = await saveMthdsMethod(
+      {
+        files: [{ path: "bundle/main.mthds" }],
+        python: [{ path: "bundle/empty.py" }],
+        name: "Demo",
+      },
+      contextFor(clientNotCalled, validationAnswering(validReport)),
+    );
+
+    expect(errorsOf(result.structuredContent)[0]).toMatchObject({
+      class: "input_domain",
+      location: "python[0].content",
+    });
+  });
+
+  it("refuses to write over a link file nobody can parse", async () => {
+    // The pull path refuses this exact state; the save path truncated it after
+    // the catalog write, destroying whatever it held.
+    await writeBundle("garbled", { "bundle.mthds": 'domain = "demo"' });
+    await fs.writeFile(path.join(root, "garbled", LINK_FILE_NAME), "not json at all", "utf8");
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "garbled/bundle.mthds" }], name: "Demo" },
+      contextFor(creating(), validationAnswering(validReport)),
+    );
+
+    expect(result.structuredContent).toMatchObject({ status: "ok", saved: "created" });
+    expect(linkFileOf(result.structuredContent)?.written).toBe(false);
+    expect(linkFileOf(result.structuredContent)?.reason).toContain("cannot be read");
+    expect(await fs.readFile(path.join(root, "garbled", LINK_FILE_NAME), "utf8")).toBe(
+      "not json at all",
+    );
   });
 });
