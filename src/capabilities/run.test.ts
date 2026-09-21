@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import { ApiResponseError, ApiUnreachableError, MissingMainStuffError } from "@pipelex/sdk";
 import type {
+  InputForm,
   MethodProvenance,
+  OutputForm,
+  PipeIOContracts,
   RunRead,
   RunResults,
   RunResultStart,
@@ -45,6 +48,32 @@ function runRead(overrides: Partial<RunRead> = {}): RunRead {
     ...overrides,
   };
 }
+
+/**
+ * A minimal but REAL trio of I/O artifacts for one pipe. The protocol types are
+ * closed shapes, so these are typed rather than cast: a literal that drifts
+ * from the standard fails the build here instead of passing a test the wire
+ * would reject.
+ */
+const FIXTURE_PIPE_REF = "demo.main";
+const CONTRACTS: PipeIOContracts = {
+  [FIXTURE_PIPE_REF]: {
+    inputs: {},
+    output: {
+      concept_ref: "native.Text",
+      json_schema: { type: "object", properties: { text: { type: "string" } } },
+      multiplicity: "single",
+      item_count: null,
+      optional: false,
+    },
+  },
+};
+const OUTPUT_FORM: OutputForm = {
+  [FIXTURE_PIPE_REF]: {
+    field: { name: "result", kind: "text", required: true, concept_ref: "native.Text" },
+  },
+};
+const INPUT_FORM: InputForm = { [FIXTURE_PIPE_REF]: { fields: [] } };
 
 describe("validateRunRequest", () => {
   it("rejects an empty file list", () => {
@@ -554,6 +583,116 @@ describe("resultsResult", () => {
     });
     expect(result.tokensUsages).toBeUndefined();
     expect(result.summary).not.toContain("## Usage");
+  });
+
+  it("carries the graph's data artifacts off structuredContent when both halves have entries", () => {
+    const contracts = CONTRACTS;
+    const outputForm = OUTPUT_FORM;
+    const inputForm = INPUT_FORM;
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: "done",
+        graph_spec: { nodes: [{ id: "demo.main" }] },
+        pipe_io_contracts: contracts,
+        output_form: outputForm,
+        input_form: inputForm,
+      },
+    });
+
+    expect(result.pipeIoContracts).toEqual(contracts);
+    expect(result.outputForm).toEqual(outputForm);
+    expect(result.inputForm).toEqual(inputForm);
+    // Never the model-facing channel — these are view-only, like the graph.
+    expect(result.structuredContent).not.toHaveProperty("pipe_io_contracts");
+    expect(result.structuredContent).not.toHaveProperty("output_form");
+    expect(result.structuredContent).not.toHaveProperty("input_form");
+  });
+
+  it("withholds both halves of the pair when only one arrived", () => {
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: "done",
+        graph_spec: { nodes: [{ id: "demo.main" }] },
+        pipe_io_contracts: CONTRACTS,
+        output_form: null,
+      },
+    });
+
+    // The renderer reads them together or not at all, so half the pair renders
+    // exactly like neither — shipping the contracts alone would only cost wire.
+    expect(result.pipeIoContracts).toBeUndefined();
+    expect(result.outputForm).toBeUndefined();
+    // The graph itself is unaffected: it still rides and is still advertised.
+    expect(result.graphSpec).toEqual({ nodes: [{ id: "demo.main" }] });
+    expect(result.structuredContent.available_view_specs).toEqual(["run_graph"]);
+  });
+
+  it("treats an empty artifact map as no artifact", () => {
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: "done",
+        graph_spec: { nodes: [{ id: "demo.main" }] },
+        pipe_io_contracts: {},
+        output_form: {},
+      },
+    });
+
+    // A map the view can look nothing up in drives nothing.
+    expect(result.pipeIoContracts).toBeUndefined();
+    expect(result.outputForm).toBeUndefined();
+  });
+
+  it("rides the pair without an input form, which is independently optional", () => {
+    const contracts = CONTRACTS;
+    const outputForm = OUTPUT_FORM;
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: "done",
+        graph_spec: { nodes: [{ id: "demo.main" }] },
+        pipe_io_contracts: contracts,
+        output_form: outputForm,
+      },
+    });
+
+    expect(result.pipeIoContracts).toEqual(contracts);
+    expect(result.outputForm).toEqual(outputForm);
+    // Only the method's own input nodes lose their value; the rest still render.
+    expect(result.inputForm).toBeUndefined();
+  });
+
+  it("withholds the data artifacts from a shell with no views", () => {
+    const result = resultsResult(
+      {
+        state: "completed",
+        pipeline_run_id: RUN_ID,
+        result: {
+          pipeline_run_id: RUN_ID,
+          main_stuff: "done",
+          graph_spec: { nodes: [{ id: "demo.main" }] },
+          pipe_io_contracts: CONTRACTS,
+          output_form: OUTPUT_FORM,
+          input_form: INPUT_FORM,
+        },
+      },
+      false,
+    );
+
+    // They exist to feed a renderer this shell does not have.
+    expect(result.pipeIoContracts).toBeUndefined();
+    expect(result.outputForm).toBeUndefined();
+    expect(result.inputForm).toBeUndefined();
   });
 
   it("does not advertise a view but preserves full result metadata when the shell has no views", () => {
@@ -1553,6 +1692,31 @@ describe("runResultsToolResult", () => {
     );
   });
 
+  it("delivers the graph's data artifacts on _meta under the API's own key names", async () => {
+    const contracts = CONTRACTS;
+    const outputForm = OUTPUT_FORM;
+    const inputForm = INPUT_FORM;
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: "done",
+        graph_spec: { nodes: [] },
+        pipe_io_contracts: contracts,
+        output_form: outputForm,
+        input_form: inputForm,
+      },
+    };
+    const context = contextWith({ getRunResult: () => Promise.resolve(state) });
+
+    const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
+
+    expect(toolResult._meta.pipe_io_contracts).toEqual(contracts);
+    expect(toolResult._meta.output_form).toEqual(outputForm);
+    expect(toolResult._meta.input_form).toEqual(inputForm);
+  });
+
   it("flags error results as isError with empty _meta", async () => {
     const toolResult = runResultsToolResult(
       await getMthdsRunResults({ run_id: "" }, contextWith({})),
@@ -1560,6 +1724,9 @@ describe("runResultsToolResult", () => {
 
     expect(toolResult.isError).toBe(true);
     expect(toolResult._meta.graph_spec).toBeUndefined();
+    expect(toolResult._meta.pipe_io_contracts).toBeUndefined();
+    expect(toolResult._meta.output_form).toBeUndefined();
+    expect(toolResult._meta.input_form).toBeUndefined();
     expect(toolResult._meta.main_stuff).toBeUndefined();
     expect(toolResult._meta.tokens_usages).toBeUndefined();
     expect(toolResult._meta.usage_by_pipe).toBeUndefined();

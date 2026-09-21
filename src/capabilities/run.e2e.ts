@@ -259,6 +259,28 @@ describe.runIf(RUN_ENABLED)("mthds_run (live, SPENDS INFERENCE CREDIT)", () => {
       expect(typeof mainStuff?.text).toBe("string");
       expect(mainStuff?.text).toContain(`| Words | ${PUBLISHED_METHOD_EXPECTED_WORDS} |`);
       expect(mainStuff?.text).toContain(`| Sentences | ${PUBLISHED_METHOD_EXPECTED_SENTENCES} |`);
+
+      // The graph's data artifacts, which no mocked test can see: they are
+      // built by the Temporal worker, relayed by the platform and typed by the
+      // SDK, so every one of those three has to be deployed for them to arrive.
+      // Asserted rather than gated — the assertion IS the probe, the same
+      // stance `validate.e2e.ts` takes on `default_pipe_ref`, so a deployment
+      // that stops relaying them fails this suite instead of skipping past it.
+      //
+      // The pair together, because that is what the renderer reads; keyed by
+      // namespaced `pipe_ref`, so the graph's own pipe must key both or the
+      // view looks up nothing.
+      expect(results.pipeIoContracts).toBeDefined();
+      expect(results.outputForm).toBeDefined();
+      const contracts = results.pipeIoContracts as Record<string, unknown>;
+      const outputForm = results.outputForm as Record<string, unknown>;
+      expect(Object.keys(contracts).length).toBeGreaterThan(0);
+      expect(Object.keys(outputForm)).toEqual(expect.arrayContaining(Object.keys(contracts)));
+      // None of the three may reach the model — they are view-only, like the graph.
+      const modelFacing = JSON.stringify(results.structuredContent);
+      expect(modelFacing).not.toContain("pipe_io_contracts");
+      expect(modelFacing).not.toContain("output_form");
+      expect(modelFacing).not.toContain("input_form");
     },
   );
 });

@@ -683,7 +683,14 @@ total USD cost (null-aware), tokens, inference-call count and any usage-assembly
 error — projected from the SDK's `summarizeUsage`. The per-pipe rollup and the
 full per-call record list ride the view-only `_meta`
 (`_meta.usage_by_pipe` / `_meta.tokens_usages`) for a future detailed-cost
-surface, and usage never appears in the prose. A by-id run executes the method's
+surface, and usage never appears in the prose. A completed result also carries
+the executed graph and the three artifacts that describe its data on the same
+channel (`_meta.graph_spec`, plus `_meta.pipe_io_contracts` and
+`_meta.output_form` as a pair with `_meta.input_form` beside them), which is
+what lets the hosted console's run card show each node's actual value rather
+than its concept's structure table. The contracts and the output form are read
+together or not at all, so they ride together or not at all; none of the four
+reaches the model. A by-id run executes the method's
 **current** stored content (methods are not versioned) and requires an API key;
 when both `files` and `method_id` are supplied, the files run and the id is
 recorded as run-history linkage on the platform. `method_ref` is a complete run
