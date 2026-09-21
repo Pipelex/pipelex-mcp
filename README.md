@@ -722,11 +722,11 @@ content blocks**. Registered on **both** deployments.
     mime_type?: string;   // the object store's own content type
     bytes?: number;
     inlined: boolean;     // true ⟺ this picture is one of the image blocks in content
-    withheld?: "size" | "budget" | "count" | "type" | "deadline";
+    withheld?: "size" | "budget" | "count" | "type" | "deadline" | "empty";
     error?: ToolError;
   }>;
-  omitted?: number;       // candidates past the 32 listed, when there were any
-  all_inlined: boolean;
+  omitted?: number;       // of the candidates THIS CALL considered, how many are past the 32 listed
+  all_inlined: boolean;   // about the RUN: false when a narrowed call left one of its pictures unconsidered
 }
 ```
 
@@ -751,9 +751,14 @@ the call, **6 attempts**, a **60-second deadline** over the whole walk, and at
 most **32 candidates** enumerated. The deadline exists because the per-image
 timeout is per image and the walk is sequential: without it, stalled objects
 accumulated into a call of three minutes and more, and a host with a shorter
-deadline lost the whole thing — pictures already fetched included. A picture
+deadline lost the whole thing — pictures already fetched included. It is
+carried both as a per-fetch timeout and as an abort signal, because the SDK
+resolves a reference before arming its timeout and only the signal reaches that
+half; with the timeout alone a call could still reach 90 seconds. A picture
 that does not fit is reported as `withheld` with its reason rather than resized
-or dropped silently; a per-reference failure rides its entry as an `error`;
+or dropped silently — as is a stored object that declares an image type and
+holds no bytes, which would otherwise become an empty, unrenderable block that
+never leaves the conversation; a per-reference failure rides its entry as an `error`;
 pictures that arrived are never discarded because a sibling failed. A
 whole-request refusal — a plan limit, a rejected credential, an unreachable host
 — that stopped the walk before any picture arrived is a `status: "error"`
