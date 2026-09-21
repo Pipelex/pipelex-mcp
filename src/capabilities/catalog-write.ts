@@ -194,6 +194,7 @@ export const mthdsGetMethodOutputSchema = z.object({
   python: z.array(sourceFileSchema).optional(),
   output_dir: z.string().optional(),
   link_file: linkFileSchema.optional(),
+  unmanaged: z.array(z.string()).optional(),
   truncated: z.boolean().optional(),
   errors: z.array(toolErrorSchema).optional(),
 });
@@ -258,6 +259,11 @@ export interface GetMethodSuccess {
   python: SourceFile[];
   output_dir?: string;
   link_file?: LinkFileReport;
+  /**
+   * Source files in the directory that this method does not have — present
+   * only on the written arm, and only when there are any.
+   */
+  unmanaged?: string[];
   truncated?: boolean;
 }
 
@@ -1009,6 +1015,19 @@ async function writtenResult(
     }),
   );
 
+  // What is here that this method does not have. The pull writes the files the
+  // catalog holds NOW, so a file a teammate removed from the stored method is
+  // neither written nor noticed — and the link was refreshed to the new
+  // updated_at anyway, leaving the directory certifying a sync it does not
+  // have, with a bundle that validates and runs differently from the catalog's.
+  //
+  // This tool records no per-file state, so it cannot tell a file the catalog
+  // dropped from one the user simply keeps here, and deleting on a guess is the
+  // one thing it must not do. So it names them and says which two things they
+  // might be. Telling them apart needs the link to record what it manages,
+  // which is a change to the link's format and is filed rather than guessed at.
+  const unmanaged = await unmanagedSources(dir, destinations);
+
   const relativeDir = path.relative(root, dir) === "" ? "." : path.relative(root, dir);
   const project = (file: MethodFile): SourceFile => ({
     name: file.name,
@@ -1026,6 +1045,7 @@ async function writtenResult(
     python: python.map(project),
     output_dir: relativeDir,
     link_file: linkFile,
+    ...(unmanaged.length === 0 ? {} : { unmanaged }),
     truncated: false,
   };
 
@@ -1053,7 +1073,72 @@ async function writtenResult(
         : `The directory is NOT linked (${linkFile.reason}), so a save from it would create a SECOND method unless it passes method_id \`${stored.method_id}\`.`,
   );
 
+  if (unmanaged.length > 0) {
+    lines.push(
+      `The directory also holds ${unmanaged.map((name) => `\`${name}\``).join(", ")}, which this method does not. Either somebody removed ${unmanaged.length === 1 ? "it" : "them"} from the stored method, or ${unmanaged.length === 1 ? "it is" : "they are"} yours — this tool cannot tell, and deletes nothing. Check before saving from here, which would add ${unmanaged.length === 1 ? "it" : "them"} back to the catalog.`,
+    );
+  }
+
   return { structuredContent, summary: lines.join("\n") };
+}
+
+/** How far the unmanaged-source walk goes before it stops looking. */
+const UNMANAGED_WALK_ENTRIES = 512;
+const UNMANAGED_WALK_DEPTH = 8;
+
+/**
+ * The directory's `.mthds` and `.py` files that are not this method's.
+ *
+ * Bounded rather than exhaustive, and it reports nothing when it hits a bound:
+ * a partial list read as a complete one would be worse than none, since the
+ * point of the line it feeds is "here is everything here that the catalog does
+ * not have". Symlinked directories are not followed, for the reason every walk
+ * in this repo does not follow them.
+ */
+async function unmanagedSources(
+  dir: string,
+  destinations: readonly { absolute: string }[],
+): Promise<string[]> {
+  const managed = new Set(destinations.map((destination) => destination.absolute.toLowerCase()));
+  const found: string[] = [];
+  let budget = UNMANAGED_WALK_ENTRIES;
+
+  const walk = async (current: string, depth: number): Promise<boolean> => {
+    if (depth > UNMANAGED_WALK_DEPTH) {
+      return false;
+    }
+    let entries;
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true });
+    } catch {
+      return true;
+    }
+    for (const entry of entries) {
+      if (budget-- <= 0) {
+        return false;
+      }
+      const absolute = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        if (!(await walk(absolute, depth + 1))) {
+          return false;
+        }
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      const extension = path.extname(entry.name).toLowerCase();
+      if (extension !== ".mthds" && extension !== ".py") {
+        continue;
+      }
+      if (!managed.has(absolute.toLowerCase())) {
+        found.push(path.relative(dir, absolute));
+      }
+    }
+    return true;
+  };
+
+  return (await walk(dir, 0)) ? found.sort() : [];
 }
 
 /**

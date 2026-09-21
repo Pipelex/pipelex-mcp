@@ -293,10 +293,13 @@ The public MCP input shape is:
   python?: Array<{ name: string; bytes: number; content?: string; written_to?: string }>;
   output_dir?: string;                          // present on the written arm — the arm discriminator
   link_file?: { path: string; written: boolean; reason?: string };
+  unmanaged?: string[];                         // written arm — source files here that this method does not have
   truncated?: boolean;                          // inline arm only; always false on the written arm
   errors?: ToolError[];
 }
 ```
+
+**A pull writes what the catalog holds now, which is not the same as making the directory match it.** A file somebody removed from the stored method is neither written nor deleted, and the link is refreshed regardless — so without saying anything the directory would certify a sync it does not have, holding a bundle that validates and runs differently from the catalog's, and a later save from it would put the removed file back. The tool records no per-file state, so it cannot tell a file the catalog dropped from one the user simply keeps beside the method, and deleting on that guess is the one thing it must not do. So it names them in `unmanaged` and says in prose which two things they might be. Telling them apart needs the link file to record what it manages, which is a change to the link's format and is filed rather than guessed at. The walk is bounded, and reports nothing at all rather than a partial list, since the line's whole claim is that it names everything.
 
 A method whose stored source parses to nothing is a produced failure, not an empty success: it is `status: "error"`, `input_domain` at `method_id`, with the SDK's own `EmptyMethodSourceError` as its cause — the row exists but has no runnable source yet, which is a different answer from "no such method" (404, also `input_domain` at `method_id`, since an id from another organization is indistinguishable from an unknown one).
 

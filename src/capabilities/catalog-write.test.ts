@@ -1368,3 +1368,61 @@ describe("the save reads only what belongs to the bundle", () => {
     );
   });
 });
+
+describe("the pull says what the directory holds that the method does not", () => {
+  const readingClient = (stored: MethodData): CatalogWriteClient => ({
+    ...clientNotCalled,
+    async getMethod() {
+      return stored;
+    },
+  });
+
+  it("names a source the stored method no longer has, and deletes nothing", async () => {
+    // The pull writes what the catalog holds NOW, so a file a teammate removed
+    // was neither written nor noticed — and the link was refreshed anyway,
+    // leaving the directory certifying a sync it does not have.
+    const stored = storedMethod({
+      updated_at: "2026-09-21T09:00:00Z",
+      mthds: JSON.stringify([{ name: "bundle.mthds", content: "first v2" }]),
+    });
+    await writeBundle("drifted", { "bundle.mthds": "first v1", "extra.mthds": "dropped" });
+    await fs.writeFile(path.join(root, "drifted/helpers.py"), "x = 1", "utf8");
+    await fs.writeFile(
+      path.join(root, "drifted", LINK_FILE_NAME),
+      JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "2026-09-20T12:00:00Z",
+      }),
+      "utf8",
+    );
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "drifted", overwrite: true },
+      contextFor(readingClient(stored), validationAnswering(validReport)),
+    );
+
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      unmanaged: ["extra.mthds", "helpers.py"],
+    });
+    expect(result.summary).toContain("which this method does not");
+    // It cannot tell a dropped file from the user's own, so it removes neither.
+    expect(await fs.readFile(path.join(root, "drifted/extra.mthds"), "utf8")).toBe("dropped");
+  });
+
+  it("says nothing when the directory holds only this method's files", async () => {
+    const stored = storedMethod({
+      mthds: JSON.stringify([{ name: "bundle.mthds", content: 'domain = "demo"' }]),
+    });
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "tidy" },
+      contextFor(readingClient(stored), validationAnswering(validReport)),
+    );
+
+    expect((result.structuredContent as { unmanaged?: string[] }).unmanaged).toBeUndefined();
+    expect(result.summary).not.toContain("which this method does not");
+  });
+});
