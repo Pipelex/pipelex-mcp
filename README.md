@@ -690,10 +690,12 @@ the value across the two calls is expected.
 
 A completed `mthds_run_results` also reports, for free, what the run **stored**:
 `image_candidates` lists the `pipelex-storage://` references whose key looks
-like an image (`{ uri, key }` each), and the prose says how many stored files
-there are and what can be done with them. Nothing is fetched to produce it — the
-walk is in memory over the full output, so a reference pruned out of the bounded
-`main_stuff` still appears. **The results tool never returns an image itself,
+like an image, and the prose says how many stored files there are and what can
+be done with them. Nothing is fetched to produce it — the walk is in memory over
+the full output, so a reference pruned out of the bounded `main_stuff` still
+appears. The list is capped at 32 entries, with any remainder counted in
+`image_candidates_omitted`; the cap is a prefix, so an index into it still means
+the same thing to `mthds_show_images`, which walks the whole set. **The results tool never returns an image itself,
 and takes no flag that would make it**; showing a picture is `mthds_show_images`
 below.
 
@@ -720,12 +722,18 @@ content blocks**. Registered on **both** deployments.
     mime_type?: string;   // the object store's own content type
     bytes?: number;
     inlined: boolean;     // true ⟺ this picture is one of the image blocks in content
-    withheld?: "size" | "budget" | "count" | "type";
+    withheld?: "size" | "budget" | "count" | "type" | "deadline";
     error?: ToolError;
   }>;
+  omitted?: number;       // candidates past the 32 listed, when there were any
   all_inlined: boolean;
 }
 ```
+
+Entries come back **in the order considered**: the order you named them when
+`images` or `indices` was given, and discovery order only when neither was. A
+repeated reference is deduplicated rather than refused — a shown picture is
+permanent, so buying the same one twice is never what was meant.
 
 **Why it is a tool and not an option on `mthds_run_results`.** An image block is
 cheap to send and permanent to keep: it costs the model's own native vision
@@ -738,11 +746,18 @@ Each inlined picture is fetched through `@pipelex/sdk`'s bounded `fetchArtifact`
 (fresh presigned link, redirects refused, no credentials forwarded, the byte cap
 checked before and during the read), gated on the object store's own
 `content-type` — `image/png`, `image/jpeg`, `image/gif`, `image/webp`, and
-nothing else. Three caps bound a call: **4 MiB** per picture, **6 MiB** across
-the call, and **6 attempts**. A picture that does not fit is reported as
-`withheld` with its reason rather than resized or dropped silently; a
-per-reference failure rides its entry as an `error`; pictures that arrived are
-never discarded because a sibling failed. The same
+nothing else. Five bounds hold a call: **4 MiB** per picture, **6 MiB** across
+the call, **6 attempts**, a **60-second deadline** over the whole walk, and at
+most **32 candidates** enumerated. The deadline exists because the per-image
+timeout is per image and the walk is sequential: without it, stalled objects
+accumulated into a call of three minutes and more, and a host with a shorter
+deadline lost the whole thing — pictures already fetched included. A picture
+that does not fit is reported as `withheld` with its reason rather than resized
+or dropped silently; a per-reference failure rides its entry as an `error`;
+pictures that arrived are never discarded because a sibling failed. A
+whole-request refusal — a plan limit, a rejected credential, an unreachable host
+— that stopped the walk before any picture arrived is a `status: "error"`
+no-verdict naming the cause, rather than a success with nothing in it. The same
 `PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP` rule as the download tool applies. A
 `running` or `failed` run, and a run whose output holds no image candidate, are
 produced verdicts that fetch nothing. See `SPEC.md` → "Image Display Scope".
@@ -753,7 +768,7 @@ produced verdicts that fetch nothing. See `SPEC.md` → "Image Display Scope".
 | Host | Model sees the picture | Person sees the picture | Notes |
 |---|---|---|---|
 | Claude Code | Yes | **No** — the terminal renders nothing | Priced at the model's native vision cost; the base64 size is free. Ask for a description if you want one in the transcript. |
-| Codex (ChatGPT desktop) | Yes | Not measured | **Refuses a block carrying `annotations`** with `Unexpected response type` — which is why ours carries none. |
+| Codex (ChatGPT desktop) | Yes | Not measured | **Refuses a block carrying `annotations`** with `Unexpected response type` — which is why ours carries none. Accepts the block-level `_meta` ours does carry; that was measured too, not assumed. |
 | Cursor | Not measured | Not measured | Tracked as its own follow-up. |
 
 ### Saving run artifacts (local workshop only)
