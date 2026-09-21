@@ -2,7 +2,6 @@ import path from "node:path";
 
 import { ArtifactAuthenticationError, PipelexApiClient, collectArtifacts } from "@pipelex/sdk";
 import type {
-  ArtifactItemError,
   ArtifactScope,
   DownloadArtifactsRequest,
   DownloadArtifactsResult,
@@ -14,20 +13,17 @@ import { z } from "zod";
 
 import { RUN_RESULTS_ERROR_OPTIONS, runStatusSchema } from "./run.js";
 import {
-  buildApiConfig,
+  BULK_RESOLVE_ERROR_OPTIONS,
+  allowsPlainHttp,
+  buildArtifactFetchConfig,
   classifyError,
+  itemToolError,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateRunIdRequest,
 } from "./shared.js";
-import type {
-  AuthErrorTexture,
-  ClassifyErrorOptions,
-  ErrorClass,
-  ErrorSummaries,
-  ToolError,
-} from "./shared.js";
+import type { AuthErrorTexture, ErrorSummaries, ToolError } from "./shared.js";
 import { resolveSaveDir } from "./workspace-boundary.js";
 
 /**
@@ -54,15 +50,6 @@ import { resolveSaveDir } from "./workspace-boundary.js";
  * default, so the empty-walk check and the download agree on what was walked.
  */
 export const DOWNLOAD_SCOPE: ArtifactScope = "main_stuff";
-
-/**
- * The explicit override of the plain-http rule. Unset, a plain `http:`
- * download link is accepted exactly when `PIPELEX_BASE_URL` is itself `http:`
- * (the local compose stack, whose object store mints plain-http links);
- * `true` / `1` accepts one from any deployment, `false` / `0` refuses one from
- * every deployment. Any other value refuses, so a typo fails closed.
- */
-export const ALLOW_HTTP_ENV = "PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP";
 
 export const mthdsDownloadArtifactsInputSchema = {
   run_id: z
@@ -189,75 +176,18 @@ export interface ArtifactsContext {
    */
   saveRoot?: string;
   /**
-   * The explicit plain-http override, read from {@link ALLOW_HTTP_ENV}. Absent,
-   * {@link allowsPlainHttp} derives the answer from `baseUrl`'s scheme.
+   * The explicit plain-http override, read from `ALLOW_HTTP_ENV` in
+   * `shared.ts`. Absent, `allowsPlainHttp` derives the answer from `baseUrl`'s
+   * scheme.
    */
   allowHttp?: boolean;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
 
-interface ArtifactsEnv {
-  PIPELEX_BASE_URL?: string;
-  PIPELEX_API_KEY?: string;
-  [ALLOW_HTTP_ENV]?: string;
+export function buildArtifactsContext(env = process.env): ArtifactsContext {
+  return buildArtifactFetchConfig(env);
 }
-
-export function buildArtifactsContext(env: ArtifactsEnv = process.env): ArtifactsContext {
-  const allowHttp = parseAllowHttpOverride(env[ALLOW_HTTP_ENV]);
-  return { ...buildApiConfig(env), ...(allowHttp === undefined ? {} : { allowHttp }) };
-}
-
-/**
- * Read {@link ALLOW_HTTP_ENV}: `undefined` when unset or blank (derive from
- * the base URL), otherwise the override. An unrecognized value refuses rather
- * than falling back to the derivation, so a misspelled override can only ever
- * make the tool stricter.
- */
-export function parseAllowHttpOverride(value: string | undefined): boolean | undefined {
-  const normalized = value?.trim().toLowerCase();
-  if (normalized === undefined || normalized === "") return undefined;
-  return normalized === "true" || normalized === "1";
-}
-
-/**
- * Whether a plain `http:` download link is fetched: the explicit override when
- * one is set, otherwise exactly when the configured API is itself plain http —
- * the local compose stack, whose object store mints plain-http presigned links.
- * A deployment reached over https gets https links, so a plain-http one there
- * is refused rather than followed silently. A malformed base URL refuses; the
- * client constructor then reports it as the config error it is.
- */
-export function allowsPlainHttp(context: Pick<ArtifactsContext, "baseUrl" | "allowHttp">): boolean {
-  if (context.allowHttp !== undefined) return context.allowHttp;
-  try {
-    return new URL(context.baseUrl).protocol === "http:";
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Classify options for the SDK's download leg, whose only request is the bulk
- * resolve route. Its whole-request refusals are about the caller or the
- * deployment, never about the caller's input: a 400 is a key acting for no
- * organization and a 422 a request this server built, a 404 a deployment
- * without the route (the default `config` arm names it), a 5xx the platform
- * failing to sign. A 401/403 never reaches these options — the SDK raises it
- * as `ArtifactAuthenticationError`, which `classifyError` maps to the auth arm.
- * Per-reference refusals are values on the verdict's items, classified by
- * {@link itemToolError}.
- */
-export const BULK_RESOLVE_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/resolve-storage-url/bulk",
-  badRequest: {
-    class: "config",
-    hint: "The API refused to resolve this run's stored files as a whole. If the message names an organization, the API key acts for none: use a key minted in the run's organization.",
-  },
-  serverError: {
-    hint: "The platform could not sign download links for this run's stored files; retrying this tool resolves them again.",
-  },
-};
 
 // Constructed inside the caught block (mirroring the sibling capabilities): the
 // SDK constructor throws PipelineRequestError on a malformed base URL, and that
@@ -447,133 +377,7 @@ function projectItem(item: DownloadedArtifact, index: number, root: string): Sav
   return {
     uri: item.uri,
     content_type: item.content_type,
-    error: itemToolError(item.error, index),
-  };
-}
-
-const RESOLVE_AGAIN_HINT =
-  "The download link is minted fresh on every call, so retrying this tool resolves a new one.";
-
-interface ItemErrorTexture {
-  class: ErrorClass;
-  hint: string;
-  retryable: boolean;
-  /** Replaces the SDK's `detail` where that sentence speaks to an SDK caller, not to the agent. */
-  message?: string;
-}
-
-/**
- * How each per-item code the SDK's verdict carries reads as a `ToolError`. The
- * codes are the SDK's closed vocabulary: the resolve route's per-reference
- * refusals, the fetch boundary's, and the download's own. A vanished or
- * oversized object is a permanent `input_domain` refusal; a store or network
- * fault is a retryable `runtime` one, since every call mints fresh links.
- */
-const ITEM_ERROR_TEXTURES: Record<string, ItemErrorTexture> = {
-  invalid_storage_uri: {
-    class: "input_domain",
-    hint: "The API rejected this storage reference as found in the run output.",
-    retryable: false,
-  },
-  forbidden: {
-    class: "input_domain",
-    hint: "The reference belongs to another organization than the API key's. Use a key minted in the run's organization.",
-    retryable: false,
-  },
-  unsupported_url: {
-    class: "runtime",
-    hint: "The configured deployment's storage resolved to a link this server does not fetch — not http(s), or carrying credentials. A deployment backed by local-filesystem storage hands out file:// links, which cannot be fetched here.",
-    retryable: false,
-  },
-  plain_http_refused: {
-    class: "config",
-    message:
-      "The platform resolved this reference to a plain http link, which this server refuses.",
-    hint: `A plain http link is accepted only when PIPELEX_BASE_URL is itself http (the local stack). Set ${ALLOW_HTTP_ENV}=true to accept one from this deployment anyway.`,
-    retryable: false,
-  },
-  redirect_refused: {
-    class: "runtime",
-    hint: "A presigned object link should answer directly. Inspect the configured deployment's storage.",
-    retryable: false,
-  },
-  store_refused: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
-  not_found: {
-    class: "input_domain",
-    hint: "The object behind this storage reference is gone; re-run the method to produce it again.",
-    retryable: false,
-  },
-  store_error: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
-  too_large: {
-    class: "input_domain",
-    hint: "The limit is an accident guard against filling the disk. Fetch the file another way — its presigned public_url in mthds_run_results works for about an hour.",
-    retryable: false,
-  },
-  timeout: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
-  network: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
-  resolve_failed: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
-  total_limit_exceeded: {
-    class: "input_domain",
-    hint: "The call's total byte limit is an accident guard against filling the disk. The files listed as saved are on disk; fetch this one through its presigned public_url in mthds_run_results, which works for about an hour.",
-    retryable: false,
-  },
-  write_failed: {
-    class: "runtime",
-    hint: "Check that the target directory under the server's working directory is writable.",
-    retryable: false,
-  },
-  aborted: {
-    class: "runtime",
-    hint: "The download stopped before this file was saved; call the tool again.",
-    retryable: true,
-  },
-};
-
-/**
- * The wire's `detail`, when it really is one. It is typed by the SDK and, like
- * the code beside it, relayed verbatim from the bulk resolve route without
- * validation — and `message` is required on this tool's own error schema, so a
- * missing one would fail the result and turn a single file's failure into a
- * failed call, which is the failure the code's own lookup was hardened against.
- */
-function wireDetail(detail: string): string | undefined {
-  const value: unknown = detail;
-  return typeof value === "string" && value.trim() !== "" ? value : undefined;
-}
-
-/** What a per-item failure reads as when the route named no detail for it. */
-function unnamedItemFailure(code: string): string {
-  const named: unknown = code;
-  const suffix = typeof named === "string" && named.trim() !== "" ? ` (${named})` : "";
-  return `This file could not be saved, and the API gave no reason${suffix}.`;
-}
-
-/** A code the SDK adds later reads as an unnamed fault, which stays retryable. */
-const UNKNOWN_ITEM_ERROR: ItemErrorTexture = {
-  class: "runtime",
-  hint: "Inspect the MCP server logs.",
-  retryable: true,
-};
-
-/**
- * Classify one per-item error, located at the artifact's own entry.
- *
- * The code comes verbatim off the bulk resolve route's wire, so the table is
- * read by own key only: a code of `constructor` or `toString` would otherwise
- * find `Object.prototype`'s member instead of falling back, and produce a
- * `ToolError` with no `class` — failing this tool's own schema and turning one
- * file's failure into a failed call.
- */
-export function itemToolError(error: ArtifactItemError, index: number): ToolError {
-  const texture = Object.hasOwn(ITEM_ERROR_TEXTURES, error.code)
-    ? ITEM_ERROR_TEXTURES[error.code]
-    : UNKNOWN_ITEM_ERROR;
-  return {
-    class: texture.class,
-    location: `artifacts[${index}].uri`,
-    message: texture.message ?? wireDetail(error.detail) ?? unnamedItemFailure(error.code),
-    hint: texture.hint,
-    retryable: texture.retryable,
+    error: itemToolError(item.error, `artifacts[${index}].uri`),
   };
 }
 

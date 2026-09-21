@@ -95,6 +95,50 @@ describe("local stdio server", () => {
     expect(Object.keys(schema.properties ?? {}).sort()).toEqual(["dir", "run_id"]);
   });
 
+  it("registers mthds_show_images on BOTH shells, with the same contract", async () => {
+    const hostedTools = await listTools(createHostedServer(TEST_OAUTH));
+    const localTools = await listTools(createLocalServer());
+
+    // Named rather than derived: the image tool's whole point is that it is a
+    // deliberate gesture available wherever a run is, so dropping it out of the
+    // shared table must fail here and not just change a derived list.
+    const hosted = hostedTools.find((tool) => tool.name === "mthds_show_images");
+    const local = localTools.find((tool) => tool.name === "mthds_show_images");
+
+    expect(hosted).toBeDefined();
+    expect(local).toBeDefined();
+    expect(sharedContract(local!)).toEqual(sharedContract(hosted!));
+
+    // It writes nothing anywhere; what it changes is the conversation, which
+    // is what the description says. The link it fetches is the configured
+    // API's own answer, so the world stays closed.
+    expect(local?.annotations).toMatchObject({
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+    });
+    const schema = local?.inputSchema as { required?: string[]; properties?: object };
+    expect(schema.required).toEqual(["run_id"]);
+    expect(Object.keys(schema.properties ?? {}).sort()).toEqual(["images", "indices", "run_id"]);
+  });
+
+  it("tells both shells that showing a picture is permanent", async () => {
+    const { client: hosted, close: closeHosted } = await connectClient(
+      createHostedServer(TEST_OAUTH),
+    );
+    const { client: local, close: closeLocal } = await connectClient(createLocalServer());
+
+    try {
+      for (const instructions of [hosted.getInstructions(), local.getInstructions()]) {
+        expect(instructions).toContain("mthds_show_images");
+        expect(instructions).toContain("stays in the");
+      }
+    } finally {
+      await closeHosted();
+      await closeLocal();
+    }
+  });
+
   it("advertises artifact download in the workshop instructions only", async () => {
     const { client: hosted, close: closeHosted } = await connectClient(
       createHostedServer(TEST_OAUTH),

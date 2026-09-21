@@ -11,6 +11,7 @@ import {
   mthdsRunResultsTool,
   mthdsRunStatusTool,
   mthdsRunTool,
+  mthdsShowImagesTool,
   mthdsUploadAttachmentsTool,
   mthdsValidateTool,
 } from "../tools.js";
@@ -41,6 +42,9 @@ export const HOSTED_SERVER_INSTRUCTIONS = [
   "Run a method durably with `mthds_run` (start from files + pipe + inputs, or from a registered",
   "method's catalog id via method_id; returns a durable run id),",
   "then check on it with `mthds_run_status` and fetch the outcome with `mthds_run_results` by that id.",
+  "When the results list `image_candidates` and the user wants to see one, call `mthds_show_images`",
+  "with that run id — it returns the pictures themselves. A picture you show stays in the",
+  "conversation for every turn that follows, so show one when it is asked for, not by reflex.",
 ].join(" ");
 
 /**
@@ -234,5 +238,20 @@ export function createHostedServer(
       },
       (input, extra) =>
         mthdsRunResultsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+    )
+    .registerTool(
+      {
+        name: mthdsShowImagesTool.name,
+        description: mthdsShowImagesTool.description,
+        inputSchema: mthdsShowImagesTool.inputSchema,
+        outputSchema: mthdsShowImagesTool.outputSchema,
+        annotations: mthdsShowImagesTool.annotations,
+        _meta: {
+          "openai/toolInvocation/invoking": "Fetching the run's images...",
+          "openai/toolInvocation/invoked": "Images fetched.",
+        },
+      },
+      (input, extra) =>
+        mthdsShowImagesTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
     );
 }

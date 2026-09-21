@@ -418,6 +418,86 @@ describe("resultsResult", () => {
     expect(resultsResult(withFiles).summary).not.toContain("mthds_download_artifacts");
   });
 
+  it("lists the image candidates on both shells, for free, from the FULL output", () => {
+    const picture = "pipelex-storage://runs/x/illustration.png";
+    const report = "pipelex-storage://runs/x/report.pdf";
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: { cover: { url: picture }, appendix: { url: report } },
+      },
+    };
+
+    // The console (no download tool) gets the same structured list as the workshop.
+    for (const result of [resultsResult(state, true, false), resultsResult(state, false, true)]) {
+      expect(result.structuredContent.image_candidates).toEqual([
+        { uri: picture, key: "runs/x/illustration.png" },
+      ]);
+    }
+
+    const summary = resultsResult(state, true, false).summary;
+    expect(summary).toContain("2 stored file(s)");
+    expect(summary).toContain("1 of which look like images");
+    expect(summary).toContain("mthds_show_images");
+    // Nothing was fetched to say it, and nothing is inlined here.
+    expect(summary).not.toContain("mthds_download_artifacts");
+  });
+
+  it("survives a main output bounded away from its references", () => {
+    const picture = "pipelex-storage://runs/x/illustration.png";
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        // Big enough that the prune ladder cuts the reference out of the
+        // model-facing copy; the candidate list still finds it.
+        main_stuff: { filler: "x".repeat(MAIN_STUFF_CAP * 2), cover: { url: picture } },
+      },
+    };
+
+    const result = resultsResult(state, false, true);
+
+    expect(result.structuredContent.truncated).toBe(true);
+    expect(result.structuredContent.image_candidates).toEqual([
+      { uri: picture, key: "runs/x/illustration.png" },
+    ]);
+  });
+
+  it("says nothing, and omits the member, when the output references no stored file", () => {
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: { pipeline_run_id: RUN_ID, main_stuff: { answer: 42 } },
+    };
+
+    const result = resultsResult(state, true, true);
+
+    expect(result.structuredContent).not.toHaveProperty("image_candidates");
+    expect(result.summary).not.toContain("mthds_show_images");
+    expect(result.summary).not.toContain("stored file(s)");
+  });
+
+  it("reports stored files that look like nothing without naming the image tool", () => {
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: { doc: { url: "pipelex-storage://runs/x/report.pdf" } },
+      },
+    };
+
+    const result = resultsResult(state, false, true);
+
+    expect(result.structuredContent.image_candidates).toEqual([]);
+    expect(result.summary).toContain("none of them looks like an image");
+    expect(result.summary).not.toContain("mthds_show_images");
+    expect(result.summary).toContain("mthds_download_artifacts");
+  });
+
   it("projects a completed run and carries graph + full output off structuredContent", () => {
     const mainStuff = { answer: 42, items: ["a", "b"] };
     const graphSpec = { nodes: [{ id: "demo.main" }] };

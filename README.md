@@ -52,7 +52,8 @@ contracts — with one documented exception per shell, marked below:
 | `mthds_upload_attachments` | **Hosted console only.** Turn a file the user attached in the chat into a run-ready `pipelex-storage://` reference (ChatGPT only — see [Chat attachments](#chat-attachments-chatgpt-only)). |
 | `mthds_run` | Start a durable run on the hosted Pipelex API; returns a durable `run_id` immediately. |
 | `mthds_run_status` | Check a durable run's coarse lifecycle state by `run_id`. |
-| `mthds_run_results` | Fetch a durable run's terminal outcome by `run_id`. |
+| `mthds_run_results` | Fetch a durable run's terminal outcome by `run_id`, and list for free which of its stored files look like images. Never returns a picture. |
+| `mthds_show_images` | Show the pictures a completed run produced, as MCP image content blocks — the deliberate gesture, on both deployments, because a shown picture stays in the conversation. |
 | `mthds_download_artifacts` | **Local workshop only.** Save the files a completed run produced (images, PDFs, documents) under the directory the server was started in — see [Saving run artifacts](#saving-run-artifacts-local-workshop-only). |
 
 The two exceptions mirror each other. `mthds_upload_attachments` takes a
@@ -686,6 +687,74 @@ The pipe selector is `pipe_code` here and `pipe_ref` on `mthds_inputs_template`
 / `mthds_prepare_inputs` — the same qualified `domain.pipe_code` value under the
 name each underlying route uses; each description names the other, so copying
 the value across the two calls is expected.
+
+A completed `mthds_run_results` also reports, for free, what the run **stored**:
+`image_candidates` lists the `pipelex-storage://` references whose key looks
+like an image (`{ uri, key }` each), and the prose says how many stored files
+there are and what can be done with them. Nothing is fetched to produce it — the
+walk is in memory over the full output, so a reference pruned out of the bounded
+`main_stuff` still appears. **The results tool never returns an image itself,
+and takes no flag that would make it**; showing a picture is `mthds_show_images`
+below.
+
+### `mthds_show_images`
+
+Put the pictures a completed run produced in front of the model, as MCP **image
+content blocks**. Registered on **both** deployments.
+
+```ts
+// input
+{
+  run_id: string;        // the durable run id from mthds_run
+  images?: string[];     // optional selection: pipelex-storage:// references from image_candidates
+  indices?: number[];    // optional selection: their zero-based positions instead
+}
+
+// structuredContent (state = "completed")
+{
+  status: "ok";
+  run_id: string;
+  state: "completed";
+  images: Array<{
+    uri: string;
+    mime_type?: string;   // the object store's own content type
+    bytes?: number;
+    inlined: boolean;     // true ⟺ this picture is one of the image blocks in content
+    withheld?: "size" | "budget" | "count" | "type";
+    error?: ToolError;
+  }>;
+  all_inlined: boolean;
+}
+```
+
+**Why it is a tool and not an option on `mthds_run_results`.** An image block is
+cheap to send and permanent to keep: it costs the model's own native vision
+price — its base64 size is free — but once it is in a conversation it is in
+every prompt that follows, and nothing takes it back. One picture is a rounding
+error; a loop that generates twenty is twenty images of context nobody chose. So
+nothing inlines by default, and seeing a picture is a gesture with a name.
+
+Each inlined picture is fetched through `@pipelex/sdk`'s bounded `fetchArtifact`
+(fresh presigned link, redirects refused, no credentials forwarded, the byte cap
+checked before and during the read), gated on the object store's own
+`content-type` — `image/png`, `image/jpeg`, `image/gif`, `image/webp`, and
+nothing else. Three caps bound a call: **4 MiB** per picture, **6 MiB** across
+the call, and **6 attempts**. A picture that does not fit is reported as
+`withheld` with its reason rather than resized or dropped silently; a
+per-reference failure rides its entry as an `error`; pictures that arrived are
+never discarded because a sibling failed. The same
+`PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP` rule as the download tool applies. A
+`running` or `failed` run, and a run whose output holds no image candidate, are
+produced verdicts that fetch nothing. See `SPEC.md` → "Image Display Scope".
+
+**What your host does with an image block** (measured, 2026-09-21 — the study is
+`wip/mcp-image-results/host-probe.md` in the Pipelex workspace):
+
+| Host | Model sees the picture | Person sees the picture | Notes |
+|---|---|---|---|
+| Claude Code | Yes | **No** — the terminal renders nothing | Priced at the model's native vision cost; the base64 size is free. Ask for a description if you want one in the transcript. |
+| Codex (ChatGPT desktop) | Yes | Not measured | **Refuses a block carrying `annotations`** with `Unexpected response type` — which is why ours carries none. |
+| Cursor | Not measured | Not measured | Tracked as its own follow-up. |
 
 ### Saving run artifacts (local workshop only)
 

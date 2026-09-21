@@ -34,7 +34,10 @@ export const LOCAL_SERVER_INSTRUCTIONS = [
   "`mthds_run_results` with the returned run id. When a completed run's output references stored",
   "files (images, PDFs, documents as pipelex-storage:// URIs), call `mthds_download_artifacts` with",
   "that run id to save them under the working directory — the presigned links in the results expire",
-  "within the hour. This tools-first workshop has no views at launch,",
+  "within the hour. When the results list `image_candidates` and the user wants to look at one,",
+  "call `mthds_show_images` with that run id — it returns the pictures themselves, and a picture",
+  "you show stays in the conversation for every turn that follows, so show one when it is asked",
+  "for, not by reflex. This tools-first workshop has no views at launch,",
   "so report the structured result and text summary directly to the user.",
 ].join(" ");
 

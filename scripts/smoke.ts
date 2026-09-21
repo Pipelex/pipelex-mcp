@@ -641,6 +641,10 @@ async function main(): Promise<void> {
       "mthds_validate",
       "mthds_inputs_template",
       "mthds_codegen",
+      // Advertised only — this smoke run starts no run, so there is no run id
+      // to show images from. The live walk is the e2e suite's, once Phase 3's
+      // fixture gives it a run that really produces a picture.
+      "mthds_show_images",
     ];
     const missing = required.filter((name) => !advertised.includes(name));
     expect(

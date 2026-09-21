@@ -84,6 +84,10 @@ function overrideContexts(
     codegen: { ...base.codegen, apiKey, authError },
     prepare: { ...base.prepare, apiKey, authError },
     run: { ...base.run, apiKey, authError },
+    // mthds_show_images resolves and fetches the caller's own stored objects,
+    // so the fetch is funded and scoped by the caller's identity like every
+    // other read.
+    images: { ...base.images, apiKey, authError },
     // The attachment ingest uploads to Pipelex storage, so the signed-in
     // caller's own identity is what funds it — the console holds no key.
     attachments: { ...base.attachments, apiKey, authError },

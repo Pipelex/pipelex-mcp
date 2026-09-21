@@ -13,13 +13,8 @@ import type {
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
-  ALLOW_HTTP_ENV,
-  allowsPlainHttp,
   artifactsToolResult,
-  buildArtifactsContext,
   downloadMthdsArtifacts,
-  itemToolError,
-  parseAllowHttpOverride,
   validateArtifactsRequest,
 } from "./artifacts.js";
 import type { ArtifactClient, ArtifactsContext } from "./artifacts.js";
@@ -167,107 +162,6 @@ describe("validateArtifactsRequest", () => {
   it("accepts a run id alone or with a relative dir", () => {
     expect(validateArtifactsRequest({ run_id: RUN_ID })).toEqual([]);
     expect(validateArtifactsRequest({ run_id: RUN_ID, dir: "assets/run-1" })).toEqual([]);
-  });
-});
-
-describe("the plain-http rule", () => {
-  it("accepts plain http exactly when the configured API is itself plain http", () => {
-    expect(allowsPlainHttp({ baseUrl: "http://localhost:8081" })).toBe(true);
-    expect(allowsPlainHttp({ baseUrl: DEFAULT_API_URL })).toBe(false);
-    // A malformed base URL refuses; the client constructor reports it as config.
-    expect(allowsPlainHttp({ baseUrl: "not a url" })).toBe(false);
-  });
-
-  it("lets the explicit override win in both directions", () => {
-    expect(allowsPlainHttp({ baseUrl: DEFAULT_API_URL, allowHttp: true })).toBe(true);
-    expect(allowsPlainHttp({ baseUrl: "http://localhost:8081", allowHttp: false })).toBe(false);
-  });
-
-  it("reads the override from the environment, failing closed on an unrecognized value", () => {
-    expect(parseAllowHttpOverride(undefined)).toBeUndefined();
-    expect(parseAllowHttpOverride("  ")).toBeUndefined();
-    expect(parseAllowHttpOverride("true")).toBe(true);
-    expect(parseAllowHttpOverride(" TRUE ")).toBe(true);
-    expect(parseAllowHttpOverride("1")).toBe(true);
-    expect(parseAllowHttpOverride("false")).toBe(false);
-    expect(parseAllowHttpOverride("0")).toBe(false);
-    expect(parseAllowHttpOverride("yes")).toBe(false);
-
-    expect(buildArtifactsContext({ [ALLOW_HTTP_ENV]: "true" }).allowHttp).toBe(true);
-    expect(buildArtifactsContext({})).not.toHaveProperty("allowHttp");
-    expect(buildArtifactsContext({}).baseUrl).toBe(DEFAULT_API_URL);
-  });
-});
-
-describe("itemToolError", () => {
-  it("classifies the SDK's per-item codes and locates each at its artifact entry", () => {
-    expect(itemToolError({ code: "not_found", detail: "gone (HTTP 404)." }, 1)).toMatchObject({
-      class: "input_domain",
-      location: "artifacts[1].uri",
-      message: "gone (HTTP 404).",
-      retryable: false,
-    });
-    expect(itemToolError({ code: "too_large", detail: "over the cap" }, 0)).toMatchObject({
-      class: "input_domain",
-      retryable: false,
-    });
-    expect(itemToolError({ code: "forbidden", detail: "another org" }, 0)).toMatchObject({
-      class: "input_domain",
-      retryable: false,
-    });
-    for (const code of ["store_refused", "store_error", "timeout", "network", "resolve_failed"]) {
-      expect(itemToolError({ code, detail: "x" }, 0)).toMatchObject({
-        class: "runtime",
-        retryable: true,
-      });
-    }
-    expect(itemToolError({ code: "write_failed", detail: "EACCES" }, 0)).toMatchObject({
-      class: "runtime",
-      retryable: false,
-    });
-  });
-
-  it("points a plain-http refusal at the override instead of the SDK option", () => {
-    const error = itemToolError(
-      { code: "plain_http_refused", detail: "pass allowHttp: true to accept it" },
-      0,
-    );
-
-    expect(error.class).toBe("config");
-    expect(error.message).not.toContain("allowHttp");
-    expect(error.hint).toContain(`${ALLOW_HTTP_ENV}=true`);
-  });
-
-  it("reads a code it does not know as a retryable runtime fault", () => {
-    expect(itemToolError({ code: "something_new", detail: "new failure" }, 2)).toMatchObject({
-      class: "runtime",
-      location: "artifacts[2].uri",
-      message: "new failure",
-      retryable: true,
-    });
-  });
-
-  it("still names a failure when the route sent no detail with it", () => {
-    // `detail` is typed but arrives verbatim off the wire, like the code, and
-    // `message` is required on this tool's error schema.
-    const missing = itemToolError({ code: "not_found", detail: undefined as unknown as string }, 0);
-    expect(missing.message).toContain("gave no reason");
-    expect(missing.message).toContain("not_found");
-    expect(missing.class).toBe("input_domain");
-
-    const blank = itemToolError({ code: "store_refused", detail: "   " }, 1);
-    expect(blank.message).toContain("gave no reason");
-  });
-
-  it("reads a code naming an Object.prototype member as an unknown code, not as its member", () => {
-    for (const code of ["constructor", "toString", "valueOf", "__proto__"]) {
-      expect(itemToolError({ code, detail: "off the wire" }, 0)).toMatchObject({
-        class: "runtime",
-        location: "artifacts[0].uri",
-        message: "off the wire",
-        retryable: true,
-      });
-    }
   });
 });
 
