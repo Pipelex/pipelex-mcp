@@ -53,6 +53,15 @@ function write(text: string): void {
  * the very next line of this function would then CREATE a second one — which
  * the platform makes admin-only to delete, after which every later run updates
  * whichever of the two the server lists first.
+ *
+ * The update arm READS the method first and forwards `input_data`, which is
+ * what makes re-running this script the no-op its header advertises. The
+ * platform's PUT rewrites the whole row and preserves only `python` on
+ * omission, so an update that simply sent `{ name, mthds }` would write
+ * `input_data: null` and erase any form inputs saved against the fixture from
+ * the webapp. `mthds_save_method` defends the same way and for the same
+ * reason — see the note above its own `updateMethod` call in
+ * `src/capabilities/catalog-write.ts`.
  */
 async function seed(name: string, mthds: string): Promise<void> {
   const client = liveClient();
@@ -61,7 +70,11 @@ async function seed(name: string, mthds: string): Promise<void> {
   const method =
     existing === undefined
       ? await client.createMethod({ name, mthds })
-      : await client.updateMethod(existing, { name, mthds });
+      : await client.updateMethod(existing, {
+          name,
+          mthds,
+          input_data: (await client.getMethod(existing)).input_data,
+        });
 
   write(existing === undefined ? `Created \`${name}\`.` : `Updated the existing \`${name}\`.`);
   write(`  method_id:   ${method.method_id}`);
