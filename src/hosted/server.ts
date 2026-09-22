@@ -18,38 +18,33 @@ import {
 import type { ToolContexts } from "../tools.js";
 import { contextsForRequest } from "./contexts.js";
 
+/**
+ * The map, not the manual — the same layering as the workshop's
+ * `LOCAL_SERVER_INSTRUCTIONS`, which says why: per-tool detail lives in each
+ * tool's description, and `npm run check:tool-texts` holds this string under
+ * the length a host shows.
+ */
 export const HOSTED_SERVER_INSTRUCTIONS = [
-  "pipelex-mcp helps you work with executable AI Methods written in the MTHDS language (.mthds).",
-  "A method reaches a tool three ways: the file contents you hold, a published method's address",
-  "passed as method_ref (github.com/<owner>/<repo>[/<selector>][@<tag>]), or a registered method's",
-  "catalog id (mt_…) passed as method_id — an address and an id are both resolved server-side, so",
-  "no bundle enters the conversation.",
+  "pipelex-mcp helps you work with executable AI methods written in MTHDS (.mthds).",
+  "The usual flow: `mthds_list_methods` to find a saved method, `mthds_validate`,",
+  "`mthds_inputs_template` and fill it, `mthds_prepare_inputs`, `mthds_run`, then",
+  "`mthds_run_status` and `mthds_run_results` with the run id, and `mthds_show_images` to see a",
+  "picture the run produced.",
+  "`mthds_codegen` turns a method into typed code for the user's project.",
+  "Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`,",
+  "`mthds_prepare_inputs`, `mthds_run`) takes its method one of three ways: the file contents you",
+  "hold, a published method's address as method_ref, or a catalog id (mt_…) as method_id.",
+  "An address or an id is resolved server-side, so no bundle enters the conversation.",
   "Call `mthds_list_methods` when the user asks what saved methods exist, names one without its",
-  "mt_ id, or a saved method may fit the task; choose or disambiguate by name and description,",
-  "then pass the returned id into the current-content validate, inputs-template, and run flow.",
-  "Call `mthds_validate` with file contents, a method_ref address or a method_id to get a stable,",
-  "structured verdict (is_valid / is_runnable, validation errors, pending signatures). When the",
-  "method is valid, the tool also returns an interactive dry-run graph of the method, rendered",
-  "through the run-graph view.",
-  "Call `mthds_inputs_template` with the same file contents, a method_ref address or a method_id",
-  "to get a fill-in template of a pipe's declared inputs, ready to populate for a run.",
-  "Call `mthds_codegen` to project a method's concepts into typed code for the user's project —",
-  "TypeScript (target ts-zod) or Python (python-pydantic for a consumer, python-structures for a",
-  "Pipelex host) — from files, a method_ref address, or a method_id; write the returned files and",
-  "codegen.lock verbatim.",
-  "Once the template is filled, call `mthds_prepare_inputs` — with files, a method_ref address, or a",
-  "method_id — to make file-bearing inputs run-ready",
-  "(this hosted console is pass-through only — it accepts http(s) URLs and pipelex-storage:// references",
-  "and refuses inputs that would need an upload; the local workshop uploads local files).",
-  "When the user attaches a file to the conversation, call `mthds_upload_attachments` with that",
-  "attachment to turn it into a run-ready pipelex-storage:// reference — its bytes never enter the",
-  "conversation, and the reference can be filled straight into the inputs template.",
-  "Run a method durably with `mthds_run` (start from files + pipe + inputs, from a method_ref",
-  "address, or from a method_id; returns a durable run id),",
-  "then check on it with `mthds_run_status` and fetch the outcome with `mthds_run_results` by that id.",
-  "When the results list `image_candidates` and the user wants to see one, call `mthds_show_images`",
-  "with that run id — it returns the pictures themselves. A picture you show stays in the",
-  "conversation for every turn that follows, so show one when it is asked for, not by reflex.",
+  "mt_ id, or a saved method may fit the task; choose by name and description, then pass the id on.",
+  "When the user attaches a file to the conversation, `mthds_upload_attachments` turns it into a",
+  "run-ready pipelex-storage:// reference to fill into the inputs.",
+  "This console uploads nothing else: `mthds_prepare_inputs` passes http(s) URLs and",
+  "pipelex-storage:// references through and refuses a value that would need an upload.",
+  "A valid `mthds_validate` verdict also shows the user an interactive graph of the method.",
+  "`mthds_run` executes on the hosted Pipelex API and spends inference credit.",
+  "A picture from `mthds_show_images` stays in the conversation for every turn that follows,",
+  "so show one when it is asked for, not by reflex.",
 ].join(" ");
 
 /**
