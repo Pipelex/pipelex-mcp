@@ -9,6 +9,10 @@
 - **Mistral Vibe's row says how to register the workshop**: The matrix cell read "pending Vibe's MCP mechanics", which was a statement about us rather than about Vibe, and it was out of date. The per-host section gains the `~/.vibe/config.toml` entry with the two things that bite: it has to be appended after every top-level setting, because a `[mcp_servers.env]` header pasted above one silently claims that setting as an environment variable of the server, and Vibe copies its whole configuration into every session log under `~/.vibe/logs/session/`, so the key lands there unredacted.
 - **The npm description says what the package is for**: It described the tools and not the point, and the package carried no keywords at all, so it was discoverable by its exact name and nothing else.
 
+### Fixed
+
+- **Server instructions and tool descriptions fit what a host shows the model**: Claude Code cuts a server's instructions and each tool description at 2,048 characters, and the workshop's instructions had grown well past that, so the model received them cut mid-word and lost the order of the steps; the console's were over too, and `mthds_codegen`'s description was within a sentence of the cap. Every one of those texts is now held to 1,800 characters by a gate in `make check` that measures what the two servers actually emit. Remove and re-add a ChatGPT or claude.ai connector to pick up the new texts, since a connector's tool list is cached when it is added.
+
 ## [0.17.0] - 2026-09-22
 
 ### Changed
