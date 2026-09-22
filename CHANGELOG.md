@@ -11,7 +11,7 @@
 
 ### Fixed
 
-- **Server instructions and tool descriptions fit what a host shows the model**: Claude Code cuts a server's instructions and each tool description at 2,048 characters, and the workshop's instructions had grown well past that, so the model received them cut mid-word and lost the order of the steps; the console's were over too, and `mthds_codegen`'s description was within a sentence of the cap. Every one of those texts is now held to 1,800 characters by a gate in `make check` that measures what the two servers actually emit. Remove and re-add a ChatGPT or claude.ai connector to pick up the new texts, since a connector's tool list is cached when it is added.
+- **Server instructions and tool descriptions fit what a host shows the model**: Claude Code cuts a server's instructions and each tool description at 2,048 characters, and the workshop's instructions had grown well past that, so the model received them cut mid-word and without the order of the steps; the console's were over too, and `mthds_codegen`'s description was within a sentence of the cap. Both instructions now open with the order of the steps and state the three ways to name a method once, the published-address grammar and codegen's per-target file lists live only on their fields, the `mthds_inputs_template` summary names the next step the instructions used to carry, and a gate in `make check` holds every one of these texts to 1,800 characters as the two servers emit them. Remove and re-add a ChatGPT or claude.ai connector to pick up the new texts, since a connector's tool list is cached when it is added.
 
 ## [0.17.0] - 2026-09-22
 
