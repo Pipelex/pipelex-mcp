@@ -212,6 +212,7 @@ const PREPARE_CLOSURE_HINT =
 /** Classify options for a files-shaped request. */
 const PREPARE_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/validate",
+  methodLocation: "files",
   // No `badRequest` override on purpose: a files request names no selector
   // field, so the default `files` locator is already right, and it is the very
   // texture `mthds_validate` gets for the very same body on the very same
@@ -228,14 +229,17 @@ const PREPARE_ERROR_OPTIONS: ClassifyErrorOptions = {
  * Classify options for an address-shaped request — the `mthds_validate`
  * textures, because this tool now reaches the very same route with the very
  * same selector. Note the address travels through `/v1/validate` and therefore
- * through the execution-locus gate, so a published package shipping in-process
- * Python is a 403 here off a deployment that is not sandbox-hosted, while the
- * same address still answers on `mthds_inputs_template` and `mthds_codegen`,
- * which reach their crate another way. That 403 is classified
- * route-independently in `classifyError`.
+ * through the execution-locus gate, so a fetched package shipping any `.py` is
+ * a 403 here off a deployment that is not sandbox-hosted, while the same
+ * address still answers on `mthds_inputs_template` and `mthds_codegen`, which
+ * reach their crate another way. Both of the gate's refusals are classified
+ * route-independently in `classifyError`, off the `error_type` the runner
+ * declares, and both land at `methodLocation` — never in the generic 401/403
+ * arm, which sent a caller with a perfectly good credential to mint a key.
  */
 const PREPARE_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/validate",
+  methodLocation: "method_ref",
   badRequest: {
     location: "method_ref",
     hint: `Check the address and tag — ${METHOD_REF_GRAMMAR}. The tag must be a git tag on the repository (branches do not pin), and the ref must be resolvable by an anonymous clone.`,
@@ -264,6 +268,7 @@ const PREPARE_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
  */
 const PREPARE_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/validate",
+  methodLocation: "method_id",
   badRequest: {
     location: "method_id",
     hint: "The stored method may have no MTHDS source yet, or this deployment may not resolve method_id on /v1/validate — the selector is hosted-only (a bare pipelex-api runner has no catalog).",

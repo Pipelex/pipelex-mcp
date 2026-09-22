@@ -1279,6 +1279,39 @@ describe("startMthdsRun by method_ref", () => {
     expect(result.structuredContent.errors?.[0]?.hint).toMatch(/MTHDS concepts/);
   });
 
+  it("classifies a sandbox refusal (403 CustomCodeRequiresSandbox) at what named the method", async () => {
+    const refusal = (): Promise<never> =>
+      Promise.reject(
+        new ApiResponseError(
+          "HTTP 403",
+          `${DEFAULT_API_URL}/v1/start`,
+          403,
+          "Forbidden",
+          "{}",
+          "CustomCodeRequiresSandbox",
+          "This bundle ships custom Python (.py); running it requires a sandbox-hosted deployment.",
+          undefined,
+          undefined,
+        ),
+      );
+
+    const byRef = await startMthdsRun({ method_ref: ADDRESS }, contextWith({ start: refusal }));
+    // `/v1/start` applies the same gate to a submitted bundle, so the locator
+    // follows the request shape rather than always naming the address.
+    const byFiles = await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }] },
+      contextWith({ start: refusal }),
+    );
+
+    for (const result of [byRef, byFiles]) {
+      expect(result.structuredContent.status).toBe("error");
+      expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+      expect(result.structuredContent.errors?.[0]?.hint).toMatch(/sandbox-hosted/);
+    }
+    expect(byRef.structuredContent.errors?.[0]?.location).toBe("method_ref");
+    expect(byFiles.structuredContent.errors?.[0]?.location).toBe("files");
+  });
+
   it("classifies a registry-form 501 at method_ref with the address-form hint", async () => {
     const context = contextWith({
       start: () =>
