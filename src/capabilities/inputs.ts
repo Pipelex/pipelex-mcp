@@ -346,9 +346,16 @@ function templateFields(
 // What to do with the template once it is filled. It is said here, where it
 // matters, rather than in the tool description or the server instructions:
 // both are held under the length a host shows, and this is the one layer that
-// reaches the model exactly when it has a template in hand.
-const NEXT_STEP =
-  "Fill it in, then call `mthds_prepare_inputs` to make file-bearing values run-ready — or pass it straight to `mthds_run` when every file value is already an http(s) URL or a pipelex-storage:// reference.";
+// reaches the model exactly when it has a template in hand. Both tools take
+// `inputs` as a JSON object, so a TOML template has to be converted first — a
+// model told to pass the TOML text on would send a string the schema refuses.
+function nextStep(format: BuildInputsValidReport["format"]): string {
+  const fill =
+    format === "json"
+      ? "Fill it in, then call"
+      : "Fill it in and convert it to a JSON object for `inputs`, then call";
+  return `${fill} \`mthds_prepare_inputs\` to make file-bearing values run-ready — or pass it straight to \`mthds_run\` when every file value is already an http(s) URL or a pipelex-storage:// reference.`;
+}
 
 // The build routes return a plain `message` rather than `rendered_markdown`,
 // so the summary is composed here. Unlike validation, the template is
@@ -365,7 +372,7 @@ function validSummary(report: BuildInputsValidReport): string {
     report.message,
     `Resolved pipe: \`${report.pipe_ref}\``,
     fence,
-    NEXT_STEP,
+    nextStep(report.format),
   ].join("\n\n");
 }
 
