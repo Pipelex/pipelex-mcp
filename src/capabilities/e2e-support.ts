@@ -413,12 +413,11 @@ export function fixtureMethodId(): Promise<string> {
 }
 
 async function lookupFixtureMethodId(): Promise<string> {
-  const page = await liveClient().listMethods({ q: FIXTURE_METHOD_NAME, limit: 50 });
-  const row = page.items.find((item) => item.name === FIXTURE_METHOD_NAME);
+  const row = await catalogRowNamed(FIXTURE_METHOD_NAME);
   if (row === undefined) {
     throw new Error(MISSING_FIXTURE_HINT);
   }
-  return row.method_id;
+  return row;
 }
 
 const MISSING_WRITE_FIXTURE_HINT =
@@ -454,10 +453,26 @@ async function lookupCatalogWriteFixtureMethodId(): Promise<string> {
  * The catalog id for a name, uncached — `undefined` when the organization has
  * no such row. Uncached on purpose: the write suite asserts that an invalid
  * save left the catalog untouched, which a memoized answer could not see.
+ *
+ * It follows the cursor rather than reading one page, and that is load-bearing
+ * rather than defensive. `q` is applied SERVER-side, but as a post-read filter
+ * over a bounded slice of the index per request, so a sparse match legitimately
+ * answers `{items: [], nextCursor: "…"}` — "nothing matched in the slice I just
+ * read, keep going". One request scans a bounded number of rows newest-first,
+ * and the index is keyed on the immutable `created_at`, so a fixture sinks
+ * monotonically as its organization accumulates methods and an update never
+ * lifts it back. A one-page lookup therefore stops finding a fixture that is
+ * really there, permanently — and since a miss here is what sends the operator
+ * to `make seed-e2e-fixture`, which creates, the failure routes them into
+ * minting a duplicate row the platform cannot delete.
  */
 export async function catalogRowNamed(name: string): Promise<string | undefined> {
-  const page = await liveClient().listMethods({ q: name, limit: 50 });
-  return page.items.find((item) => item.name === name)?.method_id;
+  for await (const row of liveClient().iterateMethods({ q: name, limit: 50 })) {
+    if (row.name === name) {
+      return row.method_id;
+    }
+  }
+  return undefined;
 }
 
 /**

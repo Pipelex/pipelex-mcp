@@ -34,6 +34,7 @@ import {
   CATALOG_WRITE_FIXTURE_NAME,
   FIXTURE_BUNDLE,
   FIXTURE_METHOD_NAME,
+  catalogRowNamed,
   liveApiConfig,
   liveClient,
 } from "../src/capabilities/e2e-support.js";
@@ -42,16 +43,25 @@ function write(text: string): void {
   process.stdout.write(`${text}\n`);
 }
 
-/** Create-or-update one fixture row by name, and report which it was. */
+/**
+ * Create-or-update one fixture row by name, and report which it was.
+ *
+ * The lookup is {@link catalogRowNamed}, which follows the cursor, and using it
+ * here rather than a one-page read is what keeps re-running this script safe.
+ * A lookup that stops at the first page answers "no such row" for a fixture
+ * that is really there once the organization holds enough newer methods, and
+ * the very next line of this function would then CREATE a second one — which
+ * the platform makes admin-only to delete, after which every later run updates
+ * whichever of the two the server lists first.
+ */
 async function seed(name: string, mthds: string): Promise<void> {
   const client = liveClient();
-  const page = await client.listMethods({ q: name, limit: 50 });
-  const existing = page.items.find((item) => item.name === name);
+  const existing = await catalogRowNamed(name);
 
   const method =
     existing === undefined
       ? await client.createMethod({ name, mthds })
-      : await client.updateMethod(existing.method_id, { name, mthds });
+      : await client.updateMethod(existing, { name, mthds });
 
   write(existing === undefined ? `Created \`${name}\`.` : `Updated the existing \`${name}\`.`);
   write(`  method_id:   ${method.method_id}`);
