@@ -23,21 +23,24 @@
  * Both halves of that are enforced in `beforeAll` rather than trusted: it
  * resolves the fixture, so an unseeded organization aborts the file instead of
  * failing one test and running the rest, and it leaves the shared work root
- * linked, so the one test that submits no `method_id` meets the duplicate
- * guard whatever else has run or failed.
+ * linked — verified rather than assumed — so that BOTH tests submitting no
+ * `method_id` meet the duplicate guard whatever else has run or failed. The
+ * second of them saves from a directory of its own and arms the guard by
+ * copying that link.
  *
  * Consequence to know: `POST /v1/methods` — `mthds_save_method`'s create arm —
  * therefore has no live coverage here. What exercises it live is the seed
  * script, through the SDK rather than through the tool.
  */
 
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildLocalToolContexts } from "../local/server.js";
+import { LINK_FILE_NAME } from "./catalog-link.js";
 import { getMthdsMethod, saveMthdsMethod } from "./catalog-write.js";
 import type {
   CatalogWriteContext,
@@ -62,6 +65,20 @@ let workRoot: string;
 let context: CatalogWriteContext;
 let fixtureId: string;
 
+/** Every `mkdtemp` this file makes, removed together in `afterAll`. */
+const tempDirs: string[] = [];
+
+/** A temp directory registered for cleanup — `prepare.e2e.ts`'s convention. */
+async function makeTempDir(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+afterAll(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
 /** The whole workshop wiring, rooted at a real temp directory. */
 function contextsFor(root: string): CatalogWriteContext {
   const config = liveApiConfig();
@@ -73,7 +90,7 @@ function contextsFor(root: string): CatalogWriteContext {
 
 /** The method id the link file in the work root records. */
 async function linkedMethodId(): Promise<string> {
-  const link = JSON.parse(await readFile(join(workRoot, "pipelex-method.json"), "utf8")) as {
+  const link = JSON.parse(await readFile(join(workRoot, LINK_FILE_NAME), "utf8")) as {
     method_id: string;
   };
   return link.method_id;
@@ -96,8 +113,8 @@ function asSaved(result: { structuredContent: unknown }): SaveMethodSuccess {
  * vitest treats as fatal to the whole file — a failing `it` does not stop the
  * ones after it, and the suite carries no `bail`. Linking here means the
  * tool's own duplicate guard is armed for every later test whatever runs and
- * whatever passes: the one test that deliberately submits no `method_id`
- * relies on that guard to be refused, and an unlinked root sends it down the
+ * whatever passes: the two tests that deliberately submit no `method_id` rely
+ * on that guard to be refused, and an unlinked root sends them down the
  * CREATE arm instead, minting a row under the fixture's own name that the
  * platform's admin-only delete cannot remove. That is reachable three ways —
  * an unseeded organization, a `-t` filter that skips the earlier tests, and a
@@ -111,11 +128,11 @@ function asSaved(result: { structuredContent: unknown }): SaveMethodSuccess {
 beforeAll(async () => {
   fixtureId = await catalogWriteFixtureMethodId();
 
-  workRoot = await mkdtemp(join(tmpdir(), "pipelex-mcp-catalog-write-"));
+  workRoot = await makeTempDir("pipelex-mcp-catalog-write-");
   context = contextsFor(workRoot);
   await writeFile(join(workRoot, CATALOG_WRITE_BUNDLE_FILE), CATALOG_WRITE_BUNDLE, "utf8");
 
-  asSaved(
+  const seeded = asSaved(
     await saveMthdsMethod(
       {
         files: [{ path: CATALOG_WRITE_BUNDLE_FILE }],
@@ -125,6 +142,26 @@ beforeAll(async () => {
       context,
     ),
   );
+
+  // Arming the guard is this hook's whole job, so the link is VERIFIED and not
+  // inferred from the save. `saveMthdsMethod` answers `status: "ok"` with
+  // `link_file.written: false` whenever the link write declines — an unusable
+  // `saveRoot`, a refused `resolveSaveDir`, a foreign entry, any `writeFile`
+  // failure — because a stored method with an unwritten link is still a
+  // successful save. A hook that checked only the status could therefore pass
+  // having armed nothing, and vitest does not bail, so a later test failing on
+  // the missing link would not stop the no-`method_id` tests from running.
+  if (seeded.link_file?.written !== true) {
+    throw new Error(
+      `the shared work root was not linked (${seeded.link_file?.reason ?? "the save reported no link_file"}) — ` +
+        "aborting the whole file rather than running the no-`method_id` tests against an unlinked " +
+        "directory, where they would reach the CREATE arm and mint a row under the fixture's own name " +
+        "that the platform's admin-only delete cannot remove",
+    );
+  }
+  // Read it back off disk: `written: true` is the tool's report, and the file
+  // itself is what the later tests actually depend on.
+  expect(await linkedMethodId()).toBe(fixtureId);
 });
 
 describe("mthds_save_method (live)", () => {
@@ -133,7 +170,7 @@ describe("mthds_save_method (live)", () => {
   // that no OTHER test can reach the create arm. Naming `method_id` keeps this
   // an update, so an unlinked root is safe here and only here.
   it("saves the bundle to the catalog and links the directory", async () => {
-    const freshRoot = await mkdtemp(join(tmpdir(), "pipelex-mcp-catalog-write-fresh-"));
+    const freshRoot = await makeTempDir("pipelex-mcp-catalog-write-fresh-");
     const freshContext = contextsFor(freshRoot);
     await writeFile(join(freshRoot, CATALOG_WRITE_BUNDLE_FILE), CATALOG_WRITE_BUNDLE, "utf8");
 
@@ -156,9 +193,10 @@ describe("mthds_save_method (live)", () => {
     // The link file is what makes a LATER save an update rather than a
     // duplicate, so a save that reported success without writing it would
     // leave the directory able to mint a second method.
-    const link = JSON.parse(
-      await readFile(join(freshRoot, "pipelex-method.json"), "utf8"),
-    ) as Record<string, unknown>;
+    const link = JSON.parse(await readFile(join(freshRoot, LINK_FILE_NAME), "utf8")) as Record<
+      string,
+      unknown
+    >;
     expect(link.method_id).toBe(saved.method_id);
     expect(typeof link.api_host).toBe("string");
   });
@@ -234,14 +272,31 @@ describe("mthds_save_method (live)", () => {
    * An invalid bundle is a VERDICT, not an error — and nothing is written
    * anywhere, which is the half a mocked client cannot prove about the catalog.
    *
-   * This is the one case that submits no `method_id`, and it is safe precisely
-   * because the bundle cannot validate: the refusal lands before the catalog is
-   * reached, which is what the two assertions below check from the outside.
+   * This is the SECOND of the two cases that submit no `method_id`, and it is
+   * safe on two counts rather than one, because one is not enough.
+   *
+   * The bundle cannot validate, so the refusal lands before the catalog is
+   * reached — `saveMthdsMethod` validates first and returns the invalid verdict
+   * before it ever reads the link claim. But that barrier is the LIVE API's
+   * judgement, and a deployment that started accepting a bundle naming a pipe
+   * type that does not exist is exactly the drift this suite exists to detect,
+   * so it is the one barrier that cannot be trusted to hold in the failure this
+   * file is written for. Left alone, such a run would mint a permanent row
+   * under `NEVER_CREATED_NAME`.
+   *
+   * So the directory is LINKED first, which arms the tool's own duplicate
+   * guard: if validation ever stops refusing, the save is refused locally as a
+   * would-be duplicate instead of creating. The server verdict stays the
+   * assertion; the local guard is what makes the test safe to run.
    */
   it("reports an invalid bundle as a verdict and writes nothing to the catalog", async () => {
-    const brokenRoot = await mkdtemp(join(tmpdir(), "pipelex-mcp-catalog-write-broken-"));
+    const brokenRoot = await makeTempDir("pipelex-mcp-catalog-write-broken-");
     const brokenContext = contextsFor(brokenRoot);
     await writeFile(join(brokenRoot, "broken.mthds"), INVALID_BUNDLE, "utf8");
+    // Arm the local guard by copying the shared root's link, so this directory
+    // is already claimed. Copying rather than saving keeps the arming free of a
+    // catalog write, which is what this suite is trying to stay sparing with.
+    await copyFile(join(workRoot, LINK_FILE_NAME), join(brokenRoot, LINK_FILE_NAME));
 
     const before = await catalogRowNamed(CATALOG_WRITE_FIXTURE_NAME);
 
@@ -255,8 +310,12 @@ describe("mthds_save_method (live)", () => {
     expect(saved.method_id).toBeUndefined();
     expect(Array.isArray(saved.validation_errors)).toBe(true);
 
-    // No link file, so the directory was left unlinked...
-    await expect(readFile(join(brokenRoot, "pipelex-method.json"), "utf8")).rejects.toThrow();
+    // The link this test armed is untouched — an invalid bundle re-points
+    // nothing, so the directory still claims the fixture and not a new row...
+    const brokenLink = JSON.parse(await readFile(join(brokenRoot, LINK_FILE_NAME), "utf8")) as {
+      method_id: string;
+    };
+    expect(brokenLink.method_id).toBe(fixtureId);
     // ...the fixture row is exactly where it was...
     expect(await catalogRowNamed(CATALOG_WRITE_FIXTURE_NAME)).toBe(before);
     // ...and no row was minted under the name it tried to save.
@@ -268,7 +327,7 @@ describe("mthds_get_method (live)", () => {
   it("brings the saved method's files to disk, and the bytes are the ones saved", async () => {
     const methodId = await catalogWriteFixtureMethodId();
 
-    const pullRoot = await mkdtemp(join(tmpdir(), "pipelex-mcp-catalog-pull-"));
+    const pullRoot = await makeTempDir("pipelex-mcp-catalog-pull-");
     const pullContext = contextsFor(pullRoot);
 
     const result = await getMthdsMethod({ method_id: methodId, output_dir: "." }, pullContext);
@@ -295,7 +354,7 @@ describe("mthds_get_method (live)", () => {
 
   it("returns the source inline when no output_dir is given", async () => {
     const methodId = await catalogWriteFixtureMethodId();
-    const inlineRoot = await mkdtemp(join(tmpdir(), "pipelex-mcp-catalog-inline-"));
+    const inlineRoot = await makeTempDir("pipelex-mcp-catalog-inline-");
 
     const result = await getMthdsMethod({ method_id: methodId }, contextsFor(inlineRoot));
 
