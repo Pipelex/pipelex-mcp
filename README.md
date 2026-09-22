@@ -263,7 +263,7 @@ with your Pipelex account:
 https://mcp.pipelex.com/mcp
 ```
 
-That is the production console, and it is the address to register: the alias is ours, so the console can move without anyone re-adding a connector.
+That is the console's production address, and the one to register.
 
 You may run this server for your own team or company, on your own infrastructure or in your own cloud account. What the Elastic License 2.0 rules out is offering others a remote MCP server through which they run the methods of their choice, their own or a catalog's. See [LICENSE](LICENSE) for the full terms, including notices and redistribution, and the [license page](https://docs.pipelex.com/latest/license/) for how Pipelex reads them.
 
