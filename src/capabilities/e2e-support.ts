@@ -255,6 +255,31 @@ $topic
 export const FIXTURE_BUNDLE_URI = "e2e/mcp_e2e_fixture.mthds";
 
 /**
+ * The catalog row the WRITE suite owns — a second durable fixture, seeded the
+ * same way and for a sharper reason than the first.
+ *
+ * `catalog-write.e2e.ts` saves through `mthds_save_method`, and a create is a
+ * check-then-act across two round trips with no compare-and-swap: two first
+ * runs in one organization would each read no row and each create one. A
+ * duplicate cannot be undone — the platform makes delete admin-only — and from
+ * then on every run updates whichever row the server happens to list first. So
+ * the create lives in `make seed-e2e-fixture`, hand-invoked once per
+ * organization, and the suite only ever updates. That also keeps `make
+ * test-e2e` free of catalog writes, which is the whole reason the seed target
+ * exists as a separate gesture.
+ */
+export const CATALOG_WRITE_FIXTURE_NAME = "pipelex_mcp_e2e_catalog_write";
+
+/** The write fixture's bundle: the run fixture's, re-domained so the two cannot collide. */
+export const CATALOG_WRITE_BUNDLE = FIXTURE_BUNDLE.replace(
+  /mcp_e2e_fixture/g,
+  "mcp_e2e_catalog_write",
+);
+
+/** The file name the write suite submits the bundle under. */
+export const CATALOG_WRITE_BUNDLE_FILE = "mcp_e2e_catalog_write.mthds";
+
+/**
  * A bundle that must NOT validate — it names a pipe type that does not exist,
  * which is a blueprint-schema violation rather than a judgment call.
  *
@@ -394,6 +419,45 @@ async function lookupFixtureMethodId(): Promise<string> {
     throw new Error(MISSING_FIXTURE_HINT);
   }
   return row.method_id;
+}
+
+const MISSING_WRITE_FIXTURE_HINT =
+  `No registered method named "${CATALOG_WRITE_FIXTURE_NAME}" is visible to this API key. The write ` +
+  "suite updates one durable row per organization and deliberately never creates it: a create is " +
+  "check-then-act with no compare-and-swap, so two first runs would mint a duplicate the platform " +
+  "cannot delete. Seed it with `make seed-e2e-fixture`, then re-run. If the key is right but the org " +
+  "is not, mint a key in the organization that holds the fixture — the catalog is org-scoped, so " +
+  "another org's method reads exactly like a miss.";
+
+let cachedWriteFixtureId: Promise<string> | undefined;
+
+/**
+ * The catalog id of the durable WRITE fixture, resolved BY NAME at run time —
+ * by name for the same portability reason {@link fixtureMethodId} is, and
+ * required rather than created for the reason on
+ * {@link CATALOG_WRITE_FIXTURE_NAME}.
+ */
+export function catalogWriteFixtureMethodId(): Promise<string> {
+  cachedWriteFixtureId ??= lookupCatalogWriteFixtureMethodId();
+  return cachedWriteFixtureId;
+}
+
+async function lookupCatalogWriteFixtureMethodId(): Promise<string> {
+  const row = await catalogRowNamed(CATALOG_WRITE_FIXTURE_NAME);
+  if (row === undefined) {
+    throw new Error(MISSING_WRITE_FIXTURE_HINT);
+  }
+  return row;
+}
+
+/**
+ * The catalog id for a name, uncached — `undefined` when the organization has
+ * no such row. Uncached on purpose: the write suite asserts that an invalid
+ * save left the catalog untouched, which a memoized answer could not see.
+ */
+export async function catalogRowNamed(name: string): Promise<string | undefined> {
+  const page = await liveClient().listMethods({ q: name, limit: 50 });
+  return page.items.find((item) => item.name === name)?.method_id;
 }
 
 /**
