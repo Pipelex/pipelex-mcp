@@ -27,6 +27,43 @@ const STALE_SEED_HINT =
   "if FIXTURE_BUNDLE or FIXTURE_DESCRIPTION changed since the last `make seed-e2e-fixture`; " +
   "re-run that target before treating this as a client-vs-API disagreement";
 
+/**
+ * The fixture's projected row, found by FOLLOWING THE CURSOR.
+ *
+ * One page is not enough, and this is the same unsoundness `catalogRowNamed`
+ * was introduced to remove — this was the last site still reading a single
+ * page. The platform applies `query` as a post-read filter over a bounded slice
+ * of the index per request, so a sparse match legitimately answers an empty
+ * page WITH a cursor: "nothing matched in the slice I just read, keep going".
+ * The index is keyed on the immutable `created_at`, so the fixture sinks
+ * monotonically as its organization accumulates methods and no update lifts it
+ * back. A one-page read therefore stops finding a fixture that is really there,
+ * permanently — and since the miss message below sends the operator to
+ * `make seed-e2e-fixture`, which creates, it would route them into minting a
+ * duplicate row the platform makes admin-only to delete.
+ *
+ * It walks through `listMthdsMethods` rather than reusing `catalogRowNamed`
+ * because the PROJECTED row is what this test asserts on, and the projection is
+ * this file's whole subject.
+ */
+async function fixtureRowByName(): Promise<CatalogSuccess["methods"][number] | undefined> {
+  let cursor: string | undefined;
+  do {
+    const result = await listMthdsMethods(
+      { query: FIXTURE_METHOD_NAME, ...(cursor === undefined ? {} : { cursor }) },
+      context,
+    );
+    expect(result.structuredContent.status).toBe("ok");
+    const page = result.structuredContent as CatalogSuccess;
+    const row = page.methods.find((item) => item.name === FIXTURE_METHOD_NAME);
+    if (row !== undefined) {
+      return row;
+    }
+    cursor = page.next_cursor ?? undefined;
+  } while (cursor !== undefined);
+  return undefined;
+}
+
 describe("mthds_list_methods (live)", () => {
   it("returns a page whose rows carry every projected field", async () => {
     const result = await listMthdsMethods({ limit: 5 }, context);
@@ -60,16 +97,14 @@ describe("mthds_list_methods (live)", () => {
   });
 
   it("finds the seeded fixture by name, with the description the server derived", async () => {
-    const result = await listMthdsMethods({ query: FIXTURE_METHOD_NAME }, context);
-
-    expect(result.structuredContent.status).toBe("ok");
-    const page = result.structuredContent as CatalogSuccess;
-    const fixture = page.methods.find((row) => row.name === FIXTURE_METHOD_NAME);
+    const fixture = await fixtureRowByName();
 
     expect(
       fixture,
-      `the server-side query for "${FIXTURE_METHOD_NAME}" returned no such row — seed it with \`make seed-e2e-fixture\`, ` +
-        "and check the API key belongs to the organization holding it (the catalog is org-scoped)",
+      `no row named "${FIXTURE_METHOD_NAME}" in ANY page of the server-side query — the walk followed ` +
+        "the cursor to the end, so this is a real miss and not a sunk fixture. Seed it with " +
+        "`make seed-e2e-fixture`, and check the API key belongs to the organization holding it " +
+        "(the catalog is org-scoped)",
     ).toBeDefined();
 
     // Not merely "a string": the platform recomputes `description` from the
