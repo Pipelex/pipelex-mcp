@@ -20,6 +20,12 @@
  * undo and after which every later run updates whichever row is listed first.
  * The reasoning is written once on `CATALOG_WRITE_FIXTURE_NAME`.
  *
+ * Both halves of that are enforced in `beforeAll` rather than trusted: it
+ * resolves the fixture, so an unseeded organization aborts the file instead of
+ * failing one test and running the rest, and it leaves the shared work root
+ * linked, so the one test that submits no `method_id` meets the duplicate
+ * guard whatever else has run or failed.
+ *
  * Consequence to know: `POST /v1/methods` — `mthds_save_method`'s create arm —
  * therefore has no live coverage here. What exercises it live is the seed
  * script, through the SDK rather than through the tool.
@@ -54,6 +60,7 @@ const NEVER_CREATED_NAME = `${CATALOG_WRITE_FIXTURE_NAME}_never_created`;
 
 let workRoot: string;
 let context: CatalogWriteContext;
+let fixtureId: string;
 
 /** The whole workshop wiring, rooted at a real temp directory. */
 function contextsFor(root: string): CatalogWriteContext {
@@ -80,28 +87,68 @@ function asSaved(result: { structuredContent: unknown }): SaveMethodSuccess {
   return sc;
 }
 
+/**
+ * Resolve the fixture and leave the shared work root LINKED, before any test
+ * runs. Both halves are safety rather than convenience, and both belong here
+ * rather than in a test.
+ *
+ * Resolving here means an unseeded organization fails `beforeAll`, which
+ * vitest treats as fatal to the whole file — a failing `it` does not stop the
+ * ones after it, and the suite carries no `bail`. Linking here means the
+ * tool's own duplicate guard is armed for every later test whatever runs and
+ * whatever passes: the one test that deliberately submits no `method_id`
+ * relies on that guard to be refused, and an unlinked root sends it down the
+ * CREATE arm instead, minting a row under the fixture's own name that the
+ * platform's admin-only delete cannot remove. That is reachable three ways —
+ * an unseeded organization, a `-t` filter that skips the earlier tests, and a
+ * seeded organization where the first test merely FAILS, which includes the
+ * wire drift this suite exists to detect.
+ *
+ * The linking save names `method_id`, so it takes the update arm and cannot
+ * create. It is why the "links the directory" test below uses a directory of
+ * its own: proving that a save writes the link needs a root that has none.
+ */
 beforeAll(async () => {
+  fixtureId = await catalogWriteFixtureMethodId();
+
   workRoot = await mkdtemp(join(tmpdir(), "pipelex-mcp-catalog-write-"));
   context = contextsFor(workRoot);
   await writeFile(join(workRoot, CATALOG_WRITE_BUNDLE_FILE), CATALOG_WRITE_BUNDLE, "utf8");
+
+  asSaved(
+    await saveMthdsMethod(
+      {
+        files: [{ path: CATALOG_WRITE_BUNDLE_FILE }],
+        name: CATALOG_WRITE_FIXTURE_NAME,
+        method_id: fixtureId,
+      },
+      context,
+    ),
+  );
 });
 
 describe("mthds_save_method (live)", () => {
+  // A directory of its own, holding no link file, because that is the state
+  // this test is about — `beforeAll` leaves the shared root already linked so
+  // that no OTHER test can reach the create arm. Naming `method_id` keeps this
+  // an update, so an unlinked root is safe here and only here.
   it("saves the bundle to the catalog and links the directory", async () => {
-    const methodId = await catalogWriteFixtureMethodId();
+    const freshRoot = await mkdtemp(join(tmpdir(), "pipelex-mcp-catalog-write-fresh-"));
+    const freshContext = contextsFor(freshRoot);
+    await writeFile(join(freshRoot, CATALOG_WRITE_BUNDLE_FILE), CATALOG_WRITE_BUNDLE, "utf8");
 
     const result = await saveMthdsMethod(
       {
         files: [{ path: CATALOG_WRITE_BUNDLE_FILE }],
         name: CATALOG_WRITE_FIXTURE_NAME,
-        method_id: methodId,
+        method_id: fixtureId,
       },
-      context,
+      freshContext,
     );
 
     const saved = asSaved(result);
     expect(saved.is_valid).toBe(true);
-    expect(saved.method_id).toBe(methodId);
+    expect(saved.method_id).toBe(fixtureId);
     expect(saved.name).toBe(CATALOG_WRITE_FIXTURE_NAME);
     expect(saved.saved).toBe("updated");
     expect(typeof saved.updated_at).toBe("string");
@@ -110,16 +157,17 @@ describe("mthds_save_method (live)", () => {
     // duplicate, so a save that reported success without writing it would
     // leave the directory able to mint a second method.
     const link = JSON.parse(
-      await readFile(join(workRoot, "pipelex-method.json"), "utf8"),
+      await readFile(join(freshRoot, "pipelex-method.json"), "utf8"),
     ) as Record<string, unknown>;
     expect(link.method_id).toBe(saved.method_id);
     expect(typeof link.api_host).toBe("string");
   });
 
   it("updates the method it just saved, through PUT", async () => {
-    // The id comes from the link file the save before this one wrote, which is
-    // how a real caller gets it. Omitting it is refused as a would-be
-    // duplicate, and that refusal has a case of its own below.
+    // The id comes from the link file rather than from `fixtureId`, which is
+    // how a real caller gets it — a save links the directory, and the next one
+    // reads that link back. Omitting it is refused as a would-be duplicate,
+    // and that refusal has a case of its own below.
     const methodId = await linkedMethodId();
 
     const result = await saveMthdsMethod(
