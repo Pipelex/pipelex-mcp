@@ -74,6 +74,12 @@ describe("inputsResult", () => {
     expect(result.summary).toContain("Resolved pipe: `demo.main`");
     expect(result.summary).toContain("```json");
     expect(result.summary).toContain('"question": "Your question here"');
+    // The next step rides the result, where the model has the template in
+    // hand, and after the template so the payload stays first.
+    expect(result.summary).toContain("`mthds_prepare_inputs`");
+    expect(result.summary.indexOf("`mthds_prepare_inputs`")).toBeGreaterThan(
+      result.summary.indexOf("```json"),
+    );
   });
 
   it("projects a toml template as raw text", () => {
@@ -87,6 +93,12 @@ describe("inputsResult", () => {
     expect(result.structuredContent).not.toHaveProperty("inputs");
     expect(result.summary).toContain("```toml");
     expect(result.summary).toContain('question = "Your question here"');
+    // Both next tools take `inputs` as a JSON object, so the TOML arm's next
+    // step says to convert it — the text itself would be refused.
+    expect(result.summary).toContain("convert it to a JSON object for `inputs`");
+    expect(result.summary.indexOf("`mthds_prepare_inputs`")).toBeGreaterThan(
+      result.summary.indexOf("```toml"),
+    );
   });
 
   it("projects invalid produced verdicts as ok with validation errors", () => {

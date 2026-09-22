@@ -122,6 +122,29 @@ describe("local stdio server", () => {
     expect(Object.keys(schema.properties ?? {}).sort()).toEqual(["images", "indices", "run_id"]);
   });
 
+  it("opens both shells' instructions with the order of the steps", async () => {
+    const { client: hosted, close: closeHosted } = await connectClient(
+      createHostedServer(TEST_OAUTH),
+    );
+    const { client: local, close: closeLocal } = await connectClient(createLocalServer());
+
+    try {
+      for (const instructions of [hosted.getInstructions() ?? "", local.getInstructions() ?? ""]) {
+        // A host that cuts keeps the head. When the workshop's instructions
+        // outgrew Claude Code's cut, the step order was what the model lost,
+        // so it is the first thing said: every step named, in order, early.
+        const head = instructions.slice(0, FLOW_HEAD_LENGTH);
+        const positions = FLOW_ORDER.map((tool) => head.indexOf(`\`${tool}\``));
+
+        expect(positions, "every step is named in the head").not.toContain(-1);
+        expect(positions).toEqual([...positions].sort((a, b) => a - b));
+      }
+    } finally {
+      await closeHosted();
+      await closeLocal();
+    }
+  });
+
   it("tells both shells that showing a picture is permanent", async () => {
     const { client: hosted, close: closeHosted } = await connectClient(
       createHostedServer(TEST_OAUTH),
@@ -494,7 +517,7 @@ describe("local stdio server", () => {
     try {
       expect(client.getInstructions()).toContain("Prefer the `{ path: string }` file form");
       expect(client.getInstructions()).toContain("Inline `{ content: string, uri?: string }`");
-      expect(client.getInstructions()).toContain("no views at launch");
+      expect(client.getInstructions()).toContain("has no views");
     } finally {
       await close();
     }
@@ -633,6 +656,21 @@ const catalogMethod: MethodPage["items"][number] = {
   description: "Extract invoice data",
   created_at: "2026-01-01T00:00:00Z",
 };
+
+/** The run flow, in the order both shells' instructions must name it. */
+const FLOW_ORDER = [
+  "mthds_list_methods",
+  "mthds_validate",
+  "mthds_inputs_template",
+  "mthds_prepare_inputs",
+  "mthds_run",
+  "mthds_run_status",
+  "mthds_run_results",
+  "mthds_show_images",
+] as const;
+
+/** How early the flow must be complete: well inside any host's cut. */
+const FLOW_HEAD_LENGTH = 500;
 
 /**
  * The tools that take a method selector, and whose instruction sentences must

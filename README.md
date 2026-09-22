@@ -547,7 +547,9 @@ published method by address, resolved server-side on the build envelope;
 `method_id` projects a registered method's current stored content (requires an
 API key, since the catalog is org-scoped). No Skybridge view — the template is
 small structured data the model reads directly, and the `content` summary repeats
-it in a fenced block.
+it in a fenced block, followed by the next step: `mthds_prepare_inputs`, or
+straight to `mthds_run` when every file value is already a URL or a
+`pipelex-storage://` reference.
 
 ### `mthds_codegen`
 

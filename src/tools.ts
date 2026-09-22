@@ -281,12 +281,10 @@ export const mthdsListMethodsTool = defineTool({
 export const mthdsValidateTool = defineTool({
   name: "mthds_validate",
   description:
-    "Validate an MTHDS method with the Pipelex API — from submitted file contents, from a published method's address passed as method_ref " +
-    "(github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0), " +
+    "Validate an MTHDS method with the Pipelex API — from submitted file contents, from a published method's address passed as method_ref, " +
     "or from a registered method's catalog id (mt_…) passed as method_id. " +
     "Supply exactly ONE of files / method_ref / method_id — never several. " +
-    "Addresses and ids are resolved server-side, so no bundle enters the conversation; " +
-    "a by-id call validates the method's CURRENT stored content and requires an API key, since the catalog is org-scoped. " +
+    "Addresses and ids are resolved server-side, so no bundle enters the conversation; a by-id call validates the method's CURRENT stored content. " +
     "A valid verdict carries the main pipe's typed signature (main_pipe): its ref, each declared input with the concept it expects and how many items, and the concept it produces — " +
     "type a call site from that instead of guessing the shapes of a method you cannot read.",
   inputSchema: mthdsValidateInputSchema,
@@ -305,11 +303,10 @@ export const mthdsValidateTool = defineTool({
 export const mthdsInputsTemplateTool = defineTool({
   name: "mthds_inputs_template",
   description:
-    "Project a pipe's declared inputs as a fill-in template — from submitted MTHDS file contents, from a published method's address passed as method_ref " +
-    "(github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0), " +
+    "Project a pipe's declared inputs as a fill-in template — from submitted MTHDS file contents, from a published method's address passed as method_ref, " +
     "or from a registered method's catalog id (mt_…) passed as method_id. " +
     "Supply exactly ONE of files / method_ref / method_id — never several. " +
-    "A by-id call projects from the method's CURRENT stored content and requires an API key, since the catalog is org-scoped.",
+    "A by-id call projects from the method's CURRENT stored content.",
   inputSchema: mthdsInputsInputSchema,
   outputSchema: mthdsInputsOutputSchema,
   annotations: {
@@ -332,13 +329,11 @@ export const mthdsInputsTemplateTool = defineTool({
  * target the SDK gains cannot be added there without being described here.
  */
 const CODEGEN_DESCRIPTION = [
-  "Generate typed code for an MTHDS method: its concept set projected into typed models (kind types) by the Pipelex codegen engine, stamped and locked so the written tree can be checked offline.",
-  "Supply exactly ONE of files / method_ref (a published method's address, github.com/<owner>/<repo>[/<selector>][@<tag>]) / method_id (a registered method's mt_… catalog id) — never several. Addresses and ids are resolved server-side, so no bundle enters the conversation; a by-id call generates from the method's CURRENT stored content and requires an API key, since the catalog is org-scoped.",
-  `target is required and has no default — choose it from the context, and the user's explicit request wins: ${CODEGEN_TARGET_RULE}.`,
-  "Field keys stay snake_case in every target.",
-  "On the local workshop, pass output_dir (a DEDICATED generated directory relative to the working directory, such as src/generated/<method>/) to write the tree directly, so the bytes never enter the conversation; the hosted console does not take output_dir.",
-  "Without output_dir, write every returned artifact at its path and the lock as codegen.lock beside them, all VERBATIM (byte for byte — any change breaks the stamp and the lock), into a dedicated generated directory; `pipelex codegen check` and @pipelex/sdk's runCodegenCheck then pass on that tree.",
-  "A large artifact set is withheld for size rather than cut mid-file (truncated: true, content absent on the withheld files) — generate such a method locally with `pipelex codegen types`.",
+  "Generate typed code for an MTHDS method: its concept set projected into typed models by the Pipelex codegen engine, stamped and locked so the written tree can be checked offline.",
+  "Supply exactly ONE of files / method_ref / method_id — never several; an address or an id is resolved server-side, so no bundle enters the conversation.",
+  `target is required and has no default — choose it from the project, and the user's explicit request wins: ${CODEGEN_TARGET_RULE}.`,
+  "On the local workshop, pass output_dir (a DEDICATED generated directory, such as src/generated/<method>/) to write the tree to disk, so the bytes never enter the conversation; the hosted console does not take output_dir.",
+  "Without output_dir, write every returned artifact at its path and the lock as codegen.lock beside them, VERBATIM — any byte change breaks the stamp and the lock.",
 ].join(" ");
 
 export const mthdsCodegenTool = defineTool({
@@ -391,10 +386,10 @@ export const mthdsRunTool = defineTool({
   name: "mthds_run",
   description:
     "Start a durable run of a MTHDS method — from submitted file contents, from a published method's address passed as method_ref " +
-    "(github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0 — resolved server-side at the tag, with the fetched commit returned as provenance), " +
+    "(resolved server-side at the tag, with the fetched commit returned as provenance), " +
     "or from a registered method's catalog id (mt_…) passed as method_id. " +
     "method_ref is a complete run source and pairs with NOTHING (not files, not method_id); files + method_id together is legal — the files run and method_id is recorded as run-history linkage. " +
-    "A by-id run executes the method's CURRENT stored content (methods are not versioned — it does not pin what you previously validated) and requires an API key, since the catalog is org-scoped. " +
+    "A by-id run executes the method's CURRENT stored content (methods are not versioned — it does not pin what you previously validated). " +
     "Executes the method on the hosted Pipelex API and spends inference credit. " +
     "When running from files, validate the bundle with mthds_validate and fill the inputs template from mthds_inputs_template first — " +
     "validation gives a structured, repairable verdict, where a start-time rejection only reports the failure. " +
@@ -564,6 +559,10 @@ export const mthdsDownloadArtifactsTool = defineTool({
  * The second load-bearing sentence is the `method_id` discriminator. Without it
  * a model that means to update calls without the id, and a create is the one
  * gesture here that cannot be taken back by calling again.
+ *
+ * What matters only after the call — that the link file is to be committed,
+ * that a pending-signature bundle does not run yet — is said by the result
+ * summary, which is where the model is when it needs it.
  */
 const SAVE_METHOD_DESCRIPTION = [
   "Save an MTHDS bundle from disk to the organization's method catalog — one call validates the files and saves those same bytes.",
@@ -572,8 +571,7 @@ const SAVE_METHOD_DESCRIPTION = [
   "name is required either way, because the save rewrites the whole catalog row; on an update a name different from the stored one IS the rename.",
   "python replaces the bundle's custom-PipeFunc .py files as a SET — omit it to preserve what is stored, send [] to clear it. It is never merged.",
   "Pass expected_updated_at (from pipelex-method.json's synced_updated_at) to refuse the save if somebody else has changed the method since this directory synced; without it you are knowingly overwriting.",
-  "An invalid bundle is a verdict, not an error: nothing is saved and the validation errors come back to fix. A valid bundle with pending signatures IS saved, and the summary says it does not run yet.",
-  "After a successful save the directory is linked by pipelex-method.json — tell the user to commit it, so a teammate updates this method instead of creating a second one.",
+  "An invalid bundle is a verdict, not an error: nothing is saved and the validation errors come back to fix. A valid bundle with pending signatures IS saved.",
 ].join(" ");
 
 export const mthdsSaveMethodTool = defineTool({
