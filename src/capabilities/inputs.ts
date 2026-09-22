@@ -343,6 +343,13 @@ function templateFields(
   return { inputs_toml: report.inputs_toml };
 }
 
+// What to do with the template once it is filled. It is said here, where it
+// matters, rather than in the tool description or the server instructions:
+// both are held under the length a host shows, and this is the one layer that
+// reaches the model exactly when it has a template in hand.
+const NEXT_STEP =
+  "Fill it in, then call `mthds_prepare_inputs` to make file-bearing values run-ready — or pass it straight to `mthds_run` when every file value is already an http(s) URL or a pipelex-storage:// reference.";
+
 // The build routes return a plain `message` rather than `rendered_markdown`,
 // so the summary is composed here. Unlike validation, the template is
 // deliberately duplicated into the summary: it is the payload the model must
@@ -353,9 +360,13 @@ function validSummary(report: BuildInputsValidReport): string {
       ? "```json\n" + JSON.stringify(report.inputs, null, 2) + "\n```"
       : "```toml\n" + (report.inputs_toml ?? "").trimEnd() + "\n```";
 
-  return ["# Inputs template", report.message, `Resolved pipe: \`${report.pipe_ref}\``, fence].join(
-    "\n\n",
-  );
+  return [
+    "# Inputs template",
+    report.message,
+    `Resolved pipe: \`${report.pipe_ref}\``,
+    fence,
+    NEXT_STEP,
+  ].join("\n\n");
 }
 
 function invalidSummary(message: string, validationErrors: ValidationErrorItem[]): string {

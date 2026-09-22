@@ -74,6 +74,12 @@ describe("inputsResult", () => {
     expect(result.summary).toContain("Resolved pipe: `demo.main`");
     expect(result.summary).toContain("```json");
     expect(result.summary).toContain('"question": "Your question here"');
+    // The next step rides the result, where the model has the template in
+    // hand, and after the template so the payload stays first.
+    expect(result.summary).toContain("`mthds_prepare_inputs`");
+    expect(result.summary.indexOf("`mthds_prepare_inputs`")).toBeGreaterThan(
+      result.summary.indexOf("```json"),
+    );
   });
 
   it("projects a toml template as raw text", () => {
