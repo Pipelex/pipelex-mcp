@@ -606,6 +606,31 @@ export interface ClassifyErrorOptions {
     hint: string;
   };
   /**
+   * The request field that named the method on this route — `files`,
+   * `method_ref` or `method_id`, picked per request shape like
+   * {@link badRequest}'s locator.
+   *
+   * It exists for the **execution-locus gate**, the one refusal whose fault is
+   * the method the caller named rather than the credential they sent. The gate
+   * is the runner's, so which field named the method is the only thing the
+   * arm cannot know for itself, and hardcoding `method_ref` would be wrong on
+   * `/v1/start`, which applies the gate to a submitted bundle and to a stored
+   * method's injected source as well as to a fetched package.
+   *
+   * Left unset on the two routes the gate cannot reach at all:
+   * `/v1/build/inputs` and `/v1/codegen` resolve an address through
+   * `fetch_method_mthds_files`, which takes only the `.mthds` files and loads
+   * no Python, so no execution locus is ever decided there. An arm that fires
+   * with this unset reports no location rather than a wrong one.
+   *
+   * It IS set on every shape of a gated route, including `/v1/validate`'s
+   * files shape, where the gate happens to be unreachable today because inline
+   * contents travel as `mthds_contents` and carry no `.py`. That is the
+   * route's current wiring rather than a rule, and a locator costs nothing to
+   * keep right.
+   */
+  methodLocation?: string;
+  /**
    * Per-route 501 override. A 501 on a method-taking route is the reserved
    * registry form of `method_ref` (any non-address reference) — the caller's
    * own selector, not a server fault — so selector-shaped requests set this to
@@ -1106,6 +1131,31 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
       location: "method_ref",
       message,
       hint: "Hosted execution accepts MTHDS concepts and sandboxed PipeFuncs, not in-process Python — the referenced package declares Python structure classes. Express its types as MTHDS concepts, or run it on a self-hosted OSS runner.",
+      retryable: false,
+    };
+  }
+
+  // The execution-locus gate's other refusal, and the one that reads worst
+  // when it is missed: a method shipping custom Python (`.py`) is refused by a
+  // deployment that is not sandbox-hosted, because running it would import
+  // caller-supplied code into the runner's own process. Unlike the structures
+  // refusal above this one is a property of the PAIR — the method and the
+  // deployment — and the method is not malformed: the very same method runs on
+  // a sandbox-hosted deployment, which is where PipeFunc Python belongs. The
+  // class is still `input_domain`, by this repo's own test for it: a request
+  // the caller can write does work around it (a Python-free method), which is
+  // exactly what `missingDescriptor` is `config` for failing. The runner reads
+  // it the same way — `raise_forbidden` tags this refusal `error_domain:
+  // input` (`pipelex-api/api/errors.py`) — though the SDK surfaces no
+  // `error_domain`, which is why the branch is on `errorType`. What must not
+  // happen is the generic 401/403 arm, which told a caller whose credential is
+  // perfectly good to go and mint a new key.
+  if (err.status === 403 && err.errorType === "CustomCodeRequiresSandbox") {
+    return {
+      class: "input_domain",
+      ...(options.methodLocation === undefined ? {} : { location: options.methodLocation }),
+      message,
+      hint: "This deployment is not sandbox-hosted, so it refuses a method that ships custom Python (.py) — the credential is not the problem. Run the method on a sandbox-hosted deployment, or name one whose pipes are all MTHDS.",
       retryable: false,
     };
   }

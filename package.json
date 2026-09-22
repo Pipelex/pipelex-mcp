@@ -1,6 +1,6 @@
 {
   "name": "@pipelex/mcp",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "description": "Pipelex MCP servers for validating, preparing, and running MTHDS methods",
   "license": "Elastic-2.0",
   "repository": {
@@ -44,7 +44,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@pipelex/sdk": "^0.20.0",
+    "@pipelex/sdk": "^0.20.1",
     "mthds": "^0.25.0",
     "skybridge": "^1.4.1",
     "zod": "^4.3.6"

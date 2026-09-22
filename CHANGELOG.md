@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.17.0] - 2026-09-22
+
+### Changed
+
+- **`@pipelex/sdk` moves from 0.20.0 to 0.20.1**: The release makes `resultsFromExecute` public — the pure lift from a blocking `execute()` result onto the `RunResults` shape the durable path hands back, which the SDK had been applying privately on its bare-runner fallback. Nothing in this repo migrated, and the reason is worth recording so the next bump does not go looking: every tool here drives the **durable** lifecycle (`start` / `getRunStatus` / `getRunResult`) through `RunClient`, and the new helper serves the blocking path this server never calls. The rest of the release is the extraction itself — the mapping moved out of the SDK's client module verbatim and the client now calls it by its new name — so no route, request shape or response reader that the capabilities touch was altered. If a future shell ever drives `execute()` directly, this is the helper that lifts the three I/O artifacts and the usage pair, rather than re-reading `pipe_output` by hand.
+
+### Fixed
+
+- **The execution-locus gate's sandbox refusal is reported against the method, not against your API key**: A method that ships custom Python (`.py`) is refused with a `403` by a deployment that is not sandbox-hosted, because running it would import caller-supplied code into the runner's own process. That refusal names itself on the wire (`error_type: "CustomCodeRequiresSandbox"`), but nothing here read it, so it fell through to the generic 401/403 arm and came back as `config` at `PIPELEX_API_KEY` — "check the API key for the configured Pipelex API" — for a credential that was working perfectly, with the hosted console's reconnect-and-sign-in wording stacked on top. It is now `input_domain` at whatever named the method, with a hint saying the deployment is not sandbox-hosted and that a Python-free method or a sandbox-hosted deployment is the way through. The sibling refusal, a package declaring in-process Python structure classes, was already classified this way; this is the other half of the same gate, and the two are now documented together in `SPEC.md` under Method Selectors. It reaches `mthds_prepare_inputs`, `mthds_validate` and `mthds_run` — every tool whose selector travels `/v1/validate` or `/v1/start`; `mthds_inputs_template` and `mthds_codegen` resolve an address through a route that loads no Python and cannot produce the refusal at all. The locator follows the request shape rather than always naming `method_ref`, because `/v1/start` applies the same gate to a submitted bundle and to a stored method's injected source.
+
 ## [0.16.0] - 2026-09-22
 
 ### Highlights

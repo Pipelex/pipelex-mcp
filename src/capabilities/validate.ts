@@ -386,6 +386,7 @@ export function buildValidationContext(env = process.env): ValidationContext {
 
 const VALIDATE_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/validate",
+  methodLocation: "files",
 };
 
 /**
@@ -393,11 +394,14 @@ const VALIDATE_ERROR_OPTIONS: ClassifyErrorOptions = {
  * failures keep their class names as distinct error types over the wire: a
  * ref that does not parse or fetch, or an ambiguous one, is a 422; no package
  * matching the address is a 404; the reserved registry form is a 501 — all the
- * caller's own selector, located at `method_ref`. (The structures-refusal 403
- * is classified route-independently in `classifyError`.)
+ * caller's own selector, located at `method_ref`. (The execution-locus gate's
+ * two 403s — the structures refusal and the sandbox refusal — are classified
+ * route-independently in `classifyError`, off the runner's declared
+ * `error_type`, and land at `methodLocation`.)
  */
 const VALIDATE_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/validate",
+  methodLocation: "method_ref",
   badRequest: {
     location: "method_ref",
     hint: `Check the address and tag — ${METHOD_REF_GRAMMAR}. The tag must be a git tag on the repository (branches do not pin), and the ref must be resolvable by an anonymous clone.`,
@@ -422,6 +426,7 @@ const VALIDATE_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
  */
 const VALIDATE_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/validate",
+  methodLocation: "method_id",
   badRequest: {
     location: "method_id",
     hint: "The stored method may have no MTHDS source yet, or this deployment may not resolve method_id on /v1/validate — the selector is hosted-only (a bare pipelex-api runner has no catalog). Submit files or a method_ref instead if it persists.",
