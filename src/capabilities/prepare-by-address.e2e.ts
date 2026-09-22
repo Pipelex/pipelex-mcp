@@ -19,11 +19,11 @@
  * route; the reservation is written once on each constant in `e2e-support.ts`.
  */
 
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildLocalToolContexts } from "../local/server.js";
 import { prepareMthdsInputs } from "./prepare.js";
@@ -59,12 +59,38 @@ async function publishedInputs(): Promise<MainPipeInputSignature[]> {
   expect(result.structuredContent.is_valid).toBe(true);
   const mainPipe = result.structuredContent.main_pipe;
   expect(mainPipe).toBeDefined();
-  return (mainPipe as { inputs: MainPipeInputSignature[] }).inputs;
+  const inputs = (mainPipe as { inputs: MainPipeInputSignature[] }).inputs;
+  // Asserted HERE rather than in one caller, so every path through this helper
+  // is guarded. Only the first case used to check it, and the second reached
+  // `fileSlotOf` unguarded — where an entry pipe declaring nothing yielded
+  // `undefined` and died on `.name` two frames away, as a bare TypeError with
+  // no bearing on the cause.
+  expect(
+    inputs.length,
+    `${PYTHON_FREE_METHOD_REF} declared no inputs — this suite needs a published method whose entry ` +
+      "pipe takes a file, so the fixture address has moved rather than the wire having drifted",
+  ).toBeGreaterThan(0);
+  return inputs;
 }
 
-/** The slot a local file goes in — a Document or Image position, else the first. */
+/**
+ * The slot a local file goes in — a Document or Image position.
+ *
+ * It fails NAMING the cause rather than falling back to `inputs[0]`. The
+ * fallback could not produce a false pass, since a text slot filled with
+ * `{ url: <local path> }` uploads nothing and the assertion on `uploads` would
+ * still fail — but it failed as though the upload path had broken, when the
+ * real news is that the published method stopped declaring a file position.
+ */
 function fileSlotOf(inputs: MainPipeInputSignature[]): MainPipeInputSignature {
-  return inputs.find((input) => /Document|Image/.test(input.concept_ref)) ?? inputs[0];
+  const slot = inputs.find((input) => /Document|Image/.test(input.concept_ref));
+  const declared = inputs.map((input) => `${input.name}: ${input.concept_ref}`).join(", ");
+  expect(
+    slot,
+    `none of ${PYTHON_FREE_METHOD_REF}'s inputs (${declared}) is a Document or Image position, so ` +
+      "there is no file slot to fill — the published method changed shape, which is not upload drift",
+  ).toBeDefined();
+  return slot as MainPipeInputSignature;
 }
 
 beforeAll(async () => {
@@ -77,6 +103,10 @@ beforeAll(async () => {
   prepareContext = contexts.prepare;
   validationContext = contexts.validation;
   await writeFile(join(workRoot, LOCAL_ASSET), Buffer.from(TINY_PNG_BASE64, "base64"));
+});
+
+afterAll(async () => {
+  await rm(workRoot, { recursive: true, force: true });
 });
 
 /**
@@ -93,8 +123,9 @@ describe.skipIf(!SERVES_SELECTORS)(
     it("names a published method's inputs from its address alone", async () => {
       const inputs = await publishedInputs();
 
-      expect(inputs.length).toBeGreaterThan(0);
       // The slot the next case fills — named by the server, not guessed here.
+      // `publishedInputs` now asserts the list is non-empty for every caller,
+      // so this case no longer carries that check of its own.
       expect(fileSlotOf(inputs).name).toBeTruthy();
     });
 
