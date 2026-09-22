@@ -55,10 +55,10 @@ make t              - Shorthand -> test
 
 Live checks against a REAL Pipelex API (never part of `make all`):
 make smoke            - Drive the workshop stdio server end to end [PIPELEX_BASE_URL=...]
-make test-e2e         - Run every capability's free path (writes one 1x1 PNG)
+make test-e2e         - Run every capability's free path (writes PNGs, updates fixture rows)
 make te               - Shorthand -> test-e2e
 make test-e2e-run     - Same, plus the run family (SPENDS INFERENCE CREDIT)
-make seed-e2e-fixture - Create/refresh the durable fixture method the by-id legs need
+make seed-e2e-fixture - Create/refresh the durable fixture methods the live suites need
 make test-all         - EVERY test: hermetic + smoke + live incl. run family (SPENDS CREDIT)
 
 make build          - Build the Skybridge app
@@ -152,9 +152,10 @@ agent-test:
 # fails nothing at all. See CLAUDE.md -> "Detecting API drift".
 #
 #   smoke            - the whole path a host exercises, through the stdio shell
-#   test-e2e         - every capability's free path; WRITES one 1x1 PNG to storage
+#   test-e2e         - every capability's free path; WRITES PNGs to storage AND updates
+#                      the seeded catalog write fixture (it never creates a row)
 #   test-e2e-run     - the same, plus the run family (SPENDS INFERENCE CREDIT)
-#   seed-e2e-fixture - WRITES the durable fixture method the by-id legs need
+#   seed-e2e-fixture - WRITES the durable fixture methods the by-id and write legs need
 #
 # The target and its key are resolved ONCE here and exported, so the URL these
 # targets preflight is the URL the suites call. Precedence follows the dotenv
