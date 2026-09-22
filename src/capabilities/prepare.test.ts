@@ -1137,6 +1137,32 @@ describe("prepareMthdsInputs — selector-shaped classification", () => {
     expect(result.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
   });
 
+  it("locates the sandbox refusal (403) at method_ref, never at the credential", async () => {
+    const result = await prepareMthdsInputs(
+      { method_ref: PUBLISHED_REF, inputs: {} },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...prepareInputsNotCalled,
+          async validate(): Promise<PipelexValidationResult> {
+            throw apiError(403, "CustomCodeRequiresSandbox", "forbidden");
+          },
+        },
+      },
+    );
+
+    // A by-address prepare reads its signature from /v1/validate and therefore
+    // travels the execution-locus gate, which the two tooling routes do not.
+    // The generic 401/403 arm used to tell the caller their key was rejected
+    // and send them to mint a new one, for a package that is perfectly fine on
+    // a sandbox-hosted deployment.
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+    expect(result.structuredContent.errors?.[0]?.hint).toMatch(/sandbox-hosted/);
+    expect(result.structuredContent.errors?.[0]?.hint).not.toMatch(/PIPELEX_API_KEY/);
+  });
+
   it("headlines a paywall (402) as a plan limit, not as connectivity", async () => {
     const result = await prepareMthdsInputs(
       { method_id: "mt_123", inputs: {} },

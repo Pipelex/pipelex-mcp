@@ -586,6 +586,101 @@ describe("classifyError", () => {
     expect(error.retryable).toBe(false);
   });
 
+  it("classifies the sandbox refusal (403 CustomCodeRequiresSandbox) at the method, not the key", () => {
+    const error = classifyError(
+      new ApiResponseError(
+        "HTTP 403",
+        `${DEFAULT_API_URL}/v1/validate`,
+        403,
+        "Forbidden",
+        "{}",
+        "CustomCodeRequiresSandbox",
+        "This bundle ships custom Python (.py); running it requires a sandbox-hosted deployment.",
+        undefined, // validationErrors
+        undefined, // code
+      ),
+      {
+        methodLocation: "method_ref",
+        // The textures that would otherwise win: a deployment auth wording and
+        // a route gate. Neither may reach a refusal about the method itself.
+        auth: { location: "authorization", hint: "Sign in again." },
+        forbidden: { hint: "The feature is gated." },
+      },
+    );
+
+    expect(error.class).toBe("input_domain");
+    expect(error.location).toBe("method_ref");
+    expect(error.hint).toMatch(/sandbox-hosted/);
+    expect(error.hint).not.toMatch(/sign in/i);
+    expect(error.retryable).toBe(false);
+  });
+
+  it("locates the sandbox refusal wherever the request named the method", () => {
+    const refusal = (methodLocation: string): ToolError =>
+      classifyError(
+        new ApiResponseError(
+          "HTTP 403",
+          `${DEFAULT_API_URL}/v1/start`,
+          403,
+          "Forbidden",
+          "{}",
+          "CustomCodeRequiresSandbox",
+          "This bundle ships custom Python (.py).",
+          undefined, // validationErrors
+          undefined, // code
+        ),
+        { methodLocation },
+      );
+
+    // `/v1/start` applies the gate to a submitted bundle and to a stored
+    // method's injected source as well as to a fetched package, so the locator
+    // follows the request shape rather than being hardcoded to method_ref.
+    expect(refusal("files").location).toBe("files");
+    expect(refusal("method_id").location).toBe("method_id");
+  });
+
+  it("reports no location for a sandbox refusal on a route that names no method field", () => {
+    const error = classifyError(
+      new ApiResponseError(
+        "HTTP 403",
+        `${DEFAULT_API_URL}/v1/validate`,
+        403,
+        "Forbidden",
+        "{}",
+        "CustomCodeRequiresSandbox",
+        "This bundle ships custom Python (.py).",
+        undefined, // validationErrors
+        undefined, // code
+      ),
+      {},
+    );
+
+    // A missing locator is the honest answer — better than pointing the caller
+    // at a field this route never had.
+    expect(error.class).toBe("input_domain");
+    expect(error.location).toBeUndefined();
+  });
+
+  it("never applies the sandbox arm to a 401 carrying the same error_type", () => {
+    const error = classifyError(
+      new ApiResponseError(
+        "HTTP 401",
+        `${DEFAULT_API_URL}/v1/validate`,
+        401,
+        "Unauthorized",
+        "{}",
+        "CustomCodeRequiresSandbox",
+        "Missing key",
+        undefined, // validationErrors
+        undefined, // code
+      ),
+      { methodLocation: "method_ref" },
+    );
+
+    expect(error.class).toBe("config");
+    expect(error.location).toBe("PIPELEX_API_KEY");
+  });
+
   it("never applies the forbidden texture to a 401 — a rejected credential is not a gate", () => {
     const error = classifyError(
       new ApiResponseError(

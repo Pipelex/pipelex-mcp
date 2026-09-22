@@ -463,6 +463,7 @@ const START_SERVER_ERROR = {
 
 export const RUN_START_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/start",
+  methodLocation: "files",
   badRequest: {
     location: "files",
     hint: "Check files, pipe_code, and inputs; validate the bundle with mthds_validate and fill the template from mthds_inputs_template first.",
@@ -480,6 +481,7 @@ export const RUN_START_ERROR_OPTIONS: ClassifyErrorOptions = {
  */
 export const RUN_START_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/start",
+  methodLocation: "method_id",
   badRequest: {
     location: "method_id",
     hint: "The stored method may have no MTHDS source yet. If the error mentions organization context, the API key's org binding is the issue — mint a key in the right organization.",
@@ -499,6 +501,9 @@ export const RUN_START_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
  */
 export const RUN_START_MIXED_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/start",
+  // The files are the executed source, so the execution-locus gate is about
+  // them and not the linkage id — the same split `badRequest` makes.
+  methodLocation: "files",
   badRequest: RUN_START_ERROR_OPTIONS.badRequest,
   notFound: RUN_START_BY_ID_ERROR_OPTIONS.notFound,
   serverError: START_SERVER_ERROR,
@@ -515,6 +520,7 @@ export const RUN_START_MIXED_ERROR_OPTIONS: ClassifyErrorOptions = {
  */
 export const RUN_START_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/start",
+  methodLocation: "method_ref",
   badRequest: {
     location: "method_ref",
     hint: `Check the address and tag — ${METHOD_REF_GRAMMAR}. The tag must be a git tag on the repository (branches do not pin). If the address resolved, check pipe_code and the inputs against mthds_inputs_template.`,

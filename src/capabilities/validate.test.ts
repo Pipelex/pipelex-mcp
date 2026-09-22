@@ -1714,6 +1714,31 @@ describe("validateMthds by selector (server pass-through)", () => {
     expect(result.structuredContent.errors?.[0]?.hint).toMatch(/MTHDS concepts/);
   });
 
+  it("classifies the sandbox refusal (403) as the caller's selector, never an auth failure", async () => {
+    const result = await validateMthds(
+      { method_ref: ADDRESS },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...validateFilesNotCalled,
+          async validate(): Promise<PipelexValidationResult> {
+            throw apiError(
+              403,
+              "Forbidden",
+              "CustomCodeRequiresSandbox",
+              "This bundle ships custom Python (.py); running it requires a sandbox-hosted deployment.",
+            );
+          },
+        },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+    expect(result.structuredContent.errors?.[0]?.hint).toMatch(/sandbox-hosted/);
+  });
+
   it("classifies a registry-form 501 as input_domain at method_ref with the address-grammar hint", async () => {
     const result = await validateMthds(
       { method_ref: "some-registry/method" },
