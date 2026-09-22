@@ -4,7 +4,7 @@
 
 Pipelex MCP lets developers and coding agents discover registered methods, validate MTHDS content, project a method's declared inputs, and run methods durably on the hosted Pipelex API from inside an MCP host while they are authoring, repairing, or running `.mthds` files.
 
-Target users are Pipelex/MTHDS developers working with an AI assistant in a local development loop. Today, validation requires leaving the assistant flow, knowing the local OSS `pipelex-api` or SDK details, and manually mapping diagnostics back to file content. The first product slice is intentionally narrow: validate submitted MTHDS file contents and return structured results the assistant can use to fix issues.
+The target user is anyone reaching their Pipelex methods from an MCP host: someone in a chat host — ChatGPT, claude.ai, Claude Desktop — through the hosted console, and someone in a coding agent — Claude Code, Codex, Cursor — through the local workshop. Today, validation requires leaving the assistant flow, knowing the local OSS `pipelex-api` or SDK details, and manually mapping diagnostics back to file content. The first product slice is intentionally narrow: validate submitted MTHDS file contents and return structured results the assistant can use to fix issues.
 
 Core actions:
 

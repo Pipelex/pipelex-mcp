@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **The hosted console's address is `https://mcp.pipelex.com/mcp`**: An alias we own, in front of the Alpic hostname the README used to publish. Both answer, each advertising its own OAuth protected-resource document against the same AuthKit authorization server, so a connector registered by the old hostname keeps working and nobody has to re-add anything — what the alias buys is that the console can move later without every connector being re-added, which is exactly what the retired paragraph about the Alpic hostname was arguing could not be avoided. The address changes in the README, in `docs/readme.html` and in the release skill's console leg.
+- **The README's get-started is generated, not written here**: It is a region between `<!-- onboarding: mcp-route -->` markers, replaced wholesale from `https://raw.githubusercontent.com/Pipelex/.github/main/onboarding/rendered/mcp-route.md`, so the words a newcomer reads first are the same ones every other Pipelex surface shows them. An edit inside those markers does not survive the next generation; the text is changed at its source. The page is reordered around it: the host matrix moves directly under the region as `## Which server, for which host`, and what used to open the page — what the servers expose, the two deployments, the tool table — now follows under `## What this repository is`.
+- **Mistral Vibe's row says how to register the workshop**: The matrix cell read "pending Vibe's MCP mechanics", which was a statement about us rather than about Vibe, and it was out of date. The per-host section gains the `~/.vibe/config.toml` entry with the two things that bite: it has to be appended after every top-level setting, because a `[mcp_servers.env]` header pasted above one silently claims that setting as an environment variable of the server, and Vibe copies its whole configuration into every session log under `~/.vibe/logs/session/`, so the key lands there unredacted.
+- **The npm description says what the package is for**: It described the tools and not the point, and the package carried no keywords at all, so it was discoverable by its exact name and nothing else.
+
 ## [0.17.0] - 2026-09-22
 
 ### Changed
