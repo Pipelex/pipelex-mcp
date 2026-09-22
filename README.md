@@ -1,43 +1,82 @@
 # Pipelex MCP
 
-Pipelex MCP exposes registered-method discovery, MTHDS validation, inputs
-projection and preparation, and durable method runs to MCP hosts, wrapping the Pipelex API through the
-`@pipelex/sdk` `PipelexApiClient`. It ships as **two servers from one repo and
-one capability core**:
-
-- **Hosted console** — a [Skybridge](https://docs.skybridge.tech) HTTP server
-  (deployed on Alpic) for remote-connector hosts (ChatGPT, claude.ai, Claude
-  Desktop, Cowork). Registers the Skybridge views.
-- **Local workshop** — an npm-distributed stdio server (`@pipelex/mcp`, bin
-  `pipelex-mcp`) that coding-agent hosts (Claude Code, Codex, Cursor, Cowork)
-  spawn via `npx`. Its headline feature is the `{ path }` file arm: it reads
-  `.mthds` files from disk instead of having the model hand-copy their contents.
-
+<!-- onboarding: mcp-route -->
+<!-- Generated from the Pipelex onboarding source; this region is replaced from https://raw.githubusercontent.com/Pipelex/.github/main/onboarding/rendered/mcp-route.md — do not edit it here. -->
 ## Get started
 
-Pick **one** server for a given host — the workshop wherever there is a
-filesystem, the console everywhere else.
+Pipelex runs your AI methods — write a method once, then run it from your agent via MCP, turn it into a webapp, or use it via API in any software. This repository is how a chat or a coding agent reaches it.
 
-**Hosted console** — add as a custom connector in ChatGPT, claude.ai or
-Claude Desktop, then sign in with your Pipelex account. Nothing to install, no
-key to paste:
+Pick one server for a given host: the **workshop** wherever there is a filesystem, the **console** everywhere else. Never both — the two deployments register the same tool names.
+
+**Hosted console** — ChatGPT, claude.ai, Claude Desktop, Cowork. Add Pipelex as a custom connector by its URL, then sign in with your Pipelex account when the host asks. Nothing to install, and no key at all — the connector runs on your signed-in session:
 
 ```
-https://pipelex-mcp-a3c6a115.alpic.live/mcp
+https://mcp.pipelex.com/mcp
 ```
 
-**Local workshop** — for hosts that can spawn a process (Claude Code, Codex,
-Cursor). Needs Node.js 24+; hosts fetch it on demand, so there is nothing to
-install globally:
+**Local workshop** — Claude Code, Codex, Cursor.
 
 ```bash
 claude mcp add pipelex --env PIPELEX_API_KEY=plx_sk_... -- npx -y @pipelex/mcp
 ```
 
-Then ask it what methods you have, or point it at a `.mthds` file. Per-host
-registration snippets are under [Local workshop: install &
-register](#local-workshop-install--register), and which server belongs on which
-host is the [Host → server matrix](#host--server-matrix).
+The server runs on your own machine, so it carries an API key of its own — create one in your console at [app.pipelex.com](https://app.pipelex.com). Needs Node.js 24 or later; the host fetches the server on demand, so there is nothing to install globally.
+
+On Claude Code and Codex the [Pipelex plugin](https://github.com/Pipelex/pipelex-plugins) already declares the workshop, so install the plugin instead and skip the command above.
+
+**Then ask for something.** On the console:
+
+> What methods do I have?
+>
+> Run the invoice method on https://example.com/invoice.pdf
+
+On the workshop, where the server reaches the files you are writing:
+
+> Validate the bundle in `./methods/invoices` and run it on `invoice.pdf`.
+
+You get a run id straight away, and you can ask for its status, its results or the files it produced at any time.
+
+Give the file as a URL the connector can reach. In ChatGPT you can attach it to the conversation instead and ask for a run on it; the other connector hosts have no channel yet for handing a server the file you attached.
+
+**Next:** [what Pipelex is](https://go.pipelex.com/product) · [documentation](https://go.pipelex.com/docs) · [your console](https://app.pipelex.com) · [Discord](https://go.pipelex.com/discord)
+<!-- /onboarding -->
+
+## Which server, for which host
+
+The rule above, host by host. A host wired to both servers is the one configuration to avoid — [One host, one server](#one-host-one-server) says why, and how a claude.ai connector gets there without anyone choosing it.
+
+| Host | Server | How to connect |
+|---|---|---|
+| ChatGPT (web) | Hosted console | Apps directory |
+| claude.ai (web + mobile) | Hosted console | Connector (custom URL) |
+| Claude Desktop (chat mode) | Hosted console | Connector / marketplace plugin |
+| Claude Code | Local workshop | `claude mcp add`, or the `pipelex` plugin from the `pipelex-plugins` marketplace (its manifest spawns the workshop) |
+| ChatGPT desktop (Codex mode) | Local workshop | `~/.codex/config.toml` |
+| Cursor | Local workshop | `~/.cursor/mcp.json` |
+| Claude Desktop (Cowork mode) | **Dual** — console for consumers, workshop for builders | Connector, or stdio in `claude_desktop_config.json` |
+| Mistral Vibe (TUI) | Local workshop | `~/.vibe/config.toml` |
+| Mistral Vibe (web) | Hosted console | Connector / config |
+
+**On views:** the hosted console ships the `run-graph` and `run-follow`
+views, which render on view-capable hosts (ChatGPT, claude.ai, Cowork) and
+degrade to text on Claude Code. The **local workshop is tools-first — it ships
+no views on any host today**, so it reports structured results and text
+summaries directly. (Codex and Cowork are view-capable hosts and would render
+workshop views if local view delivery lands in a later increment.)
+
+## What this repository is
+
+Pipelex MCP exposes registered-method discovery, MTHDS validation, inputs
+projection and preparation, and durable method runs to MCP hosts, wrapping the Pipelex API through the
+`@pipelex/sdk` `PipelexApiClient`. It ships as **two servers from one repo and
+one capability core**:
+
+- **Hosted console** — a [Skybridge](https://docs.skybridge.tech) HTTP server,
+  deployed on Alpic, for remote-connector hosts. Registers the Skybridge views.
+- **Local workshop** — an npm-distributed stdio server (`@pipelex/mcp`, bin
+  `pipelex-mcp`) that coding-agent hosts spawn via `npx`. Its headline feature
+  is the `{ path }` file arm: it reads `.mthds` files from disk instead of
+  having the model hand-copy their contents.
 
 Both servers register the same MCP tools, with identical names, schemas, and
 contracts — apart from the per-shell tools marked below: one on the console,
@@ -169,6 +208,25 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }
 }
 ```
 
+**Mistral Vibe (TUI)** — `~/.vibe/config.toml` (`$VIBE_HOME/config.toml` when `VIBE_HOME` is set)
+
+```toml
+[[mcp_servers]]
+name = "pipelex"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@pipelex/mcp@latest"]
+startup_timeout_sec = 60.0
+
+[mcp_servers.env]
+PIPELEX_API_KEY = "plx_sk_..."
+PIPELEX_BASE_URL = ""
+```
+
+**Append this at the end of the file**, after every top-level setting: pasted above one, the `[mcp_servers.env]` header claims that setting as an environment variable of the server, silently. And **Mistral Vibe copies its whole configuration, this `env` table included, into every session log** under `~/.vibe/logs/session/`, so your key is written there unredacted — redact it before you share a log.
+
+Mistral Vibe spawns stdio servers with a minimal environment plus this `env` table and expands no variables, so the key has to be written here; a key exported in your shell never reaches the server. Keep exporting it in your shell as well, because the plugin's validation hook reads it from there. `PIPELEX_BASE_URL` stays empty for the hosted API — an empty value counts as unset — and any other variable `npx` needs, such as `HTTPS_PROXY` behind a proxy, goes in the same table. `startup_timeout_sec` is raised above Mistral Vibe's 10-second default because the first `npx` spawn fills the npm cache and takes longer than that. Two things to clear out of the file first: a `mcp_servers = []` line, which Mistral Vibe writes into a new config and which makes it refuse to start, since TOML cannot add a `[[mcp_servers]]` table to an array already written inline; and any `pipelex` server you registered by hand, since it refuses to start with two servers of the same name.
+
 **Environment**
 
 - `PIPELEX_API_KEY` — a `plx_sk_` platform key. Required for
@@ -202,13 +260,10 @@ paste. Add the connector by its URL and your host walks you through signing in
 with your Pipelex account:
 
 ```
-https://pipelex-mcp-a3c6a115.alpic.live/mcp
+https://mcp.pipelex.com/mcp
 ```
 
-That is the production console. The hostname is assigned by Alpic, and the
-OAuth Resource Indicator registered with WorkOS is pinned to it, so it moves
-only behind a deliberate migration — if it ever does, every existing
-connector has to be re-added anyway.
+That is the console's production address, and the one to register.
 
 You may run this server for your own team or company, on your own infrastructure or in your own cloud account. What the Elastic License 2.0 rules out is offering others a remote MCP server through which they run the methods of their choice, their own or a catalog's. See [LICENSE](LICENSE) for the full terms, including notices and redistribution, and the [license page](https://docs.pipelex.com/latest/license/) for how Pipelex reads them.
 
@@ -230,7 +285,7 @@ one expires or is revoked, calls come back as a `config` no-verdict at
 > connector's configuration at add-time, so re-adding is the only path.
 
 (That said, prefer the **local workshop** on hosts that can spawn it — see the
-matrix below.)
+matrix above.)
 
 ## Chat attachments (ChatGPT only)
 
@@ -287,30 +342,6 @@ bounded timeout; no headers forwarded; non-2xx refused. Because these hosts are
 undocumented vendor infrastructure that changes without notice — it already has
 once — the cap, the timeout, and the no-redirect rule hold on their own; the
 host check is a filter, not the defence.
-
-## Host → server matrix
-
-Connect each host to **exactly one** Pipelex server — the local workshop
-wherever there's a filesystem, the hosted console everywhere else.
-
-| Host | Server | How to connect |
-|---|---|---|
-| ChatGPT (web) | Hosted console | Apps directory |
-| claude.ai (web + mobile) | Hosted console | Connector (custom URL) |
-| Claude Desktop (chat mode) | Hosted console | Connector / marketplace plugin |
-| Claude Code | Local workshop | `claude mcp add`, or the `pipelex` plugin from the `pipelex-plugins` marketplace (its manifest spawns the workshop) |
-| ChatGPT desktop (Codex mode) | Local workshop | `~/.codex/config.toml` |
-| Cursor | Local workshop | `~/.cursor/mcp.json` |
-| Claude Desktop (Cowork mode) | **Dual** — console for consumers, workshop for builders | Connector, or stdio in `claude_desktop_config.json` |
-| Mistral Vibe (TUI) | Local workshop | pending Vibe's MCP mechanics |
-| Mistral Vibe (web) | Hosted console | Connector / config |
-
-**On views:** the hosted console ships the `run-graph` and `run-follow`
-views, which render on view-capable hosts (ChatGPT, claude.ai, Cowork) and
-degrade to text on Claude Code. The **local workshop is tools-first — it ships
-no views on any host today**, so it reports structured results and text
-summaries directly. (Codex and Cowork are view-capable hosts and would render
-workshop views if local view delivery lands in a later increment.)
 
 ## One host, one server
 
