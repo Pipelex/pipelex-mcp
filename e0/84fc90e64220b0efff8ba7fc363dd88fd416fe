@@ -1,0 +1,25 @@
+docs/client-identification.md
+  s_249569b913e311::t_c2116177740b8a 1-46
+CHANGELOG.md
+  s_249569b913e311::t_a72649b98d685c 5-8,11-12
+CLAUDE.md
+  s_249569b913e311::t_07b17cfda1d6cd 201
+SPEC.md
+  s_249569b913e311::t_c5d942fb1c3cfb 118-119
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e084fc90e64220b0efff8ba7fc363dd88fd416fe",
+  "prompts": {},
+  "sessions": {
+    "s_249569b913e311": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c96db657-dce9-4864-8d99-e33151cd32db",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thomashebrard <thomas@pipelex.com>"
+    }
+  }
+}
