@@ -18,6 +18,7 @@ import {
   mthdsShowImagesTool,
   mthdsUploadAttachmentsTool,
   mthdsValidateTool,
+  pipelexRequestUploadTool,
 } from "./tools.js";
 import type { HostedToolContexts, HostedToolDefinition } from "./tools.js";
 
@@ -152,6 +153,13 @@ export function createHostedServer(
       )
       .registerTool(hostedToolConfig(mthdsShowImagesTool), (input, extra) =>
         mthdsShowImagesTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
+      )
+      // App-only: the run-graph view calls it, the model never does.
+      .registerTool(hostedToolConfig(pipelexRequestUploadTool), (input, extra) =>
+        pipelexRequestUploadTool.handler(
           input,
           contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
         ),

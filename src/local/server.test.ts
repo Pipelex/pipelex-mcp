@@ -112,6 +112,14 @@ describe("the workshop's tool table", () => {
     expect(names).not.toContain("mthds_upload_attachments");
   });
 
+  it("does NOT register the console's upload grant tool", async () => {
+    const names = (await listTools(createLocalServer())).map((tool) => tool.name);
+
+    // The run form that calls it is a console view, and the workshop has no
+    // views: it uploads a local file through the SDK in mthds_prepare_inputs.
+    expect(names).not.toContain("pipelex_request_upload");
+  });
+
   it("registers mthds_codegen with the target enum, no default, and the write annotations", async () => {
     const tools = await listTools(createLocalServer());
     const tool = tools.find((candidate) => candidate.name === "mthds_codegen");
