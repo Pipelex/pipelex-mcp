@@ -10,6 +10,7 @@ import {
   sentencesAbout,
 } from "../shell-test-support.js";
 import { createHostedServer } from "./server.js";
+import * as hostedTools from "./tools.js";
 
 describe("the console's emitted contract", () => {
   /**
@@ -27,6 +28,20 @@ describe("the console's emitted contract", () => {
 });
 
 describe("the console's tool table", () => {
+  it("registers every tool definition it exports, and nothing else", async () => {
+    // The console registers its tools one by one through Skybridge's typed
+    // chain, so a definition added to `tools.ts` without its link in the chain
+    // would pass every other check: the snapshot would not move and nothing
+    // flags an unused export. Reading the module rather than a list kept beside
+    // the chain is what leaves nothing else to forget.
+    const defined = Object.values(hostedTools as Record<string, unknown>)
+      .filter(isToolDefinition)
+      .map((tool) => tool.name);
+    const registered = (await listTools(createHostedServer(TEST_OAUTH))).map((tool) => tool.name);
+
+    expect([...registered].sort()).toEqual([...defined].sort());
+  });
+
   it("registers mthds_show_images", async () => {
     // Named rather than derived: the image tool's whole point is that it is a
     // deliberate gesture available wherever a run is, so dropping it out of the
@@ -218,6 +233,15 @@ describe("the console's instructions", () => {
     }
   });
 });
+
+function isToolDefinition(value: unknown): value is { name: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as Record<string, unknown>).name === "string" &&
+    typeof (value as Record<string, unknown>).handler === "function"
+  );
+}
 
 /** The console's flow, in the order its instructions must name it. */
 const FLOW_ORDER = [

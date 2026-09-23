@@ -18,7 +18,7 @@
  */
 
 import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
-import type { ViewConfig } from "skybridge/server";
+import type { ToolMeta, ViewConfig } from "skybridge/server";
 
 import {
   attachmentsToolResult,
@@ -139,8 +139,13 @@ export function buildHostedToolContexts(env: NodeJS.ProcessEnv = process.env): H
 interface HostedRegistration {
   /** The Skybridge view the result renders through, on a tool that has one. */
   view?: ViewConfig;
-  /** Host metadata on the `tools/list` entry: invocation strings, and the attachment mechanism. */
-  _meta: Record<string, unknown>;
+  /**
+   * Host metadata on the `tools/list` entry: invocation strings, and the attachment mechanism.
+   * Typed as Skybridge's own `ToolMeta` so a malformed known key (`openai/fileParams` as a
+   * string rather than an array, say) fails the build here, as it did when each literal sat
+   * inside its `registerTool` call.
+   */
+  _meta: ToolMeta;
 }
 
 export type HostedToolDefinition<
