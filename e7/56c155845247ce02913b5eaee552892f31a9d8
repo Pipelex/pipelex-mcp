@@ -1,0 +1,67 @@
+src/api-boundary-lint.test.ts
+  s_249569b913e311::t_6e9eb4a1d6a13e 1-85
+  s_249569b913e311::t_5afe224b5a5546 86
+src/capabilities/client-identification.test.ts
+  s_249569b913e311::t_796dc26ec996e6 1-198
+  s_249569b913e311::t_bcfd522dfe813c 199-202
+eslint-rules/pipelex-api-boundary.mjs
+  s_249569b913e311::t_561e66c0bb7a73 1-51,55-65,67,69-138
+  s_249569b913e311::t_2e1fce9d9f7a42 52-54,66,68
+src/capabilities/client-identification.ts
+  s_249569b913e311::t_a0288148cd6bac 1-163
+  s_249569b913e311::t_c36692d153ce70 164-166
+eslint.config.mjs
+  s_249569b913e311::t_96544df4cc6fb5 5-6,39-69
+src/capabilities/artifacts.ts
+  s_249569b913e311::t_1616dbfc5e4e43 3,20,27,167,195
+src/capabilities/attachments.ts
+  s_249569b913e311::t_58b0bb950ffd52 6-13,108,128
+src/capabilities/catalog-write.ts
+  s_249569b913e311::t_171b1d4c72199e 4,26,34,294,316
+src/capabilities/catalog.ts
+  s_249569b913e311::t_cb86d092685a3a 8,14,110,121
+src/capabilities/codegen.ts
+  s_249569b913e311::t_c8097178ad07b4 3,21,30,302,407
+src/capabilities/e2e-support.ts
+  s_249569b913e311::t_bc45f24c5e974c 18,20,42
+src/capabilities/images.ts
+  s_249569b913e311::t_3a37fc13cda5ff 1,16,25,229,255
+src/capabilities/inputs.ts
+  s_249569b913e311::t_961a1250863b6f 14,18,24,27,136,186
+src/capabilities/prepare.ts
+  s_249569b913e311::t_a97983d2d90e5d 22,25,31,34,144,314
+src/capabilities/run.ts
+  s_249569b913e311::t_958d2ee4b829f7 1,19,23,28,35,38,429,1099
+src/capabilities/shared.ts
+  s_249569b913e311::t_f38bef3e0f9210 12,22,25-27,313-348
+src/capabilities/validate.ts
+  s_249569b913e311::t_2c333d0a764eab 1,21,25,31,34,373,444
+src/hosted/contexts.test.ts
+  s_249569b913e311::t_50346144a26065 1,3,6-7,167-235
+src/hosted/contexts.ts
+  s_249569b913e311::t_ba312452f8f807 1-2,4,62-67,72,74,77,79-85,88-91
+src/hosted/server.ts
+  s_249569b913e311::t_49892998fdbc9e 97-100,120-123,138-141,156-159,174-177,196-199,228-232,247-250,265-268,283-286
+src/local/server.test.ts
+  s_249569b913e311::t_3ff70f4fb25176 9,18,24,718-780
+src/local/server.ts
+  s_249569b913e311::t_f1eb6e19955a9b 5-6,10,82-91,104-112
+src/tools.ts
+  s_249569b913e311::t_98cd49b1429523 49,99,187,225-263
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e756c155845247ce02913b5eaee552892f31a9d8",
+  "prompts": {},
+  "sessions": {
+    "s_249569b913e311": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c96db657-dce9-4864-8d99-e33151cd32db",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thomashebrard <thomas@pipelex.com>"
+    }
+  }
+}
