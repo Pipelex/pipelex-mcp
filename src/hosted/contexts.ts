@@ -1,4 +1,7 @@
+import { consoleHost, mcpAppInfo, userAgentOf } from "../capabilities/client-identification.js";
+import type { AppInfoSource, RequestHeaders } from "../capabilities/client-identification.js";
 import type { AuthErrorTexture } from "../capabilities/shared.js";
+import { patchApiContexts } from "../tools.js";
 import type { ToolContexts } from "../tools.js";
 
 /**
@@ -56,54 +59,34 @@ const NO_CREDENTIAL = "";
  * The verified token always overrides the API key everywhere — a server-held
  * `PIPELEX_API_KEY` must never fund a signed-in caller's work, since the key
  * determines the active organization and therefore the whole visible catalog.
+ *
+ * The request's own headers name the calling AI host: every client built for
+ * this request identifies itself as `pipelex-mcp/<v> (console; host=<host>)`,
+ * where `<host>` is the coarse `claude` / `openai` read from the connector's
+ * `User-Agent` (`consoleHost`), or absent when it names neither. Nothing links
+ * a stateless `tools/call` to its `initialize`, so the request is all there is.
  */
 export function contextsForRequest(
   base: ToolContexts,
   authInfo: { token: string } | undefined,
+  requestInfo?: { headers: RequestHeaders },
 ): ToolContexts {
+  const appInfo = consoleAppInfoSource(requestInfo?.headers);
   const token = authInfo?.token;
   if (token !== undefined && token !== "") {
-    return overrideContexts(base, token, REJECTED_TOKEN_AUTH_ERROR);
+    return patchApiContexts(base, { apiKey: token, authError: REJECTED_TOKEN_AUTH_ERROR, appInfo });
   }
-  return overrideContexts(base, NO_CREDENTIAL, MISSING_TOKEN_AUTH_ERROR);
+  // `apiKey` is set unconditionally — overriding it is the whole point on both
+  // branches, which `patchApiContexts` does for every key the patch carries.
+  return patchApiContexts(base, {
+    apiKey: NO_CREDENTIAL,
+    authError: MISSING_TOKEN_AUTH_ERROR,
+    appInfo,
+  });
 }
 
-/**
- * `apiKey` is set unconditionally — overriding it is the whole point on both
- * branches, so this must not be a conditional spread.
- */
-function overrideContexts(
-  base: ToolContexts,
-  apiKey: string,
-  authError: AuthErrorTexture,
-): ToolContexts {
-  return {
-    catalog: { ...base.catalog, apiKey, authError },
-    // Overridden although the console registers neither catalog-write tool: the
-    // override is a property of the context table, and a context left un-keyed
-    // here would be a latent bug the day the console serves one of the inline
-    // halves.
-    catalogWrite: {
-      ...base.catalogWrite,
-      apiKey,
-      authError,
-      validation: { ...base.catalogWrite.validation, apiKey, authError },
-    },
-    validation: { ...base.validation, apiKey, authError },
-    inputs: { ...base.inputs, apiKey, authError },
-    codegen: { ...base.codegen, apiKey, authError },
-    prepare: { ...base.prepare, apiKey, authError },
-    run: { ...base.run, apiKey, authError },
-    // mthds_show_images resolves and fetches the caller's own stored objects,
-    // so the fetch is funded and scoped by the caller's identity like every
-    // other read.
-    images: { ...base.images, apiKey, authError },
-    // The attachment ingest uploads to Pipelex storage, so the signed-in
-    // caller's own identity is what funds it — the console holds no key.
-    attachments: { ...base.attachments, apiKey, authError },
-    // The console never registers mthds_download_artifacts (it has no working
-    // directory to save into); the override is kept for uniformity so every
-    // context in the set carries the caller's identity, never a server key.
-    artifacts: { ...base.artifacts, apiKey, authError },
-  };
+/** The console's identity for one request, computed once and handed to every client it builds. */
+export function consoleAppInfoSource(headers: RequestHeaders | undefined): AppInfoSource {
+  const appInfo = mcpAppInfo("console", consoleHost(userAgentOf(headers)));
+  return () => appInfo;
 }

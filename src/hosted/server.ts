@@ -94,7 +94,10 @@ export function createHostedServer(
         },
       },
       (input, extra) =>
-        mthdsListMethodsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsListMethodsTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
     )
     .registerTool(
       {
@@ -114,7 +117,10 @@ export function createHostedServer(
         },
       },
       (input, extra) =>
-        mthdsValidateTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsValidateTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
     )
     .registerTool(
       {
@@ -129,7 +135,10 @@ export function createHostedServer(
         },
       },
       (input, extra) =>
-        mthdsInputsTemplateTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsInputsTemplateTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
     )
     .registerTool(
       {
@@ -144,7 +153,10 @@ export function createHostedServer(
         },
       },
       (input, extra) =>
-        mthdsCodegenTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsCodegenTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
     )
     .registerTool(
       {
@@ -159,7 +171,10 @@ export function createHostedServer(
         },
       },
       (input, extra) =>
-        mthdsPrepareInputsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsPrepareInputsTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
     )
     .registerTool(
       {
@@ -178,7 +193,10 @@ export function createHostedServer(
         },
       },
       (input, extra) =>
-        mthdsUploadAttachmentsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsUploadAttachmentsTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
     )
     .registerTool(
       {
@@ -207,7 +225,11 @@ export function createHostedServer(
           "openai/toolInvocation/invoked": "MTHDS run started.",
         },
       },
-      (input, extra) => mthdsRunTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+      (input, extra) =>
+        mthdsRunTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
     )
     .registerTool(
       {
@@ -222,7 +244,10 @@ export function createHostedServer(
         },
       },
       (input, extra) =>
-        mthdsRunStatusTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsRunStatusTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
     )
     .registerTool(
       {
@@ -237,7 +262,10 @@ export function createHostedServer(
         },
       },
       (input, extra) =>
-        mthdsRunResultsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsRunResultsTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
     )
     .registerTool(
       {
@@ -252,6 +280,9 @@ export function createHostedServer(
         },
       },
       (input, extra) =>
-        mthdsShowImagesTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsShowImagesTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
     );
 }

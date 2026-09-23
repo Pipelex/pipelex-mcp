@@ -46,6 +46,7 @@ import type {
   MthdsGetMethodInput,
   MthdsSaveMethodInput,
 } from "./capabilities/catalog-write.js";
+import type { AppInfoSource } from "./capabilities/client-identification.js";
 import {
   CODEGEN_TARGET_RULE,
   buildCodegenContext,
@@ -95,7 +96,7 @@ import {
   startMthdsRun,
 } from "./capabilities/run.js";
 import type { MthdsRunInput, RunContext, RunIdInput } from "./capabilities/run.js";
-import type { FileResolver } from "./capabilities/shared.js";
+import type { AuthErrorTexture, FileResolver } from "./capabilities/shared.js";
 import {
   buildValidationContext,
   mthdsValidateInputSchema,
@@ -183,7 +184,7 @@ export function buildToolContexts(options: ToolContextOptions = {}): ToolContext
     },
     // The same object mthds_save_method's validation leg gets, not a second one
     // built from the same parts: two hand-synced copies diverge the moment a
-    // field is added to one, and `hosted/contexts.ts` already has to override
+    // field is added to one, and `patchApiContexts` already has to override
     // both separately.
     validation,
     inputs: {
@@ -218,6 +219,45 @@ export function buildToolContexts(options: ToolContextOptions = {}): ToolContext
       ...buildArtifactsContext(env),
       ...(workspaceRoot === undefined ? {} : { saveRoot: workspaceRoot }),
     },
+  };
+}
+
+/** What a shell may override on every capability context that talks to the API. */
+export interface ApiContextPatch {
+  apiKey?: string;
+  authError?: AuthErrorTexture;
+  appInfo?: AppInfoSource;
+}
+
+/**
+ * Apply one patch to every capability context in the set, the nested
+ * validation context of `catalogWrite` included. This is the single list of
+ * contexts a shell-level override has to reach: the console lifts the caller's
+ * token and its request's `appInfo` through it, the workshop its handshake's
+ * `appInfo`. A context left out here would be a context whose calls go out
+ * with the deployment's env key or without the shell's identity, which is why
+ * the list lives in one place and covers contexts a shell does not register a
+ * tool for.
+ *
+ * Only the keys present in `patch` are written, and each is written
+ * unconditionally — an `apiKey` of `""` is a value, not an absence.
+ */
+export function patchApiContexts(base: ToolContexts, patch: ApiContextPatch): ToolContexts {
+  return {
+    catalog: { ...base.catalog, ...patch },
+    catalogWrite: {
+      ...base.catalogWrite,
+      ...patch,
+      validation: { ...base.catalogWrite.validation, ...patch },
+    },
+    validation: { ...base.validation, ...patch },
+    inputs: { ...base.inputs, ...patch },
+    codegen: { ...base.codegen, ...patch },
+    prepare: { ...base.prepare, ...patch },
+    run: { ...base.run, ...patch },
+    images: { ...base.images, ...patch },
+    attachments: { ...base.attachments, ...patch },
+    artifacts: { ...base.artifacts, ...patch },
   };
 }
 

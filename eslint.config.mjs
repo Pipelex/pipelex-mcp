@@ -2,6 +2,8 @@ import js from "@eslint/js";
 import globals from "globals";
 import tseslint from "typescript-eslint";
 
+import pipelexApiBoundary from "./eslint-rules/pipelex-api-boundary.mjs";
+
 export default [
   js.configs.recommended,
   ...tseslint.configs.recommended,
@@ -33,5 +35,36 @@ export default [
       ],
       "no-console": "error",
     },
+  },
+  // Every call to the Pipelex API goes through `createPipelexApiClient`, which
+  // names this server in the User-Agent (docs/client-identification.md).
+  {
+    files: ["src/**/*.{ts,tsx}", "scripts/**/*.{ts,mjs}"],
+    plugins: { pipelex: pipelexApiBoundary },
+    rules: {
+      "pipelex/sdk-client-factory": "error",
+      "pipelex/no-raw-fetch": "error",
+    },
+  },
+  // The factory itself.
+  {
+    files: ["src/capabilities/shared.ts"],
+    rules: { "pipelex/sdk-client-factory": "off" },
+  },
+  // The one sanctioned subclass, which the factory constructs.
+  {
+    files: ["src/capabilities/upload-ceiling.ts"],
+    rules: { "pipelex/sdk-client-factory": ["error", { allowExtends: true }] },
+  },
+  // The attachment fetch boundary fetches a host-supplied third-party link,
+  // whose User-Agent the spec says must not change.
+  {
+    files: ["src/capabilities/attachment-fetch.ts"],
+    rules: { "pipelex/no-raw-fetch": "off" },
+  },
+  // Unit tests build clients directly to test them, and stub the global fetch.
+  {
+    files: ["src/**/*.test.ts"],
+    rules: { "pipelex/sdk-client-factory": "off", "pipelex/no-raw-fetch": "off" },
   },
 ];

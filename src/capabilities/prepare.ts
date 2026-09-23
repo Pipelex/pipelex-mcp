@@ -19,20 +19,22 @@ import {
   blueprintMainPipeRefOf,
   buildApiConfig,
   classifyError,
-  summaryForToolError,
+  createPipelexApiClient,
   filesInputSchema,
   resolveSubmittedFiles,
+  summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
 } from "./shared.js";
 import type {
+  ApiConfig,
   AuthErrorTexture,
   ClassifyErrorOptions,
+  ErrorSummaries,
   FileResolver,
   SubmittedFile,
   SubmittedFileInput,
-  ErrorSummaries,
   ToolError,
 } from "./shared.js";
 import { MAX_UPLOAD_BYTES, SizeGuardedPipelexApiClient, formatMib } from "./upload-ceiling.js";
@@ -139,9 +141,7 @@ interface PrepareClient {
   prepareInputs(request: PrepareInputsRequest): Promise<PreparedInputs>;
 }
 
-export interface PrepareContext {
-  baseUrl: string;
-  apiKey?: string;
+export interface PrepareContext extends ApiConfig {
   client?: PrepareClient;
   /** Fills `{ path }` closure items from disk (local workshop); absent on the hosted console. */
   resolver?: FileResolver;
@@ -311,10 +311,7 @@ export function prepareClient(context: PrepareContext): PrepareClient {
     // prepareInputs) would otherwise learn an asset is too big only from the
     // gateway's 413, after the whole payload had crossed the wire — and with a
     // server message that cannot name the real limit. See upload-ceiling.ts.
-    new SizeGuardedPipelexApiClient({
-      baseUrl: context.baseUrl,
-      apiKey: context.apiKey,
-    })
+    createPipelexApiClient(context, SizeGuardedPipelexApiClient)
   );
 }
 

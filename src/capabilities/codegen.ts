@@ -1,11 +1,6 @@
 import path from "node:path";
 
-import {
-  CodegenLockError,
-  PipelexApiClient,
-  isStampableArtifactPath,
-  runCodegenCheck,
-} from "@pipelex/sdk";
+import { CodegenLockError, isStampableArtifactPath, runCodegenCheck } from "@pipelex/sdk";
 import type {
   CodegenRequest,
   CodegenResponse,
@@ -23,6 +18,7 @@ import {
   METHOD_REF_GRAMMAR,
   buildApiConfig,
   classifyError,
+  createPipelexApiClient,
   filesInputSchema,
   resolveSubmittedFiles,
   summaryForToolError,
@@ -31,6 +27,7 @@ import {
   validateMethodSelectorRequest,
 } from "./shared.js";
 import type {
+  ApiConfig,
   AuthErrorTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
@@ -302,9 +299,7 @@ export interface CodegenClient {
   codegen(request: CodegenRequest): Promise<CodegenResponse>;
 }
 
-export interface CodegenContext {
-  baseUrl: string;
-  apiKey?: string;
+export interface CodegenContext extends ApiConfig {
   client?: CodegenClient;
   /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
   resolver?: FileResolver;
@@ -409,13 +404,7 @@ function forbiddenTexture(auth: AuthErrorTexture | undefined): { hint: string } 
 // constructor throws PipelineRequestError on a malformed base URL, and that
 // must classify to a config ToolError, not reject the MCP handler.
 function codegenClient(context: CodegenContext): CodegenClient {
-  return (
-    context.client ??
-    new PipelexApiClient({
-      baseUrl: context.baseUrl,
-      apiKey: context.apiKey,
-    })
-  );
+  return context.client ?? createPipelexApiClient(context);
 }
 
 const INVALID_REQUEST_SUMMARY = "Code generation was not run: request input is invalid.";

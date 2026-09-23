@@ -6,6 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { SDK_VERSION } from "@pipelex/sdk";
 import type {
   CodegenResponse,
   MethodPage,
@@ -14,12 +15,13 @@ import type {
   PipelexValidationResult,
 } from "@pipelex/sdk";
 import type { OAuthConfig } from "skybridge/server";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { recordedTsZodReport } from "../capabilities/codegen-fixture.js";
 import { CODEGEN_TARGETS } from "../capabilities/codegen.js";
 import { createHostedServer } from "../hosted/server.js";
 import {
+  PIPELEX_MCP_SERVER_INFO,
   buildToolContexts,
   consoleOnlyToolDefinitions,
   toolDefinitions,
@@ -712,6 +714,69 @@ function sharedContract(tool: Awaited<ReturnType<Client["listTools"]>>["tools"][
     annotations: tool.annotations,
   };
 }
+
+describe("the workshop's User-Agent", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * Drive a real tool call through the real shell, with a real SDK client and
+   * a stubbed `fetch`, and read back the header the API would have seen. The
+   * host name is what the MCP client declared on `initialize` — which happens
+   * after the contexts were built, so this also proves the host is read late.
+   */
+  async function userAgentSeenBy(clientInfo: { name: string; version: string }) {
+    const seen: string[] = [];
+    vi.stubGlobal("fetch", (_url: string, init?: { headers?: HeadersInit }) => {
+      seen.push(new Headers(init?.headers).get("user-agent") ?? "");
+      return Promise.resolve(
+        new Response(JSON.stringify({ items: [], next_cursor: null }), { status: 200 }),
+      );
+    });
+    const server = createLocalServer({
+      env: { PIPELEX_BASE_URL: "https://api.pipelex.test", PIPELEX_API_KEY: "plx_sk_test" },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client(clientInfo);
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      await client.callTool({ name: "mthds_list_methods", arguments: {} });
+    } finally {
+      await client.close();
+      if (server.isConnected()) await server.close();
+    }
+    return seen;
+  }
+
+  it("names the workshop and the host from the handshake's clientInfo", async () => {
+    const seen = await userAgentSeenBy({ name: "claude-code", version: "2.1.4" });
+
+    expect(seen.length).toBeGreaterThan(0);
+    for (const value of seen) {
+      expect(value).toBe(
+        `pipelex-mcp/${PIPELEX_MCP_SERVER_INFO.version} (workshop; host=claude-code/2.1.4) ` +
+          `pipelex-sdk-js/${SDK_VERSION} node/${process.versions.node} (${process.platform}; ${process.arch})`,
+      );
+    }
+  });
+
+  it("sanitises a host name MCP allows but the header does not", async () => {
+    const seen = await userAgentSeenBy({
+      name: "Visual Studio Code",
+      version: "1.99.0 (Universal)",
+    });
+
+    expect(seen[0]).toContain("(workshop; host=visual-studio-code/1.99.0-universal)");
+  });
+
+  it("leaves the host out, never the call, when the host name has nothing usable", async () => {
+    const seen = await userAgentSeenBy({ name: "@@@", version: "1.0.0" });
+
+    expect(seen[0]).toMatch(/^pipelex-mcp\/\S+ \(workshop\) pipelex-sdk-js\//);
+  });
+});
 
 interface TestServer {
   connect(transport: Transport): Promise<void>;

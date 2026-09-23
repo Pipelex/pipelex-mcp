@@ -15,9 +15,9 @@
  * pinned by unit tests and the drift lives at the SDK/wire boundary.
  */
 
-import { PipelexApiClient } from "@pipelex/sdk";
+import type { PipelexApiClient } from "@pipelex/sdk";
 
-import { buildApiConfig } from "./shared.js";
+import { buildApiConfig, createPipelexApiClient } from "./shared.js";
 import type { ApiConfig } from "./shared.js";
 
 /**
@@ -39,8 +39,7 @@ export function liveApiConfig(): ApiConfig {
 
 /** A real, unseamed client — what the suites use for their own setup calls. */
 export function liveClient(): PipelexApiClient {
-  const config = liveApiConfig();
-  return new PipelexApiClient({ baseUrl: config.baseUrl, apiKey: config.apiKey });
+  return createPipelexApiClient(liveApiConfig());
 }
 
 /**
