@@ -427,8 +427,8 @@ const WRITE_ARM_FALLBACK =
  * The `output_dir` request-shape checks, kept beside the selector checks
  * rather than inside `resolveSubmittedFiles` (which only ever sees files).
  * The "no write root" refusal is the `{ path }` console texture: an
- * affordance the shared tool definition advertises and this deployment cannot
- * serve, refused instructively with the shell that can.
+ * affordance the tool's one contract advertises on both shells and this
+ * deployment cannot serve, refused instructively with the shell that can.
  */
 export function validateCodegenWriteRequest(
   outputDir: string | undefined,
