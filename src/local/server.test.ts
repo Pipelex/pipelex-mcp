@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { recordedTsZodReport } from "../capabilities/codegen-fixture.js";
 import { CODEGEN_TARGETS } from "../capabilities/codegen.js";
 import { createHostedServer } from "../hosted/server.js";
+import { emittedContract } from "../shell-test-support.js";
 import {
   buildToolContexts,
   consoleOnlyToolDefinitions,
@@ -47,6 +48,20 @@ const tempDirs: string[] = [];
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+});
+
+describe("the workshop's emitted contract", () => {
+  /**
+   * Everything a coding-agent host is shown, pinned byte for byte. The
+   * plugin's skills call these tools by name and read these schemas, so a diff
+   * to this file is a contract change, never a formality. Update it with
+   * `npx vitest run -u` only for a change you meant.
+   */
+  it("emits the pinned initialize result and tools/list", async () => {
+    await expect(await emittedContract(createLocalServer())).toMatchFileSnapshot(
+      "./workshop.contract.json",
+    );
+  });
 });
 
 describe("local stdio server", () => {
