@@ -4,65 +4,44 @@
 <!-- Generated from the Pipelex onboarding source; this region is replaced from https://raw.githubusercontent.com/Pipelex/.github/main/onboarding/rendered/mcp-route.md — do not edit it here. -->
 ## Get started
 
-Pipelex runs your AI methods — write a method once, then run it from your agent via MCP, turn it into a webapp, or use it via API in any software. This repository is how a chat or a coding agent reaches it.
+Pipelex runs your AI methods — write a method once, then run it from your agent via MCP, turn it into a webapp, or use it via API in any software. This repository is the Pipelex MCP: it connects your chatbot to your Pipelex account and the methods saved there.
 
-Pick one server for a given host: the **workshop** wherever there is a filesystem, the **console** everywhere else. Never both — the two deployments register the same tool names.
-
-**Hosted console** — ChatGPT, claude.ai, Claude Desktop, Cowork. Add Pipelex as a custom connector by its URL, then sign in with your Pipelex account when the host asks. Nothing to install, and no key at all — the connector runs on your signed-in session:
+**Chatbots** — ChatGPT, Claude. Add the Pipelex MCP in your chatbot's settings by the address below — in Claude, that is **Add custom connector** — then sign in with your Pipelex account when asked. Nothing to install and no key: the Pipelex MCP runs on your signed-in session.
 
 ```
 https://mcp.pipelex.com/mcp
 ```
 
-**Local workshop** — Claude Code, Codex, Cursor.
+**Coding agents** — Claude Code, Codex. Install the [Pipelex plugin](https://github.com/Pipelex/pipelex-plugins) instead: it brings the same tools, and the skills that build methods beside them. Claude Code also loads what you have added to your Claude account, so if the Pipelex MCP is there, turn it off in Claude Code with `/mcp`: an agent with the plugin never takes both, since they register the same tool names.
 
-```bash
-claude mcp add pipelex --env PIPELEX_API_KEY=plx_sk_... -- npx -y @pipelex/mcp
-```
-
-The server runs on your own machine, so it carries an API key of its own — create one in your console at [app.pipelex.com](https://app.pipelex.com). Needs Node.js 24 or later; the host fetches the server on demand, so there is nothing to install globally.
-
-On Claude Code and Codex the [Pipelex plugin](https://github.com/Pipelex/pipelex-plugins) already declares the workshop, so install the plugin instead and skip the command above.
-
-**Then ask for something.** On the console:
+**Then ask your chatbot:**
 
 > What methods do I have?
 >
 > Run the invoice method on https://example.com/invoice.pdf
 
-On the workshop, where the server reaches the files you are writing:
-
-> Validate the bundle in `./methods/invoices` and run it on `invoice.pdf`.
-
 You get a run id straight away, and you can ask for its status, its results or the files it produced at any time.
 
-Give the file as a URL the connector can reach. In ChatGPT you can attach it to the conversation instead and ask for a run on it; the other connector hosts have no channel yet for handing a server the file you attached.
+Give the file as a URL the Pipelex MCP can reach. In ChatGPT you can attach it to the conversation instead and ask for a run on it; Claude has no way yet to hand the Pipelex MCP a file you attached.
+
+Other hosts, and the reference for developers, start at [Which server, for which host](#which-server-for-which-host).
 
 **Next:** [what Pipelex is](https://go.pipelex.com/product) · [documentation](https://go.pipelex.com/docs) · [your console](https://app.pipelex.com) · [Discord](https://go.pipelex.com/discord)
 <!-- /onboarding -->
 
 ## Which server, for which host
 
-The rule above, host by host. A host wired to both servers is the one configuration to avoid — [One host, one server](#one-host-one-server) says why, and how a claude.ai connector gets there without anyone choosing it.
+A host takes one of two things, never both: the Pipelex plugin on a coding agent, the Pipelex MCP on a chatbot. The table applies that rule host by host. A host wired to both is the one configuration to avoid — [One host, one server](#one-host-one-server) says why, and how the Pipelex MCP added in Claude reaches Claude Code without anyone choosing it.
 
-| Host | Server | How to connect |
+| Host | Tool | How to connect |
 |---|---|---|
-| ChatGPT (web) | Hosted console | Apps directory |
-| claude.ai (web + mobile) | Hosted console | Connector (custom URL) |
-| Claude Desktop (chat mode) | Hosted console | Connector / marketplace plugin |
-| Claude Code | Local workshop | `claude mcp add`, or the `pipelex` plugin from the `pipelex-plugins` marketplace (its manifest spawns the workshop) |
-| ChatGPT desktop (Codex mode) | Local workshop | `~/.codex/config.toml` |
-| Cursor | Local workshop | `~/.cursor/mcp.json` |
-| Claude Desktop (Cowork mode) | **Dual** — console for consumers, workshop for builders | Connector, or stdio in `claude_desktop_config.json` |
-| Mistral Vibe (TUI) | Local workshop | `~/.vibe/config.toml` |
-| Mistral Vibe (web) | Hosted console | Connector / config |
+| Claude Code | Pipelex plugin | [Install the plugin](https://github.com/Pipelex/pipelex-plugins#install) |
+| Codex | Pipelex plugin | [Install the plugin](https://github.com/Pipelex/pipelex-plugins#install) |
+| ChatGPT (web) | Pipelex MCP | Apps directory |
+| claude.ai (web + mobile) | Pipelex MCP | **Add custom connector**, by the address above |
+| Claude Desktop | Pipelex MCP | **Add custom connector**, by the address above |
 
-**On views:** the hosted console ships the `run-graph` and `run-follow`
-views, which render on view-capable hosts (ChatGPT, claude.ai, Cowork) and
-degrade to text on Claude Code. The **local workshop is tools-first — it ships
-no views on any host today**, so it reports structured results and text
-summaries directly. (Codex and Cowork are view-capable hosts and would render
-workshop views if local view delivery lands in a later increment.)
+**On views:** the Pipelex MCP ships the `run-graph` and `run-follow` views, which render on the hosts that display views (ChatGPT, Claude) and degrade to text elsewhere. The plugin's MCP server is **tools-first — it ships no views on any host today**, so it reports structured results and text summaries directly.
 
 ## What this repository is
 
