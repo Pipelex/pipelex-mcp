@@ -1,0 +1,21 @@
+package-lock.json
+  s_249569b913e311::t_d3e0800e57a558 13,1751-1753,4506-4973,5000-5155
+package.json
+  s_249569b913e311::t_ea45e9890246be 28-30,49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d1a85c170401823cb65ce61d167b28ca825a8812",
+  "prompts": {},
+  "sessions": {
+    "s_249569b913e311": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c96db657-dce9-4864-8d99-e33151cd32db",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thomashebrard <thomas@pipelex.com>"
+    }
+  }
+}
