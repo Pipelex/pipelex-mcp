@@ -61,6 +61,25 @@ export async function listTools(server: TestServer): Promise<ListedTool[]> {
 }
 
 /**
+ * The instruction sentences that name one tool, joined.
+ *
+ * Sentence-level rather than over the whole string, so an assertion about one
+ * tool cannot be satisfied by a neighbour's prose; joined rather than asserted
+ * per sentence, because a tool may be named twice — once for its selectors and
+ * once for something else. The tool name is matched inside its backticks, so
+ * `mthds_run` does not match `mthds_run_status`.
+ */
+export function sentencesAbout(instructions: string, tool: string): string {
+  return instructions
+    .split(/(?<=\.)\s+/)
+    .filter((sentence) => sentence.includes(`\`${tool}\``))
+    .join(" ");
+}
+
+/** How early a shell's instructions must have named every step of its flow: well inside any host's cut. */
+export const FLOW_HEAD_LENGTH = 500;
+
+/**
  * Stands in for the package version in a pinned contract. The version is the
  * one field of the handshake that moves on every release, so pinning its value
  * would fail the suite at each `/release`; what is pinned instead is that it

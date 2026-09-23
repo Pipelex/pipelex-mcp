@@ -470,7 +470,7 @@
           <rect class="s-core" x="512" y="26" width="196" height="304" rx="6"/>
           <text class="s-tag" x="530" y="50">SHARED CAPABILITY CORE</text>
           <rect class="s-box" x="530" y="66" width="160" height="34" rx="4"/>
-          <text class="s-sub" x="546" y="87">tool table · schemas</text>
+          <text class="s-sub" x="546" y="87">capabilities · schemas</text>
           <rect class="s-box" x="530" y="112" width="160" height="34" rx="4"/>
           <text class="s-sub" x="546" y="133">verdict projection</text>
           <rect class="s-box" x="530" y="158" width="160" height="34" rx="4"/>
@@ -743,14 +743,16 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
 
         <div class="diff-item">
           <h3>2 · The seams each shell fills</h3>
-          <p class="path">src/local/server.ts</p>
-          <pre class="diff"><code><span class="ctx">return buildToolContexts({</span>
-<span class="ctx">  env,</span>
-<span class="add">+ resolver: localFileResolver(rootDir),  // reads { path } from disk</span>
-<span class="add">+ allowUpload: true,                     // uploads local assets</span>
-<span class="add">+ viewsAvailable: false,                 // tools-first: no views</span>
-<span class="ctx">});</span></code></pre>
-          <p>The hosted console leaves all three at their defaults: no resolver, no upload, views on. Every per-deployment difference in the product is one of these three flags.</p>
+          <p class="path">src/local/tools.ts</p>
+          <pre class="diff"><code><span class="ctx">export function buildLocalToolContexts(env, rootDir) {</span>
+<span class="add">+ const resolver = localFileResolver(rootDir);          // reads { path } from disk</span>
+<span class="ctx">  return {</span>
+<span class="add">+   validation: { …, resolver, viewsAvailable: false },  // tools-first: no views</span>
+<span class="add">+   prepare: { …, resolver, allowUpload: true },         // uploads local assets</span>
+<span class="ctx">    …</span>
+<span class="ctx">  };</span>
+<span class="ctx">}</span></code></pre>
+          <p>Each shell owns its tool table and builds its own contexts. The hosted console's builder, in <code>src/hosted/tools.ts</code>, states the opposite: no resolver, no upload, views on. Beside which tools each table holds, these settings are where the two deployments differ.</p>
         </div>
 
         <div class="diff-item">

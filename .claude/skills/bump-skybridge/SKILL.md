@@ -99,13 +99,13 @@ grep -rni "skybridge" src/ vite.config.ts nodemon.json Dockerfile package.json M
 
 ### 4a — The console entrypoint and the tool-registration shell
 
-`src/server.ts` resolves `workosProvider({ domain, audience })`, hands the resulting `OAuthConfig` to `createHostedServer`, and ends with `export default await server.run()` plus `export type AppType = typeof server`. `src/hosted/server.ts` takes that config, constructs `McpServer` and chains `.registerTool({ name, description, inputSchema, outputSchema, annotations, _meta }, (input, extra) => …)` once per tool, reaching `extra.authInfo` for the caller's verified token.
+`src/server.ts` resolves `workosProvider({ domain, audience })`, hands the resulting `OAuthConfig` to `createHostedServer`, and ends with `export default await server.run()` plus `export type AppType = typeof server`. `src/hosted/server.ts` takes that config, constructs `McpServer` and chains `.registerTool(hostedToolConfig(tool), (input, extra) => …)` once per tool, reaching `extra.authInfo` for the caller's verified token; `hostedToolConfig` reads `{ name, description, inputSchema, outputSchema, annotations, view?, _meta }` off the console's own definitions in `src/hosted/tools.ts`, which is where each tool's `view` and `_meta` are declared (typed with Skybridge's `ViewConfig`).
 
 Those two files are where a Skybridge major lands hardest, and the chain carries more than it looks: **`AppType` is inferred from the chained server**, `src/helpers.ts` feeds it to `generateHelpers<AppType>()`, and the views' `useCallTool` types come from there. Break the chain and the views lose their types several files away from the edit.
 
 Two details in this repo that a migration must preserve rather than flatten:
 
-- **`createHostedServer` takes `oauth` as a required first argument and stays synchronous.** That is deliberate: the cross-shell parity tests in `src/local/server.test.ts` construct the server directly and must not await an OAuth discovery fetch. If the new shape wants the provider inside a config object, keep the builder a function of its argument — do not move the discovery call into it.
+- **`createHostedServer` takes `oauth` as a required first argument and stays synchronous.** That is deliberate: the shell tests (`src/hosted/server.test.ts`, `src/tool-names.test.ts`) and `scripts/check-tool-texts.ts` construct the server directly and must not await an OAuth discovery fetch. `src/hosted/console.contract.json` pins what the console emits (`initialize`, `tools/list`, `resources/list`), so a bump that changes Skybridge's emitted metadata shows up there as a snapshot diff — read it before accepting it with `-u`. If the new shape wants the provider inside a config object, keep the builder a function of its argument — do not move the discovery call into it.
 - **`src/server.ts`'s two startup refusals** (both env vars present; the Resource Indicator being the bare origin with a trailing slash) must still run **before** anything serves. They are the difference between a misconfigured deploy failing loudly and one that boots clean and then fails every tool call at audience verification.
 
 ### 4b — The view layer

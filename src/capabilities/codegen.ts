@@ -311,7 +311,7 @@ export interface CodegenContext {
   /**
    * The directory `output_dir` is resolved against — the workshop's working
    * directory, absolute. The same name and meaning as `ArtifactsContext.saveRoot`:
-   * one `buildToolContexts` option fans out to both writers. Absent on the
+   * the workshop's context builder sets both to its working directory. Absent on the
    * hosted console, which then refuses `output_dir` instructively rather than
    * picking a directory of its own.
    */

@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import { ClientAuthenticationError, PipelexApiClient } from "@pipelex/sdk";
 
-import { buildToolContexts } from "../tools.js";
 import { validateMthds } from "../capabilities/validate.js";
 import { contextsForRequest } from "./contexts.js";
+import { buildHostedToolContexts } from "./tools.js";
 
 describe("contextsForRequest", () => {
   it("lifts the verified token into the API key of every capability context", () => {
-    const base = buildToolContexts({ env: {} });
+    const base = buildHostedToolContexts({});
 
     const contexts = contextsForRequest(base, { token: "workos_access_token" });
 
@@ -25,10 +25,15 @@ describe("contextsForRequest", () => {
     // it is the context where a missed override would have the deployment's
     // key reading another organization's pictures.
     expect(contexts.images.apiKey).toBe("workos_access_token");
+    // And every context the console builds, named or not, so a capability
+    // added to the console's set cannot join it on the deployment's key.
+    for (const [name, context] of Object.entries(contexts)) {
+      expect(context.apiKey, name).toBe("workos_access_token");
+    }
   });
 
   it("takes precedence over a server-held env key", () => {
-    const base = buildToolContexts({ env: { PIPELEX_API_KEY: "plx_sk_server" } });
+    const base = buildHostedToolContexts({ PIPELEX_API_KEY: "plx_sk_server" });
 
     const contexts = contextsForRequest(base, { token: "workos_access_token" });
 
@@ -37,7 +42,7 @@ describe("contextsForRequest", () => {
   });
 
   it("gives a rejected session the sign-in-again texture", () => {
-    const contexts = contextsForRequest(buildToolContexts({ env: {} }), {
+    const contexts = contextsForRequest(buildHostedToolContexts({}), {
       token: "workos_access_token",
     });
 
@@ -56,7 +61,7 @@ describe("contextsForRequest", () => {
     // Unreachable in production — Skybridge mounts `requireBearerAuth`
     // server-wide — but it must fail closed rather than spend the operator's
     // key on an unauthenticated caller.
-    const base = buildToolContexts({ env: { PIPELEX_API_KEY: "plx_sk_server" } });
+    const base = buildHostedToolContexts({ PIPELEX_API_KEY: "plx_sk_server" });
 
     const contexts = contextsForRequest(base, undefined);
 
@@ -74,14 +79,21 @@ describe("contextsForRequest", () => {
     expect(contexts.validation.authError?.hint).toContain("no verified sign-in");
   });
 
-  it("preserves the shell wiring of the base contexts", () => {
-    const base = buildToolContexts({ env: {}, viewsAvailable: true });
+  it("preserves the console's own settings through the override", () => {
+    const base = buildHostedToolContexts({});
 
     const contexts = contextsForRequest(base, { token: "workos_access_token" });
 
+    // Views on; no filesystem, so no `{ path }` resolver and no write root;
+    // no uploads through mthds_prepare_inputs; no download tool to name.
     expect(contexts.validation.viewsAvailable).toBe(true);
     expect(contexts.run.viewsAvailable).toBe(true);
     expect(contexts.validation.resolver).toBeUndefined();
+    expect(contexts.run.resolver).toBeUndefined();
+    expect(contexts.codegen.saveRoot).toBeUndefined();
+    expect(contexts.prepare.allowUpload).toBe(false);
+    expect(contexts.run.artifactDownloadAvailable).toBe(false);
+    expect(contexts.images.artifactDownloadAvailable).toBe(false);
   });
 });
 
@@ -117,7 +129,7 @@ describe("the tokenless branch on the wire", () => {
   }
 
   it("sends no Authorization header, rather than the deployment's env key", async () => {
-    const contexts = contextsForRequest(buildToolContexts({ env: {} }), undefined);
+    const contexts = contextsForRequest(buildHostedToolContexts({}), undefined);
 
     expect(await capturedAuthHeader(contexts.catalog.apiKey)).toBeUndefined();
   });
@@ -129,7 +141,7 @@ describe("the tokenless branch on the wire", () => {
   });
 
   it("sends the verified token when one is present", async () => {
-    const contexts = contextsForRequest(buildToolContexts({ env: {} }), {
+    const contexts = contextsForRequest(buildHostedToolContexts({}), {
       token: "workos_access_token",
     });
 
@@ -139,7 +151,7 @@ describe("the tokenless branch on the wire", () => {
 
 describe("console auth failures through a capability", () => {
   it("surfaces the reconnect hint when the API rejects the forwarded token", async () => {
-    const contexts = contextsForRequest(buildToolContexts({ env: {} }), {
+    const contexts = contextsForRequest(buildHostedToolContexts({}), {
       token: "workos_access_token",
     });
 

@@ -52,9 +52,9 @@ export function textLength(text: string): number {
 /**
  * Measure every emitted text against the ceiling, largest first.
  *
- * A text two shells emit identically — every shared tool's description, which
- * the cross-shell parity test pins — is one entry naming both shells, so the
- * report does not list it twice. The same name with different texts stays two
+ * A text two shells emit identically — the description of a tool both shells
+ * register, while their two tables still word it alike — is one entry naming
+ * both shells, so the report does not list it twice. The same name with different texts stays two
  * entries: that is the case for the two shells' instructions.
  */
 export function budgetEmittedTexts(
