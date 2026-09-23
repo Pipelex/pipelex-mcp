@@ -30,7 +30,7 @@ MCP does not restrict `clientInfo` to header-safe characters, and a host may wel
 
 Every Pipelex API client the server builds comes from `createPipelexApiClient` in `src/capabilities/shared.ts`, which passes the context's `appInfo`, or `pipelex-mcp/<version>` with no comment when no shell has set one (the live test suites and the scripts, which call capabilities directly). A capability that needs a subclass, such as the upload size guard, passes the class to the factory rather than constructing it.
 
-The shells set the identity on every capability context through `patchApiContexts` in `src/tools.ts`, the one list of contexts a shell-level override has to reach. The console applies it per request in `src/hosted/contexts.ts`, alongside the caller's token; the workshop applies it once in `src/local/server.ts`, with a function that reads the handshake late.
+Each shell sets the identity on every capability context of its own table through the patch helper that sits beside its context set — `patchHostedApiContexts` in `src/hosted/tools.ts` and `patchLocalApiContexts` in `src/local/tools.ts` — each being the one list of contexts a shell-level override has to reach on that shell. The console applies it per request in `src/hosted/contexts.ts`, alongside the caller's token; the workshop applies it once in `src/local/server.ts`, with a function that reads the handshake late.
 
 Two lint rules in `eslint-rules/pipelex-api-boundary.mjs` make the factory the only way to reach the API, and `src/api-boundary-lint.test.ts` pins them under the repo's real ESLint config:
 

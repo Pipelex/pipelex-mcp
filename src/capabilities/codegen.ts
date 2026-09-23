@@ -306,7 +306,7 @@ export interface CodegenContext extends ApiConfig {
   /**
    * The directory `output_dir` is resolved against — the workshop's working
    * directory, absolute. The same name and meaning as `ArtifactsContext.saveRoot`:
-   * one `buildToolContexts` option fans out to both writers. Absent on the
+   * the workshop's context builder sets both to its working directory. Absent on the
    * hosted console, which then refuses `output_dir` instructively rather than
    * picking a directory of its own.
    */
@@ -416,8 +416,8 @@ const WRITE_ARM_FALLBACK =
  * The `output_dir` request-shape checks, kept beside the selector checks
  * rather than inside `resolveSubmittedFiles` (which only ever sees files).
  * The "no write root" refusal is the `{ path }` console texture: an
- * affordance the shared tool definition advertises and this deployment cannot
- * serve, refused instructively with the shell that can.
+ * affordance the tool's one contract advertises on both shells and this
+ * deployment cannot serve, refused instructively with the shell that can.
  */
 export function validateCodegenWriteRequest(
   outputDir: string | undefined,

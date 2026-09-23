@@ -1,7 +1,7 @@
 import { workosProvider } from "skybridge/server";
 
 import { createHostedServer } from "./hosted/server.js";
-import { buildToolContexts } from "./tools.js";
+import { buildHostedToolContexts } from "./hosted/tools.js";
 
 /**
  * Console auth is per-user OAuth, and only that. Both vars are required: with
@@ -65,7 +65,7 @@ if (
 
 const oauth = await workosProvider({ domain: authkitDomain, audience: resourceIndicator });
 
-const server = createHostedServer(oauth, buildToolContexts());
+const server = createHostedServer(oauth, buildHostedToolContexts());
 
 export default await server.run();
 

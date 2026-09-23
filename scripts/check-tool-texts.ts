@@ -11,7 +11,7 @@
  * It measures what the two servers actually EMIT, not the source constants:
  * some descriptions are assembled from parts (codegen's target rule is derived
  * from its target profiles), and a host sees only the assembled string. So it
- * builds both shells in process, exactly as `src/local/server.test.ts` does,
+ * builds both shells in process, exactly as the shell tests do,
  * connects a client to each over an in-memory transport, and reads the
  * `instructions` from `initialize` and every `description` from `tools/list`.
  * Nothing here touches the network or a build output, which is why

@@ -326,7 +326,7 @@ function boundCodePoints(value: string, limit: number): { value: string; truncat
  * to one line so they cannot break out of their bullet, and the directive names
  * them as data to display. Delimiting them with JSON quotes (the previous
  * shape) reads as a data blob and cost us the rendering, so the "treat as data"
- * job is carried by the directive and {@link mthdsListMethodsTool}'s
+ * job is carried by the directive and the `mthds_list_methods` tool
  * description instead of by punctuation.
  */
 function catalogSummary(result: CatalogSuccess, query: string): string {

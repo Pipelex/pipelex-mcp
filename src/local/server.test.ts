@@ -4,8 +4,6 @@ import path from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { SDK_VERSION } from "@pipelex/sdk";
 import type {
   CodegenResponse,
@@ -14,36 +12,19 @@ import type {
   PipelexValidationReport,
   PipelexValidationResult,
 } from "@pipelex/sdk";
-import type { OAuthConfig } from "skybridge/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { recordedTsZodReport } from "../capabilities/codegen-fixture.js";
 import { CODEGEN_TARGETS } from "../capabilities/codegen.js";
-import { createHostedServer } from "../hosted/server.js";
 import {
-  PIPELEX_MCP_SERVER_INFO,
-  buildToolContexts,
-  consoleOnlyToolDefinitions,
-  toolDefinitions,
-  workshopOnlyToolDefinitions,
-} from "../tools.js";
-import { buildLocalToolContexts, createLocalServer } from "./server.js";
-
-/**
- * The console requires an `OAuthConfig` — per-user OAuth is its only auth
- * posture. These tests exercise the tool table, not the handshake, so a static
- * stand-in is enough: nothing here issues a `tools/call`, and the JWKS is
- * never fetched.
- */
-const TEST_OAUTH: OAuthConfig = {
-  oauthMetadata: {
-    issuer: "https://test.authkit.app",
-    authorization_endpoint: "https://test.authkit.app/oauth2/authorize",
-    token_endpoint: "https://test.authkit.app/oauth2/token",
-    response_types_supported: ["code"],
-  },
-  verify: { issuer: "https://test.authkit.app", audience: "https://console.test/" },
-};
+  FLOW_HEAD_LENGTH,
+  connectClient,
+  emittedContract,
+  listTools,
+  sentencesAbout,
+} from "../shell-test-support.js";
+import { LOCAL_SERVER_INFO, createLocalServer } from "./server.js";
+import { buildLocalToolContexts, localToolDefinitions } from "./tools.js";
 
 const tempDirs: string[] = [];
 
@@ -51,41 +32,43 @@ afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
 
-describe("local stdio server", () => {
-  it("registers the shared tool table with the same schemas as the hosted shell", async () => {
-    const hostedTools = await listTools(createHostedServer(TEST_OAUTH));
-    const localTools = await listTools(createLocalServer());
-    const sharedNames: string[] = toolDefinitions.map((definition) => definition.name);
-    const workshopOnlyNames: string[] = workshopOnlyToolDefinitions.map(
-      (definition) => definition.name,
+describe("the workshop's emitted contract", () => {
+  /**
+   * Everything a coding-agent host is shown, pinned byte for byte. The
+   * plugin's skills call these tools by name and read these schemas, so a diff
+   * to this file is a contract change, never a formality. Update it with
+   * `npx vitest run -u` only for a change you meant.
+   */
+  it("emits the pinned initialize result and tools/list", async () => {
+    await expect(await emittedContract(createLocalServer())).toMatchFileSnapshot(
+      "./workshop.contract.json",
     );
+  });
+});
 
-    // The shared table first, in order; the workshop-only table after it.
-    expect(localTools.map((tool) => tool.name)).toEqual([...sharedNames, ...workshopOnlyNames]);
-    // The contract of every SHARED tool must be byte-identical across shells —
-    // no tool name may mean different things on the two deployments.
-    expect(
-      localTools.filter((tool) => sharedNames.includes(tool.name)).map(sharedContract),
-    ).toEqual(hostedTools.filter((tool) => sharedNames.includes(tool.name)).map(sharedContract));
+describe("the workshop's tool table", () => {
+  it("registers its own table, in order, and nothing else", async () => {
+    const tools = await listTools(createLocalServer());
+
+    expect(tools.map((tool) => tool.name)).toEqual(
+      localToolDefinitions.map((definition) => definition.name),
+    );
   });
 
-  it("registers the workshop-only artifact download tool, which the console does NOT", async () => {
-    const hostedTools = await listTools(createHostedServer(TEST_OAUTH));
-    const localTools = await listTools(createLocalServer());
-    const workshopOnlyNames: string[] = workshopOnlyToolDefinitions.map(
-      (definition) => definition.name,
-    );
+  it("registers the tools that need a working directory: download, save and get", async () => {
+    const names = (await listTools(createLocalServer())).map((tool) => tool.name);
 
-    expect(workshopOnlyNames).toContain("mthds_download_artifacts");
-    // Absent on the console, not merely inert: it has no working directory to
-    // save into, so the tool could never fire there — advertising it would
-    // spend every console user's tokens on every tools/list for nothing.
-    for (const name of workshopOnlyNames) {
-      expect(localTools.map((tool) => tool.name)).toContain(name);
-      expect(hostedTools.map((tool) => tool.name)).not.toContain(name);
+    // The console has none of these; each writes under, or reads from, the
+    // directory this server was started in.
+    for (const name of ["mthds_download_artifacts", "mthds_save_method", "mthds_get_method"]) {
+      expect(names).toContain(name);
     }
+  });
 
-    const downloadTool = localTools.find((tool) => tool.name === "mthds_download_artifacts");
+  it("gives the artifact download tool its write annotations and its two arguments", async () => {
+    const tools = await listTools(createLocalServer());
+    const downloadTool = tools.find((tool) => tool.name === "mthds_download_artifacts");
+
     // It writes files, so it is not read-only; it only talks to the configured API.
     expect(downloadTool?.annotations).toMatchObject({
       readOnlyHint: false,
@@ -97,112 +80,175 @@ describe("local stdio server", () => {
     expect(Object.keys(schema.properties ?? {}).sort()).toEqual(["dir", "run_id"]);
   });
 
-  it("registers mthds_show_images on BOTH shells, with the same contract", async () => {
-    const hostedTools = await listTools(createHostedServer(TEST_OAUTH));
-    const localTools = await listTools(createLocalServer());
+  it("registers mthds_show_images as a read that writes nothing", async () => {
+    const tools = await listTools(createLocalServer());
 
     // Named rather than derived: the image tool's whole point is that it is a
     // deliberate gesture available wherever a run is, so dropping it out of the
-    // shared table must fail here and not just change a derived list.
-    const hosted = hostedTools.find((tool) => tool.name === "mthds_show_images");
-    const local = localTools.find((tool) => tool.name === "mthds_show_images");
-
-    expect(hosted).toBeDefined();
-    expect(local).toBeDefined();
-    expect(sharedContract(local!)).toEqual(sharedContract(hosted!));
+    // table must fail here and not just change a derived list.
+    const tool = tools.find((candidate) => candidate.name === "mthds_show_images");
 
     // It writes nothing anywhere; what it changes is the conversation, which
     // is what the description says. The link it fetches is the configured
     // API's own answer, so the world stays closed.
-    expect(local?.annotations).toMatchObject({
+    expect(tool?.annotations).toMatchObject({
       readOnlyHint: true,
       destructiveHint: false,
       openWorldHint: false,
     });
-    const schema = local?.inputSchema as { required?: string[]; properties?: object };
+    const schema = tool?.inputSchema as { required?: string[]; properties?: object };
     expect(schema.required).toEqual(["run_id"]);
     expect(Object.keys(schema.properties ?? {}).sort()).toEqual(["images", "indices", "run_id"]);
   });
 
-  it("opens both shells' instructions with the order of the steps", async () => {
-    const { client: hosted, close: closeHosted } = await connectClient(
-      createHostedServer(TEST_OAUTH),
-    );
-    const { client: local, close: closeLocal } = await connectClient(createLocalServer());
+  it("does NOT register the console's attachment tool", async () => {
+    const names = (await listTools(createLocalServer())).map((tool) => tool.name);
+
+    // Absent, not merely inert: the host gates the attachment substitution on
+    // the declared schema and no stdio host performs it, so on the workshop the
+    // tool is structurally unreachable. Advertising it would spend every
+    // workshop user's tokens on every tools/list for a capability that cannot
+    // fire, and would invite the model to attempt it.
+    expect(names).not.toContain("mthds_upload_attachments");
+  });
+
+  it("registers mthds_codegen with the target enum, no default, and the write annotations", async () => {
+    const tools = await listTools(createLocalServer());
+    const tool = tools.find((candidate) => candidate.name === "mthds_codegen");
+    const schema = tool?.inputSchema as {
+      required?: string[];
+      properties?: { target?: { enum?: string[]; default?: unknown } };
+    };
+
+    // `target` is the one required field and carries no default: choosing the
+    // language is the tool's whole point, and a default would pick one silently.
+    expect(schema.required).toEqual(["target"]);
+    expect(schema.properties?.target?.enum).toEqual([...CODEGEN_TARGETS]);
+    expect(schema.properties?.target).not.toHaveProperty("default");
+    expect(Object.keys(schema.properties ?? {}).sort()).toEqual([
+      "files",
+      "method_id",
+      "method_ref",
+      "output_dir",
+      "target",
+    ]);
+    expect(tool?.description).toContain("output_dir");
+    // Destructive: regeneration overwrites the stamped files it wrote before,
+    // discarding hand-edits below the stamp, and this is the hint a host reads
+    // to decide whether to confirm first.
+    expect(tool?.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+    });
+  });
+});
+
+describe("the workshop's instructions", () => {
+  it("open with the order of the steps", async () => {
+    const { client, close } = await connectClient(createLocalServer());
 
     try {
-      for (const instructions of [hosted.getInstructions() ?? "", local.getInstructions() ?? ""]) {
-        // A host that cuts keeps the head. When the workshop's instructions
-        // outgrew Claude Code's cut, the step order was what the model lost,
-        // so it is the first thing said: every step named, in order, early.
-        const head = instructions.slice(0, FLOW_HEAD_LENGTH);
-        const positions = FLOW_ORDER.map((tool) => head.indexOf(`\`${tool}\``));
+      // A host that cuts keeps the head. When the workshop's instructions
+      // outgrew Claude Code's cut, the step order was what the model lost,
+      // so it is the first thing said: every step named, in order, early.
+      const head = (client.getInstructions() ?? "").slice(0, FLOW_HEAD_LENGTH);
+      const positions = FLOW_ORDER.map((tool) => head.indexOf(`\`${tool}\``));
 
-        expect(positions, "every step is named in the head").not.toContain(-1);
-        expect(positions).toEqual([...positions].sort((a, b) => a - b));
+      expect(positions, "every step is named in the head").not.toContain(-1);
+      expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    } finally {
+      await close();
+    }
+  });
+
+  it("say that showing a picture is permanent", async () => {
+    const { client, close } = await connectClient(createLocalServer());
+
+    try {
+      expect(client.getInstructions()).toContain("mthds_show_images");
+      expect(client.getInstructions()).toContain("stays in the");
+    } finally {
+      await close();
+    }
+  });
+
+  it("name the tools only the workshop has, and not the console's", async () => {
+    const { client, close } = await connectClient(createLocalServer());
+
+    try {
+      expect(client.getInstructions()).toContain("mthds_download_artifacts");
+      expect(client.getInstructions()).toContain("mthds_codegen");
+      expect(client.getInstructions()).not.toContain("mthds_upload_attachments");
+    } finally {
+      await close();
+    }
+  });
+
+  it("name every source form each selector-taking tool accepts", async () => {
+    const { client, close } = await connectClient(createLocalServer());
+
+    try {
+      const instructions = client.getInstructions() ?? "";
+
+      for (const tool of SELECTOR_TOOLS) {
+        const sentences = sentencesAbout(instructions, tool);
+
+        expect(sentences, `no instruction sentence mentions ${tool}`).not.toEqual("");
+        // A sentence that named method_id and left out method_ref told the
+        // model a published method could not be validated, templated,
+        // prepared or run — so the by-address flow was never offered,
+        // although every one of these tools resolves an address server-side.
+        expect(sentences, `the ${tool} sentence must name method_ref`).toContain("method_ref");
+        expect(sentences, `the ${tool} sentence must name method_id`).toContain("method_id");
       }
     } finally {
-      await closeHosted();
-      await closeLocal();
+      await close();
     }
   });
 
-  it("tells both shells that showing a picture is permanent", async () => {
-    const { client: hosted, close: closeHosted } = await connectClient(
-      createHostedServer(TEST_OAUTH),
-    );
-    const { client: local, close: closeLocal } = await connectClient(createLocalServer());
+  it("trigger a catalog search reactively, never proactively", async () => {
+    const { client, close } = await connectClient(createLocalServer());
 
     try {
-      for (const instructions of [hosted.getInstructions(), local.getInstructions()]) {
-        expect(instructions).toContain("mthds_show_images");
-        expect(instructions).toContain("stays in the");
-      }
+      const catalog = sentencesAbout(client.getInstructions() ?? "", "mthds_list_methods");
+
+      // The reactive triggers: the user asked, or named a saved method
+      // without its id.
+      expect(catalog).toContain("asks what saved methods exist");
+      expect(catalog).toContain("without its mt_ id");
+      // Not the proactive one, which the console has. A workshop session is
+      // driven by skills, and that clause had it leaving unrelated work to
+      // search the catalog because a saved method might have fit.
+      expect(catalog).not.toContain("may fit the task");
     } finally {
-      await closeHosted();
-      await closeLocal();
+      await close();
     }
   });
+});
 
-  it("advertises artifact download in the workshop instructions only", async () => {
-    const { client: hosted, close: closeHosted } = await connectClient(
-      createHostedServer(TEST_OAUTH),
-    );
-    const { client: local, close: closeLocal } = await connectClient(createLocalServer());
-
-    try {
-      expect(local.getInstructions()).toContain("mthds_download_artifacts");
-      expect(hosted.getInstructions()).not.toContain("mthds_download_artifacts");
-    } finally {
-      await closeHosted();
-      await closeLocal();
-    }
-  });
-
+describe("the workshop's contexts and dispatch", () => {
   it("binds both write roots and the results nudge to the workshop's working directory", async () => {
     const rootDir = await makeTempDir();
 
-    const local = buildLocalToolContexts({ PIPELEX_BASE_URL: "http://127.0.0.1:8081" }, rootDir);
-    const hosted = buildToolContexts({ env: { PIPELEX_BASE_URL: "http://127.0.0.1:8081" } });
+    const contexts = buildLocalToolContexts({ PIPELEX_BASE_URL: "http://127.0.0.1:8081" }, rootDir);
 
     // One validation context, shared — not a second one built from the same
     // parts. Two hand-synced copies diverge the moment a field is added to
-    // one, and `hosted/contexts.ts` already has to override both separately,
-    // so `mthds_save_method`'s validation leg would quietly stop agreeing with
-    // `mthds_validate`.
-    expect(local.catalogWrite.validation).toBe(local.validation);
-    expect(hosted.catalogWrite.validation).toBe(hosted.validation);
+    // one, so `mthds_save_method`'s validation leg would quietly stop agreeing
+    // with `mthds_validate`.
+    expect(contexts.catalogWrite.validation).toBe(contexts.validation);
 
-    // One `workspaceRoot` option, three consumers — the download tool's save
-    // root, codegen's `output_dir` root, and the results summary's nudge.
-    expect(local.artifacts.saveRoot).toBe(rootDir);
-    expect(local.codegen.saveRoot).toBe(rootDir);
-    expect(local.run.artifactDownloadAvailable).toBe(true);
-    // The console builds the contexts (one builder serves both shells) but
-    // gives them nowhere to write and no nudge to emit.
-    expect(hosted.artifacts.saveRoot).toBeUndefined();
-    expect(hosted.codegen.saveRoot).toBeUndefined();
-    expect(hosted.run.artifactDownloadAvailable).toBe(false);
+    // One working directory, every consumer — the download tool's save root,
+    // codegen's `output_dir` root, the catalog pull's write root, and the
+    // results summary's nudge.
+    expect(contexts.artifacts.saveRoot).toBe(rootDir);
+    expect(contexts.codegen.saveRoot).toBe(rootDir);
+    expect(contexts.catalogWrite.saveRoot).toBe(rootDir);
+    expect(contexts.run.artifactDownloadAvailable).toBe(true);
+    expect(contexts.images.artifactDownloadAvailable).toBe(true);
+    // The workshop is co-located with the user's files, so it uploads them.
+    expect(contexts.prepare.allowUpload).toBe(true);
   });
 
   it("registers mthds_list_methods first with its read-only schema and dispatches it", async () => {
@@ -250,53 +296,7 @@ describe("local stdio server", () => {
     }
   });
 
-  it("registers mthds_codegen on both shells with the target enum, no view, and no default", async () => {
-    const hostedTools = await listTools(createHostedServer(TEST_OAUTH));
-    const localTools = await listTools(createLocalServer());
-    const hosted = hostedTools.find((tool) => tool.name === "mthds_codegen");
-    const local = localTools.find((tool) => tool.name === "mthds_codegen");
-    const schema = hosted?.inputSchema as {
-      required?: string[];
-      properties?: { target?: { enum?: string[]; default?: unknown } };
-    };
-
-    expect(local).toBeDefined();
-    // `target` is the one required field and carries no default: choosing the
-    // language is the tool's whole point, and a default would pick one silently.
-    expect(schema.required).toEqual(["target"]);
-    expect(schema.properties?.target?.enum).toEqual([...CODEGEN_TARGETS]);
-    expect(schema.properties?.target).not.toHaveProperty("default");
-    expect(Object.keys(schema.properties ?? {}).sort()).toEqual([
-      "files",
-      "method_id",
-      "method_ref",
-      "output_dir",
-      "target",
-    ]);
-    // Both shells advertise output_dir and the write annotation; the console
-    // refuses the argument instructively rather than silently ignoring it.
-    expect(local?.description).toContain("output_dir");
-    expect(hosted?.description).toContain("output_dir");
-    // Plain tool on both shells: invocation strings for the console, no view.
-    expect(hosted?._meta).toMatchObject({
-      "openai/toolInvocation/invoking": "Generating typed code for the method...",
-      "openai/toolInvocation/invoked": "Typed code generated.",
-    });
-    expect(hosted?._meta).not.toHaveProperty("ui/resourceUri");
-    // Destructive on BOTH shells: regeneration overwrites the stamped files it
-    // wrote before, discarding hand-edits below the stamp, and this is the hint
-    // a host reads to decide whether to confirm first. The console cannot write,
-    // but an annotation says what a tool MAY do — the same reason `readOnlyHint`
-    // is false there too.
-    expect(hosted?.annotations).toMatchObject({
-      readOnlyHint: false,
-      destructiveHint: true,
-      openWorldHint: false,
-    });
-    expect(local?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true });
-  });
-
-  it("dispatches mthds_codegen through the workshop with the artifacts on content and nothing on _meta", async () => {
+  it("dispatches mthds_codegen with the artifacts on content and nothing on _meta", async () => {
     const contexts = buildLocalToolContexts({ PIPELEX_API_KEY: "plx_sk_test" });
     contexts.codegen.client = {
       async codegen(): Promise<CodegenResponse> {
@@ -329,175 +329,6 @@ describe("local stdio server", () => {
     } finally {
       await close();
     }
-  });
-
-  it("advertises codegen in both shells' instructions", async () => {
-    const { client: hosted, close: closeHosted } = await connectClient(
-      createHostedServer(TEST_OAUTH),
-    );
-    const { client: local, close: closeLocal } = await connectClient(createLocalServer());
-
-    try {
-      expect(hosted.getInstructions()).toContain("mthds_codegen");
-      expect(local.getInstructions()).toContain("mthds_codegen");
-    } finally {
-      await closeHosted();
-      await closeLocal();
-    }
-  });
-
-  it("registers catalog invocation messages on the hosted shell without a view", async () => {
-    const hostedTools = await listTools(createHostedServer(TEST_OAUTH));
-    const tool = hostedTools.find((candidate) => candidate.name === "mthds_list_methods");
-
-    expect(tool?._meta).toMatchObject({
-      "openai/toolInvocation/invoking": "Listing registered methods...",
-      "openai/toolInvocation/invoked": "Registered methods listed.",
-    });
-    expect(tool?._meta).not.toHaveProperty("ui/resourceUri");
-  });
-
-  it("does NOT register the console-only attachment tool (D5)", async () => {
-    const hostedTools = await listTools(createHostedServer(TEST_OAUTH));
-    const localTools = await listTools(createLocalServer());
-    const consoleOnlyNames: string[] = consoleOnlyToolDefinitions.map(
-      (definition) => definition.name,
-    );
-
-    expect(consoleOnlyNames).toContain("mthds_upload_attachments");
-    // Absent, not merely inert: the host gates the attachment substitution on
-    // the declared schema and no stdio host performs it, so on the workshop the
-    // tool is structurally unreachable. Advertising it would spend every
-    // workshop user's tokens on every tools/list for a capability that cannot
-    // fire, and would invite the model to attempt it.
-    for (const name of consoleOnlyNames) {
-      expect(localTools.map((tool) => tool.name)).not.toContain(name);
-      expect(hostedTools.map((tool) => tool.name)).toContain(name);
-    }
-  });
-
-  it("names every source form each selector-taking tool accepts, in both shells' instructions", async () => {
-    const { client: hosted, close: closeHosted } = await connectClient(
-      createHostedServer(TEST_OAUTH),
-    );
-    const { client: local, close: closeLocal } = await connectClient(createLocalServer());
-
-    try {
-      const shells = [
-        ["console", hosted.getInstructions() ?? ""],
-        ["workshop", local.getInstructions() ?? ""],
-      ] as const;
-
-      for (const [shell, instructions] of shells) {
-        for (const tool of SELECTOR_TOOLS) {
-          const sentences = sentencesAbout(instructions, tool);
-
-          expect(sentences, `${shell}: no instruction sentence mentions ${tool}`).not.toEqual("");
-          // A sentence that named method_id and left out method_ref told the
-          // model a published method could not be validated, templated,
-          // prepared or run — so the by-address flow was never offered,
-          // although every one of these tools resolves an address server-side.
-          expect(sentences, `${shell}: the ${tool} sentence must name method_ref`).toContain(
-            "method_ref",
-          );
-          expect(sentences, `${shell}: the ${tool} sentence must name method_id`).toContain(
-            "method_id",
-          );
-        }
-      }
-    } finally {
-      await closeHosted();
-      await closeLocal();
-    }
-  });
-
-  it("prompts a proactive catalog search in the console instructions only", async () => {
-    const { client: hosted, close: closeHosted } = await connectClient(
-      createHostedServer(TEST_OAUTH),
-    );
-    const { client: local, close: closeLocal } = await connectClient(createLocalServer());
-
-    try {
-      const consoleCatalog = sentencesAbout(hosted.getInstructions() ?? "", "mthds_list_methods");
-      const workshopCatalog = sentencesAbout(local.getInstructions() ?? "", "mthds_list_methods");
-
-      // Both shells keep the reactive triggers: the user asked, or named a
-      // saved method without its id.
-      for (const sentence of [consoleCatalog, workshopCatalog]) {
-        expect(sentence).toContain("asks what saved methods exist");
-        expect(sentence).toContain("without its mt_ id");
-      }
-      // The proactive one is the console's alone. A workshop session is driven
-      // by skills, and this clause had it leaving unrelated work to search the
-      // catalog because a saved method might have fit.
-      expect(consoleCatalog).toContain("may fit the task");
-      expect(workshopCatalog).not.toContain("may fit the task");
-    } finally {
-      await closeHosted();
-      await closeLocal();
-    }
-  });
-
-  it("advertises the attachment channel in the hosted instructions only", async () => {
-    const { client: hosted, close: closeHosted } = await connectClient(
-      createHostedServer(TEST_OAUTH),
-    );
-    const { client: local, close: closeLocal } = await connectClient(createLocalServer());
-
-    try {
-      expect(hosted.getInstructions()).toContain("mthds_upload_attachments");
-      expect(local.getInstructions()).not.toContain("mthds_upload_attachments");
-    } finally {
-      await closeHosted();
-      await closeLocal();
-    }
-  });
-
-  it("names `attachments` in openai/fileParams — the substitution mechanism itself", async () => {
-    const hostedTools = await listTools(createHostedServer(TEST_OAUTH));
-    const uploadTool = hostedTools.find((tool) => tool.name === "mthds_upload_attachments");
-
-    // Without this key the host never rewrites the model's file reference into
-    // the signed-URL object, and the tool is silently inert.
-    expect(uploadTool?._meta?.["openai/fileParams"]).toEqual(["attachments"]);
-    // The only tool here that reaches outside the configured Pipelex API.
-    expect(uploadTool?.annotations).toMatchObject({
-      readOnlyHint: false,
-      destructiveHint: false,
-      openWorldHint: true,
-    });
-  });
-
-  it("emits the mandated four-field attachment JSON Schema", async () => {
-    const hostedTools = await listTools(createHostedServer(TEST_OAUTH));
-    const uploadTool = hostedTools.find((tool) => tool.name === "mthds_upload_attachments");
-    const schema = uploadTool?.inputSchema as {
-      required?: string[];
-      properties?: { attachments?: { items?: Record<string, unknown> } };
-    };
-    const item = schema.properties?.attachments?.items as {
-      type?: string;
-      properties?: Record<string, unknown>;
-      required?: string[];
-      additionalProperties?: unknown;
-    };
-
-    // This is the JSON Schema OpenAI's app-review "Scan Tools" step reads and
-    // the host's runtime substitution gate matches against: exactly these four
-    // properties, exactly this required/optional split. A fifth property, a
-    // missing one, or a wrongly-required optional fails review AND silently
-    // stops the host populating the field. It is un-hotfixable once users have
-    // added the connector, so it is pinned here rather than trusted.
-    expect(schema.required).toEqual(["attachments"]);
-    expect(item.type).toBe("object");
-    expect(Object.keys(item.properties ?? {}).sort()).toEqual([
-      "download_url",
-      "file_id",
-      "file_name",
-      "mime_type",
-    ]);
-    expect(item.required).toEqual(["download_url", "file_id"]);
-    expect(item).not.toHaveProperty("additionalProperties");
   });
 
   it("advertises paths as the headline and makes the local resolver available to files tools", async () => {
@@ -587,10 +418,9 @@ describe("local stdio server", () => {
       await client.connect(transport);
       const listed = await client.listTools();
 
-      expect(listed.tools.map((tool) => tool.name)).toEqual([
-        ...toolDefinitions.map((definition) => definition.name),
-        ...workshopOnlyToolDefinitions.map((definition) => definition.name),
-      ]);
+      expect(listed.tools.map((tool) => tool.name)).toEqual(
+        localToolDefinitions.map((definition) => definition.name),
+      );
       expect(client.getInstructions()).toContain("Prefer the `{ path: string }` file form");
     } finally {
       await client.close();
@@ -659,7 +489,7 @@ const catalogMethod: MethodPage["items"][number] = {
   created_at: "2026-01-01T00:00:00Z",
 };
 
-/** The run flow, in the order both shells' instructions must name it. */
+/** The workshop's flow, in the order its instructions must name it. */
 const FLOW_ORDER = [
   "mthds_list_methods",
   "mthds_validate",
@@ -671,15 +501,13 @@ const FLOW_ORDER = [
   "mthds_show_images",
 ] as const;
 
-/** How early the flow must be complete: well inside any host's cut. */
-const FLOW_HEAD_LENGTH = 500;
-
 /**
- * The tools that take a method selector, and whose instruction sentences must
- * therefore name every form they accept. `mthds_list_methods` is not one: it
- * takes no method, it answers with ids. Nor is a tool that takes an id to write
- * or read one stored method, which accepts no address — a new tool joins this
- * list only when it takes the one-of `files` / `method_ref` / `method_id`.
+ * The workshop's tools that take a method selector, and whose instruction
+ * sentences must therefore name every form they accept. `mthds_list_methods`
+ * is not one: it takes no method, it answers with ids. Nor is a tool that
+ * takes an id to write or read one stored method, which accepts no address — a
+ * new tool joins this list only when it takes the one-of `files` /
+ * `method_ref` / `method_id`.
  */
 const SELECTOR_TOOLS = [
   "mthds_validate",
@@ -688,32 +516,6 @@ const SELECTOR_TOOLS = [
   "mthds_prepare_inputs",
   "mthds_run",
 ] as const;
-
-/**
- * The instruction sentences that name one tool, joined.
- *
- * Sentence-level rather than over the whole string, so an assertion about one
- * tool cannot be satisfied by a neighbour's prose; joined rather than asserted
- * per sentence, because a tool may be named twice — once for its selectors and
- * once for something else. The tool name is matched inside its backticks, so
- * `mthds_run` does not match `mthds_run_status`.
- */
-function sentencesAbout(instructions: string, tool: string): string {
-  return instructions
-    .split(/(?<=\.)\s+/)
-    .filter((sentence) => sentence.includes(`\`${tool}\``))
-    .join(" ");
-}
-
-function sharedContract(tool: Awaited<ReturnType<Client["listTools"]>>["tools"][number]) {
-  return {
-    name: tool.name,
-    description: tool.description,
-    inputSchema: tool.inputSchema,
-    outputSchema: tool.outputSchema,
-    annotations: tool.annotations,
-  };
-}
 
 describe("the workshop's User-Agent", () => {
   afterEach(() => {
@@ -737,15 +539,11 @@ describe("the workshop's User-Agent", () => {
     const server = createLocalServer({
       env: { PIPELEX_BASE_URL: "https://api.pipelex.test", PIPELEX_API_KEY: "plx_sk_test" },
     });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client(clientInfo);
-    await server.connect(serverTransport);
-    await client.connect(clientTransport);
+    const { client, close } = await connectClient(server, clientInfo);
     try {
       await client.callTool({ name: "mthds_list_methods", arguments: {} });
     } finally {
-      await client.close();
-      if (server.isConnected()) await server.close();
+      await close();
     }
     return seen;
   }
@@ -756,7 +554,7 @@ describe("the workshop's User-Agent", () => {
     expect(seen.length).toBeGreaterThan(0);
     for (const value of seen) {
       expect(value).toBe(
-        `pipelex-mcp/${PIPELEX_MCP_SERVER_INFO.version} (workshop; host=claude-code/2.1.4) ` +
+        `pipelex-mcp/${LOCAL_SERVER_INFO.version} (workshop; host=claude-code/2.1.4) ` +
           `pipelex-sdk-js/${SDK_VERSION} node/${process.versions.node} (${process.platform}; ${process.arch})`,
       );
     }
@@ -777,37 +575,6 @@ describe("the workshop's User-Agent", () => {
     expect(seen[0]).toMatch(/^pipelex-mcp\/\S+ \(workshop\) pipelex-sdk-js\//);
   });
 });
-
-interface TestServer {
-  connect(transport: Transport): Promise<void>;
-  close(): Promise<void>;
-  isConnected(): boolean;
-}
-
-async function listTools(server: TestServer) {
-  const { client, close } = await connectClient(server);
-  try {
-    return (await client.listTools()).tools;
-  } finally {
-    await close();
-  }
-}
-
-async function connectClient(server: TestServer) {
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "pipelex-mcp-test", version: "0.0.0" });
-
-  await server.connect(serverTransport);
-  await client.connect(clientTransport);
-
-  return {
-    client,
-    async close() {
-      await client.close();
-      if (server.isConnected()) await server.close();
-    },
-  };
-}
 
 async function makeTempDir(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pipelex-local-server-"));

@@ -1,8 +1,8 @@
 import { consoleHost, mcpAppInfo, userAgentOf } from "../capabilities/client-identification.js";
 import type { AppInfoSource, RequestHeaders } from "../capabilities/client-identification.js";
 import type { AuthErrorTexture } from "../capabilities/shared.js";
-import { patchApiContexts } from "../tools.js";
-import type { ToolContexts } from "../tools.js";
+import { patchHostedApiContexts } from "./tools.js";
+import type { HostedToolContexts } from "./tools.js";
 
 /**
  * Per-request capability contexts for the hosted console.
@@ -67,18 +67,22 @@ const NO_CREDENTIAL = "";
  * a stateless `tools/call` to its `initialize`, so the request is all there is.
  */
 export function contextsForRequest(
-  base: ToolContexts,
+  base: HostedToolContexts,
   authInfo: { token: string } | undefined,
   requestInfo?: { headers: RequestHeaders },
-): ToolContexts {
+): HostedToolContexts {
   const appInfo = consoleAppInfoSource(requestInfo?.headers);
   const token = authInfo?.token;
   if (token !== undefined && token !== "") {
-    return patchApiContexts(base, { apiKey: token, authError: REJECTED_TOKEN_AUTH_ERROR, appInfo });
+    return patchHostedApiContexts(base, {
+      apiKey: token,
+      authError: REJECTED_TOKEN_AUTH_ERROR,
+      appInfo,
+    });
   }
   // `apiKey` is set unconditionally — overriding it is the whole point on both
-  // branches, which `patchApiContexts` does for every key the patch carries.
-  return patchApiContexts(base, {
+  // branches, which `patchHostedApiContexts` does for every key the patch carries.
+  return patchHostedApiContexts(base, {
     apiKey: NO_CREDENTIAL,
     authError: MISSING_TOKEN_AUTH_ERROR,
     appInfo,

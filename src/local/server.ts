@@ -2,17 +2,20 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 
+import pkg from "../../package.json" with { type: "json" };
+
 import { mcpAppInfo, workshopHost } from "../capabilities/client-identification.js";
 import type { AppInfoSource, McpClientInfo } from "../capabilities/client-identification.js";
-import {
-  PIPELEX_MCP_SERVER_INFO,
-  buildToolContexts,
-  patchApiContexts,
-  toolDefinitions,
-  workshopOnlyToolDefinitions,
-} from "../tools.js";
-import type { AnyToolDefinition, ToolContexts } from "../tools.js";
-import { localFileResolver } from "./files.js";
+import { buildLocalToolContexts, localToolDefinitions, patchLocalApiContexts } from "./tools.js";
+import type { LocalToolContexts, LocalToolDefinition } from "./tools.js";
+
+// Version is sourced from package.json so the MCP handshake always reports the
+// shipped release — the /release skill bumps package.json alone, and a
+// hardcoded copy here would silently drift (it did: 0.1.0 vs a 0.4.0 package).
+export const LOCAL_SERVER_INFO = {
+  name: "pipelex-mcp",
+  version: pkg.version,
+} as const;
 
 /**
  * The map, not the manual: what the workshop is for, the order of the steps,
@@ -49,33 +52,11 @@ export const LOCAL_SERVER_INSTRUCTIONS = [
 export interface LocalServerOptions {
   env?: NodeJS.ProcessEnv;
   rootDir?: string;
-  contexts?: ToolContexts;
-}
-
-export function buildLocalToolContexts(
-  env: NodeJS.ProcessEnv = process.env,
-  rootDir: string = process.cwd(),
-): ToolContexts {
-  return buildToolContexts({
-    env,
-    resolver: localFileResolver(rootDir),
-    // A second resolver, gated on `.py`, for mthds_save_method's `python`. The
-    // extension IS the read boundary, so one resolver serving both arguments
-    // would let each read the other's files.
-    pythonResolver: localFileResolver(rootDir, ".py"),
-    viewsAvailable: false,
-    // The workshop is co-located with the user's files, so it uploads
-    // file-bearing inputs (local paths, data: URLs, bytes) for mthds_prepare_inputs.
-    allowUpload: true,
-    // ...and, in the other direction, writes under that same working
-    // directory: run artifacts for mthds_download_artifacts, generated trees
-    // for mthds_codegen's output_dir.
-    workspaceRoot: rootDir,
-  });
+  contexts?: LocalToolContexts;
 }
 
 export function createLocalServer(options: LocalServerOptions = {}): McpServer {
-  const server = new McpServer(PIPELEX_MCP_SERVER_INFO, {
+  const server = new McpServer(LOCAL_SERVER_INFO, {
     capabilities: {},
     instructions: LOCAL_SERVER_INSTRUCTIONS,
   });
@@ -85,16 +66,12 @@ export function createLocalServer(options: LocalServerOptions = {}): McpServer {
   // the host has connected — after these contexts exist — so it is read when
   // each client is constructed, never captured here. Applied to supplied
   // contexts too: the identity is the shell's, not the caller's.
-  const contexts = patchApiContexts(
+  const contexts = patchLocalApiContexts(
     options.contexts ?? buildLocalToolContexts(options.env, options.rootDir ?? process.cwd()),
     { appInfo: workshopAppInfoSource(() => server.server.getClientVersion()) },
   );
 
-  for (const definition of toolDefinitions) {
-    registerLocalTool(server, definition, contexts);
-  }
-  // The workshop-only table — the mirror of the console's `consoleOnlyToolDefinitions`.
-  for (const definition of workshopOnlyToolDefinitions) {
+  for (const definition of localToolDefinitions) {
     registerLocalTool(server, definition, contexts);
   }
 
@@ -115,18 +92,18 @@ interface ErasedToolDefinition {
   description: string;
   inputSchema: ZodRawShapeCompat;
   outputSchema: ZodRawShapeCompat | AnySchema;
-  annotations: AnyToolDefinition["annotations"];
-  handler: (input: unknown, contexts: ToolContexts) => Promise<unknown>;
+  annotations: LocalToolDefinition["annotations"];
+  handler: (input: unknown, contexts: LocalToolContexts) => Promise<unknown>;
 }
 
 function registerLocalTool(
   server: McpServer,
-  definition: AnyToolDefinition,
-  contexts: ToolContexts,
+  definition: LocalToolDefinition,
+  contexts: LocalToolContexts,
 ): void {
-  // The table retains each handler's precise input type for the hosted typed
-  // chain. Registration through the plain SDK is necessarily homogeneous at
-  // this loop boundary; the SDK validates input before this erased dispatch.
+  // The table retains each handler's precise input type. Registration through
+  // the plain SDK is necessarily homogeneous at this loop boundary; the SDK
+  // validates input before this erased dispatch.
   const tool = definition as ErasedToolDefinition;
   server.registerTool(
     tool.name,

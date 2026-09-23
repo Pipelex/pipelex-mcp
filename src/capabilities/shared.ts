@@ -312,11 +312,23 @@ export interface ApiConfig {
   apiKey?: string;
   /**
    * Who is calling, for the `User-Agent` (`./client-identification.ts`). Set by
-   * the shell — `withAppInfo` in `../tools.ts` — never by the env: the workshop
-   * reads its host from the MCP handshake and the console from each request, so
-   * it is a function called when a client is constructed. Absent, a client
-   * still names itself `pipelex-mcp/<version>` (`BARE_APP_INFO`).
+   * the shell — `patchLocalApiContexts` in `../local/tools.ts`,
+   * `patchHostedApiContexts` in `../hosted/tools.ts` — never by the env: the
+   * workshop reads its host from the MCP handshake and the console from each
+   * request, so it is a function called when a client is constructed. Absent, a
+   * client still names itself `pipelex-mcp/<version>` (`BARE_APP_INFO`).
    */
+  appInfo?: AppInfoSource;
+}
+
+/**
+ * What a shell may override on every capability context that talks to the API.
+ * Each shell's tool table applies it to its own context set, since that table
+ * is where the list of contexts lives.
+ */
+export interface ApiContextPatch {
+  apiKey?: string;
+  authError?: AuthErrorTexture;
   appInfo?: AppInfoSource;
 }
 

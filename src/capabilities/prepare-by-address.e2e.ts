@@ -25,7 +25,7 @@ import { join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { buildLocalToolContexts } from "../local/server.js";
+import { buildLocalToolContexts } from "../local/tools.js";
 import { prepareMthdsInputs } from "./prepare.js";
 import type { PrepareContext } from "./prepare.js";
 import { validateMthds } from "./validate.js";
