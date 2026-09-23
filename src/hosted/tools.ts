@@ -96,6 +96,7 @@ import {
   validateMthds,
 } from "../capabilities/validate.js";
 import type { MthdsValidateInput, ValidationContext } from "../capabilities/validate.js";
+import type { ApiContextPatch } from "../capabilities/shared.js";
 import type { ToolDefinition } from "../tool-definition.js";
 
 /**
@@ -132,6 +133,38 @@ export function buildHostedToolContexts(env: NodeJS.ProcessEnv = process.env): H
     run: { ...buildRunContext(env), viewsAvailable: true, artifactDownloadAvailable: false },
     images: { ...buildImagesContext(env), artifactDownloadAvailable: false },
     attachments: buildAttachmentsContext(env),
+  };
+}
+
+/**
+ * Apply one patch to every console context. This is the single list of
+ * contexts a shell-level override has to reach on the console:
+ * `./contexts.ts` lifts the caller's token, its auth texture and the request's
+ * `appInfo` through it. A context left out here would be one whose calls go
+ * out with the deployment's env key or without the shell's identity, which is
+ * why the list lives beside `HostedToolContexts` and covers every member of it.
+ *
+ * Only the keys present in `patch` are written, and each is written
+ * unconditionally — an `apiKey` of `""` is a value, not an absence.
+ */
+export function patchHostedApiContexts(
+  base: HostedToolContexts,
+  patch: ApiContextPatch,
+): HostedToolContexts {
+  return {
+    catalog: { ...base.catalog, ...patch },
+    validation: { ...base.validation, ...patch },
+    inputs: { ...base.inputs, ...patch },
+    codegen: { ...base.codegen, ...patch },
+    prepare: { ...base.prepare, ...patch },
+    run: { ...base.run, ...patch },
+    // mthds_show_images resolves and fetches the caller's own stored objects,
+    // so the fetch is funded and scoped by the caller's identity like every
+    // other read.
+    images: { ...base.images, ...patch },
+    // The attachment ingest uploads to Pipelex storage, so the signed-in
+    // caller's own identity is what funds it — the console holds no key.
+    attachments: { ...base.attachments, ...patch },
   };
 }
 

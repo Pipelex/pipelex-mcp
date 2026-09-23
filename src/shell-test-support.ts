@@ -35,9 +35,17 @@ export interface TestServer {
 
 export type ListedTool = Awaited<ReturnType<Client["listTools"]>>["tools"][number];
 
-export async function connectClient(server: TestServer) {
+/**
+ * Connect an in-memory MCP client to a shell. `clientInfo` is what the client
+ * declares on `initialize` — the host identity the workshop's `User-Agent`
+ * reads — and defaults to a neutral test name.
+ */
+export async function connectClient(
+  server: TestServer,
+  clientInfo: { name: string; version: string } = { name: "pipelex-mcp-test", version: "0.0.0" },
+) {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "pipelex-mcp-test", version: "0.0.0" });
+  const client = new Client(clientInfo);
 
   await server.connect(serverTransport);
   await client.connect(clientTransport);

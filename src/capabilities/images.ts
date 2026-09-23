@@ -1,4 +1,4 @@
-import { ArtifactFetchError, PipelexApiClient } from "@pipelex/sdk";
+import { ArtifactFetchError } from "@pipelex/sdk";
 import type { FetchArtifactOptions, RunResultState, RunStatus } from "@pipelex/sdk";
 import { z } from "zod";
 
@@ -13,6 +13,7 @@ import {
   allowsPlainHttp,
   buildArtifactFetchConfig,
   classifyError,
+  createPipelexApiClient,
   imageCandidatesOf,
   itemToolError,
   summaryForToolError,
@@ -21,6 +22,7 @@ import {
   validateRunIdRequest,
 } from "./shared.js";
 import type {
+  ApiConfig,
   AuthErrorTexture,
   ContentImage,
   ErrorSummaries,
@@ -224,9 +226,7 @@ export interface ImagesClient {
   fetchArtifact(uri: string, options?: FetchArtifactOptions): Promise<Response>;
 }
 
-export interface ImagesContext {
-  baseUrl: string;
-  apiKey?: string;
+export interface ImagesContext extends ApiConfig {
   client?: ImagesClient;
   /**
    * The explicit plain-http override, read from `ALLOW_HTTP_ENV` in
@@ -252,13 +252,7 @@ export function buildImagesContext(env = process.env): ImagesContext {
 // SDK constructor throws PipelineRequestError on a malformed base URL, and that
 // must classify to a config ToolError, not reject the MCP handler.
 function imagesClient(context: ImagesContext): ImagesClient {
-  return (
-    context.client ??
-    new PipelexApiClient({
-      baseUrl: context.baseUrl,
-      apiKey: context.apiKey,
-    })
-  );
+  return context.client ?? createPipelexApiClient(context);
 }
 
 export function validateShowImagesRequest(input: MthdsShowImagesInput): ToolError[] {

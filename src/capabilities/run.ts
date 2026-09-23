@@ -1,9 +1,4 @@
-import {
-  collectArtifacts,
-  isTerminalRunStatus,
-  PipelexApiClient,
-  summarizeUsage,
-} from "@pipelex/sdk";
+import { collectArtifacts, isTerminalRunStatus, summarizeUsage } from "@pipelex/sdk";
 import type {
   MethodProvenance,
   PipelexRunResultStart,
@@ -21,27 +16,29 @@ import type {
 import { z } from "zod";
 
 import {
+  MAX_IMAGE_CANDIDATE_ENTRIES,
   METHOD_REF_GRAMMAR,
   buildApiConfig,
   classifyError,
-  summaryForToolError,
+  createPipelexApiClient,
   filesInputSchema,
   hasArtifactEntries,
   imageCandidatesOf,
-  MAX_IMAGE_CANDIDATE_ENTRIES,
   resolveSubmittedFiles,
+  summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
   validateRunIdRequest,
 } from "./shared.js";
 import type {
+  ApiConfig,
   AuthErrorTexture,
   ClassifyErrorOptions,
+  ErrorSummaries,
   FileResolver,
   SubmittedFile,
   SubmittedFileInput,
-  ErrorSummaries,
   ToolError,
 } from "./shared.js";
 
@@ -429,9 +426,7 @@ interface RunClient {
   getRunResult(runId: string): Promise<RunResultState>;
 }
 
-export interface RunContext {
-  baseUrl: string;
-  apiKey?: string;
+export interface RunContext extends ApiConfig {
   client?: RunClient;
   /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
   resolver?: FileResolver;
@@ -1101,13 +1096,7 @@ function failedResult(runId: string, status: RunStatus, message: string): RunRes
 // ── capabilities ────────────────────────────────────────────────────
 
 function runClient(context: RunContext): RunClient {
-  return (
-    context.client ??
-    new PipelexApiClient({
-      baseUrl: context.baseUrl,
-      apiKey: context.apiKey,
-    })
-  );
+  return context.client ?? createPipelexApiClient(context);
 }
 
 /** Start a durable run — fire-and-forget `POST /v1/start`, never blocking. */

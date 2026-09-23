@@ -3,8 +3,14 @@ import { z } from "zod";
 
 import { MAX_ATTACHMENT_BYTES, httpAttachmentFetcher } from "./attachment-fetch.js";
 import type { AttachmentFetchFailure, AttachmentFetcher } from "./attachment-fetch.js";
-import { buildApiConfig, classifyError, toolErrorSchema, toolResultContent } from "./shared.js";
-import type { AuthErrorTexture, ClassifyErrorOptions, ToolError } from "./shared.js";
+import {
+  buildApiConfig,
+  classifyError,
+  createPipelexApiClient,
+  toolErrorSchema,
+  toolResultContent,
+} from "./shared.js";
+import type { ApiConfig, AuthErrorTexture, ClassifyErrorOptions, ToolError } from "./shared.js";
 import { SizeGuardedPipelexApiClient, formatMib } from "./upload-ceiling.js";
 
 /**
@@ -99,9 +105,7 @@ export interface AttachmentUploadClient {
   uploadFile(asset: UploadableAsset, options?: UploadFileOptions): Promise<UploadRecord>;
 }
 
-export interface AttachmentsContext {
-  baseUrl: string;
-  apiKey?: string;
+export interface AttachmentsContext extends ApiConfig {
   client?: AttachmentUploadClient;
   /** The fetch boundary; the real https fetcher unless a test injects one. */
   fetcher?: AttachmentFetcher;
@@ -121,10 +125,7 @@ const UPLOAD_ERROR_OPTIONS: ClassifyErrorOptions = {
 // SDK constructor throws PipelineRequestError on a malformed base URL, and that
 // must classify to a config ToolError, not reject the MCP handler.
 export function uploadClient(context: AttachmentsContext): AttachmentUploadClient {
-  return (
-    context.client ??
-    new SizeGuardedPipelexApiClient({ baseUrl: context.baseUrl, apiKey: context.apiKey })
-  );
+  return context.client ?? createPipelexApiClient(context, SizeGuardedPipelexApiClient);
 }
 
 export async function uploadMthdsAttachments(

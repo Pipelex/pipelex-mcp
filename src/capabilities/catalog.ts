@@ -1,4 +1,3 @@
-import { PipelexApiClient } from "@pipelex/sdk";
 import type { ListMethodsQuery, MethodPage } from "@pipelex/sdk";
 import { z } from "zod";
 
@@ -6,11 +5,13 @@ import {
   asOneLine,
   buildApiConfig,
   classifyError,
+  createPipelexApiClient,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
 } from "./shared.js";
 import type {
+  ApiConfig,
   AuthErrorTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
@@ -106,9 +107,7 @@ export interface CatalogClient {
   listMethods(query?: ListMethodsQuery): Promise<MethodPage>;
 }
 
-export interface CatalogContext {
-  baseUrl: string;
-  apiKey?: string;
+export interface CatalogContext extends ApiConfig {
   client?: CatalogClient;
   /** Deployment-specific auth-failure texture (the hosted console overrides it per request); env-var wording by default. */
   authError?: AuthErrorTexture;
@@ -119,13 +118,7 @@ export function buildCatalogContext(env = process.env): CatalogContext {
 }
 
 function catalogClient(context: CatalogContext): CatalogClient {
-  return (
-    context.client ??
-    new PipelexApiClient({
-      baseUrl: context.baseUrl,
-      apiKey: context.apiKey,
-    })
-  );
+  return context.client ?? createPipelexApiClient(context);
 }
 
 export interface NormalizedCatalogInput {

@@ -115,6 +115,8 @@ The shells already differ in behavior behind shared names (views on the console 
 
 **One host, one server.** A host should be connected to exactly one of the two shells, never both — same tool names on both mean a both-installed host has ambiguous routing. Notably, a claude.ai Pipelex connector syncs into Claude Code; a workshop user disables it there (`/mcp`) in favor of the local server.
 
+**Client identification.** Every request either shell sends to the Pipelex API names this server in its `User-Agent`, so the platform attributes it to the `mcp` surface and records the AI host behind it: `pipelex-mcp/<version> (workshop; host=<name>/<version>) pipelex-sdk-js/<v> node/<v> (<os>; <arch>)` from the workshop, where the host is the `initialize` handshake's `clientInfo`, sanitised to header-safe characters and read when each tool call builds its client; and `pipelex-mcp/<version> (console; host=<claude|openai>) …` from the console, where the host is reduced from the connector's own request `User-Agent` and omitted when it names neither. The server passes this as the SDK's `appInfo` through one client factory, and a lint rule refuses any other way of reaching the API. The header is analytics only and never gates anything. `docs/client-identification.md` has the sanitising rule, the guard and what it does not catch.
+
 ## Naming Conventions
 
 Tools are the contract; the `../pipelex-plugins` skills are the manual. The naming follows that split:

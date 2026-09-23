@@ -1,4 +1,4 @@
-import { FIELD_KINDS, PipelexApiClient } from "@pipelex/sdk";
+import { FIELD_KINDS } from "@pipelex/sdk";
 import type {
   FieldKind,
   IOMultiplicity,
@@ -18,21 +18,23 @@ import {
   blueprintMainPipeRefOf,
   buildApiConfig,
   classifyError,
-  summaryForToolError,
+  createPipelexApiClient,
   filesInputSchema,
   hasArtifactEntries,
   resolveSubmittedFiles,
+  summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
 } from "./shared.js";
 import type {
+  ApiConfig,
   AuthErrorTexture,
   ClassifyErrorOptions,
+  ErrorSummaries,
   FileResolver,
   SubmittedFile,
   SubmittedFileInput,
-  ErrorSummaries,
   ToolError,
 } from "./shared.js";
 
@@ -368,9 +370,7 @@ interface ValidationClient {
   ): Promise<PipelexValidationResult>;
 }
 
-export interface ValidationContext {
-  baseUrl: string;
-  apiKey?: string;
+export interface ValidationContext extends ApiConfig {
   client?: ValidationClient;
   /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
   resolver?: FileResolver;
@@ -441,13 +441,7 @@ const VALIDATE_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
 // constructor throws PipelineRequestError on a malformed base URL, and that
 // must classify to a config ToolError, not reject the MCP handler.
 function validationClient(context: ValidationContext): ValidationClient {
-  return (
-    context.client ??
-    new PipelexApiClient({
-      baseUrl: context.baseUrl,
-      apiKey: context.apiKey,
-    })
-  );
+  return context.client ?? createPipelexApiClient(context);
 }
 
 export async function validateMthds(

@@ -97,34 +97,64 @@ export function createHostedServer(
       // per tool rather than a loop, because the chain is what types
       // `AppType`, which the views' `useToolInfo` / `useCallTool` read.
       .registerTool(hostedToolConfig(mthdsListMethodsTool), (input, extra) =>
-        mthdsListMethodsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsListMethodsTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
       )
       .registerTool(hostedToolConfig(mthdsValidateTool), (input, extra) =>
-        mthdsValidateTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsValidateTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
       )
       .registerTool(hostedToolConfig(mthdsInputsTemplateTool), (input, extra) =>
-        mthdsInputsTemplateTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsInputsTemplateTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
       )
       .registerTool(hostedToolConfig(mthdsCodegenTool), (input, extra) =>
-        mthdsCodegenTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsCodegenTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
       )
       .registerTool(hostedToolConfig(mthdsPrepareInputsTool), (input, extra) =>
-        mthdsPrepareInputsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsPrepareInputsTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
       )
       .registerTool(hostedToolConfig(mthdsUploadAttachmentsTool), (input, extra) =>
-        mthdsUploadAttachmentsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsUploadAttachmentsTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
       )
       .registerTool(hostedToolConfig(mthdsRunTool), (input, extra) =>
-        mthdsRunTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsRunTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
       )
       .registerTool(hostedToolConfig(mthdsRunStatusTool), (input, extra) =>
-        mthdsRunStatusTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsRunStatusTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
       )
       .registerTool(hostedToolConfig(mthdsRunResultsTool), (input, extra) =>
-        mthdsRunResultsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsRunResultsTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
       )
       .registerTool(hostedToolConfig(mthdsShowImagesTool), (input, extra) =>
-        mthdsShowImagesTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+        mthdsShowImagesTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
       )
   );
 }

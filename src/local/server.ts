@@ -4,7 +4,9 @@ import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/ser
 
 import pkg from "../../package.json" with { type: "json" };
 
-import { buildLocalToolContexts, localToolDefinitions } from "./tools.js";
+import { mcpAppInfo, workshopHost } from "../capabilities/client-identification.js";
+import type { AppInfoSource, McpClientInfo } from "../capabilities/client-identification.js";
+import { buildLocalToolContexts, localToolDefinitions, patchLocalApiContexts } from "./tools.js";
 import type { LocalToolContexts, LocalToolDefinition } from "./tools.js";
 
 // Version is sourced from package.json so the MCP handshake always reports the
@@ -54,18 +56,35 @@ export interface LocalServerOptions {
 }
 
 export function createLocalServer(options: LocalServerOptions = {}): McpServer {
-  const contexts =
-    options.contexts ?? buildLocalToolContexts(options.env, options.rootDir ?? process.cwd());
   const server = new McpServer(LOCAL_SERVER_INFO, {
     capabilities: {},
     instructions: LOCAL_SERVER_INSTRUCTIONS,
   });
+  // Every client a tool call builds names the workshop and the AI host driving
+  // it: `pipelex-mcp/<v> (workshop; host=<name>/<version>)`. The host is the
+  // `clientInfo` of the MCP `initialize` handshake, which is only known once
+  // the host has connected — after these contexts exist — so it is read when
+  // each client is constructed, never captured here. Applied to supplied
+  // contexts too: the identity is the shell's, not the caller's.
+  const contexts = patchLocalApiContexts(
+    options.contexts ?? buildLocalToolContexts(options.env, options.rootDir ?? process.cwd()),
+    { appInfo: workshopAppInfoSource(() => server.server.getClientVersion()) },
+  );
 
   for (const definition of localToolDefinitions) {
     registerLocalTool(server, definition, contexts);
   }
 
   return server;
+}
+
+/**
+ * The workshop's identity, read from the handshake each time a client is built.
+ * Before `initialize` (no tool call can arrive then) or from a host that sent
+ * an unusable name, the `host=` parameter is simply left out.
+ */
+export function workshopAppInfoSource(clientInfo: () => McpClientInfo | undefined): AppInfoSource {
+  return () => mcpAppInfo("workshop", workshopHost(clientInfo()));
 }
 
 interface ErasedToolDefinition {

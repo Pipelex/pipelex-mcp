@@ -93,6 +93,7 @@ import {
   startMthdsRun,
 } from "../capabilities/run.js";
 import type { MthdsRunInput, RunContext, RunIdInput } from "../capabilities/run.js";
+import type { ApiContextPatch } from "../capabilities/shared.js";
 import {
   buildValidationContext,
   mthdsValidateInputSchema,
@@ -168,6 +169,38 @@ export function buildLocalToolContexts(
     // The same prose-only nudge as the run context's.
     images: { ...buildImagesContext(env), artifactDownloadAvailable: true },
     artifacts: { ...buildArtifactsContext(env), saveRoot: rootDir },
+  };
+}
+
+/**
+ * Apply one patch to every workshop context, the nested validation context of
+ * `catalogWrite` included. This is the single list of contexts a shell-level
+ * override has to reach on the workshop: `createLocalServer` lifts its
+ * handshake's `appInfo` through it. A context left out here would be one whose
+ * calls go out without the shell's identity, which is why the list lives
+ * beside `LocalToolContexts` and covers every member of it.
+ *
+ * Only the keys present in `patch` are written, and each is written
+ * unconditionally — an `apiKey` of `""` is a value, not an absence.
+ */
+export function patchLocalApiContexts(
+  base: LocalToolContexts,
+  patch: ApiContextPatch,
+): LocalToolContexts {
+  return {
+    catalog: { ...base.catalog, ...patch },
+    catalogWrite: {
+      ...base.catalogWrite,
+      ...patch,
+      validation: { ...base.catalogWrite.validation, ...patch },
+    },
+    validation: { ...base.validation, ...patch },
+    inputs: { ...base.inputs, ...patch },
+    codegen: { ...base.codegen, ...patch },
+    prepare: { ...base.prepare, ...patch },
+    run: { ...base.run, ...patch },
+    images: { ...base.images, ...patch },
+    artifacts: { ...base.artifacts, ...patch },
   };
 }
 

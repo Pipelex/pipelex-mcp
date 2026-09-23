@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { ArtifactAuthenticationError, PipelexApiClient, collectArtifacts } from "@pipelex/sdk";
+import { ArtifactAuthenticationError, collectArtifacts } from "@pipelex/sdk";
 import type {
   ArtifactScope,
   DownloadArtifactsRequest,
@@ -17,13 +17,14 @@ import {
   allowsPlainHttp,
   buildArtifactFetchConfig,
   classifyError,
+  createPipelexApiClient,
   itemToolError,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateRunIdRequest,
 } from "./shared.js";
-import type { AuthErrorTexture, ErrorSummaries, ToolError } from "./shared.js";
+import type { ApiConfig, AuthErrorTexture, ErrorSummaries, ToolError } from "./shared.js";
 import { resolveSaveDir } from "./workspace-boundary.js";
 
 /**
@@ -163,9 +164,7 @@ export interface ArtifactClient {
   downloadArtifacts(request: DownloadArtifactsRequest): Promise<DownloadArtifactsResult>;
 }
 
-export interface ArtifactsContext {
-  baseUrl: string;
-  apiKey?: string;
+export interface ArtifactsContext extends ApiConfig {
   client?: ArtifactClient;
   /**
    * The directory downloads land under — the workshop's working directory,
@@ -193,13 +192,7 @@ export function buildArtifactsContext(env = process.env): ArtifactsContext {
 // SDK constructor throws PipelineRequestError on a malformed base URL, and that
 // must classify to a config ToolError, not reject the MCP handler.
 function artifactClient(context: ArtifactsContext): ArtifactClient {
-  return (
-    context.client ??
-    new PipelexApiClient({
-      baseUrl: context.baseUrl,
-      apiKey: context.apiKey,
-    })
-  );
+  return context.client ?? createPipelexApiClient(context);
 }
 
 /**

@@ -1,4 +1,3 @@
-import { PipelexApiClient } from "@pipelex/sdk";
 import type {
   BuildInputsRequest,
   BuildInputsResponse,
@@ -12,22 +11,24 @@ import {
   METHOD_REF_GRAMMAR,
   buildApiConfig,
   classifyError,
-  summaryForToolError,
+  createPipelexApiClient,
   fetchMethodFiles,
   filesInputSchema,
   resolveSubmittedFiles,
+  summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
 } from "./shared.js";
 import type {
+  ApiConfig,
   AuthErrorTexture,
   ClassifyErrorOptions,
+  ErrorSummaries,
   FileResolver,
   MethodFetchClient,
   SubmittedFile,
   SubmittedFileInput,
-  ErrorSummaries,
   ToolError,
 } from "./shared.js";
 
@@ -132,9 +133,7 @@ interface InputsClient extends MethodFetchClient {
   buildInputs(request: BuildInputsRequest): Promise<BuildInputsResponse>;
 }
 
-export interface InputsContext {
-  baseUrl: string;
-  apiKey?: string;
+export interface InputsContext extends ApiConfig {
   client?: InputsClient;
   /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
   resolver?: FileResolver;
@@ -184,13 +183,7 @@ const INPUTS_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
 // constructor throws PipelineRequestError on a malformed base URL, and that
 // must classify to a config ToolError, not reject the MCP handler.
 function inputsClient(context: InputsContext): InputsClient {
-  return (
-    context.client ??
-    new PipelexApiClient({
-      baseUrl: context.baseUrl,
-      apiKey: context.apiKey,
-    })
-  );
+  return context.client ?? createPipelexApiClient(context);
 }
 
 export async function buildMthdsInputs(

@@ -9,6 +9,7 @@ import {
   InvalidLocalSourceError,
   MissingMainStuffError,
   PIPELEX_STORAGE_SCHEME,
+  PipelexApiClient,
   PipelineRequestError,
   RejectedAssetError,
   RunLifecycleUnavailableError,
@@ -18,8 +19,11 @@ import {
   UploadTransportError,
   collectArtifacts,
 } from "@pipelex/sdk";
-import type { MthdsFileItem } from "@pipelex/sdk";
+import type { MthdsFileItem, PipelexApiClientOptions } from "@pipelex/sdk";
 import { z } from "zod";
+
+import { BARE_APP_INFO } from "./client-identification.js";
+import type { AppInfoSource } from "./client-identification.js";
 
 // The Makefile's console dev banner (CONSOLE_DEV_ENV) prints this same URL as "the server default" — keep the two in step.
 export const DEFAULT_API_URL = "https://api.pipelex.com";
@@ -306,6 +310,54 @@ export function asOneLine(text: string): string {
 export interface ApiConfig {
   baseUrl: string;
   apiKey?: string;
+  /**
+   * Who is calling, for the `User-Agent` (`./client-identification.ts`). Set by
+   * the shell — `patchLocalApiContexts` in `../local/tools.ts`,
+   * `patchHostedApiContexts` in `../hosted/tools.ts` — never by the env: the
+   * workshop reads its host from the MCP handshake and the console from each
+   * request, so it is a function called when a client is constructed. Absent, a
+   * client still names itself `pipelex-mcp/<version>` (`BARE_APP_INFO`).
+   */
+  appInfo?: AppInfoSource;
+}
+
+/**
+ * What a shell may override on every capability context that talks to the API.
+ * Each shell's tool table applies it to its own context set, since that table
+ * is where the list of contexts lives.
+ */
+export interface ApiContextPatch {
+  apiKey?: string;
+  authError?: AuthErrorTexture;
+  appInfo?: AppInfoSource;
+}
+
+/**
+ * THE one place this server constructs a Pipelex API client. Every client is
+ * given the caller's `appInfo`, so every request it sends carries the
+ * `pipelex-mcp/<version> (<mode>; host=<host>)` `User-Agent` and the platform
+ * attributes it to the `mcp` surface. The `pipelex/sdk-client-factory` lint rule
+ * (`eslint-rules/pipelex-api-boundary.mjs`) refuses `new PipelexApiClient(…)` —
+ * or any other `…ApiClient` — anywhere else, and `pipelex/no-raw-fetch` refuses
+ * a bare `fetch` outside the files that fetch third-party links.
+ *
+ * `clientClass` lets a capability pick a subclass (`SizeGuardedPipelexApiClient`)
+ * without constructing it itself. The client is built per tool call, which is
+ * what makes the lazy `appInfo` possible: by then the workshop has completed its
+ * handshake and the console holds the request.
+ */
+export function createPipelexApiClient<T extends PipelexApiClient = PipelexApiClient>(
+  config: ApiConfig,
+  clientClass?: new (options: PipelexApiClientOptions) => T,
+): T {
+  const options: PipelexApiClientOptions = {
+    baseUrl: config.baseUrl,
+    apiKey: config.apiKey,
+    appInfo: config.appInfo?.() ?? BARE_APP_INFO,
+  };
+  const Client =
+    clientClass ?? (PipelexApiClient as unknown as new (options: PipelexApiClientOptions) => T);
+  return new Client(options);
 }
 
 interface ApiEnv {
