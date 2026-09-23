@@ -25,9 +25,9 @@
     "dev:local": "tsx src/local/main.ts",
     "inspect:local": "npx @modelcontextprotocol/inspector npx tsx src/local/main.ts",
     "dev:tunnel": "skybridge dev --tunnel",
-    "lint": "eslint src/ scripts/ vite.config.ts vitest.config.ts vitest.e2e.config.ts",
-    "format": "prettier --write \"src/**/*.{ts,tsx}\" \"scripts/**/*.{ts,mjs}\" \"*.{ts,tsx,mjs}\"",
-    "format:check": "prettier --check \"src/**/*.{ts,tsx}\" \"scripts/**/*.{ts,mjs}\" \"*.{ts,tsx,mjs}\"",
+    "lint": "eslint src/ scripts/ eslint-rules/ vite.config.ts vitest.config.ts vitest.e2e.config.ts",
+    "format": "prettier --write \"src/**/*.{ts,tsx}\" \"scripts/**/*.{ts,mjs}\" \"eslint-rules/**/*.mjs\" \"*.{ts,tsx,mjs}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx}\" \"scripts/**/*.{ts,mjs}\" \"eslint-rules/**/*.mjs\" \"*.{ts,tsx,mjs}\"",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
@@ -46,7 +46,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@pipelex/sdk": "^0.20.1",
+    "@pipelex/sdk": "^0.21.0",
     "mthds": "^0.25.0",
     "skybridge": "^1.4.1",
     "zod": "^4.3.6"
