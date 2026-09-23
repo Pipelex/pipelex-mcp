@@ -1,5 +1,5 @@
 import type { AuthErrorTexture } from "../capabilities/shared.js";
-import type { ToolContexts } from "../tools.js";
+import type { HostedToolContexts } from "./tools.js";
 
 /**
  * Per-request capability contexts for the hosted console.
@@ -58,9 +58,9 @@ const NO_CREDENTIAL = "";
  * determines the active organization and therefore the whole visible catalog.
  */
 export function contextsForRequest(
-  base: ToolContexts,
+  base: HostedToolContexts,
   authInfo: { token: string } | undefined,
-): ToolContexts {
+): HostedToolContexts {
   const token = authInfo?.token;
   if (token !== undefined && token !== "") {
     return overrideContexts(base, token, REJECTED_TOKEN_AUTH_ERROR);
@@ -73,22 +73,12 @@ export function contextsForRequest(
  * branches, so this must not be a conditional spread.
  */
 function overrideContexts(
-  base: ToolContexts,
+  base: HostedToolContexts,
   apiKey: string,
   authError: AuthErrorTexture,
-): ToolContexts {
+): HostedToolContexts {
   return {
     catalog: { ...base.catalog, apiKey, authError },
-    // Overridden although the console registers neither catalog-write tool: the
-    // override is a property of the context table, and a context left un-keyed
-    // here would be a latent bug the day the console serves one of the inline
-    // halves.
-    catalogWrite: {
-      ...base.catalogWrite,
-      apiKey,
-      authError,
-      validation: { ...base.catalogWrite.validation, apiKey, authError },
-    },
     validation: { ...base.validation, apiKey, authError },
     inputs: { ...base.inputs, apiKey, authError },
     codegen: { ...base.codegen, apiKey, authError },
@@ -101,9 +91,5 @@ function overrideContexts(
     // The attachment ingest uploads to Pipelex storage, so the signed-in
     // caller's own identity is what funds it — the console holds no key.
     attachments: { ...base.attachments, apiKey, authError },
-    // The console never registers mthds_download_artifacts (it has no working
-    // directory to save into); the override is kept for uniformity so every
-    // context in the set carries the caller's identity, never a server key.
-    artifacts: { ...base.artifacts, apiKey, authError },
   };
 }

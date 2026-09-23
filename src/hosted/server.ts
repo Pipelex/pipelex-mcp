@@ -1,9 +1,13 @@
 import { McpServer } from "skybridge/server";
 import type { OAuthConfig } from "skybridge/server";
 
+import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
+
+import pkg from "../../package.json" with { type: "json" };
+
+import { contextsForRequest } from "./contexts.js";
 import {
-  PIPELEX_MCP_SERVER_INFO,
-  buildToolContexts,
+  buildHostedToolContexts,
   mthdsCodegenTool,
   mthdsInputsTemplateTool,
   mthdsListMethodsTool,
@@ -14,9 +18,17 @@ import {
   mthdsShowImagesTool,
   mthdsUploadAttachmentsTool,
   mthdsValidateTool,
-} from "../tools.js";
-import type { ToolContexts } from "../tools.js";
-import { contextsForRequest } from "./contexts.js";
+} from "./tools.js";
+import type { HostedToolContexts, HostedToolDefinition } from "./tools.js";
+
+/**
+ * Sourced from package.json, like the workshop's `LOCAL_SERVER_INFO`, so the
+ * handshake reports the shipped release.
+ */
+export const HOSTED_SERVER_INFO = {
+  name: "pipelex-mcp",
+  version: pkg.version,
+} as const;
 
 /**
  * The map, not the manual — the same layering as the workshop's
@@ -53,205 +65,93 @@ export const HOSTED_SERVER_INSTRUCTIONS = [
  * `oauth` is **required**: per-user OAuth is the console's only auth posture,
  * so a console that cannot authenticate a caller is not a thing this function
  * can produce. Making it a parameter rather than resolving it here keeps the
- * builder synchronous — the cross-shell parity tests construct the server
- * directly and have no business awaiting an OAuth discovery fetch. The
- * entrypoint (`../server.ts`) resolves it from env and refuses to boot without
- * it.
+ * builder synchronous — the shell tests construct the server directly and have
+ * no business awaiting an OAuth discovery fetch. The entrypoint (`../server.ts`)
+ * resolves it from env and refuses to boot without it.
  */
 export function createHostedServer(
   oauth: OAuthConfig,
-  contexts: ToolContexts = buildToolContexts(),
+  contexts: HostedToolContexts = buildHostedToolContexts(),
 ) {
-  return new McpServer(
-    PIPELEX_MCP_SERVER_INFO,
-    {
-      capabilities: {},
-      instructions: HOSTED_SERVER_INSTRUCTIONS,
-    },
-    // `oauth` belongs to SkybridgeServerOptions — the THIRD constructor
-    // argument. Putting it in the second (the MCP SDK's ServerOptions) is
-    // silently accepted and simply never read, so the well-known metadata and
-    // bearer middleware are never mounted and clients fall back to DCR against
-    // our own origin ("Cannot POST /register").
-    //
-    // Nothing of ours is mounted on `/mcp`: Skybridge's own bearer middleware
-    // owns `req.auth` and, since no console tool allows anonymous, it mounts
-    // `requireBearerAuth` across the endpoint. Writing that field ourselves is
-    // exactly the race that made the old bring-your-own-key posture
-    // incompatible with OAuth.
-    { oauth },
-  )
-    .registerTool(
+  return (
+    new McpServer(
+      HOSTED_SERVER_INFO,
       {
-        name: mthdsListMethodsTool.name,
-        description: mthdsListMethodsTool.description,
-        inputSchema: mthdsListMethodsTool.inputSchema,
-        outputSchema: mthdsListMethodsTool.outputSchema,
-        annotations: mthdsListMethodsTool.annotations,
-        _meta: {
-          "openai/toolInvocation/invoking": "Listing registered methods...",
-          "openai/toolInvocation/invoked": "Registered methods listed.",
-        },
+        capabilities: {},
+        instructions: HOSTED_SERVER_INSTRUCTIONS,
       },
-      (input, extra) =>
+      // `oauth` belongs to SkybridgeServerOptions — the THIRD constructor
+      // argument. Putting it in the second (the MCP SDK's ServerOptions) is
+      // silently accepted and simply never read, so the well-known metadata and
+      // bearer middleware are never mounted and clients fall back to DCR against
+      // our own origin ("Cannot POST /register").
+      //
+      // Nothing of ours is mounted on `/mcp`: Skybridge's own bearer middleware
+      // owns `req.auth` and, since no console tool allows anonymous, it mounts
+      // `requireBearerAuth` across the endpoint. Writing that field ourselves is
+      // exactly the race that made the old bring-your-own-key posture
+      // incompatible with OAuth.
+      { oauth },
+    )
+      // The console's table, in the order a host lists it. One chained call
+      // per tool rather than a loop, because the chain is what types
+      // `AppType`, which the views' `useToolInfo` / `useCallTool` read.
+      .registerTool(hostedToolConfig(mthdsListMethodsTool), (input, extra) =>
         mthdsListMethodsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    )
-    .registerTool(
-      {
-        name: mthdsValidateTool.name,
-        description: mthdsValidateTool.description,
-        inputSchema: mthdsValidateTool.inputSchema,
-        outputSchema: mthdsValidateTool.outputSchema,
-        annotations: mthdsValidateTool.annotations,
-        view: {
-          component: "run-graph",
-          description:
-            "Interactive run graph of the method (the dry-run graph from validation), plus an input form to run it.",
-        },
-        _meta: {
-          "openai/toolInvocation/invoking": "Validating MTHDS files...",
-          "openai/toolInvocation/invoked": "MTHDS validation finished.",
-        },
-      },
-      (input, extra) =>
+      )
+      .registerTool(hostedToolConfig(mthdsValidateTool), (input, extra) =>
         mthdsValidateTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    )
-    .registerTool(
-      {
-        name: mthdsInputsTemplateTool.name,
-        description: mthdsInputsTemplateTool.description,
-        inputSchema: mthdsInputsTemplateTool.inputSchema,
-        outputSchema: mthdsInputsTemplateTool.outputSchema,
-        annotations: mthdsInputsTemplateTool.annotations,
-        _meta: {
-          "openai/toolInvocation/invoking": "Projecting MTHDS inputs template...",
-          "openai/toolInvocation/invoked": "MTHDS inputs template finished.",
-        },
-      },
-      (input, extra) =>
+      )
+      .registerTool(hostedToolConfig(mthdsInputsTemplateTool), (input, extra) =>
         mthdsInputsTemplateTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    )
-    .registerTool(
-      {
-        name: mthdsCodegenTool.name,
-        description: mthdsCodegenTool.description,
-        inputSchema: mthdsCodegenTool.inputSchema,
-        outputSchema: mthdsCodegenTool.outputSchema,
-        annotations: mthdsCodegenTool.annotations,
-        _meta: {
-          "openai/toolInvocation/invoking": "Generating typed code for the method...",
-          "openai/toolInvocation/invoked": "Typed code generated.",
-        },
-      },
-      (input, extra) =>
+      )
+      .registerTool(hostedToolConfig(mthdsCodegenTool), (input, extra) =>
         mthdsCodegenTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    )
-    .registerTool(
-      {
-        name: mthdsPrepareInputsTool.name,
-        description: mthdsPrepareInputsTool.description,
-        inputSchema: mthdsPrepareInputsTool.inputSchema,
-        outputSchema: mthdsPrepareInputsTool.outputSchema,
-        annotations: mthdsPrepareInputsTool.annotations,
-        _meta: {
-          "openai/toolInvocation/invoking": "Preparing MTHDS run inputs...",
-          "openai/toolInvocation/invoked": "MTHDS run inputs prepared.",
-        },
-      },
-      (input, extra) =>
+      )
+      .registerTool(hostedToolConfig(mthdsPrepareInputsTool), (input, extra) =>
         mthdsPrepareInputsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    )
-    .registerTool(
-      {
-        name: mthdsUploadAttachmentsTool.name,
-        description: mthdsUploadAttachmentsTool.description,
-        inputSchema: mthdsUploadAttachmentsTool.inputSchema,
-        outputSchema: mthdsUploadAttachmentsTool.outputSchema,
-        annotations: mthdsUploadAttachmentsTool.annotations,
-        _meta: {
-          // THE mechanism: naming `attachments` here is what makes the ChatGPT
-          // host rewrite the model's file reference into the four-field
-          // signed-URL object. Without it the field is never populated.
-          "openai/fileParams": ["attachments"],
-          "openai/toolInvocation/invoking": "Uploading attachments to Pipelex storage...",
-          "openai/toolInvocation/invoked": "Attachments uploaded.",
-        },
-      },
-      (input, extra) =>
+      )
+      .registerTool(hostedToolConfig(mthdsUploadAttachmentsTool), (input, extra) =>
         mthdsUploadAttachmentsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    )
-    .registerTool(
-      {
-        name: mthdsRunTool.name,
-        description: mthdsRunTool.description,
-        inputSchema: mthdsRunTool.inputSchema,
-        outputSchema: mthdsRunTool.outputSchema,
-        annotations: mthdsRunTool.annotations,
-        view: {
-          component: "run-follow",
-          description: "Live-following status card for the durable run.",
-          csp: {
-            // Run-output images are presigned URLs on the hosted platform's
-            // per-env storage buckets — a tight host allowlist, never a
-            // wildcard. Anything else in main_stuff stays CSP-blocked and the
-            // view falls back to the text preview.
-            resourceDomains: [
-              "https://pipelex-app-dev.s3.us-west-2.amazonaws.com",
-              "https://pipelex-app-staging.s3.us-west-2.amazonaws.com",
-              "https://pipelex-app-prod.s3.us-west-2.amazonaws.com",
-            ],
-          },
-        },
-        _meta: {
-          "openai/toolInvocation/invoking": "Starting MTHDS run...",
-          "openai/toolInvocation/invoked": "MTHDS run started.",
-        },
-      },
-      (input, extra) => mthdsRunTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    )
-    .registerTool(
-      {
-        name: mthdsRunStatusTool.name,
-        description: mthdsRunStatusTool.description,
-        inputSchema: mthdsRunStatusTool.inputSchema,
-        outputSchema: mthdsRunStatusTool.outputSchema,
-        annotations: mthdsRunStatusTool.annotations,
-        _meta: {
-          "openai/toolInvocation/invoking": "Checking MTHDS run status...",
-          "openai/toolInvocation/invoked": "MTHDS run status checked.",
-        },
-      },
-      (input, extra) =>
+      )
+      .registerTool(hostedToolConfig(mthdsRunTool), (input, extra) =>
+        mthdsRunTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+      )
+      .registerTool(hostedToolConfig(mthdsRunStatusTool), (input, extra) =>
         mthdsRunStatusTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    )
-    .registerTool(
-      {
-        name: mthdsRunResultsTool.name,
-        description: mthdsRunResultsTool.description,
-        inputSchema: mthdsRunResultsTool.inputSchema,
-        outputSchema: mthdsRunResultsTool.outputSchema,
-        annotations: mthdsRunResultsTool.annotations,
-        _meta: {
-          "openai/toolInvocation/invoking": "Fetching MTHDS run results...",
-          "openai/toolInvocation/invoked": "MTHDS run results fetched.",
-        },
-      },
-      (input, extra) =>
+      )
+      .registerTool(hostedToolConfig(mthdsRunResultsTool), (input, extra) =>
         mthdsRunResultsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    )
-    .registerTool(
-      {
-        name: mthdsShowImagesTool.name,
-        description: mthdsShowImagesTool.description,
-        inputSchema: mthdsShowImagesTool.inputSchema,
-        outputSchema: mthdsShowImagesTool.outputSchema,
-        annotations: mthdsShowImagesTool.annotations,
-        _meta: {
-          "openai/toolInvocation/invoking": "Fetching the run's images...",
-          "openai/toolInvocation/invoked": "Images fetched.",
-        },
-      },
-      (input, extra) =>
+      )
+      .registerTool(hostedToolConfig(mthdsShowImagesTool), (input, extra) =>
         mthdsShowImagesTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    );
+      )
+  );
+}
+
+/**
+ * The registration config Skybridge takes, read off one of the console's
+ * definitions: everything but the handler, with `view` passed only where the
+ * tool has one. The casts are not redundant: without them the object literal
+ * widens each field to its constraint, the chain infers a schema of `any`, and
+ * every handler below stops typechecking against its capability's input.
+ */
+function hostedToolConfig<
+  TTool extends HostedToolDefinition<
+    string,
+    ZodRawShapeCompat,
+    ZodRawShapeCompat | AnySchema,
+    never,
+    unknown
+  >,
+>(tool: TTool) {
+  return {
+    name: tool.name as TTool["name"],
+    description: tool.description,
+    inputSchema: tool.inputSchema as TTool["inputSchema"],
+    outputSchema: tool.outputSchema as TTool["outputSchema"],
+    annotations: tool.annotations,
+    ...(tool.view === undefined ? {} : { view: tool.view }),
+    _meta: tool._meta,
+  };
 }

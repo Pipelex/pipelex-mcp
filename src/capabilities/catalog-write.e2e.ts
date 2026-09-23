@@ -39,7 +39,7 @@ import { join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { buildLocalToolContexts } from "../local/server.js";
+import { buildLocalToolContexts } from "../local/tools.js";
 import { LINK_FILE_NAME } from "./catalog-link.js";
 import { getMthdsMethod, saveMthdsMethod } from "./catalog-write.js";
 import type {

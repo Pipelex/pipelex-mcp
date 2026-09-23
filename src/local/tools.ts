@@ -1,7 +1,16 @@
-import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
-import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
-
-import pkg from "../package.json" with { type: "json" };
+/**
+ * The workshop's tool table: every tool the local stdio server registers, in
+ * registration order, over the workshop's own capability contexts.
+ *
+ * The console has its own table (`hosted/tools.ts`); nothing here is registered
+ * by both shells. Where a tool exists on both, its definition is written once
+ * per table: a change that should reach one shell is an edit here or there, not
+ * a flag on a shared definition. Both tables are built from the same capability
+ * functions in `capabilities/`, which is where sharing pays.
+ *
+ * Nothing here may import Skybridge: tsup bundles this module into the npm
+ * package, and `skybridge` is the console's dependency.
+ */
 
 import {
   artifactsToolResult,
@@ -9,27 +18,16 @@ import {
   downloadMthdsArtifacts,
   mthdsDownloadArtifactsInputSchema,
   mthdsDownloadArtifactsOutputSchema,
-} from "./capabilities/artifacts.js";
-import type { ArtifactsContext, MthdsDownloadArtifactsInput } from "./capabilities/artifacts.js";
-import {
-  attachmentsToolResult,
-  buildAttachmentsContext,
-  mthdsUploadAttachmentsInputSchema,
-  mthdsUploadAttachmentsOutputSchema,
-  uploadMthdsAttachments,
-} from "./capabilities/attachments.js";
-import type {
-  AttachmentsContext,
-  MthdsUploadAttachmentsInput,
-} from "./capabilities/attachments.js";
+} from "../capabilities/artifacts.js";
+import type { ArtifactsContext, MthdsDownloadArtifactsInput } from "../capabilities/artifacts.js";
 import {
   buildCatalogContext,
   catalogToolResult,
   listMthdsMethods,
   mthdsListMethodsInputSchema,
   mthdsListMethodsOutputSchema,
-} from "./capabilities/catalog.js";
-import type { CatalogContext, MthdsListMethodsInput } from "./capabilities/catalog.js";
+} from "../capabilities/catalog.js";
+import type { CatalogContext, MthdsListMethodsInput } from "../capabilities/catalog.js";
 import {
   buildCatalogWriteContext,
   getMethodToolResult,
@@ -40,12 +38,12 @@ import {
   mthdsSaveMethodOutputSchema,
   saveMethodToolResult,
   saveMthdsMethod,
-} from "./capabilities/catalog-write.js";
+} from "../capabilities/catalog-write.js";
 import type {
   CatalogWriteContext,
   MthdsGetMethodInput,
   MthdsSaveMethodInput,
-} from "./capabilities/catalog-write.js";
+} from "../capabilities/catalog-write.js";
 import {
   CODEGEN_TARGET_RULE,
   buildCodegenContext,
@@ -53,32 +51,32 @@ import {
   generateMthdsCode,
   mthdsCodegenInputSchema,
   mthdsCodegenOutputSchema,
-} from "./capabilities/codegen.js";
-import type { CodegenContext, MthdsCodegenInput } from "./capabilities/codegen.js";
+} from "../capabilities/codegen.js";
+import type { CodegenContext, MthdsCodegenInput } from "../capabilities/codegen.js";
 import {
   buildImagesContext,
   mthdsShowImagesInputSchema,
   mthdsShowImagesOutputSchema,
   showImagesToolResult,
   showMthdsRunImages,
-} from "./capabilities/images.js";
-import type { ImagesContext, MthdsShowImagesInput } from "./capabilities/images.js";
+} from "../capabilities/images.js";
+import type { ImagesContext, MthdsShowImagesInput } from "../capabilities/images.js";
 import {
   buildInputsContext,
   buildMthdsInputs,
   inputsToolResult,
   mthdsInputsInputSchema,
   mthdsInputsOutputSchema,
-} from "./capabilities/inputs.js";
-import type { InputsContext, MthdsInputsInput } from "./capabilities/inputs.js";
+} from "../capabilities/inputs.js";
+import type { InputsContext, MthdsInputsInput } from "../capabilities/inputs.js";
 import {
   buildPrepareContext,
   mthdsPrepareInputsInputSchema,
   mthdsPrepareInputsOutputSchema,
   prepareInputsToolResult,
   prepareMthdsInputs,
-} from "./capabilities/prepare.js";
-import type { MthdsPrepareInputsInput, PrepareContext } from "./capabilities/prepare.js";
+} from "../capabilities/prepare.js";
+import type { MthdsPrepareInputsInput, PrepareContext } from "../capabilities/prepare.js";
 import {
   buildRunContext,
   getMthdsRunResults,
@@ -93,83 +91,54 @@ import {
   runStatusToolResult,
   runToolResult,
   startMthdsRun,
-} from "./capabilities/run.js";
-import type { MthdsRunInput, RunContext, RunIdInput } from "./capabilities/run.js";
-import type { FileResolver } from "./capabilities/shared.js";
+} from "../capabilities/run.js";
+import type { MthdsRunInput, RunContext, RunIdInput } from "../capabilities/run.js";
 import {
   buildValidationContext,
   mthdsValidateInputSchema,
   mthdsValidateOutputSchema,
   toolResult,
   validateMthds,
-} from "./capabilities/validate.js";
-import type { MthdsValidateInput, ValidationContext } from "./capabilities/validate.js";
+} from "../capabilities/validate.js";
+import type { MthdsValidateInput, ValidationContext } from "../capabilities/validate.js";
+import { defineTool } from "../tool-definition.js";
+import { localFileResolver } from "./files.js";
 
-// Version is sourced from package.json so the MCP handshake always reports the
-// shipped release — the /release skill bumps package.json alone, and a
-// hardcoded copy here would silently drift (it did: 0.1.0 vs a 0.4.0 package).
-export const PIPELEX_MCP_SERVER_INFO = {
-  name: "pipelex-mcp",
-  version: pkg.version,
-} as const;
-
-export interface ToolContexts {
+/** The capability contexts the workshop's tools run over — one per capability it registers. */
+export interface LocalToolContexts {
   catalog: CatalogContext;
-  /**
-   * Consumed by the workshop-only mthds_save_method / mthds_get_method. Built on
-   * both shells so one builder serves both; the console registers neither tool,
-   * and neither would work there — both need a filesystem.
-   */
   catalogWrite: CatalogWriteContext;
   validation: ValidationContext;
   inputs: InputsContext;
   codegen: CodegenContext;
   prepare: PrepareContext;
   run: RunContext;
-  /** Consumed by mthds_show_images, which both shells register — nothing in it touches a filesystem. */
   images: ImagesContext;
-  /** Consumed by the console-only mthds_upload_attachments; built on both shells so one builder serves both. */
-  attachments: AttachmentsContext;
-  /** Consumed by the workshop-only mthds_download_artifacts; built on both shells so one builder serves both. */
   artifacts: ArtifactsContext;
 }
 
-interface ToolContextOptions {
-  env?: NodeJS.ProcessEnv;
-  resolver?: FileResolver;
-  /**
-   * Resolves `{ path }` items of `mthds_save_method`'s `python`, gated on `.py`
-   * where `resolver` is gated on `.mthds`. Separate because the extension IS the
-   * read boundary: one resolver taking both would let a `.mthds` argument read a
-   * `.py` file and the other way round.
-   */
-  pythonResolver?: FileResolver;
-  viewsAvailable?: boolean;
-  /** The per-deployment asset boundary for mthds_prepare_inputs (workshop uploads; console pass-through only). */
-  allowUpload?: boolean;
-  /**
-   * The workshop's working directory — the one write root, fanned out to every
-   * consumer that needs it: `mthds_download_artifacts` saves under it,
-   * `mthds_codegen` resolves `output_dir` against it, and `mthds_run_results`
-   * names the download tool only where it exists. Absent on the console, which
-   * never writes a file.
-   */
-  workspaceRoot?: string;
-}
+/**
+ * The workshop's contexts, every per-shell setting stated here rather than
+ * passed in as an option: the workshop reads `{ path }` files from `rootDir`,
+ * uploads file-bearing inputs, writes under `rootDir`, and has no views.
+ */
+export function buildLocalToolContexts(
+  env: NodeJS.ProcessEnv = process.env,
+  rootDir: string = process.cwd(),
+): LocalToolContexts {
+  // One resolver for every bundle argument, gated on `.mthds`, and a second
+  // for mthds_save_method's `python`, gated on `.py`. The extension IS the read
+  // boundary, so one resolver serving both would let each read the other's files.
+  const resolver = localFileResolver(rootDir);
+  const pythonResolver = localFileResolver(rootDir, ".py");
 
-/** Build one capability-context set for either deployment shell. */
-export function buildToolContexts(options: ToolContextOptions = {}): ToolContexts {
-  const env = options.env ?? process.env;
-  const resolver = options.resolver;
-  const pythonResolver = options.pythonResolver;
-  const viewsAvailable = options.viewsAvailable ?? true;
-  const allowUpload = options.allowUpload ?? false;
-  const workspaceRoot = options.workspaceRoot;
-
-  const validation = {
+  // One object, used by mthds_validate and by mthds_save_method's validation
+  // leg alike — not a second one built from the same parts, since two
+  // hand-synced copies diverge the moment a field is added to one.
+  const validation: ValidationContext = {
     ...buildValidationContext(env),
     resolver,
-    viewsAvailable,
+    viewsAvailable: false,
   };
 
   return {
@@ -179,86 +148,36 @@ export function buildToolContexts(options: ToolContextOptions = {}): ToolContext
       resolver,
       pythonResolver,
       validation,
-      ...(workspaceRoot === undefined ? {} : { saveRoot: workspaceRoot }),
+      saveRoot: rootDir,
     },
-    // The same object mthds_save_method's validation leg gets, not a second one
-    // built from the same parts: two hand-synced copies diverge the moment a
-    // field is added to one, and `hosted/contexts.ts` already has to override
-    // both separately.
     validation,
-    inputs: {
-      ...buildInputsContext(env),
-      resolver,
-    },
-    codegen: {
-      ...buildCodegenContext(env),
-      resolver,
-      ...(workspaceRoot === undefined ? {} : { saveRoot: workspaceRoot }),
-    },
-    prepare: {
-      ...buildPrepareContext(env),
-      resolver,
-      allowUpload,
-    },
+    inputs: { ...buildInputsContext(env), resolver },
+    // `saveRoot` is the working directory on every writer: codegen resolves
+    // `output_dir` against it, as the download tool resolves `dir`.
+    codegen: { ...buildCodegenContext(env), resolver, saveRoot: rootDir },
+    // The workshop is co-located with the user's files, so it uploads
+    // file-bearing inputs (local paths, data: URLs, bytes).
+    prepare: { ...buildPrepareContext(env), resolver, allowUpload: true },
+    // The results summary names mthds_download_artifacts, which exists here.
     run: {
       ...buildRunContext(env),
       resolver,
-      viewsAvailable,
-      // The results summary names the download tool only where it exists.
-      artifactDownloadAvailable: workspaceRoot !== undefined,
+      viewsAvailable: false,
+      artifactDownloadAvailable: true,
     },
-    images: {
-      ...buildImagesContext(env),
-      // Same prose-only flag as the run context's: the structured contract of
-      // mthds_show_images is identical on both shells.
-      artifactDownloadAvailable: workspaceRoot !== undefined,
-    },
-    attachments: buildAttachmentsContext(env),
-    artifacts: {
-      ...buildArtifactsContext(env),
-      ...(workspaceRoot === undefined ? {} : { saveRoot: workspaceRoot }),
-    },
+    // The same prose-only nudge as the run context's.
+    images: { ...buildImagesContext(env), artifactDownloadAvailable: true },
+    artifacts: { ...buildArtifactsContext(env), saveRoot: rootDir },
   };
-}
-
-interface ToolDefinition<
-  TName extends string,
-  TInputSchema extends ZodRawShapeCompat,
-  TOutputSchema extends ZodRawShapeCompat | AnySchema,
-  TInput,
-  TResult,
-> {
-  name: TName;
-  description: string;
-  inputSchema: TInputSchema;
-  outputSchema: TOutputSchema;
-  annotations: ToolAnnotations;
-  handler: (input: TInput, contexts: ToolContexts) => Promise<TResult>;
-}
-
-function defineTool<
-  const TName extends string,
-  TInputSchema extends ZodRawShapeCompat,
-  TOutputSchema extends ZodRawShapeCompat | AnySchema,
-  TInput,
-  TResult,
->(
-  definition: ToolDefinition<TName, TInputSchema, TOutputSchema, TInput, TResult>,
-): ToolDefinition<TName, TInputSchema, TOutputSchema, TInput, TResult> {
-  return definition;
 }
 
 export const mthdsListMethodsTool = defineTool({
   name: "mthds_list_methods",
   // The triggers here are reactive only — the user asked, or named a method
   // without its id. Searching the catalog because a saved method MIGHT fit the
-  // task is a proactive gesture, and this description is shared by both shells,
-  // so it cannot say "proactively" on one and not the other. On the console
-  // discovery is the point, and its own `instructions` say so; on the workshop a
-  // skill decides when the catalog is searched, and a proactive trigger here
-  // sent sessions searching in the middle of unrelated work. Per-shell guidance
-  // belongs in each shell's `instructions`, which is the channel that exists for
-  // it (SPEC.md -> Catalog Discovery Scope).
+  // task is a proactive gesture, and on the workshop a skill decides when the
+  // catalog is searched: a proactive trigger here sent sessions searching in
+  // the middle of unrelated work (SPEC.md -> Catalog Discovery Scope).
   description:
     "List the saved methods in the current API key's organization catalog as bounded names, descriptions, and canonical method ids — never method source or stored inputs/outputs. " +
     "Call this when the user asks what registered methods exist or names a saved method without its mt_… id. " +
@@ -273,7 +192,7 @@ export const mthdsListMethodsTool = defineTool({
     destructiveHint: false,
     openWorldHint: false,
   },
-  async handler(input: MthdsListMethodsInput, contexts: ToolContexts) {
+  async handler(input: MthdsListMethodsInput, contexts: LocalToolContexts) {
     return catalogToolResult(await listMthdsMethods(input, contexts.catalog));
   },
 });
@@ -295,7 +214,7 @@ export const mthdsValidateTool = defineTool({
     destructiveHint: false,
     openWorldHint: false,
   },
-  async handler(input: MthdsValidateInput, contexts: ToolContexts) {
+  async handler(input: MthdsValidateInput, contexts: LocalToolContexts) {
     return toolResult(await validateMthds(input, contexts.validation));
   },
 });
@@ -315,7 +234,7 @@ export const mthdsInputsTemplateTool = defineTool({
     destructiveHint: false,
     openWorldHint: false,
   },
-  async handler(input: MthdsInputsInput, contexts: ToolContexts) {
+  async handler(input: MthdsInputsInput, contexts: LocalToolContexts) {
     return inputsToolResult(await buildMthdsInputs(input, contexts.inputs));
   },
 });
@@ -342,22 +261,19 @@ export const mthdsCodegenTool = defineTool({
   inputSchema: mthdsCodegenInputSchema,
   outputSchema: mthdsCodegenOutputSchema,
   annotations: {
-    // Both shells advertise the write, although only the workshop can perform
-    // it: an annotation says what a tool MAY do, and the shared definition is
-    // what keeps one tool name from meaning two things. `mthds_prepare_inputs`
-    // already sets the precedent for its workshop-only uploads.
     title: "Generate typed code for an MTHDS method",
+    // The workshop writes the generated tree under `output_dir`.
     readOnlyHint: false,
     // Destructive because regeneration OVERWRITES the stamped files it wrote
     // before, discarding any hand-edits below the stamp without warning — the
     // rule SPEC.md states and the inverse of `mthds_download_artifacts`, which
     // never overwrites (`wx`) and so stays additive. This is the one annotation
     // a host uses to decide whether to confirm before calling, and it is only
-    // meaningful once `readOnlyHint` is false, as it now is.
+    // meaningful once `readOnlyHint` is false, as it is.
     destructiveHint: true,
     openWorldHint: false,
   },
-  async handler(input: MthdsCodegenInput, contexts: ToolContexts) {
+  async handler(input: MthdsCodegenInput, contexts: LocalToolContexts) {
     return codegenToolResult(await generateMthdsCode(input, contexts.codegen));
   },
 });
@@ -377,7 +293,7 @@ export const mthdsPrepareInputsTool = defineTool({
     destructiveHint: false,
     openWorldHint: false,
   },
-  async handler(input: MthdsPrepareInputsInput, contexts: ToolContexts) {
+  async handler(input: MthdsPrepareInputsInput, contexts: LocalToolContexts) {
     return prepareInputsToolResult(await prepareMthdsInputs(input, contexts.prepare));
   },
 });
@@ -402,7 +318,7 @@ export const mthdsRunTool = defineTool({
     destructiveHint: false,
     openWorldHint: false,
   },
-  async handler(input: MthdsRunInput, contexts: ToolContexts) {
+  async handler(input: MthdsRunInput, contexts: LocalToolContexts) {
     return runToolResult(await startMthdsRun(input, contexts.run));
   },
 });
@@ -420,7 +336,7 @@ export const mthdsRunStatusTool = defineTool({
     destructiveHint: false,
     openWorldHint: false,
   },
-  async handler(input: RunIdInput, contexts: ToolContexts) {
+  async handler(input: RunIdInput, contexts: LocalToolContexts) {
     return runStatusToolResult(await getMthdsRunStatus(input, contexts.run));
   },
 });
@@ -438,7 +354,7 @@ export const mthdsRunResultsTool = defineTool({
     destructiveHint: false,
     openWorldHint: false,
   },
-  async handler(input: RunIdInput, contexts: ToolContexts) {
+  async handler(input: RunIdInput, contexts: LocalToolContexts) {
     return runResultsToolResult(await getMthdsRunResults(input, contexts.run));
   },
 });
@@ -475,57 +391,17 @@ export const mthdsShowImagesTool = defineTool({
     // caller-supplied URL.
     openWorldHint: false,
   },
-  async handler(input: MthdsShowImagesInput, contexts: ToolContexts) {
+  async handler(input: MthdsShowImagesInput, contexts: LocalToolContexts) {
     return showImagesToolResult(await showMthdsRunImages(input, contexts.images));
   },
 });
 
 /**
- * The tool description is load-bearing MECHANISM, not documentation, and it is
- * effectively un-hotfixable — treat it with the same review rigour as the schema.
- *
- * Mechanism: the host substitutes the user's attachment only where the model
- * puts a file reference; it never injects into a field the model left alone. A
- * neutral or defensive description therefore yields calls with `attachments`
- * absent, which looks exactly like a host failure. Measured both ways: under a
- * description that said "do not invent values for attachments", every observed
- * call omitted the field; under an imperative one, the model populated it
- * unprompted on the first try.
- *
- * Un-hotfixable: ChatGPT caches a connector's tool list at add-time and does
- * not refresh it (four `initialize` handshakes and five `tools/call`
- * invocations in one session, `tools/list` issued zero times). Shipping a fix
- * leaves every existing installation on the old text until each user removes
- * and re-adds the connector.
+ * Workshop-only: it writes a run's produced files under the server's working
+ * directory. The console has no working directory and never writes a file (its
+ * users download run outputs from the app's UI), so there it would have
+ * nowhere to save.
  */
-const UPLOAD_ATTACHMENTS_DESCRIPTION = [
-  "ALWAYS pass the user's attached file(s) in `attachments` — reference the attachment the user put in this conversation and the ChatGPT host rewrites that reference into the signed-URL object this tool needs.",
-  "Never construct a URL yourself, and never call this with the field omitted or empty.",
-  "It turns each attachment into a run-ready pipelex-storage:// reference: the server fetches the bytes from the host's signed URL and uploads them to Pipelex storage, so the file's contents never enter the conversation.",
-  "Fill the returned uris into the mthds_inputs_template output and call mthds_run — a pipelex-storage:// reference is already run-ready, so mthds_prepare_inputs can be skipped.",
-  "Each attachment is capped at 7 MiB; a larger file is refused with the limit named.",
-  "This channel exists on ChatGPT only. On any other host there is no attachment to reference — ask the user for an http(s) URL to the file instead of fabricating one.",
-].join(" ");
-
-export const mthdsUploadAttachmentsTool = defineTool({
-  name: "mthds_upload_attachments",
-  description: UPLOAD_ATTACHMENTS_DESCRIPTION,
-  inputSchema: mthdsUploadAttachmentsInputSchema,
-  outputSchema: mthdsUploadAttachmentsOutputSchema,
-  annotations: {
-    title: "Upload chat attachments to Pipelex storage",
-    readOnlyHint: false,
-    destructiveHint: false,
-    // The only tool here that reaches a host outside the configured Pipelex
-    // API: it fetches an arbitrary host-supplied URL (within the attachment
-    // fetch boundary) before uploading.
-    openWorldHint: true,
-  },
-  async handler(input: MthdsUploadAttachmentsInput, contexts: ToolContexts) {
-    return attachmentsToolResult(await uploadMthdsAttachments(input, contexts.attachments));
-  },
-});
-
 export const mthdsDownloadArtifactsTool = defineTool({
   name: "mthds_download_artifacts",
   description:
@@ -543,12 +419,18 @@ export const mthdsDownloadArtifactsTool = defineTool({
     destructiveHint: false,
     openWorldHint: false,
   },
-  async handler(input: MthdsDownloadArtifactsInput, contexts: ToolContexts) {
+  async handler(input: MthdsDownloadArtifactsInput, contexts: LocalToolContexts) {
     return artifactsToolResult(await downloadMthdsArtifacts(input, contexts.artifacts));
   },
 });
 
 /**
+ * Workshop-only, like the pull below: the save submits the bundle in the
+ * `{ path }` form and finishes by writing the link file that makes the next
+ * save an update rather than a duplicate, so it needs the working directory the
+ * console does not have. The console's users reach both gestures in the
+ * webapp's editor.
+ *
  * The order rule is the load-bearing part of this description, and it is stated
  * rather than inferred: the platform derives a method's LISTED description from
  * the first file, so a bundle sent root-file-last is saved with a sub-file's
@@ -589,7 +471,7 @@ export const mthdsSaveMethodTool = defineTool({
     destructiveHint: true,
     openWorldHint: false,
   },
-  async handler(input: MthdsSaveMethodInput, contexts: ToolContexts) {
+  async handler(input: MthdsSaveMethodInput, contexts: LocalToolContexts) {
     return saveMethodToolResult(await saveMthdsMethod(input, contexts.catalogWrite));
   },
 });
@@ -618,13 +500,13 @@ export const mthdsGetMethodTool = defineTool({
     destructiveHint: true,
     openWorldHint: false,
   },
-  async handler(input: MthdsGetMethodInput, contexts: ToolContexts) {
+  async handler(input: MthdsGetMethodInput, contexts: LocalToolContexts) {
     return getMethodToolResult(await getMthdsMethod(input, contexts.catalogWrite));
   },
 });
 
-/** The cross-shell MCP contract, in registration order. Both shells register all of these. */
-export const toolDefinitions = [
+/** The workshop's table, in the order a host lists it. */
+export const localToolDefinitions = [
   mthdsListMethodsTool,
   mthdsValidateTool,
   mthdsInputsTemplateTool,
@@ -634,61 +516,9 @@ export const toolDefinitions = [
   mthdsRunStatusTool,
   mthdsRunResultsTool,
   mthdsShowImagesTool,
-] as const;
-
-/**
- * Tools the hosted console registers and the workshop does not — the one
- * documented exception to "both shells register the same table".
- *
- * `mthds_upload_attachments`'s sole argument is a host-substituted attachment
- * reference, and the host gates that substitution on the declared JSON Schema.
- * No stdio host performs it, so on the workshop the tool would be
- * *structurally unreachable* rather than merely unused: nothing could ever
- * populate it. Registering it there would spend every workshop user's tokens
- * on every `tools/list` advertising a capability that cannot fire, and would
- * invite the model to attempt it.
- *
- * The invariant that still holds, and that matters for routing: no tool NAME
- * means different things on the two shells. Kept as a table beside
- * {@link toolDefinitions} so there is still one definition per tool and one
- * registration site per shell.
- */
-export const consoleOnlyToolDefinitions = [mthdsUploadAttachmentsTool] as const;
-
-/**
- * Tools the local workshop registers and the hosted console does not — the
- * mirror image of {@link consoleOnlyToolDefinitions}, for the same reason
- * inverted.
- *
- * `mthds_download_artifacts` writes a run's produced files to disk under the
- * server's working directory. The console has no working directory and never
- * writes a file (its users download run outputs from the app's UI), so there
- * the tool would be *structurally unreachable*: nothing could ever give it a
- * place to save. Registering it would spend every console user's tokens on
- * every `tools/list` advertising a capability that cannot fire.
- *
- * `mthds_save_method` and `mthds_get_method` are here for the same reason and
- * NOT as the `output_dir` precedent widened. `mthds_codegen` advertises its
- * write argument on both shells because writing is *optional* there — the
- * inline arm is the whole contract and the console refuses one argument
- * instructively. Here the filesystem is not optional on either side: the save
- * submits the bundle as `files` in the `{ path }` form the console rejects
- * outright and finishes by writing the link file that makes the next save an
- * update rather than a duplicate, so a console save would be a materially
- * different act under the same name; and the pull's write arm would have
- * nowhere to write. The console's users reach both gestures in the webapp's
- * editor, which is where the catalog's human surface lives. Serving the inline
- * halves there later is additive and needs no change here.
- *
- * The invariant that still holds: no tool NAME means different things on the
- * two shells. One definition per tool, one registration site per shell.
- */
-export const workshopOnlyToolDefinitions = [
   mthdsDownloadArtifactsTool,
   mthdsSaveMethodTool,
   mthdsGetMethodTool,
 ] as const;
 
-export type AnyToolDefinition =
-  | (typeof toolDefinitions)[number]
-  | (typeof workshopOnlyToolDefinitions)[number];
+export type LocalToolDefinition = (typeof localToolDefinitions)[number];
