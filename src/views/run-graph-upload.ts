@@ -61,6 +61,62 @@ export interface PickedFileUpload {
   maxBytes: number;
 }
 
+/**
+ * The failed uploads the form shows, one per field, keyed by the id `RunPanel`
+ * hands `uploadFile`: the field's dotted value path (`cv`, `documents.1`,
+ * `applicant.photo`). One slot for the whole form let a second upload erase
+ * the first field's failure while that field was still empty.
+ */
+export type UploadErrors = Readonly<Record<string, string>>;
+
+/** The value the panel holds at a field id, walked the way the panel writes it. */
+export function valueAtFieldId(values: unknown, fieldId: string): unknown {
+  let node = values;
+  for (const segment of fieldId.split(".")) {
+    if (node === null || typeof node !== "object" || !Object.hasOwn(node, segment)) {
+      return undefined;
+    }
+    node = (node as Record<string, unknown>)[segment];
+  }
+  return node;
+}
+
+/**
+ * Drops the failure of every field whose value changed between two commits of
+ * the form: the user pasted a link, cleared the field or a later upload filled
+ * it, so the message no longer describes the field. The panel commits nothing
+ * when an upload fails, so a failure is never cleared by its own rejection.
+ * Returns `errors` itself when nothing was dropped, so React sees no change.
+ */
+export function clearChangedFields(
+  errors: UploadErrors,
+  previous: Record<string, unknown>,
+  next: Record<string, unknown>,
+): UploadErrors {
+  let kept: Record<string, string> | undefined;
+  for (const fieldId of Object.keys(errors)) {
+    if (sameValue(valueAtFieldId(previous, fieldId), valueAtFieldId(next, fieldId))) continue;
+    kept ??= { ...errors };
+    delete kept[fieldId];
+  }
+  return kept ?? errors;
+}
+
+/** Drops one field's failure, for a retry into that field. */
+export function withoutField(errors: UploadErrors, fieldId: string): UploadErrors {
+  if (!Object.hasOwn(errors, fieldId)) return errors;
+  const kept = { ...errors };
+  delete kept[fieldId];
+  return kept;
+}
+
+// A field's value is plain JSON (a string, a number, `{ url, filename }`, a
+// list of those), and a nested commit may rebuild an object it did not change,
+// so identity alone would clear a failure on an unrelated edit.
+function sameValue(a: unknown, b: unknown): boolean {
+  return a === b || JSON.stringify(a) === JSON.stringify(b);
+}
+
 /** A failed upload, with a message meant for the person who picked the file. */
 export class UploadFailure extends Error {
   constructor(message: string) {

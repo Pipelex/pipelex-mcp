@@ -3,7 +3,14 @@ import type { UploadGrant, UploadWithGrantOptions } from "@pipelex/sdk/upload";
 import { describe, expect, it } from "vitest";
 
 import { UPLOAD_GRANT_META_KEY } from "../capabilities/upload-grant-shape.js";
-import { UploadFailure, uploadPickedFile, uploadTimeoutMs } from "./run-graph-upload.js";
+import {
+  UploadFailure,
+  clearChangedFields,
+  uploadPickedFile,
+  uploadTimeoutMs,
+  valueAtFieldId,
+  withoutField,
+} from "./run-graph-upload.js";
 import type { GrantRequest, GrantToolResponse } from "./run-graph-upload.js";
 
 const GRANT: UploadGrant = {
@@ -189,5 +196,66 @@ describe("uploadTimeoutMs", () => {
     expect(uploadTimeoutMs(131_072)).toBe(61_000);
     // The platform's 50 MiB cap: 400 seconds on top of the minute.
     expect(uploadTimeoutMs(50 * 1024 * 1024)).toBe(460_000);
+  });
+});
+
+describe("per-field upload errors", () => {
+  const failures = {
+    cv: 'Could not upload "cv.pdf": storage refused it.',
+    job_offer: 'Could not upload "offer.pdf": storage refused it.',
+  };
+
+  it("reads a field's value down the dotted path the panel writes, list indices included", () => {
+    const values = { applicant: { photo: { url: "https://a/p.png" } }, documents: ["x", "y"] };
+
+    expect(valueAtFieldId(values, "applicant.photo")).toEqual({ url: "https://a/p.png" });
+    expect(valueAtFieldId(values, "documents.1")).toBe("y");
+    expect(valueAtFieldId(values, "missing.path")).toBeUndefined();
+    // An inherited key is not a field's value.
+    expect(valueAtFieldId(values, "constructor")).toBeUndefined();
+  });
+
+  it("keeps a field's failure while another field is edited or uploaded", () => {
+    const previous = { cv: undefined, job_offer: undefined, note: "a" };
+    const next = { ...previous, note: "ab", job_offer: { url: "pipelex-storage://o/j.pdf" } };
+
+    expect(clearChangedFields({ cv: failures.cv }, previous, next)).toEqual({ cv: failures.cv });
+  });
+
+  it("drops the failure of a field the user fixed by pasting a link", () => {
+    const previous = { cv: undefined, job_offer: undefined };
+    const next = { ...previous, cv: { url: "https://example.com/cv.pdf" } };
+
+    expect(clearChangedFields(failures, previous, next)).toEqual({
+      job_offer: failures.job_offer,
+    });
+  });
+
+  it("keeps each field's failure when two uploads fail", () => {
+    let errors = withoutField({}, "cv");
+    errors = { ...errors, cv: failures.cv };
+    errors = { ...withoutField(errors, "job_offer"), job_offer: failures.job_offer };
+
+    expect(errors).toEqual(failures);
+  });
+
+  it("drops only the retried field's failure", () => {
+    expect(withoutField(failures, "cv")).toEqual({ job_offer: failures.job_offer });
+  });
+
+  it("returns the same object when nothing is dropped, so React sees no change", () => {
+    const values = { cv: undefined };
+
+    expect(clearChangedFields(failures, values, { ...values })).toBe(failures);
+    expect(withoutField(failures, "note")).toBe(failures);
+  });
+
+  it("treats a rebuilt but equal value as unchanged", () => {
+    const previous = { applicant: { photo: { url: "https://a/p.png" }, name: "A" } };
+    const next = { applicant: { photo: { url: "https://a/p.png" }, name: "Ab" } };
+
+    expect(clearChangedFields({ "applicant.photo": "failed" }, previous, next)).toEqual({
+      "applicant.photo": "failed",
+    });
   });
 });

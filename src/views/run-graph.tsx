@@ -20,8 +20,13 @@ import { useCallTool, useToolInfo } from "../helpers.js";
 import { ToolbarButton } from "./components/toolbar-button.js";
 import { graphCaptionFor, graphPipeRefOf, selectedPipeFor } from "./run-graph-selection.js";
 import type { SelectedPipe } from "./run-graph-selection.js";
-import { UploadFailure, uploadPickedFile } from "./run-graph-upload.js";
-import type { GrantRequest, GrantToolResponse } from "./run-graph-upload.js";
+import {
+  UploadFailure,
+  clearChangedFields,
+  uploadPickedFile,
+  withoutField,
+} from "./run-graph-upload.js";
+import type { GrantRequest, GrantToolResponse, UploadErrors } from "./run-graph-upload.js";
 import { terminalFollowUpPrompt } from "./run-notify.js";
 import { useRunPolling } from "./use-run-polling.js";
 
@@ -116,7 +121,7 @@ export default function RunGraphView() {
   const [starting, setStarting] = useState(false);
   const [runId, setRunId] = useState<string | undefined>(undefined);
   const [startError, setStartError] = useState<string | null>(null);
-  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadErrors, setUploadErrors] = useState<UploadErrors>({});
   const polling = useRunPolling(runId, statusAsync);
 
   // `useCallTool`'s caller changes identity per render; pin the latest so the
@@ -130,9 +135,9 @@ export default function RunGraphView() {
   // upload still in flight from the previous form must not post its failure
   // under the new one.
   const uploadGenerationRef = useRef(0);
-  const uploadFile = useCallback(async (file: File) => {
+  const uploadFile = useCallback(async (file: File, fieldId: string) => {
     const generation = uploadGenerationRef.current;
-    setUploadError(null);
+    setUploadErrors((current) => withoutField(current, fieldId));
     try {
       const uploaded = await uploadPickedFile(file, {
         requestGrant: async (request: GrantRequest): Promise<GrantToolResponse> =>
@@ -143,13 +148,27 @@ export default function RunGraphView() {
       return { url: uploaded.url, filename: uploaded.filename };
     } catch (err) {
       if (generation === uploadGenerationRef.current) {
-        setUploadError(
-          err instanceof UploadFailure ? err.message : `Could not upload "${file.name}".`,
-        );
+        const message =
+          err instanceof UploadFailure ? err.message : `Could not upload "${file.name}".`;
+        setUploadErrors((current) => ({ ...current, [fieldId]: message }));
       }
       // Rethrown so the panel clears the field's busy state and leaves it empty.
       throw err;
     }
+  }, []);
+
+  // A field the user fixes another way — a pasted link, a cleared field, a
+  // later upload — loses its failure. The previous values are read off a ref so
+  // the callback stays put: the panel rebuilds its drop handler from it.
+  const valuesRef = useRef(values);
+  valuesRef.current = values;
+  const handleValuesChange = useCallback((next: Record<string, unknown>) => {
+    const previous = valuesRef.current;
+    // Two commits in one tick (an upload landing as the user types) must each
+    // compare against the one before, not both against the last render.
+    valuesRef.current = next;
+    setUploadErrors((current) => clearChangedFields(current, previous, next));
+    setValues(next);
   }, []);
 
   // Completion handoff: one follow-up per run, on the terminal status. Unlike
@@ -211,7 +230,7 @@ export default function RunGraphView() {
     setPickedPipe(next);
     setValues({});
     uploadGenerationRef.current += 1;
-    setUploadError(null);
+    setUploadErrors({});
   };
 
   const handleRun = (apiInputs: Record<string, unknown>) => {
@@ -309,18 +328,18 @@ export default function RunGraphView() {
             contract={contract}
             descriptor={descriptor}
             values={values}
-            onValuesChange={setValues}
+            onValuesChange={handleValuesChange}
             onRun={handleRun}
             running={running}
             uploadFile={uploadFile}
             title={pipeLabel}
             theme={theme}
           />
-          {uploadError ? (
-            <p className="mt-2 px-1 text-xs" style={{ color: "#b91c1c" }}>
-              {uploadError}
+          {Object.entries(uploadErrors).map(([fieldId, message]) => (
+            <p key={fieldId} className="mt-2 px-1 text-xs" style={{ color: "#b91c1c" }}>
+              {message}
             </p>
-          ) : null}
+          ))}
           <RunStatusLine
             runId={runId}
             starting={starting}
