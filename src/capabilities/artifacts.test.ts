@@ -657,7 +657,7 @@ describe("downloadMthdsArtifacts", () => {
     },
   );
 
-  it("refuses a climbing dir on a run that references no file, rather than reporting it saved", async () => {
+  it("refuses a climbing dir before the run is read, so a run still running refuses it too", async () => {
     const root = await makeTempDir();
     const { client, requests, reads } = fakeClient(completedState({ answer: 42 }));
 
