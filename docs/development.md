@@ -8,7 +8,7 @@ The hosted server is a Skybridge app. During early development this repo also su
 
 Prerequisites:
 
-- Node.js 24+
+- Node.js 24.14.1 or later
 - A Pipelex API serving `POST /v1/validate` and `POST /v1/build/inputs` (a local `pipelex-api` during development)
 - A WorkOS AuthKit tenant — **the console has no keyless mode and refuses to start without one** (see below)
 
@@ -26,9 +26,12 @@ If you only need to work on the capability core, **use `make dev-local` instead*
 Install dependencies, start the API, then the Skybridge dev server:
 
 ```bash
-npm install
+make install
 
-cd ../pipelex-api && make run          # serves http://localhost:8081
+# in a checkout of pipelex-api, in another terminal:
+make run                               # serves http://localhost:8081
+
+# back in this repository:
 make dev                               # sources .env ahead of the shell, then `npm run dev`
 ```
 

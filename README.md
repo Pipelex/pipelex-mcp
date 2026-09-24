@@ -37,9 +37,11 @@ A host takes one of two things, never both: the Pipelex plugin on a coding agent
 |---|---|---|
 | Claude Code | Pipelex plugin | [Install the plugin](https://github.com/Pipelex/pipelex-plugins#quick-start) |
 | Codex | Pipelex plugin | [Install the plugin](https://github.com/Pipelex/pipelex-plugins#quick-start) |
-| ChatGPT (web) | Pipelex MCP | Apps directory |
+| ChatGPT (web) | Pipelex MCP | In its settings, by the address above |
 | claude.ai (web + mobile) | Pipelex MCP | **Add custom connector**, by the address above |
 | Claude Desktop | Pipelex MCP | **Add custom connector**, by the address above |
+
+A host that spawns MCP servers but takes no plugin, such as Cursor, can run the plugin's MCP server by hand: [Registering the workshop in a host](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/hosts.md) gives its configuration.
 
 **On views:** the Pipelex MCP ships the `run-graph` and `run-follow` views, which render on the hosts that display views (ChatGPT, Claude) and degrade to text elsewhere. The plugin's MCP server is **tools-first — it ships no views on any host**, so it reports structured results and text summaries directly.
 
@@ -94,13 +96,13 @@ An item is one arm or the other; on a malformed item carrying both keys, `conten
 
 ## Local workshop: start it
 
-The workshop is published on npm as [`@pipelex/mcp`](https://www.npmjs.com/package/@pipelex/mcp). You do not install it: a host spawns it on demand in your project with the command below, and on Claude Code and Codex the [Pipelex plugin](https://github.com/Pipelex/pipelex-plugins) does that for you. Run by hand, it waits for a host on its standard input.
+The workshop is published on npm as [`@pipelex/mcp`](https://www.npmjs.com/package/@pipelex/mcp). You do not install it: a host spawns it on demand in your project with the command below, and on Claude Code and Codex the [Pipelex plugin](https://github.com/Pipelex/pipelex-plugins) does that for you. Run by hand, it prints nothing and waits for a host on its standard input.
 
 ```bash
 npx -y @pipelex/mcp
 ```
 
-It needs Node.js 24 or later, and a `PIPELEX_API_KEY` in its environment for the catalog, the runs and any call by `method_id`: a `plx_sk_` key, which you create in your console at [app.pipelex.com](https://app.pipelex.com). The directory the host starts it in is the boundary for everything it reads and writes on disk. [Registering the workshop in a host](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/hosts.md) gives the configuration for each host, every environment variable the workshop reads, and the rules of that boundary.
+It needs Node.js 24.14.1 or later, and a `PIPELEX_API_KEY` in its environment, since every tool calls the hosted Pipelex API: a `plx_sk_` key, which you create in your console at [app.pipelex.com](https://app.pipelex.com). The directory the host starts it in is the boundary for everything it reads and writes on disk. [Registering the workshop in a host](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/hosts.md) gives the configuration for each host, every environment variable the workshop reads, and the rules of that boundary.
 
 ## Hosted console: sign in with your Pipelex account
 
@@ -110,9 +112,9 @@ The hosted console holds **no server-side API key** and there is nothing to past
 https://mcp.pipelex.com/mcp
 ```
 
-That is the console's production address, and the one to register.
+That is the address to register, in every host.
 
-Sign-in is OAuth through WorkOS AuthKit, which the console's MCP host drives for you — ChatGPT, claude.ai, Claude Desktop/Cowork and Cursor all handle the handshake themselves, including picking the organization you want to work in. Your verified session is what authorizes every call the console makes on your behalf, so the catalog you see and the runs you spend are your own. The token never travels through tool arguments, so it never enters the model's context.
+Sign-in is OAuth through WorkOS AuthKit, which the console's MCP host drives for you — ChatGPT, claude.ai and Claude Desktop handle the handshake themselves, including picking the organization you want to work in. Your verified session is what authorizes every call the console makes on your behalf, so the catalog you see and the runs you spend are your own. The token never travels through tool arguments, so it never enters the model's context.
 
 There is **no keyless mode**: every tool call requires a signed-in session. If one expires or is revoked, calls come back as a `config` no-verdict at `authorization` telling you to reconnect and sign in again.
 
@@ -120,7 +122,7 @@ On a coding agent, prefer the **local workshop**, which the Pipelex plugin bring
 
 ## Chat attachments (ChatGPT only)
 
-The workshop gets the user's actual file through the `{ path }` arm. The console has no filesystem, so it gets it a different way: **ChatGPT's Apps runtime rewrites the model's reference to an attached file into a signed-URL object** before the call reaches the server. `mthds_upload_attachments` takes that channel — it fetches the bytes server-side and uploads them to Pipelex storage under your signed-in account, returning only small URI strings. **The bytes never enter the model's context**, which is the whole reason console-side upload is allowed here at all.
+The workshop reads a user's file from disk: a local path given as an input value is uploaded to Pipelex storage by `mthds_prepare_inputs`. The console has no filesystem, so it gets it a different way: **ChatGPT's Apps runtime rewrites the model's reference to an attached file into a signed-URL object** before the call reaches the server. `mthds_upload_attachments` takes that channel — it fetches the bytes server-side and uploads them to Pipelex storage under your signed-in account, returning only small URI strings. **The bytes never enter the model's context**, which is the whole reason console-side upload is allowed here at all.
 
 The flow, on the console:
 
