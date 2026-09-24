@@ -80,21 +80,17 @@ export type UploadErrors = Readonly<Record<string, string>>;
 
 /** The value the panel holds at a field id, walked the way the panel writes it. */
 export function valueAtFieldId(values: unknown, fieldId: string): unknown {
-  let node = values;
-  for (const segment of fieldId.split(".")) {
-    if (node === null || typeof node !== "object" || !Object.hasOwn(node, segment)) {
-      return undefined;
-    }
-    node = (node as Record<string, unknown>)[segment];
-  }
-  return node;
+  return fieldSlot(values, fieldId).value;
 }
 
 /**
  * Drops the failure of every field whose value changed between two commits of
  * the form: the user pasted a link, cleared the field or a later upload filled
- * it, so the message no longer describes the field. The panel commits nothing
- * when an upload fails, so a failure is never cleared by its own rejection.
+ * it, so the message no longer describes the field. A failure inside a list is
+ * also dropped when that list gained or lost a row, since the failed row holds
+ * nothing either way: a removed row and an unchanged one read alike by value,
+ * and after a shift the id names another row. The panel commits nothing when
+ * an upload fails, so a failure is never cleared by its own rejection.
  * Returns `errors` itself when nothing was dropped, so React sees no change.
  */
 export function clearChangedFields(
@@ -104,11 +100,35 @@ export function clearChangedFields(
 ): UploadErrors {
   let kept: Record<string, string> | undefined;
   for (const fieldId of Object.keys(errors)) {
-    if (sameValue(valueAtFieldId(previous, fieldId), valueAtFieldId(next, fieldId))) continue;
+    if (sameSlot(fieldSlot(previous, fieldId), fieldSlot(next, fieldId))) continue;
     kept ??= { ...errors };
     delete kept[fieldId];
   }
   return kept ?? errors;
+}
+
+// Where a field id lands: the value there (`undefined` past a missing segment)
+// and the length of every list the path crosses on the way, which is what
+// tells a row that left its list from one that stayed empty.
+interface FieldSlot {
+  value: unknown;
+  listLengths: number[];
+}
+
+function fieldSlot(values: unknown, fieldId: string): FieldSlot {
+  const listLengths: number[] = [];
+  let node = values;
+  for (const segment of fieldId.split(".")) {
+    if (node === null || typeof node !== "object") return { value: undefined, listLengths };
+    if (Array.isArray(node)) listLengths.push(node.length);
+    if (!Object.hasOwn(node, segment)) return { value: undefined, listLengths };
+    node = (node as Record<string, unknown>)[segment];
+  }
+  return { value: node, listLengths };
+}
+
+function sameSlot(a: FieldSlot, b: FieldSlot): boolean {
+  return sameValue(a.listLengths, b.listLengths) && sameValue(a.value, b.value);
 }
 
 /** Drops one field's failure, for a retry into that field. */

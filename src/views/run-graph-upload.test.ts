@@ -320,6 +320,29 @@ describe("per-field upload errors", () => {
     expect(withoutField(failures, "note")).toBe(failures);
   });
 
+  it("drops a failed row's failure when the user removes that row", () => {
+    const previous = { documents: [{ url: "pipelex-storage://o/a.pdf" }, undefined] };
+    const next = { documents: [{ url: "pipelex-storage://o/a.pdf" }] };
+
+    expect(clearChangedFields({ "documents.1": "failed" }, previous, next)).toEqual({});
+  });
+
+  it("drops a failed row's failure when an earlier row is removed, since its id now names another row", () => {
+    const previous = { documents: [{ url: "pipelex-storage://o/a.pdf" }, undefined, undefined] };
+    const next = { documents: [undefined, undefined] };
+
+    expect(clearChangedFields({ "documents.1": "failed" }, previous, next)).toEqual({});
+  });
+
+  it("keeps a failed row's failure while another row of the same list is filled", () => {
+    const previous = { documents: [undefined, undefined] };
+    const next = { documents: [{ url: "pipelex-storage://o/a.pdf" }, undefined] };
+
+    expect(clearChangedFields({ "documents.1": "failed" }, previous, next)).toEqual({
+      "documents.1": "failed",
+    });
+  });
+
   it("treats a rebuilt but equal value as unchanged", () => {
     const previous = { applicant: { photo: { url: "https://a/p.png" }, name: "A" } };
     const next = { applicant: { photo: { url: "https://a/p.png" }, name: "Ab" } };
