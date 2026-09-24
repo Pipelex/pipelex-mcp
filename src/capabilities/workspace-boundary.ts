@@ -6,21 +6,23 @@ import type { ToolError } from "./shared.js";
 /**
  * The containment boundary every filesystem-touching capability shares.
  *
- * Three tools reach the disk on the local workshop — `{ path }` file reads
- * (`local/files.ts`), run-artifact downloads (`capabilities/artifacts.ts`) and
- * generated-tree writes (`capabilities/codegen-writer.ts`) — and all three ask
- * the same question: does this path stay inside the directory the host started
- * the server in, on REAL paths, with symlinks followed? That question, and
- * only that question, lives here.
+ * Every tool that reaches the disk on the local workshop — `{ path }` file
+ * reads (`local/files.ts`), run saves (`capabilities/artifacts.ts`),
+ * generated-tree writes (`capabilities/codegen-writer.ts`) and the catalog
+ * pair's pulled sources and link file (`capabilities/catalog-write.ts`,
+ * `capabilities/catalog-link.ts`) — asks the same question: does this path
+ * stay inside the directory the host started the server in, on REAL paths,
+ * with symlinks followed? That question, and only that question, lives here.
  *
- * What deliberately does NOT live here is write POLICY. The two writers are
- * inverted on purpose: `mthds_download_artifacts` never overwrites (the SDK's
- * `downloadArtifacts` creates with `wx`, a numeric suffix on collision) because
- * its filenames come from a storage key, while `mthds_codegen` must overwrite
- * its own previous output and only that, because its paths come from the
- * engine and the lock hashes them. One shared
- * "write a file" helper would either suffix a regeneration or let a download
- * clobber, so the fold stops at containment.
+ * What deliberately does NOT live here is write POLICY, because the writers'
+ * policies are inverted on purpose. `mthds_download_artifacts` never
+ * overwrites — its own `main_stuff.json` and the SDK's `downloadArtifacts`
+ * alike create with `wx` and take a numeric suffix on a collision — because a
+ * collision there means two different files, while `mthds_codegen` must
+ * overwrite its own previous output and only that, because its paths come from
+ * the engine and the lock hashes them. One shared "write a file" helper would
+ * either suffix a regeneration or let a download clobber, so the fold stops at
+ * containment.
  */
 
 /** Whether `candidate` (an absolute, already-real path) is `root` itself or inside it. */

@@ -17,6 +17,8 @@
 
 import type { PipelexApiClient } from "@pipelex/sdk";
 
+import { getMthdsRunStatus } from "./run.js";
+import type { RunContext } from "./run.js";
 import { buildApiConfig, createPipelexApiClient } from "./shared.js";
 import type { ApiConfig } from "./shared.js";
 
@@ -40,6 +42,28 @@ export function liveApiConfig(): ApiConfig {
 /** A real, unseamed client — what the suites use for their own setup calls. */
 export function liveClient(): PipelexApiClient {
   return createPipelexApiClient(liveApiConfig());
+}
+
+/** Ceiling for polling one small run to a terminal state. */
+const POLL_DEADLINE_MS = 90_000;
+const POLL_INTERVAL_MS = 2_000;
+
+/**
+ * Poll a run to a terminal state, returning the last status read. Bounded by a
+ * deadline so a stuck run fails as a timeout with a readable last state rather
+ * than hanging until vitest kills the file. Terminal is not success: the
+ * caller asserts `run_status` as well.
+ */
+export async function pollRunToTerminal(runId: string, context: RunContext) {
+  const deadline = Date.now() + POLL_DEADLINE_MS;
+  let last = await getMthdsRunStatus({ run_id: runId }, context);
+
+  while (last.structuredContent.is_terminal !== true && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    last = await getMthdsRunStatus({ run_id: runId }, context);
+  }
+
+  return last;
 }
 
 /**

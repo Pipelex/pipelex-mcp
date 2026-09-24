@@ -19,8 +19,10 @@ import {
  * The generated-tree writer behind `mthds_codegen`'s `output_dir` — the
  * workshop's second write path, and deliberately NOT the first one's policy.
  *
- * `mthds_download_artifacts` never overwrites: its filenames come from a
- * storage key it sanitizes, so a collision means two different files and the
+ * `mthds_download_artifacts` never overwrites: the SDK names each file after
+ * the output field it fills (the storage key supplies only the extension), so
+ * a name already taken belongs to another file — another field that reduces
+ * to the same name, or another run saved into the same directory — and the
  * safe move is a numeric suffix. This writer is the inverse: its paths come
  * from the engine, the lock hashes them, and regeneration MUST land on the
  * same names — so it overwrites, but only files it can prove are its own
