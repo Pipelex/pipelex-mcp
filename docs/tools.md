@@ -330,7 +330,7 @@ Each file is named after the field it fills in the output: the picture at `$.roo
 
 ## `mthds_save_method` / `mthds_get_method` — local workshop only
 
-Two tools carry a bundle between the working directory and the organization's catalog: `mthds_save_method` saves the files on disk as a method, creating one or updating one, and `mthds_get_method` brings a saved method's files back. Both write `pipelex-method.json` beside the bundle, the link file that ties a directory to the method it was saved as. Commit it, so that a teammate's save from the same directory updates the same method instead of creating a second one.
+Two tools carry a bundle between the working directory and the organization's catalog: `mthds_save_method` saves the files on disk as a method, creating one or updating one, and `mthds_get_method` brings a saved method's files back. A save whose root file is a `{ path }` item, or that names a `link_dir`, writes `pipelex-method.json` there, and so does a pull with `output_dir`; that link file ties a directory to the method it was saved as. Commit it, so that a teammate's save from the same directory updates the same method instead of creating a second one. A save sent inline with no `link_dir`, and a pull without `output_dir`, write no link, so the next save must pass `method_id` or it creates a second method; `link_file.written` on the save's result says which happened. Every `{ path }` item, `python` included, must sit at or under the root file's directory, and the root file must itself be a `{ path }` for any other item to be read from disk.
 
 ```ts
 // mthds_save_method — input
@@ -340,7 +340,7 @@ Two tools carry a bundle between the working directory and the organization's ca
   method_id?: string;             // absent creates; present updates THAT method
   python?: SubmittedFileInput[];  // the bundle's .py files, replaced as a set
   expected_updated_at?: string;   // the stored updated_at this save believes it is overwriting
-  link_dir?: string;              // where to write pipelex-method.json; defaults to the root file's directory
+  link_dir?: string;              // where to write pipelex-method.json; defaults to the root file's directory when that file is a { path } item — an inline-only save with no link_dir writes no link
 }
 
 // mthds_save_method — structuredContent

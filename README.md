@@ -37,7 +37,7 @@ A host takes one of two things, never both: the Pipelex plugin on a coding agent
 |---|---|---|
 | Claude Code | Pipelex plugin | [Install the plugin](https://github.com/Pipelex/pipelex-plugins#quick-start) |
 | Codex | Pipelex plugin | [Install the plugin](https://github.com/Pipelex/pipelex-plugins#quick-start) |
-| ChatGPT (web) | Pipelex MCP | In its settings, by the address above |
+| ChatGPT (web) | Pipelex MCP | A developer-mode app, created by the address above ([OpenAI's conditions](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt)) |
 | claude.ai (web + mobile) | Pipelex MCP | **Add custom connector**, by the address above |
 | Claude Desktop | Pipelex MCP | **Add custom connector**, by the address above |
 
@@ -66,13 +66,13 @@ Both servers register the same tools, under the same names and contracts, apart 
 | [`mthds_codegen`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_codegen) | both servers | Generate typed TypeScript or Python for a method's concepts, stamped and locked; the workshop can write the tree straight to disk. |
 | [`mthds_prepare_inputs`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_prepare_inputs) | both servers | Make filled inputs run-ready: the workshop uploads local files to Pipelex storage, and the console passes URLs and storage references through. |
 | [`mthds_upload_attachments`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_upload_attachments--hosted-console-only) | console | Turn a file attached in a ChatGPT conversation into a run-ready `pipelex-storage://` reference. |
-| [`pipelex_request_upload`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#pipelex_request_upload--hosted-console-only-called-by-the-view) | console | Issue the one-time upload grant the `run-graph` view's run form uses for a file the user picks; hidden from the model. |
+| [`pipelex_request_upload`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#pipelex_request_upload--hosted-console-only-called-by-the-view) | console | Issue the one-time upload grant the `run-graph` view's run form uses for a file the user picks; hidden from the model on hosts that honour the MCP Apps `ui.visibility` key. |
 | [`mthds_run`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_run--mthds_run_status--mthds_run_results) | both servers | Start a durable run on the hosted Pipelex API and return its `run_id` at once. |
 | [`mthds_run_status`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_run--mthds_run_status--mthds_run_results) | both servers | Read a run's lifecycle state by its `run_id`. |
 | [`mthds_run_results`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_run--mthds_run_status--mthds_run_results) | both servers | Fetch a run's outcome, and list for free which of its stored files look like images. |
 | [`mthds_show_images`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_show_images) | both servers | Show the pictures a completed run produced, as image content that stays in the conversation. |
 | [`mthds_download_artifacts`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#saving-a-run-to-disk-local-workshop-only) | workshop | Save a completed run to disk: its output as `main_stuff.json`, and the files it produced. |
-| [`mthds_save_method`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_save_method--mthds_get_method--local-workshop-only) | workshop | Validate a bundle and save it to your organization's catalog, linking the directory to the saved method. |
+| [`mthds_save_method`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_save_method--mthds_get_method--local-workshop-only) | workshop | Validate a bundle and save it to your organization's catalog, linking the directory to the saved method when the bundle was given by path. |
 | [`mthds_get_method`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_save_method--mthds_get_method--local-workshop-only) | workshop | Bring a saved method's files back, to disk or inline. |
 
 ## The two deployments, and the `{ path }` arm
@@ -92,7 +92,7 @@ Both servers register this same union, so the tool contract never forks; what di
 
 An item is one arm or the other; on a malformed item carrying both keys, `content` wins (first-match union semantics) and `path` is ignored.
 
-**Path trust boundary (workshop).** `{ path }` values resolve relative to the server's working directory. The arm is contracted to `.mthds` files, so a non-`.mthds` extension is rejected **before any filesystem access** (a prompt-injected `.env` or key-file path is never opened), and the resolved target (symlinks followed) must live inside the working-directory subtree. Non-`.mthds` paths, escapes, missing files, and non-regular files come back as `input_domain` errors located at `files[i].path`.
+**Path trust boundary (workshop).** `{ path }` values resolve relative to the server's working directory. Each `{ path }` argument is contracted to one extension, `.mthds` for every bundle argument and `.py` for `mthds_save_method`'s `python`, so any other extension is rejected **before any filesystem access** (a prompt-injected `.env` or key-file path is never opened), and the resolved target (symlinks followed) must live inside the working-directory subtree. `mthds_save_method` adds one more bound: every `{ path }` item must sit at or under the directory of its first `files` item, which must itself be a `{ path }`. A wrong extension, an escape, a missing file and a non-regular file come back as `input_domain` errors located at the item (`files[i].path`, or `python[i].path`).
 
 ## Local workshop: start it
 
