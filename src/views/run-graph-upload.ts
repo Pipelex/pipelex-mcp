@@ -25,9 +25,18 @@ import { UPLOAD_GRANT_META_KEY, narrowUploadGrant } from "../capabilities/upload
 export interface GrantToolResponse {
   structuredContent: {
     status: "ok" | "error";
-    errors?: { message: string }[];
+    errors?: GrantRefusal[];
   };
   meta?: Record<string, unknown>;
+}
+
+/** The members of the console's `ToolError` the form reads. */
+export interface GrantRefusal {
+  class?: string;
+  kind?: string;
+  location?: string;
+  message: string;
+  hint?: string;
 }
 
 export interface GrantRequest {
@@ -161,8 +170,9 @@ export async function uploadPickedFile(
   }
 
   if (response.structuredContent.status !== "ok") {
-    const reason = response.structuredContent.errors?.[0]?.message ?? "the console refused it.";
-    throw new UploadFailure(`Could not upload "${file.name}": ${reason}`);
+    throw new UploadFailure(
+      `Could not upload "${file.name}": ${refusalText(response.structuredContent.errors?.[0])}`,
+    );
   }
   const grant = narrowUploadGrant(response.meta?.[UPLOAD_GRANT_META_KEY]);
   if (grant === undefined) {
@@ -189,6 +199,28 @@ export async function uploadPickedFile(
   }
 
   return { url: stored.uri, filename: file.name, maxBytes: grant.max_bytes };
+}
+
+/**
+ * The console's refusal as the person who picked the file should read it. The
+ * message is the platform's, and for a body the route rejects (`422`) it is a
+ * generic "Request body failed validation" pointing at a breakdown nobody sees
+ * here; the hint is what says what to do. It is shown only where it is written
+ * for that person: a refusal about the file (`input_domain`), one about the
+ * sign-in (`authorization`, the console's reconnect wording, which the
+ * organization-less `400` is filed under too) and a plan limit (`paywall`).
+ * Every other hint is written for an operator — start pipelex-api, inspect the
+ * route's logs — and stays off the form.
+ */
+function refusalText(refusal: GrantRefusal | undefined): string {
+  if (refusal === undefined) return "the console refused it.";
+  const forThePerson =
+    refusal.class === "input_domain" ||
+    refusal.location === "authorization" ||
+    refusal.kind === "paywall";
+  if (!forThePerson || !refusal.hint) return refusal.message;
+  const message = /[.!?]$/.test(refusal.message) ? refusal.message : `${refusal.message}.`;
+  return `${message} ${refusal.hint}`;
 }
 
 // ChatGPT's answer for a tool its stored copy of the connector's list lacks.

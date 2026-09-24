@@ -11,7 +11,7 @@ import {
   valueAtFieldId,
   withoutField,
 } from "./run-graph-upload.js";
-import type { GrantRequest, GrantToolResponse } from "./run-graph-upload.js";
+import type { GrantRefusal, GrantRequest, GrantToolResponse } from "./run-graph-upload.js";
 
 const GRANT: UploadGrant = {
   uri: "pipelex-storage://org_1/assets/0f1e2d3c.pdf",
@@ -104,6 +104,62 @@ describe("uploadPickedFile", () => {
     // The console answered, so the connector is fine: re-adding it fixes nothing.
     const failure: unknown = await upload.catch((err: unknown) => err);
     expect((failure as Error).message).not.toContain("re-add");
+  });
+
+  function refusedWith(error: GrantRefusal): Promise<unknown> {
+    return uploadPickedFile(pdf(), {
+      requestGrant: async () => ({ structuredContent: { status: "error", errors: [error] } }),
+    }).catch((err: unknown) => err);
+  }
+
+  it("adds the hint to a refusal about the file, whose message alone says nothing useful", async () => {
+    const failure = await refusedWith({
+      class: "input_domain",
+      message: "Request body failed validation. See `errors` for the per-field breakdown.",
+      hint: "Pipelex storage refused the file's name, type or size as given. Rename the file, or pick another one.",
+    });
+
+    expect((failure as Error).message).toBe(
+      'Could not upload "report.pdf": Request body failed validation. See `errors` for the per-field breakdown. ' +
+        "Pipelex storage refused the file's name, type or size as given. Rename the file, or pick another one.",
+    );
+  });
+
+  it("adds the reconnect hint to a rejected sign-in, ending the message with a full stop first", async () => {
+    const failure = await refusedWith({
+      class: "config",
+      location: "authorization",
+      message: "Unauthorized",
+      hint: "reconnect the Pipelex connector and sign in again.",
+    });
+
+    expect((failure as Error).message).toBe(
+      'Could not upload "report.pdf": Unauthorized. reconnect the Pipelex connector and sign in again.',
+    );
+  });
+
+  it("adds the plan hint to a paywall refusal", async () => {
+    const failure = await refusedWith({
+      class: "config",
+      kind: "paywall",
+      message: "Subscription required.",
+      hint: "The organization's plan does not cover this call.",
+    });
+
+    expect((failure as Error).message).toContain("does not cover this call");
+  });
+
+  it("keeps an operator's hint off the form", async () => {
+    const failure = await refusedWith({
+      class: "config",
+      location: "PIPELEX_BASE_URL",
+      message: "The Pipelex API could not be reached.",
+      hint: "Start pipelex-api locally or set PIPELEX_BASE_URL.",
+    });
+
+    expect((failure as Error).message).toBe(
+      'Could not upload "report.pdf": The Pipelex API could not be reached.',
+    );
   });
 
   it("refuses to send when the answer carries no usable grant", async () => {
