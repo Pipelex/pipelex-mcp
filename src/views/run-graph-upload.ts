@@ -1,4 +1,4 @@
-import { UploadTransportError, uploadWithGrant } from "@pipelex/sdk/upload";
+import { RejectedAssetError, UploadTransportError, uploadWithGrant } from "@pipelex/sdk/upload";
 import type { GrantedUpload, UploadGrant } from "@pipelex/sdk/upload";
 
 import { UPLOAD_GRANT_META_KEY, narrowUploadGrant } from "../capabilities/upload-grant-shape.js";
@@ -17,8 +17,9 @@ import { UPLOAD_GRANT_META_KEY, narrowUploadGrant } from "../capabilities/upload
  *
  * Every failure is thrown as an {@link UploadFailure} whose message is written
  * for the person who picked the file. The panel discards a rejection silently,
- * so the view shows that message itself; the SDK's own messages never carry the
- * grant's URL, which is a bearer credential.
+ * so the view shows that message itself. The view words storage's failures
+ * itself and does not relay the SDK's text, because that text is written for
+ * whoever holds the grant.
  */
 
 /** What the grant tool's response carries, as `useCallTool` hands it to the view. */
@@ -197,19 +198,41 @@ export async function uploadPickedFile(
   try {
     stored = await send(grant, file);
   } catch (err) {
-    // The SDK's own timeout message is written for a developer holding the
-    // grant (a longer `timeoutMs`, a retry with the same grant), neither of
-    // which the person at the form can do.
-    if (err instanceof UploadTransportError && err.code === "timeout") {
-      throw new UploadFailure(
-        `The upload of "${file.name}" timed out. Try again, or pick a smaller file.`,
-      );
-    }
-    // The SDK's refusals already name the file and say what to do.
-    throw new UploadFailure(messageOf(err, `The upload of "${file.name}" failed.`));
+    throw new UploadFailure(storageFailureMessage(file.name, err));
   }
 
   return { url: stored.uri, filename: file.name, maxBytes: grant.max_bytes };
+}
+
+/**
+ * A failed send, as the person who picked the file should read it. The SDK
+ * words its errors for a caller holding the grant: a longer `timeoutMs`, a
+ * retry with the same grant before it expires, a look at the page's CSP, a new
+ * grant. The person at the form can take none of those steps, and the form
+ * already asks for a fresh grant on every pick. So the view picks its own line
+ * from the error's `code` and never shows the SDK's text. Every line ends with
+ * something the person can do.
+ */
+function storageFailureMessage(filename: string, err: unknown): string {
+  const file = `"${filename}"`;
+  if (err instanceof UploadTransportError) {
+    switch (err.code) {
+      case "timeout":
+        return `The upload of ${file} timed out. Try again, or pick a smaller file.`;
+      case "unreachable":
+        return `Couldn't reach storage to upload ${file}. Check your connection and try again.`;
+      case "server_error":
+        return `Storage failed while uploading ${file}. Try again in a moment.`;
+      case "storage_timeout":
+        return `Storage stopped waiting for ${file}. Try again.`;
+    }
+  }
+  if (err instanceof RejectedAssetError) {
+    return err.code === "grant_expired"
+      ? `The upload of ${file} took too long to start. Try again.`
+      : `Storage refused the upload of ${file}. Try again, or pick another file.`;
+  }
+  return `The upload of ${file} failed. Try again.`;
 }
 
 /**

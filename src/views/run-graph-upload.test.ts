@@ -1,6 +1,5 @@
-import { RejectedAssetError, UploadTransportError } from "@pipelex/sdk/upload";
 import type { UploadGrant } from "@pipelex/sdk/upload";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { UPLOAD_GRANT_META_KEY } from "../capabilities/upload-grant-shape.js";
 import {
@@ -228,60 +227,139 @@ describe("uploadPickedFile", () => {
     await expect(upload).rejects.toThrow(/Pick the file again;.*to your message instead\.$/);
   });
 
-  it("relays storage's refusal as the SDK words it", async () => {
-    const refusal = new RejectedAssetError(
-      'Storage refused the upload of "report.pdf" (412 PreconditionFailed): this grant was already used.',
-      "report.pdf",
-      412,
-      { code: "grant_used" },
-    );
-
-    const upload = uploadPickedFile(pdf(), {
-      requestGrant: async () => granted,
-      send: async () => {
-        throw refusal;
-      },
-    });
-
-    await expect(upload).rejects.toThrow(UploadFailure);
-    await expect(upload).rejects.toThrow("this grant was already used");
-  });
-
-  it("says a stalled upload timed out, in words for the person rather than the SDK's", async () => {
-    // The SDK's own time limit, worded for a caller holding the grant.
-    const timeout = new UploadTransportError(
-      'Upload of "report.pdf" did not finish within the 60.001 s allowed, so whether storage stored the file is unknown. ' +
-        "On a slow link, pass a longer timeoutMs. Retrying with the same grant before it expires at " +
-        "2026-09-23T15:00:00Z either stores the file or reports the grant as used, and then the grant's uri already names the file.",
-      { code: "timeout" },
-    );
-
+  it("says any other failure to send in a generic line", async () => {
     const failure = await uploadPickedFile(pdf(), {
       requestGrant: async () => granted,
       send: async () => {
-        throw timeout;
+        throw new Error("something the SDK does not classify");
       },
     }).catch((err: unknown) => err);
 
     expect(failure).toBeInstanceOf(UploadFailure);
-    expect((failure as Error).message).toBe(
-      'The upload of "report.pdf" timed out. Try again, or pick a smaller file.',
-    );
+    expect((failure as Error).message).toBe('The upload of "report.pdf" failed. Try again.');
+  });
+});
+
+// These run the SDK's own `uploadWithGrant` over a stubbed `fetch`, so each
+// line is pinned to how the SDK really classifies what storage answered, not
+// to an error built by hand. The SDK words its messages for whoever holds the
+// grant ("retrying with the same grant before it expires…", "check the page's
+// CSP connect-src"), and none of that may reach the form.
+describe("a failed send, through the SDK", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
-  it("relays a transport failure other than a timeout as the SDK words it", async () => {
-    const upload = uploadPickedFile(pdf(), {
-      requestGrant: async () => granted,
-      send: async () => {
-        throw new UploadTransportError(
-          'Upload of "report.pdf" failed at storage (503 SlowDown): please reduce your request rate.',
-          { status: 503, code: "server_error" },
-        );
-      },
-    });
+  // What S3 answers when it refuses or fails a PUT: an XML error document.
+  function s3Error(status: number, code: string, message: string): Response {
+    return new Response(
+      `<?xml version="1.0" encoding="UTF-8"?><Error><Code>${code}</Code><Message>${message}</Message></Error>`,
+      { status, headers: { "content-type": "application/xml" } },
+    );
+  }
 
-    await expect(upload).rejects.toThrow(UploadFailure);
-    await expect(upload).rejects.toThrow("503 SlowDown");
+  async function failureLine(): Promise<string> {
+    const failure = await uploadPickedFile(pdf(), { requestGrant: async () => granted }).catch(
+      (err: unknown) => err,
+    );
+    expect(failure).toBeInstanceOf(UploadFailure);
+    return (failure as Error).message;
+  }
+
+  it.each([
+    {
+      when: "storage cannot be reached",
+      answer: () => Promise.reject(new TypeError("Failed to fetch")),
+      line: 'Couldn\'t reach storage to upload "report.pdf". Check your connection and try again.',
+    },
+    {
+      when: "storage fails with a 5xx",
+      answer: async () => s3Error(503, "SlowDown", "Please reduce your request rate."),
+      line: 'Storage failed while uploading "report.pdf". Try again in a moment.',
+    },
+    {
+      when: "storage fails with a 5xx and no body",
+      answer: async () => new Response(null, { status: 502 }),
+      line: 'Storage failed while uploading "report.pdf". Try again in a moment.',
+    },
+    {
+      when: "storage stops waiting for the bytes",
+      answer: async () =>
+        s3Error(
+          400,
+          "RequestTimeout",
+          "Your socket connection to the server was not read from or written to within the timeout period.",
+        ),
+      line: 'Storage stopped waiting for "report.pdf". Try again.',
+    },
+    {
+      when: "the grant expired before the upload started",
+      answer: async () => s3Error(403, "AccessDenied", "Request has expired"),
+      line: 'The upload of "report.pdf" took too long to start. Try again.',
+    },
+    {
+      when: "storage refuses the file against its signature",
+      answer: async () =>
+        s3Error(
+          403,
+          "SignatureDoesNotMatch",
+          "The request signature we calculated does not match the signature you provided.",
+        ),
+      line: 'Storage refused the upload of "report.pdf". Try again, or pick another file.',
+    },
+    {
+      when: "storage says the grant was already used",
+      answer: async () =>
+        s3Error(
+          412,
+          "PreconditionFailed",
+          "At least one of the pre-conditions you specified did not hold",
+        ),
+      line: 'Storage refused the upload of "report.pdf". Try again, or pick another file.',
+    },
+    {
+      when: "another upload with the same grant is in progress",
+      answer: async () =>
+        s3Error(
+          409,
+          "ConditionalRequestConflict",
+          "A conflicting conditional operation is currently in progress against this resource.",
+        ),
+      line: 'The upload of "report.pdf" failed. Try again.',
+    },
+  ])("says so in words for the person when $when", async ({ answer, line }) => {
+    vi.stubGlobal("fetch", vi.fn(answer));
+
+    expect(await failureLine()).toBe(line);
+  });
+
+  it("says a stalled upload timed out, on the SDK's own time limit", async () => {
+    // The view passes no timer, so this is the SDK's default (a minute plus a
+    // second per started 128 KiB) running out on a PUT storage never answers.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let sent!: () => void;
+    const started = new Promise<void>((resolve) => {
+      sent = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+            sent();
+          }),
+      ),
+    );
+
+    const failure = failureLine();
+    await started;
+    await vi.advanceTimersByTimeAsync(61_001);
+
+    expect(await failure).toBe(
+      'The upload of "report.pdf" timed out. Try again, or pick a smaller file.',
+    );
   });
 });
 
