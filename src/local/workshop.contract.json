@@ -1898,7 +1898,7 @@
             ]
           },
           "output": {
-            "description": "The run's main output, saved as main_stuff.json — on state \"completed\", and on a credential refused part-way through a download, since it is written first.",
+            "description": "The run's main output, saved as main_stuff.json — on state \"completed\", and on any refusal of the file download, since it is written first.",
             "type": "object",
             "properties": {
               "path": {
@@ -1917,7 +1917,7 @@
             "additionalProperties": false
           },
           "artifacts": {
-            "description": "One entry per stored file the main output references, in discovery order — on state \"completed\", and on a credential refused part-way through a download, where it carries the files saved before the refusal.",
+            "description": "One entry per stored file the main output references, in discovery order — on state \"completed\", and on a credential refused after some files were saved, where it carries them.",
             "type": "array",
             "items": {
               "type": "object",
@@ -1993,7 +1993,7 @@
             }
           },
           "saved_paths": {
-            "description": "Every file that was saved, relative to the server's working directory: main_stuff.json first, then the saved artifacts — present wherever artifacts is.",
+            "description": "Every file that was saved, relative to the server's working directory: main_stuff.json first, then the saved artifacts — present wherever output is.",
             "type": "array",
             "items": {
               "type": "string"

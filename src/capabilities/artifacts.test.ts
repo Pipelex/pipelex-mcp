@@ -497,6 +497,42 @@ describe("downloadMthdsArtifacts", () => {
     expect(result.structuredContent.all_saved).toBeUndefined();
   });
 
+  it("leaves artifacts out of a credential refused before any file was saved", async () => {
+    const root = await makeTempDir();
+    const { client } = fakeClient(completedState({ url: PICTURE_URI }), () =>
+      Promise.reject(
+        new ArtifactAuthenticationError(
+          "The resolve route refused the credential (401); no artifact was downloaded.",
+          401,
+          verdictOf([
+            {
+              uri: PICTURE_URI,
+              path: null,
+              content_type: null,
+              size: null,
+              error: { code: "aborted", detail: "stopped on a credential failure" },
+            },
+          ]),
+        ),
+      ),
+    );
+
+    const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
+
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      location: "PIPELEX_API_KEY",
+      retryable: false,
+    });
+    // Every item would be an `aborted` error inviting a retry the refusal
+    // itself rules out, so only what is on disk rides: the output.
+    expect(result.structuredContent.artifacts).toBeUndefined();
+    expect(result.structuredContent.output?.path).toBe(OUTPUT_PATH);
+    expect(result.structuredContent.saved_paths).toEqual([OUTPUT_PATH]);
+    expect(result.summary).toContain(
+      `Before the failure, the run's main output was saved as \`${OUTPUT_PATH}\`.`,
+    );
+  });
+
   it("writes the output before the SDK downloads anything, so the output keeps its name", async () => {
     const root = await makeTempDir();
     const mainStuff = { url: PICTURE_URI, caption: "a kitchen" };
@@ -656,6 +692,14 @@ describe("downloadMthdsArtifacts", () => {
     });
     expect(result.structuredContent.errors?.[0]?.hint).toContain("/v1/resolve-storage-url/bulk");
     expect(result.summary).toContain("unreachable or misconfigured");
+    // The output was written before the bulk route was asked, so the refusal
+    // still says where it is, and nothing reads as a download verdict.
+    expect(result.structuredContent.output?.path).toBe(OUTPUT_PATH);
+    expect(result.structuredContent.saved_paths).toEqual([OUTPUT_PATH]);
+    expect(result.structuredContent.artifacts).toBeUndefined();
+    expect(await fs.readFile(path.join(root, OUTPUT_PATH), "utf8")).toBe(
+      outputBytes({ url: PICTURE_URI }),
+    );
   });
 
   it("classifies a whole-request 400 on the bulk route as config, not as the caller's input", async () => {

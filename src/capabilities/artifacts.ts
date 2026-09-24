@@ -138,19 +138,19 @@ const artifactsStructuredContentSchema = z.object({
   output: savedOutputSchema
     .optional()
     .describe(
-      'The run\'s main output, saved as main_stuff.json — on state "completed", and on a credential refused part-way through a download, since it is written first.',
+      'The run\'s main output, saved as main_stuff.json — on state "completed", and on any refusal of the file download, since it is written first.',
     ),
   artifacts: z
     .array(savedArtifactSchema)
     .optional()
     .describe(
-      'One entry per stored file the main output references, in discovery order — on state "completed", and on a credential refused part-way through a download, where it carries the files saved before the refusal.',
+      'One entry per stored file the main output references, in discovery order — on state "completed", and on a credential refused after some files were saved, where it carries them.',
     ),
   saved_paths: z
     .array(z.string())
     .optional()
     .describe(
-      "Every file that was saved, relative to the server's working directory: main_stuff.json first, then the saved artifacts — present wherever artifacts is.",
+      "Every file that was saved, relative to the server's working directory: main_stuff.json first, then the saved artifacts — present wherever output is.",
     ),
   all_saved: z
     .boolean()
@@ -484,14 +484,17 @@ function outputWriteError(dir: string, err: unknown): ToolError {
 
 /**
  * A download the SDK could not produce a verdict for. The output file was
- * written before the download began, and a credential refused part-way through
- * leaves the files saved before it on disk too — the SDK hands them back on
- * the error. Everything on disk is real, so it rides the structured result as
- * well as the prose. `state` and `all_saved` stay absent — no verdict was
- * produced, and a consumer branching on `status` must not read one here — but
- * `output`, `artifacts` and `saved_paths` let it find what is already on its
- * disk instead of parsing the summary for it, and calling again would not
- * overwrite those files, it would write suffixed copies beside them.
+ * written before the download began, so EVERY refusal here carries `output`
+ * and `saved_paths`. A credential refused part-way through leaves the files
+ * saved before it on disk too, and the SDK hands them back on the error: only
+ * then does `artifacts` ride, carrying them. A credential refused before any
+ * file was saved hands back a verdict of nothing but `aborted` items, whose
+ * per-item "call the tool again" would contradict the refusal's own
+ * not-retryable error, so it is left out. `state` and `all_saved` stay absent —
+ * no verdict was produced, and a consumer branching on `status` must not read
+ * one here — but what is on disk rides the structured result as well as the
+ * prose, so a consumer finds it without parsing the summary; calling again
+ * would not overwrite those files, it would write suffixed copies beside them.
  */
 function refusedResult(
   error: ToolError,
@@ -500,25 +503,26 @@ function refusedResult(
   root: string,
 ): ArtifactsResult {
   const summary = summaryForToolError(error, FILES_ERROR_SUMMARIES);
-  const artifacts =
+  const refused =
     err instanceof ArtifactAuthenticationError
       ? err.verdict.artifacts.map((item, index) => projectItem(item, index, root))
-      : undefined;
-  const savedArtifacts = (artifacts ?? []).flatMap((item) =>
-    item.path === undefined ? [] : [item.path],
-  );
+      : [];
+  const savedArtifacts = refused.flatMap((item) => (item.path === undefined ? [] : [item.path]));
   const savedPaths = [output.path, ...savedArtifacts];
 
-  const lines = savedPaths.map((saved) => `- \`${saved}\``);
+  const saved =
+    savedArtifacts.length === 0
+      ? `Before the failure, the run's main output was saved as \`${output.path}\`.`
+      : `Before the failure, the run's main output and ${savedArtifacts.length} file(s) were saved under \`${root}\`:\n${savedPaths.map((entry) => `- \`${entry}\``).join("\n")}`;
   return {
     structuredContent: {
       status: "error",
       errors: [error],
       output,
-      ...(artifacts === undefined ? {} : { artifacts }),
+      ...(savedArtifacts.length === 0 ? {} : { artifacts: refused }),
       saved_paths: savedPaths,
     },
-    summary: `${summary}\n\nBefore the failure, the run's main output and ${savedArtifacts.length} file(s) were saved under \`${root}\`:\n${lines.join("\n")}`,
+    summary: `${summary}\n\n${saved}`,
   };
 }
 
