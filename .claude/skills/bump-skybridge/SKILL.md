@@ -226,7 +226,7 @@ That ships the **working tree** (not a branch) to the Dev environment and restor
 This repo's `CLAUDE.md` carries several paragraphs that are statements *about Skybridge*, not about this repo, and a bump can falsify them without touching a line of code. Check each one you have reason to doubt:
 
 ```bash
-grep -n "Skybridge\|skybridge" CLAUDE.md README.md SPEC.md
+grep -rn "Skybridge\|skybridge" CLAUDE.md README.md docs/ SPEC.md
 ```
 
 The ones most exposed are the pinned-port paragraph (Skybridge's default port and its walk-up-when-busy behavior), the `nodemon.json` note (that it replaces the watch defaults), the DevTools token-lifetime note, and the `dependencies` paragraph that explains why `skybridge` is the one runtime exception and names `dist/__entry.js` and `dist/server.js`. Record *why* something moved, not only that it did.

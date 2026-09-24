@@ -107,7 +107,7 @@ A fake written against the old shape keeps the suite green through a breaking ch
 
 ### 4d — Everything mechanical
 
-Some bullets are a plain rename — an option, an export, an env var written as `` `oldName` `` → `` `newName` ``. For those, grep the **whole repo**, not just `src/`: env var names in particular leak into `README.md`, `SPEC.md`, `CLAUDE.md`, `.env.example`, and `wip/` notes. Apply the rename everywhere and show the diff — this workspace keeps no backward-compatibility shims, so there is nothing to preserve. The one place to leave untouched is this repo's **already-dated `CHANGELOG.md` release headings**: those record what was true at that release. Step 8 is where the changelog gets its new entry.
+Some bullets are a plain rename — an option, an export, an env var written as `` `oldName` `` → `` `newName` ``. For those, grep the **whole repo**, not just `src/`: env var names in particular leak into `README.md`, `docs/`, `SPEC.md`, `CLAUDE.md`, `.env.example`, and `wip/` notes. Apply the rename everywhere and show the diff — this workspace keeps no backward-compatibility shims, so there is nothing to preserve. The one place to leave untouched is this repo's **already-dated `CHANGELOG.md` release headings**: those record what was true at that release. Step 8 is where the changelog gets its new entry.
 
 Run `make format` after any edit, not just renames. Prettier re-flows on line length, so reworking a function body or a Markdown table will fail `format:check` on whitespace alone — a confusing way to fail Step 6 if you have forgotten that your own edit caused it.
 
@@ -174,16 +174,17 @@ If Step 4c flagged a `GraphSpec` change, the graph view needs eyes on it as well
 
 ## Step 8 — Sync the docs to any contract you changed
 
-If Step 4 changed a **tool's input or output contract**, this repo requires the prose to move in the same change — its `CLAUDE.md` names the rule: keep `SPEC.md`'s declared shapes, the Zod schemas in `capabilities/`, and `README.md` in sync. Grep for every field you added, renamed or removed:
+If Step 4 changed a **tool's input or output contract**, this repo requires the prose to move in the same change — its `CLAUDE.md` names the rule: keep `SPEC.md`'s declared shapes, the Zod schemas in `capabilities/`, and `docs/tools.md` in sync. Grep for every field you added, renamed or removed:
 
 ```bash
-grep -rn "old_field_name\|new_field_name" README.md SPEC.md CLAUDE.md
+grep -rn "old_field_name\|new_field_name" README.md docs/ SPEC.md CLAUDE.md
 ```
 
-Three documents carry different weight, so read what each one is for rather than pattern-matching the same edit into all three:
+These documents carry different weight, so read what each one is for rather than pattern-matching the same edit into all of them:
 
 - **`SPEC.md`** is the source of truth for the contract. Update the declared input/output blocks *and* the prose that explains them — a stale sentence about how paging or filtering works is worse than a stale type, because the type is checked and the sentence is not.
-- **`README.md`** is what a user of the npm package reads. Keep it to the shape and the behavior, not the reasoning.
+- **`docs/tools.md`** is the tool-by-tool reference a user of the npm package reads. Keep it to the shape and the behavior, not the reasoning.
+- **`README.md`** is the npm front page and names each tool in one line, so it moves only when a tool is added, removed, renamed or changes shell.
 - **`CLAUDE.md`** is what the next agent reads. Record *why* the contract moved, not just that it did — a removed field whose absence looks like an oversight will get helpfully re-added by someone six months from now.
 
 A removed field deserves a sentence explaining why it cannot come back cheaply. That is the note that stops the next person reintroducing it.
