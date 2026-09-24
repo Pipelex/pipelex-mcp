@@ -89,6 +89,11 @@ export const mthdsDownloadArtifactsInputSchema = {
 
 const savedArtifactSchema = z.object({
   uri: z.string().describe("The pipelex-storage:// reference found in the run's main output."),
+  found_at: z
+    .array(z.string())
+    .describe(
+      'Every path in main_stuff.json at which the reference sits, $-rooted and in walk order ($.rooms[3].staged_photo.url, $["a key"].url) — the first one named the file.',
+    ),
   path: z
     .string()
     .optional()
@@ -170,6 +175,8 @@ export interface MthdsDownloadArtifactsInput {
 
 export interface SavedArtifactEntry {
   uri: string;
+  /** Every `$`-rooted path in the main output where the reference sits; the first named the file. */
+  found_at: string[];
   path?: string;
   content_type?: string | null;
   size?: number;
@@ -533,6 +540,7 @@ function projectItem(item: DownloadedArtifact, index: number, root: string): Sav
   if (item.error === null) {
     return {
       uri: item.uri,
+      found_at: item.found_at,
       path: path.relative(root, item.path),
       content_type: item.content_type,
       size: item.size,
@@ -540,6 +548,7 @@ function projectItem(item: DownloadedArtifact, index: number, root: string): Sav
   }
   return {
     uri: item.uri,
+    found_at: item.found_at,
     content_type: item.content_type,
     error: itemToolError(item.error, `artifacts[${index}].uri`),
   };
@@ -652,15 +661,26 @@ function completedSummary(
       const type = item.content_type == null ? "" : `${item.content_type}, `;
       const size = item.size === undefined ? "" : formatBytes(item.size);
       const detail = type === "" && size === "" ? "" : ` (${type}${size})`;
-      return `- \`${item.path}\`${detail} ← \`${item.uri}\``;
+      return `- \`${item.path}\`${detail} ← ${fieldOf(item)}`;
     }
     const hint = item.error?.hint === undefined ? "" : ` *Hint: ${item.error.hint}*`;
-    return `- \`${item.uri}\` — failed: ${item.error?.message ?? "unknown failure"}${hint}`;
+    return `- ${fieldOf(item)} (\`${item.uri}\`) — failed: ${item.error?.message ?? "unknown failure"}${hint}`;
   });
   parts.push([outputLine, ...lines].join("\n"));
   parts.push(readIt);
 
   return parts.join("\n\n");
+}
+
+/**
+ * The field a file fills, as the summary names it: the first path, which is
+ * the one its name came from, and a count of any others — the output can
+ * repeat one reference, and the file on disk is one copy either way.
+ */
+function fieldOf(item: SavedArtifactEntry): string {
+  const [first, ...others] = item.found_at;
+  if (first === undefined) return `\`${item.uri}\``;
+  return others.length === 0 ? `\`${first}\`` : `\`${first}\` (and ${others.length} more)`;
 }
 
 function formatBytes(bytes: number): string {

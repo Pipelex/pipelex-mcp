@@ -1,8 +1,9 @@
-import { PipelexApiClient, RejectedAssetError } from "@pipelex/sdk";
+import { PipelexApiClient, RejectedAssetError, UploadTransportError } from "@pipelex/sdk";
 import { describe, expect, it, vi } from "vitest";
 
 import { uploadClient } from "./attachments.js";
 import { prepareClient } from "./prepare.js";
+import { classifyError } from "./shared.js";
 import {
   MAX_UPLOAD_BYTES,
   SizeGuardedPipelexApiClient,
@@ -91,9 +92,39 @@ describe("SizeGuardedPipelexApiClient", () => {
     expect((error as RejectedAssetError).message).toContain("huge.pdf");
     expect((error as RejectedAssetError).message).toContain("9.0 MiB");
     expect((error as RejectedAssetError).message).toContain(formatMib(MAX_UPLOAD_BYTES));
-    // Reported as the same 413 the gateway would have produced, so every
-    // downstream classifier keeps working unchanged.
+    // Reported as the same 413 the gateway would have produced, with the code
+    // the SDK gives a real one.
     expect((error as RejectedAssetError).status).toBe(413);
+    expect((error as RejectedAssetError).code).toBe("too_large");
+  });
+
+  it("reaches the caller of uploadFile as a refused asset, not as a retryable transport fault", async () => {
+    // Every real caller uploads through `uploadFile`, which wraps what
+    // `upload()` throws in an UploadTransportError; classified as that, an
+    // oversize file told the agent to retry.
+    const client = new SizeGuardedPipelexApiClient({ baseUrl: "https://api.pipelex.test" });
+    const wire = vi
+      .spyOn(PipelexApiClient.prototype, "upload")
+      .mockRejectedValue(new Error("the wire must not be touched"));
+
+    const error = await client
+      .uploadFile(new Uint8Array(9 * 1024 * 1024), { filename: "huge.pdf" })
+      .catch((err: unknown) => err);
+
+    expect(wire).not.toHaveBeenCalled();
+    expect(error).toBeInstanceOf(UploadTransportError);
+    expect((error as UploadTransportError).cause).toBeInstanceOf(RejectedAssetError);
+    expect(classifyError(error, { asset: { location: "attachments[0]" } })).toEqual({
+      class: "input_domain",
+      location: "attachments[0]",
+      message: expect.stringContaining(
+        `over the ${formatMib(MAX_UPLOAD_BYTES)} Pipelex upload limit`,
+      ),
+      hint: expect.any(String),
+      retryable: false,
+    });
+
+    wire.mockRestore();
   });
 
   it("lets an upload at the ceiling through to the wire", async () => {

@@ -2,7 +2,13 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { ApiResponseError, ApiUnreachableError, ArtifactAuthenticationError } from "@pipelex/sdk";
+import {
+  ApiResponseError,
+  ApiUnreachableError,
+  ArtifactAuthenticationError,
+  artifactFilename,
+  locateArtifacts,
+} from "@pipelex/sdk";
 import type {
   DownloadArtifactsRequest,
   DownloadArtifactsResult,
@@ -53,35 +59,36 @@ function completedState(mainStuff: unknown): RunResultState {
   };
 }
 
-/** One file the fake SDK download saves: its reference, its bare name, its type. */
-interface FakeFile {
-  uri: string;
-  name: string;
-  content_type: string | null;
-}
+/** The content type the fake platform answers for each reference. */
+const CONTENT_TYPES: Record<string, string> = {
+  [PICTURE_URI]: "image/png",
+  [REPORT_URI]: "application/pdf",
+};
 
 /**
- * The SDK's `downloadArtifacts`, faked: it writes each file into the directory
- * the capability handed it — so the directory must really exist, which is what
- * `resolveSaveDir` guarantees — and answers the verdict the SDK would, with
- * absolute paths.
+ * The SDK's `downloadArtifacts`, faked over the SDK's own pure half: the walk
+ * is its `locateArtifacts` and each name its `artifactFilename`, so neither
+ * `found_at` nor a filename can drift from what the released SDK answers. Only
+ * the network is faked — each file is written into the directory the
+ * capability handed over, which must really exist, as `resolveSaveDir`
+ * guarantees — and the verdict carries absolute paths, as the SDK's does.
  */
-function savingDownload(files: FakeFile[]) {
-  return async (request: DownloadArtifactsRequest): Promise<DownloadArtifactsResult> => {
-    const artifacts: DownloadedArtifact[] = [];
-    for (const file of files) {
-      const target = path.join(request.dir, file.name);
-      await fs.writeFile(target, PNG_BYTES);
-      artifacts.push({
-        uri: file.uri,
-        path: target,
-        content_type: file.content_type,
-        size: PNG_BYTES.byteLength,
-        error: null,
-      });
-    }
-    return verdictOf(artifacts);
-  };
+async function savingDownload(request: DownloadArtifactsRequest): Promise<DownloadArtifactsResult> {
+  const artifacts: DownloadedArtifact[] = [];
+  for (const location of locateArtifacts(request.results?.main_stuff)) {
+    const contentType = CONTENT_TYPES[location.uri] ?? null;
+    const target = path.join(request.dir, artifactFilename(location, contentType, "main_stuff"));
+    await fs.writeFile(target, PNG_BYTES, { flag: "wx" });
+    artifacts.push({
+      uri: location.uri,
+      found_at: location.found_at,
+      path: target,
+      content_type: contentType,
+      size: PNG_BYTES.byteLength,
+      error: null,
+    });
+  }
+  return verdictOf(artifacts);
 }
 
 function verdictOf(artifacts: DownloadedArtifact[]): DownloadArtifactsResult {
@@ -94,17 +101,16 @@ function verdictOf(artifacts: DownloadedArtifact[]): DownloadArtifactsResult {
   };
 }
 
-const BOTH_FILES: FakeFile[] = [
-  { uri: PICTURE_URI, name: "illustration.png", content_type: "image/png" },
-  { uri: REPORT_URI, name: "report.pdf", content_type: "application/pdf" },
-];
+/** A picture that is the whole output: a path of `$.url`, so the SDK names it after the scope. */
+const PICTURE_ONLY = { url: PICTURE_URI };
+const PICTURE_ONLY_FILE = path.join(RUN_DIR, "main_stuff.png");
 
 /** A client over a fixed run state whose download is `download`; every download request is recorded. */
 function fakeClient(
   state: RunResultState,
   download: (
     request: DownloadArtifactsRequest,
-  ) => Promise<DownloadArtifactsResult> = savingDownload(BOTH_FILES),
+  ) => Promise<DownloadArtifactsResult> = savingDownload,
 ) {
   const requests: DownloadArtifactsRequest[] = [];
   const reads: string[] = [];
@@ -305,8 +311,10 @@ describe("downloadMthdsArtifacts", () => {
         allowHttp: false,
       },
     ]);
-    const picture = path.join(RUN_DIR, "illustration.png");
-    const report = path.join(RUN_DIR, "report.pdf");
+    // Each file is named after the first field it fills; the report's key
+    // carries no extension, so its content type supplies one.
+    const picture = path.join(RUN_DIR, "image.png");
+    const report = path.join(RUN_DIR, "nested-1-document.pdf");
     expect(result.structuredContent).toEqual({
       status: "ok",
       run_id: RUN_ID,
@@ -314,25 +322,40 @@ describe("downloadMthdsArtifacts", () => {
       scope: "main_stuff",
       output: { path: OUTPUT_PATH, size: Buffer.byteLength(outputBytes(results.main_stuff)) },
       artifacts: [
-        { uri: PICTURE_URI, path: picture, content_type: "image/png", size: 4 },
-        { uri: REPORT_URI, path: report, content_type: "application/pdf", size: 4 },
+        {
+          uri: PICTURE_URI,
+          found_at: ["$.image.url", "$.nested[0].url"],
+          path: picture,
+          content_type: "image/png",
+          size: 4,
+        },
+        {
+          uri: REPORT_URI,
+          found_at: ["$.nested[1].document.url"],
+          path: report,
+          content_type: "application/pdf",
+          size: 4,
+        },
       ],
       saved_paths: [OUTPUT_PATH, picture, report],
       all_saved: true,
     });
     expect(result.summary).toContain("its main output and 2 file(s)");
     expect(result.summary).toContain(`\`${OUTPUT_PATH}\``);
-    expect(result.summary).toContain(`\`${picture}\``);
-    expect(result.summary).toContain(`\`${report}\``);
+    // The prose names the field each file fills, and says when the output
+    // repeats a reference rather than listing the file twice.
+    expect(result.summary).toContain(
+      `- \`${picture}\` (image/png, 4 B) ← \`$.image.url\` (and 1 more)`,
+    );
+    expect(result.summary).toContain(
+      `- \`${report}\` (application/pdf, 4 B) ← \`$.nested[1].document.url\``,
+    );
     expect(result.summary).toContain(await fs.realpath(root));
   });
 
   it("creates a relative dir inside the working directory before the SDK writes into it", async () => {
     const root = await makeTempDir();
-    const { client, requests } = fakeClient(
-      completedState({ url: PICTURE_URI }),
-      savingDownload([BOTH_FILES[0]!]),
-    );
+    const { client, requests } = fakeClient(completedState(PICTURE_ONLY), savingDownload);
 
     const result = await downloadMthdsArtifacts(
       { run_id: RUN_ID, dir: "assets/run-1" },
@@ -342,29 +365,23 @@ describe("downloadMthdsArtifacts", () => {
     expect(requests[0]?.dir).toBe(path.join(await fs.realpath(root), "assets", "run-1"));
     expect(result.structuredContent.saved_paths).toEqual([
       path.join("assets", "run-1", "main_stuff.json"),
-      path.join("assets", "run-1", "illustration.png"),
+      path.join("assets", "run-1", "main_stuff.png"),
     ]);
     await expect(
-      fs.stat(path.join(root, "assets", "run-1", "illustration.png")),
+      fs.stat(path.join(root, "assets", "run-1", "main_stuff.png")),
     ).resolves.toBeTruthy();
   });
 
   it("derives the plain-http opt-in from the base URL, and lets the override win", async () => {
     const root = await makeTempDir();
-    const local = fakeClient(
-      completedState({ url: PICTURE_URI }),
-      savingDownload([BOTH_FILES[0]!]),
-    );
+    const local = fakeClient(completedState(PICTURE_ONLY), savingDownload);
     await downloadMthdsArtifacts(
       { run_id: RUN_ID },
       contextIn(root, local.client, { baseUrl: "http://localhost:8081" }),
     );
     expect(local.requests[0]?.allowHttp).toBe(true);
 
-    const overridden = fakeClient(
-      completedState({ url: PICTURE_URI }),
-      savingDownload([BOTH_FILES[0]!]),
-    );
+    const overridden = fakeClient(completedState(PICTURE_ONLY), savingDownload);
     await downloadMthdsArtifacts(
       { run_id: RUN_ID },
       contextIn(root, overridden.client, { allowHttp: true }),
@@ -374,7 +391,7 @@ describe("downloadMthdsArtifacts", () => {
 
   it("refuses a dir escaping the working directory as input_domain at dir, saving nothing", async () => {
     const root = await makeTempDir();
-    const { client, requests } = fakeClient(completedState({ url: PICTURE_URI }));
+    const { client, requests } = fakeClient(completedState(PICTURE_ONLY));
 
     const result = await downloadMthdsArtifacts(
       { run_id: RUN_ID, dir: "../outside" },
@@ -395,12 +412,20 @@ describe("downloadMthdsArtifacts", () => {
     const { client } = fakeClient(
       completedState({ a: { url: PICTURE_URI }, b: { url: REPORT_URI } }),
       async (request) => {
-        const saved = path.join(request.dir, "illustration.png");
+        const saved = path.join(request.dir, "a.png");
         await fs.writeFile(saved, PNG_BYTES);
         return verdictOf([
-          { uri: PICTURE_URI, path: saved, content_type: "image/png", size: 4, error: null },
+          {
+            uri: PICTURE_URI,
+            found_at: ["$.a.url"],
+            path: saved,
+            content_type: "image/png",
+            size: 4,
+            error: null,
+          },
           {
             uri: REPORT_URI,
+            found_at: ["$.b.url"],
             path: null,
             content_type: null,
             size: null,
@@ -419,10 +444,12 @@ describe("downloadMthdsArtifacts", () => {
     expect(result.structuredContent.all_saved).toBe(false);
     expect(result.structuredContent.saved_paths).toEqual([
       OUTPUT_PATH,
-      path.join(RUN_DIR, "illustration.png"),
+      path.join(RUN_DIR, "a.png"),
     ]);
+    // A file that was not saved still says which field it would have filled.
     expect(result.structuredContent.artifacts?.[1]).toEqual({
       uri: REPORT_URI,
+      found_at: ["$.b.url"],
       content_type: null,
       error: {
         class: "input_domain",
@@ -433,7 +460,7 @@ describe("downloadMthdsArtifacts", () => {
       },
     });
     expect(result.summary).toContain("its main output and 1 of 2 file(s)");
-    expect(result.summary).toContain(`\`${REPORT_URI}\` — failed`);
+    expect(result.summary).toContain(`- \`$.b.url\` (\`${REPORT_URI}\`) — failed`);
   });
 
   it("names the files saved before a credential refusal, on a no-verdict error", async () => {
@@ -441,15 +468,23 @@ describe("downloadMthdsArtifacts", () => {
     const { client } = fakeClient(
       completedState({ a: { url: PICTURE_URI }, b: { url: REPORT_URI } }),
       async (request) => {
-        const saved = path.join(request.dir, "illustration.png");
+        const saved = path.join(request.dir, "a.png");
         await fs.writeFile(saved, PNG_BYTES);
         throw new ArtifactAuthenticationError(
           "The resolve route refused the credential (401) part-way through the download.",
           401,
           verdictOf([
-            { uri: PICTURE_URI, path: saved, content_type: "image/png", size: 4, error: null },
+            {
+              uri: PICTURE_URI,
+              found_at: ["$.a.url"],
+              path: saved,
+              content_type: "image/png",
+              size: 4,
+              error: null,
+            },
             {
               uri: REPORT_URI,
+              found_at: ["$.b.url"],
               path: null,
               content_type: null,
               size: null,
@@ -469,7 +504,7 @@ describe("downloadMthdsArtifacts", () => {
       retryable: false,
     });
     expect(result.summary).toContain("the run's main output and 1 file(s) were saved");
-    expect(result.summary).toContain(`- \`${path.join(RUN_DIR, "illustration.png")}\``);
+    expect(result.summary).toContain(`- \`${path.join(RUN_DIR, "a.png")}\``);
     // The files are on the caller's disk, so a machine consumer reads them
     // from the structured result rather than out of the prose — and calling
     // again would write suffixed copies beside them, not overwrite them. The
@@ -477,17 +512,19 @@ describe("downloadMthdsArtifacts", () => {
     expect(result.structuredContent.output?.path).toBe(OUTPUT_PATH);
     expect(result.structuredContent.saved_paths).toEqual([
       OUTPUT_PATH,
-      path.join(RUN_DIR, "illustration.png"),
+      path.join(RUN_DIR, "a.png"),
     ]);
     expect(result.structuredContent.artifacts).toEqual([
       {
         uri: PICTURE_URI,
-        path: path.join(RUN_DIR, "illustration.png"),
+        found_at: ["$.a.url"],
+        path: path.join(RUN_DIR, "a.png"),
         content_type: "image/png",
         size: 4,
       },
       {
         uri: REPORT_URI,
+        found_at: ["$.b.url"],
         content_type: null,
         error: expect.objectContaining({ class: "runtime", location: "artifacts[1].uri" }),
       },
@@ -499,7 +536,7 @@ describe("downloadMthdsArtifacts", () => {
 
   it("leaves artifacts out of a credential refused before any file was saved", async () => {
     const root = await makeTempDir();
-    const { client } = fakeClient(completedState({ url: PICTURE_URI }), () =>
+    const { client } = fakeClient(completedState(PICTURE_ONLY), () =>
       Promise.reject(
         new ArtifactAuthenticationError(
           "The resolve route refused the credential (401); no artifact was downloaded.",
@@ -507,6 +544,7 @@ describe("downloadMthdsArtifacts", () => {
           verdictOf([
             {
               uri: PICTURE_URI,
+              found_at: ["$.url"],
               path: null,
               content_type: null,
               size: null,
@@ -539,7 +577,7 @@ describe("downloadMthdsArtifacts", () => {
     let outputAtDownload: string | undefined;
     const { client } = fakeClient(completedState(mainStuff), async (request) => {
       outputAtDownload = await fs.readFile(path.join(request.dir, "main_stuff.json"), "utf8");
-      return savingDownload([BOTH_FILES[0]!])(request);
+      return savingDownload(request);
     });
 
     await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
@@ -633,7 +671,7 @@ describe("downloadMthdsArtifacts", () => {
       await fs.mkdir(locked);
       await fs.chmod(locked, 0o555);
       try {
-        const { client, requests } = fakeClient(completedState({ url: PICTURE_URI }));
+        const { client, requests } = fakeClient(completedState(PICTURE_ONLY));
 
         const result = await downloadMthdsArtifacts(
           { run_id: RUN_ID, dir: "locked" },
@@ -679,7 +717,7 @@ describe("downloadMthdsArtifacts", () => {
 
   it("classifies a deployment without the bulk resolve route as config at PIPELEX_BASE_URL", async () => {
     const root = await makeTempDir();
-    const { client } = fakeClient(completedState({ url: PICTURE_URI }), () =>
+    const { client } = fakeClient(completedState(PICTURE_ONLY), () =>
       Promise.reject(apiError("/v1/resolve-storage-url/bulk", 404, "Not Found")),
     );
 
@@ -704,7 +742,7 @@ describe("downloadMthdsArtifacts", () => {
 
   it("classifies a whole-request 400 on the bulk route as config, not as the caller's input", async () => {
     const root = await makeTempDir();
-    const { client } = fakeClient(completedState({ url: PICTURE_URI }), () =>
+    const { client } = fakeClient(completedState(PICTURE_ONLY), () =>
       Promise.reject(apiError("/v1/resolve-storage-url/bulk", 400, "No organization context.")),
     );
 
@@ -775,10 +813,7 @@ describe("downloadMthdsArtifacts", () => {
 describe("artifactsToolResult", () => {
   it("surfaces the per-file outcome in content and flags no-verdict results as errors", async () => {
     const root = await makeTempDir();
-    const { client } = fakeClient(
-      completedState({ url: PICTURE_URI }),
-      savingDownload([BOTH_FILES[0]!]),
-    );
+    const { client } = fakeClient(completedState(PICTURE_ONLY), savingDownload);
     const ok = artifactsToolResult(
       await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client)),
     );
@@ -787,7 +822,7 @@ describe("artifactsToolResult", () => {
     );
 
     expect(ok.isError).toBe(false);
-    expect(ok.content[0]?.text).toContain(`\`${path.join(RUN_DIR, "illustration.png")}\``);
+    expect(ok.content[0]?.text).toContain(`\`${PICTURE_ONLY_FILE}\``);
     expect(ok).not.toHaveProperty("_meta");
     expect(bad.isError).toBe(true);
     expect(bad.content[0]?.text).toContain("`run_id` — run_id must not be empty.");

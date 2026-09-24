@@ -1926,6 +1926,13 @@
                   "type": "string",
                   "description": "The pipelex-storage:// reference found in the run's main output."
                 },
+                "found_at": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Every path in main_stuff.json at which the reference sits, $-rooted and in walk order ($.rooms[3].staged_photo.url, $[\"a key\"].url) — the first one named the file."
+                },
                 "path": {
                   "description": "Where the file was saved, relative to the server's working directory — on success.",
                   "type": "string"
@@ -1987,7 +1994,8 @@
                 }
               },
               "required": [
-                "uri"
+                "uri",
+                "found_at"
               ],
               "additionalProperties": false
             }
