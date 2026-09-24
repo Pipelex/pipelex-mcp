@@ -1,11 +1,6 @@
 import path from "node:path";
 
-import {
-  CodegenLockError,
-  PipelexApiClient,
-  isStampableArtifactPath,
-  runCodegenCheck,
-} from "@pipelex/sdk";
+import { CodegenLockError, isStampableArtifactPath, runCodegenCheck } from "@pipelex/sdk";
 import type {
   CodegenRequest,
   CodegenResponse,
@@ -23,6 +18,7 @@ import {
   METHOD_REF_GRAMMAR,
   buildApiConfig,
   classifyError,
+  createPipelexApiClient,
   filesInputSchema,
   resolveSubmittedFiles,
   summaryForToolError,
@@ -31,6 +27,7 @@ import {
   validateMethodSelectorRequest,
 } from "./shared.js";
 import type {
+  ApiConfig,
   AuthErrorTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
@@ -68,29 +65,38 @@ const CODEGEN_LOCK_FILENAME = "codegen.lock";
  * direction (`satisfies` rejects a target the SDK no longer has). Together they
  * turn a silently missing option into a deliberate edit — the description, the
  * smoke section and the live target loop all derive from these two.
+ *
+ * The profile is split by layer. `audience` is the decision, which the tool
+ * description states because choosing the target is the judgment the tool asks
+ * of the model; `emits` and `files` are parameter detail, which only the
+ * `target` field carries — the description is held under the length a host
+ * shows, and it had come within a sentence of the cut.
  */
 interface CodegenTargetProfile {
   /** The fixed file names the target emits; what varies per method is the type names inside them. */
   files: string;
   /** Who wants it — one clause of the decision rule. */
   audience: string;
+  /** What the files hold and what they depend on. */
+  emits: string;
 }
 
 export const CODEGEN_TARGET_PROFILES: Record<CodegenTarget, CodegenTargetProfile> = {
   "ts-zod": {
     files: "types.ts + binder.ts",
-    audience:
-      "a TypeScript or JavaScript project (a package.json, .ts sources) — zod schemas and inferred types in types.ts plus a parse/serialize binder per concept in binder.ts, depending only on zod; keep both files",
+    audience: "a TypeScript or JavaScript project (a package.json, .ts sources)",
+    emits:
+      "zod schemas and inferred types in types.ts plus a parse/serialize binder per concept in binder.ts, depending only on zod; keep both files",
   },
   "python-pydantic": {
     files: "models.py",
-    audience:
-      "a Python project that consumes run results without a Pipelex runtime — plain pydantic BaseModels, depending only on pydantic",
+    audience: "a Python project that consumes run results without a Pipelex runtime",
+    emits: "plain pydantic BaseModels, depending only on pydantic",
   },
   "python-structures": {
     files: "structures.py",
-    audience:
-      "writing a Pipelex host or a @pipe_func implementation — runtime StructuredContent subclasses",
+    audience: "writing a Pipelex host or a @pipe_func implementation",
+    emits: "runtime StructuredContent subclasses",
   },
 };
 
@@ -101,10 +107,15 @@ export const CODEGEN_TARGETS = [
   "python-structures",
 ] as const satisfies readonly CodegenTarget[];
 
-/** The decision rule as one sentence fragment, shared by the tool description and the schema. */
+/** The decision rule as one sentence fragment: which target, for whom. The tool description states it. */
 export const CODEGEN_TARGET_RULE = CODEGEN_TARGETS.map(
+  (target) => `${target} for ${CODEGEN_TARGET_PROFILES[target].audience}`,
+).join("; ");
+
+/** The decision rule with what each target emits, for the `target` field. */
+const CODEGEN_TARGET_DETAIL = CODEGEN_TARGETS.map(
   (target) =>
-    `${target} for ${CODEGEN_TARGET_PROFILES[target].audience} (${CODEGEN_TARGET_PROFILES[target].files})`,
+    `${target} for ${CODEGEN_TARGET_PROFILES[target].audience} — ${CODEGEN_TARGET_PROFILES[target].emits} (${CODEGEN_TARGET_PROFILES[target].files})`,
 ).join("; ");
 
 const codegenTargetSchema = z.enum(CODEGEN_TARGETS);
@@ -124,7 +135,7 @@ export const mthdsCodegenInputSchema = {
       "Catalog id (mt_…) of a registered method. Generates from the method's CURRENT stored content, resolved server-side by the hosted platform — requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_ref / method_id.",
     ),
   target: codegenTargetSchema.describe(
-    `Which typed projection to emit. Required, no default — choose it from the calling context, and the user's explicit request wins: ${CODEGEN_TARGET_RULE}. Field keys are snake_case in every target.`,
+    `Which typed projection to emit. Required, no default — choose it from the calling context, and the user's explicit request wins: ${CODEGEN_TARGET_DETAIL}. Field keys are snake_case in every target.`,
   ),
   output_dir: z
     .string()
@@ -288,16 +299,14 @@ export interface CodegenClient {
   codegen(request: CodegenRequest): Promise<CodegenResponse>;
 }
 
-export interface CodegenContext {
-  baseUrl: string;
-  apiKey?: string;
+export interface CodegenContext extends ApiConfig {
   client?: CodegenClient;
   /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
   resolver?: FileResolver;
   /**
    * The directory `output_dir` is resolved against — the workshop's working
    * directory, absolute. The same name and meaning as `ArtifactsContext.saveRoot`:
-   * one `buildToolContexts` option fans out to both writers. Absent on the
+   * the workshop's context builder sets both to its working directory. Absent on the
    * hosted console, which then refuses `output_dir` instructively rather than
    * picking a directory of its own.
    */
@@ -395,13 +404,7 @@ function forbiddenTexture(auth: AuthErrorTexture | undefined): { hint: string } 
 // constructor throws PipelineRequestError on a malformed base URL, and that
 // must classify to a config ToolError, not reject the MCP handler.
 function codegenClient(context: CodegenContext): CodegenClient {
-  return (
-    context.client ??
-    new PipelexApiClient({
-      baseUrl: context.baseUrl,
-      apiKey: context.apiKey,
-    })
-  );
+  return context.client ?? createPipelexApiClient(context);
 }
 
 const INVALID_REQUEST_SUMMARY = "Code generation was not run: request input is invalid.";
@@ -413,8 +416,8 @@ const WRITE_ARM_FALLBACK =
  * The `output_dir` request-shape checks, kept beside the selector checks
  * rather than inside `resolveSubmittedFiles` (which only ever sees files).
  * The "no write root" refusal is the `{ path }` console texture: an
- * affordance the shared tool definition advertises and this deployment cannot
- * serve, refused instructively with the shell that can.
+ * affordance the tool's one contract advertises on both shells and this
+ * deployment cannot serve, refused instructively with the shell that can.
  */
 export function validateCodegenWriteRequest(
   outputDir: string | undefined,

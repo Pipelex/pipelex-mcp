@@ -1,4 +1,3 @@
-import { PipelexApiClient } from "@pipelex/sdk";
 import type { ListMethodsQuery, MethodPage } from "@pipelex/sdk";
 import { z } from "zod";
 
@@ -6,11 +5,13 @@ import {
   asOneLine,
   buildApiConfig,
   classifyError,
+  createPipelexApiClient,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
 } from "./shared.js";
 import type {
+  ApiConfig,
   AuthErrorTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
@@ -106,9 +107,7 @@ export interface CatalogClient {
   listMethods(query?: ListMethodsQuery): Promise<MethodPage>;
 }
 
-export interface CatalogContext {
-  baseUrl: string;
-  apiKey?: string;
+export interface CatalogContext extends ApiConfig {
   client?: CatalogClient;
   /** Deployment-specific auth-failure texture (the hosted console overrides it per request); env-var wording by default. */
   authError?: AuthErrorTexture;
@@ -119,13 +118,7 @@ export function buildCatalogContext(env = process.env): CatalogContext {
 }
 
 function catalogClient(context: CatalogContext): CatalogClient {
-  return (
-    context.client ??
-    new PipelexApiClient({
-      baseUrl: context.baseUrl,
-      apiKey: context.apiKey,
-    })
-  );
+  return context.client ?? createPipelexApiClient(context);
 }
 
 export interface NormalizedCatalogInput {
@@ -333,7 +326,7 @@ function boundCodePoints(value: string, limit: number): { value: string; truncat
  * to one line so they cannot break out of their bullet, and the directive names
  * them as data to display. Delimiting them with JSON quotes (the previous
  * shape) reads as a data blob and cost us the rendering, so the "treat as data"
- * job is carried by the directive and {@link mthdsListMethodsTool}'s
+ * job is carried by the directive and the `mthds_list_methods` tool
  * description instead of by punctuation.
  */
 function catalogSummary(result: CatalogSuccess, query: string): string {

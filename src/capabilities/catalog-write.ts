@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { EmptyMethodSourceError, PipelexApiClient } from "@pipelex/sdk";
+import { EmptyMethodSourceError } from "@pipelex/sdk";
 import type { MethodData, MethodWriteInput } from "@pipelex/sdk";
 import type { MethodFile } from "mthds/protocol";
 import { parseMethodFiles, serializeMethodFiles } from "mthds/protocol";
@@ -23,6 +23,7 @@ import {
   PRUNED_DIRECTORIES,
   buildApiConfig,
   classifyError,
+  createPipelexApiClient,
   filesInputSchema,
   resolveSubmittedFiles,
   summaryForToolError,
@@ -30,6 +31,7 @@ import {
   toolResultContent,
 } from "./shared.js";
 import type {
+  ApiConfig,
   AuthErrorTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
@@ -289,9 +291,7 @@ export interface CatalogWriteClient {
   updateMethod(methodId: string, input: MethodWriteInput): Promise<MethodData>;
 }
 
-export interface CatalogWriteContext {
-  baseUrl: string;
-  apiKey?: string;
+export interface CatalogWriteContext extends ApiConfig {
   client?: CatalogWriteClient;
   /** Fills `{ path }` items of `files` — `.mthds` only. */
   resolver?: FileResolver;
@@ -313,9 +313,7 @@ export function buildCatalogWriteContext(env = process.env): CatalogWriteContext
 }
 
 function catalogWriteClient(context: CatalogWriteContext): CatalogWriteClient {
-  return (
-    context.client ?? new PipelexApiClient({ baseUrl: context.baseUrl, apiKey: context.apiKey })
-  );
+  return context.client ?? createPipelexApiClient(context);
 }
 
 // ── error options ───────────────────────────────────────────────────

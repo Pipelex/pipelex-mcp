@@ -1,4 +1,3 @@
-import { PipelexApiClient } from "@pipelex/sdk";
 import type {
   BuildInputsRequest,
   BuildInputsResponse,
@@ -12,22 +11,24 @@ import {
   METHOD_REF_GRAMMAR,
   buildApiConfig,
   classifyError,
-  summaryForToolError,
+  createPipelexApiClient,
   fetchMethodFiles,
   filesInputSchema,
   resolveSubmittedFiles,
+  summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
 } from "./shared.js";
 import type {
+  ApiConfig,
   AuthErrorTexture,
   ClassifyErrorOptions,
+  ErrorSummaries,
   FileResolver,
   MethodFetchClient,
   SubmittedFile,
   SubmittedFileInput,
-  ErrorSummaries,
   ToolError,
 } from "./shared.js";
 
@@ -132,9 +133,7 @@ interface InputsClient extends MethodFetchClient {
   buildInputs(request: BuildInputsRequest): Promise<BuildInputsResponse>;
 }
 
-export interface InputsContext {
-  baseUrl: string;
-  apiKey?: string;
+export interface InputsContext extends ApiConfig {
   client?: InputsClient;
   /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
   resolver?: FileResolver;
@@ -184,13 +183,7 @@ const INPUTS_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
 // constructor throws PipelineRequestError on a malformed base URL, and that
 // must classify to a config ToolError, not reject the MCP handler.
 function inputsClient(context: InputsContext): InputsClient {
-  return (
-    context.client ??
-    new PipelexApiClient({
-      baseUrl: context.baseUrl,
-      apiKey: context.apiKey,
-    })
-  );
+  return context.client ?? createPipelexApiClient(context);
 }
 
 export async function buildMthdsInputs(
@@ -343,6 +336,20 @@ function templateFields(
   return { inputs_toml: report.inputs_toml };
 }
 
+// What to do with the template once it is filled. It is said here, where it
+// matters, rather than in the tool description or the server instructions:
+// both are held under the length a host shows, and this is the one layer that
+// reaches the model exactly when it has a template in hand. Both tools take
+// `inputs` as a JSON object, so a TOML template has to be converted first — a
+// model told to pass the TOML text on would send a string the schema refuses.
+function nextStep(format: BuildInputsValidReport["format"]): string {
+  const fill =
+    format === "json"
+      ? "Fill it in, then call"
+      : "Fill it in and convert it to a JSON object for `inputs`, then call";
+  return `${fill} \`mthds_prepare_inputs\` to make file-bearing values run-ready — or pass it straight to \`mthds_run\` when every file value is already an http(s) URL or a pipelex-storage:// reference.`;
+}
+
 // The build routes return a plain `message` rather than `rendered_markdown`,
 // so the summary is composed here. Unlike validation, the template is
 // deliberately duplicated into the summary: it is the payload the model must
@@ -353,9 +360,13 @@ function validSummary(report: BuildInputsValidReport): string {
       ? "```json\n" + JSON.stringify(report.inputs, null, 2) + "\n```"
       : "```toml\n" + (report.inputs_toml ?? "").trimEnd() + "\n```";
 
-  return ["# Inputs template", report.message, `Resolved pipe: \`${report.pipe_ref}\``, fence].join(
-    "\n\n",
-  );
+  return [
+    "# Inputs template",
+    report.message,
+    `Resolved pipe: \`${report.pipe_ref}\``,
+    fence,
+    nextStep(report.format),
+  ].join("\n\n");
 }
 
 function invalidSummary(message: string, validationErrors: ValidationErrorItem[]): string {

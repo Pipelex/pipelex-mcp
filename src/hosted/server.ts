@@ -1,9 +1,13 @@
 import { McpServer } from "skybridge/server";
 import type { OAuthConfig } from "skybridge/server";
 
+import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
+
+import pkg from "../../package.json" with { type: "json" };
+
+import { contextsForRequest } from "./contexts.js";
 import {
-  PIPELEX_MCP_SERVER_INFO,
-  buildToolContexts,
+  buildHostedToolContexts,
   mthdsCodegenTool,
   mthdsInputsTemplateTool,
   mthdsListMethodsTool,
@@ -14,42 +18,45 @@ import {
   mthdsShowImagesTool,
   mthdsUploadAttachmentsTool,
   mthdsValidateTool,
-} from "../tools.js";
-import type { ToolContexts } from "../tools.js";
-import { contextsForRequest } from "./contexts.js";
+} from "./tools.js";
+import type { HostedToolContexts, HostedToolDefinition } from "./tools.js";
 
+/**
+ * Sourced from package.json, like the workshop's `LOCAL_SERVER_INFO`, so the
+ * handshake reports the shipped release.
+ */
+export const HOSTED_SERVER_INFO = {
+  name: "pipelex-mcp",
+  version: pkg.version,
+} as const;
+
+/**
+ * The map, not the manual — the same layering as the workshop's
+ * `LOCAL_SERVER_INSTRUCTIONS`, which says why: per-tool detail lives in each
+ * tool's description, and `npm run check:tool-texts` holds this string under
+ * the length a host shows.
+ */
 export const HOSTED_SERVER_INSTRUCTIONS = [
-  "pipelex-mcp helps you work with executable AI Methods written in the MTHDS language (.mthds).",
-  "A method reaches a tool three ways: the file contents you hold, a published method's address",
-  "passed as method_ref (github.com/<owner>/<repo>[/<selector>][@<tag>]), or a registered method's",
-  "catalog id (mt_…) passed as method_id — an address and an id are both resolved server-side, so",
-  "no bundle enters the conversation.",
+  "pipelex-mcp helps you work with executable AI methods written in MTHDS (.mthds).",
+  "The usual flow: `mthds_list_methods` to find a saved method, `mthds_validate`,",
+  "`mthds_inputs_template` and fill it, `mthds_prepare_inputs`, `mthds_run`, then",
+  "`mthds_run_status` and `mthds_run_results` with the run id, and `mthds_show_images` to see a",
+  "picture the run produced.",
+  "`mthds_codegen` turns a method into typed code for the user's project.",
+  "Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`,",
+  "`mthds_prepare_inputs`, `mthds_run`) takes its method one of three ways: the file contents you",
+  "hold, a published method's address as method_ref, or a catalog id (mt_…) as method_id.",
+  "An address or an id is resolved server-side, so no bundle enters the conversation.",
   "Call `mthds_list_methods` when the user asks what saved methods exist, names one without its",
-  "mt_ id, or a saved method may fit the task; choose or disambiguate by name and description,",
-  "then pass the returned id into the current-content validate, inputs-template, and run flow.",
-  "Call `mthds_validate` with file contents, a method_ref address or a method_id to get a stable,",
-  "structured verdict (is_valid / is_runnable, validation errors, pending signatures). When the",
-  "method is valid, the tool also returns an interactive dry-run graph of the method, rendered",
-  "through the run-graph view.",
-  "Call `mthds_inputs_template` with the same file contents, a method_ref address or a method_id",
-  "to get a fill-in template of a pipe's declared inputs, ready to populate for a run.",
-  "Call `mthds_codegen` to project a method's concepts into typed code for the user's project —",
-  "TypeScript (target ts-zod) or Python (python-pydantic for a consumer, python-structures for a",
-  "Pipelex host) — from files, a method_ref address, or a method_id; write the returned files and",
-  "codegen.lock verbatim.",
-  "Once the template is filled, call `mthds_prepare_inputs` — with files, a method_ref address, or a",
-  "method_id — to make file-bearing inputs run-ready",
-  "(this hosted console is pass-through only — it accepts http(s) URLs and pipelex-storage:// references",
-  "and refuses inputs that would need an upload; the local workshop uploads local files).",
-  "When the user attaches a file to the conversation, call `mthds_upload_attachments` with that",
-  "attachment to turn it into a run-ready pipelex-storage:// reference — its bytes never enter the",
-  "conversation, and the reference can be filled straight into the inputs template.",
-  "Run a method durably with `mthds_run` (start from files + pipe + inputs, from a method_ref",
-  "address, or from a method_id; returns a durable run id),",
-  "then check on it with `mthds_run_status` and fetch the outcome with `mthds_run_results` by that id.",
-  "When the results list `image_candidates` and the user wants to see one, call `mthds_show_images`",
-  "with that run id — it returns the pictures themselves. A picture you show stays in the",
-  "conversation for every turn that follows, so show one when it is asked for, not by reflex.",
+  "mt_ id, or a saved method may fit the task; choose by name and description, then pass the id on.",
+  "When the user attaches a file to the conversation, `mthds_upload_attachments` turns it into a",
+  "run-ready pipelex-storage:// reference to fill into the inputs.",
+  "This console uploads nothing else: `mthds_prepare_inputs` passes http(s) URLs and",
+  "pipelex-storage:// references through and refuses a value that would need an upload.",
+  "A valid `mthds_validate` verdict also shows the user an interactive graph of the method.",
+  "`mthds_run` executes on the hosted Pipelex API and spends inference credit.",
+  "A picture from `mthds_show_images` stays in the conversation for every turn that follows,",
+  "so show one when it is asked for, not by reflex.",
 ].join(" ");
 
 /**
@@ -58,205 +65,123 @@ export const HOSTED_SERVER_INSTRUCTIONS = [
  * `oauth` is **required**: per-user OAuth is the console's only auth posture,
  * so a console that cannot authenticate a caller is not a thing this function
  * can produce. Making it a parameter rather than resolving it here keeps the
- * builder synchronous — the cross-shell parity tests construct the server
- * directly and have no business awaiting an OAuth discovery fetch. The
- * entrypoint (`../server.ts`) resolves it from env and refuses to boot without
- * it.
+ * builder synchronous — the shell tests construct the server directly and have
+ * no business awaiting an OAuth discovery fetch. The entrypoint (`../server.ts`)
+ * resolves it from env and refuses to boot without it.
  */
 export function createHostedServer(
   oauth: OAuthConfig,
-  contexts: ToolContexts = buildToolContexts(),
+  contexts: HostedToolContexts = buildHostedToolContexts(),
 ) {
-  return new McpServer(
-    PIPELEX_MCP_SERVER_INFO,
-    {
-      capabilities: {},
-      instructions: HOSTED_SERVER_INSTRUCTIONS,
-    },
-    // `oauth` belongs to SkybridgeServerOptions — the THIRD constructor
-    // argument. Putting it in the second (the MCP SDK's ServerOptions) is
-    // silently accepted and simply never read, so the well-known metadata and
-    // bearer middleware are never mounted and clients fall back to DCR against
-    // our own origin ("Cannot POST /register").
-    //
-    // Nothing of ours is mounted on `/mcp`: Skybridge's own bearer middleware
-    // owns `req.auth` and, since no console tool allows anonymous, it mounts
-    // `requireBearerAuth` across the endpoint. Writing that field ourselves is
-    // exactly the race that made the old bring-your-own-key posture
-    // incompatible with OAuth.
-    { oauth },
-  )
-    .registerTool(
+  return (
+    new McpServer(
+      HOSTED_SERVER_INFO,
       {
-        name: mthdsListMethodsTool.name,
-        description: mthdsListMethodsTool.description,
-        inputSchema: mthdsListMethodsTool.inputSchema,
-        outputSchema: mthdsListMethodsTool.outputSchema,
-        annotations: mthdsListMethodsTool.annotations,
-        _meta: {
-          "openai/toolInvocation/invoking": "Listing registered methods...",
-          "openai/toolInvocation/invoked": "Registered methods listed.",
-        },
+        capabilities: {},
+        instructions: HOSTED_SERVER_INSTRUCTIONS,
       },
-      (input, extra) =>
-        mthdsListMethodsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
+      // `oauth` belongs to SkybridgeServerOptions — the THIRD constructor
+      // argument. Putting it in the second (the MCP SDK's ServerOptions) is
+      // silently accepted and simply never read, so the well-known metadata and
+      // bearer middleware are never mounted and clients fall back to DCR against
+      // our own origin ("Cannot POST /register").
+      //
+      // Nothing of ours is mounted on `/mcp`: Skybridge's own bearer middleware
+      // owns `req.auth` and, since no console tool allows anonymous, it mounts
+      // `requireBearerAuth` across the endpoint. Writing that field ourselves is
+      // exactly the race that made the old bring-your-own-key posture
+      // incompatible with OAuth.
+      { oauth },
     )
-    .registerTool(
-      {
-        name: mthdsValidateTool.name,
-        description: mthdsValidateTool.description,
-        inputSchema: mthdsValidateTool.inputSchema,
-        outputSchema: mthdsValidateTool.outputSchema,
-        annotations: mthdsValidateTool.annotations,
-        view: {
-          component: "run-graph",
-          description:
-            "Interactive run graph of the method (the dry-run graph from validation), plus an input form to run it.",
-        },
-        _meta: {
-          "openai/toolInvocation/invoking": "Validating MTHDS files...",
-          "openai/toolInvocation/invoked": "MTHDS validation finished.",
-        },
-      },
-      (input, extra) =>
-        mthdsValidateTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    )
-    .registerTool(
-      {
-        name: mthdsInputsTemplateTool.name,
-        description: mthdsInputsTemplateTool.description,
-        inputSchema: mthdsInputsTemplateTool.inputSchema,
-        outputSchema: mthdsInputsTemplateTool.outputSchema,
-        annotations: mthdsInputsTemplateTool.annotations,
-        _meta: {
-          "openai/toolInvocation/invoking": "Projecting MTHDS inputs template...",
-          "openai/toolInvocation/invoked": "MTHDS inputs template finished.",
-        },
-      },
-      (input, extra) =>
-        mthdsInputsTemplateTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    )
-    .registerTool(
-      {
-        name: mthdsCodegenTool.name,
-        description: mthdsCodegenTool.description,
-        inputSchema: mthdsCodegenTool.inputSchema,
-        outputSchema: mthdsCodegenTool.outputSchema,
-        annotations: mthdsCodegenTool.annotations,
-        _meta: {
-          "openai/toolInvocation/invoking": "Generating typed code for the method...",
-          "openai/toolInvocation/invoked": "Typed code generated.",
-        },
-      },
-      (input, extra) =>
-        mthdsCodegenTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    )
-    .registerTool(
-      {
-        name: mthdsPrepareInputsTool.name,
-        description: mthdsPrepareInputsTool.description,
-        inputSchema: mthdsPrepareInputsTool.inputSchema,
-        outputSchema: mthdsPrepareInputsTool.outputSchema,
-        annotations: mthdsPrepareInputsTool.annotations,
-        _meta: {
-          "openai/toolInvocation/invoking": "Preparing MTHDS run inputs...",
-          "openai/toolInvocation/invoked": "MTHDS run inputs prepared.",
-        },
-      },
-      (input, extra) =>
-        mthdsPrepareInputsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    )
-    .registerTool(
-      {
-        name: mthdsUploadAttachmentsTool.name,
-        description: mthdsUploadAttachmentsTool.description,
-        inputSchema: mthdsUploadAttachmentsTool.inputSchema,
-        outputSchema: mthdsUploadAttachmentsTool.outputSchema,
-        annotations: mthdsUploadAttachmentsTool.annotations,
-        _meta: {
-          // THE mechanism: naming `attachments` here is what makes the ChatGPT
-          // host rewrite the model's file reference into the four-field
-          // signed-URL object. Without it the field is never populated.
-          "openai/fileParams": ["attachments"],
-          "openai/toolInvocation/invoking": "Uploading attachments to Pipelex storage...",
-          "openai/toolInvocation/invoked": "Attachments uploaded.",
-        },
-      },
-      (input, extra) =>
-        mthdsUploadAttachmentsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    )
-    .registerTool(
-      {
-        name: mthdsRunTool.name,
-        description: mthdsRunTool.description,
-        inputSchema: mthdsRunTool.inputSchema,
-        outputSchema: mthdsRunTool.outputSchema,
-        annotations: mthdsRunTool.annotations,
-        view: {
-          component: "run-follow",
-          description: "Live-following status card for the durable run.",
-          csp: {
-            // Run-output images are presigned URLs on the hosted platform's
-            // per-env storage buckets — a tight host allowlist, never a
-            // wildcard. Anything else in main_stuff stays CSP-blocked and the
-            // view falls back to the text preview.
-            resourceDomains: [
-              "https://pipelex-app-dev.s3.us-west-2.amazonaws.com",
-              "https://pipelex-app-staging.s3.us-west-2.amazonaws.com",
-              "https://pipelex-app-prod.s3.us-west-2.amazonaws.com",
-            ],
-          },
-        },
-        _meta: {
-          "openai/toolInvocation/invoking": "Starting MTHDS run...",
-          "openai/toolInvocation/invoked": "MTHDS run started.",
-        },
-      },
-      (input, extra) => mthdsRunTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    )
-    .registerTool(
-      {
-        name: mthdsRunStatusTool.name,
-        description: mthdsRunStatusTool.description,
-        inputSchema: mthdsRunStatusTool.inputSchema,
-        outputSchema: mthdsRunStatusTool.outputSchema,
-        annotations: mthdsRunStatusTool.annotations,
-        _meta: {
-          "openai/toolInvocation/invoking": "Checking MTHDS run status...",
-          "openai/toolInvocation/invoked": "MTHDS run status checked.",
-        },
-      },
-      (input, extra) =>
-        mthdsRunStatusTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    )
-    .registerTool(
-      {
-        name: mthdsRunResultsTool.name,
-        description: mthdsRunResultsTool.description,
-        inputSchema: mthdsRunResultsTool.inputSchema,
-        outputSchema: mthdsRunResultsTool.outputSchema,
-        annotations: mthdsRunResultsTool.annotations,
-        _meta: {
-          "openai/toolInvocation/invoking": "Fetching MTHDS run results...",
-          "openai/toolInvocation/invoked": "MTHDS run results fetched.",
-        },
-      },
-      (input, extra) =>
-        mthdsRunResultsTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    )
-    .registerTool(
-      {
-        name: mthdsShowImagesTool.name,
-        description: mthdsShowImagesTool.description,
-        inputSchema: mthdsShowImagesTool.inputSchema,
-        outputSchema: mthdsShowImagesTool.outputSchema,
-        annotations: mthdsShowImagesTool.annotations,
-        _meta: {
-          "openai/toolInvocation/invoking": "Fetching the run's images...",
-          "openai/toolInvocation/invoked": "Images fetched.",
-        },
-      },
-      (input, extra) =>
-        mthdsShowImagesTool.handler(input, contextsForRequest(contexts, extra.authInfo)),
-    );
+      // The console's table, in the order a host lists it. One chained call
+      // per tool rather than a loop, because the chain is what types
+      // `AppType`, which the views' `useToolInfo` / `useCallTool` read.
+      .registerTool(hostedToolConfig(mthdsListMethodsTool), (input, extra) =>
+        mthdsListMethodsTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
+      )
+      .registerTool(hostedToolConfig(mthdsValidateTool), (input, extra) =>
+        mthdsValidateTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
+      )
+      .registerTool(hostedToolConfig(mthdsInputsTemplateTool), (input, extra) =>
+        mthdsInputsTemplateTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
+      )
+      .registerTool(hostedToolConfig(mthdsCodegenTool), (input, extra) =>
+        mthdsCodegenTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
+      )
+      .registerTool(hostedToolConfig(mthdsPrepareInputsTool), (input, extra) =>
+        mthdsPrepareInputsTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
+      )
+      .registerTool(hostedToolConfig(mthdsUploadAttachmentsTool), (input, extra) =>
+        mthdsUploadAttachmentsTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
+      )
+      .registerTool(hostedToolConfig(mthdsRunTool), (input, extra) =>
+        mthdsRunTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
+      )
+      .registerTool(hostedToolConfig(mthdsRunStatusTool), (input, extra) =>
+        mthdsRunStatusTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
+      )
+      .registerTool(hostedToolConfig(mthdsRunResultsTool), (input, extra) =>
+        mthdsRunResultsTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
+      )
+      .registerTool(hostedToolConfig(mthdsShowImagesTool), (input, extra) =>
+        mthdsShowImagesTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
+      )
+  );
+}
+
+/**
+ * The registration config Skybridge takes, read off one of the console's
+ * definitions: everything but the handler, with `view` passed only where the
+ * tool has one. The casts are not redundant: without them the object literal
+ * widens each field to its constraint, the chain infers a schema of `any`, and
+ * every handler below stops typechecking against its capability's input.
+ */
+function hostedToolConfig<
+  TTool extends HostedToolDefinition<
+    string,
+    ZodRawShapeCompat,
+    ZodRawShapeCompat | AnySchema,
+    never,
+    unknown
+  >,
+>(tool: TTool) {
+  return {
+    name: tool.name as TTool["name"],
+    description: tool.description,
+    inputSchema: tool.inputSchema as TTool["inputSchema"],
+    outputSchema: tool.outputSchema as TTool["outputSchema"],
+    annotations: tool.annotations,
+    ...(tool.view === undefined ? {} : { view: tool.view }),
+    _meta: tool._meta,
+  };
 }

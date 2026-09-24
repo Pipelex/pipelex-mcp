@@ -1,9 +1,4 @@
-import {
-  collectArtifacts,
-  isTerminalRunStatus,
-  PipelexApiClient,
-  summarizeUsage,
-} from "@pipelex/sdk";
+import { collectArtifacts, isTerminalRunStatus, summarizeUsage } from "@pipelex/sdk";
 import type {
   MethodProvenance,
   PipelexRunResultStart,
@@ -21,27 +16,29 @@ import type {
 import { z } from "zod";
 
 import {
+  MAX_IMAGE_CANDIDATE_ENTRIES,
   METHOD_REF_GRAMMAR,
   buildApiConfig,
   classifyError,
-  summaryForToolError,
+  createPipelexApiClient,
   filesInputSchema,
   hasArtifactEntries,
   imageCandidatesOf,
-  MAX_IMAGE_CANDIDATE_ENTRIES,
   resolveSubmittedFiles,
+  summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
   validateRunIdRequest,
 } from "./shared.js";
 import type {
+  ApiConfig,
   AuthErrorTexture,
   ClassifyErrorOptions,
+  ErrorSummaries,
   FileResolver,
   SubmittedFile,
   SubmittedFileInput,
-  ErrorSummaries,
   ToolError,
 } from "./shared.js";
 
@@ -429,9 +426,7 @@ interface RunClient {
   getRunResult(runId: string): Promise<RunResultState>;
 }
 
-export interface RunContext {
-  baseUrl: string;
-  apiKey?: string;
+export interface RunContext extends ApiConfig {
   client?: RunClient;
   /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
   resolver?: FileResolver;
@@ -439,10 +434,12 @@ export interface RunContext {
   viewsAvailable?: boolean;
   /**
    * Whether this shell registers `mthds_download_artifacts` (the workshop
-   * does; the console has a UI for it). When true, a completed result whose
-   * output references stored files says so in its summary and names the tool
-   * — the summary is the channel that reaches the agent at the moment it
-   * matters, and the presigned links in the output die within the hour.
+   * does; the console has a UI for it). When true, every completed result's
+   * summary names the tool as the way to keep the run on disk — the output
+   * verbatim, and the files it references, whose presigned links die within
+   * the hour — and a truncated result names it as the way to read the rest.
+   * The summary is the channel that reaches the agent at the moment it
+   * matters, and a model that does not know the tool retypes the output.
    */
   artifactDownloadAvailable?: boolean;
   /** Deployment-specific auth-failure texture (the hosted console overrides it per request); default env-var wording when absent. */
@@ -1031,35 +1028,41 @@ function completedSummary(
 
   const parts = ["# Run results", `Run \`${runId}\` completed. Main output:`, fence];
   if (truncated) {
-    parts.push(
-      viewsAvailable
-        ? "The output shown above was truncated to fit the response; the full output is available to views."
-        : "The output shown above was truncated to fit the response.",
-    );
+    parts.push(truncationNote(viewsAvailable, artifactDownloadAvailable));
   }
-  const stored = storedFilesNote(storedFiles, imageCandidates, artifactDownloadAvailable);
-  if (stored !== undefined) parts.push(stored);
+  const stored = [
+    storedFilesNote(storedFiles, imageCandidates),
+    artifactDownloadAvailable ? saveNote(storedFiles, truncated) : undefined,
+  ].filter((sentence): sentence is string => sentence !== undefined);
+  if (stored.length > 0) parts.push(stored.join(" "));
   return parts.join("\n\n");
 }
 
 /**
- * One merged sentence on the run's stored files: how many there are, how many
- * look like images, and what can be done with them. The moment the results
- * land is the moment to say it, because the presigned `public_url` links
- * inside the output expire within the hour — but this tool itself never
- * fetches a byte and never puts a picture in the conversation, which is the
- * whole point of naming `mthds_show_images` here instead.
- *
- * The download half is only said on a shell that registers the download tool
- * (the workshop); the image half is said on both, since `mthds_show_images` is
- * registered on both. Nothing is said at all when the output references no
- * stored file.
+ * What the model is told when the output was bounded. On the workshop the rest
+ * is one call away — the download tool writes the whole output to disk, where
+ * the agent reads it with its own file tools — so the sentence says so rather
+ * than leave a cut output looking like the last word. The console has no disk:
+ * its views hold the full output, and its model does not.
  */
-function storedFilesNote(
-  storedFiles: number,
-  imageCandidates: number,
-  artifactDownloadAvailable: boolean,
-): string | undefined {
+function truncationNote(viewsAvailable: boolean, artifactDownloadAvailable: boolean): string {
+  if (artifactDownloadAvailable) {
+    return "The output shown above was truncated to fit the response. `mthds_download_artifacts` with this run id saves all of it to disk as `main_stuff.json`, verbatim; read it there in full.";
+  }
+  return viewsAvailable
+    ? "The output shown above was truncated to fit the response; the full output is available to views."
+    : "The output shown above was truncated to fit the response.";
+}
+
+/**
+ * The run's stored files: how many there are, how many look like images, and
+ * how to see one. This tool itself never fetches a byte and never puts a
+ * picture in the conversation, which is the whole point of naming
+ * `mthds_show_images` here instead. Said on both shells, since
+ * `mthds_show_images` is registered on both; nothing is said when the output
+ * references no stored file.
+ */
+function storedFilesNote(storedFiles: number, imageCandidates: number): string | undefined {
   if (storedFiles === 0) return undefined;
 
   const parts = [
@@ -1072,12 +1075,24 @@ function storedFilesNote(
       "To see one, call `mthds_show_images` with this run id — it returns the picture itself, which then stays in this conversation for every turn that follows, so ask for it when someone wants to look at it rather than by reflex.",
     );
   }
-  if (artifactDownloadAvailable) {
-    parts.push(
-      "To save the full files under the working directory, call `mthds_download_artifacts` with this run id — the presigned `public_url` links in the output expire within the hour, where that tool resolves a fresh one every time.",
-    );
-  }
   return parts.join(" ");
+}
+
+/**
+ * How to keep the run, on the shell that registers the download tool. The
+ * results land here and nowhere else, so this is the moment to say that the
+ * output can reach the disk without the model retyping it — which costs output
+ * tokens in proportion to the result and can alter it silently — and, when the
+ * output references stored files, that their presigned links expire within the
+ * hour. A truncated result's own sentence already names the tool, so without
+ * files there is nothing left to add.
+ */
+function saveNote(storedFiles: number, truncated: boolean): string | undefined {
+  if (storedFiles > 0) {
+    return "To keep this run, call `mthds_download_artifacts` with this run id: it saves the output verbatim as `main_stuff.json` and the full files beside it, under `runs/<run_id>/` — the presigned `public_url` links in the output expire within the hour, where that tool resolves a fresh one every time.";
+  }
+  if (truncated) return undefined;
+  return "To keep this output on disk, call `mthds_download_artifacts` with this run id: it writes it verbatim as `main_stuff.json` under `runs/<run_id>/`. Never retype it into a file yourself.";
 }
 
 function failedResult(runId: string, status: RunStatus, message: string): RunResultsResult {
@@ -1101,13 +1116,7 @@ function failedResult(runId: string, status: RunStatus, message: string): RunRes
 // ── capabilities ────────────────────────────────────────────────────
 
 function runClient(context: RunContext): RunClient {
-  return (
-    context.client ??
-    new PipelexApiClient({
-      baseUrl: context.baseUrl,
-      apiKey: context.apiKey,
-    })
-  );
+  return context.client ?? createPipelexApiClient(context);
 }
 
 /** Start a durable run — fire-and-forget `POST /v1/start`, never blocking. */

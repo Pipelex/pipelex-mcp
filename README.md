@@ -1,43 +1,61 @@
 # Pipelex MCP
 
+<!-- onboarding: mcp-route -->
+<!-- Generated from the Pipelex onboarding source; this region is replaced from https://raw.githubusercontent.com/Pipelex/.github/main/onboarding/rendered/mcp-route.md — do not edit it here. -->
+## Get started
+
+Pipelex runs your AI methods — write a method once, then run it from your agent via MCP, turn it into a webapp, or use it via API in any software. This repository is the Pipelex MCP: it connects your chatbot to your Pipelex account and the methods saved there.
+
+**Chatbots** — ChatGPT, Claude. Add the Pipelex MCP in your chatbot's settings by the address below — in Claude, that is **Add custom connector** — then sign in with your Pipelex account when asked. Nothing to install and no key: the Pipelex MCP runs on your signed-in session.
+
+```
+https://mcp.pipelex.com/mcp
+```
+
+**Coding agents** — Claude Code, Codex. Install the [Pipelex plugin](https://github.com/Pipelex/pipelex-plugins) instead: it brings the same tools, and the skills that build methods beside them. Claude Code also loads what you have added to your Claude account, so if the Pipelex MCP is there, turn it off in Claude Code with `/mcp`: an agent with the plugin never takes both, since they register the same tool names.
+
+**Then ask your chatbot:**
+
+> What methods do I have?
+>
+> Run the invoice method on https://example.com/invoice.pdf
+
+You get a run id straight away, and you can ask for its status, its results or the files it produced at any time.
+
+Give the file as a URL the Pipelex MCP can reach. In ChatGPT you can attach it to the conversation instead and ask for a run on it; Claude has no way yet to hand the Pipelex MCP a file you attached.
+
+Other hosts, and the reference for developers, start at [Which server, for which host](#which-server-for-which-host).
+
+**Next:** [what Pipelex is](https://go.pipelex.com/product) · [documentation](https://go.pipelex.com/docs) · [your console](https://app.pipelex.com) · [Discord](https://go.pipelex.com/discord)
+<!-- /onboarding -->
+
+## Which server, for which host
+
+A host takes one of two things, never both: the Pipelex plugin on a coding agent, the Pipelex MCP on a chatbot. The table applies that rule host by host. A host wired to both is the one configuration to avoid — [One host, one server](#one-host-one-server) says why, and how the Pipelex MCP added in Claude reaches Claude Code without anyone choosing it.
+
+| Host | Tool | How to connect |
+|---|---|---|
+| Claude Code | Pipelex plugin | [Install the plugin](https://github.com/Pipelex/pipelex-plugins#install) |
+| Codex | Pipelex plugin | [Install the plugin](https://github.com/Pipelex/pipelex-plugins#install) |
+| ChatGPT (web) | Pipelex MCP | Apps directory |
+| claude.ai (web + mobile) | Pipelex MCP | **Add custom connector**, by the address above |
+| Claude Desktop | Pipelex MCP | **Add custom connector**, by the address above |
+
+**On views:** the Pipelex MCP ships the `run-graph` and `run-follow` views, which render on the hosts that display views (ChatGPT, Claude) and degrade to text elsewhere. The plugin's MCP server is **tools-first — it ships no views on any host today**, so it reports structured results and text summaries directly.
+
+## What this repository is
+
 Pipelex MCP exposes registered-method discovery, MTHDS validation, inputs
 projection and preparation, and durable method runs to MCP hosts, wrapping the Pipelex API through the
 `@pipelex/sdk` `PipelexApiClient`. It ships as **two servers from one repo and
 one capability core**:
 
-- **Hosted console** — a [Skybridge](https://docs.skybridge.tech) HTTP server
-  (deployed on Alpic) for remote-connector hosts (ChatGPT, claude.ai, Claude
-  Desktop, Cowork). Registers the Skybridge views.
+- **Hosted console** — a [Skybridge](https://docs.skybridge.tech) HTTP server,
+  deployed on Alpic, for remote-connector hosts. Registers the Skybridge views.
 - **Local workshop** — an npm-distributed stdio server (`@pipelex/mcp`, bin
-  `pipelex-mcp`) that coding-agent hosts (Claude Code, Codex, Cursor, Cowork)
-  spawn via `npx`. Its headline feature is the `{ path }` file arm: it reads
-  `.mthds` files from disk instead of having the model hand-copy their contents.
-
-## Get started
-
-Pick **one** server for a given host — the workshop wherever there is a
-filesystem, the console everywhere else.
-
-**Hosted console** — add as a custom connector in ChatGPT, claude.ai or
-Claude Desktop, then sign in with your Pipelex account. Nothing to install, no
-key to paste:
-
-```
-https://pipelex-mcp-a3c6a115.alpic.live/mcp
-```
-
-**Local workshop** — for hosts that can spawn a process (Claude Code, Codex,
-Cursor). Needs Node.js 24+; hosts fetch it on demand, so there is nothing to
-install globally:
-
-```bash
-claude mcp add pipelex --env PIPELEX_API_KEY=plx_sk_... -- npx -y @pipelex/mcp
-```
-
-Then ask it what methods you have, or point it at a `.mthds` file. Per-host
-registration snippets are under [Local workshop: install &
-register](#local-workshop-install--register), and which server belongs on which
-host is the [Host → server matrix](#host--server-matrix).
+  `pipelex-mcp`) that coding-agent hosts spawn via `npx`. Its headline feature
+  is the `{ path }` file arm: it reads `.mthds` files from disk instead of
+  having the model hand-copy their contents.
 
 Both servers register the same MCP tools, with identical names, schemas, and
 contracts — apart from the per-shell tools marked below: one on the console,
@@ -55,7 +73,7 @@ three on the workshop.
 | `mthds_run_status` | Check a durable run's coarse lifecycle state by `run_id`. |
 | `mthds_run_results` | Fetch a durable run's terminal outcome by `run_id`, and list for free which of its stored files look like images. Never returns a picture. |
 | `mthds_show_images` | Show the pictures a completed run produced, as MCP image content blocks — the deliberate gesture, on both deployments, because a shown picture stays in the conversation. |
-| `mthds_download_artifacts` | **Local workshop only.** Save the files a completed run produced (images, PDFs, documents) under the directory the server was started in — see [Saving run artifacts](#saving-run-artifacts-local-workshop-only). |
+| `mthds_download_artifacts` | **Local workshop only.** Save a completed run to disk: its main output as `main_stuff.json` and the files it produced (images, PDFs, documents), under `runs/<run_id>/` in the directory the server was started in — see [Saving a run to disk](#saving-a-run-to-disk-local-workshop-only). |
 | `mthds_save_method` | **Local workshop only.** Validate a bundle and save it to the organization's catalog — a create without `method_id`, an update with one — writing `pipelex-method.json` beside the files so a later save from that directory updates the same method instead of creating a second one. |
 | `mthds_get_method` | **Local workshop only.** Bring a saved method's sources back: with `output_dir`, written to disk with the link file beside them and no source through the conversation; without it, inline, for reading a method you cannot see on disk. It refuses rather than overwrite work it does not own. |
 
@@ -64,7 +82,7 @@ turns on something the other shell does not have. `mthds_upload_attachments`
 takes a host-substituted attachment reference, and the host gates that
 substitution on the declared JSON Schema, so on the workshop the tool would be
 *structurally
-unreachable* rather than merely unused. `mthds_download_artifacts` writes files
+unreachable* rather than merely unused. `mthds_download_artifacts` writes a run
 under the server's working directory, which the console does not have — its
 users download run outputs from the app's UI. The invariant that still holds is
 that **no tool name means different things on the two shells.**
@@ -169,6 +187,25 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }
 }
 ```
 
+**Mistral Vibe (TUI)** — `~/.vibe/config.toml` (`$VIBE_HOME/config.toml` when `VIBE_HOME` is set)
+
+```toml
+[[mcp_servers]]
+name = "pipelex"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@pipelex/mcp@latest"]
+startup_timeout_sec = 60.0
+
+[mcp_servers.env]
+PIPELEX_API_KEY = "plx_sk_..."
+PIPELEX_BASE_URL = ""
+```
+
+**Append this at the end of the file**, after every top-level setting: pasted above one, the `[mcp_servers.env]` header claims that setting as an environment variable of the server, silently. And **Mistral Vibe copies its whole configuration, this `env` table included, into every session log** under `~/.vibe/logs/session/`, so your key is written there unredacted — redact it before you share a log.
+
+Mistral Vibe spawns stdio servers with a minimal environment plus this `env` table and expands no variables, so the key has to be written here; a key exported in your shell never reaches the server. Keep exporting it in your shell as well, because the plugin's validation hook reads it from there. `PIPELEX_BASE_URL` stays empty for the hosted API — an empty value counts as unset — and any other variable `npx` needs, such as `HTTPS_PROXY` behind a proxy, goes in the same table. `startup_timeout_sec` is raised above Mistral Vibe's 10-second default because the first `npx` spawn fills the npm cache and takes longer than that. Two things to clear out of the file first: a `mcp_servers = []` line, which Mistral Vibe writes into a new config and which makes it refuse to start, since TOML cannot add a `[[mcp_servers]]` table to an array already written inline; and any `pipelex` server you registered by hand, since it refuses to start with two servers of the same name.
+
 **Environment**
 
 - `PIPELEX_API_KEY` — a `plx_sk_` platform key. Required for
@@ -202,13 +239,10 @@ paste. Add the connector by its URL and your host walks you through signing in
 with your Pipelex account:
 
 ```
-https://pipelex-mcp-a3c6a115.alpic.live/mcp
+https://mcp.pipelex.com/mcp
 ```
 
-That is the production console. The hostname is assigned by Alpic, and the
-OAuth Resource Indicator registered with WorkOS is pinned to it, so it moves
-only behind a deliberate migration — if it ever does, every existing
-connector has to be re-added anyway.
+That is the console's production address, and the one to register.
 
 You may run this server for your own team or company, on your own infrastructure or in your own cloud account. What the Elastic License 2.0 rules out is offering others a remote MCP server through which they run the methods of their choice, their own or a catalog's. See [LICENSE](LICENSE) for the full terms, including notices and redistribution, and the [license page](https://docs.pipelex.com/latest/license/) for how Pipelex reads them.
 
@@ -230,7 +264,7 @@ one expires or is revoked, calls come back as a `config` no-verdict at
 > connector's configuration at add-time, so re-adding is the only path.
 
 (That said, prefer the **local workshop** on hosts that can spawn it — see the
-matrix below.)
+matrix above.)
 
 ## Chat attachments (ChatGPT only)
 
@@ -287,30 +321,6 @@ bounded timeout; no headers forwarded; non-2xx refused. Because these hosts are
 undocumented vendor infrastructure that changes without notice — it already has
 once — the cap, the timeout, and the no-redirect rule hold on their own; the
 host check is a filter, not the defence.
-
-## Host → server matrix
-
-Connect each host to **exactly one** Pipelex server — the local workshop
-wherever there's a filesystem, the hosted console everywhere else.
-
-| Host | Server | How to connect |
-|---|---|---|
-| ChatGPT (web) | Hosted console | Apps directory |
-| claude.ai (web + mobile) | Hosted console | Connector (custom URL) |
-| Claude Desktop (chat mode) | Hosted console | Connector / marketplace plugin |
-| Claude Code | Local workshop | `claude mcp add`, or the `pipelex` plugin from the `pipelex-plugins` marketplace (its manifest spawns the workshop) |
-| ChatGPT desktop (Codex mode) | Local workshop | `~/.codex/config.toml` |
-| Cursor | Local workshop | `~/.cursor/mcp.json` |
-| Claude Desktop (Cowork mode) | **Dual** — console for consumers, workshop for builders | Connector, or stdio in `claude_desktop_config.json` |
-| Mistral Vibe (TUI) | Local workshop | pending Vibe's MCP mechanics |
-| Mistral Vibe (web) | Hosted console | Connector / config |
-
-**On views:** the hosted console ships the `run-graph` and `run-follow`
-views, which render on view-capable hosts (ChatGPT, claude.ai, Cowork) and
-degrade to text on Claude Code. The **local workshop is tools-first — it ships
-no views on any host today**, so it reports structured results and text
-summaries directly. (Codex and Cowork are view-capable hosts and would render
-workshop views if local view delivery lands in a later increment.)
 
 ## One host, one server
 
@@ -516,7 +526,9 @@ published method by address, resolved server-side on the build envelope;
 `method_id` projects a registered method's current stored content (requires an
 API key, since the catalog is org-scoped). No Skybridge view — the template is
 small structured data the model reads directly, and the `content` summary repeats
-it in a fenced block.
+it in a fenced block, followed by the next step: `mthds_prepare_inputs`, or
+straight to `mthds_run` when every file value is already a URL or a
+`pipelex-storage://` reference.
 
 ### `mthds_codegen`
 
@@ -794,17 +806,16 @@ produced verdicts that fetch nothing. See `SPEC.md` → "Image Display Scope".
 | Codex (ChatGPT desktop) | Yes | Not measured | **Refuses a block carrying `annotations`** with `Unexpected response type` — which is why ours carries none. Accepts the block-level `_meta` ours does carry; that was measured too, not assumed. |
 | Cursor | Not measured | Not measured | Tracked as its own follow-up. |
 
-### Saving run artifacts (local workshop only)
+### Saving a run to disk (local workshop only)
 
-`mthds_download_artifacts` is the download counterpart of `mthds_prepare_inputs`:
-where prepare pushes local files *into* Pipelex storage, this brings a run's
-produced files back *out*, onto disk.
+`mthds_download_artifacts` saves a completed run to disk: its main output, and the files it produced. It is the download counterpart of `mthds_prepare_inputs`: where prepare pushes local files *into* Pipelex storage, this brings a run back *out*, onto disk.
 
 ```ts
 // input
 {
   run_id: string;   // the durable run id from mthds_run
   dir?: string;     // where to save, relative to the server's working directory (created if missing; must stay inside it)
+                    // omitted → runs/<run_id>; "." → the working directory itself
 }
 
 // structuredContent (state = "completed")
@@ -813,32 +824,18 @@ produced files back *out*, onto disk.
   run_id: string;
   state: "completed";
   scope: "main_stuff";     // what was walked: the run's main output
-  artifacts: Array<{ uri: string; path?: string; content_type?: string | null; size?: number; error?: ToolError }>;
-  saved_paths: string[];   // relative to the working directory
-  all_saved: boolean;      // every referenced file saved
+  output: { path: string; size: number };   // main_stuff.json, written first
+  artifacts: Array<{ uri: string; found_at: string[]; found_at_omitted?: number; path?: string; content_type?: string | null; size?: number; error?: ToolError }>;
+  saved_paths: string[];   // every file written, main_stuff.json first; relative to the working directory
+  all_saved: boolean;      // the output and every referenced file saved
 }
 ```
 
-A completed run's results carry a produced image, PDF or document with a
-`pipelex-storage://` reference beside a presigned `public_url` that expires
-within the hour. Pass the run id here instead of racing that link: every
-reference in the run's full output is resolved to a *fresh* link through the
-API and streamed into a file under the working directory — so the same call
-still works days later. The walk, the links and the download are
-`@pipelex/sdk`'s artifact stack (`collectArtifacts`, `downloadArtifacts`), so
-the tool needs a Pipelex platform serving the bulk resolve route
-(`POST /v1/resolve-storage-url/bulk`); a bare `pipelex-api` runner has none.
-Filenames come from the storage key, sanitized; files are **never overwritten**
-(a collision gets a numeric suffix); `dir` cannot escape the working directory
-(no absolute paths, no `..`, no symlink out). Plain `http:` links are accepted
-only against a plain-http `PIPELEX_BASE_URL` unless
-`PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP` says otherwise. A `running` or `failed` run
-is a produced verdict with nothing to save; partial success is a produced
-verdict with the failures on their items. On the
-workshop, a `mthds_run_results` summary whose output references stored files
-names this tool. See `SPEC.md` → "Artifact Download Scope" for the full
-contract and the reasoning behind a companion tool rather than a flag on
-`mthds_run_results`.
+Every completed save writes the run's **full** main output to `main_stuff.json`, exactly as the API returned it: the name `pipelex run --save-main-stuff` uses. The model never has to retype an output into a file, and an output that `mthds_run_results` cut to fit the conversation is on disk whole, where the agent reads it with its own file tools. By default the run lands in its own folder, `runs/<run_id>/`.
+
+A completed run's results also carry a produced image, PDF or document with a `pipelex-storage://` reference beside a presigned `public_url` that expires within the hour. Pass the run id here instead of racing that link: every reference in the run's full output is resolved to a *fresh* link through the API and streamed into a file beside `main_stuff.json`, so the same call still works days later. The walk, the links and the download are `@pipelex/sdk`'s artifact stack (`locateArtifacts`, `downloadArtifacts`), so the tool needs a Pipelex platform serving the bulk resolve route (`POST /v1/resolve-storage-url/bulk`); a bare `pipelex-api` runner has none.
+
+Each file is named after the field it fills in the output: the picture at `$.rooms[3].staged_photo.url` is saved as `rooms-3-staged_photo.png`, and an output that is one image as `main_stuff.png`. The storage key supplies only the extension. Each entry's `found_at` lists the paths in `main_stuff.json` where its reference sits, the first being the one that named the file; an output that repeats one reference lists the first few and counts the rest in `found_at_omitted`. Files are **never overwritten**: a collision gets a numeric suffix, `main_stuff.json` included, and since the output is written first, a produced file never takes its name. `dir` cannot escape the working directory (no absolute paths, no `..`, no symlink out). Plain `http:` links are accepted only against a plain-http `PIPELEX_BASE_URL` unless `PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP` says otherwise. A `running` or `failed` run is a produced verdict with nothing to save, and partial success is a produced verdict with the failures on their items. On the workshop, every completed `mthds_run_results` summary names this tool as the way to keep the run, and a truncated one names it as the way to read the rest. See `SPEC.md` → "Artifact Download Scope" for the full contract and the reasoning behind a companion tool rather than a flag on `mthds_run_results`.
 
 ### Success and verdict discipline
 

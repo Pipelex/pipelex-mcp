@@ -413,7 +413,7 @@ describe("resultsResult", () => {
     expect(result.mainStuff).toBeUndefined();
   });
 
-  it("names mthds_download_artifacts in the summary only where the tool exists and files were produced", () => {
+  it("names mthds_download_artifacts on every completed workshop result, and never on the console", () => {
     const withFiles = {
       state: "completed" as const,
       pipeline_run_id: RUN_ID,
@@ -430,18 +430,22 @@ describe("resultsResult", () => {
       result: { pipeline_run_id: RUN_ID, main_stuff: { answer: 42 } },
     };
 
-    // The workshop: files produced → the nudge, with the expiry stated.
+    // The workshop: files produced → the nudge, output and files, with the expiry stated.
     const workshop = resultsResult(withFiles, false, true);
     expect(workshop.summary).toContain("mthds_download_artifacts");
+    expect(workshop.summary).toContain("main_stuff.json");
     expect(workshop.summary).toContain("1 stored file(s)");
     expect(workshop.summary).toContain("expire");
     // The nudge is prose only — the structured contract is untouched.
     expect(workshop.structuredContent).not.toHaveProperty("artifacts");
 
-    // The workshop, nothing produced → silent.
-    expect(resultsResult(withoutFiles, false, true).summary).not.toContain(
-      "mthds_download_artifacts",
-    );
+    // The workshop, nothing produced → still the way to keep the output, since
+    // a model that does not know the tool retypes the output into a file.
+    const outputOnly = resultsResult(withoutFiles, false, true).summary;
+    expect(outputOnly).toContain("mthds_download_artifacts");
+    expect(outputOnly).toContain("main_stuff.json");
+    expect(outputOnly).toContain("Never retype it");
+    expect(outputOnly).not.toContain("stored file(s)");
     // The console has no such tool → silent even with files.
     expect(resultsResult(withFiles, true, false).summary).not.toContain("mthds_download_artifacts");
     expect(resultsResult(withFiles).summary).not.toContain("mthds_download_artifacts");
@@ -522,18 +526,39 @@ describe("resultsResult", () => {
     expect(result.structuredContent.image_candidates_omitted).toBe(9);
   });
 
-  it("says nothing, and omits the member, when the output references no stored file", () => {
+  it("says nothing of files, and omits the member, when the output references no stored file", () => {
     const state: RunResultState = {
       state: "completed",
       pipeline_run_id: RUN_ID,
       result: { pipeline_run_id: RUN_ID, main_stuff: { answer: 42 } },
     };
 
-    const result = resultsResult(state, true, true);
+    const result = resultsResult(state, true, false);
 
     expect(result.structuredContent).not.toHaveProperty("image_candidates");
     expect(result.summary).not.toContain("mthds_show_images");
     expect(result.summary).not.toContain("stored file(s)");
+  });
+
+  it("names the download tool as the way to read a truncated output, on the workshop only", () => {
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: { pipeline_run_id: RUN_ID, main_stuff: { memo: "x".repeat(MAIN_STUFF_CAP * 2) } },
+    };
+
+    const workshop = resultsResult(state, false, true);
+    expect(workshop.structuredContent.truncated).toBe(true);
+    expect(workshop.summary).toContain("truncated to fit the response");
+    expect(workshop.summary).toContain("saves all of it to disk");
+    // One mention, not two: without files, the truncation sentence is the save note.
+    expect(workshop.summary.split("mthds_download_artifacts")).toHaveLength(2);
+
+    // The console keeps its own sentences: the views hold the full output, the model does not.
+    const hosted = resultsResult(state, true, false);
+    expect(hosted.summary).toContain("the full output is available to views");
+    expect(hosted.summary).not.toContain("mthds_download_artifacts");
+    expect(resultsResult(state, false, false).summary).not.toContain("mthds_download_artifacts");
   });
 
   it("reports stored files that look like nothing without naming the image tool", () => {

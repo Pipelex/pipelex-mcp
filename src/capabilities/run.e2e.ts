@@ -30,6 +30,7 @@ import {
   apiAdvertisesExtension,
   fixtureMethodId,
   liveApiConfig,
+  pollRunToTerminal,
 } from "./e2e-support.js";
 import { getMthdsRunResults, getMthdsRunStatus, startMthdsRun } from "./run.js";
 import type { RunContext } from "./run.js";
@@ -46,10 +47,6 @@ const UNKNOWN_RUN_ID = "00000000-0000-4000-8000-000000000000";
 const UNKNOWN_METHOD_ID = "mt_00000000-0000-4000-8000-000000000000";
 
 const RUN_ENABLED = process.env.PIPELEX_E2E_RUN === "1";
-
-/** Ceiling for polling one tiny single-pipe run to a terminal state. */
-const POLL_DEADLINE_MS = 90_000;
-const POLL_INTERVAL_MS = 2_000;
 
 describe("run lifecycle reads (live, free)", () => {
   it("classifies an unknown run id as an input_domain no-verdict at run_id", async () => {
@@ -122,23 +119,6 @@ describe("run lifecycle reads (live, free)", () => {
   );
 });
 
-/**
- * Poll a run to a terminal state, returning the last status read. Bounded by a
- * deadline so a stuck run fails as a timeout with a readable last state rather
- * than hanging until vitest kills the file.
- */
-async function pollToTerminal(runId: string) {
-  const deadline = Date.now() + POLL_DEADLINE_MS;
-  let last = await getMthdsRunStatus({ run_id: runId }, context);
-
-  while (last.structuredContent.is_terminal !== true && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-    last = await getMthdsRunStatus({ run_id: runId }, context);
-  }
-
-  return last;
-}
-
 describe.runIf(RUN_ENABLED)("mthds_run (live, SPENDS INFERENCE CREDIT)", () => {
   it("starts from files, reaches a terminal state, and returns a bounded result", async () => {
     const started = await startMthdsRun(
@@ -155,7 +135,7 @@ describe.runIf(RUN_ENABLED)("mthds_run (live, SPENDS INFERENCE CREDIT)", () => {
     expect(started.structuredContent.run_status).toBeDefined();
     if (typeof runId !== "string") return;
 
-    const status = await pollToTerminal(runId);
+    const status = await pollRunToTerminal(runId, context);
     expect(status.structuredContent.status).toBe("ok");
     expect(status.structuredContent.is_terminal).toBe(true);
     expect(status.structuredContent.run_id).toBe(runId);
@@ -196,7 +176,7 @@ describe.runIf(RUN_ENABLED)("mthds_run (live, SPENDS INFERENCE CREDIT)", () => {
     expect(typeof runId).toBe("string");
     if (typeof runId !== "string") return;
 
-    const status = await pollToTerminal(runId);
+    const status = await pollRunToTerminal(runId, context);
     expect(status.structuredContent.status).toBe("ok");
     expect(status.structuredContent.is_terminal).toBe(true);
     // Terminal is not success: `is_terminal` is true for FAILED/TIMED_OUT/CANCELLED
@@ -242,7 +222,7 @@ describe.runIf(RUN_ENABLED)("mthds_run (live, SPENDS INFERENCE CREDIT)", () => {
         commit_sha: PUBLISHED_METHOD_COMMIT,
       });
 
-      const status = await pollToTerminal(runId);
+      const status = await pollRunToTerminal(runId, context);
       expect(status.structuredContent.is_terminal).toBe(true);
       // Terminal is not success — see the by-id leg above.
       expect(status.structuredContent.run_status).toBe("COMPLETED");
