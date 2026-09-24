@@ -363,9 +363,12 @@ function RunStatusLine({
     if (phase === "hard_error") {
       text = `Run ${runId}: lost track of it (${hardError ?? "status unavailable"}).`;
     } else if (phase === "terminal") {
+      // The completion handoff is a prompt the host may only draft for the user
+      // (claude.ai) or not act on at all (ChatGPT), so the line says what the user
+      // does next rather than claiming the assistant already started.
       text =
         runStatus === "COMPLETED"
-          ? `Run ${runId} completed — the assistant is fetching the results.`
+          ? `Run ${runId} completed. Ask the assistant to fetch the results.`
           : `Run ${runId} ended with status ${runStatus ?? "unknown"}.`;
     } else {
       const suffix =
