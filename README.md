@@ -35,8 +35,8 @@ A host takes one of two things, never both: the Pipelex plugin on a coding agent
 
 | Host | Tool | How to connect |
 |---|---|---|
-| Claude Code | Pipelex plugin | [Install the plugin](https://github.com/Pipelex/pipelex-plugins#install) |
-| Codex | Pipelex plugin | [Install the plugin](https://github.com/Pipelex/pipelex-plugins#install) |
+| Claude Code | Pipelex plugin | [Install the plugin](https://github.com/Pipelex/pipelex-plugins#quick-start) |
+| Codex | Pipelex plugin | [Install the plugin](https://github.com/Pipelex/pipelex-plugins#quick-start) |
 | ChatGPT (web) | Pipelex MCP | Apps directory |
 | claude.ai (web + mobile) | Pipelex MCP | **Add custom connector**, by the address above |
 | Claude Desktop | Pipelex MCP | **Add custom connector**, by the address above |
