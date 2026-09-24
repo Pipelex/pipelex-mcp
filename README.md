@@ -74,7 +74,7 @@ three on the workshop.
 | `mthds_run_status` | Check a durable run's coarse lifecycle state by `run_id`. |
 | `mthds_run_results` | Fetch a durable run's terminal outcome by `run_id`, and list for free which of its stored files look like images. Never returns a picture. |
 | `mthds_show_images` | Show the pictures a completed run produced, as MCP image content blocks — the deliberate gesture, on both deployments, because a shown picture stays in the conversation. |
-| `mthds_download_artifacts` | **Local workshop only.** Save the files a completed run produced (images, PDFs, documents) under the directory the server was started in — see [Saving run artifacts](#saving-run-artifacts-local-workshop-only). |
+| `mthds_download_artifacts` | **Local workshop only.** Save a completed run to disk: its main output as `main_stuff.json` and the files it produced (images, PDFs, documents), under `runs/<run_id>/` in the directory the server was started in — see [Saving a run to disk](#saving-a-run-to-disk-local-workshop-only). |
 | `mthds_save_method` | **Local workshop only.** Validate a bundle and save it to the organization's catalog — a create without `method_id`, an update with one — writing `pipelex-method.json` beside the files so a later save from that directory updates the same method instead of creating a second one. |
 | `mthds_get_method` | **Local workshop only.** Bring a saved method's sources back: with `output_dir`, written to disk with the link file beside them and no source through the conversation; without it, inline, for reading a method you cannot see on disk. It refuses rather than overwrite work it does not own. |
 
@@ -85,7 +85,7 @@ substitution on the declared JSON Schema, so on the workshop the tool would be
 *structurally
 unreachable* rather than merely unused. `pipelex_request_upload` is called by
 the `run-graph` view's input form, and the workshop has no views.
-`mthds_download_artifacts` writes files
+`mthds_download_artifacts` writes a run
 under the server's working directory, which the console does not have — its
 users download run outputs from the app's UI. The invariant that still holds is
 that **no tool name means different things on the two shells.**
@@ -840,17 +840,16 @@ produced verdicts that fetch nothing. See `SPEC.md` → "Image Display Scope".
 | Codex (ChatGPT desktop) | Yes | Not measured | **Refuses a block carrying `annotations`** with `Unexpected response type` — which is why ours carries none. Accepts the block-level `_meta` ours does carry; that was measured too, not assumed. |
 | Cursor | Not measured | Not measured | Tracked as its own follow-up. |
 
-### Saving run artifacts (local workshop only)
+### Saving a run to disk (local workshop only)
 
-`mthds_download_artifacts` is the download counterpart of `mthds_prepare_inputs`:
-where prepare pushes local files *into* Pipelex storage, this brings a run's
-produced files back *out*, onto disk.
+`mthds_download_artifacts` saves a completed run to disk: its main output, and the files it produced. It is the download counterpart of `mthds_prepare_inputs`: where prepare pushes local files *into* Pipelex storage, this brings a run back *out*, onto disk.
 
 ```ts
 // input
 {
   run_id: string;   // the durable run id from mthds_run
   dir?: string;     // where to save, relative to the server's working directory (created if missing; must stay inside it)
+                    // omitted → runs/<run_id>; "." → the working directory itself
 }
 
 // structuredContent (state = "completed")
@@ -859,32 +858,18 @@ produced files back *out*, onto disk.
   run_id: string;
   state: "completed";
   scope: "main_stuff";     // what was walked: the run's main output
-  artifacts: Array<{ uri: string; path?: string; content_type?: string | null; size?: number; error?: ToolError }>;
-  saved_paths: string[];   // relative to the working directory
-  all_saved: boolean;      // every referenced file saved
+  output: { path: string; size: number };   // main_stuff.json, written first
+  artifacts: Array<{ uri: string; found_at: string[]; found_at_omitted?: number; path?: string; content_type?: string | null; size?: number; error?: ToolError }>;
+  saved_paths: string[];   // every file written, main_stuff.json first; relative to the working directory
+  all_saved: boolean;      // the output and every referenced file saved
 }
 ```
 
-A completed run's results carry a produced image, PDF or document with a
-`pipelex-storage://` reference beside a presigned `public_url` that expires
-within the hour. Pass the run id here instead of racing that link: every
-reference in the run's full output is resolved to a *fresh* link through the
-API and streamed into a file under the working directory — so the same call
-still works days later. The walk, the links and the download are
-`@pipelex/sdk`'s artifact stack (`collectArtifacts`, `downloadArtifacts`), so
-the tool needs a Pipelex platform serving the bulk resolve route
-(`POST /v1/resolve-storage-url/bulk`); a bare `pipelex-api` runner has none.
-Filenames come from the storage key, sanitized; files are **never overwritten**
-(a collision gets a numeric suffix); `dir` cannot escape the working directory
-(no absolute paths, no `..`, no symlink out). Plain `http:` links are accepted
-only against a plain-http `PIPELEX_BASE_URL` unless
-`PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP` says otherwise. A `running` or `failed` run
-is a produced verdict with nothing to save; partial success is a produced
-verdict with the failures on their items. On the
-workshop, a `mthds_run_results` summary whose output references stored files
-names this tool. See `SPEC.md` → "Artifact Download Scope" for the full
-contract and the reasoning behind a companion tool rather than a flag on
-`mthds_run_results`.
+Every completed save writes the run's **full** main output to `main_stuff.json`, exactly as the API returned it: the name `pipelex run --save-main-stuff` uses. The model never has to retype an output into a file, and an output that `mthds_run_results` cut to fit the conversation is on disk whole, where the agent reads it with its own file tools. By default the run lands in its own folder, `runs/<run_id>/`.
+
+A completed run's results also carry a produced image, PDF or document with a `pipelex-storage://` reference beside a presigned `public_url` that expires within the hour. Pass the run id here instead of racing that link: every reference in the run's full output is resolved to a *fresh* link through the API and streamed into a file beside `main_stuff.json`, so the same call still works days later. The walk, the links and the download are `@pipelex/sdk`'s artifact stack (`locateArtifacts`, `downloadArtifacts`), so the tool needs a Pipelex platform serving the bulk resolve route (`POST /v1/resolve-storage-url/bulk`); a bare `pipelex-api` runner has none.
+
+Each file is named after the field it fills in the output: the picture at `$.rooms[3].staged_photo.url` is saved as `rooms-3-staged_photo.png`, and an output that is one image as `main_stuff.png`. The storage key supplies only the extension. Each entry's `found_at` lists the paths in `main_stuff.json` where its reference sits, the first being the one that named the file; an output that repeats one reference lists the first few and counts the rest in `found_at_omitted`. Files are **never overwritten**: a collision gets a numeric suffix, `main_stuff.json` included, and since the output is written first, a produced file never takes its name. `dir` cannot escape the working directory (no absolute paths, no `..`, no symlink out). Plain `http:` links are accepted only against a plain-http `PIPELEX_BASE_URL` unless `PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP` says otherwise. A `running` or `failed` run is a produced verdict with nothing to save, and partial success is a produced verdict with the failures on their items. On the workshop, every completed `mthds_run_results` summary names this tool as the way to keep the run, and a truncated one names it as the way to read the rest. See `SPEC.md` → "Artifact Download Scope" for the full contract and the reasoning behind a companion tool rather than a flag on `mthds_run_results`.
 
 ### Success and verdict discipline
 

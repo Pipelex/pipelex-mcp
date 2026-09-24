@@ -45,8 +45,12 @@ export function base64DecodedLength(data: string): number {
  * A `PipelexApiClient` that refuses an oversize upload locally instead of
  * letting the gateway answer `413` after the whole payload has crossed the
  * wire. It throws the same `RejectedAssetError` the SDK maps a real 413 onto,
- * so every downstream classifier keeps working unchanged — only the message
- * improves, because it can name the actual limit where the server's cannot.
+ * `code: "too_large"` included — only the message improves, because it can
+ * name the actual limit where the server's cannot. It does not reach a caller
+ * the way a real 413 does, though: the SDK's `uploadFile` wraps whatever
+ * `upload()` throws in an `UploadTransportError`, a real 413 being mapped
+ * before that wrap, so this one arrives as the wrapper's `cause`, and
+ * `classifyError` unwraps it.
  *
  * `upload` is the only seam available here: the SDK's `prepareInputs` walk
  * calls it through `this`, so subclassing catches both the workshop's
@@ -66,6 +70,7 @@ export class SizeGuardedPipelexApiClient extends PipelexApiClient {
         `"${input.filename}" is ${formatMib(size)}, over the ${formatMib(MAX_UPLOAD_BYTES)} Pipelex upload limit.`,
         input.filename,
         413,
+        { code: "too_large" },
       );
     }
     return super.upload(input);

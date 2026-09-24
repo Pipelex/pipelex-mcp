@@ -901,6 +901,15 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
     };
   }
 
+  // The upload ceiling's local refusal (`upload-ceiling.ts`) is thrown from
+  // inside the client's `upload()`, and the SDK's `uploadFile` wraps anything
+  // `upload()` throws that is neither an API response nor an unreachable host in
+  // an `UploadTransportError`. So the refusal arrives as that error's cause, and
+  // the transport arm below would call an oversize file retryable.
+  if (err instanceof UploadTransportError && err.cause instanceof RejectedAssetError) {
+    return classifyError(err.cause, options);
+  }
+
   // A missing/unreadable local path or an asset the storage service refused
   // (413): the caller's input value is the problem.
   if (err instanceof InvalidLocalSourceError || err instanceof RejectedAssetError) {

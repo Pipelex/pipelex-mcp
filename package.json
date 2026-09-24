@@ -1,6 +1,6 @@
 {
   "name": "@pipelex/mcp",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "The MCP server inside the Pipelex plugin: validate, prepare and run AI methods on Pipelex from a coding agent.",
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "pipelex", "mthds", "ai-methods", "coding-agent", "claude-code", "codex", "cursor", "mistral-vibe"],
   "license": "Elastic-2.0",
@@ -46,7 +46,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@pipelex/sdk": "^0.22.0",
+    "@pipelex/sdk": "^0.23.0",
     "mthds": "^0.25.0",
     "skybridge": "^1.4.1",
     "zod": "^4.3.6"
