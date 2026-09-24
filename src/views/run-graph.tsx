@@ -13,13 +13,20 @@ import { RunPanel } from "@pipelex/mthds-ui/form/react";
 import { GraphViewer } from "@pipelex/mthds-ui/graph/react";
 import { TOOLBAR_POSITION } from "@pipelex/mthds-ui";
 import type { GraphNodeData, GraphSpec, ToolbarPosition } from "@pipelex/mthds-ui";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDisplayMode, useLayout, useSendFollowUpMessage } from "skybridge/web";
 
 import { useCallTool, useToolInfo } from "../helpers.js";
 import { ToolbarButton } from "./components/toolbar-button.js";
 import { graphCaptionFor, graphPipeRefOf, selectedPipeFor } from "./run-graph-selection.js";
 import type { SelectedPipe } from "./run-graph-selection.js";
+import {
+  UploadFailure,
+  clearChangedFields,
+  uploadPickedFile,
+  withoutField,
+} from "./run-graph-upload.js";
+import type { GrantRequest, GrantToolResponse, UploadErrors } from "./run-graph-upload.js";
 import { terminalFollowUpPrompt } from "./run-notify.js";
 import { useRunPolling } from "./use-run-polling.js";
 
@@ -53,6 +60,11 @@ const TOOLBAR_POSITION_FOR_VIEW: ToolbarPosition = TOOLBAR_POSITION.TOP_LEFT;
  * manifest can override as the entry pipe: when the two differ the graph stays
  * and a caption under it names both (`graphCaptionFor`), so the diagram is
  * never silently of a different pipe from the form below it.
+ * A file-bearing input takes a file the user picks: the form asks the console
+ * for an upload grant (`pipelex_request_upload`) and sends the file straight
+ * to Pipelex storage, so the bytes never cross the conversation or the server
+ * (`./run-graph-upload.ts`). A failed upload is said under the form, because
+ * the panel itself discards the failure silently.
  * Run starts the method through `mthds_run` with the same
  * `files` / `method_ref` / `method_id` the validation was called with, then follows the run
  * by polling `mthds_run_status` and hands the conversation back to the model
@@ -63,6 +75,7 @@ export default function RunGraphView() {
   const toolInfo = useToolInfo<"mthds_validate">();
   const { callToolAsync: startRun } = useCallTool("mthds_run");
   const { callToolAsync: statusAsync } = useCallTool("mthds_run_status");
+  const { callToolAsync: requestUploadAsync } = useCallTool("pipelex_request_upload");
   const { theme, maxHeight, safeArea } = useLayout();
   const [displayMode, setDisplayMode] = useDisplayMode();
   const sendFollowUpMessage = useSendFollowUpMessage();
@@ -108,7 +121,55 @@ export default function RunGraphView() {
   const [starting, setStarting] = useState(false);
   const [runId, setRunId] = useState<string | undefined>(undefined);
   const [startError, setStartError] = useState<string | null>(null);
+  const [uploadErrors, setUploadErrors] = useState<UploadErrors>({});
   const polling = useRunPolling(runId, statusAsync);
+
+  // `useCallTool`'s caller changes identity per render; pin the latest so the
+  // upload callback, which `RunPanel` builds its drop handler from, stays put.
+  const requestUploadRef = useRef(requestUploadAsync);
+  requestUploadRef.current = requestUploadAsync;
+  // The cap the last grant reported, so a second oversized file is refused
+  // before any call. The first one is refused by the grant route itself.
+  const maxBytesRef = useRef<number | undefined>(undefined);
+  // Bumped when the form switches pipe, as the panel's own generation is: an
+  // upload still in flight from the previous form must not post its failure
+  // under the new one.
+  const uploadGenerationRef = useRef(0);
+  const uploadFile = useCallback(async (file: File, fieldId: string) => {
+    const generation = uploadGenerationRef.current;
+    setUploadErrors((current) => withoutField(current, fieldId));
+    try {
+      const uploaded = await uploadPickedFile(file, {
+        requestGrant: async (request: GrantRequest): Promise<GrantToolResponse> =>
+          requestUploadRef.current(request),
+        knownMaxBytes: maxBytesRef.current,
+      });
+      maxBytesRef.current = uploaded.maxBytes;
+      return { url: uploaded.url, filename: uploaded.filename };
+    } catch (err) {
+      if (generation === uploadGenerationRef.current) {
+        const message =
+          err instanceof UploadFailure ? err.message : `Could not upload "${file.name}".`;
+        setUploadErrors((current) => ({ ...current, [fieldId]: message }));
+      }
+      // Rethrown so the panel clears the field's busy state and leaves it empty.
+      throw err;
+    }
+  }, []);
+
+  // A field the user fixes another way — a pasted link, a cleared field, a
+  // later upload — loses its failure. The previous values are read off a ref so
+  // the callback stays put: the panel rebuilds its drop handler from it.
+  const valuesRef = useRef(values);
+  valuesRef.current = values;
+  const handleValuesChange = useCallback((next: Record<string, unknown>) => {
+    const previous = valuesRef.current;
+    // Two commits in one tick (an upload landing as the user types) must each
+    // compare against the one before, not both against the last render.
+    valuesRef.current = next;
+    setUploadErrors((current) => clearChangedFields(current, previous, next));
+    setValues(next);
+  }, []);
 
   // Completion handoff: one follow-up per run, on the terminal status. Unlike
   // `run-follow` this view does not fetch results itself — the prompt tells
@@ -168,6 +229,8 @@ export default function RunGraphView() {
     if (next.code === selectedPipe?.code && next.domain === selectedPipe?.domain) return;
     setPickedPipe(next);
     setValues({});
+    uploadGenerationRef.current += 1;
+    setUploadErrors({});
   };
 
   const handleRun = (apiInputs: Record<string, unknown>) => {
@@ -265,12 +328,18 @@ export default function RunGraphView() {
             contract={contract}
             descriptor={descriptor}
             values={values}
-            onValuesChange={setValues}
+            onValuesChange={handleValuesChange}
             onRun={handleRun}
             running={running}
+            uploadFile={uploadFile}
             title={pipeLabel}
             theme={theme}
           />
+          {Object.entries(uploadErrors).map(([fieldId, message]) => (
+            <p key={fieldId} className="mt-2 px-1 text-xs" style={{ color: "#b91c1c" }}>
+              {message}
+            </p>
+          ))}
           <RunStatusLine
             runId={runId}
             starting={starting}
@@ -313,9 +382,12 @@ function RunStatusLine({
     if (phase === "hard_error") {
       text = `Run ${runId}: lost track of it (${hardError ?? "status unavailable"}).`;
     } else if (phase === "terminal") {
+      // The completion handoff is a prompt the host may only draft for the user
+      // (claude.ai) or not act on at all (ChatGPT), so the line says what the user
+      // does next rather than claiming the assistant already started.
       text =
         runStatus === "COMPLETED"
-          ? `Run ${runId} completed — the assistant is fetching the results.`
+          ? `Run ${runId} completed. Ask the assistant to fetch the results.`
           : `Run ${runId} ended with status ${runStatus ?? "unknown"}.`;
     } else {
       const suffix =

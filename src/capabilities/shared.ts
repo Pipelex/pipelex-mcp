@@ -695,6 +695,18 @@ export interface ClassifyErrorOptions {
     hint: string;
   };
   /**
+   * Per-route 413 override. A route that refuses a declared size before any
+   * bytes move (`/v1/upload/grant` answers `413 payload_too_large` for a size
+   * over the upload cap) sets this so the refusal is `input_domain` at the
+   * size the caller declared, with the server's own message naming the limit.
+   * Routes that never declare a size leave it unset and keep the generic
+   * unexpected-status arm.
+   */
+  tooLarge?: {
+    location?: string;
+    hint: string;
+  };
+  /**
    * Per-route 5xx hint override. Use it when a route is known to report
    * request-caused failures as a generic server error (the hosted `/v1/start`
    * answers 503 "Failed to start pipeline" for an invalid bundle), so the
@@ -1279,6 +1291,16 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
         : { location: options.notImplemented.location }),
       message,
       hint: options.notImplemented.hint,
+      retryable: false,
+    };
+  }
+
+  if (err.status === 413 && options.tooLarge) {
+    return {
+      class: "input_domain",
+      ...(options.tooLarge.location === undefined ? {} : { location: options.tooLarge.location }),
+      message,
+      hint: options.tooLarge.hint,
       retryable: false,
     };
   }

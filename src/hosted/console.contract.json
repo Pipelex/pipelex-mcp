@@ -12,7 +12,7 @@
         "listChanged": true
       }
     },
-    "instructions": "pipelex-mcp helps you work with executable AI methods written in MTHDS (.mthds). The usual flow: `mthds_list_methods` to find a saved method, `mthds_validate`, `mthds_inputs_template` and fill it, `mthds_prepare_inputs`, `mthds_run`, then `mthds_run_status` and `mthds_run_results` with the run id, and `mthds_show_images` to see a picture the run produced. `mthds_codegen` turns a method into typed code for the user's project. Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`, `mthds_run`) takes its method one of three ways: the file contents you hold, a published method's address as method_ref, or a catalog id (mt_…) as method_id. An address or an id is resolved server-side, so no bundle enters the conversation. Call `mthds_list_methods` when the user asks what saved methods exist, names one without its mt_ id, or a saved method may fit the task; choose by name and description, then pass the id on. When the user attaches a file to the conversation, `mthds_upload_attachments` turns it into a run-ready pipelex-storage:// reference to fill into the inputs. This console uploads nothing else: `mthds_prepare_inputs` passes http(s) URLs and pipelex-storage:// references through and refuses a value that would need an upload. A valid `mthds_validate` verdict also shows the user an interactive graph of the method. `mthds_run` executes on the hosted Pipelex API and spends inference credit. A picture from `mthds_show_images` stays in the conversation for every turn that follows, so show one when it is asked for, not by reflex."
+    "instructions": "pipelex-mcp helps you work with executable AI methods written in MTHDS (.mthds). The usual flow: `mthds_list_methods` to find a saved method, `mthds_validate`, `mthds_inputs_template` and fill it, `mthds_prepare_inputs`, `mthds_run`, then `mthds_run_status` and `mthds_run_results` with the run id, and `mthds_show_images` to see a picture the run produced. `mthds_codegen` turns a method into typed code for the user's project. Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`, `mthds_run`) takes its method one of three ways: the file contents you hold, a published method's address as method_ref, or a catalog id (mt_…) as method_id. An address or an id is resolved server-side, so no bundle enters the conversation. Call `mthds_list_methods` when the user asks what saved methods exist, names one without its mt_ id, or a saved method may fit the task; choose by name and description, then pass the id on. When the user attaches a file to the conversation, `mthds_upload_attachments` turns it into a run-ready pipelex-storage:// reference to fill into the inputs. `mthds_prepare_inputs` passes http(s) URLs and pipelex-storage:// references through and refuses a value that would need an upload. A valid `mthds_validate` verdict also shows the user an interactive graph of the method, and a runnable one a run form whose file inputs take a file picked from the user's device: point a user who holds a file but no URL there. `mthds_run` executes on the hosted Pipelex API and spends inference credit. A picture from `mthds_show_images` stays in the conversation for every turn that follows, so show one when it is asked for, not by reflex."
   },
   "tools": [
     {
@@ -2062,6 +2062,121 @@
         "openai/toolInvocation/invoking": "Fetching the run's images...",
         "openai/toolInvocation/invoked": "Images fetched."
       }
+    },
+    {
+      "name": "pipelex_request_upload",
+      "description": "Issue a one-time upload grant for a file the user picked in the run form of this console's method view. The view calls this itself and then sends the file straight to Pipelex storage; the grant goes to the view and never into the conversation. Do not call it from the conversation: it uploads nothing on its own. For a file the user attached in the chat, call mthds_upload_attachments instead.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "filename": {
+            "type": "string",
+            "description": "The picked file's name, with its extension; the stored object keeps the extension."
+          },
+          "content_type": {
+            "description": "The file's MIME type as the browser reports it. Omit it when the browser reports none.",
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "The file's exact size in bytes. The grant accepts a body of this size and no other."
+          }
+        },
+        "required": [
+          "filename",
+          "size"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "error"
+            ]
+          },
+          "uri": {
+            "description": "The pipelex-storage:// reference the file will carry once the run form has sent it. It names nothing until then.",
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "ISO-8601 UTC instant after which storage refuses the upload.",
+            "type": "string"
+          },
+          "max_bytes": {
+            "description": "The largest file any grant allows, in bytes.",
+            "type": "number"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "class": {
+                  "type": "string",
+                  "enum": [
+                    "input_domain",
+                    "config",
+                    "runtime"
+                  ]
+                },
+                "kind": {
+                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call.",
+                  "type": "string",
+                  "enum": [
+                    "paywall"
+                  ]
+                },
+                "location": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "hint": {
+                  "type": "string"
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "description": "True when retrying the same call may succeed; false for permanent conditions."
+                }
+              },
+              "required": [
+                "class",
+                "message",
+                "retryable"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "Request an upload grant",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "app"
+          ]
+        }
+      }
     }
   ],
   "resources": [
@@ -2077,7 +2192,13 @@
             ],
             "connectDomains": [
               "http://<skybridge dev host>",
-              "ws://<skybridge dev host>"
+              "ws://<skybridge dev host>",
+              "https://pipelex-app-dev.s3.amazonaws.com",
+              "https://pipelex-app-staging.s3.amazonaws.com",
+              "https://pipelex-app-prod.s3.amazonaws.com",
+              "https://pipelex-app-dev.s3.us-west-2.amazonaws.com",
+              "https://pipelex-app-staging.s3.us-west-2.amazonaws.com",
+              "https://pipelex-app-prod.s3.us-west-2.amazonaws.com"
             ],
             "baseUriDomains": [
               "http://<skybridge dev host>"

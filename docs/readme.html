@@ -407,6 +407,11 @@
             <td class="narrow"><span class="chip console">console · ChatGPT</span></td>
           </tr>
           <tr>
+            <td class="tool">pipelex_request_upload</td>
+            <td>A file the user picks in the method view's run form → a one-time upload grant, with which the view sends the file straight from the browser to <code>pipelex-storage://</code>. Called by the view, hidden from the model.</td>
+            <td class="narrow"><span class="chip console">console · view</span></td>
+          </tr>
+          <tr>
             <td class="tool">mthds_run</td>
             <td>Starts a <strong>durable</strong> run and returns a <code>run_id</code> immediately — never blocks a tool call.</td>
             <td class="narrow"><span class="chip both">both</span> <span class="chip console">+ view</span></td>
@@ -499,7 +504,7 @@
           </defs>
         </svg>
       </div>
-      <figcaption>Same tools on both shells — one documented exception: <code>mthds_upload_attachments</code> is console-only, because the host substitutes the attachment based on the declared schema, so on the workshop it would be structurally unreachable.</figcaption>
+      <figcaption>Same tools on both shells, apart from those only one shell can serve: on the console, <code>mthds_upload_attachments</code> (the host substitutes the attachment based on the declared schema, so on the workshop it would be structurally unreachable) and <code>pipelex_request_upload</code> (its caller is a view, and the workshop has none); on the workshop, the tools that need a working directory.</figcaption>
     </figure>
 
     <div class="table-wrap">

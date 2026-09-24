@@ -1,0 +1,448 @@
+import type { UploadGrant } from "@pipelex/sdk/upload";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { UPLOAD_GRANT_META_KEY } from "../capabilities/upload-grant-shape.js";
+import {
+  UploadFailure,
+  clearChangedFields,
+  uploadPickedFile,
+  valueAtFieldId,
+  withoutField,
+} from "./run-graph-upload.js";
+import type { GrantRefusal, GrantRequest, GrantToolResponse } from "./run-graph-upload.js";
+
+const GRANT: UploadGrant = {
+  uri: "pipelex-storage://org_1/assets/0f1e2d3c.pdf",
+  url: "https://pipelex-app-dev.s3.amazonaws.com/org_1/assets/0f1e2d3c.pdf?X-Amz-Signature=deadbeef",
+  headers: { "If-None-Match": "*", "Content-Type": "application/pdf" },
+  expires_at: "2026-09-23T15:00:00Z",
+  max_bytes: 1_000,
+};
+
+const granted: GrantToolResponse = {
+  structuredContent: { status: "ok" },
+  meta: { [UPLOAD_GRANT_META_KEY]: GRANT },
+};
+
+function pdf(size = 125, name = "report.pdf", type = "application/pdf"): File {
+  return new File([new Uint8Array(size)], name, { type });
+}
+
+describe("uploadPickedFile", () => {
+  it("asks for a grant with the file's name, type and size, sends it, and returns the reference", async () => {
+    const requests: GrantRequest[] = [];
+    const sent: { grant: UploadGrant; file: Blob; rest: unknown[] }[] = [];
+    const file = pdf();
+
+    const uploaded = await uploadPickedFile(file, {
+      requestGrant: async (request) => {
+        requests.push(request);
+        return granted;
+      },
+      send: async (grant, blob, ...rest: unknown[]) => {
+        sent.push({ grant, file: blob, rest });
+        return { uri: grant.uri };
+      },
+    });
+
+    expect(requests).toEqual([
+      { filename: "report.pdf", content_type: "application/pdf", size: 125 },
+    ]);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.grant).toEqual(GRANT);
+    expect(sent[0]?.file).toBe(file);
+    // The SDK bounds the PUT itself, so the view passes no timer of its own.
+    expect(sent[0]?.rest).toEqual([]);
+    expect(uploaded).toEqual({ url: GRANT.uri, filename: "report.pdf", maxBytes: 1_000 });
+  });
+
+  it("omits a type the browser does not know", async () => {
+    const requests: GrantRequest[] = [];
+
+    await uploadPickedFile(pdf(3, "data.xyz", ""), {
+      requestGrant: async (request) => {
+        requests.push(request);
+        return granted;
+      },
+      send: async (grant) => ({ uri: grant.uri }),
+    });
+
+    expect(requests).toEqual([{ filename: "data.xyz", size: 3 }]);
+  });
+
+  it("refuses a file over a cap it already knows, before any call", async () => {
+    let called = false;
+
+    const upload = uploadPickedFile(pdf(2 * 1024 * 1024), {
+      requestGrant: async () => {
+        called = true;
+        return granted;
+      },
+      knownMaxBytes: 1024 * 1024,
+    });
+
+    await expect(upload).rejects.toThrow(UploadFailure);
+    await expect(upload).rejects.toThrow('"report.pdf" is 2 MiB, over the 1 MiB');
+    expect(called).toBe(false);
+  });
+
+  it("says why the console refused the grant", async () => {
+    const upload = uploadPickedFile(pdf(), {
+      requestGrant: async () => ({
+        structuredContent: {
+          status: "error",
+          errors: [{ message: "Declared file size exceeds the 50 MiB limit." }],
+        },
+      }),
+    });
+
+    await expect(upload).rejects.toThrow(
+      'Could not upload "report.pdf": Declared file size exceeds the 50 MiB limit.',
+    );
+    // The console answered, so the connector is fine: re-adding it fixes nothing.
+    const failure: unknown = await upload.catch((err: unknown) => err);
+    expect((failure as Error).message).not.toContain("re-add");
+  });
+
+  function refusedWith(error: GrantRefusal): Promise<unknown> {
+    return uploadPickedFile(pdf(), {
+      requestGrant: async () => ({ structuredContent: { status: "error", errors: [error] } }),
+    }).catch((err: unknown) => err);
+  }
+
+  it("adds the hint to a refusal about the file, whose message alone says nothing useful", async () => {
+    const failure = await refusedWith({
+      class: "input_domain",
+      message: "Request body failed validation. See `errors` for the per-field breakdown.",
+      hint: "Pipelex storage refused the file's name, type or size as given. Rename the file, or pick another one.",
+    });
+
+    expect((failure as Error).message).toBe(
+      'Could not upload "report.pdf": Request body failed validation. See `errors` for the per-field breakdown. ' +
+        "Pipelex storage refused the file's name, type or size as given. Rename the file, or pick another one.",
+    );
+  });
+
+  it("adds the reconnect hint to a rejected sign-in, ending the message with a full stop first", async () => {
+    const failure = await refusedWith({
+      class: "config",
+      location: "authorization",
+      message: "Unauthorized",
+      hint: "reconnect the Pipelex connector and sign in again.",
+    });
+
+    expect((failure as Error).message).toBe(
+      'Could not upload "report.pdf": Unauthorized. reconnect the Pipelex connector and sign in again.',
+    );
+  });
+
+  it("adds the plan hint to a paywall refusal", async () => {
+    const failure = await refusedWith({
+      class: "config",
+      kind: "paywall",
+      message: "Subscription required.",
+      hint: "The organization's plan does not cover this call.",
+    });
+
+    expect((failure as Error).message).toContain("does not cover this call");
+  });
+
+  it("keeps an operator's hint off the form", async () => {
+    const failure = await refusedWith({
+      class: "config",
+      location: "PIPELEX_BASE_URL",
+      message: "The Pipelex API could not be reached.",
+      hint: "Start pipelex-api locally or set PIPELEX_BASE_URL.",
+    });
+
+    expect((failure as Error).message).toBe(
+      'Could not upload "report.pdf": The Pipelex API could not be reached.',
+    );
+  });
+
+  it("refuses to send when the answer carries no usable grant", async () => {
+    let sent = false;
+
+    const upload = uploadPickedFile(pdf(), {
+      // A host that dropped the result's _meta on its way to the view.
+      requestGrant: async () => ({ structuredContent: { status: "ok" } }),
+      send: async (grant) => {
+        sent = true;
+        return { uri: grant.uri };
+      },
+    });
+
+    await expect(upload).rejects.toThrow("carried no usable upload grant");
+    expect(sent).toBe(false);
+  });
+
+  it("tells the user to re-add the connector when the host refuses the call", async () => {
+    let sent = false;
+
+    const upload = uploadPickedFile(pdf(), {
+      // What ChatGPT answered, from its stored tool list, on a connector added
+      // before the tool existed.
+      requestGrant: async () => {
+        throw new Error("MCP error -32000: MCP Resource not found");
+      },
+      send: async (grant) => {
+        sent = true;
+        return { uri: grant.uri };
+      },
+    });
+
+    await expect(upload).rejects.toThrow(UploadFailure);
+    await expect(upload).rejects.toThrow(
+      'Could not upload "report.pdf": this app could not store the file here. ' +
+        "Remove and re-add the Pipelex connector in your chat app's settings, then pick the file again. " +
+        "You can also paste a link to the file into this field, or on ChatGPT attach the file to your message instead. " +
+        "(MCP error -32000: MCP Resource not found)",
+    );
+    expect(sent).toBe(false);
+  });
+
+  it("says to pick the file again first when the call timed out, since a re-add fixes nothing", async () => {
+    const upload = uploadPickedFile(pdf(), {
+      // The view's own request timeout, as the MCP SDK words it.
+      requestGrant: async () => {
+        throw new Error("MCP error -32001: Request timed out");
+      },
+    });
+
+    await expect(upload).rejects.toThrow(
+      'Could not upload "report.pdf": the call to the console did not go through. ' +
+        "Pick the file again; if it keeps failing, remove and re-add the Pipelex connector in your chat app's settings. " +
+        "You can also paste a link to the file into this field, or on ChatGPT attach the file to your message instead. " +
+        "(MCP error -32001: Request timed out)",
+    );
+  });
+
+  it("gives the retry-first advice, with no detail, when the host's error carries no message", async () => {
+    const upload = uploadPickedFile(pdf(), {
+      requestGrant: async () => {
+        throw new Error("");
+      },
+    });
+
+    await expect(upload).rejects.toThrow(/Pick the file again;.*to your message instead\.$/);
+  });
+
+  it("says any other failure to send in a generic line", async () => {
+    const failure = await uploadPickedFile(pdf(), {
+      requestGrant: async () => granted,
+      send: async () => {
+        throw new Error("something the SDK does not classify");
+      },
+    }).catch((err: unknown) => err);
+
+    expect(failure).toBeInstanceOf(UploadFailure);
+    expect((failure as Error).message).toBe('The upload of "report.pdf" failed. Try again.');
+  });
+});
+
+// These run the SDK's own `uploadWithGrant` over a stubbed `fetch`, so each
+// line is pinned to how the SDK really classifies what storage answered, not
+// to an error built by hand. The SDK words its messages for whoever holds the
+// grant ("retrying with the same grant before it expires…", "check the page's
+// CSP connect-src"), and none of that may reach the form.
+describe("a failed send, through the SDK", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  // What S3 answers when it refuses or fails a PUT: an XML error document.
+  function s3Error(status: number, code: string, message: string): Response {
+    return new Response(
+      `<?xml version="1.0" encoding="UTF-8"?><Error><Code>${code}</Code><Message>${message}</Message></Error>`,
+      { status, headers: { "content-type": "application/xml" } },
+    );
+  }
+
+  async function failureLine(): Promise<string> {
+    const failure = await uploadPickedFile(pdf(), { requestGrant: async () => granted }).catch(
+      (err: unknown) => err,
+    );
+    expect(failure).toBeInstanceOf(UploadFailure);
+    return (failure as Error).message;
+  }
+
+  it.each([
+    {
+      when: "storage cannot be reached",
+      answer: () => Promise.reject(new TypeError("Failed to fetch")),
+      line: 'Couldn\'t reach storage to upload "report.pdf". Check your connection and try again.',
+    },
+    {
+      when: "storage fails with a 5xx",
+      answer: async () => s3Error(503, "SlowDown", "Please reduce your request rate."),
+      line: 'Storage failed while uploading "report.pdf". Try again in a moment.',
+    },
+    {
+      when: "storage fails with a 5xx and no body",
+      answer: async () => new Response(null, { status: 502 }),
+      line: 'Storage failed while uploading "report.pdf". Try again in a moment.',
+    },
+    {
+      when: "storage stops waiting for the bytes",
+      answer: async () =>
+        s3Error(
+          400,
+          "RequestTimeout",
+          "Your socket connection to the server was not read from or written to within the timeout period.",
+        ),
+      line: 'Storage stopped waiting for "report.pdf". Try again.',
+    },
+    {
+      when: "the grant expired before the upload started",
+      answer: async () => s3Error(403, "AccessDenied", "Request has expired"),
+      line: 'The upload of "report.pdf" took too long to start. Try again.',
+    },
+    {
+      when: "storage refuses the file against its signature",
+      answer: async () =>
+        s3Error(
+          403,
+          "SignatureDoesNotMatch",
+          "The request signature we calculated does not match the signature you provided.",
+        ),
+      line: 'Storage refused the upload of "report.pdf". Try again, or pick another file.',
+    },
+    {
+      when: "storage says the grant was already used",
+      answer: async () =>
+        s3Error(
+          412,
+          "PreconditionFailed",
+          "At least one of the pre-conditions you specified did not hold",
+        ),
+      line: 'Storage refused the upload of "report.pdf". Try again, or pick another file.',
+    },
+    {
+      when: "another upload with the same grant is in progress",
+      answer: async () =>
+        s3Error(
+          409,
+          "ConditionalRequestConflict",
+          "A conflicting conditional operation is currently in progress against this resource.",
+        ),
+      line: 'The upload of "report.pdf" failed. Try again.',
+    },
+  ])("says so in words for the person when $when", async ({ answer, line }) => {
+    vi.stubGlobal("fetch", vi.fn(answer));
+
+    expect(await failureLine()).toBe(line);
+  });
+
+  it("says a stalled upload timed out, on the SDK's own time limit", async () => {
+    // The view passes no timer, so this is the SDK's default (a minute plus a
+    // second per started 128 KiB) running out on a PUT storage never answers.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let sent!: () => void;
+    const started = new Promise<void>((resolve) => {
+      sent = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+            sent();
+          }),
+      ),
+    );
+
+    const failure = failureLine();
+    await started;
+    await vi.advanceTimersByTimeAsync(61_001);
+
+    expect(await failure).toBe(
+      'The upload of "report.pdf" timed out. Try again, or pick a smaller file.',
+    );
+  });
+});
+
+describe("per-field upload errors", () => {
+  const failures = {
+    cv: 'Could not upload "cv.pdf": storage refused it.',
+    job_offer: 'Could not upload "offer.pdf": storage refused it.',
+  };
+
+  it("reads a field's value down the dotted path the panel writes, list indices included", () => {
+    const values = { applicant: { photo: { url: "https://a/p.png" } }, documents: ["x", "y"] };
+
+    expect(valueAtFieldId(values, "applicant.photo")).toEqual({ url: "https://a/p.png" });
+    expect(valueAtFieldId(values, "documents.1")).toBe("y");
+    expect(valueAtFieldId(values, "missing.path")).toBeUndefined();
+    // An inherited key is not a field's value.
+    expect(valueAtFieldId(values, "constructor")).toBeUndefined();
+  });
+
+  it("keeps a field's failure while another field is edited or uploaded", () => {
+    const previous = { cv: undefined, job_offer: undefined, note: "a" };
+    const next = { ...previous, note: "ab", job_offer: { url: "pipelex-storage://o/j.pdf" } };
+
+    expect(clearChangedFields({ cv: failures.cv }, previous, next)).toEqual({ cv: failures.cv });
+  });
+
+  it("drops the failure of a field the user fixed by pasting a link", () => {
+    const previous = { cv: undefined, job_offer: undefined };
+    const next = { ...previous, cv: { url: "https://example.com/cv.pdf" } };
+
+    expect(clearChangedFields(failures, previous, next)).toEqual({
+      job_offer: failures.job_offer,
+    });
+  });
+
+  it("keeps each field's failure when two uploads fail", () => {
+    let errors = withoutField({}, "cv");
+    errors = { ...errors, cv: failures.cv };
+    errors = { ...withoutField(errors, "job_offer"), job_offer: failures.job_offer };
+
+    expect(errors).toEqual(failures);
+  });
+
+  it("drops only the retried field's failure", () => {
+    expect(withoutField(failures, "cv")).toEqual({ job_offer: failures.job_offer });
+  });
+
+  it("returns the same object when nothing is dropped, so React sees no change", () => {
+    const values = { cv: undefined };
+
+    expect(clearChangedFields(failures, values, { ...values })).toBe(failures);
+    expect(withoutField(failures, "note")).toBe(failures);
+  });
+
+  it("drops a failed row's failure when the user removes that row", () => {
+    const previous = { documents: [{ url: "pipelex-storage://o/a.pdf" }, undefined] };
+    const next = { documents: [{ url: "pipelex-storage://o/a.pdf" }] };
+
+    expect(clearChangedFields({ "documents.1": "failed" }, previous, next)).toEqual({});
+  });
+
+  it("drops a failed row's failure when an earlier row is removed, since its id now names another row", () => {
+    const previous = { documents: [{ url: "pipelex-storage://o/a.pdf" }, undefined, undefined] };
+    const next = { documents: [undefined, undefined] };
+
+    expect(clearChangedFields({ "documents.1": "failed" }, previous, next)).toEqual({});
+  });
+
+  it("keeps a failed row's failure while another row of the same list is filled", () => {
+    const previous = { documents: [undefined, undefined] };
+    const next = { documents: [{ url: "pipelex-storage://o/a.pdf" }, undefined] };
+
+    expect(clearChangedFields({ "documents.1": "failed" }, previous, next)).toEqual({
+      "documents.1": "failed",
+    });
+  });
+
+  it("treats a rebuilt but equal value as unchanged", () => {
+    const previous = { applicant: { photo: { url: "https://a/p.png" }, name: "A" } };
+    const next = { applicant: { photo: { url: "https://a/p.png" }, name: "Ab" } };
+
+    expect(clearChangedFields({ "applicant.photo": "failed" }, previous, next)).toEqual({
+      "applicant.photo": "failed",
+    });
+  });
+});

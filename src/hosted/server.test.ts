@@ -106,6 +106,52 @@ describe("the console's tool table", () => {
     });
   });
 
+  it("registers pipelex_request_upload for the view alone, with no view of its own", async () => {
+    const tools = await listTools(createHostedServer(TEST_OAUTH));
+    const tool = tools.find((candidate) => candidate.name === "pipelex_request_upload");
+    const schema = tool?.inputSchema as { required?: string[]; properties?: object };
+
+    // App-only, per the MCP Apps standard: a host that honours it keeps the
+    // tool off the model's list, and the run-graph view calls it. Losing the
+    // key would put a tool the model cannot usefully call in every prompt.
+    expect(tool?._meta?.ui).toEqual({ visibility: ["app"] });
+    expect(tool?._meta).not.toHaveProperty("ui/resourceUri");
+    // Name, type and size — never the bytes.
+    expect(schema.required?.sort()).toEqual(["filename", "size"]);
+    expect(Object.keys(schema.properties ?? {}).sort()).toEqual([
+      "content_type",
+      "filename",
+      "size",
+    ]);
+    expect(tool?.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+    });
+  });
+
+  it("lets the run-graph view connect to the bucket an upload grant names", async () => {
+    const { client, close } = await connectClient(createHostedServer(TEST_OAUTH));
+
+    try {
+      const { resources } = await client.listResources();
+      const runGraph = resources.find(
+        (resource) => resource.uri === "ui://views/ext-apps/run-graph.html",
+      );
+      const ui = runGraph?._meta?.ui as { csp?: { connectDomains?: string[] } } | undefined;
+
+      // The platform signs grants against the GLOBAL S3 host (measured on
+      // api-dev); the regional one is allowed too, so a platform that pins its
+      // endpoint later does not silently break uploads.
+      for (const bucket of ["pipelex-app-dev", "pipelex-app-staging", "pipelex-app-prod"]) {
+        expect(ui?.csp?.connectDomains).toContain(`https://${bucket}.s3.amazonaws.com`);
+        expect(ui?.csp?.connectDomains).toContain(`https://${bucket}.s3.us-west-2.amazonaws.com`);
+      }
+    } finally {
+      await close();
+    }
+  });
+
   it("names `attachments` in openai/fileParams — the substitution mechanism itself", async () => {
     const tools = await listTools(createHostedServer(TEST_OAUTH));
     const uploadTool = tools.find((tool) => tool.name === "mthds_upload_attachments");

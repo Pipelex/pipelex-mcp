@@ -32,7 +32,7 @@ import {
   getDefaultEnvironment,
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-import { buildApiConfig } from "../src/capabilities/shared.js";
+import { LIVE_API_KEY_ENV, liveApiTarget } from "../src/capabilities/e2e-support.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER_ENTRYPOINT = path.join(REPO_ROOT, "src", "local", "main.ts");
@@ -586,13 +586,13 @@ function errorMessage(err: unknown): string {
 }
 
 async function main(): Promise<void> {
-  const config = buildApiConfig(process.env);
+  const config = liveApiTarget();
 
   write("pipelex-mcp smoke — the workshop stdio server against a live Pipelex API");
   write(`  target: ${config.baseUrl}`);
   write(`  key:    ${config.apiKey === undefined ? "NOT SET" : "set"}`);
   if (config.apiKey === undefined) {
-    note("Without PIPELEX_API_KEY every org-scoped call will fail as a config error.");
+    note(`Without ${LIVE_API_KEY_ENV} every org-scoped call will fail as a config error.`);
   }
 
   if (!existsSync(TSX_BIN)) {
@@ -602,14 +602,15 @@ async function main(): Promise<void> {
     return;
   }
 
-  // The child gets the SDK's safe base environment plus this repo's two knobs, so
-  // the server resolves exactly the API this script just reported.
-  const childEnv: Record<string, string> = { ...getDefaultEnvironment() };
-  if (process.env.PIPELEX_BASE_URL !== undefined) {
-    childEnv.PIPELEX_BASE_URL = process.env.PIPELEX_BASE_URL;
-  }
-  if (process.env.PIPELEX_API_KEY !== undefined) {
-    childEnv.PIPELEX_API_KEY = process.env.PIPELEX_API_KEY;
+  // The child gets the SDK's safe base environment plus the server's two knobs,
+  // set from the live pair, so the server resolves exactly the API this script
+  // just reported and never an ambient PIPELEX_BASE_URL meant for other tools.
+  const childEnv: Record<string, string> = {
+    ...getDefaultEnvironment(),
+    PIPELEX_BASE_URL: config.baseUrl,
+  };
+  if (config.apiKey !== undefined) {
+    childEnv.PIPELEX_API_KEY = config.apiKey;
   }
 
   const transport = new StdioClientTransport({
