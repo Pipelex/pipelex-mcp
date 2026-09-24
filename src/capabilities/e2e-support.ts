@@ -19,8 +19,43 @@ import type { PipelexApiClient } from "@pipelex/sdk";
 
 import { getMthdsRunStatus } from "./run.js";
 import type { RunContext } from "./run.js";
-import { buildApiConfig, createPipelexApiClient } from "./shared.js";
+import { createPipelexApiClient } from "./shared.js";
 import type { ApiConfig } from "./shared.js";
+
+/**
+ * The live suite's own API coordinates. They are deliberately not
+ * `PIPELEX_BASE_URL` / `PIPELEX_API_KEY`: those names are shared with every
+ * other tool and with the console's dev loop, so a shell exporting the
+ * production pair for other tools aimed the suite at an organization holding no
+ * seeded fixture, and every by-id leg failed with a miss that read like drift.
+ * The Makefile resolves these two names for the live targets; the comment above
+ * its `LIVE_TARGETS` says in what order.
+ */
+export const LIVE_BASE_URL_ENV = "PIPELEX_E2E_BASE_URL";
+export const LIVE_API_KEY_ENV = "PIPELEX_E2E_API_KEY";
+
+/**
+ * Dev, not production: the Makefile's `LIVE_DEFAULT_BASE_URL`, repeated for a
+ * bare `npm run test:e2e`. The Makefile says why it is dev.
+ */
+export const LIVE_DEFAULT_BASE_URL = "https://api-dev.pipelex.com";
+
+/** Where the live suite points, with a missing key reported rather than refused. */
+export interface LiveApiTarget {
+  baseUrl: string;
+  apiKey: string | undefined;
+}
+
+/**
+ * The live coordinates as the environment gives them. `make smoke` reads this
+ * directly, since it reports a missing key instead of refusing to start.
+ */
+export function liveApiTarget(env: NodeJS.ProcessEnv = process.env): LiveApiTarget {
+  return {
+    baseUrl: env[LIVE_BASE_URL_ENV] || LIVE_DEFAULT_BASE_URL,
+    apiKey: env[LIVE_API_KEY_ENV] || undefined,
+  };
+}
 
 /**
  * The API coordinates for a live run, or an instructive throw.
@@ -29,14 +64,28 @@ import type { ApiConfig } from "./shared.js";
  * and a check that has quietly stopped checking is worse than a red one.
  */
 export function liveApiConfig(): ApiConfig {
-  const config = buildApiConfig(process.env);
-  if (config.apiKey === undefined) {
+  const { baseUrl, apiKey } = liveApiTarget();
+  if (apiKey === undefined) {
     throw new Error(
-      "PIPELEX_API_KEY is not set — every org-scoped call would fail as a config error and this suite would " +
-        "be testing the error path only. Put it in .env or export it, then run `make test-e2e`.",
+      `${LIVE_API_KEY_ENV} is not set — every org-scoped call would fail as a config error and this suite would ` +
+        `be testing the error path only. Put the key for ${baseUrl}'s organization in .env as ${LIVE_API_KEY_ENV}, ` +
+        "then run `make test-e2e`.",
     );
   }
-  return config;
+  return { baseUrl, apiKey };
+}
+
+/**
+ * The last sentence of every fixture-miss message: which deployment was
+ * searched. A key aimed at the wrong deployment reads exactly like an unseeded
+ * organization, so naming the URL is what tells the two apart.
+ */
+export function searchedAtHint(baseUrl: string): string {
+  return (
+    `The lookup searched ${baseUrl}; if that is not the deployment holding the fixture, set ` +
+    `${LIVE_BASE_URL_ENV} and ${LIVE_API_KEY_ENV} in .env (the live targets never read PIPELEX_BASE_URL or ` +
+    "PIPELEX_API_KEY)."
+  );
 }
 
 /** A real, unseamed client — what the suites use for their own setup calls. */
@@ -438,7 +487,7 @@ export function fixtureMethodId(): Promise<string> {
 async function lookupFixtureMethodId(): Promise<string> {
   const row = await catalogRowNamed(FIXTURE_METHOD_NAME);
   if (row === undefined) {
-    throw new Error(MISSING_FIXTURE_HINT);
+    throw new Error(`${MISSING_FIXTURE_HINT} ${searchedAtHint(liveApiTarget().baseUrl)}`);
   }
   return row;
 }
@@ -467,7 +516,7 @@ export function catalogWriteFixtureMethodId(): Promise<string> {
 async function lookupCatalogWriteFixtureMethodId(): Promise<string> {
   const row = await catalogRowNamed(CATALOG_WRITE_FIXTURE_NAME);
   if (row === undefined) {
-    throw new Error(MISSING_WRITE_FIXTURE_HINT);
+    throw new Error(`${MISSING_WRITE_FIXTURE_HINT} ${searchedAtHint(liveApiTarget().baseUrl)}`);
   }
   return row;
 }
