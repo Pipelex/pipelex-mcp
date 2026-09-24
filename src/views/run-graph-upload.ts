@@ -191,21 +191,34 @@ export async function uploadPickedFile(
   return { url: stored.uri, filename: file.name, maxBytes: grant.max_bytes };
 }
 
+// ChatGPT's answer for a tool its stored copy of the connector's list lacks.
+const STALE_TOOL_LIST = /resource not found/i;
+
 /**
- * The call to the grant tool threw, so the host refused it before any result
- * came back — a different failure from the console answering `status: "error"`.
- * Its known cause is a connector whose stored tool list predates the tool:
+ * The call to the grant tool threw, so it failed on the way to the console,
+ * never inside it: Skybridge resolves a tool's own error as a result, and the
+ * console answers every refusal as `status: "error"`. Two different things
+ * land here, and they need different advice.
+ *
+ * The measured one is a connector whose stored tool list predates the tool:
  * ChatGPT answers `MCP error -32000: MCP Resource not found` from its own copy
- * of the list, and removing and re-adding the connector fixed it when measured
- * on 2026-09-24, which is the state of every install a release first reaches.
- * So the message leads with that fix, then names the ways in that need no
- * upload, and keeps the host's own words last for whoever reports it.
+ * of the list, and removing and re-adding the connector fixed it on
+ * 2026-09-24. That is the state of every install a release first reaches, so
+ * that error leads with the re-add. Everything else — the view's own 60-second
+ * request timeout (`-32001`), a bridge that never finished its handshake
+ * (`Not connected`), a closed connection — is not fixed by a re-add, and
+ * pushing a user through a fresh sign-in for a timeout helps nobody; those
+ * lead with picking the file again. Both name the ways in that need no upload
+ * and keep the host's own words last, for whoever reports it.
  */
 function hostRefusalMessage(filename: string, err: unknown): string {
   const detail = messageOf(err, "");
+  const staleToolList = STALE_TOOL_LIST.test(detail);
   return (
-    `Could not upload "${filename}": this app could not store the file here. ` +
-    "Remove and re-add the Pipelex connector in your chat app's settings, then pick the file again. " +
+    `Could not upload "${filename}": ` +
+    (staleToolList
+      ? "this app could not store the file here. Remove and re-add the Pipelex connector in your chat app's settings, then pick the file again. "
+      : "the call to the console did not go through. Pick the file again; if it keeps failing, remove and re-add the Pipelex connector in your chat app's settings. ") +
     "You can also paste a link to the file into this field, or on ChatGPT attach the file to your message instead." +
     (detail === "" ? "" : ` (${detail})`)
   );

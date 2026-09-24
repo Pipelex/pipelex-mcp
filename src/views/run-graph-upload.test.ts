@@ -147,16 +147,30 @@ describe("uploadPickedFile", () => {
     expect(sent).toBe(false);
   });
 
-  it("gives the same advice when the host's refusal carries no message", async () => {
+  it("says to pick the file again first when the call timed out, since a re-add fixes nothing", async () => {
+    const upload = uploadPickedFile(pdf(), {
+      // The view's own request timeout, as the MCP SDK words it.
+      requestGrant: async () => {
+        throw new Error("MCP error -32001: Request timed out");
+      },
+    });
+
+    await expect(upload).rejects.toThrow(
+      'Could not upload "report.pdf": the call to the console did not go through. ' +
+        "Pick the file again; if it keeps failing, remove and re-add the Pipelex connector in your chat app's settings. " +
+        "You can also paste a link to the file into this field, or on ChatGPT attach the file to your message instead. " +
+        "(MCP error -32001: Request timed out)",
+    );
+  });
+
+  it("gives the retry-first advice, with no detail, when the host's error carries no message", async () => {
     const upload = uploadPickedFile(pdf(), {
       requestGrant: async () => {
         throw new Error("");
       },
     });
 
-    await expect(upload).rejects.toThrow(
-      /re-add the Pipelex connector.*to your message instead\.$/,
-    );
+    await expect(upload).rejects.toThrow(/Pick the file again;.*to your message instead\.$/);
   });
 
   it("relays storage's refusal as the SDK words it", async () => {
