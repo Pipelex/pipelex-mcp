@@ -1,6 +1,11 @@
 # Changelog
 
-## [Unreleased]
+## [0.19.0] - 2026-09-24
+
+### Highlights
+
+- **A method that takes a file runs from the method view alone.** A file picked in the console's run form now goes straight to Pipelex storage, up to 50 MiB, instead of being dropped. Existing ChatGPT installations get it once the Pipelex MCP is removed and added again.
+- **The README is the front page.** What each tool does, how to register the workshop in each host and how to develop this repository now live in `docs/`, one click from a README short enough to read.
 
 ### Changed
 
