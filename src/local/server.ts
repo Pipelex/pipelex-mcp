@@ -31,7 +31,7 @@ export const LOCAL_SERVER_INSTRUCTIONS = [
   "The usual flow: `mthds_list_methods` to find a saved method, `mthds_validate`,",
   "`mthds_inputs_template` and fill it, `mthds_prepare_inputs`, `mthds_run`, then",
   "`mthds_run_status` and `mthds_run_results` with the run id, and finally `mthds_show_images`",
-  "or `mthds_download_artifacts` for the files the run produced.",
+  "to see a picture it produced, or `mthds_download_artifacts` to save its output and files to disk.",
   "`mthds_codegen` turns a method into typed code for the project you are in, and",
   "`mthds_save_method` and `mthds_get_method` push a bundle to the catalog and pull one back.",
   "Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`,",

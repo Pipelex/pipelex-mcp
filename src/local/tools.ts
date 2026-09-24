@@ -430,23 +430,29 @@ export const mthdsShowImagesTool = defineTool({
 });
 
 /**
- * Workshop-only: it writes a run's produced files under the server's working
- * directory. The console has no working directory and never writes a file (its
- * users download run outputs from the app's UI), so there it would have
- * nowhere to save.
+ * Workshop-only: it writes a completed run — its main output and the files the
+ * output references — under the server's working directory. The console has no
+ * working directory and never writes a file (its users download run outputs
+ * from the app's UI), so there it would have nowhere to save.
+ *
+ * The description leads with the output because that is what a model asked to
+ * "save the results" is looking for, and the tool's name says "artifacts": a
+ * model that does not find it retypes the output with its own file tool, which
+ * costs output tokens in proportion to the result and can alter it silently.
  */
 export const mthdsDownloadArtifactsTool = defineTool({
   name: "mthds_download_artifacts",
   description:
-    "Save the files a completed MTHDS run produced (images, PDFs, documents — anything its main output references as a pipelex-storage:// URI) to disk, under the directory this server was started in. " +
-    "Pass the run id from mthds_run; each reference is resolved to a fresh download link through the Pipelex API, so this works days after the run, unlike the presigned public_url links in mthds_run_results, which expire within the hour. " +
-    "Call it once the run is COMPLETED (a running run has nothing to save yet; a failed run produces no files). " +
-    "Optionally pass dir, a subdirectory relative to the working directory, to save into (created if missing). " +
+    "Save a completed MTHDS run to disk: its main output as main_stuff.json, exactly as the API returned it, and every file the output references (images, PDFs, documents — its pipelex-storage:// URIs). " +
+    "Use it whenever the user wants a run's result kept or delivered as a file: never retype an output into a file yourself. " +
+    "Pass the run id from mthds_run; each file reference is resolved to a fresh download link through the Pipelex API, so this works days after the run, unlike the presigned public_url links in mthds_run_results, which expire within the hour. " +
+    "Call it once the run is COMPLETED (a running run has nothing to save yet; a failed run produces nothing). " +
+    'Everything lands under runs/<run_id>/ in the directory this server was started in, unless you pass dir (relative to that directory; "." for the directory itself). ' +
     "Existing files are never overwritten — a name collision gets a numeric suffix. Report the saved paths to the user.",
   inputSchema: mthdsDownloadArtifactsInputSchema,
   outputSchema: mthdsDownloadArtifactsOutputSchema,
   annotations: {
-    title: "Save MTHDS run artifacts to disk",
+    title: "Save an MTHDS run to disk",
     // It writes files under the working directory.
     readOnlyHint: false,
     destructiveHint: false,
