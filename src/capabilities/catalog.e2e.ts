@@ -17,6 +17,7 @@ import {
   FORBIDDEN_CATALOG_KEYS,
   findForbiddenKeys,
   liveApiConfig,
+  searchedAtHint,
 } from "./e2e-support.js";
 
 // No `client` seam: this is the real PipelexApiClient talking to the real API.
@@ -104,7 +105,7 @@ describe("mthds_list_methods (live)", () => {
       `no row named "${FIXTURE_METHOD_NAME}" in ANY page of the server-side query — the walk followed ` +
         "the cursor to the end, so this is a real miss and not a sunk fixture. Seed it with " +
         "`make seed-e2e-fixture`, and check the API key belongs to the organization holding it " +
-        "(the catalog is org-scoped)",
+        `(the catalog is org-scoped). ${searchedAtHint(context.baseUrl)}`,
     ).toBeDefined();
 
     // Not merely "a string": the platform recomputes `description` from the

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **The live targets read their own `PIPELEX_E2E_BASE_URL` and `PIPELEX_E2E_API_KEY` (Breaking, for contributors)**: `make smoke`, `make test-e2e`, `make test-e2e-run`, `make seed-e2e-fixture` and `make test-all` used to take `PIPELEX_BASE_URL` and `PIPELEX_API_KEY` from the shell first, the names every other tool shares. A shell profile exporting the production pair for other tools therefore sent `make test-e2e` to production, where no fixture is seeded, and every by-id test failed with a fixture miss that looked like API drift. They now read a pair of their own, from the make command line, then `.env`, then the shell, with the URL defaulting to `https://api-dev.pipelex.com` as before. The preflight line says where each value came from, a fixture miss names the URL it searched, and `PIPELEX_BASE_URL=…` on a live target's command line is refused rather than silently ignored. Add `PIPELEX_E2E_API_KEY=<the dev key>` to your `.env`; the old `PIPELEX_API_KEY` line stays, since the console still reads it.
+
 ### Fixed
 
 - **The console's run form keeps a file you pick**: A file-bearing input in the method view's run form (a PDF, say) used to open the file dialog and then drop the file, so the field stayed empty and Run stayed disabled. The form now asks for a one-time upload grant through the new app-only tool `pipelex_request_upload` and sends the file straight from the browser to Pipelex storage, so a method taking a file runs from the view alone, files up to 50 MiB are accepted, and a failed upload is said under the form. The console's instructions no longer tell the assistant that it uploads nothing but chat attachments, and point a user who holds a file but no URL at the form. Remove and re-add a ChatGPT connector to pick up the new tool: until then ChatGPT refuses the form's call from its stored copy of the tool list, and the form tells the user to re-add it, then suggests pasting a link to the file or attaching it to a message instead.
