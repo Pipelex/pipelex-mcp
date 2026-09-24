@@ -1,5 +1,5 @@
-import { RejectedAssetError } from "@pipelex/sdk/upload";
-import type { UploadGrant, UploadWithGrantOptions } from "@pipelex/sdk/upload";
+import { RejectedAssetError, UploadTransportError } from "@pipelex/sdk/upload";
+import type { UploadGrant } from "@pipelex/sdk/upload";
 import { describe, expect, it } from "vitest";
 
 import { UPLOAD_GRANT_META_KEY } from "../capabilities/upload-grant-shape.js";
@@ -7,7 +7,6 @@ import {
   UploadFailure,
   clearChangedFields,
   uploadPickedFile,
-  uploadTimeoutMs,
   valueAtFieldId,
   withoutField,
 } from "./run-graph-upload.js";
@@ -33,7 +32,7 @@ function pdf(size = 125, name = "report.pdf", type = "application/pdf"): File {
 describe("uploadPickedFile", () => {
   it("asks for a grant with the file's name, type and size, sends it, and returns the reference", async () => {
     const requests: GrantRequest[] = [];
-    const sent: { grant: UploadGrant; file: Blob; options: UploadWithGrantOptions }[] = [];
+    const sent: { grant: UploadGrant; file: Blob; rest: unknown[] }[] = [];
     const file = pdf();
 
     const uploaded = await uploadPickedFile(file, {
@@ -41,8 +40,8 @@ describe("uploadPickedFile", () => {
         requests.push(request);
         return granted;
       },
-      send: async (grant, blob, options) => {
-        sent.push({ grant, file: blob, options });
+      send: async (grant, blob, ...rest: unknown[]) => {
+        sent.push({ grant, file: blob, rest });
         return { uri: grant.uri };
       },
     });
@@ -53,8 +52,8 @@ describe("uploadPickedFile", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]?.grant).toEqual(GRANT);
     expect(sent[0]?.file).toBe(file);
-    // The SDK sets no timeout of its own, so the view must bound the PUT.
-    expect(sent[0]?.options.signal).toBeInstanceOf(AbortSignal);
+    // The SDK bounds the PUT itself, so the view passes no timer of its own.
+    expect(sent[0]?.rest).toEqual([]);
     expect(uploaded).toEqual({ url: GRANT.uri, filename: "report.pdf", maxBytes: 1_000 });
   });
 
@@ -248,24 +247,41 @@ describe("uploadPickedFile", () => {
     await expect(upload).rejects.toThrow("this grant was already used");
   });
 
-  it("says a stalled upload timed out", async () => {
+  it("says a stalled upload timed out, in words for the person rather than the SDK's", async () => {
+    // The SDK's own time limit, worded for a caller holding the grant.
+    const timeout = new UploadTransportError(
+      'Upload of "report.pdf" did not finish within the 60.001 s allowed, so whether storage stored the file is unknown. ' +
+        "On a slow link, pass a longer timeoutMs. Retrying with the same grant before it expires at " +
+        "2026-09-23T15:00:00Z either stores the file or reports the grant as used, and then the grant's uri already names the file.",
+      { code: "timeout" },
+    );
+
+    const failure = await uploadPickedFile(pdf(), {
+      requestGrant: async () => granted,
+      send: async () => {
+        throw timeout;
+      },
+    }).catch((err: unknown) => err);
+
+    expect(failure).toBeInstanceOf(UploadFailure);
+    expect((failure as Error).message).toBe(
+      'The upload of "report.pdf" timed out. Try again, or pick a smaller file.',
+    );
+  });
+
+  it("relays a transport failure other than a timeout as the SDK words it", async () => {
     const upload = uploadPickedFile(pdf(), {
       requestGrant: async () => granted,
       send: async () => {
-        throw new DOMException("The operation timed out.", "TimeoutError");
+        throw new UploadTransportError(
+          'Upload of "report.pdf" failed at storage (503 SlowDown): please reduce your request rate.',
+          { status: 503, code: "server_error" },
+        );
       },
     });
 
-    await expect(upload).rejects.toThrow('The upload of "report.pdf" timed out after 61 seconds');
-  });
-});
-
-describe("uploadTimeoutMs", () => {
-  it("gives a minute to start and a second per 128 KiB", () => {
-    expect(uploadTimeoutMs(0)).toBe(60_000);
-    expect(uploadTimeoutMs(131_072)).toBe(61_000);
-    // The platform's 50 MiB cap: 400 seconds on top of the minute.
-    expect(uploadTimeoutMs(50 * 1024 * 1024)).toBe(460_000);
+    await expect(upload).rejects.toThrow(UploadFailure);
+    await expect(upload).rejects.toThrow("503 SlowDown");
   });
 });
 

@@ -1,5 +1,5 @@
-import { uploadWithGrant } from "@pipelex/sdk/upload";
-import type { GrantedUpload, UploadGrant, UploadWithGrantOptions } from "@pipelex/sdk/upload";
+import { UploadTransportError, uploadWithGrant } from "@pipelex/sdk/upload";
+import type { GrantedUpload, UploadGrant } from "@pipelex/sdk/upload";
 
 import { UPLOAD_GRANT_META_KEY, narrowUploadGrant } from "../capabilities/upload-grant-shape.js";
 
@@ -49,11 +49,7 @@ export interface UploadPickedFileDeps {
   /** Calls `pipelex_request_upload`. */
   requestGrant: (request: GrantRequest) => Promise<GrantToolResponse>;
   /** Sends the file with the grant; the SDK's `uploadWithGrant` unless a test injects one. */
-  send?: (
-    grant: UploadGrant,
-    file: Blob,
-    options: UploadWithGrantOptions,
-  ) => Promise<GrantedUpload>;
+  send?: (grant: UploadGrant, file: Blob) => Promise<GrantedUpload>;
   /**
    * The upload cap a previous grant reported, when there was one. A file over it
    * is refused before any call; the first file of a session has no cap to check
@@ -154,17 +150,6 @@ export class UploadFailure extends Error {
   }
 }
 
-/**
- * The time the PUT is given before it is abandoned: a minute to start, plus one
- * second per 128 KiB, which is a floor of about 1 Mbit/s. The SDK sets no
- * timeout of its own on `uploadWithGrant`, so without one a stalled upload
- * would leave the field busy forever. The grant's own expiry does not bound it:
- * storage checks the signature when the request starts, not when it ends.
- */
-export function uploadTimeoutMs(size: number): number {
-  return 60_000 + Math.ceil(size / 131_072) * 1_000;
-}
-
 export async function uploadPickedFile(
   file: File,
   deps: UploadPickedFileDeps,
@@ -203,15 +188,21 @@ export async function uploadPickedFile(
     );
   }
 
-  const timeoutMs = uploadTimeoutMs(file.size);
+  // The SDK bounds the PUT itself (a minute plus a second per 128 KiB), so a
+  // stalled upload cannot leave the field busy forever. The grant's own expiry
+  // would not: storage checks the signature when the request starts, not when
+  // it ends.
   const send = deps.send ?? uploadWithGrant;
   let stored: GrantedUpload;
   try {
-    stored = await send(grant, file, { signal: AbortSignal.timeout(timeoutMs) });
+    stored = await send(grant, file);
   } catch (err) {
-    if (isNamedError(err, "TimeoutError")) {
+    // The SDK's own timeout message is written for a developer holding the
+    // grant (a longer `timeoutMs`, a retry with the same grant), neither of
+    // which the person at the form can do.
+    if (err instanceof UploadTransportError && err.code === "timeout") {
       throw new UploadFailure(
-        `The upload of "${file.name}" timed out after ${Math.round(timeoutMs / 1_000)} seconds. Try again, or pick a smaller file.`,
+        `The upload of "${file.name}" timed out. Try again, or pick a smaller file.`,
       );
     }
     // The SDK's refusals already name the file and say what to do.
@@ -278,13 +269,6 @@ function hostRefusalMessage(filename: string, err: unknown): string {
 
 function messageOf(err: unknown, fallback: string): string {
   return err instanceof Error && err.message !== "" ? err.message : fallback;
-}
-
-// `AbortSignal.timeout` aborts with a `DOMException` named `TimeoutError`, and
-// the SDK rethrows a caller's abort reason unwrapped. A DOMException is not an
-// `Error` subclass in every runtime, so the name is read directly.
-function isNamedError(err: unknown, name: string): boolean {
-  return typeof err === "object" && err !== null && (err as { name?: unknown }).name === name;
 }
 
 function formatBytes(bytes: number): string {
