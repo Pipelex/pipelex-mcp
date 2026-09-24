@@ -101,9 +101,7 @@ export async function uploadPickedFile(
       size: file.size,
     });
   } catch (err) {
-    throw new UploadFailure(
-      `Could not ask for an upload grant for "${file.name}": ${messageOf(err, "the console did not answer.")}`,
-    );
+    throw new UploadFailure(hostRefusalMessage(file.name, err));
   }
 
   if (response.structuredContent.status !== "ok") {
@@ -135,6 +133,26 @@ export async function uploadPickedFile(
   }
 
   return { url: stored.uri, filename: file.name, maxBytes: grant.max_bytes };
+}
+
+/**
+ * The call to the grant tool threw, so the host refused it before any result
+ * came back — a different failure from the console answering `status: "error"`.
+ * Its known cause is a connector whose stored tool list predates the tool:
+ * ChatGPT answers `MCP error -32000: MCP Resource not found` from its own copy
+ * of the list, and removing and re-adding the connector fixed it when measured
+ * on 2026-09-24, which is the state of every install a release first reaches.
+ * So the message leads with that fix, then names the ways in that need no
+ * upload, and keeps the host's own words last for whoever reports it.
+ */
+function hostRefusalMessage(filename: string, err: unknown): string {
+  const detail = messageOf(err, "");
+  return (
+    `Could not upload "${filename}": this app could not store the file here. ` +
+    "Remove and re-add the Pipelex connector in your chat app's settings, then pick the file again. " +
+    "You can also paste a link to the file into this field, or on ChatGPT attach the file to your message instead." +
+    (detail === "" ? "" : ` (${detail})`)
+  );
 }
 
 function messageOf(err: unknown, fallback: string): string {

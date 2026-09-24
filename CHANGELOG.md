@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- **The console's run form keeps a file you pick**: A file-bearing input in the method view's run form (a PDF, say) used to open the file dialog and then drop the file, so the field stayed empty and Run stayed disabled. The form now asks for a one-time upload grant through the new app-only tool `pipelex_request_upload` and sends the file straight from the browser to Pipelex storage, so a method taking a file runs from the view alone, files up to 50 MiB are accepted, and a failed upload is said under the form. Remove and re-add a ChatGPT connector to pick up the new tool.
+- **The console's run form keeps a file you pick**: A file-bearing input in the method view's run form (a PDF, say) used to open the file dialog and then drop the file, so the field stayed empty and Run stayed disabled. The form now asks for a one-time upload grant through the new app-only tool `pipelex_request_upload` and sends the file straight from the browser to Pipelex storage, so a method taking a file runs from the view alone, files up to 50 MiB are accepted, and a failed upload is said under the form. Remove and re-add a ChatGPT connector to pick up the new tool: until then ChatGPT refuses the form's call from its stored copy of the tool list, and the form tells the user to re-add it, then suggests pasting a link to the file or attaching it to a message instead.
 
 ## [0.18.0] - 2026-09-24
 

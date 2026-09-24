@@ -94,6 +94,9 @@ describe("uploadPickedFile", () => {
     await expect(upload).rejects.toThrow(
       'Could not upload "report.pdf": Declared file size exceeds the 50 MiB limit.',
     );
+    // The console answered, so the connector is fine: re-adding it fixes nothing.
+    const failure: unknown = await upload.catch((err: unknown) => err);
+    expect((failure as Error).message).not.toContain("re-add");
   });
 
   it("refuses to send when the answer carries no usable grant", async () => {
@@ -112,15 +115,40 @@ describe("uploadPickedFile", () => {
     expect(sent).toBe(false);
   });
 
-  it("reports a tool call the host could not make", async () => {
+  it("tells the user to re-add the connector when the host refuses the call", async () => {
+    let sent = false;
+
+    const upload = uploadPickedFile(pdf(), {
+      // What ChatGPT answered, from its stored tool list, on a connector added
+      // before the tool existed.
+      requestGrant: async () => {
+        throw new Error("MCP error -32000: MCP Resource not found");
+      },
+      send: async (grant) => {
+        sent = true;
+        return { uri: grant.uri };
+      },
+    });
+
+    await expect(upload).rejects.toThrow(UploadFailure);
+    await expect(upload).rejects.toThrow(
+      'Could not upload "report.pdf": this app could not store the file here. ' +
+        "Remove and re-add the Pipelex connector in your chat app's settings, then pick the file again. " +
+        "You can also paste a link to the file into this field, or on ChatGPT attach the file to your message instead. " +
+        "(MCP error -32000: MCP Resource not found)",
+    );
+    expect(sent).toBe(false);
+  });
+
+  it("gives the same advice when the host's refusal carries no message", async () => {
     const upload = uploadPickedFile(pdf(), {
       requestGrant: async () => {
-        throw new Error("Tool not found: pipelex_request_upload");
+        throw new Error("");
       },
     });
 
     await expect(upload).rejects.toThrow(
-      'Could not ask for an upload grant for "report.pdf": Tool not found: pipelex_request_upload',
+      /re-add the Pipelex connector.*to your message instead\.$/,
     );
   });
 
