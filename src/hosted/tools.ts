@@ -96,8 +96,20 @@ import {
   validateMthds,
 } from "../capabilities/validate.js";
 import type { MthdsValidateInput, ValidationContext } from "../capabilities/validate.js";
+import {
+  buildUploadGrantContext,
+  pipelexRequestUploadInputSchema,
+  pipelexRequestUploadOutputSchema,
+  requestPipelexUpload,
+  requestUploadToolResult,
+} from "../capabilities/upload-grant.js";
+import type {
+  PipelexRequestUploadInput,
+  UploadGrantContext,
+} from "../capabilities/upload-grant.js";
 import type { ApiContextPatch } from "../capabilities/shared.js";
 import type { ToolDefinition } from "../tool-definition.js";
+import { APP_BUCKET_REGIONAL_ORIGINS, UPLOAD_CONNECT_DOMAINS } from "./app-buckets.js";
 
 /**
  * The capability contexts the console's tools run over — one per capability
@@ -113,6 +125,7 @@ export interface HostedToolContexts {
   run: RunContext;
   images: ImagesContext;
   attachments: AttachmentsContext;
+  uploadGrant: UploadGrantContext;
 }
 
 /**
@@ -133,6 +146,7 @@ export function buildHostedToolContexts(env: NodeJS.ProcessEnv = process.env): H
     run: { ...buildRunContext(env), viewsAvailable: true, artifactDownloadAvailable: false },
     images: { ...buildImagesContext(env), artifactDownloadAvailable: false },
     attachments: buildAttachmentsContext(env),
+    uploadGrant: buildUploadGrantContext(env),
   };
 }
 
@@ -165,6 +179,9 @@ export function patchHostedApiContexts(
     // The attachment ingest uploads to Pipelex storage, so the signed-in
     // caller's own identity is what funds it — the console holds no key.
     attachments: { ...base.attachments, ...patch },
+    // The grant is minted for the signed-in caller's organization, so the
+    // stored file belongs to the org that will run the method.
+    uploadGrant: { ...base.uploadGrant, ...patch },
   };
 }
 
@@ -254,6 +271,13 @@ export const mthdsValidateTool = defineHostedTool({
     component: "run-graph",
     description:
       "Interactive run graph of the method (the dry-run graph from validation), plus an input form to run it.",
+    csp: {
+      // The form sends a picked file straight to the app bucket with an
+      // upload grant (pipelex_request_upload), so the view must be allowed to
+      // connect to it — nothing else. `./app-buckets.ts` says why both host
+      // forms are listed.
+      connectDomains: UPLOAD_CONNECT_DOMAINS,
+    },
   },
   _meta: {
     "openai/toolInvocation/invoking": "Validating MTHDS files...",
@@ -432,11 +456,7 @@ export const mthdsRunTool = defineHostedTool({
       // per-env storage buckets — a tight host allowlist, never a
       // wildcard. Anything else in main_stuff stays CSP-blocked and the
       // view falls back to the text preview.
-      resourceDomains: [
-        "https://pipelex-app-dev.s3.us-west-2.amazonaws.com",
-        "https://pipelex-app-staging.s3.us-west-2.amazonaws.com",
-        "https://pipelex-app-prod.s3.us-west-2.amazonaws.com",
-      ],
+      resourceDomains: APP_BUCKET_REGIONAL_ORIGINS,
     },
   },
   _meta: {
@@ -515,5 +535,46 @@ export const mthdsShowImagesTool = defineHostedTool({
   _meta: {
     "openai/toolInvocation/invoking": "Fetching the run's images...",
     "openai/toolInvocation/invoked": "Images fetched.",
+  },
+});
+
+/**
+ * Console-only and app-only: the `run-graph` view's input form calls it when
+ * the user picks a file for a file-bearing input, then sends the file itself
+ * with the grant it gets back. The model never needs it, so `ui.visibility`
+ * keeps it off the model's tool list on a host that honours the MCP Apps
+ * standard; the description is written for a host that does not, and sends a
+ * chat attachment to the tool that takes one.
+ *
+ * Born `pipelex_*` rather than `mthds_*`: the server split
+ * (`wip/mcp-server-split/design.md`, D2) renames every console tool with the
+ * `pipelex_` prefix, and a tool added before that release takes its final name
+ * from the start rather than being renamed in it (ruled 2026-09-23).
+ */
+export const pipelexRequestUploadTool = defineHostedTool({
+  name: "pipelex_request_upload",
+  description:
+    "Issue a one-time upload grant for a file the user picked in the run form of this console's method view. " +
+    "The view calls this itself and then sends the file straight to Pipelex storage; the grant goes to the view and never into the conversation. " +
+    "Do not call it from the conversation: it uploads nothing on its own. " +
+    "For a file the user attached in the chat, call mthds_upload_attachments instead.",
+  inputSchema: pipelexRequestUploadInputSchema,
+  outputSchema: pipelexRequestUploadOutputSchema,
+  annotations: {
+    title: "Request an upload grant",
+    // It mints a capability to write one new object; it overwrites nothing and
+    // reaches nothing outside the Pipelex API.
+    readOnlyHint: false,
+    destructiveHint: false,
+    openWorldHint: false,
+  },
+  async handler(input: PipelexRequestUploadInput, contexts: HostedToolContexts) {
+    return requestUploadToolResult(await requestPipelexUpload(input, contexts.uploadGrant));
+  },
+  _meta: {
+    // The MCP Apps standard's way to keep a tool for the view alone; OpenAI's
+    // Apps SDK reference names it the preferred form over its own
+    // `openai/visibility` and `openai/widgetAccessible` keys.
+    ui: { visibility: ["app"] },
   },
 });

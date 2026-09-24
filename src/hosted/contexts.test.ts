@@ -231,7 +231,7 @@ describe("the console's User-Agent", () => {
     // Every member of the console's context set, so a context added to it later
     // is covered without editing this list.
     const all = Object.values(contexts);
-    expect(all).toHaveLength(8);
+    expect(all).toHaveLength(9);
     for (const context of all) {
       expect(context.appInfo?.().details).toEqual(["console", "host=openai"]);
     }

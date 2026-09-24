@@ -486,6 +486,38 @@ describe("classifyError", () => {
     expect(error.hint).toBe("Pass a qualified domain.pipe_code.");
   });
 
+  it("classifies a 413 at the declared size only on a route that declared the texture", () => {
+    const tooLarge = () =>
+      new ApiResponseError(
+        "HTTP 413",
+        `${DEFAULT_API_URL}/v1/upload/grant`,
+        413,
+        "Payload Too Large",
+        "{}",
+        "PayloadTooLargeError",
+        "Declared file size exceeds the 50 MiB limit.",
+        undefined, // validationErrors
+        "payload_too_large",
+      );
+
+    const declared = classifyError(tooLarge(), {
+      route: "/v1/upload/grant",
+      tooLarge: { location: "size", hint: "Pick a smaller file." },
+    });
+    expect(declared).toEqual({
+      class: "input_domain",
+      location: "size",
+      message: "Declared file size exceeds the 50 MiB limit.",
+      hint: "Pick a smaller file.",
+      retryable: false,
+    });
+
+    // Elsewhere a 413 keeps the unexpected-status arm it always had.
+    const undeclared = classifyError(tooLarge(), { route: "/v1/validate" });
+    expect(undeclared.class).toBe("runtime");
+    expect(undeclared.hint).toBe("The Pipelex API returned HTTP 413.");
+  });
+
   it("names the route in the 404 hint", () => {
     const error = classifyError(
       new ApiResponseError(

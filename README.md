@@ -58,7 +58,7 @@ one capability core**:
   having the model hand-copy their contents.
 
 Both servers register the same MCP tools, with identical names, schemas, and
-contracts — apart from the per-shell tools marked below: one on the console,
+contracts — apart from the per-shell tools marked below: two on the console,
 three on the workshop.
 
 | Tool | What it does |
@@ -69,6 +69,7 @@ three on the workshop.
 | `mthds_codegen` | Generate typed code for a method's concepts — TypeScript (`ts-zod`) or Python (`python-pydantic`, `python-structures`) — stamped and locked, to write verbatim into the project. On the local workshop, `output_dir` writes the tree straight to disk. |
 | `mthds_prepare_inputs` | Turn filled inputs run-ready: upload file-bearing values to Pipelex storage and rewrite them to `pipelex-storage://` (workshop uploads; console is pass-through only). |
 | `mthds_upload_attachments` | **Hosted console only.** Turn a file the user attached in the chat into a run-ready `pipelex-storage://` reference (ChatGPT only — see [Chat attachments](#chat-attachments-chatgpt-only)). |
+| `pipelex_request_upload` | **Hosted console only, called by the method view.** Issue a one-time upload grant for a file the user picked in the view's run form, which then sends the file straight to Pipelex storage. Hidden from the model on hosts that honour the MCP Apps `ui.visibility` key. |
 | `mthds_run` | Start a durable run on the hosted Pipelex API; returns a durable `run_id` immediately. |
 | `mthds_run_status` | Check a durable run's coarse lifecycle state by `run_id`. |
 | `mthds_run_results` | Fetch a durable run's terminal outcome by `run_id`, and list for free which of its stored files look like images. Never returns a picture. |
@@ -82,7 +83,9 @@ turns on something the other shell does not have. `mthds_upload_attachments`
 takes a host-substituted attachment reference, and the host gates that
 substitution on the declared JSON Schema, so on the workshop the tool would be
 *structurally
-unreachable* rather than merely unused. `mthds_download_artifacts` writes a run
+unreachable* rather than merely unused. `pipelex_request_upload` is called by
+the `run-graph` view's input form, and the workshop has no views.
+`mthds_download_artifacts` writes a run
 under the server's working directory, which the console does not have — its
 users download run outputs from the app's UI. The invariant that still holds is
 that **no tool name means different things on the two shells.**
@@ -299,7 +302,8 @@ Three things to know:
   `POST /v1/upload` takes a base64 body behind an AWS API Gateway HTTP API, whose
   10 MiB request quota divides by base64's 4/3 inflation to ~7.5 MiB decoded.
   (The app-level 50 MiB `MAX_UPLOAD_MIB` is unreachable through the public
-  gateway — don't quote it.) ChatGPT hands over much larger files happily, so
+  gateway — don't quote it for an attachment. A file picked in the method
+  view's run form never crosses the gateway, and up to 50 MiB it is accepted.) ChatGPT hands over much larger files happily, so
   expect to meet this; the refusal fires before any bytes are fetched and names
   the limit.
 - **ChatGPT only.** claude.ai injects no file reference into a connector call, and
@@ -476,7 +480,10 @@ tool result's view-only `_meta` channel for the `run-graph` view — never
 `structuredContent`, so the model never pays their tokens. On the hosted
 console that view renders the method graph and, on a runnable verdict that
 carries both artifacts, an input form for the main pipe (its fields derived
-from the wire descriptor) whose Run button starts the method from the view.
+from the wire descriptor) whose Run button starts the method from the view. A
+file-bearing input takes a file the user picks: the form asks for a one-time
+upload grant and sends the file straight from the browser to Pipelex storage,
+so a method taking a PDF runs from the view alone.
 `available_view_specs` is how the model learns which views exist to surface;
 `include_graph` defaults to true. The MCP `content` text
 carries the human-readable summary. The three source forms are **mutually
@@ -678,6 +685,33 @@ success is a produced verdict**: `status: "ok"` with `is_valid: false`, the
 successful `uploads` returned alongside per-item errors rather than discarded.
 No Skybridge view — the returned URIs are small structured data the model reads
 directly, repeated in the `content` summary.
+
+### `pipelex_request_upload` — hosted console only, called by the view
+
+```ts
+// input — the file's description, never its bytes
+{ filename: string; content_type?: string; size: number }
+
+// structuredContent — the grant's URL and signed headers ride _meta.upload_grant
+{
+  status: "ok" | "error";
+  uri?: string;          // the pipelex-storage:// reference, once the file is sent
+  expires_at?: string;   // after which storage refuses the upload
+  max_bytes?: number;    // the upload cap (50 MiB)
+  errors?: ToolError[];
+}
+```
+
+The `run-graph` view's input form calls it when the user picks a file for a
+file-bearing input, then sends the file itself with `@pipelex/sdk/upload`'s
+`uploadWithGrant`: the bytes go from the browser straight to the app bucket,
+crossing neither the conversation, the host's relay, this server nor the API
+gateway, which is why a file up to 50 MiB is accepted here while an attachment
+stops at 7 MiB. The grant is a one-time, create-only permission to write one
+object, so it rides the view-only `_meta` channel and never `structuredContent`.
+The tool is declared `_meta.ui.visibility: ["app"]`, so a host that honours the
+MCP Apps standard never offers it to the model. See `SPEC.md` → "Run-Form Upload
+Scope".
 
 ### `mthds_run` / `mthds_run_status` / `mthds_run_results`
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **The console's run form keeps a file you pick**: A file-bearing input in the method view's run form (a PDF, say) used to open the file dialog and then drop the file, so the field stayed empty and Run stayed disabled. The form now asks for a one-time upload grant through the new app-only tool `pipelex_request_upload` and sends the file straight from the browser to Pipelex storage, so a method taking a file runs from the view alone, files up to 50 MiB are accepted, and a failed upload is said under the form. The console's instructions no longer tell the assistant that it uploads nothing but chat attachments, and point a user who holds a file but no URL at the form. Remove and re-add a ChatGPT connector to pick up the new tool: until then ChatGPT refuses the form's call from its stored copy of the tool list, and the form tells the user to re-add it, then suggests pasting a link to the file or attaching it to a message instead.
+
+- **The run form no longer says the assistant is fetching the results**: When a run started from the method view's form completed, the line under the form said the assistant was fetching the results. The view does hand the conversation back with a prompt, but claude.ai only drafts it for the user to send and ChatGPT does nothing with it, so the line claimed something that had not happened. It now says the run completed and asks the user to ask the assistant for the results.
+
 ## [0.18.0] - 2026-09-24
 
 ### Highlights

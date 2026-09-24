@@ -18,6 +18,7 @@ import {
   mthdsShowImagesTool,
   mthdsUploadAttachmentsTool,
   mthdsValidateTool,
+  pipelexRequestUploadTool,
 } from "./tools.js";
 import type { HostedToolContexts, HostedToolDefinition } from "./tools.js";
 
@@ -51,9 +52,11 @@ export const HOSTED_SERVER_INSTRUCTIONS = [
   "mt_ id, or a saved method may fit the task; choose by name and description, then pass the id on.",
   "When the user attaches a file to the conversation, `mthds_upload_attachments` turns it into a",
   "run-ready pipelex-storage:// reference to fill into the inputs.",
-  "This console uploads nothing else: `mthds_prepare_inputs` passes http(s) URLs and",
-  "pipelex-storage:// references through and refuses a value that would need an upload.",
-  "A valid `mthds_validate` verdict also shows the user an interactive graph of the method.",
+  "`mthds_prepare_inputs` passes http(s) URLs and pipelex-storage:// references through and",
+  "refuses a value that would need an upload.",
+  "A valid `mthds_validate` verdict also shows the user an interactive graph of the method, and a",
+  "runnable one a run form whose file inputs take a file picked from the user's device: point a",
+  "user who holds a file but no URL there.",
   "`mthds_run` executes on the hosted Pipelex API and spends inference credit.",
   "A picture from `mthds_show_images` stays in the conversation for every turn that follows,",
   "so show one when it is asked for, not by reflex.",
@@ -152,6 +155,13 @@ export function createHostedServer(
       )
       .registerTool(hostedToolConfig(mthdsShowImagesTool), (input, extra) =>
         mthdsShowImagesTool.handler(
+          input,
+          contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
+        ),
+      )
+      // App-only: the run-graph view calls it, the model never does.
+      .registerTool(hostedToolConfig(pipelexRequestUploadTool), (input, extra) =>
+        pipelexRequestUploadTool.handler(
           input,
           contextsForRequest(contexts, extra.authInfo, extra.requestInfo),
         ),
