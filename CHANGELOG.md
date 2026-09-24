@@ -1,6 +1,11 @@
 # Changelog
 
-## [Unreleased]
+## [0.18.0] - 2026-09-24
+
+### Highlights
+
+- **A run can be saved whole.** `mthds_download_artifacts` now writes the run's full output as `main_stuff.json` into a `runs/<run_id>/` folder of its own, and names every file after the output field it fills. Both of those changes break callers that relied on the old defaults.
+- **Pipelex can see MCP traffic.** Every API call now names pipelex-mcp, the shell it came from and the AI host behind it, so usage through the MCP servers is counted as its own surface.
 
 ### Added
 
@@ -12,7 +17,6 @@
 - **`mthds_download_artifacts` saves into `runs/<run_id>/` by default (Breaking)**: With `dir` omitted, a run lands in its own folder under the working directory instead of in the working directory itself; pass `dir: "."` for the old behaviour.
 - **`mthds_download_artifacts` names each file after the field it fills (Breaking)**: A saved file is now named after where it sits in the run's output rather than after its storage key, so the picture at `$.rooms[3].staged_photo.url` is saved as `rooms-3-staged_photo.png` and an output that is one image as `main_stuff.png`; the storage key supplies only the extension. Each `artifacts` entry carries `found_at`, the paths in `main_stuff.json` where its reference sits, the first being the one that named the file, on a failed entry too, and the summary names each file's field beside its path. An output that repeats one reference lists only the first few paths and counts the rest in `found_at_omitted`, so the verdict stays bounded however often a file is used.
 - **`@pipelex/sdk` moves from 0.20.1 to 0.23.0**: 0.21.0 adds the `appInfo` option the client identification relies on and sends its own `User-Agent` on every request, and 0.23.0 brings the field-path file names and `found_at` the entry above describes; 0.22.0's upload grants serve browser pages and reach nothing here. `mthds` stays at `^0.25.0`: this server imports only `mthds/protocol`'s stored-source helpers, never constructs `MthdsApiClient`, and `@pipelex/sdk` 0.23.0 itself still depends on `mthds` `^0.25.0`, so moving it would install a second copy beside the SDK's.
-
 - **The hosted console's address is `https://mcp.pipelex.com/mcp`**: That is the console's production address and the one to register as a connector. The `alpic.live` address the README used to publish was a development one; it is gone from the README, from `docs/readme.html` and from the release skill's console leg.
 - **The README's get-started is generated, not written here**: It is a region between `<!-- onboarding: mcp-route -->` markers, replaced wholesale from `https://raw.githubusercontent.com/Pipelex/.github/main/onboarding/rendered/mcp-route.md`, so the words a newcomer reads first are the same ones every other Pipelex surface shows them. An edit inside those markers does not survive the next generation; the text is changed at its source. It sends a chatbot (ChatGPT, Claude) to the Pipelex MCP at `https://mcp.pipelex.com/mcp` and a coding agent (Claude Code, Codex) to the Pipelex plugin, never both, and ends by pointing at the host table below it. The page is reordered around it: the host table moves directly under the region as `## Which server, for which host`, names for each host the Pipelex plugin or the Pipelex MCP, coding agents first, and no longer lists Claude Cowork, Mistral Vibe or Cursor, whose registrations stay in the per-host setup section; what used to open the page — what the servers expose, the two deployments, the tool table — now follows under `## What this repository is`.
 - **The README says how to register the workshop in Mistral Vibe**: The host table's Mistral Vibe rows, whose cell read "pending Vibe's MCP mechanics", are gone, and the per-host registration section gains the `~/.vibe/config.toml` entry with the two things that bite: it has to be appended after every top-level setting, because a `[mcp_servers.env]` header pasted above one silently claims that setting as an environment variable of the server, and Vibe copies its whole configuration into every session log under `~/.vibe/logs/session/`, so the key lands there unredacted.
