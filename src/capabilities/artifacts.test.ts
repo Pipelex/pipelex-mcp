@@ -19,6 +19,7 @@ import type {
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  MAX_FOUND_AT_PATHS,
   artifactsToolResult,
   downloadMthdsArtifacts,
   validateArtifactsRequest,
@@ -351,6 +352,29 @@ describe("downloadMthdsArtifacts", () => {
       `- \`${report}\` (application/pdf, 4 B) ← \`$.nested[1].document.url\``,
     );
     expect(result.summary).toContain(await fs.realpath(root));
+  });
+
+  it("bounds the paths an entry lists, counting the rest, when the output repeats one reference", async () => {
+    const root = await makeTempDir();
+    const pages = Array.from({ length: MAX_FOUND_AT_PATHS + 5 }, () => ({
+      source: { url: PICTURE_URI },
+    }));
+    const { client } = fakeClient(completedState({ pages }), savingDownload);
+
+    const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
+
+    // One file, whatever the repetition: the first path named it and is kept,
+    // the list stops at the cap, and the count covers the rest.
+    const [entry] = result.structuredContent.artifacts ?? [];
+    expect(result.structuredContent.artifacts).toHaveLength(1);
+    expect(entry?.found_at).toEqual(
+      Array.from({ length: MAX_FOUND_AT_PATHS }, (_, index) => `$.pages[${index}].source.url`),
+    );
+    expect(entry?.found_at_omitted).toBe(5);
+    expect(entry?.path).toBe(path.join(RUN_DIR, "pages-0-source.png"));
+    expect(result.summary).toContain(
+      `← \`$.pages[0].source.url\` (and ${MAX_FOUND_AT_PATHS + 4} more)`,
+    );
   });
 
   it("creates a relative dir inside the working directory before the SDK writes into it", async () => {

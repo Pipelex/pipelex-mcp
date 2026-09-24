@@ -75,6 +75,17 @@ export const DEFAULT_RUNS_DIR = "runs";
  */
 const MAX_OUTPUT_NAME_ATTEMPTS = 10_000;
 
+/**
+ * How many of a reference's paths an entry lists. The SDK answers one path per
+ * occurrence, so an output that repeats one stored reference — every page of
+ * a split document pointing back at its source — would grow the verdict with
+ * every repetition, and the verdict is model-facing while the output it
+ * describes was written to disk precisely to stay out of the context. The
+ * first path is always kept, since it named the file; the rest are counted in
+ * `found_at_omitted`, and `main_stuff.json` holds every one of them.
+ */
+export const MAX_FOUND_AT_PATHS = 8;
+
 export const mthdsDownloadArtifactsInputSchema = {
   run_id: z
     .string()
@@ -92,7 +103,13 @@ const savedArtifactSchema = z.object({
   found_at: z
     .array(z.string())
     .describe(
-      'Every path in main_stuff.json at which the reference sits, $-rooted and in walk order ($.rooms[3].staged_photo.url, $["a key"].url) — the first one named the file.',
+      'Every path in main_stuff.json at which the reference sits, $-rooted and in walk order ($.rooms[3].staged_photo.url, $["a key"].url) — the first one named the file. Bounded — see found_at_omitted.',
+    ),
+  found_at_omitted: z
+    .number()
+    .optional()
+    .describe(
+      "Present when the reference sits at more paths than found_at lists: how many were left out. main_stuff.json holds them all.",
     ),
   path: z
     .string()
@@ -177,6 +194,8 @@ export interface SavedArtifactEntry {
   uri: string;
   /** Every `$`-rooted path in the main output where the reference sits; the first named the file. */
   found_at: string[];
+  /** How many further paths `found_at` leaves out; absent when it lists them all. */
+  found_at_omitted?: number;
   path?: string;
   content_type?: string | null;
   size?: number;
@@ -540,7 +559,7 @@ function projectItem(item: DownloadedArtifact, index: number, root: string): Sav
   if (item.error === null) {
     return {
       uri: item.uri,
-      found_at: item.found_at,
+      ...boundFoundAt(item.found_at),
       path: path.relative(root, item.path),
       content_type: item.content_type,
       size: item.size,
@@ -548,10 +567,20 @@ function projectItem(item: DownloadedArtifact, index: number, root: string): Sav
   }
   return {
     uri: item.uri,
-    found_at: item.found_at,
+    ...boundFoundAt(item.found_at),
     content_type: item.content_type,
     error: itemToolError(item.error, `artifacts[${index}].uri`),
   };
+}
+
+/** The first {@link MAX_FOUND_AT_PATHS} paths, and a count of the rest when there are any. */
+function boundFoundAt(
+  foundAt: readonly string[],
+): Pick<SavedArtifactEntry, "found_at" | "found_at_omitted"> {
+  const omitted = foundAt.length - MAX_FOUND_AT_PATHS;
+  return omitted > 0
+    ? { found_at: foundAt.slice(0, MAX_FOUND_AT_PATHS), found_at_omitted: omitted }
+    : { found_at: [...foundAt] };
 }
 
 // ── projections ─────────────────────────────────────────────────────
@@ -680,7 +709,8 @@ function completedSummary(
 function fieldOf(item: SavedArtifactEntry): string {
   const [first, ...others] = item.found_at;
   if (first === undefined) return `\`${item.uri}\``;
-  return others.length === 0 ? `\`${first}\`` : `\`${first}\` (and ${others.length} more)`;
+  const more = others.length + (item.found_at_omitted ?? 0);
+  return more === 0 ? `\`${first}\`` : `\`${first}\` (and ${more} more)`;
 }
 
 function formatBytes(bytes: number): string {

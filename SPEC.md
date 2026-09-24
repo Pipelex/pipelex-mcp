@@ -1017,7 +1017,8 @@ The structured output is:
   };
   artifacts?: Array<{                           // state=completed — one per storage reference, in discovery order; its length is the count walked. Also on a credential refused after some files were saved
     uri: string;                                // the pipelex-storage:// reference found in the output
-    found_at: string[];                         // every $-rooted path in main_stuff.json where the reference sits, in walk order; the first named the file — on both arms
+    found_at: string[];                         // the $-rooted paths in main_stuff.json where the reference sits, in walk order, at most `MAX_FOUND_AT_PATHS` (8); the first named the file — on both arms
+    found_at_omitted?: number;                  // how many further paths found_at leaves out; absent when it lists them all
     path?: string;                              // where it was saved, relative to the working directory — on success
     content_type?: string | null;               // the platform's content type from the reference; null when it has none
     size?: number;                              // bytes written

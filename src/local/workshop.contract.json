@@ -1931,7 +1931,11 @@
                   "items": {
                     "type": "string"
                   },
-                  "description": "Every path in main_stuff.json at which the reference sits, $-rooted and in walk order ($.rooms[3].staged_photo.url, $[\"a key\"].url) — the first one named the file."
+                  "description": "Every path in main_stuff.json at which the reference sits, $-rooted and in walk order ($.rooms[3].staged_photo.url, $[\"a key\"].url) — the first one named the file. Bounded — see found_at_omitted."
+                },
+                "found_at_omitted": {
+                  "description": "Present when the reference sits at more paths than found_at lists: how many were left out. main_stuff.json holds them all.",
+                  "type": "number"
                 },
                 "path": {
                   "description": "Where the file was saved, relative to the server's working directory — on success.",
