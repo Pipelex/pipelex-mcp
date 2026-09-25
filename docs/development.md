@@ -108,6 +108,6 @@ The two servers are released separately, each on its own track following [Semant
 | The workshop, `@pipelex/mcp` | `packages/workshop/package.json` | [`packages/workshop/CHANGELOG.md`](../packages/workshop/CHANGELOG.md) | `release/vX.Y.Z` | `vX.Y.Z` | an npm publish |
 | The console | `packages/console/package.json` | [`packages/console/CHANGELOG.md`](../packages/console/CHANGELOG.md) | `release/console-vX.Y.Z` | `console-vX.Y.Z` | an Alpic deploy |
 
-Up to and including 0.19.0 both servers shipped together at one version, tagged `vX.Y.Z`, and the workshop's changelog carries that joint history. `0.1.0` is the first tagged release.
+Up to and including 0.20.0 both servers shipped together at one version, tagged `vX.Y.Z`, and the workshop's changelog carries that joint history. `0.1.0` is the first tagged release.
 
 Merging a release pull request into `main` is what ships a version, of the one server its branch names: the release workflow reads each server's version at the merge commit, publishes the workshop to npm or deploys the console to Alpic when that server's version rose, and tags the commit with that server's tag. A release of one server never ships the other. The `/release` skill cuts a release and asks which server ships, and [`CLAUDE.md`](../CLAUDE.md#ci) describes the release workflow and its guards.
