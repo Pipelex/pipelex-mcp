@@ -290,6 +290,14 @@ function RunOutput({
           </p>
         )
       )}
+      {/* Said rather than left to a broken tile: a file with no fresh link
+          falls back to a link the CSP refuses. `useRunResults` is reading
+          the results again for the missing ones. */}
+      {results.linksPartial && (
+        <p className="mt-1 text-xs" style={{ color: mutedColor }}>
+          Some of this output&apos;s files could not be linked yet, so they may not show.
+        </p>
+      )}
     </div>
   );
 }

@@ -496,6 +496,14 @@ export interface RunResultsResult {
    * expires an hour after the run. See `freshStorageLinks`.
    */
   resolvedUrls?: Record<string, string>;
+  /**
+   * Set, and only ever `true`, when a request for those links failed or ran
+   * out of time, so some reference went without one that a later read may
+   * mint (rides `_meta.resolved_urls_partial`). The views read the results
+   * again for it; a reference the route refused on its own item does not set
+   * it, since asking again would get the same answer.
+   */
+  resolvedUrlsPartial?: true;
 }
 
 /** The slice of `PipelexApiClient` the run capabilities call (test seam). */
@@ -1541,23 +1549,39 @@ export async function getMthdsRunResults(
   }
 
   if (viewsAvailable && state.state === "completed") {
-    const links = await freshStorageLinks(runClient(context), [
+    const fresh = await freshStorageLinks(runClient(context), [
       state.result.main_stuff,
       state.result.graph_spec,
     ]);
-    if (links !== undefined) projected.resolvedUrls = links;
+    if (fresh.links !== undefined) projected.resolvedUrls = fresh.links;
+    if (fresh.partial) projected.resolvedUrlsPartial = true;
   }
   return projected;
 }
 
-/** How long the results wait on the bulk resolve route before the views go without fresh links. */
+/**
+ * How long the results wait on the bulk resolve route, across every request
+ * one read makes, before the views go without the links still missing.
+ */
 export const VIEW_LINKS_TIMEOUT_MS = 5_000;
+
+/** What {@link freshStorageLinks} minted, and whether a failed request left references without a link. */
+export interface FreshStorageLinks {
+  /** The link minted for each reference that got one; `undefined` when none did. */
+  links: Record<string, string> | undefined;
+  /**
+   * Whether a request failed or the deadline cut the walk short, so a later
+   * read may link what this one could not. A reference the route refused on
+   * its own item does not count: asking again gets the same answer.
+   */
+  partial: boolean;
+}
 
 /**
  * Fresh links for the stored files a completed run references, for the views
  * to paint from: the output's references first, then the executed graph's,
- * deduplicated, and at most one bulk request's worth (`BULK_RESOLVE_MAX_URIS`),
- * so a results read pays one round trip at most.
+ * deduplicated, asked for `BULK_RESOLVE_MAX_URIS` at a time, one request
+ * after another, all under one {@link VIEW_LINKS_TIMEOUT_MS} deadline.
  *
  * The baked `public_url` cannot serve. The runtime signs it path-style on the
  * shared regional endpoint (`s3.us-west-2.amazonaws.com/<bucket>/…`), where a
@@ -1566,34 +1590,49 @@ export const VIEW_LINKS_TIMEOUT_MS = 5_000;
  * The platform signs these on each bucket's own host
  * (`<bucket>.s3.amazonaws.com`, measured against api-dev on 2026-09-25), which
  * the views' CSP names as a plain origin, and a view that remounts reads the
- * results again and gets new ones.
+ * results again and gets new ones. Because the CSP refuses the baked link, a
+ * reference left without a fresh one paints nothing, which is why every
+ * reference is asked for rather than the first request's worth.
  *
  * Best effort by design: the links are a view's convenience and never part of
- * the verdict, so a refused, failed or slow resolve leaves the result as it was,
- * and a reference without a link falls back to its `public_url` in the kernel.
- * Only a link the route actually minted is kept; an item it refused is left out.
+ * the verdict, so a failed or slow request never fails the results. It stops
+ * the walk, keeps what the earlier requests minted, and says so through
+ * `partial`, which the views read the results again for. Only a link the route
+ * actually minted is kept; an item it refused is left out.
  */
 export async function freshStorageLinks(
   client: Pick<RunClient, "resolveStorageUrls">,
   sources: readonly unknown[],
-): Promise<Record<string, string> | undefined> {
-  const uris = [...new Set(sources.flatMap((source) => collectArtifacts(source)))].slice(
-    0,
-    BULK_RESOLVE_MAX_URIS,
-  );
-  if (uris.length === 0) return undefined;
-  let answer: BulkResolvedStorageUrls;
-  try {
-    answer = await client.resolveStorageUrls(
-      { uris },
-      { signal: AbortSignal.timeout(VIEW_LINKS_TIMEOUT_MS) },
-    );
-  } catch {
-    return undefined;
-  }
-  const requested = new Set(uris);
+): Promise<FreshStorageLinks> {
+  const uris = [...new Set(sources.flatMap((source) => collectArtifacts(source)))];
+  if (uris.length === 0) return { links: undefined, partial: false };
   const links: Record<string, string> = {};
-  // Narrowed rather than trusted: the answer is written into a page's <img src>.
+  let partial = false;
+  const deadline = AbortSignal.timeout(VIEW_LINKS_TIMEOUT_MS);
+  for (let start = 0; start < uris.length; start += BULK_RESOLVE_MAX_URIS) {
+    const chunk = uris.slice(start, start + BULK_RESOLVE_MAX_URIS);
+    let answer: BulkResolvedStorageUrls;
+    try {
+      answer = await client.resolveStorageUrls({ uris: chunk }, { signal: deadline });
+    } catch {
+      partial = true;
+      break;
+    }
+    keepMintedLinks(answer, new Set(chunk), links);
+  }
+  return { links: Object.keys(links).length === 0 ? undefined : links, partial };
+}
+
+/**
+ * Copy into `links` each link the route minted for a reference it was asked
+ * for. Narrowed rather than trusted: the answer is written into a page's
+ * `<img src>`, so only an `https:` string survives.
+ */
+function keepMintedLinks(
+  answer: BulkResolvedStorageUrls,
+  requested: ReadonlySet<string>,
+  links: Record<string, string>,
+): void {
   for (const item of Array.isArray(answer?.items) ? (answer.items as unknown[]) : []) {
     if (typeof item !== "object" || item === null) continue;
     const { uri, url, error } = item as Record<string, unknown>;
@@ -1607,7 +1646,6 @@ export async function freshStorageLinks(
       links[uri] = url;
     }
   }
-  return Object.keys(links).length === 0 ? undefined : links;
 }
 
 // `/v1/start` takes no source labels — the MCP surface's `uri` feeds only our
@@ -1756,9 +1794,11 @@ export function runResultsToolResult(result: RunResultsResult) {
       main_stuff: result.mainStuff,
       tokens_usages: result.tokensUsages,
       usage_by_pipe: result.usageByPipe,
-      // Not an API field: the fresh link for each stored reference, which the
-      // views paint from (see `freshStorageLinks`).
+      // Not API fields: the fresh link for each stored reference, which the
+      // views paint from, and whether a failed request left some without one
+      // (see `freshStorageLinks`).
       resolved_urls: result.resolvedUrls,
+      resolved_urls_partial: result.resolvedUrlsPartial,
     },
   };
 }

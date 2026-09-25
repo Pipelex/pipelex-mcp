@@ -34,13 +34,20 @@ export interface RunResultsView {
   inputForm: InputForm | null;
   /** The full, unbounded main output (`_meta.main_stuff`); `content.main_stuff` is the bounded copy. */
   mainStuff: unknown;
+  /** The fresh links the results carried (`_meta.resolved_urls`), each stored reference to its link. */
+  links: ReadonlyMap<string, string>;
   /**
-   * The kernel's resolver over the fresh links the results carried
-   * (`_meta.resolved_urls`), for the output and the executed graph alike, or
-   * undefined when they carried none. Built once per read, so it keeps one
-   * identity for as long as the result is on screen.
+   * The kernel's resolver over {@link links}, for the output and the executed
+   * graph alike, or undefined when there are none. Built once per set of
+   * links, so it keeps one identity for as long as they are on screen.
    */
   resolveUrl: ResolveUrl | undefined;
+  /**
+   * Whether a failed request left some reference without a link
+   * (`_meta.resolved_urls_partial`), which `useRunResults` reads the results
+   * again for, and the panel says while it holds.
+   */
+  linksPartial: boolean;
 }
 
 /**
@@ -60,8 +67,38 @@ export function runResultsViewOf(
     outputForm: (meta?.output_form ?? null) as OutputForm | null,
     inputForm: (meta?.input_form ?? null) as InputForm | null,
     mainStuff: meta?.main_stuff,
-    resolveUrl: resolveUrlFor(meta?.resolved_urls),
+    ...withLinks(linksOf(meta?.resolved_urls)),
+    linksPartial: meta?.resolved_urls_partial === true,
   };
+}
+
+/**
+ * A view already on screen, with the links a later read of the same run
+ * minted for references it had none for. Everything else stays as it was,
+ * the artifacts' identities included, so the output and the graph repaint
+ * their files without being derived again; a link already held is kept rather
+ * than swapped for a new one, which would reload a picture that painted. The
+ * partial flag is the later read's, since it answers for the latest request.
+ */
+export function withLinksFrom(shown: RunResultsView, later: RunResultsView): RunResultsView {
+  let merged: Map<string, string> | undefined;
+  for (const [reference, link] of later.links) {
+    if (shown.links.has(reference)) continue;
+    merged ??= new Map(shown.links);
+    merged.set(reference, link);
+  }
+  return {
+    ...shown,
+    ...(merged === undefined ? {} : withLinks(merged)),
+    linksPartial: later.linksPartial,
+  };
+}
+
+/** The links and the kernel's resolver over them, built together so they never disagree. */
+function withLinks(
+  links: ReadonlyMap<string, string>,
+): Pick<RunResultsView, "links" | "resolveUrl"> {
+  return { links, resolveUrl: resolverOver(links) };
 }
 
 /**
@@ -79,11 +116,20 @@ export function runResultsViewOf(
  * no links, since the value lands in an `<img src>`.
  */
 export function resolveUrlFor(value: unknown): ResolveUrl | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  return resolverOver(linksOf(value));
+}
+
+/** `_meta.resolved_urls` narrowed to a map of `https:` links; anything else reads as none. */
+function linksOf(value: unknown): Map<string, string> {
   const links = new Map<string, string>();
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return links;
   for (const [reference, link] of Object.entries(value)) {
     if (typeof link === "string" && link.startsWith("https://")) links.set(reference, link);
   }
+  return links;
+}
+
+function resolverOver(links: ReadonlyMap<string, string>): ResolveUrl | undefined {
   if (links.size === 0) return undefined;
   return (url) => links.get(url);
 }
@@ -262,6 +308,17 @@ export function outputToRender(full: unknown, bounded: unknown): OutputToRender 
  * persisted.
  */
 export const RESULTS_FETCH_MAX_ATTEMPTS = 40;
+
+/**
+ * When a completed result's links came back partial, how long `useRunResults`
+ * waits before each further read for the missing ones, in order; the list's
+ * length is how many it makes. The output stays on screen meanwhile, so these
+ * are spaced for a route that is recovering rather than hammered at the poll
+ * ladder's first rung, and they stop after the last: a route that is still
+ * failing a minute on is not coming back while the view is open, and a
+ * remount reads again.
+ */
+export const LINK_REREAD_DELAYS_MS: readonly number[] = [5_000, 15_000, 45_000];
 
 /**
  * The error a results fetch settles on once {@link RESULTS_FETCH_MAX_ATTEMPTS}

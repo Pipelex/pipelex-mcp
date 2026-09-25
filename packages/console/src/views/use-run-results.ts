@@ -4,9 +4,11 @@ import type { RunResultsStructuredContent } from "@pipelex/mcp-core/capabilities
 import type { ToolError } from "@pipelex/mcp-core/capabilities/shared.js";
 import { isTransientPollError, nextPollDelayMs } from "./run-polling.js";
 import {
+  LINK_REREAD_DELAYS_MS,
   RESULTS_FETCH_MAX_ATTEMPTS,
   resultsFetchExhausted,
   runResultsViewOf,
+  withLinksFrom,
 } from "./run-results.js";
 import type { RunResultsView } from "./run-results.js";
 
@@ -44,6 +46,14 @@ const NOTHING: RunResultsSnapshot = { results: null, error: null };
  * settles on an error naming what the last one ran into, which frees the form's
  * Run button and puts the failure on screen.
  *
+ * A completed result whose links came back partial (a request for them failed
+ * or ran out of time) settles at once, so the output shows, and is then read
+ * again on {@link LINK_REREAD_DELAYS_MS} for the links alone: each later read
+ * adds the links it minted to the view on screen and changes nothing else, so
+ * a file the first read could not link paints once the route recovers, without
+ * a remount. A re-read that fails or answers anything but a completed result
+ * spends one and leaves the view as it is.
+ *
  * The snapshot is stamped with the run it answers for, so a view that starts
  * another run sees nothing until that run's own results are read — never the
  * previous run's, not even for the render before the effect catches up.
@@ -71,6 +81,10 @@ export function useRunResults(
     let attempts = 0;
     // What the last read ran into, for the error the loop settles on when it stops.
     let lastProblem = "no answer yet";
+    // The results on screen once a read has settled them; every later read is
+    // a re-read for links the first one could not mint.
+    let shown: RunResultsView | null = null;
+    let linkRereads = 0;
     const retry = (retryAfterSeconds?: number | null) => {
       if (cancelled || done) {
         return;
@@ -88,6 +102,20 @@ export function useRunResults(
         nextPollDelayMs(Date.now() - firstAttemptAt, retryAfterSeconds),
       );
     };
+    const rereadForLinks = () => {
+      if (cancelled || done) {
+        return;
+      }
+      const delay = LINK_REREAD_DELAYS_MS[linkRereads];
+      if (delay === undefined) {
+        done = true;
+        return;
+      }
+      if (document.visibilityState === "hidden") {
+        return;
+      }
+      timer = setTimeout(() => void fetchOnce(), delay);
+    };
     // At most one results fetch in flight: a hidden→visible flip during a
     // fetch must not start a concurrent one (each would schedule its own
     // retry, orphaning the other's timer).
@@ -97,7 +125,12 @@ export function useRunResults(
         return;
       }
       inFlight = true;
-      attempts += 1;
+      const rereading = shown !== null;
+      if (rereading) {
+        linkRereads += 1;
+      } else {
+        attempts += 1;
+      }
       let content: RunResultsStructuredContent;
       let meta: Record<string, unknown> | undefined;
       try {
@@ -106,12 +139,29 @@ export function useRunResults(
         meta = response.meta;
       } catch (err) {
         inFlight = false;
+        if (rereading) {
+          rereadForLinks();
+          return;
+        }
         lastProblem = err instanceof Error ? err.message : "the call failed";
         retry();
         return;
       }
       inFlight = false;
       if (cancelled) {
+        return;
+      }
+      if (shown !== null) {
+        // The results are on screen; this read is for their missing links only.
+        if (content.status !== "error" && content.state === "completed") {
+          shown = withLinksFrom(shown, runResultsViewOf(content, meta));
+          setSettled({ runId, results: shown, error: null });
+          if (!shown.linksPartial) {
+            done = true;
+            return;
+          }
+        }
+        rereadForLinks();
         return;
       }
       if (content.status === "error") {
@@ -134,8 +184,13 @@ export function useRunResults(
         retry(content.retry_after_seconds);
         return;
       }
+      shown = runResultsViewOf(content, meta);
+      setSettled({ runId, results: shown, error: null });
+      if (shown.linksPartial) {
+        rereadForLinks();
+        return;
+      }
       done = true;
-      setSettled({ runId, results: runResultsViewOf(content, meta), error: null });
     };
     const onVisibilityChange = () => {
       if (document.visibilityState === "hidden") {

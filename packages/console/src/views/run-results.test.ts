@@ -18,6 +18,7 @@ import {
   resultsFetchExhausted,
   runDurationSeconds,
   runResultsViewOf,
+  withLinksFrom,
 } from "./run-results.js";
 
 // The standard's own minimal shapes, as the validate tests state them: a
@@ -102,6 +103,75 @@ describe("runResultsViewOf", () => {
       "https://pipelex-app-dev.s3.amazonaws.com/runs/x/illustration.png?X-Amz-Expires=900";
     const view = runResultsViewOf(content, { resolved_urls: { [picture]: link } });
     expect(view.resolveUrl?.(picture)).toBe(link);
+    expect(view.linksPartial).toBe(false);
+  });
+
+  it("reads the partial flag only when it is exactly true", () => {
+    expect(runResultsViewOf(content, { resolved_urls_partial: true }).linksPartial).toBe(true);
+    expect(runResultsViewOf(content, { resolved_urls_partial: "true" }).linksPartial).toBe(false);
+    expect(runResultsViewOf(content, undefined).linksPartial).toBe(false);
+  });
+});
+
+describe("withLinksFrom", () => {
+  const content: RunResultsStructuredContent = {
+    status: "ok",
+    run_id: "run_1",
+    state: "completed",
+    main_stuff: { text: "bounded" },
+    available_view_specs: ["run_graph"],
+  };
+  const first = "pipelex-storage://runs/x/first.png";
+  const second = "pipelex-storage://runs/x/second.png";
+  const linkOf = (reference: string, round: number) =>
+    `https://pipelex-app-dev.s3.amazonaws.com/${reference.slice("pipelex-storage://".length)}?round=${round}`;
+
+  it("adds the links a later read minted and keeps everything else on screen as it was", () => {
+    const shown = runResultsViewOf(content, {
+      graph_spec: liveGraph,
+      pipe_io_contracts: contracts,
+      output_form: outputForm,
+      resolved_urls: { [first]: linkOf(first, 1) },
+      resolved_urls_partial: true,
+    });
+    const later = runResultsViewOf(content, {
+      graph_spec: { ...liveGraph },
+      resolved_urls: { [first]: linkOf(first, 2), [second]: linkOf(second, 2) },
+    });
+
+    const merged = withLinksFrom(shown, later);
+
+    expect(merged.graphSpec).toBe(shown.graphSpec);
+    expect(merged.contracts).toBe(shown.contracts);
+    // A link already painting is kept, not swapped for the later one.
+    expect(merged.resolveUrl?.(first)).toBe(linkOf(first, 1));
+    expect(merged.resolveUrl?.(second)).toBe(linkOf(second, 2));
+    expect(merged.linksPartial).toBe(false);
+  });
+
+  it("keeps the resolver's identity when the later read adds nothing", () => {
+    const shown = runResultsViewOf(content, {
+      resolved_urls: { [first]: linkOf(first, 1) },
+      resolved_urls_partial: true,
+    });
+    const later = runResultsViewOf(content, { resolved_urls_partial: true });
+
+    const merged = withLinksFrom(shown, later);
+
+    expect(merged.resolveUrl).toBe(shown.resolveUrl);
+    expect(merged.linksPartial).toBe(true);
+  });
+
+  it("gives a view that had no links a resolver once a later read mints one", () => {
+    const shown = runResultsViewOf(content, { resolved_urls_partial: true });
+    expect(shown.resolveUrl).toBeUndefined();
+
+    const merged = withLinksFrom(
+      shown,
+      runResultsViewOf(content, { resolved_urls: { [first]: linkOf(first, 2) } }),
+    );
+
+    expect(merged.resolveUrl?.(first)).toBe(linkOf(first, 2));
   });
 });
 

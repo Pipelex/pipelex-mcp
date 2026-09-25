@@ -1764,6 +1764,7 @@ describe("getMthdsRunResults", () => {
       [picture]:
         "https://pipelex-app-dev.s3.amazonaws.com/runs/x/illustration.png?X-Amz-Expires=900",
     });
+    expect(toolResult._meta.resolved_urls_partial).toBeUndefined();
     expect(JSON.stringify(toolResult.structuredContent)).not.toContain("s3.amazonaws.com");
   });
 
@@ -1776,15 +1777,45 @@ describe("getMthdsRunResults", () => {
         main_stuff: { image: { url: "pipelex-storage://runs/x/illustration.png" } },
       },
     };
+    let requests = 0;
     const context = {
-      ...contextWith({ getRunResult: () => Promise.resolve(state) }),
+      ...contextWith({
+        getRunResult: () => Promise.resolve(state),
+        resolveStorageUrls: (input) => {
+          requests += 1;
+          return mintedLinks(input);
+        },
+      }),
       viewsAvailable: false,
     };
 
     const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
 
     expect(result.structuredContent.state).toBe("completed");
+    expect(requests).toBe(0);
     expect(result.resolvedUrls).toBeUndefined();
+  });
+
+  it("flags the links as partial on _meta when the route fails, and still answers", async () => {
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: { image: { url: "pipelex-storage://runs/x/illustration.png" } },
+      },
+    };
+    const context = contextWith({
+      getRunResult: () => Promise.resolve(state),
+      resolveStorageUrls: () =>
+        Promise.reject(new ApiUnreachableError("down", DEFAULT_API_URL, "ECONNREFUSED")),
+    });
+
+    const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
+
+    expect(toolResult.structuredContent.state).toBe("completed");
+    expect(toolResult._meta.resolved_urls).toBeUndefined();
+    expect(toolResult._meta.resolved_urls_partial).toBe(true);
   });
 
   it("does not call the client on a blank run_id", async () => {
@@ -1855,39 +1886,84 @@ describe("freshStorageLinks", () => {
     expect(asked).toEqual([[picture, step]]);
     expect(signal).toBeInstanceOf(AbortSignal);
     expect(links).toEqual({
-      [picture]:
-        "https://pipelex-app-dev.s3.amazonaws.com/runs/x/illustration.png?X-Amz-Expires=900",
-      [step]: "https://pipelex-app-dev.s3.amazonaws.com/runs/x/step.png?X-Amz-Expires=900",
+      links: {
+        [picture]:
+          "https://pipelex-app-dev.s3.amazonaws.com/runs/x/illustration.png?X-Amz-Expires=900",
+        [step]: "https://pipelex-app-dev.s3.amazonaws.com/runs/x/step.png?X-Amz-Expires=900",
+      },
+      partial: false,
     });
   });
 
-  it("asks for at most one bulk request's worth, the output's first", async () => {
-    const many = Array.from(
-      { length: BULK_RESOLVE_MAX_URIS + 5 },
+  const frames = (count: number) =>
+    Array.from(
+      { length: count },
       (_unused, index) => `pipelex-storage://runs/x/frame-${index}.png`,
     );
-    let asked: string[] = [];
-    await freshStorageLinks(
+
+  it("links every reference, a bulk request's worth at a time, under one deadline", async () => {
+    const many = frames(BULK_RESOLVE_MAX_URIS * 2 + 5);
+    const asked: string[][] = [];
+    const signals: (AbortSignal | undefined)[] = [];
+    const fresh = await freshStorageLinks(
       {
-        resolveStorageUrls: (input) => {
-          asked = input.uris;
+        resolveStorageUrls: (input, options) => {
+          asked.push(input.uris);
+          signals.push(options?.signal);
           return mintedLinks(input);
         },
       },
       [many, { url: step }],
     );
 
-    expect(asked).toEqual(many.slice(0, BULK_RESOLVE_MAX_URIS));
+    expect(asked).toEqual([
+      many.slice(0, BULK_RESOLVE_MAX_URIS),
+      many.slice(BULK_RESOLVE_MAX_URIS, BULK_RESOLVE_MAX_URIS * 2),
+      [...many.slice(BULK_RESOLVE_MAX_URIS * 2), step],
+    ]);
+    expect(new Set(signals).size).toBe(1);
+    expect(Object.keys(fresh.links ?? {})).toEqual([...many, step]);
+    expect(fresh.partial).toBe(false);
+  });
+
+  it("keeps what the earlier requests minted when a later one fails, and says it is partial", async () => {
+    const many = frames(BULK_RESOLVE_MAX_URIS * 3);
+    let requests = 0;
+    const fresh = await freshStorageLinks(
+      {
+        resolveStorageUrls: (input) => {
+          requests += 1;
+          return requests === 2
+            ? Promise.reject(new ApiUnreachableError("down", DEFAULT_API_URL, "ECONNREFUSED"))
+            : mintedLinks(input);
+        },
+      },
+      [many],
+    );
+
+    expect(requests).toBe(2);
+    expect(Object.keys(fresh.links ?? {})).toEqual(many.slice(0, BULK_RESOLVE_MAX_URIS));
+    expect(fresh.partial).toBe(true);
   });
 
   it("makes no request when nothing is stored", async () => {
-    const links = await freshStorageLinks(NEVER_CLIENT, [{ answer: 42 }, undefined]);
+    let requests = 0;
+    const fresh = await freshStorageLinks(
+      {
+        resolveStorageUrls: (input) => {
+          requests += 1;
+          return mintedLinks(input);
+        },
+      },
+      [{ answer: 42 }, undefined],
+    );
 
-    expect(links).toBeUndefined();
+    expect(requests).toBe(0);
+    expect(fresh).toEqual({ links: undefined, partial: false });
   });
 
   it("goes without links when the route fails, rather than failing the results", async () => {
-    const links = await freshStorageLinks(
+    const fresh = await freshStorageLinks(
       {
         resolveStorageUrls: () =>
           Promise.reject(new ApiUnreachableError("down", DEFAULT_API_URL, "ECONNREFUSED")),
@@ -1895,7 +1971,7 @@ describe("freshStorageLinks", () => {
       [{ url: picture }],
     );
 
-    expect(links).toBeUndefined();
+    expect(fresh).toEqual({ links: undefined, partial: true });
   });
 
   it("keeps only an https link the route minted for a reference it was asked for", async () => {
@@ -1932,7 +2008,9 @@ describe("freshStorageLinks", () => {
       [{ a: { url: picture }, b: { url: step } }],
     );
 
-    expect(links).toBeUndefined();
+    // A refused item is the route's answer, not a failure: asking again gets
+    // the same, so it does not make the links partial.
+    expect(links).toEqual({ links: undefined, partial: false });
   });
 });
 
