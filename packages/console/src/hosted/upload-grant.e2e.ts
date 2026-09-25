@@ -22,7 +22,6 @@ import { describe, expect, it } from "vitest";
 
 import { RUN_OUTPUT_SOURCES, UPLOAD_CONNECT_DOMAINS } from "./app-buckets.js";
 import { liveApiConfig } from "@pipelex/mcp-core/capabilities/e2e-support.js";
-import { freshStorageLinks } from "@pipelex/mcp-core/capabilities/run.js";
 import { createPipelexApiClient } from "@pipelex/mcp-core/capabilities/shared.js";
 import { requestPipelexUpload } from "@pipelex/mcp-core/capabilities/upload-grant.js";
 
@@ -61,11 +60,18 @@ describe("pipelex_request_upload (live)", () => {
     const reference = minted.grant?.uri;
     expect(reference, minted.summary).toBeDefined();
 
-    const links = await freshStorageLinks(createPipelexApiClient(context), [{ url: reference }]);
+    // The route itself, not `freshStorageLinks`: that is best effort and
+    // swallows a refusal, where this must fail naming a 403, a 404 or wire
+    // drift, and it keeps only https links, where a local stack's plain-http
+    // one must reach the guard below.
+    const answer = await createPipelexApiClient(context).resolveStorageUrls({
+      uris: [reference ?? ""],
+    });
 
-    const link = links?.[reference ?? ""];
-    expect(link, "the bulk resolve route minted no link").toBeDefined();
-    const origin = new URL(link ?? "").origin;
+    const [item] = answer.items;
+    expect(item?.error ?? null, JSON.stringify(item?.error)).toBeNull();
+    expect(item?.uri).toBe(reference);
+    const origin = new URL(item?.url ?? "").origin;
     if (!origin.startsWith("http://")) {
       expect(RUN_OUTPUT_SOURCES).toContain(origin);
     }
