@@ -181,11 +181,16 @@ jobs:
           # Every version is read before anything is fetched: the freshness
           # script's shallow fetch of `main` can cut this checkout's history to
           # the tip, after which `HEAD^` is no longer there to read.
+          # Each read is a plain assignment before it is stored, because `set -e`
+          # sees a command substitution's failure only there: inside `printf -v`
+          # an unreadable version became an empty one, which the comparison
+          # below reads as a release against no version at all.
           for TRACK in workshop console; do
-            printf -v "VERSION_$TRACK" '%s' "$(bash .github/scripts/track-version.sh "$TRACK" HEAD)"
-            printf -v "PARENT_$TRACK" '%s' "$(bash .github/scripts/track-version.sh "$TRACK" HEAD^)"
-            NAME="VERSION_$TRACK"
-            echo "${TRACK}_version=${!NAME}" >> "$GITHUB_OUTPUT"
+            CURRENT=$(bash .github/scripts/track-version.sh "$TRACK" HEAD)
+            BEFORE=$(bash .github/scripts/track-version.sh "$TRACK" HEAD^)
+            printf -v "VERSION_$TRACK" '%s' "$CURRENT"
+            printf -v "PARENT_$TRACK" '%s' "$BEFORE"
+            echo "${TRACK}_version=${CURRENT}" >> "$GITHUB_OUTPUT"
           done
 
           RELEASES=0
