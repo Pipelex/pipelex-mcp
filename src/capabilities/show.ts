@@ -1,4 +1,8 @@
-import type { PipelexValidationResult, ValidateMethodSelector } from "@pipelex/sdk";
+import type {
+  PipelexValidationReport,
+  PipelexValidationResult,
+  ValidateMethodSelector,
+} from "@pipelex/sdk";
 import { z } from "zod";
 
 import { inputsTemplateFor } from "./inputs-template.js";
@@ -25,6 +29,7 @@ import { CONSOLE_TOOL_NAMES } from "./tool-names.js";
 import {
   VALIDATE_BY_REF_ERROR_OPTIONS,
   VALIDATE_VIEW_TOKENS,
+  defaultPipeRefOf,
   mainPipeSignatureSchema,
   projectValidationReport,
   signatureLine,
@@ -148,7 +153,10 @@ export interface ShowResult {
   pipeIoContracts?: unknown;
   inputForm?: unknown;
   outputForm?: unknown;
+  /** The method's own entry pipe, which the view's caption calls the entry pipe. */
   mainPipeRef?: string;
+  /** The pipe the form opens on: the one the caller named, else the entry pipe. */
+  formPipeRef?: string;
 }
 
 /** The slice of `PipelexApiClient` this capability calls (test seam). */
@@ -331,6 +339,11 @@ export function showResult(
   const projection = projectValidationReport(report, true, true, requestedPipe);
   const verdict = projection.structuredContent;
   const pipeRef = report.is_valid ? projection.mainPipeRef : undefined;
+  // The projection answers for the pipe the caller named; the view also needs
+  // the method's own entry pipe, so that it never calls a named pipe that.
+  const entryPipeRef = report.is_valid
+    ? defaultPipeRefOf(report as PipelexValidationReport)
+    : undefined;
 
   // The template is for a method that can run: a pending-signature method
   // gets neither a template nor (from the projection) a form, since both
@@ -371,7 +384,8 @@ export function showResult(
     pipeIoContracts: projection.pipeIoContracts,
     inputForm: projection.inputForm,
     outputForm: projection.outputForm,
-    mainPipeRef: projection.mainPipeRef,
+    ...(entryPipeRef === undefined ? {} : { mainPipeRef: entryPipeRef }),
+    ...(projection.mainPipeRef === undefined ? {} : { formPipeRef: projection.mainPipeRef }),
   };
 }
 
@@ -520,6 +534,7 @@ export function showToolResult(result: ShowResult) {
       input_form: result.inputForm,
       output_form: result.outputForm,
       main_pipe_ref: result.mainPipeRef,
+      form_pipe_ref: result.formPipeRef,
     },
   };
 }

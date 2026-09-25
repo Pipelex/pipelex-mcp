@@ -17,8 +17,9 @@ export function parsePipeRef(ref: string): SelectedPipe {
 }
 
 /**
- * The pipe the form is for: the node the user last clicked, else the effective
- * entry pipe the verdict settled (`_meta.main_pipe_ref`), else **nothing**.
+ * The pipe the form is for: the node the user last clicked, else the pipe the
+ * show named or the effective entry pipe the verdict settled
+ * (`_meta.form_pipe_ref`, then `_meta.main_pipe_ref`), else **nothing**.
  *
  * There is deliberately no third arm. A verdict with no entry pipe — the server
  * stated `default_pipe_ref: null`, say, because the manifest names a pipe the
@@ -33,10 +34,10 @@ export function parsePipeRef(ref: string): SelectedPipe {
  */
 export function selectedPipeFor(
   pickedPipe: SelectedPipe | null,
-  mainPipeRef: string | null,
+  formPipeRef: string | null,
 ): SelectedPipe | null {
   if (pickedPipe) return pickedPipe;
-  if (mainPipeRef) return parsePipeRef(mainPipeRef);
+  if (formPipeRef) return parsePipeRef(formPipeRef);
   return null;
 }
 

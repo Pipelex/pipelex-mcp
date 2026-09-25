@@ -12,6 +12,10 @@
 
 - **`npx @pipelex/mcp` no longer installs React, Vite or Skybridge**: The package's runtime dependencies are now only what the workshop imports, so a production install is about a quarter of its former size and no longer carries React, React DOM, Vite, nodemon, the Skybridge devtools or the advisories that came with them. The hosted console starts from a self-contained bundle of its server instead of resolving Skybridge from `node_modules`, which is what let Skybridge become a development dependency.
 
+### Fixed
+
+- **A start that may have created a run is no longer marked retryable**: When `mthds_run` fails with a timeout, a connection lost after the request went out, or a 502 or 504, its error now carries `retryable: false` and a hint that the run may have started, because starting it again would be a second run spending inference credit. A connection refused before anything was sent stays retryable.
+
 ### Removed
 
 - **Validation, inputs templates, code generation, input preparation and file arguments on the console (Breaking)**: `mthds_validate`, `mthds_inputs_template`, `mthds_codegen` and `mthds_prepare_inputs` are gone from the hosted console, and no console tool takes `files` or `output_dir` any more. All of them remain on the workshop, the Pipelex plugin's server.

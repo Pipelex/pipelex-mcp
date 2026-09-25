@@ -1,4 +1,10 @@
-import { collectArtifacts, isTerminalRunStatus, summarizeUsage } from "@pipelex/sdk";
+import {
+  ApiResponseError,
+  ApiUnreachableError,
+  collectArtifacts,
+  isTerminalRunStatus,
+  summarizeUsage,
+} from "@pipelex/sdk";
 import type {
   MethodProvenance,
   PipelexRunResultStart,
@@ -946,7 +952,7 @@ export function startResult(
   if (viewsAvailable) {
     summaryParts.push(
       "## Views",
-      "A live status card follows this run on its own (polling, then the results); the user is already watching it — no need to poll on their behalf.",
+      `If this host shows views (the server instructions say whether it does), a live status card follows this run on its own (polling, then the results) and the user is already watching it, so there is no need to poll on their behalf. If it shows none, give the user the run id and check on the run with \`${names.runStatus}\` when they ask.`,
     );
   }
 
@@ -1302,7 +1308,7 @@ export async function startMthdsRun(
     const ack = await runClient(context).start(toStartOptions(request));
     return startResult(ack, context.viewsAvailable !== false, context.toolNames);
   } catch (err) {
-    const error = classifyError(err, { ...classifyOptions, auth: context.authError });
+    const error = classifyStartError(err, { ...classifyOptions, auth: context.authError });
     return startErrorResult(startSummaryForError(error), [error]);
   }
 }
@@ -1346,13 +1352,15 @@ export async function startPipelexRun(
     return startErrorResult(startSummaryForError(error), [error]);
   }
 
+  // Trimmed once, so the walk checks and the start runs the same pipe.
+  const pipeRef = input.pipe_ref?.trim();
   let inputs = input.inputs;
   if (inputs !== undefined && Object.keys(inputs).length > 0) {
     const prepared = await prepareConsoleInputs(
       client,
       {
         selector,
-        ...(input.pipe_ref === undefined ? {} : { pipe_ref: input.pipe_ref }),
+        ...(pipeRef === undefined ? {} : { pipe_ref: pipeRef }),
         inputs,
       },
       context.authError,
@@ -1368,25 +1376,81 @@ export async function startPipelexRun(
   try {
     const ack = await client.start({
       ...selector,
-      ...(input.pipe_ref === undefined ? {} : { pipe_code: input.pipe_ref }),
+      ...(pipeRef === undefined ? {} : { pipe_code: pipeRef }),
       ...(inputs === undefined ? {} : { inputs }),
     });
     return startResult(ack, context.viewsAvailable !== false, names);
   } catch (err) {
-    const error = classifyError(err, { ...startOptions, auth: context.authError });
+    const error = classifyStartError(err, { ...startOptions, auth: context.authError });
     return startErrorResult(startSummaryForError(error), [error]);
   }
 }
 
-/** Request-shape checks on `pipelex_run`: exactly one method reference, and a pipe_ref that is not blank. */
+/**
+ * Network codes that mean the start request never reached the server, so no
+ * run can exist and a retry is safe. Anything else an unreachable API reports
+ * (the SDK's own timeout, a reset connection, no code at all) may have come
+ * after the server accepted the request.
+ */
+const START_NOT_SENT_CODES: ReadonlySet<string> = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+
+/**
+ * Classify a failed start, refusing a retry when the run may exist. A start
+ * creates a durable run that spends inference credit, and this client sends no
+ * idempotency key, so retrying after a lost acknowledgement would start a second
+ * run. That is the case for a timeout or a dropped connection after the request
+ * went out, and for a 502 or 504, where the gateway answered for a request the
+ * runner may have accepted.
+ */
+export function classifyStartError(err: unknown, options: ClassifyErrorOptions): ToolError {
+  const error = classifyError(err, options);
+  if (!error.retryable || !startMayHaveRun(err)) return error;
+  return {
+    ...error,
+    retryable: false,
+    hint: "The request may have reached the server before the answer was lost, so the run may have started. Do not start it again without asking the user: a second start would be a second run, spending inference credit again.",
+  };
+}
+
+function startMayHaveRun(err: unknown): boolean {
+  if (err instanceof ApiUnreachableError) {
+    return err.code === undefined || !START_NOT_SENT_CODES.has(err.code);
+  }
+  if (err instanceof ApiResponseError) return err.status === 502 || err.status === 504;
+  return false;
+}
+
+/**
+ * Request-shape checks on `pipelex_run`: exactly one method reference, and a
+ * pipe_ref that is neither blank nor bare. The qualified rule is checked here
+ * rather than left to the input walk, because the walk runs only when there are
+ * inputs: a run with none would otherwise send a bare code to `/v1/start`, whose
+ * runner resolves one across domains.
+ */
 export function validatePipelexRunRequest(input: PipelexRunInput): ToolError[] {
   const errors = validateMethodReferenceRequest(input);
-  if (input.pipe_ref !== undefined && input.pipe_ref.trim() === "") {
+  const pipeRef = input.pipe_ref?.trim();
+  if (pipeRef === "") {
     errors.push({
       class: "input_domain",
       location: "pipe_ref",
       message: "pipe_ref must not be empty when supplied.",
       hint: "Pass a qualified domain.pipe_code, or omit pipe_ref to run the method's entry pipe.",
+      retryable: false,
+    });
+  } else if (pipeRef !== undefined && !pipeRef.includes(".")) {
+    errors.push({
+      class: "input_domain",
+      location: "pipe_ref",
+      message: `pipe_ref must be qualified (domain.pipe_code), got the bare "${pipeRef}".`,
+      hint: `Pass the pipe as ${CONSOLE_TOOL_NAMES.showMethod} names it, or omit pipe_ref to run the method's entry pipe.`,
       retryable: false,
     });
   }

@@ -232,6 +232,7 @@ describe("showPipelexMethod", () => {
       input_form: inputForm,
       output_form: outputForm,
       main_pipe_ref: "demo.main",
+      form_pipe_ref: "demo.main",
     });
     // None of it reaches the model's contract.
     expect(JSON.stringify(content)).not.toContain("json_schema");
@@ -283,7 +284,10 @@ describe("showPipelexMethod", () => {
     expect(result.structuredContent.pipe_ref).toBe("demo.other");
     expect(result.structuredContent.main_pipe?.pipe_ref).toBe("demo.other");
     expect(Object.keys(result.structuredContent.inputs ?? {})).toEqual(["note"]);
-    expect(result.mainPipeRef).toBe("demo.other");
+    // The form opens on the named pipe; the entry pipe stays the method's own,
+    // so the view never calls the named pipe the entry pipe.
+    expect(result.formPipeRef).toBe("demo.other");
+    expect(result.mainPipeRef).toBe("demo.main");
     expect(result.summary).toContain("pipe_ref `demo.other`");
   });
 

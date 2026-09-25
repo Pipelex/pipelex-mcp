@@ -22,6 +22,7 @@ import type {
 
 import {
   boundMainStuff,
+  classifyStartError,
   ELLIPSIS_MARKER,
   getMthdsRunResults,
   getMthdsRunStatus,
@@ -258,6 +259,10 @@ describe("startResult", () => {
     expect(result.summary).toContain("mthds_run_status");
     expect(result.summary).toContain("mthds_run_results");
     expect(result.summary).toContain("## Views");
+    // A shell that registers views cannot tell whether this host renders them,
+    // so the status card is promised only on the host that shows one.
+    expect(result.summary).toContain("If this host shows views");
+    expect(result.summary).toContain("If it shows none, give the user the run id");
   });
 
   it("projects method_provenance and narrates the resolved snapshot", () => {
@@ -1243,6 +1248,49 @@ describe("startMthdsRun", () => {
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("config");
     expect(result.summary).toContain("unreachable or misconfigured");
+    // Refused before it was sent: no run exists, so a retry is safe.
+    expect(result.structuredContent.errors?.[0]?.retryable).toBe(true);
+  });
+
+  function serverError(status: number): ApiResponseError {
+    return new ApiResponseError(
+      `HTTP ${status}`,
+      `${DEFAULT_API_URL}/v1/start`,
+      status,
+      "Server Error",
+      "{}",
+      undefined,
+      undefined,
+      undefined, // validationErrors
+      undefined,
+    );
+  }
+
+  it("refuses a retry when the failed start may have created a run", async () => {
+    // A start creates a paid run and sends no idempotency key: after a timeout,
+    // a dropped connection or a gateway 502/504, the run may exist.
+    const failures = [
+      new ApiUnreachableError("timed out", DEFAULT_API_URL, "ABORT_TIMEOUT"),
+      new ApiUnreachableError("socket hang up", DEFAULT_API_URL, "ECONNRESET"),
+      new ApiUnreachableError("network error", DEFAULT_API_URL, undefined),
+      serverError(504),
+      serverError(502),
+    ];
+    for (const failure of failures) {
+      const result = await startMthdsRun(
+        { files: [{ content: 'domain = "demo"' }] },
+        contextWith({ start: () => Promise.reject(failure) }),
+      );
+      const error = result.structuredContent.errors?.[0];
+      expect(error?.retryable).toBe(false);
+      expect(error?.hint).toContain("the run may have started");
+    }
+  });
+
+  it("keeps a start the server refused outright retryable", () => {
+    const error = classifyStartError(serverError(503), RUN_START_ERROR_OPTIONS);
+    expect(error.retryable).toBe(true);
+    expect(error.hint).not.toContain("the run may have started");
   });
 });
 
@@ -1983,6 +2031,39 @@ describe("startPipelexRun", () => {
     expect(blankPipe.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
     expect(recorded.validated).toEqual([]);
     expect(recorded.started).toEqual([]);
+  });
+
+  it("refuses a bare pipe_ref whether or not there are inputs to walk", async () => {
+    const { context, recorded } = consoleContext();
+
+    // With no inputs the walk never runs, so the request check is what keeps a
+    // bare code from reaching the run route, which resolves one across domains.
+    for (const inputs of [undefined, {}, { question: "why?" }]) {
+      const result = await startPipelexRun(
+        { method_id: "mt_demo", pipe_ref: "main", ...(inputs === undefined ? {} : { inputs }) },
+        context,
+      );
+      const error = result.structuredContent.errors?.[0];
+      expect(error?.location).toBe("pipe_ref");
+      expect(error?.message).toContain('the bare "main"');
+    }
+    expect(recorded.validated).toEqual([]);
+    expect(recorded.started).toEqual([]);
+  });
+
+  it("walks and starts the same trimmed pipe_ref", async () => {
+    const { context, recorded } = consoleContext();
+
+    await startPipelexRun({ method_id: "mt_demo", pipe_ref: "  demo.main  " }, context);
+    await startPipelexRun(
+      { method_id: "mt_demo", pipe_ref: " demo.main ", inputs: { question: "why?" } },
+      context,
+    );
+
+    expect(recorded.started.map((options) => options.pipe_code)).toEqual([
+      "demo.main",
+      "demo.main",
+    ]);
   });
 
   it("points a refused start at the console's own tools", async () => {

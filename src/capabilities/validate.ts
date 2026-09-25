@@ -1096,7 +1096,7 @@ function hasEntryFor(artifact: unknown, pipeRef: string): boolean {
  * A JSON body cannot produce an own property holding `undefined`, so reading the
  * field is the whole absence test.
  */
-function defaultPipeRefOf(report: PipelexValidationReport): string | undefined {
+export function defaultPipeRefOf(report: PipelexValidationReport): string | undefined {
   const stated: unknown = report.default_pipe_ref;
   if (stated === undefined) {
     return blueprintMainPipeRefOf(report.bundle_blueprint);

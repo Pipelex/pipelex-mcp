@@ -51,9 +51,9 @@ const TOOLBAR_POSITION_FOR_VIEW: ToolbarPosition = TOOLBAR_POSITION.TOP_LEFT;
  * graph — mthds-ui's `RunPanel` over the wire input-form descriptor riding
  * `responseMetadata.input_form` (the derivation, since kernel 0.5.0), with the
  * per-pipe IO contracts (`responseMetadata.pipe_io_contracts`) co-walked
- * beside it. The form is for the effective entry pipe
- * (`responseMetadata.main_pipe_ref`); clicking a pipe node in the graph
- * switches it. With no entry pipe settled no form opens on its own —
+ * beside it. The form is for the pipe the show named, else the effective entry
+ * pipe (`responseMetadata.form_pipe_ref`, then `main_pipe_ref`); clicking a
+ * pipe node in the graph switches it. With no entry pipe settled no form opens on its own —
  * `selectedPipeFor` never substitutes a pipe of the view's own choosing — but
  * the artifacts still ride, so clicking a pipe node still produces its form.
  * The graph is the bundle's declared main pipe, which a `method_ref` package's
@@ -86,15 +86,21 @@ export default function RunGraphView() {
   // to "no form" rather than throwing — the lookups below just miss.
   const contracts = (responseMetadata?.pipe_io_contracts ?? null) as PipeIOContracts | null;
   const inputForm = (responseMetadata?.input_form ?? null) as InputForm | null;
+  // The method's entry pipe, which the caption names, and the pipe the form
+  // opens on, which is the one the show named when it named one.
   const mainPipeRef =
     typeof responseMetadata?.main_pipe_ref === "string" ? responseMetadata.main_pipe_ref : null;
+  const formPipeRef =
+    typeof responseMetadata?.form_pipe_ref === "string"
+      ? responseMetadata.form_pipe_ref
+      : mainPipeRef;
 
   const [pickedPipe, setPickedPipe] = useState<SelectedPipe | null>(null);
   // Clicked node, else the entry pipe, else nothing — never the first pipe the
   // contract map happens to hold (see `selectedPipeFor`).
   const selectedPipe = useMemo<SelectedPipe | null>(
-    () => selectedPipeFor(pickedPipe, mainPipeRef),
-    [pickedPipe, mainPipeRef],
+    () => selectedPipeFor(pickedPipe, formPipeRef),
+    [pickedPipe, formPipeRef],
   );
   // `RunPanel` treats `contract` as referentially significant (uploads in
   // flight are abandoned on a new reference), so look it up once per selection.
@@ -244,7 +250,8 @@ export default function RunGraphView() {
       : selectedPipe.code
     : undefined;
   // The method the show was called with, as the result echoes it (the input as
-  // a fallback): a run started from the form executes exactly what was shown.
+  // a fallback). The run resolves it again, so a method saved again or a tag
+  // moved since the show runs its new content: nothing pins a revision yet.
   const methodSelector = methodSelectorOf(output, input);
 
   const handleRun = (apiInputs: Record<string, unknown>) => {
