@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [0.20.0] - 2026-09-25
+
+### Highlights
+
+**The console is now the Pipelex connector.** It finds a saved or published method, shows its signature, inputs template, graph and run form, and runs it by reference, with its own `pipelex_*` tools. Validation, code generation and file-based work stay with the Pipelex plugin's workshop, which now calls itself `pipelex-plugin`. Existing installations must remove the Pipelex connector and add it again, once.
 
 ### Changed
 

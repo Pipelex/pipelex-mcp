@@ -1,8 +1,20 @@
 {
   "name": "@pipelex/mcp",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "The MCP server inside the Pipelex plugin: validate, prepare and run AI methods on Pipelex from a coding agent.",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol", "pipelex", "mthds", "ai-methods", "coding-agent", "claude-code", "codex", "cursor", "mistral-vibe"],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "pipelex",
+    "mthds",
+    "ai-methods",
+    "coding-agent",
+    "claude-code",
+    "codex",
+    "cursor",
+    "mistral-vibe"
+  ],
   "license": "Elastic-2.0",
   "repository": {
     "type": "git",
