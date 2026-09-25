@@ -4,6 +4,8 @@
 
 ### Changed
 
+- **`@pipelex/sdk` 0.24.0 → 0.25.1**: The SDK dropped a gateway-key surface this server never called, so nothing here changes; the bump keeps the console release on the current client.
+
 - **The console is the Pipelex connector, with its own `pipelex_*` tools (Breaking)**: The hosted console now reports the server name `pipelex` instead of `pipelex-mcp`, registers `pipelex_list_methods`, `pipelex_show_method`, `pipelex_upload_attachments`, `pipelex_run`, `pipelex_run_status`, `pipelex_run_results`, `pipelex_show_images` and the app-only `pipelex_request_upload`, and names a method by its catalog id or its published address only: `pipelex_show_method` returns the signature and a fill-in inputs template and, on a host that renders views, the graph and the run form, while `pipelex_run` checks its own file inputs, which take an `http(s)` URL or a `pipelex-storage://` reference. Its instructions now differ between a host that shows the form and one that does not. **Every existing connector installation must remove the Pipelex connector and add it again, once**: until then its cached tool list calls the old `mthds_*` names, which run nothing and answer with that same instruction.
 
 - **The workshop reports the server name `pipelex-plugin` (Breaking)**: The local workshop, the server the Pipelex plugin runs, now names itself `pipelex-plugin` in its MCP handshake instead of `pipelex-mcp`, and the texts of its tools no longer describe the console. Its instructions now tell the model to use its `mthds_*` tools for all method work when the connector's `pipelex_*` tools are present too, and never to mix the two servers.
