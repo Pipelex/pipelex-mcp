@@ -11,7 +11,7 @@
  * in this repo noticed.
  *
  * What it does: spawns the workshop stdio server the way a host does
- * (`tsx src/local/main.ts`), completes the MCP handshake, then calls the
+ * (`tsx packages/workshop/src/main.ts`), completes the MCP handshake, then calls the
  * read-only tools against the configured API and asserts on their
  * `structuredContent`. Nothing here executes a method, so a run spends no
  * inference credit and is safe to run unattended (a scheduled canary reuses it).
@@ -32,10 +32,10 @@ import {
   getDefaultEnvironment,
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-import { LIVE_API_KEY_ENV, liveApiTarget } from "../src/capabilities/e2e-support.js";
+import { LIVE_API_KEY_ENV, liveApiTarget } from "@pipelex/mcp-core/capabilities/e2e-support.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const SERVER_ENTRYPOINT = path.join(REPO_ROOT, "src", "local", "main.ts");
+const SERVER_ENTRYPOINT = path.join(REPO_ROOT, "packages", "workshop", "src", "main.ts");
 const TSX_BIN = path.join(REPO_ROOT, "node_modules", ".bin", "tsx");
 
 /** Generous: a cold hosted API can take seconds, and a hang must still end in a verdict. */

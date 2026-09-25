@@ -1,12 +1,9 @@
 {
-  "extends": "skybridge/tsconfig",
+  // The repository's own scripts and cross-package tests. They build both
+  // servers in process, so the console's generated view registry is included
+  // for `view.component` to resolve (it exists once the console has been
+  // built or run; `npm run check` builds before it type-checks).
+  "extends": "./tsconfig.base.json",
 
-  "compilerOptions": {
-    "resolveJsonModule": true,
-    "paths": {
-      "@/*": ["./src/*"]
-    }
-  },
-
-  "include": ["src", ".skybridge/**/*.d.ts"]
+  "include": ["scripts", "tests", "packages/console/.skybridge/**/*.d.ts"]
 }

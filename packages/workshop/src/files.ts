@@ -1,0 +1,106 @@
+import { promises as fs } from "node:fs";
+import path from "node:path";
+
+import type { FileResolution, FileResolver } from "@pipelex/mcp-core/capabilities/shared.js";
+import {
+  errorMessage,
+  isInsideRoot,
+  isMissingPathError,
+} from "@pipelex/mcp-core/capabilities/workspace-boundary.js";
+
+const MTHDS_EXTENSION = ".mthds";
+const INLINE_FALLBACK = "or inline the contents as { content, uri? }.";
+
+/**
+ * The workshop's filesystem-backed {@link FileResolver}. Submitted paths
+ * resolve relative to `rootDir` (the server's working directory — the host
+ * spawns the stdio server in the workspace). Containment is enforced on real
+ * paths (symlinks followed): the resolved target must live inside the
+ * `rootDir` subtree. Escapes, missing files, non-regular files, and read
+ * failures are reported as {@link FileResolution} failures, never thrown —
+ * the seam turns them into `input_domain` errors at `files[i].path`.
+ *
+ * `extension` is the ONE thing a caller chooses, and it is chosen per argument
+ * rather than per call: every bundle argument is `.mthds`, and
+ * `mthds_save_method`'s `python` is `.py`. It is deliberately not reachable
+ * from the MCP surface — a tool input that named the extension would turn the
+ * read boundary into something the model picks, which is the opposite of what
+ * it is for.
+ */
+export function localFileResolver(
+  rootDir: string = process.cwd(),
+  extension: string = MTHDS_EXTENSION,
+): FileResolver {
+  return {
+    async resolve(submitted: string): Promise<FileResolution> {
+      // Each `{ path }` arm is contracted to one extension — `.mthds` for every
+      // bundle argument, `.py` for `mthds_save_method`'s `python`. Enforce it
+      // before any filesystem access, so a path pointing at an unrelated local
+      // file — a prompt-injected `.env`, `.git/config`, key material — is refused
+      // without ever being opened. Containment below only bounds *where* we read;
+      // this bounds *what* we read, and a caller that could choose the extension
+      // would have neither bound.
+      if (path.extname(submitted).toLowerCase() !== extension) {
+        return failure(
+          `Path is not a ${extension} file: ${submitted}`,
+          `This argument reads only ${extension} files. Point at a ${extension} file, ${INLINE_FALLBACK}`,
+        );
+      }
+
+      let rootReal: string;
+      try {
+        rootReal = await fs.realpath(rootDir);
+      } catch (err) {
+        return failure(
+          `Could not resolve the server's working directory: ${errorMessage(err)}`,
+          `The local workshop resolves paths relative to its working directory (${rootDir}), which must exist.`,
+        );
+      }
+
+      const target = path.resolve(rootDir, submitted);
+
+      let real: string;
+      try {
+        real = await fs.realpath(target);
+      } catch (err) {
+        if (isMissingPathError(err)) {
+          return failure(
+            `File not found: ${submitted}`,
+            `Paths are resolved relative to the MCP server's working directory (${rootDir}). Check the path, ${INLINE_FALLBACK}`,
+          );
+        }
+        return failure(
+          `Could not read file ${submitted}: ${errorMessage(err)}`,
+          `Check the file and its permissions, ${INLINE_FALLBACK}`,
+        );
+      }
+
+      if (!isInsideRoot(rootReal, real)) {
+        return failure(
+          `Path resolves outside the server's working directory: ${submitted}`,
+          `The local workshop only reads files inside the directory it was started in (${rootDir}). Move the file into the workspace, ${INLINE_FALLBACK}`,
+        );
+      }
+
+      try {
+        const stats = await fs.stat(real);
+        if (!stats.isFile()) {
+          return failure(
+            `Path is not a regular file: ${submitted}`,
+            `Submit the path of a ${extension} file, ${INLINE_FALLBACK}`,
+          );
+        }
+        return { ok: true, content: await fs.readFile(real, "utf8") };
+      } catch (err) {
+        return failure(
+          `Could not read file ${submitted}: ${errorMessage(err)}`,
+          `Check the file and its permissions, ${INLINE_FALLBACK}`,
+        );
+      }
+    },
+  };
+}
+
+function failure(message: string, hint: string): FileResolution {
+  return { ok: false, message, hint };
+}

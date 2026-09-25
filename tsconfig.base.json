@@ -1,0 +1,27 @@
+{
+  // The compiler options the core, the workshop and the repository's own
+  // scripts and tests share. They mirror `skybridge/tsconfig`, which the
+  // console extends instead, minus what only the console's build needs (JSX,
+  // Vite's client types, an emit directory): the core is type-checked inside
+  // the console's program as well as in its own, so the two sets must agree.
+  // Nothing here emits; tsup and Skybridge build.
+  "compilerOptions": {
+    "module": "NodeNext",
+    "esModuleInterop": true,
+    "verbatimModuleSyntax": true,
+    "resolveJsonModule": true,
+
+    "noEmit": true,
+
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  }
+}

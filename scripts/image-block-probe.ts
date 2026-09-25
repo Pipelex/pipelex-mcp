@@ -37,8 +37,8 @@
  *     costs, and it is the honest reading if a host re-encodes the image (which
  *     would drop the filler chunk and make a `solid` measurement flatter).
  *
- * Dev tooling under `scripts/`: typechecked by `tsconfig.scripts.json`, linted
- * and formatted with `src/`, and never reachable from either shipped entrypoint.
+ * Dev tooling under `scripts/`: typechecked by the root `tsconfig.json`, linted
+ * and formatted with the packages, and never reachable from either shipped entrypoint.
  *
  * Who sets the size: the harness, through the environment, not the model. Asked
  * in prose for a four-megabyte image a model will call with fifty kilobytes and
