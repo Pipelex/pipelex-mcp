@@ -220,7 +220,6 @@ No method source crosses the conversation in this flow.
   files?: SubmittedFileInput[];
   method_ref?: string;         // published method address — github.com/<owner>/<repo>[/<selector>][@<tag>]
   method_id?: string;          // catalog id (mt_…) of a registered method
-  include_graph?: boolean;
 }
 
 // structuredContent
@@ -256,7 +255,7 @@ No method source crosses the conversation in this flow.
 
 `output.images` answers "will this method produce pictures?" before anything runs. It lists where images sit inside the produced output, as paths from its root: `$` is the output itself, `$.name` a field of it, `$[]` an element of a list, `$[].name` a field of one — so a top-level `Image` output is `["$"]`, an `Image[]` is `["$[]"]`, and the question is `images.length > 0`. It is read from the MTHDS standard's output-form descriptor, which the capability requests from the API, so it costs nothing at run time. An empty array and an absent member are **different answers**: `[]` means the output was described and holds no image, while absence means nothing described it — unknown, not none. The rendered summary line says it too, as a trailing ` (produces images)`.
 
-The graph and the form's artifacts are view-only data, and the workshop renders no views, so a workshop verdict never carries them and `include_graph` changes nothing here; on the console, `pipelex_show_method` runs the same projection and delivers them to the `run-graph` view. The MCP `content` text is the API's rendered summary, with the signature line appended. The three source forms are **mutually exclusive — supply exactly one**. `method_ref` validates a published method by its address (`github.com/<owner>/<repo>[/<selector>][@<tag>]`, e.g. `github.com/Pipelex/methods/documents@v0.1.0`); `method_id` validates a registered method by its catalog id (requires an API key, since the catalog is org-scoped). Both are **server pass-throughs**: the selector rides the `/v1/validate` body and the hosted API resolves it — no method source enters the conversation.
+The graph and the form's artifacts are view-only data, and the workshop renders no views, so a workshop verdict never carries them; on the console, `pipelex_show_method` runs the same projection and delivers them to the `run-graph` view. The MCP `content` text is the API's rendered summary, with the signature line appended. The three source forms are **mutually exclusive — supply exactly one**. `method_ref` validates a published method by its address (`github.com/<owner>/<repo>[/<selector>][@<tag>]`, e.g. `github.com/Pipelex/methods/documents@v0.1.0`); `method_id` validates a registered method by its catalog id (requires an API key, since the catalog is org-scoped). Both are **server pass-throughs**: the selector rides the `/v1/validate` body and the hosted API resolves it — no method source enters the conversation.
 
 ### `mthds_inputs_template`
 

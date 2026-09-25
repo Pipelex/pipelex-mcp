@@ -53,13 +53,13 @@ export const filesInputSchema = z
         path: z
           .string()
           .describe(
-            "Filesystem path to a .mthds file, resolved by the local workshop server relative to its working directory. The hosted deployment cannot read files and rejects this form.",
+            "Filesystem path to a .mthds file, resolved relative to this server's working directory.",
           ),
       }),
     ]),
   )
   .describe(
-    "One or more submitted MTHDS files forming the method closure. Each item is either inline contents ({ content, uri? }) or a file path ({ path }, local workshop only).",
+    "One or more submitted MTHDS files forming the method closure. Each item is either inline contents ({ content, uri? }) or a file path ({ path }).",
   );
 
 /** A submitted file resolved to its contents — what the capabilities consume. */
@@ -376,9 +376,9 @@ export function buildApiConfig(env: ApiEnv = process.env): ApiConfig {
 
 /**
  * The bundle blueprint's declared `main_pipe`, qualified by the blueprint's
- * `domain` when it is authored bare — the fallback pipe both `mthds_validate`
- * and `mthds_prepare_inputs`'s console walk consult behind the runner's own
- * `default_pipe_ref`.
+ * `domain` when it is authored bare — the fallback pipe both the validate
+ * capability and the console's input walk (`console-inputs.ts`) consult behind
+ * the runner's own `default_pipe_ref`.
  *
  * Every read is defensive: `bundle_blueprint` is opaque transport (its schema
  * is the runtime's, not this server's), so a blueprint that is not an object,
@@ -1474,8 +1474,9 @@ interface ItemErrorTexture {
  * call mints fresh links.
  *
  * It lives here rather than in `artifacts.ts` because both fetching
- * capabilities need it, and `mthds_show_images` — which both shells register —
- * must not import the workshop-only download tool to get it.
+ * capabilities need it, and the image-display capability — which both shells
+ * register, as `mthds_show_images` and `pipelex_show_images` — must not import
+ * the workshop-only download tool to get it.
  */
 const ITEM_ERROR_TEXTURES: Record<string, ItemErrorTexture> = {
   invalid_storage_uri: {

@@ -52,10 +52,6 @@ export const mthdsValidateInputSchema = {
     .describe(
       "Catalog id (mt_…) of a registered method. Validates the method's CURRENT stored content server-side — requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_ref / method_id.",
     ),
-  include_graph: z
-    .boolean()
-    .optional()
-    .describe("Whether to include graph_spec in successful responses. Defaults to true."),
 };
 
 /**
@@ -231,7 +227,6 @@ export interface MthdsValidateInput {
   files?: SubmittedFileInput[];
   method_ref?: string;
   method_id?: string;
-  include_graph?: boolean;
 }
 
 /** The validate request after `{ path }` resolution — what the checks and the API call consume. */
@@ -239,7 +234,6 @@ interface ResolvedValidateRequest {
   files: SubmittedFile[];
   method_ref?: string;
   method_id?: string;
-  include_graph?: boolean;
 }
 
 export type ViewSpec = z.infer<typeof viewSpecSchema>;
@@ -297,7 +291,7 @@ export interface ValidationResult {
    * the agent acts on the verdict in `structuredContent` and the Markdown
    * summary, never the raw graph. Opaque (`unknown`) here; the view casts it to
    * `@pipelex/mthds-ui`'s `GraphSpec`. Populated only on a valid verdict when
-   * `include_graph !== false` and the invoking shell has a registered view.
+   * the invoking shell has a registered view.
    */
   graphSpec?: unknown;
   /**
@@ -512,11 +506,7 @@ export async function validateMthds(
   // API. A malformed report (e.g. missing rendered_markdown) is a reachable
   // contract violation, surfaced as a runtime no-verdict error.
   try {
-    return validationResult(
-      report,
-      input.include_graph !== false,
-      context.viewsAvailable !== false,
-    );
+    return validationResult(report, true, context.viewsAvailable !== false);
   } catch (err) {
     return errorResult(
       "Validation produced no verdict: the Pipelex API returned a malformed report.",
@@ -608,7 +598,7 @@ export function projectValidationReport(
     // the view ignores.
     mainPipeRef = pipeRef ?? defaultPipeRefOf(validReport);
     // The signature is the workshop's deliverable as much as the console's, so
-    // it is independent of `viewsAvailable` and of `include_graph`, and a
+    // it is independent of `viewsAvailable` and of `includeGraph`, and a
     // pending-signature verdict carries it too — the shape is fully determined
     // before the signatures resolve.
     const mainPipe = mainPipeSignatureOf(validReport, mainPipeRef);
@@ -631,7 +621,7 @@ export function projectValidationReport(
     // them costs no context, and they are the maps the view looks a pipe up
     // in. Gating them on `mainPipeRef` made a click on a graph node dead —
     // every selector missed, for every pipe — on exactly the verdicts where a
-    // click is the only route to a form. Independent of `include_graph`.
+    // click is the only route to a form. Independent of `includeGraph`.
     //
     // The ADVERT is narrower, and it is what "no form for a pipe nobody chose"
     // actually means: `input_form` joins `available_view_specs` only when an
@@ -666,7 +656,7 @@ export function projectValidationReport(
   }
 
   // Advertise the dry-run graph view to the model only when a graph spec was
-  // actually produced (valid verdict + include_graph). The spec itself rides
+  // actually produced (valid verdict + includeGraph). The spec itself rides
   // `_meta`, which the model never sees — `available_view_specs` is the
   // structured signal, and the Markdown note is the prose one for agents that
   // read the summary more reliably than the structured fields.

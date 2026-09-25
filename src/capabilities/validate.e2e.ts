@@ -168,17 +168,17 @@ describe("mthds_validate (live)", () => {
     expect((report as PipelexValidationReport).default_pipe_ref).toBe(FIXTURE_PIPE_REF);
   });
 
-  it("omits the graph when include_graph is false", async () => {
+  it("carries no view artifacts on the workshop, which renders no views", async () => {
     const result = await validateMthds(
-      { files: [{ content: FIXTURE_BUNDLE, uri: FIXTURE_BUNDLE_URI }], include_graph: false },
-      context,
+      { files: [{ content: FIXTURE_BUNDLE, uri: FIXTURE_BUNDLE_URI }] },
+      { ...context, viewsAvailable: false },
     );
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);
     expect(result.graphSpec).toBeUndefined();
-    // The form does not depend on the graph, and neither does the signature.
-    expect(result.structuredContent.available_view_specs).toEqual(["input_form"]);
+    // The signature does not depend on views.
+    expect(result.structuredContent.available_view_specs).toEqual([]);
     expect(result.structuredContent.main_pipe?.output.concept_ref).toBe("native.Text");
   });
 

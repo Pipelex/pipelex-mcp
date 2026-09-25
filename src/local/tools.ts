@@ -285,7 +285,7 @@ const CODEGEN_DESCRIPTION = [
   "Generate typed code for an MTHDS method: its concept set projected into typed models by the Pipelex codegen engine, stamped and locked so the written tree can be checked offline.",
   "Supply exactly ONE of files / method_ref / method_id — never several; an address or an id is resolved server-side, so no bundle enters the conversation.",
   `target is required and has no default — choose it from the project, and the user's explicit request wins: ${CODEGEN_TARGET_RULE}.`,
-  "On the local workshop, pass output_dir (a DEDICATED generated directory, such as src/generated/<method>/) to write the tree to disk, so the bytes never enter the conversation; the hosted console does not take output_dir.",
+  "Pass output_dir (a DEDICATED generated directory, such as src/generated/<method>/) to write the tree to disk, so the bytes never enter the conversation.",
   "Without output_dir, write every returned artifact at its path and the lock as codegen.lock beside them, VERBATIM — any byte change breaks the stamp and the lock.",
 ].join(" ");
 
@@ -318,7 +318,7 @@ export const mthdsPrepareInputsTool = defineTool({
     "Prepare a pipe's FILLED inputs for a run — upload file-bearing values (local paths, data: URLs, bytes) to Pipelex storage and rewrite them to pipelex-storage:// so they are run-ready. " +
     "http(s) URLs and existing pipelex-storage:// references pass through unchanged; an inputs set that is already all pass-through can skip this and go straight to mthds_run. " +
     "Name the method as files, as a published method's address via method_ref, or as a registered method's catalog id via method_id — exactly ONE of the three, never several — plus the filled inputs from mthds_inputs_template. " +
-    "The local workshop uploads local/byte assets with your API key; the hosted console is pass-through only and refuses upload-needing inputs (use a URL, a pipelex-storage:// reference, or the local workshop).",
+    "Uploads are made with your API key.",
   inputSchema: mthdsPrepareInputsInputSchema,
   outputSchema: mthdsPrepareInputsOutputSchema,
   annotations: {

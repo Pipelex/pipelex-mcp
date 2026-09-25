@@ -141,7 +141,7 @@ export const mthdsCodegenInputSchema = {
     .string()
     .optional()
     .describe(
-      "LOCAL WORKSHOP ONLY. Write the generated tree straight to disk instead of returning its content, so the bytes never enter the conversation. A directory relative to the server's working directory, created if missing and required to stay inside it (no absolute paths, no `..`). Use a DEDICATED generated directory such as `src/generated/<method>/`: this tool overwrites files it generated (they carry a codegen stamp) and the codegen.lock beside them, and refuses the whole write rather than touch anything else. The hosted console takes no output_dir.",
+      "Write the generated tree straight to disk instead of returning its content, so the bytes never enter the conversation. A directory relative to the server's working directory, created if missing and required to stay inside it (no absolute paths, no `..`). Use a DEDICATED generated directory such as `src/generated/<method>/`: this tool overwrites files it generated (they carry a codegen stamp) and the codegen.lock beside them, and refuses the whole write rather than touch anything else.",
     ),
 };
 
