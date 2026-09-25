@@ -385,7 +385,11 @@ export default function RunGraphView() {
     startError,
     polling,
     hasResults: results !== null,
-    resultsError: resultsError?.message ?? null,
+    // With its hint, as a failed start's: it is what says to reopen the view
+    // or to sign in again, which the message alone does not.
+    resultsError: resultsError
+      ? [resultsError.message, resultsError.hint].filter(Boolean).join(" ")
+      : null,
   });
   const llmSummary = [
     executedGraph
