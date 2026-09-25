@@ -1508,6 +1508,9 @@
           "csp": {
             "resourceDomains": [
               "http://<skybridge dev host>",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-dev/",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-staging/",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-prod/",
               "https://pipelex-app-dev.s3.us-west-2.amazonaws.com",
               "https://pipelex-app-staging.s3.us-west-2.amazonaws.com",
               "https://pipelex-app-prod.s3.us-west-2.amazonaws.com"
@@ -1526,6 +1529,9 @@
               "http://<skybridge dev host>"
             ],
             "frameDomains": [
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-dev/",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-staging/",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-prod/",
               "https://pipelex-app-dev.s3.us-west-2.amazonaws.com",
               "https://pipelex-app-staging.s3.us-west-2.amazonaws.com",
               "https://pipelex-app-prod.s3.us-west-2.amazonaws.com"
@@ -1546,6 +1552,9 @@
           "csp": {
             "resourceDomains": [
               "http://<skybridge dev host>",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-dev/",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-staging/",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-prod/",
               "https://pipelex-app-dev.s3.us-west-2.amazonaws.com",
               "https://pipelex-app-staging.s3.us-west-2.amazonaws.com",
               "https://pipelex-app-prod.s3.us-west-2.amazonaws.com"
@@ -1558,6 +1567,9 @@
               "http://<skybridge dev host>"
             ],
             "frameDomains": [
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-dev/",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-staging/",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-prod/",
               "https://pipelex-app-dev.s3.us-west-2.amazonaws.com",
               "https://pipelex-app-staging.s3.us-west-2.amazonaws.com",
               "https://pipelex-app-prod.s3.us-west-2.amazonaws.com"

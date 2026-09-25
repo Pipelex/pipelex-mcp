@@ -93,7 +93,7 @@ import type {
 } from "@pipelex/mcp-core/capabilities/upload-grant.js";
 import type { ApiContextPatch } from "@pipelex/mcp-core/capabilities/shared.js";
 import type { ToolDefinition } from "@pipelex/mcp-core/tool-definition.js";
-import { APP_BUCKET_REGIONAL_ORIGINS, UPLOAD_CONNECT_DOMAINS } from "./app-buckets.js";
+import { RUN_OUTPUT_SOURCES, UPLOAD_CONNECT_DOMAINS } from "./app-buckets.js";
 
 const NAMES = CONSOLE_TOOL_NAMES;
 
@@ -267,8 +267,10 @@ export const pipelexShowMethodTool = defineHostedTool({
       // A run started from the form shows its results here, so the output's
       // images load from, and its documents preview in a frame from, the
       // buckets the runtime signs run outputs against — as in run-follow.
-      resourceDomains: APP_BUCKET_REGIONAL_ORIGINS,
-      frameDomains: APP_BUCKET_REGIONAL_ORIGINS,
+      // `frameDomains` is what makes ChatGPT's app directory review a listing
+      // more strictly, which matters only for a public listing.
+      resourceDomains: RUN_OUTPUT_SOURCES,
+      frameDomains: RUN_OUTPUT_SOURCES,
     },
   },
   _meta: {
@@ -367,12 +369,14 @@ export const pipelexRunTool = defineHostedTool({
     description: "Live-following status card for the durable run, then its results.",
     csp: {
       // Run-output images and documents are presigned URLs on the hosted
-      // platform's per-env storage buckets — a tight host allowlist, never a
-      // wildcard. Images load as resources; the result renderer previews a
-      // PDF in a frame, which is what `frameDomains` allows. Anything else in
+      // platform's per-env storage buckets — a tight allowlist scoped to those
+      // buckets, never the shared regional endpoint or a wildcard
+      // (`./app-buckets.ts`). Images load as resources; the result renderer
+      // previews a PDF in a frame, which is what `frameDomains` allows, at the
+      // cost of a stricter review of a public ChatGPT listing. Anything else in
       // the output stays CSP-blocked, and the renderer names the file instead.
-      resourceDomains: APP_BUCKET_REGIONAL_ORIGINS,
-      frameDomains: APP_BUCKET_REGIONAL_ORIGINS,
+      resourceDomains: RUN_OUTPUT_SOURCES,
+      frameDomains: RUN_OUTPUT_SOURCES,
     },
   },
   _meta: {
