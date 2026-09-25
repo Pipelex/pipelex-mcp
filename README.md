@@ -52,7 +52,7 @@ Pipelex MCP connects MCP hosts to Pipelex methods, wrapping the Pipelex API thro
 - **The console**, the Pipelex connector (server name `pipelex`): a [Skybridge](https://docs.skybridge.tech) HTTP server, deployed on Alpic, for chat hosts. Its tools are `pipelex_*`, and it names a method by reference only, a saved method's catalog id or a published method's address: it finds a method, shows it, takes a file attached in the chat, and runs it. It registers the Skybridge views.
 - **The workshop**, the Pipelex plugin's server (server name `pipelex-plugin`): an npm-distributed stdio server (`@pipelex/mcp`, bin `pipelex-mcp`) that coding-agent hosts spawn via `npx`. Its tools are `mthds_*`, and they also validate a method, template its inputs, generate typed code for it, prepare its files, and save it to the catalog and pull it back. Its headline feature is the `{ path }` file arm: it reads `.mthds` files from disk instead of having the model hand-copy their contents.
 
-The console is the Pipelex MCP of the get-started above, at `mcp.pipelex.com`, and the workshop is the MCP server the Pipelex plugin runs. The rest of this page calls them by the names the code uses.
+The console is the Pipelex MCP of the get-started above, at `mcp.pipelex.com`, and the workshop is the MCP server the Pipelex plugin runs. The rest of this page calls them by the names the code uses. The two are released separately, each with its own version and changelog.
 
 ## Tools
 
@@ -166,12 +166,12 @@ The way to end up with both without choosing it: **the console added in claude.a
 - [Client identification](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/client-identification.md): the `User-Agent` every request to the Pipelex API carries, naming this server, its shell and the host behind it.
 - [The specification](https://github.com/Pipelex/pipelex-mcp/blob/main/SPEC.md): the source of truth for the full tool contracts, verdict discipline and view behavior.
 - [An illustrated overview](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/readme.html) of the two servers, the tool surface, the flow a method takes and the sharp edges, as an HTML page to download and open in a browser.
-- [The changelog](https://github.com/Pipelex/pipelex-mcp/blob/main/CHANGELOG.md): what each release shipped.
+- The changelogs, one per server, since each is released on its own: [the workshop's](https://github.com/Pipelex/pipelex-mcp/blob/main/packages/workshop/CHANGELOG.md), whose versions are the ones on npm and which also records every release made before the two were split, and [the console's](https://github.com/Pipelex/pipelex-mcp/blob/main/packages/console/CHANGELOG.md).
 - [The Pipelex documentation](https://docs.pipelex.com/) and [the MTHDS standard](https://mthds.ai/).
 
 ## Develop
 
-To work on this repository, clone it, then:
+The repository is an npm workspace of three packages: the capability core both servers are built from, the workshop and the console, under `packages/`. To work on it, clone it, then, from the root:
 
 ```bash
 make install   # install the dependencies
@@ -179,7 +179,7 @@ make check     # lint, formatting, both builds, typecheck, and the text and styl
 make test      # the hermetic test suite, which never touches the network
 ```
 
-A coding agent runs `make agent-test` instead of `make test`: the same suite, with its output shown only when a test fails. `make dev-local` runs the workshop from source. [Developing pipelex-mcp](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/development.md) covers running the console locally, the live test suites against the Pipelex API, and versioning, and [the changelog](https://github.com/Pipelex/pipelex-mcp/blob/main/CHANGELOG.md) records what each release shipped.
+A coding agent runs `make agent-test` instead of `make test`: the same suite, with its output shown only when a test fails. `make dev-local` runs the workshop from source. [Developing pipelex-mcp](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/development.md) covers the layout, running the console locally, the live test suites against the Pipelex API, and how each server is versioned and released.
 
 ## License
 

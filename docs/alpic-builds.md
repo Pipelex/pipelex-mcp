@@ -8,16 +8,16 @@ A deployment's log is read with `npx alpic deployment logs --non-interactive --d
 
 The Alpic project's Root Directory, install command, build command and start command are project settings, shared by every environment, and all of them are unset on this project. Alpic's API sets the Root Directory only when a project is created, so it cannot be changed per environment or per branch.
 
-An `alpic.json` at the repository root can override `installCommand`, `buildCommand`, `buildOutputDir` and `startCommand`. Unlike the project settings, it travels with the commit, so two branches with different layouts can each carry their own. This repository's `alpic.json` leaves the install to Alpic's detected default (an install from `package-lock.json`), and names the other three: `npm run build`, which runs `skybridge build` and then copies the server bundle it emits to `dist/server.bundle.js`; `dist` as the build output; and `node dist/server.bundle.js` as the start command. The build and output values are the ones Alpic would detect anyway, and are written down so the start command's dependency on them is visible in one place.
+An `alpic.json` at the repository root can override `installCommand`, `buildCommand`, `buildOutputDir` and `startCommand`. Unlike the project settings, it travels with the commit, so two branches with different layouts can each carry their own. This repository is an npm workspace whose console is the member `packages/console`, and the Root Directory stays unset: the install has to run at the root, where the lockfile and the workspace are, so that the console's packages are installed at all. The root `alpic.json` then points the rest at the member. It leaves the install to Alpic's detected default (an install from the root `package-lock.json`, which installs every member's dependencies into the root `node_modules`), and names the other three: `npm run build`, whose root script runs the console's own build, `skybridge build` followed by a copy of the server bundle it emits to `packages/console/dist/server.bundle.js`; `packages/console/dist` as the build output; and `node packages/console/dist/server.bundle.js` as the start command, which runs from `/var/task`, where the build output lands at the same relative path. None of the three is what Alpic would detect for a root with no Skybridge app of its own, so all three must stay written down.
 
 ## The install stage installs devDependencies
 
 The builder runs one install at the repository root, from the lockfile, and that install includes devDependencies. Two things in every build log show it:
 
 - The install adds far more packages than the lockfile's production closure holds. A build of `94755a6` printed `added 732 packages`, while that commit's lockfile has only 461 entries outside `devDependencies`. The difference from the lockfile's full size is the platform-specific optional packages a Linux x64 install skips.
-- The build that follows runs `vite build` with this repository's `vite.config.ts`, which loads `@vitejs/plugin-react` and `@tailwindcss/vite` at config time. Both are declared only in `devDependencies`, and the build succeeds.
+- The build that follows runs `vite build` with the console's `vite.config.ts` (at the root when these builds ran, in `packages/console/` since the workspace split), which loads `@vitejs/plugin-react` and `@tailwindcss/vite` at config time. Both are declared only in `devDependencies`, and the build succeeds.
 
-So the console's build-only packages belong in `devDependencies` (see the dependency convention in `CLAUDE.md`), and Alpic builds the console with them. Deployments `dpl_swlz0ucxswfo5lpsadwtj` and `dpl_3akp84bj6j7456rfxn4yw` both show it.
+So the console's build-only packages belong in its `devDependencies` (see the dependency convention in `CLAUDE.md`), and Alpic builds the console with them: in the workspace, the root install installs every member's devDependencies too. Deployments `dpl_swlz0ucxswfo5lpsadwtj` and `dpl_3akp84bj6j7456rfxn4yw` both show it.
 
 ## What the running image contains
 
@@ -37,6 +37,6 @@ Two consequences follow:
 
 ## Assets and validation
 
-The views' assets are extracted from `<buildOutputDir>/assets` (the log prints `Assets extracted`) and served under `/assets/assets/`. Pointing `buildOutputDir` at a wider directory therefore moves where Alpic looks for them.
+The views' assets are extracted from `<buildOutputDir>/assets` (the log prints `Assets extracted`) and served under `/assets/assets/`. Pointing `buildOutputDir` at a wider directory therefore moves where Alpic looks for them; the workspace's `packages/console/dist` holds them at `packages/console/dist/assets`, where Skybridge's build writes them.
 
 After the image is deployed, Alpic starts the server and tests that it responds. A server that fails to start fails the deployment with `MCP server validation failed` and the server's own error. A failed deployment never takes traffic: the environment keeps serving its previous deployment.

@@ -4,7 +4,7 @@
  * Claude Code cuts MCP server instructions and each tool description at 2,048
  * characters, and at dev `c5e4652` the workshop's instructions reached the
  * model cut mid-word, because nothing measured them. This gate holds every one
- * of those texts to a ceiling below the cap; `src/tool-text-budget.ts` says why
+ * of those texts to a ceiling below the cap; `scripts/tool-text-budget.ts` says why
  * the ceiling sits where it does and owns the arithmetic, which the hermetic
  * suite tests.
  *
