@@ -305,6 +305,25 @@ describe("showPipelexMethod", () => {
     }
   });
 
+  it("refuses a bare pipe_ref even when the report carries no contracts", async () => {
+    // An older runner sends no pipe_io_contracts, so membership cannot be
+    // checked; a bare ref is still refused, since pipelex_run always refuses one.
+    const { pipe_io_contracts: _dropped, ...legacyReport } = validReport as unknown as Record<
+      string,
+      unknown
+    >;
+    const { context } = contextAnswering(async () => legacyReport as PipelexValidationReport);
+
+    const bare = await showPipelexMethod({ method_id: "mt_demo", pipe_ref: "main" }, context);
+    const qualified = await showPipelexMethod(
+      { method_id: "mt_demo", pipe_ref: "demo.main" },
+      context,
+    );
+
+    expect(bare.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
+    expect(qualified.structuredContent.status).toBe("ok");
+  });
+
   it("reports a pending-signature method as not runnable, with no template and no form", async () => {
     const { context } = contextAnswering(async () => pendingReport);
 

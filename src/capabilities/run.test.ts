@@ -2016,6 +2016,29 @@ describe("startPipelexRun", () => {
     ]);
   });
 
+  it("headlines a walk failure by where it lies, not as an inputs fault by default", async () => {
+    // A method that does not validate is refused at the selector during the
+    // walk; its headline must not send the model to fix inputs that were fine.
+    const broken = consoleContext({
+      report: { is_valid: false, validation_errors: [] } as unknown as PipelexValidationResult,
+    });
+    const refusedMethod = await startPipelexRun(
+      { method_id: "mt_demo", inputs: { question: "why?" } },
+      broken.context,
+    );
+    expect(refusedMethod.structuredContent.errors?.[0]?.location).toBe("method_id");
+    expect(refusedMethod.summary).not.toContain("its inputs");
+
+    // An input that would need an upload is an inputs fault, and says so.
+    const { context } = consoleContext();
+    const refusedInput = await startPipelexRun(
+      { method_id: "mt_demo", inputs: { photo: "./cat.png" } },
+      context,
+    );
+    expect(refusedInput.structuredContent.errors?.[0]?.location).toMatch(/^inputs/);
+    expect(refusedInput.summary).toContain("its inputs could not be prepared");
+  });
+
   it("requires exactly one method reference, before any call", async () => {
     const { context, recorded } = consoleContext();
 

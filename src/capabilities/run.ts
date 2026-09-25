@@ -1366,7 +1366,7 @@ export async function startPipelexRun(
       context.authError,
     );
     if (!prepared.ok) {
-      return startErrorResult(summaryForToolError(prepared.error, INPUTS_ERROR_SUMMARIES), [
+      return startErrorResult(summaryForToolError(prepared.error, walkHeadlines(prepared.error)), [
         prepared.error,
       ]);
     }
@@ -1415,7 +1415,7 @@ export function classifyStartError(err: unknown, options: ClassifyErrorOptions):
   return {
     ...error,
     retryable: false,
-    hint: "The request may have reached the server before the answer was lost, so the run may have started. Do not start it again without asking the user: a second start would be a second run, spending inference credit again.",
+    hint: "The request may have reached the server before the answer was lost, so the run may have started anyway. Check before starting it again: a second start would be a second run, spending inference credit again.",
   };
 }
 
@@ -1546,6 +1546,20 @@ function toStartOptions(input: ResolvedRunRequest): PipelexStartOptions {
     ...(input.method_ref === undefined ? {} : { method_ref: input.method_ref }),
     ...(input.method_id === undefined ? {} : { method_id: input.method_id }),
   };
+}
+
+/**
+ * The walk reads the method before the start does, so it also meets the
+ * start's own failures: an unknown id, an address that does not resolve, a
+ * refused sign-in. Those keep the start's headlines, and only a fault in the
+ * inputs or the pipe is headlined as one, since a host that shows only the
+ * first line would otherwise send the model to fix inputs that were fine.
+ */
+function walkHeadlines(error: ToolError): ErrorSummaries {
+  const location = error.location ?? "";
+  return location === "pipe_ref" || location === "inputs" || location.startsWith("inputs.")
+    ? INPUTS_ERROR_SUMMARIES
+    : START_ERROR_SUMMARIES;
 }
 
 /** Headlines for a run refused while its inputs were being prepared, before anything started. */

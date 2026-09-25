@@ -294,25 +294,35 @@ export function validateShowRequest(input: PipelexShowMethodInput): ToolError[] 
  * projected, naming the pipes it does declare — the same two refusals
  * `pipelex_run`'s input walk makes, so a pipe this tool accepts is one the run
  * accepts too. Read off the IO contracts, keyed by the same namespaced refs; a
- * report without them (an older runner) cannot be checked, and is not refused.
+ * report without them (an older runner) cannot be checked for membership, so
+ * only a bare ref is refused there.
  */
 function unknownPipeError(
   requested: string,
   report: PipelexValidationResult,
 ): ToolError | undefined {
   const contracts = asRecord((report as { pipe_io_contracts?: unknown }).pipe_io_contracts);
-  if (contracts === undefined) return undefined;
-  const declared = Object.keys(contracts);
+  const declared = contracts === undefined ? [] : Object.keys(contracts);
   const candidates = declared.length > 0 ? declared.join(", ") : "(none)";
+  // Checked whether or not the contracts arrived: `pipelex_run` refuses a bare
+  // ref before any call, so a show that let one through would hand the model a
+  // run that cannot start.
   if (!requested.includes(".")) {
     return {
       class: "input_domain",
       location: "pipe_ref",
-      message: `pipe_ref must be qualified (domain.pipe_code), got the bare "${requested}". The method declares: ${candidates}.`,
-      hint: "Pass one of the declared pipes as it is written above, or omit pipe_ref for the entry pipe.",
+      message:
+        contracts === undefined
+          ? `pipe_ref must be qualified (domain.pipe_code), got the bare "${requested}".`
+          : `pipe_ref must be qualified (domain.pipe_code), got the bare "${requested}". The method declares: ${candidates}.`,
+      hint:
+        contracts === undefined
+          ? "Pass the pipe as domain.pipe_code, or omit pipe_ref for the entry pipe."
+          : "Pass one of the declared pipes as it is written above, or omit pipe_ref for the entry pipe.",
       retryable: false,
     };
   }
+  if (contracts === undefined) return undefined;
   if (!(requested in contracts)) {
     return {
       class: "input_domain",

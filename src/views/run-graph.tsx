@@ -273,7 +273,14 @@ export default function RunGraphView() {
         if (ack.status === "ok" && ack.run_id) {
           setRunId(ack.run_id);
         } else {
-          setStartError(ack.errors?.[0]?.message ?? "The run could not be started.");
+          // The hint rides along: after a start whose outcome is unknown it is
+          // what tells the user the run may exist before they press Run again.
+          const error = ack.errors?.[0];
+          setStartError(
+            error === undefined
+              ? "The run could not be started."
+              : [error.message, error.hint].filter(Boolean).join(" "),
+          );
         }
       } catch (err) {
         setStartError(err instanceof Error ? err.message : "The run could not be started.");
