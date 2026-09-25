@@ -9,6 +9,8 @@
  * The guard reads each track's version at HEAD and at its first parent through
  * `.github/scripts/track-version.sh`, so each case below builds a small history
  * in a temp repository holding that script and runs the guard target in it.
+ * `check-release-ready` also holds HEAD to origin/main's tip, which a bare
+ * repository beside the temp one stands in for.
  */
 import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
@@ -56,13 +58,17 @@ async function commitVersions(versions: { workshop: string; console: string }): 
   git("commit", "-q", "-m", `workshop ${versions.workshop}, console ${versions.console}`);
 }
 
-function guard(track: "workshop" | "console"): { status: number | null; output: string } {
-  const result = spawnSync("make", ["-f", MAKEFILE, `check-${track}-released`], {
+function run(target: string): { status: number | null; output: string } {
+  const result = spawnSync("make", ["-f", MAKEFILE, target], {
     cwd: repo,
     env: BASE_ENV,
     encoding: "utf8",
   });
   return { status: result.status, output: `${result.stdout}${result.stderr}` };
+}
+
+function guard(track: "workshop" | "console"): { status: number | null; output: string } {
+  return run(`check-${track}-released`);
 }
 
 beforeEach(async () => {
@@ -84,7 +90,7 @@ describe("the break-glass release guard", () => {
     expect(guard("workshop").status).toBe(0);
     const refused = guard("console");
     expect(refused.status).not.toBe(0);
-    expect(refused.output).toContain("HEAD did not release the console");
+    expect(refused.output).toContain("HEAD did not raise the console version");
   });
 
   it("refuses a track once the other track's release has moved main past its release commit", async () => {
@@ -94,7 +100,7 @@ describe("the break-glass release guard", () => {
 
     const refused = guard("workshop");
     expect(refused.status).not.toBe(0);
-    expect(refused.output).toContain("it carries workshop 0.21.0, as its first parent does");
+    expect(refused.output).toContain("it carries workshop 0.21.0 over its first parent's 0.21.0");
     expect(guard("console").status).toBe(0);
   });
 
@@ -107,6 +113,45 @@ describe("the break-glass release guard", () => {
 
     expect(guard("console").status).toBe(0);
     expect(guard("workshop").status).not.toBe(0);
+  });
+
+  it("refuses a commit that lowers a track's version", async () => {
+    await commitVersions({ workshop: "0.21.0", console: "0.21.0" });
+    await commitVersions({ workshop: "0.21.0", console: "0.20.0" });
+
+    const refused = guard("console");
+    expect(refused.status).not.toBe(0);
+    expect(refused.output).toContain("it carries console 0.20.0 over its first parent's 0.21.0");
+  });
+
+  it("holds a clean main to origin/main's tip", async () => {
+    await commitVersions({ workshop: "0.20.0", console: "0.20.0" });
+    await commitVersions({ workshop: "0.20.0", console: "0.21.0" });
+    const origin = `${repo}-origin.git`;
+    spawnSync("git", ["init", "-q", "--bare", origin], { env: BASE_ENV });
+    try {
+      git("remote", "add", "origin", origin);
+      git("push", "-q", "origin", "main");
+      expect(run("check-release-ready").status).toBe(0);
+
+      // origin/main moves on while this checkout stays on the older release.
+      await commitVersions({ workshop: "0.21.0", console: "0.21.0" });
+      git("push", "-q", "origin", "main");
+      git("reset", "-q", "--hard", "HEAD^");
+      const refused = run("check-release-ready");
+      expect(refused.status).not.toBe(0);
+      expect(refused.output).toContain("HEAD is not origin/main's tip");
+    } finally {
+      await fs.rm(origin, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses when origin/main cannot be fetched", async () => {
+    await commitVersions({ workshop: "0.20.0", console: "0.20.0" });
+
+    const refused = run("check-release-ready");
+    expect(refused.status).not.toBe(0);
+    expect(refused.output).toContain("could not fetch origin/main");
   });
 
   it("refuses when a version cannot be read at all", async () => {

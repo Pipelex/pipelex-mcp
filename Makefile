@@ -432,20 +432,27 @@ check-release-ready:
 	@if [ -n "$$(git status --porcelain)" ]; then \
 		echo "ERROR: working tree is not clean. Commit or stash changes before publishing/deploying."; exit 1; \
 	fi
+	@git fetch -q origin main || { echo "ERROR: could not fetch origin/main, so nothing says this checkout is its tip."; exit 1; }; \
+	if [ "$$(git rev-parse HEAD)" != "$$(git rev-parse FETCH_HEAD)" ]; then \
+		echo "ERROR: HEAD is not origin/main's tip. Publish/deploy ship only main's tip: pull it, and if main has moved past the release you meant to ship, cut a new release instead."; exit 1; \
+	fi
 
 # Each target also ships only from the commit that released its own track: the
 # merge whose first parent carried another version of that track. main moves past
 # that commit when the other server releases, and its tip then still carries this
 # track's released version with code that version never shipped, so a recovery
 # from the tip would put the wrong bytes under the right number. Past that point
-# the cure is a new release of the track, not a recovery.
+# the cure is a new release of the track, not a recovery. The rise must be strict,
+# so a revert that lowers the version never reads as a release, and
+# check-release-ready holds HEAD to origin/main's tip, so a stale local main
+# sitting on an older release commit cannot roll Production back.
 check-workshop-released: TRACK := workshop
 check-console-released: TRACK := console
 check-workshop-released check-console-released:
 	@now="$$(bash .github/scripts/track-version.sh $(TRACK) HEAD)" && \
 	before="$$(bash .github/scripts/track-version.sh $(TRACK) HEAD^)" || exit 1; \
-	if [ "$$now" = "$$before" ]; then \
-		echo "ERROR: HEAD did not release the $(TRACK): it carries $(TRACK) $$now, as its first parent does. A break-glass ship runs only from the commit that raised the $(TRACK) version; once main has moved past it, cut a new $(TRACK) release instead."; exit 1; \
+	if [ "$$now" = "$$before" ] || [ "$$(printf '%s\n%s\n' "$$before" "$$now" | sort -V | tail -1)" != "$$now" ]; then \
+		echo "ERROR: HEAD did not raise the $(TRACK) version: it carries $(TRACK) $$now over its first parent's $$before. A break-glass ship runs only from the commit that raised the $(TRACK) version; once main has moved past it, cut a new $(TRACK) release instead."; exit 1; \
 	fi
 
 deploy: check-no-local-deps check-release-ready check-console-released

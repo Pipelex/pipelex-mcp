@@ -10,8 +10,8 @@
  * to check every guard verdict. Nothing here touches the network, the repo's own
  * `.env`, or a real server.
  *
- * It lives at the top of `src/` because the hermetic suite's `include` and the
- * TypeScript root are both `src/`; it is about the Makefile, not a module.
+ * It lives in `tests/`, which the root `tsconfig.json` and `vitest.config.ts`
+ * include directly, because it is about the Makefile, not a module.
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
