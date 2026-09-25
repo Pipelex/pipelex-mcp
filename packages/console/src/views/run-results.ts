@@ -133,7 +133,9 @@ export function runDurationSeconds(
 
 /** `23.6 s`, `2 min 5 s`, `1 h 3 min`. */
 export function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${seconds.toFixed(1)} s`;
+  // Compared after rounding to the tenth it is written at, so 59.97 s reads
+  // `1 min` rather than `60.0 s`.
+  if (Math.round(seconds * 10) < 600) return `${seconds.toFixed(1)} s`;
   const totalSeconds = Math.round(seconds);
   if (totalSeconds < 3600) {
     const minutes = Math.floor(totalSeconds / 60);
@@ -155,6 +157,8 @@ export function formatDuration(seconds: number): string {
  * zero. A partial cost — some calls unpriced — is a lower bound and says so
  * with `≥`. Nothing is printed when no call was priced, when the run made no
  * inference, or when usage is unknown: a missing dollar is never a zero one.
+ * Nor for a partial cost too small to write, since a lower bound that rounds
+ * to nothing says nothing, and `≥ $0.0000` would read as free.
  * No token count appears, because the counts are wrong upstream today while
  * the cost is sound.
  */
@@ -162,7 +166,7 @@ export function formatRunCost(usage: RunUsage | undefined): string | null {
   if (!usage || usage.state !== "records" || usage.calls === 0) return null;
   const cost = usage.cost_usd;
   if (cost === null || !Number.isFinite(cost)) return null;
-  if (usage.cost_partial === true) return `≥ $${cost.toFixed(4)}`;
+  if (usage.cost_partial === true) return cost < 0.0001 ? null : `≥ $${cost.toFixed(4)}`;
   if (cost > 0 && cost < 0.0001) return "<$0.0001";
   return `$${cost.toFixed(4)}`;
 }
@@ -176,6 +180,43 @@ export function completedHeadline(
     durationSeconds === null ? "Completed" : `Completed in ${formatDuration(durationSeconds)}`;
   const cost = formatRunCost(usage);
   return cost === null ? head : `${head} · ${cost}`;
+}
+
+/**
+ * How much of a run's output, serialized, the panel renders whole. The kernel
+ * renders eagerly — one element per list row, one span per JSON token — inside
+ * a frame in the conversation, so an output past this is not handed to it; the
+ * panel shows the bounded copy the model reads instead, as JSON. Set an order
+ * of magnitude above that copy's 32 KiB and past anything a person reads in a
+ * chat; it is a guard against a pathological output, not a measured frame
+ * budget.
+ */
+export const FULL_OUTPUT_RENDER_BUDGET = 256 * 1024;
+
+/** What the panel renders for the output, and the full output's size when it was too large to render. */
+export interface OutputToRender {
+  value: unknown;
+  /** The full output's serialized length, in characters, when it is over the budget; `null` when the value is it. */
+  oversizedLength: number | null;
+}
+
+/**
+ * The output the panel renders: the full one (`_meta.main_stuff`) when it is
+ * within {@link FULL_OUTPUT_RENDER_BUDGET}, else the bounded copy
+ * (`structuredContent.main_stuff`). The bounded copy is also the floor for a
+ * response that carried no full output at all.
+ */
+export function outputToRender(full: unknown, bounded: unknown): OutputToRender {
+  if (full === undefined) return { value: bounded, oversizedLength: null };
+  let length: number;
+  try {
+    length = JSON.stringify(full)?.length ?? 0;
+  } catch {
+    return { value: bounded, oversizedLength: null };
+  }
+  return length > FULL_OUTPUT_RENDER_BUDGET
+    ? { value: bounded, oversizedLength: length }
+    : { value: full, oversizedLength: null };
 }
 
 /** Friendly words for the terminal statuses a run can fail with. */

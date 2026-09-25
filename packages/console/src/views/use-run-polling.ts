@@ -46,17 +46,20 @@ export type StatusFetcher = (args: {
  * live in `run-polling.ts` (pure, unit-tested); this hook owns the timers.
  * Pauses while the tab is hidden (one immediate read on return), stops on a
  * terminal status or a hard error.
+ *
+ * The snapshot is stamped with the run it answers for, so the render that
+ * first sees a new run id reads that run as just started — never the previous
+ * run's terminal status, which would free the Run button and set a results
+ * fetch off for a run that has only begun.
  */
 export function useRunPolling(
   runId: string | undefined,
   fetchStatus: StatusFetcher,
 ): RunPollingSnapshot {
-  const [snapshot, setSnapshot] = useState<RunPollingSnapshot>({
-    phase: runId ? "polling" : "idle",
-    runStatus: undefined,
-    health: null,
-    hardError: null,
-  });
+  const [stamped, setStamped] = useState<{
+    runId: string | undefined;
+    snapshot: RunPollingSnapshot;
+  }>({ runId, snapshot: freshSnapshot(runId) });
 
   // The fetcher from useCallTool changes identity per render; pin the latest
   // so the poll effect depends on runId only and never cancels itself.
@@ -67,6 +70,16 @@ export function useRunPolling(
     if (!runId) {
       return;
     }
+    const setSnapshot = (
+      next: RunPollingSnapshot | ((prev: RunPollingSnapshot) => RunPollingSnapshot),
+    ) =>
+      setStamped((prev) => ({
+        runId,
+        snapshot:
+          typeof next === "function"
+            ? next(prev.runId === runId ? prev.snapshot : freshSnapshot(runId))
+            : next,
+      }));
     const startedAt = Date.now();
     let cancelled = false;
     let stopped = false;
@@ -155,7 +168,6 @@ export function useRunPolling(
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
 
-    setSnapshot({ phase: "polling", runStatus: undefined, health: null, hardError: null });
     // Honor the pause-while-hidden contract from the very first read: if the
     // view mounts in a hidden tab, the visibilitychange listener fires the
     // immediate read on return instead.
@@ -170,7 +182,12 @@ export function useRunPolling(
     };
   }, [runId]);
 
-  return snapshot;
+  return stamped.runId === runId ? stamped.snapshot : freshSnapshot(runId);
+}
+
+/** What a run reads as before its first status read: polling when there is one, idle otherwise. */
+function freshSnapshot(runId: string | undefined): RunPollingSnapshot {
+  return { phase: runId ? "polling" : "idle", runStatus: undefined, health: null, hardError: null };
 }
 
 /**

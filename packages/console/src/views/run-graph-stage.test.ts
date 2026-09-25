@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formViewStage, runStatusLineFor } from "./run-graph-stage.js";
+import { formRunInFlight, formViewStage, runStatusLineFor } from "./run-graph-stage.js";
 
 describe("formViewStage", () => {
   it("shows the form and the dry-run graph before any run, and while one is going", () => {
@@ -15,10 +15,11 @@ describe("formViewStage", () => {
     ).toEqual({ graph: "executed", showPanel: true, showForm: false, showEditToggle: true });
   });
 
-  it("brings the form back under the results when the user asks to edit", () => {
+  it("brings the form back under the results, with the dry-run graph, when the user asks to edit", () => {
+    // The dry-run graph is the one whose pipe nodes switch the form's pipe.
     expect(
       formViewStage({ outcome: "completed", executedGraph: true, hasForm: true, editing: true }),
-    ).toEqual({ graph: "executed", showPanel: true, showForm: true, showEditToggle: false });
+    ).toEqual({ graph: "dry_run", showPanel: true, showForm: true, showEditToggle: false });
   });
 
   it("keeps the dry-run graph when the completed run carries no graph", () => {
@@ -43,6 +44,31 @@ describe("formViewStage", () => {
       formViewStage({ outcome: null, executedGraph: false, hasForm: false, editing: false })
         .showForm,
     ).toBe(false);
+  });
+});
+
+describe("formRunInFlight", () => {
+  const settled = { starting: false, runId: "run_1", hasResults: false, resultsFailed: false };
+
+  it("holds Run while the run starts and while it runs", () => {
+    expect(formRunInFlight({ ...settled, starting: true, runId: undefined, phase: "idle" })).toBe(
+      true,
+    );
+    expect(formRunInFlight({ ...settled, phase: "polling" })).toBe(true);
+  });
+
+  it("keeps holding Run once the run is terminal, until its results are read", () => {
+    expect(formRunInFlight({ ...settled, phase: "terminal" })).toBe(true);
+    expect(formRunInFlight({ ...settled, phase: "terminal", hasResults: true })).toBe(false);
+  });
+
+  it("frees Run when the results fetch failed for good, or the view lost the run", () => {
+    expect(formRunInFlight({ ...settled, phase: "terminal", resultsFailed: true })).toBe(false);
+    expect(formRunInFlight({ ...settled, phase: "hard_error" })).toBe(false);
+  });
+
+  it("frees Run before any run", () => {
+    expect(formRunInFlight({ ...settled, runId: undefined, phase: "idle" })).toBe(false);
   });
 });
 

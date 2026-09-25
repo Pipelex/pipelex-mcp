@@ -35,6 +35,10 @@ export interface FormViewStage {
  * changing the inputs is the likely next step, and keeps the dry-run graph,
  * since the hosted plane produces no graph for a failed run.
  *
+ * Unfolding the form brings the dry-run graph back too: it is the graph whose
+ * pipe nodes switch the form to another pipe, and the executed graph has no
+ * form to switch.
+ *
  * The toggle is offered only where there is a form to unfold, and never while
  * it is already unfolded.
  */
@@ -52,11 +56,38 @@ export function formViewStage({
 }): FormViewStage {
   const completed = outcome === "completed";
   return {
-    graph: completed && executedGraph ? "executed" : "dry_run",
+    graph: completed && executedGraph && !editing ? "executed" : "dry_run",
     showPanel: outcome !== null,
     showForm: hasForm && (!completed || editing),
     showEditToggle: hasForm && completed && !editing,
   };
+}
+
+/**
+ * Whether the run started from the form is still in hand, which holds the Run
+ * button disabled: while it starts, while it runs, and once it is terminal until
+ * its results are read or their fetch has failed for good. That last window can
+ * last several retries, and a second Run inside it would drop the only handle
+ * on the first run's output before anyone had seen it. A hard poll error frees
+ * the button, since the view has lost track of the run.
+ */
+export function formRunInFlight({
+  starting,
+  runId,
+  phase,
+  hasResults,
+  resultsFailed,
+}: {
+  starting: boolean;
+  runId: string | undefined;
+  phase: RunPollingSnapshot["phase"];
+  hasResults: boolean;
+  resultsFailed: boolean;
+}): boolean {
+  if (starting) return true;
+  if (runId === undefined) return false;
+  if (phase === "polling") return true;
+  return phase === "terminal" && !hasResults && !resultsFailed;
 }
 
 /** The status line under the form: what the run started from it is doing, or `null` for nothing to say. */

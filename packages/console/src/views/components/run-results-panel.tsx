@@ -17,6 +17,7 @@ import {
   failedHeadline,
   hasExecutedGraph,
   outputFieldFor,
+  outputToRender,
 } from "../run-results.js";
 import type { RunResultsView } from "../run-results.js";
 import { ToolbarButton } from "./toolbar-button.js";
@@ -41,10 +42,14 @@ const FADE_MASK = "linear-gradient(to bottom, black 72%, transparent)";
  * The output is the form kernel's `StuffViewer` in the `app` presentation, the
  * component every other Pipelex surface renders results with, over the field
  * derived from the executed pipe's output descriptor and its contract's payload
- * schema. It is fed the FULL output (`_meta.main_stuff`), never the bounded
- * copy the model reads. When the result cannot describe its output — an older
- * runner, or a pipe the panel cannot identify — it is shown as JSON instead,
- * and the panel says why.
+ * schema. It is fed the FULL output (`_meta.main_stuff`) rather than the bounded
+ * copy the model reads, unless the full output is past the render budget
+ * (`outputToRender`), when the bounded copy is shown as JSON and the panel says
+ * so. When the result cannot describe its output — an older runner, or a pipe
+ * the panel cannot identify — it is shown as JSON too, and the panel says why.
+ * The kernel's Download control is hidden: it saves through an object URL and
+ * a clicked link, falling back to a popup, and a host's sandboxed view frame
+ * blocks all three.
  *
  * Everything shown here was fetched by the view and goes to the view alone:
  * none of it enters the model's context. The model gets one line through
@@ -202,9 +207,12 @@ function RunOutput({
     () => outputFieldFor(results.contracts, results.outputForm, pipeRef),
     [results.contracts, results.outputForm, pipeRef],
   );
-  // The full output rides `_meta`; the bounded copy is the floor for a
-  // response that somehow carried none.
-  const value = results.mainStuff === undefined ? results.content.main_stuff : results.mainStuff;
+  // The full output rides `_meta`; the bounded copy stands in past the render
+  // budget, and for a response that somehow carried none.
+  const { value, oversizedLength } = useMemo(
+    () => outputToRender(results.mainStuff, results.content.main_stuff),
+    [results.mainStuff, results.content.main_stuff],
+  );
 
   const contentRef = useRef<HTMLDivElement>(null);
   const [overflowing, setOverflowing] = useState(false);
@@ -242,7 +250,11 @@ function RunOutput({
           className={["text-foreground", dark && "dark"].filter(Boolean).join(" ")}
         >
           <FieldPresentationProvider presentation="app">
-            {field ? <StuffViewer field={field} value={value} /> : <JsonView value={value} />}
+            {field && oversizedLength === null ? (
+              <StuffViewer field={field} value={value} hideDownload />
+            ) : (
+              <JsonView value={value} />
+            )}
           </FieldPresentationProvider>
         </div>
       </div>
@@ -256,10 +268,17 @@ function RunOutput({
           Open fullscreen to read the rest
         </button>
       )}
-      {!field && (
+      {oversizedLength !== null ? (
         <p className="mt-1 text-xs" style={{ color: mutedColor }}>
-          Shown as JSON: this result does not describe its output&apos;s structure.
+          This output is about {Math.ceil(oversizedLength / 1024)} KiB, more than this view renders
+          at once, so only its first part is shown, as JSON.
         </p>
+      ) : (
+        !field && (
+          <p className="mt-1 text-xs" style={{ color: mutedColor }}>
+            Shown as JSON: this result does not describe its output&apos;s structure.
+          </p>
+        )
       )}
     </div>
   );

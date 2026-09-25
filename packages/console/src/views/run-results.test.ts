@@ -4,6 +4,7 @@ import type { OutputForm, PipeIOContracts } from "@pipelex/mthds-ui/form";
 
 import type { RunResultsStructuredContent, RunUsage } from "@pipelex/mcp-core/capabilities/run.js";
 import {
+  FULL_OUTPUT_RENDER_BUDGET,
   completedHeadline,
   executedPipeRefOf,
   failedHeadline,
@@ -11,6 +12,7 @@ import {
   formatRunCost,
   hasExecutedGraph,
   outputFieldFor,
+  outputToRender,
   runDurationSeconds,
   runResultsViewOf,
 } from "./run-results.js";
@@ -156,6 +158,12 @@ describe("formatDuration", () => {
   it("writes seconds to one decimal under a minute", () => {
     expect(formatDuration(23.56)).toBe("23.6 s");
     expect(formatDuration(0.4)).toBe("0.4 s");
+    expect(formatDuration(59.94)).toBe("59.9 s");
+  });
+
+  it("never writes a minute as 60.0 s", () => {
+    expect(formatDuration(59.95)).toBe("1 min");
+    expect(formatDuration(59.99)).toBe("1 min");
   });
 
   it("writes minutes and seconds under an hour", () => {
@@ -183,6 +191,11 @@ describe("formatRunCost", () => {
     expect(formatRunCost(usage({ cost_partial: true }))).toBe("≥ $0.0138");
   });
 
+  it("prints no lower bound too small to write, rather than one that reads as free", () => {
+    expect(formatRunCost(usage({ cost_partial: true, cost_usd: 0.00004 }))).toBeNull();
+    expect(formatRunCost(usage({ cost_partial: true, cost_usd: 0 }))).toBeNull();
+  });
+
   it("prints nothing when nothing honest can be printed", () => {
     expect(formatRunCost(undefined)).toBeNull();
     // No call was priced: a missing dollar is never a zero one.
@@ -190,6 +203,26 @@ describe("formatRunCost", () => {
     // The run made no inference.
     expect(formatRunCost(usage({ state: "no_inference", cost_usd: 0, calls: 0 }))).toBeNull();
     expect(formatRunCost(usage({ state: "unavailable", cost_usd: null, calls: 0 }))).toBeNull();
+  });
+});
+
+describe("outputToRender", () => {
+  it("renders the full output when it is within the budget", () => {
+    expect(outputToRender({ a: 1 }, { a: "bounded" })).toEqual({
+      value: { a: 1 },
+      oversizedLength: null,
+    });
+  });
+
+  it("falls back to the bounded copy past the budget, and says how large the full one is", () => {
+    const full = { text: "x".repeat(FULL_OUTPUT_RENDER_BUDGET) };
+    const render = outputToRender(full, { text: "x…" });
+    expect(render.value).toEqual({ text: "x…" });
+    expect(render.oversizedLength).toBe(JSON.stringify(full).length);
+  });
+
+  it("uses the bounded copy when the response carried no full output", () => {
+    expect(outputToRender(undefined, [1, 2])).toEqual({ value: [1, 2], oversizedLength: null });
   });
 });
 

@@ -13,15 +13,15 @@ import { RunPanel } from "@pipelex/mthds-ui/form/react";
 import { GraphViewer } from "@pipelex/mthds-ui/graph/react";
 import { TOOLBAR_POSITION } from "@pipelex/mthds-ui";
 import type { GraphNodeData, GraphSpec, ToolbarPosition } from "@pipelex/mthds-ui";
-import { useCallback, useMemo, useRef, useState } from "react";
-import { useDisplayMode, useLayout } from "skybridge/web";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useDisplayMode, useLayout, useViewState } from "skybridge/web";
 
 import { useCallTool, useToolInfo } from "../helpers.js";
 import { RunResultsPanel } from "./components/run-results-panel.js";
 import { ToolbarButton } from "./components/toolbar-button.js";
 import { graphCaptionFor, graphPipeRefOf, selectedPipeFor } from "./run-graph-selection.js";
 import type { SelectedPipe } from "./run-graph-selection.js";
-import { formViewStage, runStatusLineFor } from "./run-graph-stage.js";
+import { formRunInFlight, formViewStage, runStatusLineFor } from "./run-graph-stage.js";
 import type { RunStatusLine } from "./run-graph-stage.js";
 import {
   UploadFailure,
@@ -39,6 +39,17 @@ import { useRunResults } from "./use-run-results.js";
  * `top-right`, but this view owns the choice. Pinned to `top-left` for now.
  */
 const TOOLBAR_POSITION_FOR_VIEW: ToolbarPosition = TOOLBAR_POSITION.TOP_LEFT;
+
+/**
+ * Host-persisted view state: the handle on the run the form last started, and
+ * the pipe it was started for. It is what lets a remount — a reopened
+ * conversation, a host re-render — follow that run again and show its results,
+ * since the view sends the conversation no message carrying the run id.
+ */
+type RunGraphViewState = {
+  run_id?: string;
+  run_pipe_ref?: string | null;
+};
 
 /**
  * The run-graph Skybridge view. A view is a tool with a UI, so this renders a
@@ -81,7 +92,8 @@ const TOOLBAR_POSITION_FOR_VIEW: ToolbarPosition = TOOLBAR_POSITION.TOP_LEFT;
  * it fetches and shows the results itself. It sends the model no completion
  * message: the user started this run and is reading its output, so an
  * automatic turn would be noise, and "Summarize in chat" is there for a user
- * who wants one.
+ * who wants one. The run's handle rides host-persisted view state instead, so a
+ * remount follows the run again and shows its results.
  */
 export default function RunGraphView() {
   // Hooks run unconditionally before any early return.
@@ -92,6 +104,7 @@ export default function RunGraphView() {
   const { callToolAsync: requestUploadAsync } = useCallTool("pipelex_request_upload");
   const { theme, maxHeight, safeArea } = useLayout();
   const [displayMode, setDisplayMode] = useDisplayMode();
+  const [viewState, setViewState] = useViewState<RunGraphViewState>({});
 
   const responseMetadata = toolInfo.isSuccess ? toolInfo.responseMetadata : undefined;
   // All three are opaque on the wire; the standard owns both per-pipe artifact
@@ -152,6 +165,20 @@ export default function RunGraphView() {
     polling.phase === "terminal",
     resultsAsync,
   );
+
+  // A remount finds the run the form last started in view state and follows it
+  // again: one status read, then its results, as `run-follow` does from its tool
+  // output. Once per mount, since the host may hand the state over after the
+  // first render, and never over a run the user has started in this mount.
+  const restoredRef = useRef(false);
+  const persistedRunId = viewState?.run_id;
+  const persistedPipeRef = viewState?.run_pipe_ref;
+  useEffect(() => {
+    if (restoredRef.current || typeof persistedRunId !== "string") return;
+    restoredRef.current = true;
+    setRunId(persistedRunId);
+    setRunPipeRef(typeof persistedPipeRef === "string" ? persistedPipeRef : null);
+  }, [persistedRunId, persistedPipeRef]);
 
   // `useCallTool`'s caller changes identity per render; pin the latest so the
   // upload callback, which `RunPanel` builds its drop handler from, stays put.
@@ -240,7 +267,13 @@ export default function RunGraphView() {
     : Math.max(isFullscreen ? available : Math.min(available, 420), 240);
 
   const dark = theme === "dark";
-  const running = starting || (runId !== undefined && polling.phase === "polling");
+  const running = formRunInFlight({
+    starting,
+    runId,
+    phase: polling.phase,
+    hasResults: results !== null,
+    resultsFailed: resultsError !== null,
+  });
   const stage = formViewStage({
     outcome: results?.content.state === "failed" ? "failed" : results ? "completed" : null,
     executedGraph: results ? hasExecutedGraph(results) : false,
@@ -273,6 +306,8 @@ export default function RunGraphView() {
     if (!selectedPipe || !methodSelector || !pipeLabel) return;
     // Synchronously, before any await — the panel's duplicate-run guard.
     setStarting(true);
+    // A run started here replaces whatever a remount would have restored.
+    restoredRef.current = true;
     setStartError(null);
     setRunId(undefined);
     setRunPipeRef(pipeLabel);
@@ -289,7 +324,13 @@ export default function RunGraphView() {
         });
         const ack = response.structuredContent;
         if (ack.status === "ok" && ack.run_id) {
-          setRunId(ack.run_id);
+          const startedRunId = ack.run_id;
+          setRunId(startedRunId);
+          void setViewState((prev) => ({
+            ...prev,
+            run_id: startedRunId,
+            run_pipe_ref: pipeLabel,
+          }));
         } else {
           // The hint rides along: after a start whose outcome is unknown it is
           // what tells the user the run may exist before they press Run again.
