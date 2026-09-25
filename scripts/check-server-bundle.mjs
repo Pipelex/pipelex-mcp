@@ -51,6 +51,11 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BUNDLE = path.join(ROOT, "dist", "server.bundle.js");
 const CONTRACT = path.join(ROOT, "src", "hosted", "console.contract.json");
 const BOOT_TIMEOUT_MS = 30_000;
+// Every request the check makes is bounded on its own, so a bundle that accepts a
+// connection and never answers fails in seconds rather than at undici's five-minute
+// header timeout, or the MCP client's one-minute request timeout.
+const REQUEST_TIMEOUT_MS = 10_000;
+const bounded = () => AbortSignal.timeout(REQUEST_TIMEOUT_MS);
 
 /**
  * A production build versions each view's resource URI with a content hash
@@ -123,7 +128,7 @@ async function waitForBoot(url, child, logs) {
       );
     }
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, { signal: bounded() });
       if (response.ok) return response;
     } catch {
       // Not listening yet.
@@ -199,6 +204,7 @@ try {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    signal: bounded(),
   });
   check(
     "refuses an unauthenticated POST /mcp with 401",
@@ -215,10 +221,12 @@ try {
     exp: now + 300,
   });
   client = new Client({ name: "check-server-bundle", version: "0.0.0" });
+  const timeout = { timeout: REQUEST_TIMEOUT_MS };
   await client.connect(
     new StreamableHTTPClientTransport(new URL(`${origin}/mcp`), {
       requestInit: { headers: { authorization: `Bearer ${token}` } },
     }),
+    timeout,
   );
 
   const serverName = client.getServerVersion()?.name;
@@ -228,7 +236,7 @@ try {
     `got ${serverName}, the contract pins ${contract.initialize.serverInfo.name}`,
   );
 
-  const tools = (await client.listTools()).tools;
+  const tools = (await client.listTools(undefined, timeout)).tools;
   check(
     "serves the tools/list the console contract pins",
     unversioned(tools) === JSON.stringify(contract.tools),
@@ -238,7 +246,7 @@ try {
       "re-run the console contract test to see which.",
   );
 
-  const resources = (await client.listResources()).resources;
+  const resources = (await client.listResources(undefined, timeout)).resources;
   const uris = resources.map((entry) => entry.uri);
   const pinnedUris = contract.resources.map((entry) => entry.uri);
   check(
@@ -248,7 +256,7 @@ try {
   );
 
   for (const uri of new Set(uris)) {
-    const read = await client.readResource({ uri });
+    const read = await client.readResource({ uri }, timeout);
     const text = read.contents.map((content) => content.text ?? "").join("");
     check(
       `reads ${uri} from the bundled view manifest`,

@@ -42,7 +42,7 @@
     "check:tool-texts": "tsx scripts/check-tool-texts.ts",
     "build:local": "tsup",
     "prepack": "npm run build:local",
-    "start": "skybridge start",
+    "start": "NODE_ENV=production node dist/server.bundle.js",
     "deploy": "alpic deploy"
   },
   "dependencies": {

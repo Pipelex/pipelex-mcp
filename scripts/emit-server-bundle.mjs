@@ -18,7 +18,7 @@
 // promised interface, so this script refuses loudly when it moves, and
 // `scripts/check-server-bundle.mjs` boots the copy from an empty directory on
 // every `make check`.
-import { copyFileSync, existsSync, readdirSync } from "node:fs";
+import { copyFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -26,6 +26,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const FUNCTION_DIR = path.join(ROOT, ".vercel", "output", "functions", "mcp.func");
 const SOURCE = path.join(FUNCTION_DIR, "index.js");
 const TARGET = path.join(ROOT, "dist", "server.bundle.js");
+// Written by the same `skybridge build`, before its Vercel step.
+const ENTRY = path.join(ROOT, "dist", "__entry.js");
 
 // The files Skybridge writes into the function directory beside the bundle.
 // Anything else is a file the bundle needs next to it (esbuild's `file`
@@ -44,6 +46,20 @@ if (!existsSync(SOURCE)) {
       "build output there; if a Skybridge upgrade moved or dropped it, find where the server " +
       "bundle went (or bundle dist/__entry.js with esbuild the same way) before shipping, " +
       "because the console starts from dist/server.bundle.js and skybridge is a devDependency.",
+  );
+}
+
+// `skybridge build` deletes `dist/` before it compiles and `.vercel/output`
+// before its Vercel step, so today a bundle older than this build's entry
+// cannot exist. If an upgrade stopped writing the Vercel output, or wrote it
+// elsewhere, the copy a previous build left in the gitignored `.vercel/` would
+// still be here, and a local `docker build` (whose context carries `.vercel/`)
+// would ship it without a word.
+if (!existsSync(ENTRY) || statSync(SOURCE).mtimeMs < statSync(ENTRY).mtimeMs) {
+  fail(
+    `${path.relative(ROOT, SOURCE)} is older than ${path.relative(ROOT, ENTRY)}, so this build did not ` +
+      "write it: it is left over from an earlier build. Find where `skybridge build` now writes its " +
+      "server bundle before shipping.",
   );
 }
 

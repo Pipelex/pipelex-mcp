@@ -1,6 +1,6 @@
 ---
 name: bump-skybridge
-description: Bump the Skybridge framework this repo's hosted console is built on — the lockstep pair `skybridge` and `@skybridge/devtools` — to their latest published versions, or to a version the caller names. Reads the GitHub Releases that serve as Skybridge's changelog (there is no CHANGELOG.md anywhere), maps every breaking change onto the places this repo actually touches Skybridge (the console entrypoint, the tool-registration shell, the view hooks, the Vite plugin, the dev recipe and the Docker entry), applies the bump, runs the checks, and then boots the console for real — because nothing in this repo's automated suite exercises a running console. Use this whenever the user says "bump skybridge", "update skybridge", "upgrade skybridge", "bump to skybridge 2", "migrate to skybridge v2", "bump the devtools", "are we behind on skybridge", or asks to pull in a newer Skybridge release. Also use it when the hosted console fails to boot, fails to register its tools, or renders a broken view while `make all` passes — that pattern almost always means the installed Skybridge disagrees with what `src/server.ts` and `src/hosted/server.ts` declare.
+description: Bump the Skybridge framework this repo's hosted console is built on — the lockstep pair `skybridge` and `@skybridge/devtools` — to their latest published versions, or to a version the caller names. Reads the GitHub Releases that serve as Skybridge's changelog (there is no CHANGELOG.md anywhere), maps every breaking change onto the places this repo actually touches Skybridge (the console entrypoint, the tool-registration shell, the view hooks, the Vite plugin, the dev recipe, and the server bundle the console is started from), applies the bump, runs the checks, and then boots the console for real — because the automated suite boots the built console only against a stand-in authorization server, and never calls a tool or renders a view. Use this whenever the user says "bump skybridge", "update skybridge", "upgrade skybridge", "bump to skybridge 2", "migrate to skybridge v2", "bump the devtools", "are we behind on skybridge", or asks to pull in a newer Skybridge release. Also use it when the hosted console fails to boot, fails to register its tools, or renders a broken view while `make all` passes — that pattern almost always means the installed Skybridge disagrees with what `src/server.ts` and `src/hosted/server.ts` declare.
 ---
 
 # Bump the Skybridge framework
@@ -9,7 +9,7 @@ Skybridge is the framework behind **one of this repo's two shells** — the host
 
 | Package | What it gives this repo | Block |
 |---|---|---|
-| `skybridge` | `McpServer` / `OAuthConfig` / `workosProvider` (`skybridge/server`), the view hooks and `generateHelpers` (`skybridge/web`), the Vite plugin (`skybridge/vite`), and the `skybridge dev \| build \| start` CLI | `dependencies` |
+| `skybridge` | `McpServer` / `OAuthConfig` / `workosProvider` (`skybridge/server`), the view hooks and `generateHelpers` (`skybridge/web`), the Vite plugin (`skybridge/vite`), and the `skybridge dev \| build \| start` CLI, and the self-contained server bundle the console is started from | `devDependencies` |
 | `@skybridge/devtools` | the DevTools UI `make dev` serves — the only way to exercise the console by hand | `devDependencies` |
 
 Both come from `alpic-ai/skybridge`. `@skybridge/devtools` is declared as a **non-optional peer of `skybridge` pinned to the same major**, so they are not two independent bumps — move one and you have to move the other. Read the pin rather than assuming it: `npm view skybridge@<target> peerDependencies`.
@@ -26,13 +26,14 @@ What `make all` genuinely covers is narrow but real: `skybridge build` has to su
 
 What it cannot see is everything that only exists at run time or at deploy time:
 
-- whether the server **boots** (the OAuth provider is resolved with a top-level `await` in `src/server.ts`, and `workosProvider` performs discovery over the network);
-- whether tools still **register** the way `src/hosted/server.ts` chains them, and whether the per-request `extra.authInfo` a handler reads still arrives in that shape;
+- whether the server boots against the **real** WorkOS AuthKit (the OAuth provider is resolved with a top-level `await` in `src/server.ts`, and `workosProvider` performs discovery over the network);
+- whether the per-request `extra.authInfo` a handler reads still arrives in that shape, since no automated check calls a tool on the built console;
 - whether a **view renders**, since `_meta` plumbing and the host bridge are runtime contracts;
-- whether the **CLI flags** the Makefile passes still exist (`make dev` appends `--port`);
-- whether the **built entry filename** the Dockerfile runs is still `dist/__entry.js`.
+- whether the **CLI flags** the Makefile passes still exist (`make dev` appends `--port`).
 
 Steps 7 and 8 exist for exactly that list.
+
+**One gate does start the built console: `check:bundle`**, the step of `make check` right after the build. The console is started from `dist/server.bundle.js`, which `scripts/emit-server-bundle.mjs` copies out of the Vercel build output `skybridge build` writes (`.vercel/output/functions/mcp.func/index.js`), and `scripts/check-server-bundle.mjs` boots that copy from an empty directory, with no `node_modules` anywhere above it, against a local stand-in for AuthKit. It proves the bundle is self-contained, that it boots, that it refuses an anonymous call, and that an authenticated client gets the `tools/list` and view resources `src/hosted/console.contract.json` pins. So a release that moves the Vercel output, leaves a new package external, or changes what registration emits fails `make check`. It does not prove the four items above.
 
 ## Step 1 — Gather state
 
@@ -52,7 +53,7 @@ Two things to read carefully in that output.
 
 **The declared range and the installed version can differ, and that changes what "bump" means.** Skybridge is past 1.0, so `^1.3.5` *admits* every later minor and patch — but admitting is not installing. `package-lock.json` is committed here and CI installs with `npm ci`, so the tree sits at exactly what the lock pins and a plain `npm install` leaves it there; only `npm update`, or naming a version explicitly the way Step 5 does, moves it. This is *not* the `0.x` situation the `bump-sdks` skill deals with, where the leading zero makes npm treat a minor as a major and pins it in the range itself. So say plainly which of the two you are moving: the **installed** version (what the lock pins, which an explicit install re-pins) or the **declared floor** (a deliberate edit, and the only way across a major). A major always needs the floor moved.
 
-**The blocks are not interchangeable and the bump must keep them where they are.** `skybridge` is a runtime `dependencies` entry because `dist/__entry.js` and `dist/server.js` import `skybridge/server` at run time and the Dockerfile's runtime stage carries only the `npm prune --omit=dev` tree — demote it and the image starts, then dies on the first import. `@skybridge/devtools` is build-and-dev only. Nothing in the repo tests this boundary in either direction, so read the `package.json` diff in Step 11 rather than trusting the suite to object.
+**Both packages are `devDependencies`, and the bump must keep them there.** The console is started from the server bundle, which inlines everything `skybridge/server` reaches, so nothing reads `skybridge` from `node_modules` at run time. Putting `skybridge` back in `dependencies` would change nothing for the console and would put its non-optional peers (`react`, `react-dom`, `vite`, `nodemon`, `@skybridge/devtools`) back into every `npx @pipelex/mcp` install, because the npm package and the console share one `package.json`. No test catches that move, so read the `package.json` diff in Step 11 rather than trusting the suite to object.
 
 A dirty tree is not a blocker, but if `package.json`, `package-lock.json` or `CHANGELOG.md` is already dirty, say so and agree how to keep your edits separable before you start.
 
@@ -129,13 +130,11 @@ Four wiring points, none of them in `src/`, and each fails in its own quiet way:
 
 ### 4d — The deploy surface
 
-`Dockerfile`'s runtime stage ends in `CMD ["node", "dist/__entry.js"]` — a filename Skybridge's build produces, not one this repo writes. Nothing in `make all` reads the Dockerfile, so a changed entry layout ships an image that starts nothing. After the build in Step 6, just look:
+Alpic's `startCommand` in `alpic.json` and the `Dockerfile`'s `CMD` both run `node dist/server.bundle.js`, a copy of `.vercel/output/functions/mcp.func/index.js`. That path is Skybridge's Vercel build output, not a promised interface, and it is where a release is most likely to break this repo without touching a line of `src/`. Three things guard it, and each tells you something different when it fails:
 
-```bash
-ls dist/*.js
-```
-
-If `dist/__entry.js` is gone, the Dockerfile's `CMD` and `EXPOSE` both need revisiting in this change.
+- `scripts/emit-server-bundle.mjs` (the last step of `npm run build`) refuses when the file is missing, when it is older than this build's `dist/__entry.js`, or when the function directory holds a file other than the bundle, `.vc-config.json` and `package.json`. The first two mean Skybridge moved or stopped writing its Vercel output; find where the bundle went before anything else. The third means esbuild now ships a file beside the bundle (a native addon, say), which the copy would leave behind.
+- `check:bundle` failing to boot from the empty directory means a package is now left external. Read the esbuild call in `node_modules/skybridge/dist/cli/build-helpers.js`: today only `vite` and `@skybridge/devtools` are external, the two dev-only packages whose code paths the production define strips.
+- `EXPOSE` and the port: the bundle listens on `__PORT`, default 3000, which is what the `Dockerfile` exposes. A release that renames that variable or moves the default changes both the `Dockerfile` and how Alpic reaches the console.
 
 ### 4e — What a major looks like, as a worked example
 
@@ -147,12 +146,11 @@ Behavior changes, a changed per-request lifecycle, new defaults, and anything to
 
 ## Step 5 — Apply the bump
 
-There is no Makefile switch for these two (the `use-npm-*` targets are `@pipelex`-only). **Edit both version strings in `package.json` first, then resolve once** — `skybridge` under `dependencies` and `@skybridge/devtools` under `devDependencies`, each left in the block it is already in:
+There is no Makefile switch for these two (the `use-npm-*` targets are `@pipelex`-only). **Edit both version strings in `package.json` first, then resolve once** — both under `devDependencies`, where they already are:
 
 ```jsonc
-// package.json — two edits, in place, blocks untouched
-"dependencies":    { "skybridge": "^<target>" }
-"devDependencies": { "@skybridge/devtools": "^<devtools-target>" }
+// package.json — two edits, in place, both in devDependencies
+"devDependencies": { "skybridge": "^<target>", "@skybridge/devtools": "^<devtools-target>" }
 ```
 
 ```bash
@@ -181,13 +179,11 @@ make clean && make check && make agent-test
 
 That is `make all`, with the agent-facing test target substituted: same hermetic suite, but output is replayed only on failure with a heartbeat while it runs. (`make all` itself is fine when a human is watching.)
 
-The order inside `check` is deliberate — lint, format check, `skybridge build`, the tsup workshop bundle, then typecheck — because the build regenerates the view-name registry `tsc` needs to resolve each view's `view.component`.
+The order inside `check` is deliberate — lint, format check, `skybridge build` (which ends by copying the server bundle), `check:bundle`, the tsup workshop bundle, then typecheck — because the build regenerates the view-name registry `tsc` needs to resolve each view's `view.component`, and `check:bundle` can only boot what the build just wrote.
 
 **On failure**, connect each error back to Step 4 rather than dumping output. A typecheck error naming `McpServer`, `OAuthConfig` or a `skybridge/web` hook is the framework telling you precisely which surface moved; that is the system working. If a failure traces to a 4f item, stop and ask.
 
-Then run `ls dist/*.js` for the 4d check while the build output is fresh.
-
-And remember what green means here: the console compiled. It has not run.
+And remember what green means here: the console compiled, and its bundle booted against a stand-in authorization server and listed its tools. It has not run a tool, met the real AuthKit, or rendered a view.
 
 ## Step 7 — Boot the console and use it
 
@@ -229,7 +225,7 @@ This repo's `CLAUDE.md` carries several paragraphs that are statements *about Sk
 grep -rn "Skybridge\|skybridge" CLAUDE.md README.md docs/ SPEC.md
 ```
 
-The ones most exposed are the pinned-port paragraph (Skybridge's default port and its walk-up-when-busy behavior), the `nodemon.json` note (that it replaces the watch defaults), the DevTools token-lifetime note, and the `dependencies` paragraph that explains why `skybridge` is the one runtime exception and names `dist/__entry.js` and `dist/server.js`. Record *why* something moved, not only that it did.
+The ones most exposed are the pinned-port paragraph (Skybridge's default port and its walk-up-when-busy behavior), the `nodemon.json` note (that it replaces the watch defaults), the DevTools token-lifetime note, and the `dependencies` paragraph, which explains why `skybridge` is a devDependency and names the server bundle's path. Record *why* something moved, not only that it did.
 
 Two more, both flag-don't-fix:
 
@@ -249,7 +245,7 @@ Summarise: `old → new` for both packages, every file touched, every 4f item st
 On approval:
 
 1. Stage **only** what this bump touched — `package.json`, `package-lock.json`, `CHANGELOG.md`, plus whatever Steps 4 and 9 migrated. Never `git add .` or `git add -A`.
-2. Read the `package.json` diff one more time for the block boundary: `skybridge` under `dependencies`, `@skybridge/devtools` under `devDependencies`.
+2. Read the `package.json` diff one more time for the block boundary: `skybridge` and `@skybridge/devtools` both under `devDependencies`.
 3. If the branch is `dev` or `main`, stop — this repo's work happens in a worktree off a prefixed branch (`fix/ feature/ refactor/ chore/ docs/ ci-cd/ changelog/ codex/`). `chore/Bump-skybridge` is the usual name.
 4. Commit as `chore: bump skybridge and @skybridge/devtools to X.Y.Z`, with a body naming any migration applied and what the console check showed.
 
@@ -258,9 +254,9 @@ Then *offer* — do not run — a `/rev` pass, pushing, and opening a PR. PRs ta
 ## Rules
 
 - Move both packages together, at the major the `skybridge` peer pin names.
-- Never treat a green `make all`, `make smoke` or `make test-e2e` as evidence the console works — none of them load the console shell.
+- Never treat a green `make all`, `make smoke` or `make test-e2e` as evidence the console works. The last two never load the console shell, and `make all`'s `check:bundle` boots it against a stand-in authorization server without calling a tool or rendering a view.
 - Never skip Step 7 on a major. A console that compiles is not a console that boots.
-- Keep `skybridge` in `dependencies` and `@skybridge/devtools` in `devDependencies`; no test catches a swap.
+- Keep `skybridge` and `@skybridge/devtools` in `devDependencies`; no test catches a move back into `dependencies`.
 - Don't look for a `CHANGELOG.md` upstream — GitHub Releases are the changelog.
 - Never guess at a behavior or auth change — flag it and let the user decide.
 - Never rewrite the vendored `skybridge` skill or its lock hash.
