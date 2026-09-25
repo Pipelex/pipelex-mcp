@@ -1,0 +1,12 @@
+{
+  "extends": "skybridge/tsconfig",
+
+  "compilerOptions": {
+    "resolveJsonModule": true,
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+
+  "include": ["src", ".skybridge/**/*.d.ts"]
+}

@@ -4,7 +4,7 @@
  * Claude Code cuts MCP server instructions and each tool description at 2,048
  * characters, and at dev `c5e4652` the workshop's instructions reached the
  * model cut mid-word, because nothing measured them. This gate holds every one
- * of those texts to a ceiling below the cap; `src/tool-text-budget.ts` says why
+ * of those texts to a ceiling below the cap; `scripts/tool-text-budget.ts` says why
  * the ceiling sits where it does and owns the arithmetic, which the hermetic
  * suite tests.
  *
@@ -29,37 +29,22 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { OAuthConfig } from "skybridge/server";
 
-import { createHostedServer } from "../src/hosted/server.js";
-import { createLocalServer } from "../src/local/server.js";
+import { createHostedServer } from "../packages/console/src/hosted/server.js";
+import { TEST_OAUTH } from "../packages/console/src/hosted/test-oauth.js";
+import { createLocalServer } from "../packages/workshop/src/server.js";
 import {
   HOST_TEXT_CAP,
   TOOL_TEXT_CEILING,
   budgetEmittedTexts,
   overCeiling,
-} from "../src/tool-text-budget.js";
-import type { EmittedText } from "../src/tool-text-budget.js";
+} from "./tool-text-budget.js";
+import type { EmittedText } from "./tool-text-budget.js";
 
 // `no-console` is an error in this repo's eslint config; the report is this
 // script's whole output. `scripts/smoke.ts` writes the same way.
 const say = (text = ""): void => {
   process.stdout.write(`${text}\n`);
-};
-
-/**
- * The console requires an `OAuthConfig`, since per-user OAuth is its only auth
- * posture. Only `initialize` and `tools/list` are exchanged here, so a static
- * stand-in is enough and the JWKS is never fetched.
- */
-const STAND_IN_OAUTH: OAuthConfig = {
-  oauthMetadata: {
-    issuer: "https://stand-in.authkit.app",
-    authorization_endpoint: "https://stand-in.authkit.app/oauth2/authorize",
-    token_endpoint: "https://stand-in.authkit.app/oauth2/token",
-    response_types_supported: ["code"],
-  },
-  verify: { issuer: "https://stand-in.authkit.app", audience: "https://console.stand-in/" },
 };
 
 interface ConnectableServer {
@@ -127,12 +112,12 @@ function label(name: string): string {
 
 async function main(): Promise<void> {
   const readings = [
-    await readShell("console", createHostedServer(STAND_IN_OAUTH)),
+    await readShell("console", createHostedServer(TEST_OAUTH)),
     await readShell("workshop", createLocalServer()),
   ];
   // The console's other instructions variant: only the instructions differ,
   // so only they are read off this handshake.
-  const viewsHost = await readShell("console (views host)", createHostedServer(STAND_IN_OAUTH), {
+  const viewsHost = await readShell("console (views host)", createHostedServer(TEST_OAUTH), {
     capabilities: VIEWS_HOST_CAPABILITIES,
   });
 

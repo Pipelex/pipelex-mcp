@@ -1,9 +1,14 @@
-# On a release PR (release/vX.Y.Z → main), require a matching CHANGELOG entry.
+# On a release PR into main, require a matching entry in the changelog of the
+# server it releases:
+#
+#   release/vX.Y.Z          the workshop, packages/workshop/CHANGELOG.md
+#   release/console-vX.Y.Z  the console,  packages/console/CHANGELOG.md
 #
 # Adapted from the sibling TS repos, with one deliberate difference: pipelex-mcp
-# changelog headings have NO `v` prefix — `## [X.Y.Z] - YYYY-MM-DD`. The `v` lives
-# on the branch name and the git tag only (see CLAUDE.md / the /release skill).
-# The branch ref is read into env: and never interpolated into the shell.
+# changelog headings have NO prefix — `## [X.Y.Z] - YYYY-MM-DD`. The `v` and the
+# `console-v` live on the branch name and the git tag only (see CLAUDE.md and
+# the /release skill). The branch ref is read into env: and never interpolated
+# into the shell.
 name: Changelog Version Check
 
 on:
@@ -18,7 +23,7 @@ permissions:
 jobs:
   check-changelog:
     runs-on: ubuntu-latest
-    if: startsWith(github.head_ref, 'release/v')
+    if: startsWith(github.head_ref, 'release/')
     steps:
       - uses: actions/checkout@v4
 
@@ -26,19 +31,23 @@ jobs:
         env:
           HEAD: ${{ github.head_ref }}
         run: |
-          if [[ ! "$HEAD" =~ ^release/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            echo "::error::Branch name '$HEAD' does not match the expected format 'release/vX.Y.Z'."
+          if [[ "$HEAD" =~ ^release/console-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            CHANGELOG=packages/console/CHANGELOG.md
+          elif [[ "$HEAD" =~ ^release/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            CHANGELOG=packages/workshop/CHANGELOG.md
+          else
+            echo "::error::Branch name '$HEAD' matches neither 'release/vX.Y.Z' (the workshop) nor 'release/console-vX.Y.Z' (the console)."
             exit 1
           fi
           VERSION="${BASH_REMATCH[1]}"
-          echo "Checking CHANGELOG.md for version $VERSION (no 'v' prefix in the heading)..."
+          echo "Checking $CHANGELOG for version $VERSION (no prefix in the heading)..."
 
           # Match a `## [X.Y.Z]` heading exactly — escape the dots and brackets.
-          if ! grep -qE "^## \[${VERSION//./\\.}\]" CHANGELOG.md; then
-            echo "::error::No changelog entry found for version $VERSION (expected a '## [$VERSION]' heading)."
-            echo "Versions currently in the changelog:"
-            grep -E "^## \[[0-9]+\.[0-9]+\.[0-9]+\]" CHANGELOG.md || true
+          if ! grep -qE "^## \[${VERSION//./\\.}\]" "$CHANGELOG"; then
+            echo "::error::No entry for version $VERSION in $CHANGELOG (expected a '## [$VERSION]' heading)."
+            echo "Versions currently in that changelog:"
+            grep -E "^## \[[0-9]+\.[0-9]+\.[0-9]+\]" "$CHANGELOG" || true
             echo "Add a '## [$VERSION] - YYYY-MM-DD' entry before merging this release to main."
             exit 1
           fi
-          echo "Changelog entry found for version $VERSION."
+          echo "$CHANGELOG has an entry for version $VERSION."

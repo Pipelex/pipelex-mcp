@@ -2,6 +2,18 @@
 
 This page is for working on this repository: running the hosted console on your machine, building both servers, the test suites, and how versions are cut. [`CLAUDE.md`](../CLAUDE.md) holds the conventions behind all of it and the reasons for them, and [`SPEC.md`](../SPEC.md) is the source of truth for the tool contracts.
 
+## Layout
+
+The repository is an npm workspace of three packages, installed together by one `npm install` at the root:
+
+| Package | Name | What it is |
+| --- | --- | --- |
+| `packages/core` | `@pipelex/mcp-core`, private | The capability core both servers are built from: the API calls, the projections, error classification, the tool-definition shape and the shell-test helpers. Never published. |
+| `packages/workshop` | `@pipelex/mcp` | The local stdio server, published to npm and run by the Pipelex plugin. |
+| `packages/console` | `@pipelex/mcp-console`, private | The hosted console, a Skybridge app deployed to Alpic. |
+
+The core exports its TypeScript source, not a build, and each server's build inlines it, so neither server imports a workspace package at run time. Each package's `package.json` declares only what its own entrypoint reaches, which is what keeps the console's React, Vite and Skybridge out of every `npx @pipelex/mcp` install. The root holds what spans the packages: the Makefile, the lint, format and test configuration, `scripts/` and the cross-package tests in `tests/`. Every `make` target runs from the root.
+
 ## Hosted console: local development
 
 The hosted server is a Skybridge app. During early development this repo also supports the local `pipelex-api` runner so the MCP can be exercised before the hosted path is fully wired — temporary; the production target is the hosted Pipelex API only.
@@ -42,7 +54,7 @@ PIPELEX_MCP_RESOURCE_INDICATOR=http://localhost:6843/
 PIPELEX_BASE_URL=http://localhost:8081
 ```
 
-`PIPELEX_BASE_URL` defaults to the hosted Pipelex API when unset — set it to `http://localhost:8081` to develop against a local runner. `PIPELEX_API_KEY` has **no effect on the console**: the caller's verified OAuth token always overrides it. `.env` is dev-only and loaded via `nodemon.json` (`tsx --env-file-if-exists=.env`); it is not watched, so restart the dev server after editing it. `make dev` also sources it with `sh` before Node reads it, so keep it to plain `KEY=value` lines (no `$`, `#`, spaces or backticks inside a value; none of the console's keys need any), and `set -a` there exports the whole file to every process under `npm run dev`, the `alpic tunnel` CLI included.
+`PIPELEX_BASE_URL` defaults to the hosted Pipelex API when unset — set it to `http://localhost:8081` to develop against a local runner. `PIPELEX_API_KEY` has **no effect on the console**: the caller's verified OAuth token always overrides it. `.env` is dev-only and loaded via `packages/console/nodemon.json` (`tsx --env-file-if-exists=../../.env`, run from the console's directory); it is not watched, so restart the dev server after editing it. `make dev` also sources it with `sh` before Node reads it, so keep it to plain `KEY=value` lines (no `$`, `#`, spaces or backticks inside a value; none of the console's keys need any), and `set -a` there exports the whole file to every process under `npm run dev`, the `alpic tunnel` CLI included.
 
 Start it with `make dev`, not `npm run dev` — for the `.env` precedence here and for the pinned port below. Node's `--env-file` never overrides an inherited variable, so a profile-level `export PIPELEX_BASE_URL=…` would silently win over `.env` under a bare `npm run dev`. `make dev` (and `make dev-tunnel`) sources `.env` first so the file wins, prints the API target it resolved, and still lets `make dev PIPELEX_BASE_URL=http://localhost:8080` override it for one run.
 
@@ -62,14 +74,14 @@ make inspect-local   # open MCP Inspector against it
 ## Build
 
 ```bash
-npm run build        # Skybridge app (regenerates .skybridge/views.d.ts first), then dist/server.bundle.js
-npm run build:local  # tsup → dist/local/main.js (the npm-distributed bin)
+npm run build        # the console: Skybridge app (regenerates .skybridge/views.d.ts first), then dist/server.bundle.js, under packages/console
+npm run build:local  # the workshop: tsup → packages/workshop/dist/main.js (the npm-distributed bin)
 npm run check        # lint + format:check + check:tool-texts + build + check:bundle + check:cascade + build:local + typecheck
 ```
 
-**The console starts from one self-contained file, `dist/server.bundle.js`.** `skybridge build` ends by writing a Vercel build output whose function is an esbuild bundle of the whole server, every package inlined but the dev-only `vite` and `@skybridge/devtools`, whose code paths it strips; `npm run build` copies that bundle into `dist/` (`scripts/emit-server-bundle.mjs`), and both `alpic.json` and the `Dockerfile` start it. Nothing reads `skybridge` from `node_modules` at run time, so it is a devDependency, and `npx @pipelex/mcp` no longer installs it or its peers (React, React DOM, Vite, nodemon). The bundle's path is Skybridge's Vercel output rather than a promised interface, so `check:bundle` (`scripts/check-server-bundle.mjs`) copies the bundle alone into an empty directory, boots it there against a local stand-in for the AuthKit discovery document and its keys, and asserts that it answers its OAuth metadata, refuses an anonymous call, and serves the tools and views the console's contract snapshot pins. It never touches the network.
+**The console starts from one self-contained file, `packages/console/dist/server.bundle.js`.** `skybridge build` ends by writing a Vercel build output whose function is an esbuild bundle of the whole server, the core and every package inlined but the dev-only `vite` and `@skybridge/devtools`, whose code paths it strips; the console's `npm run build` copies that bundle into its `dist/` (`packages/console/scripts/emit-server-bundle.mjs`), and both the root `alpic.json` and the `Dockerfile` start it. The bundle is what lets the console run where the workspace does not: Alpic's runtime image holds the root `node_modules` and the build output, and the core's entry in that `node_modules` is a link to a directory the image does not carry. Skybridge, React, React DOM, Vite and nodemon are the console's to declare, and none of them reaches an `npx @pipelex/mcp` install, since the workshop's manifest does not name them. The bundle's path is Skybridge's Vercel output rather than a promised interface, so `check:bundle` (`packages/console/scripts/check-server-bundle.mjs`) copies the bundle alone into an empty directory, boots it there against a local stand-in for the AuthKit discovery document and its keys, and asserts that it answers its OAuth metadata, refuses an anonymous call, and serves the tools and views the console's contract snapshot pins. It never touches the network.
 
-`pipelex_show_method` registers the `run-graph` view (`src/views/run-graph.tsx`) and `pipelex_run` the `run-follow` view, which satisfies Skybridge's "≥1 view entry" production-build requirement. The Skybridge build scans `src/views/` and regenerates `.skybridge/views.d.ts` (the view-name registry) as its first step, so `npm run check` runs `build` before the standalone `typecheck` — the registry must exist for `tsc` to resolve the registered view name. The local build follows and `prepack` rebuilds it, so a pack/publish can never ship a stale or absent bin.
+`pipelex_show_method` registers the `run-graph` view (`packages/console/src/views/run-graph.tsx`) and `pipelex_run` the `run-follow` view, which satisfies Skybridge's "≥1 view entry" production-build requirement. The Skybridge build scans the console's `src/views/` and regenerates its `.skybridge/views.d.ts` (the view-name registry) as its first step, so `npm run check` runs `build` before the standalone `typecheck` — the registry must exist for `tsc` to resolve the registered view name. The workshop's build follows, and its `prepack` rebuilds the bin and copies the root `README.md` and `LICENSE` into the package, so a pack or publish can never ship a stale or absent bin; `postpack` removes the copies.
 
 ## Tests
 
@@ -89,6 +101,13 @@ The by-id paths and the catalog-write suite need durable fixture methods in the 
 
 ## Versioning
 
-`pipelex-mcp` follows [Semantic Versioning](https://semver.org); `version` in `package.json` is tagged (`vX.Y.Z`) on release, and npm publish and the Alpic deploy ship together at one version. See [`CHANGELOG.md`](../CHANGELOG.md) for what has shipped. `0.1.0` is the first tagged release.
+The two servers are released separately, each on its own track following [Semantic Versioning](https://semver.org):
 
-Merging a `release/vX.Y.Z` pull request into `main` is what ships a version: it publishes `@pipelex/mcp` to npm, deploys the console to Alpic and tags the commit. [`CLAUDE.md`](../CLAUDE.md#ci) describes the release workflow and its guards.
+| Server | Version | Changelog | Release branch | Tag | What the merge ships |
+| --- | --- | --- | --- | --- | --- |
+| The workshop, `@pipelex/mcp` | `packages/workshop/package.json` | [`packages/workshop/CHANGELOG.md`](../packages/workshop/CHANGELOG.md) | `release/vX.Y.Z` | `vX.Y.Z` | an npm publish |
+| The console | `packages/console/package.json` | [`packages/console/CHANGELOG.md`](../packages/console/CHANGELOG.md) | `release/console-vX.Y.Z` | `console-vX.Y.Z` | an Alpic deploy |
+
+Up to and including 0.20.0 both servers shipped together at one version, tagged `vX.Y.Z`, and the workshop's changelog carries that joint history. `0.1.0` is the first tagged release.
+
+Merging a release pull request into `main` is what ships a version, of the one server its branch names: the release workflow reads each server's version at the merge commit, publishes the workshop to npm or deploys the console to Alpic when that server's version rose, and tags the commit with that server's tag. A release of one server never ships the other. The `/release` skill cuts a release and asks which server ships, and [`CLAUDE.md`](../CLAUDE.md#ci) describes the release workflow and its guards.

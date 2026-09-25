@@ -775,7 +775,7 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
 
         <div class="diff-item">
           <h3>1 · One files union, on the workshop only</h3>
-          <p class="path">src/capabilities/shared.ts</p>
+          <p class="path">packages/core/src/capabilities/shared.ts</p>
           <pre class="diff"><code><span class="ctx">export const filesInputSchema = z.array(</span>
 <span class="ctx">  z.union([</span>
 <span class="ctx">    z.object({ content: z.string(), uri: z.string().nullable().optional() }),</span>
@@ -787,7 +787,7 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
 
         <div class="diff-item">
           <h3>2 · The seams each shell fills</h3>
-          <p class="path">src/local/tools.ts</p>
+          <p class="path">packages/workshop/src/tools.ts</p>
           <pre class="diff"><code><span class="ctx">export function buildLocalToolContexts(env, rootDir) {</span>
 <span class="add">+ const resolver = localFileResolver(rootDir);          // reads { path } from disk</span>
 <span class="ctx">  return {</span>
@@ -796,12 +796,12 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
 <span class="ctx">    …</span>
 <span class="ctx">  };</span>
 <span class="ctx">}</span></code></pre>
-          <p>Each shell owns its tool table and builds its own contexts. The hosted console's builder, in <code>src/hosted/tools.ts</code>, states the opposite: no resolver, views on, and the console's own tool names on every context whose texts name a tool. Beside which tools each table holds, these settings are where the two servers differ.</p>
+          <p>Each shell owns its tool table and builds its own contexts. The hosted console's builder, in <code>packages/console/src/hosted/tools.ts</code>, states the opposite: no resolver, views on, and the console's own tool names on every context whose texts name a tool. Beside which tools each table holds, these settings are where the two servers differ.</p>
         </div>
 
         <div class="diff-item">
           <h3>3 · Paths are a trust boundary, not a convenience</h3>
-          <p class="path">src/local/files.ts</p>
+          <p class="path">packages/workshop/src/files.ts</p>
           <pre class="diff"><code><span class="add">+ if (!path.endsWith(".mthds")) return refuse(...);   // BEFORE any fs access</span>
 <span class="add">+ const real = await fs.realpath(resolved);           // symlinks followed</span>
 <span class="add">+ if (!isInside(rootDir, real)) return refuse(...);   // cwd containment</span></code></pre>
@@ -810,7 +810,7 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
 
         <div class="diff-item">
           <h3>4 · The signed-in caller's token overrides the server's key, unconditionally</h3>
-          <p class="path">src/hosted/contexts.ts</p>
+          <p class="path">packages/console/src/hosted/contexts.ts</p>
           <pre class="diff"><code><span class="del">- const key = bearer(req.headers.authorization) ?? req.query.api_key;   // BYOK, deleted</span>
 <span class="add">+ const token = authInfo?.token;                    // verified by Skybridge against AuthKit's JWKS</span>
 <span class="add">+ return overrideContexts(base, token ?? "", ...);  // "" — NOT undefined</span></code></pre>
@@ -819,7 +819,7 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
 
         <div class="diff-item">
           <h3>5 · One <code>_meta</code> key is the entire attachment mechanism</h3>
-          <p class="path">src/hosted/tools.ts</p>
+          <p class="path">packages/console/src/hosted/tools.ts</p>
           <pre class="diff"><code><span class="ctx">_meta: {</span>
 <span class="add">+ "openai/fileParams": ["attachments"],</span>
 <span class="ctx">},</span></code></pre>
@@ -828,7 +828,7 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
 
         <div class="diff-item">
           <h3>6 · Derive the limit, don't hardcode it</h3>
-          <p class="path">src/capabilities/upload-ceiling.ts</p>
+          <p class="path">packages/core/src/capabilities/upload-ceiling.ts</p>
           <pre class="diff"><code><span class="del">- const MAX_UPLOAD = 50 * 1024 * 1024;  // app-level, unreachable in practice</span>
 <span class="add">+ const GATEWAY_REQUEST_LIMIT_BYTES = 10 * 1024 * 1024;   // hard AWS quota</span>
 <span class="add">+ export const MAX_UPLOAD_BYTES = Math.floor(</span>
@@ -873,7 +873,7 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
 <footer>
   <span>pipelex-mcp</span>
   <span>@pipelex/mcp on npm · console on Alpic</span>
-  <span>full contracts: SPEC.md · what shipped: CHANGELOG.md</span>
+  <span>full contracts: SPEC.md · what shipped: each server's CHANGELOG.md under packages/</span>
 </footer>
 
 </div>

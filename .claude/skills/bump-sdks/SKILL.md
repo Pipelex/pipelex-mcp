@@ -32,18 +32,21 @@ Show the user, for both packages, the declared range, what is actually installed
 ```bash
 for p in sdk mthds-ui; do
   echo "@pipelex/$p"
-  echo "  range:     $(node -p "const m=require('./package.json'); m.dependencies['@pipelex/$p'] ?? m.devDependencies['@pipelex/$p']")"
+  for m in packages/*/package.json; do
+    r=$(node -p "const m=require('./$m'); m.dependencies?.['@pipelex/$p'] ?? m.devDependencies?.['@pipelex/$p'] ?? ''")
+    [ -n "$r" ] && echo "  range in $m: $r"
+  done
   echo "  installed: $(node -p "require('./node_modules/@pipelex/$p/package.json').version" 2>/dev/null || echo 'not installed')"
   echo "  npm latest: $(npm view @pipelex/$p version)"
 done
 git status --short
 ```
 
-**The two packages live in different blocks, and the bump must keep them there.** `@pipelex/sdk` is a runtime `dependencies` entry — every capability imports it, and an `--omit=dev` install needs it on disk. `@pipelex/mthds-ui` is a `devDependencies` entry: only the console's views import it, Vite bundles them into client assets, and a runtime entry would make every `npx @pipelex/mcp` user download React's whole view tree. That is why the Makefile's UI targets pass `--save-dev`: npm infers the block from an entry that is already there, so while the `devDependencies` entry exists a bare `npm install @pipelex/mthds-ui@…` updates it in place, but the flag is what keeps a fresh add — or a re-add once the entry is gone — out of `dependencies`. Use `make use-npm-ui`. No test catches a bump that crosses the line, so read the `package.json` diff in Step 9 instead of trusting the suite to object.
+**The repository is an npm workspace, and each package is declared by exactly the members that import it.** `@pipelex/sdk` sits in the `dependencies` of all three members: the core imports it, the workshop re-declares it because tsup inlines the core into the published bin, and the console's server uses it. `tests/workspace-manifests.test.ts` fails when their ranges differ, so they move together. `@pipelex/mthds-ui` is declared by the console alone: only the console's views import it, and the console is never published, so it reaches no `npx @pipelex/mcp` install whichever block it sits in. The Makefile's targets install each package into exactly those members (`make use-npm-sdk` into all three, `make use-npm-ui` into the console), never into the root, and npm keeps an entry in the block it already sits in. Use them rather than a bare `npm install`, which would add the package to the root manifest. What reaches every workshop user is `packages/workshop/package.json`'s `dependencies` alone, so read that diff in Step 10 instead of trusting the suite to object.
 
 **If either range reads `file:` / `link:` / `portal:`**, the repo is mid local-SDK development (`make use-local-sdk` / `make use-local-ui`). A bump targets the *published* package, so this must be undone first — and `make check` will refuse to run until it is, via the `check-no-local-deps` guard. Tell the user and offer to run `make use-npm-sdk` / `make use-npm-ui` to get back to a clean baseline before bumping.
 
-A dirty working tree is not a blocker — this repo's checks don't need a clean tree. But if `package.json`, `package-lock.json`, or `CHANGELOG.md` is *already* dirty, say so and ask how to proceed: your edits will land on top of unrelated in-flight work in the same files, and Step 9 has to keep them apart.
+A dirty working tree is not a blocker — this repo's checks don't need a clean tree. But if a member's `package.json`, `package-lock.json`, or a server's `CHANGELOG.md` is *already* dirty, say so and ask how to proceed: your edits will land on top of unrelated in-flight work in the same files, and Step 9 has to keep them apart.
 
 ## Step 2 — Decide the targets
 
@@ -55,7 +58,7 @@ Record targets without a `v` prefix (`0.12.0`). Flag any downgrade and confirm i
 
 ## Step 3 — Read what changed
 
-You need each package's `CHANGELOG.md` entries strictly after its current version through its target. Their headings carry a `v` (`## [v0.12.0] - YYYY-MM-DD`) — **this repo's own changelog does not** (see Step 8), so don't let the two formats bleed into each other.
+You need each package's `CHANGELOG.md` entries strictly after its current version through its target. Their headings carry a `v` (`## [v0.12.0] - YYYY-MM-DD`) — **this repo's two changelogs do not** (see Step 9), so don't let the two formats bleed into each other.
 
 Prefer a sibling checkout, but **verify it is current before trusting it** — that is the trap here, not a formality. A workspace checkout sitting on `dev` a few commits behind `origin` simply will not contain the newest release entry, and you will silently review an incomplete set of breaking changes:
 
@@ -81,11 +84,11 @@ This is the step that matters. For each breaking bullet, answer one question: *d
 Every place the SDK's shape is restated locally is a place a breaking change has to be re-reconciled by hand. Find them all:
 
 ```bash
-grep -rn "interface .*Client" src/ --include="*.ts" | grep -v test
-grep -rn "new PipelexApiClient" src/ --include="*.ts"
+grep -rn "interface .*Client" packages/ --include="*.ts" --exclude-dir=node_modules | grep -v test
+grep -rn "PipelexApiClient" packages/ --include="*.ts" --exclude-dir=node_modules | grep -v test
 ```
 
-They live in `src/capabilities/` — the catalog client, the shared method-fetch client, and the validation, inputs, prepare, attachment-upload and run clients, plus the `SizeGuardedPipelexApiClient` subclass in `upload-ceiling.ts` that overrides the `upload` wire call. For each seam whose methods appear in a breaking bullet:
+They live in `packages/core/src/capabilities/` — the catalog client, the shared method-fetch client, and the validation, inputs, prepare, attachment-upload and run clients, plus the `SizeGuardedPipelexApiClient` subclass in `upload-ceiling.ts` that overrides the `upload` wire call. For each seam whose methods appear in a breaking bullet:
 
 1. Read the local interface's declared signature.
 2. Read the new SDK's actual signature (`node_modules/@pipelex/sdk/dist/**/*.d.ts` after Step 5, or the sibling checkout's source before it).
@@ -96,18 +99,18 @@ They live in `src/capabilities/` — the catalog client, the shared method-fetch
 ### 4b — The test fakes
 
 ```bash
-grep -rln "client:" src/ --include="*.test.ts"
+grep -rln "client:" packages/ --include="*.test.ts" --exclude-dir=node_modules
 ```
 
 A fake written against the old shape keeps the suite green through a breaking change. Every fake for a seam you touched in 4a needs the same reshaping, and its assertions need re-reading — otherwise the tests now assert the old contract.
 
 ### 4c — The mthds-ui views
 
-`GraphSpec` is owned by `@pipelex/mthds-ui`, and `graph_spec` arrives opaque on the wire, so `src/views/run-graph.tsx` and `src/views/run-follow.tsx` reach it through an `as GraphSpec | null` cast. **A cast means `tsc` can never catch a `GraphSpec` shape change** — a UI bump that reshapes the spec compiles perfectly and degrades to `GraphViewer`'s internal empty state at runtime. So on any `@pipelex/mthds-ui` bump, read its changelog specifically for `GraphSpec`, `validateGraphSpec`, `GraphViewer` props, `TOOLBAR_POSITION`, and the `@pipelex/mthds-ui/graph/react` entry point, and treat a change to any of them as needing the visual check in Step 7.
+`GraphSpec` is owned by `@pipelex/mthds-ui`, and `graph_spec` arrives opaque on the wire, so `packages/console/src/views/run-graph.tsx` and `packages/console/src/views/run-follow.tsx` reach it through an `as GraphSpec | null` cast. **A cast means `tsc` can never catch a `GraphSpec` shape change** — a UI bump that reshapes the spec compiles perfectly and degrades to `GraphViewer`'s internal empty state at runtime. So on any `@pipelex/mthds-ui` bump, read its changelog specifically for `GraphSpec`, `validateGraphSpec`, `GraphViewer` props, `TOOLBAR_POSITION`, and the `@pipelex/mthds-ui/graph/react` entry point, and treat a change to any of them as needing the visual check in Step 7.
 
 ### 4d — Everything mechanical
 
-Some bullets are a plain rename — an option, an export, an env var written as `` `oldName` `` → `` `newName` ``. For those, grep the **whole repo**, not just `src/`: env var names in particular leak into `README.md`, `docs/`, `SPEC.md`, `CLAUDE.md`, `.env.example`, and `wip/` notes. Apply the rename everywhere and show the diff — this workspace keeps no backward-compatibility shims, so there is nothing to preserve. The one place to leave untouched is this repo's **already-dated `CHANGELOG.md` release headings**: those record what was true at that release. Step 8 is where the changelog gets its new entry.
+Some bullets are a plain rename — an option, an export, an env var written as `` `oldName` `` → `` `newName` ``. For those, grep the **whole repo**, not just `packages/`: env var names in particular leak into `README.md`, `docs/`, `SPEC.md`, `CLAUDE.md`, `.env.example`, and `wip/` notes. Apply the rename everywhere and show the diff — this workspace keeps no backward-compatibility shims, so there is nothing to preserve. The one place to leave untouched is the changelogs' **already-dated release headings**: those record what was true at that release. Step 9 is where the changelogs get their new entries.
 
 Run `make format` after any edit, not just renames. Prettier re-flows on line length, so reworking a function body or a Markdown table will fail `format:check` on whitespace alone — a confusing way to fail Step 6 if you have forgotten that your own edit caused it.
 
@@ -131,7 +134,7 @@ node -p "require('./node_modules/@pipelex/sdk/package.json').version"
 node -p "require('./node_modules/@pipelex/mthds-ui/package.json').version"
 ```
 
-Then show the user the resulting `package.json` diff.
+Then show the user the resulting diff of the members' `package.json` files; the root manifest must not have moved.
 
 ## Step 6 — Run the checks
 
@@ -168,7 +171,7 @@ Read the result as a whole rather than the exit code alone:
 - **A failed check or a failed test** — the real client disagreeing with the real API, which is precisely what Step 6 cannot see. Both surfaces name the tool, the field, and what they got. If the API moved, the fix belongs in `../pipelex-sdk-js` (plus its own e2e), then a bump here — never a local patch that papers over it. If a live result contradicts a unit-test fake in this repo, fix the fake in the same change: a fake that has drifted from the wire is how the mocked suite goes green over a broken client.
 - **`catalog is EMPTY`** on a pass — a note, not a failure, and worth repeating to the user: the org holds no methods, so row projection was not exercised by that run. A pass under an empty catalog is a weaker result than it looks.
 
-Worth running **before** the bump too when the user reports a live failure: a check that fails on the old version and passes on the new one turns "we upgraded" into "we fixed it", and gives Step 8 something concrete to write.
+Worth running **before** the bump too when the user reports a live failure: a check that fails on the old version and passes on the new one turns "we upgraded" into "we fixed it", and gives Step 9 something concrete to write.
 
 If Step 4c flagged a `GraphSpec` change, the graph view needs eyes on it as well — `make dev` serves the DevTools UI at `http://localhost:6843` where `pipelex_show_method` renders the run-graph view. That one needs `WORKOS_AUTHKIT_DOMAIN` and `PIPELEX_MCP_RESOURCE_INDICATOR` set, so offer it, but do not treat it as blocking.
 
@@ -189,9 +192,9 @@ These documents carry different weight, so read what each one is for rather than
 
 A removed field deserves a sentence explaining why it cannot come back cheaply. That is the note that stops the next person reintroducing it.
 
-## Step 9 — Update this repo's CHANGELOG.md
+## Step 9 — Update the servers' changelogs
 
-Entries accumulate under `## [Unreleased]` — **create that heading above the newest version heading if it is not there**, since releases consume it. Use this repo's format: `## [x.y.z]`, **no `v` prefix** (the `v` belongs to branch names and git tags only).
+Each server has its own changelog, `packages/workshop/CHANGELOG.md` and `packages/console/CHANGELOG.md`, and a bump belongs in the changelog of each server it reaches: an `@pipelex/sdk` bump reaches both, through the core, and an `@pipelex/mthds-ui` bump reaches the console alone. Entries accumulate under `## [Unreleased]` — **create that heading above the newest version heading if it is not there**, since releases consume it. Use this repo's format: `## [x.y.z]`, **no `v` prefix** (the `v` belongs to branch names and git tags only).
 
 Add a `### Changed` bullet naming both packages and the versions they moved from and to. Then write for *this repo's* reader, not the SDK's — restate what changed in terms of what pipelex-mcp does:
 
@@ -207,12 +210,12 @@ Summarise: each package's `old → new`, every file touched, and any unresolved 
 
 On approval:
 
-1. Stage **only** the files this bump touched — `package.json`, `package-lock.json`, `CHANGELOG.md`, plus anything Steps 4 and 8 migrated. Never `git add .` or `git add -A`. If Step 1 flagged pre-existing changes in one of these files, stage hunks carefully or ask the user how to separate them.
+1. Stage **only** the files this bump touched — the members' `package.json` files, `package-lock.json`, the changelogs, plus anything Steps 4 and 8 migrated. Never `git add .` or `git add -A`. If Step 1 flagged pre-existing changes in one of these files, stage hunks carefully or ask the user how to separate them.
 2. If the current branch is `dev` or `main`, create a work branch first — `chore/Bump-sdks` (this repo's guard workflow requires one of `fix/ feature/ refactor/ chore/ docs/ ci-cd/ changelog/ codex/`).
 3. Commit as `chore: bump @pipelex/sdk to X.Y.Z and @pipelex/mthds-ui to A.B.C`, with a short body naming any migration applied and any live failure fixed.
 4. Show the result.
 
-Then *offer* — do not run — pushing and opening a PR. PRs target **`dev`**, never `main`; only a `release/vX.Y.Z` branch may target `main` here. Wait for explicit approval.
+Then *offer* — do not run — pushing and opening a PR. PRs target **`dev`**, never `main`; only a release branch (`release/vX.Y.Z` or `release/console-vX.Y.Z`) may target `main` here. Wait for explicit approval.
 
 ## Rules
 

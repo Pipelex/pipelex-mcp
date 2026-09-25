@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint format format-check typecheck test agent-test test-watch test-coverage smoke live-preflight test-e2e test-e2e-run test-all seed-e2e-fixture te check check-no-local-deps check-release-ready build build-local all clean dev dev-local inspect-local dev-tunnel start deploy deploy-prod deploy-dev deploy-staging deploy-envs alpic-deploy publish c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
+.PHONY: help install lint format format-check typecheck test agent-test test-watch test-coverage smoke live-preflight test-e2e test-e2e-run test-all seed-e2e-fixture te check check-no-local-deps check-release-ready check-workshop-released check-console-released build build-local all clean dev dev-local inspect-local dev-tunnel start deploy deploy-prod deploy-dev deploy-staging deploy-envs alpic-deploy publish c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
 
 # Sibling repos for live development of our npm dependencies (see use-local / use-npm).
 MTHDS_UI_DIR := ../mthds-ui
@@ -26,7 +26,9 @@ PIPELEX_SDK_DIR := ../pipelex-sdk-js
 export CONSOLE_PORT ?= 6843
 
 define HELP
-Manage pipelex-mcp located in $(CURDIR).
+Manage pipelex-mcp located in $(CURDIR): an npm workspace holding the core
+(packages/core), the workshop published as @pipelex/mcp (packages/workshop)
+and the hosted console deployed to Alpic (packages/console).
 Usage:
 
 make install        - Install dependencies
@@ -35,12 +37,12 @@ make dev-local      - Start the local stdio server from TypeScript
 make inspect-local  - Open MCP Inspector against the local stdio server
 make dev-tunnel     - Start Skybridge dev server with tunnel (same port and .env rules as dev)
 make start          - Start the built console from its server bundle, as Alpic does
-make deploy         - Deploy the hosted console to Alpic Production (from a clean main)
+make deploy         - Deploy the hosted console to Alpic Production (from a clean main; break-glass)
 make deploy-prod    - Same as deploy
 make deploy-staging - Deploy the working tree to the Alpic Staging console
 make deploy-dev     - Deploy the working tree to the Alpic Dev console
 make deploy-envs    - List this project's Alpic environments and their URLs
-make publish        - Publish @pipelex/mcp to npm (from a clean main)
+make publish        - Publish the workshop, @pipelex/mcp, to npm (from a clean main; break-glass)
 
 make lint           - Run ESLint
 make format         - Format source files with Prettier
@@ -61,14 +63,14 @@ make test-e2e-run     - Same, plus the run family (SPENDS INFERENCE CREDIT)
 make seed-e2e-fixture - Create/refresh the durable fixture methods the live suites need
 make test-all         - EVERY test: hermetic + smoke + live incl. run family (SPENDS CREDIT)
 
-make build          - Build the Skybridge app
-make build-local    - Build the npm-distributed local stdio server
+make build          - Build the console (Skybridge app and its server bundle)
+make build-local    - Build the workshop, the npm-distributed stdio server
 make check          - Run lint, format check, typecheck, and build
 make all            - Clean, check, and test
 make clean          - Remove generated artifacts
 make c              - Shorthand -> check
 
-make use-local      - Switch @pipelex/mthds-ui AND @pipelex/sdk to their sibling repos (file links)
+make use-local      - Switch @pipelex/mthds-ui AND @pipelex/sdk to their sibling repos (file links), in every manifest naming them
 make use-npm        - Switch both back to npm (latest)
 make use-local-ui   - Switch only @pipelex/mthds-ui to sibling ../mthds-ui
 make use-npm-ui     - Switch only @pipelex/mthds-ui back to npm [VERSION=x.y.z]
@@ -167,7 +169,7 @@ agent-test:
 # also the name pipelex-sdk-js's live suite uses.
 #
 # The pair is resolved ONCE here and exported, so the URL these targets
-# preflight is the URL the suites call (`src/capabilities/e2e-support.ts` reads
+# preflight is the URL the suites call (`packages/core/src/capabilities/e2e-support.ts` reads
 # the same two names). Precedence is the make command line, then `.env`, then the
 # shell, then the default — `make dev`'s order, for the same reason: `.env` is
 # this checkout's own configuration and the shell is ambient. Each value is taken
@@ -290,9 +292,14 @@ test-all: live-preflight
 check: check-no-local-deps
 	npm run check
 
+# Every manifest in the workspace, since `use-local` links a package in each
+# member that declares it.
+MANIFESTS := package.json $(wildcard packages/*/package.json)
+
 check-no-local-deps:
-	@if grep -qE '"@pipelex/(mthds-ui|sdk)":[[:space:]]*"(file:|link:|portal:)' package.json; then \
-		echo "ERROR: a @pipelex dependency in package.json is a local link. Run 'make use-npm' first."; exit 1; \
+	@if grep -qE '"@pipelex/(mthds-ui|sdk)":[[:space:]]*"(file:|link:|portal:)' $(MANIFESTS); then \
+		grep -nE '"@pipelex/(mthds-ui|sdk)":[[:space:]]*"(file:|link:|portal:)' $(MANIFESTS); \
+		echo "ERROR: a @pipelex dependency above is a local link. Run 'make use-npm' first."; exit 1; \
 	fi
 
 build:
@@ -304,7 +311,7 @@ build-local:
 all: clean check test
 
 clean:
-	rm -rf dist coverage *.tsbuildinfo
+	rm -rf coverage *.tsbuildinfo packages/*/dist packages/*/*.tsbuildinfo
 
 # --- The console dev loop ---
 # `make dev` runs THIS checkout's console, so `.env` is its configuration and
@@ -408,10 +415,13 @@ dev-tunnel:
 start:
 	npm run start
 
-# --- Release-only publish/deploy ---
-# Both surfaces always ship from the same clean main commit (see CLAUDE.md
-# "Versioning & changelog" and the /release skill). check-release-ready guards
-# that, plus check-no-local-deps: a @pipelex file: link would ship a broken
+# --- Release-only publish/deploy (break-glass) ---
+# A release ships from the merge of its pull request into main, through
+# release.yml, one server at a time: a workshop release publishes to npm, a
+# console release deploys to Alpic (see CLAUDE.md "Versioning & changelog" and
+# the /release skill). These two targets are the escape hatches for a CI outage,
+# and each ships one server only. check-release-ready demands a clean main, and
+# check-no-local-deps refuses a @pipelex file: link, which would ship a broken
 # install (npm) or fail to resolve on Alpic's build machine (deploy).
 
 check-release-ready:
@@ -422,14 +432,36 @@ check-release-ready:
 	@if [ -n "$$(git status --porcelain)" ]; then \
 		echo "ERROR: working tree is not clean. Commit or stash changes before publishing/deploying."; exit 1; \
 	fi
+	@git fetch -q origin main || { echo "ERROR: could not fetch origin/main, so nothing says this checkout is its tip."; exit 1; }; \
+	if [ "$$(git rev-parse HEAD)" != "$$(git rev-parse FETCH_HEAD)" ]; then \
+		echo "ERROR: HEAD is not origin/main's tip. Publish/deploy ship only main's tip: pull it, and if main has moved past the release you meant to ship, cut a new release instead."; exit 1; \
+	fi
 
-deploy: check-no-local-deps check-release-ready
+# Each target also ships only from the commit that released its own track: the
+# merge whose first parent carried another version of that track. main moves past
+# that commit when the other server releases, and its tip then still carries this
+# track's released version with code that version never shipped, so a recovery
+# from the tip would put the wrong bytes under the right number. Past that point
+# the cure is a new release of the track, not a recovery. The rise must be strict,
+# so a revert that lowers the version never reads as a release, and
+# check-release-ready holds HEAD to origin/main's tip, so a stale local main
+# sitting on an older release commit cannot roll Production back.
+check-workshop-released: TRACK := workshop
+check-console-released: TRACK := console
+check-workshop-released check-console-released:
+	@now="$$(bash .github/scripts/track-version.sh $(TRACK) HEAD)" && \
+	before="$$(bash .github/scripts/track-version.sh $(TRACK) HEAD^)" || exit 1; \
+	if [ "$$now" = "$$before" ] || [ "$$(printf '%s\n%s\n' "$$before" "$$now" | sort -V | tail -1)" != "$$now" ]; then \
+		echo "ERROR: HEAD did not raise the $(TRACK) version: it carries $(TRACK) $$now over its first parent's $$before. A break-glass ship runs only from the commit that raised the $(TRACK) version; once main has moved past it, cut a new $(TRACK) release instead."; exit 1; \
+	fi
+
+deploy: check-no-local-deps check-release-ready check-console-released
 	npm run deploy
 
 deploy-prod: deploy
 
-publish: check-no-local-deps check-release-ready
-	npm publish
+publish: check-no-local-deps check-release-ready check-workshop-released
+	npm publish --workspace @pipelex/mcp
 
 # --- The non-production consoles ---
 # `make deploy` above ships Production through the tracked `.alpic/project.json`,
@@ -487,16 +519,16 @@ te: test-e2e
 # use-local / use-npm act on BOTH @pipelex/mthds-ui and @pipelex/sdk.
 # The per-package targets act on one, and take VERSION=x.y.z to pin an npm version.
 #
-# The UI targets pass `--save-dev` and the SDK targets do not, and that
-# asymmetry is the dependency boundary, not a slip: @pipelex/mthds-ui is
-# imported by the console's views alone, which Vite bundles into client assets,
-# while @pipelex/sdk is imported by every capability and must be on disk in an
-# `--omit=dev` install. npm infers the block from where a package already sits,
-# so a bare `npm install @pipelex/mthds-ui` updates the existing devDependencies
-# entry in place; the flag is what keeps a fresh add — or a re-add once the entry
-# is gone — out of `dependencies`, where it would put React's whole view tree
-# back into every `npx @pipelex/mcp` install. No test catches it either way, so
-# read the `package.json` diff before committing a bump.
+# Each package is installed into exactly the workspace members that declare it,
+# never into the root: @pipelex/mthds-ui into the console alone, whose views are
+# its only importer, and @pipelex/sdk into the core, the workshop and the
+# console, which carry the same range (tests/workspace-manifests.test.ts fails
+# when they drift apart). npm updates an entry in the block it already sits in,
+# so a bump keeps @pipelex/sdk in `dependencies` everywhere. What reaches every
+# `npx @pipelex/mcp` install is the workshop's `dependencies` alone, so read the
+# diff of packages/workshop/package.json before committing a bump.
+UI_WORKSPACES := --workspace @pipelex/mcp-console
+SDK_WORKSPACES := --workspace @pipelex/mcp-core --workspace @pipelex/mcp --workspace @pipelex/mcp-console
 
 use-local: use-local-ui use-local-sdk
 
@@ -505,26 +537,26 @@ use-npm: use-npm-ui use-npm-sdk
 use-local-ui:
 	@if [ ! -d $(MTHDS_UI_DIR) ]; then echo "ERROR: $(MTHDS_UI_DIR) not found. Clone it next to pipelex-mcp."; exit 1; fi
 	cd $(MTHDS_UI_DIR) && npm install && npm run build
-	npm install --save-dev @pipelex/mthds-ui@file:$(MTHDS_UI_DIR)
+	npm install $(UI_WORKSPACES) @pipelex/mthds-ui@file:$(abspath $(MTHDS_UI_DIR))
 	@echo "Switched to local mthds-ui (file link). Run 'make use-npm-ui' to switch back."
 
 use-npm-ui:
 	@VERSION="$${VERSION:-latest}" && \
 	echo "Installing @pipelex/mthds-ui@$$VERSION from npm" && \
-	npm install --save-dev @pipelex/mthds-ui@$$VERSION && \
-	echo "Switched to npm @pipelex/mthds-ui@$$VERSION. Review the diff, then commit package.json + package-lock.json."
+	npm install $(UI_WORKSPACES) @pipelex/mthds-ui@$$VERSION && \
+	echo "Switched to npm @pipelex/mthds-ui@$$VERSION. Review the diff, then commit packages/console/package.json + package-lock.json."
 
 use-local-sdk:
 	@if [ ! -d $(PIPELEX_SDK_DIR) ]; then echo "ERROR: $(PIPELEX_SDK_DIR) not found. Clone it next to pipelex-mcp."; exit 1; fi
 	cd $(PIPELEX_SDK_DIR) && npm install && npm run build
-	npm install @pipelex/sdk@file:$(PIPELEX_SDK_DIR)
+	npm install $(SDK_WORKSPACES) @pipelex/sdk@file:$(abspath $(PIPELEX_SDK_DIR))
 	@echo "Switched to local pipelex-sdk-js (file link). Run 'make use-npm-sdk' to switch back."
 
 use-npm-sdk:
 	@VERSION="$${VERSION:-latest}" && \
 	echo "Installing @pipelex/sdk@$$VERSION from npm" && \
-	npm install @pipelex/sdk@$$VERSION && \
-	echo "Switched to npm @pipelex/sdk@$$VERSION. Review the diff, then commit package.json + package-lock.json."
+	npm install $(SDK_WORKSPACES) @pipelex/sdk@$$VERSION && \
+	echo "Switched to npm @pipelex/sdk@$$VERSION. Review the diff, then commit packages/*/package.json + package-lock.json."
 
 ul: use-local
 un: use-npm

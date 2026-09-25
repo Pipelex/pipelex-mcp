@@ -28,7 +28,7 @@ if (existsSync(".env")) {
 
 export default defineConfig({
   test: {
-    include: ["src/**/*.e2e.ts"],
+    include: ["packages/*/src/**/*.e2e.ts"],
     environment: "node",
     // A cold hosted API answers in seconds, not milliseconds, and the run suite
     // polls a durable execution to a terminal state.
