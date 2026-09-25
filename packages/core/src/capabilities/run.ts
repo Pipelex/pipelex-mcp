@@ -1,11 +1,14 @@
 import {
   ApiResponseError,
   ApiUnreachableError,
+  BULK_RESOLVE_MAX_URIS,
   collectArtifacts,
   isTerminalRunStatus,
   summarizeUsage,
 } from "@pipelex/sdk";
 import type {
+  BulkResolvedStorageUrls,
+  BulkResolveStorageUrlsInput,
   MethodProvenance,
   PipelexRunResultStart,
   PipelexStartOptions,
@@ -22,6 +25,7 @@ import type {
 import { z } from "zod";
 
 import {
+  BULK_RESOLVE_ERROR_OPTIONS,
   MAX_IMAGE_CANDIDATE_ENTRIES,
   METHOD_REF_GRAMMAR,
   buildApiConfig,
@@ -484,6 +488,24 @@ export interface RunResultsResult {
    * the run reported no usage list.
    */
   usageByPipe?: PipeUsage[];
+  /**
+   * A fresh link for each stored file a completed output references, keyed by
+   * its `pipelex-storage://` reference, for the views only (rides
+   * `_meta.resolved_urls`). The views paint files from these rather than from
+   * the payload's baked `public_url`, which the runtime signs path-style on the
+   * shared regional S3 host, where no host's CSP matches a bucket, and which
+   * expires an hour after the run. See `freshStorageLinks`.
+   */
+  resolvedUrls?: Record<string, string>;
+  /**
+   * Set, and only ever `true`, when a request for those links failed in a way
+   * that may pass, or ran out of time, so some reference went without one
+   * that a later read may mint (rides `_meta.resolved_urls_partial`). The
+   * views read the results again for it. A refusal that asking again would
+   * repeat does not set it: the route refusing the credential or missing from
+   * the deployment, or refusing one reference on its own item.
+   */
+  resolvedUrlsPartial?: true;
 }
 
 /** The slice of `PipelexApiClient` the run capabilities call (test seam). */
@@ -491,6 +513,11 @@ interface RunClient {
   start(options: PipelexStartOptions): Promise<PipelexRunResultStart>;
   getRunStatus(runId: string): Promise<RunRead>;
   getRunResult(runId: string): Promise<RunResultState>;
+  /** The bulk resolve route, `POST /v1/resolve-storage-url/bulk`: fresh links for a completed output's files. */
+  resolveStorageUrls(
+    input: BulkResolveStorageUrlsInput,
+    options?: { signal?: AbortSignal },
+  ): Promise<BulkResolvedStorageUrls>;
 }
 
 /** The console's run also reads the signature its input walk needs (test seam). */
@@ -1406,8 +1433,8 @@ const START_NOT_SENT_CODES: ReadonlySet<string> = new Set([
  * creates a durable run that spends inference credit, and this client sends no
  * idempotency key, so retrying after a lost acknowledgement would start a second
  * run. That is the case for a timeout or a dropped connection after the request
- * went out, and for a 502 or 504, where the gateway answered for a request the
- * runner may have accepted.
+ * went out, and for a 502, a 504 or a 408, where something in front of the
+ * runner answered for a request it may have accepted.
  */
 export function classifyStartError(err: unknown, options: ClassifyErrorOptions): ToolError {
   const error = classifyError(err, options);
@@ -1423,7 +1450,12 @@ function startMayHaveRun(err: unknown): boolean {
   if (err instanceof ApiUnreachableError) {
     return err.code === undefined || !START_NOT_SENT_CODES.has(err.code);
   }
-  if (err instanceof ApiResponseError) return err.status === 502 || err.status === 504;
+  // A 408 is a request the server says it never received whole, but a proxy
+  // may answer it for one it forwarded, and a wrong retry here is a second
+  // paid run. A 429 is a throttle refusing the request before it runs.
+  if (err instanceof ApiResponseError) {
+    return err.status === 502 || err.status === 504 || err.status === 408;
+  }
   return false;
 }
 
@@ -1499,10 +1531,12 @@ export async function getMthdsRunResults(
   // The API responded; projecting it must not be reported as an unreachable
   // API. A malformed report (a completed result missing main_stuff) is a
   // reachable contract violation, surfaced as a runtime no-verdict error.
+  const viewsAvailable = context.viewsAvailable !== false;
+  let projected: RunResultsResult;
   try {
-    return resultsResult(
+    projected = resultsResult(
       state,
-      context.viewsAvailable !== false,
+      viewsAvailable,
       context.artifactDownloadAvailable === true,
       names,
     );
@@ -1519,6 +1553,111 @@ export async function getMthdsRunResults(
         },
       ],
     );
+  }
+
+  if (viewsAvailable && state.state === "completed") {
+    const fresh = await freshStorageLinks(runClient(context), [
+      state.result.main_stuff,
+      state.result.graph_spec,
+    ]);
+    if (fresh.links !== undefined) projected.resolvedUrls = fresh.links;
+    if (fresh.partial) projected.resolvedUrlsPartial = true;
+  }
+  return projected;
+}
+
+/**
+ * How long the results wait on the bulk resolve route, across every request
+ * one read makes, before the views go without the links still missing.
+ */
+export const VIEW_LINKS_TIMEOUT_MS = 5_000;
+
+/** What {@link freshStorageLinks} minted, and whether a failed request left references without a link. */
+export interface FreshStorageLinks {
+  /** The link minted for each reference that got one; `undefined` when none did. */
+  links: Record<string, string> | undefined;
+  /**
+   * Whether a request failed in a way that may pass, or the deadline cut the
+   * walk short, so a later read may link what this one could not. A refusal
+   * that asking again would repeat does not count, whether of the whole
+   * request (a 401, a 403, a 404 from a deployment without the route) or of
+   * one reference on its own item.
+   */
+  partial: boolean;
+}
+
+/**
+ * Fresh links for the stored files a completed run references, for the views
+ * to paint from: the output's references first, then the executed graph's,
+ * deduplicated, asked for `BULK_RESOLVE_MAX_URIS` at a time, one request
+ * after another, all under one {@link VIEW_LINKS_TIMEOUT_MS} deadline.
+ *
+ * The baked `public_url` cannot serve. The runtime signs it path-style on the
+ * shared regional endpoint (`s3.us-west-2.amazonaws.com/<bucket>/…`), where a
+ * CSP could scope a bucket only by path, and no host kept the path; it also
+ * expires an hour after the run, so a reopened conversation painted nothing.
+ * The platform signs these on each bucket's own host
+ * (`<bucket>.s3.amazonaws.com`, measured against api-dev on 2026-09-25), which
+ * the views' CSP names as a plain origin, and a view that remounts reads the
+ * results again and gets new ones. Because the CSP refuses the baked link, a
+ * reference left without a fresh one paints nothing, which is why every
+ * reference is asked for rather than the first request's worth.
+ *
+ * Best effort by design: the links are a view's convenience and never part of
+ * the verdict, so a failed or slow request never fails the results. It stops
+ * the walk, keeps what the earlier requests minted, and says so through
+ * `partial`, which the views read the results again for — but only when the
+ * failure may pass, which is `classifyError`'s `retryable` verdict on it: the
+ * deadline, an unreachable API, a 5xx, a 408 or a 429. Only a link the route
+ * actually minted is kept; an item it refused is left out.
+ */
+export async function freshStorageLinks(
+  client: Pick<RunClient, "resolveStorageUrls">,
+  sources: readonly unknown[],
+): Promise<FreshStorageLinks> {
+  const uris = [...new Set(sources.flatMap((source) => collectArtifacts(source)))];
+  if (uris.length === 0) return { links: undefined, partial: false };
+  const links: Record<string, string> = {};
+  let partial = false;
+  const deadline = AbortSignal.timeout(VIEW_LINKS_TIMEOUT_MS);
+  for (let start = 0; start < uris.length; start += BULK_RESOLVE_MAX_URIS) {
+    const chunk = uris.slice(start, start + BULK_RESOLVE_MAX_URIS);
+    let answer: BulkResolvedStorageUrls;
+    try {
+      answer = await client.resolveStorageUrls({ uris: chunk }, { signal: deadline });
+    } catch (err) {
+      // A refusal that would repeat ends the walk too, since every later
+      // request would get it, but asks the views for no further read.
+      partial = classifyError(err, BULK_RESOLVE_ERROR_OPTIONS).retryable;
+      break;
+    }
+    keepMintedLinks(answer, new Set(chunk), links);
+  }
+  return { links: Object.keys(links).length === 0 ? undefined : links, partial };
+}
+
+/**
+ * Copy into `links` each link the route minted for a reference it was asked
+ * for. Narrowed rather than trusted: the answer is written into a page's
+ * `<img src>`, so only an `https:` string survives.
+ */
+function keepMintedLinks(
+  answer: BulkResolvedStorageUrls,
+  requested: ReadonlySet<string>,
+  links: Record<string, string>,
+): void {
+  for (const item of Array.isArray(answer?.items) ? (answer.items as unknown[]) : []) {
+    if (typeof item !== "object" || item === null) continue;
+    const { uri, url, error } = item as Record<string, unknown>;
+    if (error != null) continue;
+    if (
+      typeof uri === "string" &&
+      requested.has(uri) &&
+      typeof url === "string" &&
+      url.startsWith("https://")
+    ) {
+      links[uri] = url;
+    }
   }
 }
 
@@ -1668,6 +1807,11 @@ export function runResultsToolResult(result: RunResultsResult) {
       main_stuff: result.mainStuff,
       tokens_usages: result.tokensUsages,
       usage_by_pipe: result.usageByPipe,
+      // Not API fields: the fresh link for each stored reference, which the
+      // views paint from, and whether a failed request left some without one
+      // (see `freshStorageLinks`).
+      resolved_urls: result.resolvedUrls,
+      resolved_urls_partial: result.resolvedUrlsPartial,
     },
   };
 }

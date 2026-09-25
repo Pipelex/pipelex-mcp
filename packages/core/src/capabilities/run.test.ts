@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { ApiResponseError, ApiUnreachableError, MissingMainStuffError } from "@pipelex/sdk";
+import {
+  ApiResponseError,
+  ApiUnreachableError,
+  BULK_RESOLVE_MAX_URIS,
+  MissingMainStuffError,
+} from "@pipelex/sdk";
 import type {
+  BulkResolvedStorageUrls,
+  BulkResolveStorageUrlsInput,
   InputForm,
   MethodProvenance,
   OutputForm,
@@ -24,6 +31,7 @@ import {
   boundMainStuff,
   classifyStartError,
   ELLIPSIS_MARKER,
+  freshStorageLinks,
   getMthdsRunResults,
   getMthdsRunStatus,
   MAIN_STUFF_CAP,
@@ -1167,13 +1175,31 @@ interface FakeRunClient {
   start(options: PipelexStartOptions): Promise<RunResultStart>;
   getRunStatus(runId: string): Promise<RunRead>;
   getRunResult(runId: string): Promise<RunResultState>;
+  resolveStorageUrls(
+    input: BulkResolveStorageUrlsInput,
+    options?: { signal?: AbortSignal },
+  ): Promise<BulkResolvedStorageUrls>;
 }
 
 const NEVER_CLIENT: FakeRunClient = {
   start: () => Promise.reject(new Error("start must not be called")),
   getRunStatus: () => Promise.reject(new Error("getRunStatus must not be called")),
   getRunResult: () => Promise.reject(new Error("getRunResult must not be called")),
+  resolveStorageUrls: () => Promise.reject(new Error("resolveStorageUrls must not be called")),
 };
+
+/** The bulk resolve route's answer for each reference, minted on each bucket's own host. */
+function mintedLinks(input: BulkResolveStorageUrlsInput): Promise<BulkResolvedStorageUrls> {
+  return Promise.resolve({
+    items: input.uris.map((uri) => ({
+      uri,
+      url: `https://pipelex-app-dev.s3.amazonaws.com/${uri.slice("pipelex-storage://".length)}?X-Amz-Expires=900`,
+      expires_at: "2026-09-25T12:00:00Z",
+      content_type: "image/png",
+      error: null,
+    })),
+  });
+}
 
 function contextWith(overrides: Partial<FakeRunClient>): RunContext {
   return {
@@ -1275,6 +1301,7 @@ describe("startMthdsRun", () => {
       new ApiUnreachableError("network error", DEFAULT_API_URL, undefined),
       serverError(504),
       serverError(502),
+      serverError(408),
     ];
     for (const failure of failures) {
       const result = await startMthdsRun(
@@ -1288,9 +1315,11 @@ describe("startMthdsRun", () => {
   });
 
   it("keeps a start the server refused outright retryable", () => {
-    const error = classifyStartError(serverError(503), RUN_START_ERROR_OPTIONS);
-    expect(error.retryable).toBe(true);
-    expect(error.hint).not.toContain("the run may have started");
+    for (const status of [503, 429]) {
+      const error = classifyStartError(serverError(status), RUN_START_ERROR_OPTIONS);
+      expect(error.retryable).toBe(true);
+      expect(error.hint).not.toContain("the run may have started");
+    }
   });
 });
 
@@ -1720,6 +1749,78 @@ describe("getMthdsRunResults", () => {
     expect(result.graphSpec).toEqual({ nodes: [] });
   });
 
+  it("puts a fresh link for each stored file on _meta when the shell has views", async () => {
+    const picture = "pipelex-storage://runs/x/illustration.png";
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: { pipeline_run_id: RUN_ID, main_stuff: { image: { url: picture } } },
+    };
+    const context = contextWith({
+      getRunResult: () => Promise.resolve(state),
+      resolveStorageUrls: mintedLinks,
+    });
+
+    const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
+
+    expect(toolResult._meta.resolved_urls).toEqual({
+      [picture]:
+        "https://pipelex-app-dev.s3.amazonaws.com/runs/x/illustration.png?X-Amz-Expires=900",
+    });
+    expect(toolResult._meta.resolved_urls_partial).toBeUndefined();
+    expect(JSON.stringify(toolResult.structuredContent)).not.toContain("s3.amazonaws.com");
+  });
+
+  it("resolves nothing on a shell without views", async () => {
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: { image: { url: "pipelex-storage://runs/x/illustration.png" } },
+      },
+    };
+    let requests = 0;
+    const context = {
+      ...contextWith({
+        getRunResult: () => Promise.resolve(state),
+        resolveStorageUrls: (input) => {
+          requests += 1;
+          return mintedLinks(input);
+        },
+      }),
+      viewsAvailable: false,
+    };
+
+    const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.state).toBe("completed");
+    expect(requests).toBe(0);
+    expect(result.resolvedUrls).toBeUndefined();
+  });
+
+  it("flags the links as partial on _meta when the route fails, and still answers", async () => {
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: { image: { url: "pipelex-storage://runs/x/illustration.png" } },
+      },
+    };
+    const context = contextWith({
+      getRunResult: () => Promise.resolve(state),
+      resolveStorageUrls: () =>
+        Promise.reject(new ApiUnreachableError("down", DEFAULT_API_URL, "ECONNREFUSED")),
+    });
+
+    const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
+
+    expect(toolResult.structuredContent.state).toBe("completed");
+    expect(toolResult._meta.resolved_urls).toBeUndefined();
+    expect(toolResult._meta.resolved_urls_partial).toBe(true);
+  });
+
   it("does not call the client on a blank run_id", async () => {
     const result = await getMthdsRunResults({ run_id: "" }, contextWith({}));
 
@@ -1764,6 +1865,185 @@ describe("getMthdsRunResults", () => {
       "Run results could not be read: the organization's Pipelex plan does not cover this call.",
     );
     expect(result.summary).not.toMatch(/unreachable/);
+  });
+});
+
+describe("freshStorageLinks", () => {
+  const picture = "pipelex-storage://runs/x/illustration.png";
+  const step = "pipelex-storage://runs/x/step.png";
+
+  it("resolves the output's references, then the graph's, once each, in one request", async () => {
+    const asked: string[][] = [];
+    let signal: AbortSignal | undefined;
+    const links = await freshStorageLinks(
+      {
+        resolveStorageUrls: (input, options) => {
+          asked.push(input.uris);
+          signal = options?.signal;
+          return mintedLinks(input);
+        },
+      },
+      [{ image: { url: picture }, again: picture }, { nodes: [{ value: { url: step } }, picture] }],
+    );
+
+    expect(asked).toEqual([[picture, step]]);
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(links).toEqual({
+      links: {
+        [picture]:
+          "https://pipelex-app-dev.s3.amazonaws.com/runs/x/illustration.png?X-Amz-Expires=900",
+        [step]: "https://pipelex-app-dev.s3.amazonaws.com/runs/x/step.png?X-Amz-Expires=900",
+      },
+      partial: false,
+    });
+  });
+
+  const frames = (count: number) =>
+    Array.from(
+      { length: count },
+      (_unused, index) => `pipelex-storage://runs/x/frame-${index}.png`,
+    );
+
+  it("links every reference, a bulk request's worth at a time, under one deadline", async () => {
+    const many = frames(BULK_RESOLVE_MAX_URIS * 2 + 5);
+    const asked: string[][] = [];
+    const signals: (AbortSignal | undefined)[] = [];
+    const fresh = await freshStorageLinks(
+      {
+        resolveStorageUrls: (input, options) => {
+          asked.push(input.uris);
+          signals.push(options?.signal);
+          return mintedLinks(input);
+        },
+      },
+      [many, { url: step }],
+    );
+
+    expect(asked).toEqual([
+      many.slice(0, BULK_RESOLVE_MAX_URIS),
+      many.slice(BULK_RESOLVE_MAX_URIS, BULK_RESOLVE_MAX_URIS * 2),
+      [...many.slice(BULK_RESOLVE_MAX_URIS * 2), step],
+    ]);
+    expect(new Set(signals).size).toBe(1);
+    expect(Object.keys(fresh.links ?? {})).toEqual([...many, step]);
+    expect(fresh.partial).toBe(false);
+  });
+
+  it("keeps what the earlier requests minted when a later one fails, and says it is partial", async () => {
+    const many = frames(BULK_RESOLVE_MAX_URIS * 3);
+    let requests = 0;
+    const fresh = await freshStorageLinks(
+      {
+        resolveStorageUrls: (input) => {
+          requests += 1;
+          return requests === 2
+            ? Promise.reject(new ApiUnreachableError("down", DEFAULT_API_URL, "ECONNREFUSED"))
+            : mintedLinks(input);
+        },
+      },
+      [many],
+    );
+
+    expect(requests).toBe(2);
+    expect(Object.keys(fresh.links ?? {})).toEqual(many.slice(0, BULK_RESOLVE_MAX_URIS));
+    expect(fresh.partial).toBe(true);
+  });
+
+  it("makes no request when nothing is stored", async () => {
+    let requests = 0;
+    const fresh = await freshStorageLinks(
+      {
+        resolveStorageUrls: (input) => {
+          requests += 1;
+          return mintedLinks(input);
+        },
+      },
+      [{ answer: 42 }, undefined],
+    );
+
+    expect(requests).toBe(0);
+    expect(fresh).toEqual({ links: undefined, partial: false });
+  });
+
+  it("goes without links when the route fails, rather than failing the results", async () => {
+    const fresh = await freshStorageLinks(
+      {
+        resolveStorageUrls: () =>
+          Promise.reject(new ApiUnreachableError("down", DEFAULT_API_URL, "ECONNREFUSED")),
+      },
+      [{ url: picture }],
+    );
+
+    expect(fresh).toEqual({ links: undefined, partial: true });
+  });
+
+  it("asks for no further read when the route refuses in a way that would repeat", async () => {
+    const refused = (status: number) =>
+      new ApiResponseError(
+        `HTTP ${status}`,
+        `${DEFAULT_API_URL}/v1/resolve-storage-url/bulk`,
+        status,
+        "Refused",
+        "{}",
+        undefined,
+        undefined,
+        undefined, // validationErrors
+        undefined, // code
+      );
+    // A credential refused, or a deployment without the route: every later
+    // read would get the same answer, so none is asked for.
+    for (const status of [401, 403, 404]) {
+      const fresh = await freshStorageLinks(
+        { resolveStorageUrls: () => Promise.reject(refused(status)) },
+        [{ url: picture }],
+      );
+      expect(fresh).toEqual({ links: undefined, partial: false });
+    }
+    // A throttle may pass, so it is one.
+    const throttled = await freshStorageLinks(
+      { resolveStorageUrls: () => Promise.reject(refused(429)) },
+      [{ url: picture }],
+    );
+    expect(throttled).toEqual({ links: undefined, partial: true });
+  });
+
+  it("keeps only an https link the route minted for a reference it was asked for", async () => {
+    const other = "pipelex-storage://runs/x/other.png";
+    const links = await freshStorageLinks(
+      {
+        resolveStorageUrls: () =>
+          Promise.resolve({
+            items: [
+              {
+                uri: picture,
+                url: null,
+                expires_at: null,
+                content_type: null,
+                error: { code: "not_found", message: "gone" },
+              },
+              {
+                uri: step,
+                url: "javascript:alert(1)",
+                expires_at: "2026-09-25T12:00:00Z",
+                content_type: null,
+                error: null,
+              },
+              {
+                uri: other,
+                url: "https://pipelex-app-dev.s3.amazonaws.com/runs/x/other.png",
+                expires_at: "2026-09-25T12:00:00Z",
+                content_type: null,
+                error: null,
+              },
+            ],
+          } as unknown as BulkResolvedStorageUrls),
+      },
+      [{ a: { url: picture }, b: { url: step } }],
+    );
+
+    // A refused item is the route's answer, not a failure: asking again gets
+    // the same, so it does not make the links partial.
+    expect(links).toEqual({ links: undefined, partial: false });
   });
 });
 

@@ -436,6 +436,7 @@ export default function RunGraphView() {
             contracts={executedGraph.contracts ?? undefined}
             outputForm={executedGraph.outputForm ?? undefined}
             inputForm={executedGraph.inputForm ?? undefined}
+            resolveUrl={executedGraph.resolveUrl}
             initialDirection="LR"
             initialShowControllers={true}
             theme={theme}

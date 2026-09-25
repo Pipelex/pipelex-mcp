@@ -2,7 +2,12 @@
 // re-exports it whole and imports its prebuilt stylesheet — never
 // `@pipelex/mthds-form` directly, which would put a second copy of its React
 // contexts in the tree (`FieldPresentationProvider` among them).
-import { FieldPresentationProvider, JsonView, StuffViewer } from "@pipelex/mthds-ui/form/react";
+import {
+  FieldPresentationProvider,
+  JsonView,
+  ResultEnvProvider,
+  StuffViewer,
+} from "@pipelex/mthds-ui/form/react";
 import { GraphViewer } from "@pipelex/mthds-ui/graph/react";
 import { TOOLBAR_POSITION } from "@pipelex/mthds-ui";
 import type { GraphSpec, ToolbarPosition } from "@pipelex/mthds-ui";
@@ -137,6 +142,7 @@ export function RunResultsPanel({
                   contracts={results.contracts ?? undefined}
                   outputForm={results.outputForm ?? undefined}
                   inputForm={results.inputForm ?? undefined}
+                  resolveUrl={results.resolveUrl}
                   initialDirection="LR"
                   initialShowControllers={true}
                   theme={dark ? "dark" : "light"}
@@ -250,11 +256,15 @@ function RunOutput({
           className={["text-foreground", dark && "dark"].filter(Boolean).join(" ")}
         >
           <FieldPresentationProvider presentation="app">
-            {field && oversizedLength === null ? (
-              <StuffViewer field={field} value={value} hideDownload />
-            ) : (
-              <JsonView value={value} />
-            )}
+            {/* Files paint from the fresh links the results carried, not the
+                payload's baked `public_url`; see `withLinks` in `run-results.ts`. */}
+            <ResultEnvProvider resolveUrl={results.resolveUrl}>
+              {field && oversizedLength === null ? (
+                <StuffViewer field={field} value={value} hideDownload />
+              ) : (
+                <JsonView value={value} />
+              )}
+            </ResultEnvProvider>
           </FieldPresentationProvider>
         </div>
       </div>
@@ -279,6 +289,16 @@ function RunOutput({
             Shown as JSON: this result does not describe its output&apos;s structure.
           </p>
         )
+      )}
+      {/* Said rather than left to a broken tile: a file with no fresh link
+          falls back to a link the CSP refuses. Worded so it stays true once
+          `useRunResults` has made its last read for the missing links
+          (`LINK_REREAD_DELAYS_MS`), and while the tab is hidden, when it
+          reads nothing. */}
+      {results.linksPartial && (
+        <p className="mt-1 text-xs" style={{ color: mutedColor }}>
+          Some of this output&apos;s files could not be linked, so they may not show.
+        </p>
       )}
     </div>
   );

@@ -17,6 +17,7 @@ import {
   resultsFetchExhausted,
   runDurationSeconds,
   runResultsViewOf,
+  withLinksFrom,
 } from "./run-results.js";
 
 // The standard's own minimal shapes, as the validate tests state them: a
@@ -87,11 +88,127 @@ describe("runResultsViewOf", () => {
     expect(view.contracts).toBeNull();
     expect(view.outputForm).toBeNull();
     expect(view.mainStuff).toBeUndefined();
+    expect(view.resolveUrl).toBeUndefined();
     expect(hasExecutedGraph(view)).toBe(false);
   });
 
   it("treats a graph with no nodes as no graph", () => {
     expect(hasExecutedGraph(runResultsViewOf(content, { graph_spec: { nodes: [] } }))).toBe(false);
+  });
+
+  it("resolves a stored file through the fresh links the results carried", () => {
+    const picture = "pipelex-storage://runs/x/illustration.png";
+    const link =
+      "https://pipelex-app-dev.s3.amazonaws.com/runs/x/illustration.png?X-Amz-Expires=900";
+    const view = runResultsViewOf(content, { resolved_urls: { [picture]: link } });
+    expect(view.resolveUrl?.(picture)).toBe(link);
+    expect(view.linksPartial).toBe(false);
+  });
+
+  it("reads the partial flag only when it is exactly true", () => {
+    expect(runResultsViewOf(content, { resolved_urls_partial: true }).linksPartial).toBe(true);
+    expect(runResultsViewOf(content, { resolved_urls_partial: "true" }).linksPartial).toBe(false);
+    expect(runResultsViewOf(content, undefined).linksPartial).toBe(false);
+  });
+});
+
+describe("withLinksFrom", () => {
+  const content: RunResultsStructuredContent = {
+    status: "ok",
+    run_id: "run_1",
+    state: "completed",
+    main_stuff: { text: "bounded" },
+    available_view_specs: ["run_graph"],
+  };
+  const first = "pipelex-storage://runs/x/first.png";
+  const second = "pipelex-storage://runs/x/second.png";
+  const linkOf = (reference: string, round: number) =>
+    `https://pipelex-app-dev.s3.amazonaws.com/${reference.slice("pipelex-storage://".length)}?round=${round}`;
+
+  it("adds the links a later read minted and keeps everything else on screen as it was", () => {
+    const shown = runResultsViewOf(content, {
+      graph_spec: liveGraph,
+      pipe_io_contracts: contracts,
+      output_form: outputForm,
+      resolved_urls: { [first]: linkOf(first, 1) },
+      resolved_urls_partial: true,
+    });
+    const later = runResultsViewOf(content, {
+      graph_spec: { ...liveGraph },
+      resolved_urls: { [first]: linkOf(first, 2), [second]: linkOf(second, 2) },
+    });
+
+    const merged = withLinksFrom(shown, later);
+
+    expect(merged.graphSpec).toBe(shown.graphSpec);
+    expect(merged.contracts).toBe(shown.contracts);
+    // A link already painting is kept, not swapped for the later one.
+    expect(merged.resolveUrl?.(first)).toBe(linkOf(first, 1));
+    expect(merged.resolveUrl?.(second)).toBe(linkOf(second, 2));
+    expect(merged.linksPartial).toBe(false);
+  });
+
+  it("keeps the resolver's identity when the later read adds nothing", () => {
+    const shown = runResultsViewOf(content, {
+      resolved_urls: { [first]: linkOf(first, 1) },
+      resolved_urls_partial: true,
+    });
+    const later = runResultsViewOf(content, { resolved_urls_partial: true });
+
+    const merged = withLinksFrom(shown, later);
+
+    expect(merged.resolveUrl).toBe(shown.resolveUrl);
+    expect(merged.linksPartial).toBe(true);
+  });
+
+  it("gives a view that had no links a resolver once a later read mints one", () => {
+    const shown = runResultsViewOf(content, { resolved_urls_partial: true });
+    expect(shown.resolveUrl).toBeUndefined();
+
+    const merged = withLinksFrom(
+      shown,
+      runResultsViewOf(content, { resolved_urls: { [first]: linkOf(first, 2) } }),
+    );
+
+    expect(merged.resolveUrl?.(first)).toBe(linkOf(first, 2));
+  });
+});
+
+describe("the resolver runResultsViewOf builds", () => {
+  const content: RunResultsStructuredContent = {
+    status: "ok",
+    run_id: "run_1",
+    state: "completed",
+    main_stuff: { text: "bounded" },
+    available_view_specs: ["run_graph"],
+  };
+  const resolverOf = (links: unknown) =>
+    runResultsViewOf(content, { resolved_urls: links }).resolveUrl;
+  const picture = "pipelex-storage://runs/x/illustration.png";
+  const link = "https://pipelex-app-dev.s3.amazonaws.com/runs/x/illustration.png?X-Amz-Expires=900";
+
+  it("answers a reference it holds a link for, and undefined for any other", () => {
+    const resolve = resolverOf({ [picture]: link });
+    expect(resolve?.(picture)).toBe(link);
+    // Undefined is the kernel's cue to fall back to the payload's public_url.
+    expect(resolve?.("pipelex-storage://runs/x/other.png")).toBeUndefined();
+    expect(resolve?.("__proto__")).toBeUndefined();
+    expect(resolve?.("toString")).toBeUndefined();
+  });
+
+  it("reads anything but a map of https links as no resolver", () => {
+    expect(resolverOf(undefined)).toBeUndefined();
+    expect(resolverOf(null)).toBeUndefined();
+    expect(resolverOf([link])).toBeUndefined();
+    expect(resolverOf({})).toBeUndefined();
+    expect(resolverOf({ [picture]: "javascript:alert(1)" })).toBeUndefined();
+    expect(resolverOf({ [picture]: 42 })).toBeUndefined();
+  });
+
+  it("keeps the https links of a map that also carries bad entries", () => {
+    const resolve = resolverOf({ [picture]: link, other: "http://plain.example/x.png" });
+    expect(resolve?.(picture)).toBe(link);
+    expect(resolve?.("other")).toBeUndefined();
   });
 });
 
