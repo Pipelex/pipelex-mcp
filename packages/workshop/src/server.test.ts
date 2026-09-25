@@ -26,6 +26,7 @@ import {
 } from "@pipelex/mcp-core/shell-test-support.js";
 import pkg from "../package.json" with { type: "json" };
 import { LOCAL_SERVER_INFO, createLocalServer } from "./server.js";
+import * as localTools from "./tools.js";
 import { buildLocalToolContexts, localToolDefinitions } from "./tools.js";
 
 const tempDirs: string[] = [];
@@ -54,6 +55,20 @@ describe("the workshop's tool table", () => {
 
     expect(tools.map((tool) => tool.name)).toEqual(
       localToolDefinitions.map((definition) => definition.name),
+    );
+  });
+
+  it("lists every tool definition its module exports", () => {
+    // The server registers `localToolDefinitions` in a loop, so a definition
+    // exported from `tools.ts` and left out of that array would pass the check
+    // above and the snapshot alike. Reading the module's exports, as the
+    // console's test does, leaves nothing else to forget.
+    const defined = Object.values(localTools as Record<string, unknown>)
+      .filter(isToolDefinition)
+      .map((tool) => tool.name);
+
+    expect(localToolDefinitions.map((definition) => definition.name).sort()).toEqual(
+      [...defined].sort(),
     );
   });
 
@@ -583,6 +598,15 @@ describe("the workshop's User-Agent", () => {
     expect(seen[0]).toMatch(/^pipelex-mcp\/\S+ \(workshop\) pipelex-sdk-js\//);
   });
 });
+
+function isToolDefinition(value: unknown): value is { name: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as Record<string, unknown>).name === "string" &&
+    typeof (value as Record<string, unknown>).handler === "function"
+  );
+}
 
 async function makeTempDir(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pipelex-local-server-"));
