@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint format format-check typecheck test agent-test test-watch test-coverage smoke live-preflight test-e2e test-e2e-run test-all seed-e2e-fixture te check check-no-local-deps check-release-ready build build-local all clean dev dev-local inspect-local dev-tunnel start deploy deploy-prod deploy-dev deploy-staging deploy-envs alpic-deploy publish c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
+.PHONY: help install lint format format-check typecheck test agent-test test-watch test-coverage smoke live-preflight test-e2e test-e2e-run test-all seed-e2e-fixture te check check-no-local-deps check-release-ready check-workshop-released check-console-released build build-local all clean dev dev-local inspect-local dev-tunnel start deploy deploy-prod deploy-dev deploy-staging deploy-envs alpic-deploy publish c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
 
 # Sibling repos for live development of our npm dependencies (see use-local / use-npm).
 MTHDS_UI_DIR := ../mthds-ui
@@ -433,12 +433,27 @@ check-release-ready:
 		echo "ERROR: working tree is not clean. Commit or stash changes before publishing/deploying."; exit 1; \
 	fi
 
-deploy: check-no-local-deps check-release-ready
+# Each target also ships only from the commit that released its own track: the
+# merge whose first parent carried another version of that track. main moves past
+# that commit when the other server releases, and its tip then still carries this
+# track's released version with code that version never shipped, so a recovery
+# from the tip would put the wrong bytes under the right number. Past that point
+# the cure is a new release of the track, not a recovery.
+check-workshop-released: TRACK := workshop
+check-console-released: TRACK := console
+check-workshop-released check-console-released:
+	@now="$$(bash .github/scripts/track-version.sh $(TRACK) HEAD)" && \
+	before="$$(bash .github/scripts/track-version.sh $(TRACK) HEAD^)" || exit 1; \
+	if [ "$$now" = "$$before" ]; then \
+		echo "ERROR: HEAD did not release the $(TRACK): it carries $(TRACK) $$now, as its first parent does. A break-glass ship runs only from the commit that raised the $(TRACK) version; once main has moved past it, cut a new $(TRACK) release instead."; exit 1; \
+	fi
+
+deploy: check-no-local-deps check-release-ready check-console-released
 	npm run deploy
 
 deploy-prod: deploy
 
-publish: check-no-local-deps check-release-ready
+publish: check-no-local-deps check-release-ready check-workshop-released
 	npm publish --workspace @pipelex/mcp
 
 # --- The non-production consoles ---
