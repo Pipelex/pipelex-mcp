@@ -26,6 +26,13 @@ export interface RunPollingSnapshot {
   health: RunPollingHealth;
   /** The classified error that stopped polling, when phase is `hard_error`. */
   hardError: ToolError | null;
+  /**
+   * The run record's own timestamps, from the last read that succeeded: when the
+   * run was created and, once it is terminal, when it finished. They are what
+   * the results header states the run's duration from.
+   */
+  createdAt?: string;
+  finishedAt?: string | null;
 }
 
 /** The slice of `useCallTool("pipelex_run_status")` the poll loop consumes. */
@@ -128,6 +135,8 @@ export function useRunPolling(
         runStatus: content.run_status,
         health: terminal ? null : content.degraded ? "reconnecting" : null,
         hardError: null,
+        createdAt: content.created_at,
+        finishedAt: content.finished_at,
       });
       if (!terminal) {
         schedule(content.retry_after_seconds);

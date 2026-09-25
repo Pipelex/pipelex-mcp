@@ -13,13 +13,16 @@ import { RunPanel } from "@pipelex/mthds-ui/form/react";
 import { GraphViewer } from "@pipelex/mthds-ui/graph/react";
 import { TOOLBAR_POSITION } from "@pipelex/mthds-ui";
 import type { GraphNodeData, GraphSpec, ToolbarPosition } from "@pipelex/mthds-ui";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useDisplayMode, useLayout, useSendFollowUpMessage } from "skybridge/web";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { useDisplayMode, useLayout } from "skybridge/web";
 
 import { useCallTool, useToolInfo } from "../helpers.js";
+import { RunResultsPanel } from "./components/run-results-panel.js";
 import { ToolbarButton } from "./components/toolbar-button.js";
 import { graphCaptionFor, graphPipeRefOf, selectedPipeFor } from "./run-graph-selection.js";
 import type { SelectedPipe } from "./run-graph-selection.js";
+import { formViewStage, runStatusLineFor } from "./run-graph-stage.js";
+import type { RunStatusLine } from "./run-graph-stage.js";
 import {
   UploadFailure,
   clearChangedFields,
@@ -27,8 +30,9 @@ import {
   withoutField,
 } from "./run-graph-upload.js";
 import type { GrantRequest, GrantToolResponse, UploadErrors } from "./run-graph-upload.js";
-import { terminalFollowUpPrompt } from "./run-notify.js";
+import { hasExecutedGraph, runDurationSeconds } from "./run-results.js";
 import { useRunPolling } from "./use-run-polling.js";
+import { useRunResults } from "./use-run-results.js";
 
 /**
  * The graph toolbar's anchor is ours to control — mthds-ui defaults to
@@ -67,18 +71,27 @@ const TOOLBAR_POSITION_FOR_VIEW: ToolbarPosition = TOOLBAR_POSITION.TOP_LEFT;
  * the panel itself discards the failure silently.
  * Run starts the method through `pipelex_run` with the same `method_ref` or
  * `method_id` the show was called with and the pipe the form is for, then
- * follows the run by polling `pipelex_run_status` and hands the conversation
- * back to the model on the terminal outcome, exactly as `run-follow` does.
+ * follows the run by polling `pipelex_run_status`, fetches `pipelex_run_results`
+ * itself once the run is terminal, and shows them in the results panel it
+ * shares with `run-follow`: the output rendered by the form kernel takes the
+ * form's place, the dry-run graph gives way to the executed one, and the form
+ * folds behind "Edit inputs and run again", which brings it back with the
+ * values entered (`./run-graph-stage.ts` holds those transitions). A call the
+ * view makes returns to the view alone and mounts no other view, which is why
+ * it fetches and shows the results itself. It sends the model no completion
+ * message: the user started this run and is reading its output, so an
+ * automatic turn would be noise, and "Summarize in chat" is there for a user
+ * who wants one.
  */
 export default function RunGraphView() {
   // Hooks run unconditionally before any early return.
   const toolInfo = useToolInfo<"pipelex_show_method">();
   const { callToolAsync: startRun } = useCallTool("pipelex_run");
   const { callToolAsync: statusAsync } = useCallTool("pipelex_run_status");
+  const { callToolAsync: resultsAsync } = useCallTool("pipelex_run_results");
   const { callToolAsync: requestUploadAsync } = useCallTool("pipelex_request_upload");
   const { theme, maxHeight, safeArea } = useLayout();
   const [displayMode, setDisplayMode] = useDisplayMode();
-  const sendFollowUpMessage = useSendFollowUpMessage();
 
   const responseMetadata = toolInfo.isSuccess ? toolInfo.responseMetadata : undefined;
   // All three are opaque on the wire; the standard owns both per-pipe artifact
@@ -126,9 +139,19 @@ export default function RunGraphView() {
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [starting, setStarting] = useState(false);
   const [runId, setRunId] = useState<string | undefined>(undefined);
+  // The pipe the current run was started for, which the results panel looks
+  // its output descriptor up by when the executed graph does not name it.
+  const [runPipeRef, setRunPipeRef] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
   const [uploadErrors, setUploadErrors] = useState<UploadErrors>({});
+  // Whether the user unfolded the form again after a completed run.
+  const [editing, setEditing] = useState(false);
   const polling = useRunPolling(runId, statusAsync);
+  const { results, error: resultsError } = useRunResults(
+    runId,
+    polling.phase === "terminal",
+    resultsAsync,
+  );
 
   // `useCallTool`'s caller changes identity per render; pin the latest so the
   // upload callback, which `RunPanel` builds its drop handler from, stays put.
@@ -177,21 +200,6 @@ export default function RunGraphView() {
     setValues(next);
   }, []);
 
-  // Completion handoff: one follow-up per run, on the terminal status. Unlike
-  // `run-follow` this view does not fetch results itself — the prompt tells
-  // the model to, which lands the results (and their graph) as its own turn.
-  const notifiedRunRef = useRef<string | undefined>(undefined);
-  useEffect(() => {
-    if (!runId || polling.phase !== "terminal" || notifiedRunRef.current === runId) {
-      return;
-    }
-    notifiedRunRef.current = runId;
-    const outcome = polling.runStatus === "COMPLETED" ? "completed" : "failed";
-    void sendFollowUpMessage(terminalFollowUpPrompt(runId, outcome)).catch(() => {
-      notifiedRunRef.current = undefined;
-    });
-  }, [runId, polling.phase, polling.runStatus, sendFollowUpMessage]);
-
   if (!toolInfo.isSuccess) {
     return <EmptyState message="Loading the method…" maxHeight={maxHeight} />;
   }
@@ -233,6 +241,13 @@ export default function RunGraphView() {
 
   const dark = theme === "dark";
   const running = starting || (runId !== undefined && polling.phase === "polling");
+  const stage = formViewStage({
+    outcome: results?.content.state === "failed" ? "failed" : results ? "completed" : null,
+    executedGraph: results ? hasExecutedGraph(results) : false,
+    hasForm,
+    editing,
+  });
+  const executedGraph = stage.graph === "executed" && results ? results : null;
 
   const handleNodeSelect = (_nodeId: string, nodeData: GraphNodeData) => {
     if (!nodeData.isPipe || !nodeData.pipeCode) return;
@@ -260,6 +275,9 @@ export default function RunGraphView() {
     setStarting(true);
     setStartError(null);
     setRunId(undefined);
+    setRunPipeRef(pipeLabel);
+    // A new run folds the form again once its own results arrive.
+    setEditing(false);
     void (async () => {
       try {
         // The pipe goes by its qualified ref, the one the form was built for:
@@ -290,17 +308,36 @@ export default function RunGraphView() {
     })();
   };
 
-  // The graph is built for the bundle's declared main pipe; the form defaults
-  // to the entry pipe. Say so when they are not the same pipe.
-  const graphCaption = hasGraph
-    ? graphCaptionFor(graphPipeRefOf(graphSpec), mainPipeRef, hasForm ? (pipeLabel ?? null) : null)
-    : null;
+  // The dry-run graph is built for the bundle's declared main pipe; the form
+  // defaults to the entry pipe. Say so when they are not the same pipe. The
+  // executed graph gets no caption: it is of the pipe that ran, which is the
+  // one the results below it are for.
+  const graphCaption =
+    hasGraph && executedGraph === null
+      ? graphCaptionFor(
+          graphPipeRefOf(graphSpec),
+          mainPipeRef,
+          stage.showForm && hasForm ? (pipeLabel ?? null) : null,
+        )
+      : null;
+  const statusLine = runStatusLineFor({
+    runId,
+    starting,
+    startError,
+    polling,
+    hasResults: results !== null,
+    resultsError: resultsError?.message ?? null,
+  });
   const llmSummary = [
-    hasGraph ? `Showing the dry-run graph of the method: ${graphSpec?.nodes.length} nodes` : null,
+    executedGraph
+      ? `Showing the executed graph of run ${runId}`
+      : hasGraph
+        ? `Showing the dry-run graph of the method: ${graphSpec?.nodes.length} nodes`
+        : null,
     graphCaption,
     `runnable=${output.is_runnable}`,
-    hasForm ? `input form shown for pipe ${pipeLabel}` : null,
-    runId ? `run ${runId} ${polling.runStatus ?? "starting"}` : null,
+    stage.showForm && hasForm ? `input form shown for pipe ${pipeLabel}` : null,
+    statusLine?.text,
   ]
     .filter(Boolean)
     .join(", ");
@@ -324,7 +361,26 @@ export default function RunGraphView() {
       >
         {isFullscreen ? "Collapse" : "Fullscreen"}
       </ToolbarButton>
-      {hasGraph && graphSpec ? (
+      {executedGraph ? (
+        <div className="relative w-full overflow-hidden" style={{ height: graphHeight }}>
+          {/* Keyed by run, so a later run's graph mounts fresh rather than
+              inheriting the previous one's viewport and selection. */}
+          <GraphViewer
+            key={runId}
+            graphspec={executedGraph.graphSpec as GraphSpec}
+            // The executed run's own artifacts, so a data node shows its value
+            // rather than its concept's structure table.
+            contracts={executedGraph.contracts ?? undefined}
+            outputForm={executedGraph.outputForm ?? undefined}
+            inputForm={executedGraph.inputForm ?? undefined}
+            initialDirection="LR"
+            initialShowControllers={true}
+            theme={theme}
+            showThemeToggle={false}
+            toolbarPosition={TOOLBAR_POSITION_FOR_VIEW}
+          />
+        </div>
+      ) : hasGraph && graphSpec ? (
         <div className="relative w-full overflow-hidden" style={{ height: graphHeight }}>
           <GraphViewer
             graphspec={graphSpec}
@@ -342,7 +398,32 @@ export default function RunGraphView() {
           {graphCaption}
         </p>
       ) : null}
-      {contract && descriptor && selectedPipe ? (
+      {stage.showPanel && results && runId ? (
+        <div className="mt-3">
+          <RunResultsPanel
+            runId={runId}
+            results={results}
+            requestedPipeRef={runPipeRef}
+            durationSeconds={runDurationSeconds(polling.createdAt, polling.finishedAt)}
+            dark={dark}
+            isFullscreen={isFullscreen}
+            onToggleFullscreen={() => void setDisplayMode(isFullscreen ? "inline" : "fullscreen")}
+            // The view's own toggle floats over the graph, and the executed
+            // graph is at the top already.
+            showFullscreenAction={false}
+            showGraph={false}
+            graphHeight={graphHeight}
+          />
+        </div>
+      ) : null}
+      {stage.showEditToggle ? (
+        <div className="mt-2 px-2">
+          <ToolbarButton dark={dark} onClick={() => setEditing(true)}>
+            Edit inputs and run again
+          </ToolbarButton>
+        </div>
+      ) : null}
+      {stage.showForm && contract && descriptor && selectedPipe ? (
         <div className="mt-3">
           <RunPanel
             key={pipeLabel}
@@ -361,15 +442,7 @@ export default function RunGraphView() {
               {message}
             </p>
           ))}
-          <RunStatusLine
-            runId={runId}
-            starting={starting}
-            phase={polling.phase}
-            runStatus={polling.runStatus}
-            health={polling.health}
-            hardError={polling.hardError?.message ?? null}
-            startError={startError}
-          />
+          <StatusLine line={statusLine} />
         </div>
       ) : null}
     </div>
@@ -377,53 +450,14 @@ export default function RunGraphView() {
 }
 
 /** One line under the form: what the run started from it is doing. */
-function RunStatusLine({
-  runId,
-  starting,
-  phase,
-  runStatus,
-  health,
-  hardError,
-  startError,
-}: {
-  runId: string | undefined;
-  starting: boolean;
-  phase: ReturnType<typeof useRunPolling>["phase"];
-  runStatus: ReturnType<typeof useRunPolling>["runStatus"];
-  health: ReturnType<typeof useRunPolling>["health"];
-  hardError: string | null;
-  startError: string | null;
-}) {
-  let text: string | null = null;
-  if (startError) {
-    text = `Could not start the run: ${startError}`;
-  } else if (starting) {
-    text = "Starting the run…";
-  } else if (runId) {
-    if (phase === "hard_error") {
-      text = `Run ${runId}: lost track of it (${hardError ?? "status unavailable"}).`;
-    } else if (phase === "terminal") {
-      // The completion handoff is a prompt the host may only draft for the user
-      // (claude.ai) or not act on at all (ChatGPT), so the line says what the user
-      // does next rather than claiming the assistant already started.
-      text =
-        runStatus === "COMPLETED"
-          ? `Run ${runId} completed. Ask the assistant to fetch the results.`
-          : `Run ${runId} ended with status ${runStatus ?? "unknown"}.`;
-    } else {
-      const suffix =
-        health === "reconnecting"
-          ? " (reconnecting…)"
-          : health === "retrying"
-            ? " (retrying…)"
-            : "";
-      text = `Run ${runId}: ${runStatus ?? "starting"}${suffix}`;
-    }
-  }
-  if (!text) return null;
+function StatusLine({ line }: { line: RunStatusLine | null }) {
+  if (!line) return null;
   return (
-    <p className="mt-2 px-1 text-xs" style={{ color: startError ? "#b91c1c" : "#6b7280" }}>
-      {text}
+    <p
+      className="mt-2 px-1 text-xs"
+      style={{ color: line.tone === "error" ? "#b91c1c" : "#6b7280" }}
+    >
+      {line.text}
     </p>
   );
 }
