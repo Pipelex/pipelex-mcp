@@ -4,6 +4,7 @@
 
 ### Changed
 
+- **The README's pitch names who each way of running a method is for**: it now says a method runs "as an MCP for chatbots, as a webapp for people, or via API for your software", instead of "from your agent or your chatbot via MCP, as a webapp, or via API in any software".
 - **`npx @pipelex/mcp` no longer installs React, Vite or Skybridge**: The package's runtime dependencies are now only what the workshop imports, so a production install is about a quarter of its former size and no longer carries React, React DOM, Vite, nodemon, the Skybridge devtools or the advisories that came with them. The hosted console starts from a self-contained bundle of its server instead of resolving Skybridge from `node_modules`, which is what let Skybridge become a development dependency.
 
 ## [0.19.0] - 2026-09-24
