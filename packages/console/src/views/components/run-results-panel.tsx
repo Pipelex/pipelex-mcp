@@ -25,6 +25,7 @@ import {
   outputToRender,
 } from "../run-results.js";
 import type { RunResultsView } from "../run-results.js";
+import { RenderBoundary } from "./render-boundary.js";
 import { ToolbarButton } from "./toolbar-button.js";
 
 const TOOLBAR_POSITION_FOR_VIEW: ToolbarPosition = TOOLBAR_POSITION.TOP_LEFT;
@@ -134,21 +135,27 @@ export function RunResultsPanel({
                 Execution graph
               </p>
               <div className="relative w-full overflow-hidden" style={{ height: graphHeight }}>
-                <GraphViewer
-                  graphspec={results.graphSpec as GraphSpec}
-                  // Without these the panel takes the renderer's no-data floor:
-                  // the concept's structure table and no data tab. `contracts`
-                  // and `outputForm` are read together or not at all.
-                  contracts={results.contracts ?? undefined}
-                  outputForm={results.outputForm ?? undefined}
-                  inputForm={results.inputForm ?? undefined}
-                  resolveUrl={results.resolveUrl}
-                  initialDirection="LR"
-                  initialShowControllers={true}
-                  theme={dark ? "dark" : "light"}
-                  showThemeToggle={false}
-                  toolbarPosition={TOOLBAR_POSITION_FOR_VIEW}
-                />
+                <RenderBoundary
+                  what="The run's graph"
+                  resetKey={results.graphSpec}
+                  mutedColor={palette.muted}
+                >
+                  <GraphViewer
+                    graphspec={results.graphSpec as GraphSpec}
+                    // Without these the panel takes the renderer's no-data floor:
+                    // the concept's structure table and no data tab. `contracts`
+                    // and `outputForm` are read together or not at all.
+                    contracts={results.contracts ?? undefined}
+                    outputForm={results.outputForm ?? undefined}
+                    inputForm={results.inputForm ?? undefined}
+                    resolveUrl={results.resolveUrl}
+                    initialDirection="LR"
+                    initialShowControllers={true}
+                    theme={dark ? "dark" : "light"}
+                    showThemeToggle={false}
+                    toolbarPosition={TOOLBAR_POSITION_FOR_VIEW}
+                  />
+                </RenderBoundary>
               </div>
             </div>
           )}
@@ -260,7 +267,16 @@ function RunOutput({
                 payload's baked `public_url`; see `withLinks` in `run-results.ts`. */}
             <ResultEnvProvider resolveUrl={results.resolveUrl}>
               {field && oversizedLength === null ? (
-                <StuffViewer field={field} value={value} hideDownload />
+                // The JSON view is the floor a failed rendering falls to, so
+                // the output stays readable whatever the kernel made of it.
+                <RenderBoundary
+                  what="The rendered output"
+                  resetKey={value}
+                  fallback={<JsonView value={value} />}
+                  mutedColor={mutedColor}
+                >
+                  <StuffViewer field={field} value={value} hideDownload />
+                </RenderBoundary>
               ) : (
                 <JsonView value={value} />
               )}

@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDisplayMode, useLayout, useViewState } from "skybridge/web";
 
 import { useCallTool, useToolInfo } from "../helpers.js";
+import { RenderBoundary } from "./components/render-boundary.js";
 import { RunResultsPanel } from "./components/run-results-panel.js";
 import { ToolbarButton } from "./components/toolbar-button.js";
 import {
@@ -103,6 +104,14 @@ type RunGraphViewState = {
  * remount follows the run again and shows its results.
  */
 export default function RunGraphView() {
+  return (
+    <RenderBoundary what="This view">
+      <RunGraph />
+    </RenderBoundary>
+  );
+}
+
+function RunGraph() {
   // Hooks run unconditionally before any early return.
   const toolInfo = useToolInfo<"pipelex_show_method">();
   const { callToolAsync: startRun } = useCallTool("pipelex_run");
@@ -428,33 +437,37 @@ export default function RunGraphView() {
         <div className="relative w-full overflow-hidden" style={{ height: graphHeight }}>
           {/* Keyed by run, so a later run's graph mounts fresh rather than
               inheriting the previous one's viewport and selection. */}
-          <GraphViewer
-            key={runId}
-            graphspec={executedGraph.graphSpec as GraphSpec}
-            // The executed run's own artifacts, so a data node shows its value
-            // rather than its concept's structure table.
-            contracts={executedGraph.contracts ?? undefined}
-            outputForm={executedGraph.outputForm ?? undefined}
-            inputForm={executedGraph.inputForm ?? undefined}
-            resolveUrl={executedGraph.resolveUrl}
-            initialDirection="LR"
-            initialShowControllers={true}
-            theme={theme}
-            showThemeToggle={false}
-            toolbarPosition={TOOLBAR_POSITION_FOR_VIEW}
-          />
+          <RenderBoundary what="The run's graph" resetKey={executedGraph.graphSpec}>
+            <GraphViewer
+              key={runId}
+              graphspec={executedGraph.graphSpec as GraphSpec}
+              // The executed run's own artifacts, so a data node shows its value
+              // rather than its concept's structure table.
+              contracts={executedGraph.contracts ?? undefined}
+              outputForm={executedGraph.outputForm ?? undefined}
+              inputForm={executedGraph.inputForm ?? undefined}
+              resolveUrl={executedGraph.resolveUrl}
+              initialDirection="LR"
+              initialShowControllers={true}
+              theme={theme}
+              showThemeToggle={false}
+              toolbarPosition={TOOLBAR_POSITION_FOR_VIEW}
+            />
+          </RenderBoundary>
         </div>
       ) : hasGraph && graphSpec ? (
         <div className="relative w-full overflow-hidden" style={{ height: graphHeight }}>
-          <GraphViewer
-            graphspec={graphSpec}
-            initialDirection="LR"
-            initialShowControllers={true}
-            theme={theme}
-            showThemeToggle={false}
-            toolbarPosition={TOOLBAR_POSITION_FOR_VIEW}
-            onNodeSelect={handleNodeSelect}
-          />
+          <RenderBoundary what="The method's graph" resetKey={graphSpec}>
+            <GraphViewer
+              graphspec={graphSpec}
+              initialDirection="LR"
+              initialShowControllers={true}
+              theme={theme}
+              showThemeToggle={false}
+              toolbarPosition={TOOLBAR_POSITION_FOR_VIEW}
+              onNodeSelect={handleNodeSelect}
+            />
+          </RenderBoundary>
         </div>
       ) : null}
       {graphCaption ? (
@@ -489,18 +502,20 @@ export default function RunGraphView() {
       ) : null}
       {stage.showForm && contract && descriptor && selectedPipe ? (
         <div className="mt-3">
-          <RunPanel
-            key={pipeLabel}
-            contract={contract}
-            descriptor={descriptor}
-            values={values}
-            onValuesChange={handleValuesChange}
-            onRun={handleRun}
-            running={running}
-            uploadFile={uploadFile}
-            title={pipeLabel}
-            theme={theme}
-          />
+          <RenderBoundary what="The input form" resetKey={pipeLabel}>
+            <RunPanel
+              key={pipeLabel}
+              contract={contract}
+              descriptor={descriptor}
+              values={values}
+              onValuesChange={handleValuesChange}
+              onRun={handleRun}
+              running={running}
+              uploadFile={uploadFile}
+              title={pipeLabel}
+              theme={theme}
+            />
+          </RenderBoundary>
           {Object.entries(uploadErrors).map(([fieldId, message]) => (
             <p key={fieldId} className="mt-2 px-1 text-xs" style={{ color: "#b91c1c" }}>
               {message}
