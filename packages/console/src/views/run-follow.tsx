@@ -1,23 +1,14 @@
 import "@/index.css";
 
-import { GraphViewer } from "@pipelex/mthds-ui/graph/react";
-import { TOOLBAR_POSITION } from "@pipelex/mthds-ui";
-import type { GraphSpec, ToolbarPosition } from "@pipelex/mthds-ui";
-// Through `@pipelex/mthds-ui/form`, which re-exports the kernel whole — never
-// `@pipelex/mthds-form` directly, which would put a second copy in the tree.
-import type { InputForm, OutputForm, PipeIOContracts } from "@pipelex/mthds-ui/form";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useDisplayMode, useLayout, useSendFollowUpMessage, useViewState } from "skybridge/web";
 
-import type { RunResultsStructuredContent } from "@pipelex/mcp-core/capabilities/run.js";
-import type { ToolError } from "@pipelex/mcp-core/capabilities/shared.js";
 import { useCallTool, useToolInfo } from "../helpers.js";
+import { RunResultsPanel } from "./components/run-results-panel.js";
 import { terminalFollowUpPrompt } from "./run-notify.js";
-import { isTransientPollError, nextPollDelayMs } from "./run-polling.js";
-import { ToolbarButton } from "./components/toolbar-button.js";
+import { runDurationSeconds } from "./run-results.js";
 import { useElapsedSeconds, useRunPolling } from "./use-run-polling.js";
-
-const TOOLBAR_POSITION_FOR_VIEW: ToolbarPosition = TOOLBAR_POSITION.TOP_LEFT;
+import { useRunResults } from "./use-run-results.js";
 
 /**
  * Friendly labels for the hosted run statuses. `COMPLETED` maps to
@@ -44,23 +35,6 @@ const HEALTH_NOTES = {
   retrying: "Network hiccup — retrying. Your run is still going.",
 } as const;
 
-interface RunResultsView {
-  content: RunResultsStructuredContent;
-  graphSpec: GraphSpec | null;
-  /**
-   * The graph's data artifacts, from the results tool's view-only `_meta`.
-   * `contracts` and `outputForm` are a pair by the renderer's own rule — it
-   * shows a data node's VALUE only when it holds both, and the concept's
-   * structure table otherwise — and the capability ships them as one, so a
-   * half-populated pair never reaches here. `inputForm` is independent and
-   * optional: it is what lets the method's own inputs show their value.
-   */
-  contracts: PipeIOContracts | null;
-  outputForm: OutputForm | null;
-  inputForm: InputForm | null;
-  mainStuff: unknown;
-}
-
 /**
  * Host-persisted view state: the status mirror the assistant reads to answer
  * "is it done?", plus the once-per-run completion-handoff guard — `notified`
@@ -77,13 +51,14 @@ type RunFollowViewState = {
  * The run-follow Skybridge view, registered on `pipelex_run`. It follows a
  * durable run on its own — polling the read-only `pipelex_run_status` through
  * `useCallTool` (no model turns, no conversation noise), then fetching
- * `pipelex_run_results` once the run is terminal: the executed graph (from the
- * response's view-only `meta.graph_spec`) plus a compact output preview on
- * success, the failure message on a failed run. On resolving the terminal
- * outcome it hands the conversation back to the model once (the completion
- * handoff — see the notify effect) so the assistant reports unprompted. On
- * remount it re-resolves by id — one status poll; if terminal, one results
- * fetch — so the card is as resumable as the run itself.
+ * `pipelex_run_results` once the run is terminal and showing it in the results
+ * panel the form view shares: the output rendered by the form kernel, and the
+ * executed graph in fullscreen, on success; the failure message on a failed
+ * run. On resolving the terminal outcome it hands the conversation back to the
+ * model once (the completion handoff — see the notify effect), since here the
+ * model started the run and is expected to report on it. On remount it
+ * re-resolves by id — one status poll; if terminal, one results fetch — so the
+ * card is as resumable as the run itself.
  */
 export default function RunFollowView() {
   // Hooks run unconditionally before any early return.
@@ -107,113 +82,11 @@ export default function RunFollowView() {
 
   const polling = useRunPolling(runId, statusAsync);
 
-  const [results, setResults] = useState<RunResultsView | null>(null);
-  const [resultsError, setResultsError] = useState<ToolError | null>(null);
-  const resultsRef = useRef(resultsAsync);
-  resultsRef.current = resultsAsync;
-
-  // One results fetch once the run is terminal. A `state: "running"` answer is
-  // the mid-write race (status flipped terminal before the artifacts were
-  // written) — retry on the server's hint; transient errors likewise. Retries
-  // age along the same elapsed-time ladder as status polls (measured from the
-  // first attempt), so a persistent race or hiccup backs off instead of
-  // hammering the endpoint at the ladder's first rung forever. Same
-  // visibility discipline as the status loop: nothing is scheduled while the
-  // tab is hidden, one immediate fetch on return.
-  useEffect(() => {
-    if (!runId || polling.phase !== "terminal") {
-      return;
-    }
-    const firstAttemptAt = Date.now();
-    let cancelled = false;
-    let done = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const retry = (retryAfterSeconds?: number | null) => {
-      if (cancelled || done || document.visibilityState === "hidden") {
-        return;
-      }
-      timer = setTimeout(
-        () => void fetchResults(),
-        nextPollDelayMs(Date.now() - firstAttemptAt, retryAfterSeconds),
-      );
-    };
-    // At most one results fetch in flight: a hidden→visible flip during a
-    // fetch must not start a concurrent one (each would schedule its own
-    // retry, orphaning the other's timer).
-    let inFlight = false;
-    const fetchResults = async () => {
-      if (cancelled || done || inFlight) {
-        return;
-      }
-      inFlight = true;
-      let content: RunResultsStructuredContent;
-      let meta: Record<string, unknown> | undefined;
-      try {
-        const res = await resultsRef.current({ run_id: runId });
-        content = res.structuredContent;
-        meta = res.meta;
-      } catch {
-        inFlight = false;
-        retry();
-        return;
-      }
-      inFlight = false;
-      if (cancelled) {
-        return;
-      }
-      if (content.status === "error") {
-        const error = content.errors?.[0] ?? {
-          class: "runtime" as const,
-          message: "pipelex_run_results produced no verdict.",
-          retryable: false,
-        };
-        if (isTransientPollError(error)) {
-          retry();
-        } else {
-          done = true;
-          setResultsError(error);
-        }
-        return;
-      }
-      if (content.state === "running") {
-        retry(content.retry_after_seconds);
-        return;
-      }
-      done = true;
-      setResults({
-        content,
-        // All four are opaque on the wire — the standard owns their types and
-        // nothing validates them at runtime, so each is a cast, exactly as the
-        // graph spec has always been.
-        graphSpec: (meta?.graph_spec ?? null) as GraphSpec | null,
-        contracts: (meta?.pipe_io_contracts ?? null) as PipeIOContracts | null,
-        outputForm: (meta?.output_form ?? null) as OutputForm | null,
-        inputForm: (meta?.input_form ?? null) as InputForm | null,
-        mainStuff: meta?.main_stuff,
-      });
-    };
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "hidden") {
-        clearTimeout(timer);
-      } else if (!done) {
-        // Back from a hidden tab: fetch once immediately rather than waiting
-        // out a stale delay.
-        clearTimeout(timer);
-        void fetchResults();
-      }
-    };
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    // Honor the pause-while-hidden contract from the very first fetch: if the
-    // tab is hidden, the visibilitychange listener fires it on return.
-    if (document.visibilityState !== "hidden") {
-      void fetchResults();
-    }
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    };
-  }, [runId, polling.phase]);
+  const { results, error: resultsError } = useRunResults(
+    runId,
+    polling.phase === "terminal",
+    resultsAsync,
+  );
 
   const elapsedSeconds = useElapsedSeconds(
     startedAtMs,
@@ -304,32 +177,35 @@ export default function RunFollowView() {
   }
 
   if (results) {
-    if (results.content.state === "failed") {
-      const status = results.content.run_status ?? "FAILED";
-      return (
-        <Card
-          title={`Run ${STATUS_LABELS[status] ?? status}`}
-          note={results.content.failure_message ?? "The run did not complete."}
-          hint="No graph is available for failed runs."
-          tone="error"
-          maxHeight={maxHeight}
-          dark={dark}
-          llm={`Run ${runId}: ${status} — ${results.content.failure_message ?? "no failure message"}.`}
-        />
-      );
-    }
+    const isFullscreen = displayMode === "fullscreen";
+    const { top, right, bottom, left } = safeArea.insets;
+    // ReactFlow needs an explicit pixel height; the graph shows in fullscreen
+    // only, under the output, and the whole card scrolls there.
+    const available = (maxHeight ?? 600) - top - bottom;
     return (
-      <CompletedCard
-        runId={runId}
-        results={results}
-        dark={dark}
-        maxHeight={maxHeight}
-        insets={safeArea.insets}
-        isFullscreen={displayMode === "fullscreen"}
-        onToggleFullscreen={() =>
-          void setDisplayMode(displayMode === "fullscreen" ? "inline" : "fullscreen")
-        }
-      />
+      <div
+        className="relative w-full overflow-y-auto"
+        style={{
+          paddingTop: top,
+          paddingRight: right,
+          paddingBottom: bottom,
+          paddingLeft: left,
+          maxHeight: isFullscreen ? available : undefined,
+        }}
+      >
+        <RunResultsPanel
+          runId={runId}
+          results={results}
+          requestedPipeRef={toolInfo.input?.pipe_ref ?? null}
+          durationSeconds={runDurationSeconds(polling.createdAt, polling.finishedAt)}
+          dark={dark}
+          isFullscreen={isFullscreen}
+          onToggleFullscreen={() => void setDisplayMode(isFullscreen ? "inline" : "fullscreen")}
+          showFullscreenAction={true}
+          showGraph={true}
+          graphHeight={Math.max(Math.floor(available * 0.7), 320)}
+        />
+      </div>
     );
   }
 
@@ -406,154 +282,4 @@ function Card({
       </div>
     </div>
   );
-}
-
-/** Terminal success: the executed graph plus a compact output preview. */
-function CompletedCard({
-  runId,
-  results,
-  dark,
-  maxHeight,
-  insets,
-  isFullscreen,
-  onToggleFullscreen,
-}: {
-  runId: string;
-  results: RunResultsView;
-  dark: boolean;
-  maxHeight: number | undefined;
-  insets: { top: number; right: number; bottom: number; left: number };
-  isFullscreen: boolean;
-  onToggleFullscreen: () => void;
-}) {
-  const { top, right, bottom, left } = insets;
-  // §6.6 (revised) — manual re-trigger/fallback for the automatic completion
-  // handoff: re-asks after the auto turn, or covers a host that declined it.
-  const sendFollowUpMessage = useSendFollowUpMessage();
-  const [summarizeRequested, setSummarizeRequested] = useState(false);
-  // An image can fail to load at runtime (expired presigned URL, a host
-  // outside the view's CSP resourceDomains allowlist) — fall back to the
-  // text preview rather than showing a broken image.
-  const [imageFailed, setImageFailed] = useState(false);
-  const hasGraph = results.graphSpec != null && (results.graphSpec.nodes?.length ?? 0) > 0;
-  // Same sizing discipline as run-graph: explicit pixel height for ReactFlow,
-  // compact inline, filling the host in fullscreen, floored against collapse.
-  const available = (maxHeight ?? 600) - top - bottom;
-  const graphHeight = Math.max(isFullscreen ? available - 220 : Math.min(available, 320), 200);
-
-  const imageUrl = narrowImageUrl(results.mainStuff);
-  const preview = results.content.main_stuff;
-
-  return (
-    <div
-      data-llm={`Run ${runId}: COMPLETED — output shown${hasGraph ? " with the executed graph" : ""}.`}
-      className="relative w-full overflow-hidden"
-      style={{ paddingTop: top, paddingRight: right, paddingBottom: bottom, paddingLeft: left }}
-    >
-      <div className="absolute right-2 top-2 z-10 flex gap-1">
-        <ToolbarButton
-          dark={dark}
-          disabled={summarizeRequested}
-          onClick={() => {
-            setSummarizeRequested(true);
-            void sendFollowUpMessage(terminalFollowUpPrompt(runId, "completed")).catch(() =>
-              setSummarizeRequested(false),
-            );
-          }}
-        >
-          {summarizeRequested ? "Asked in chat" : "Summarize in chat"}
-        </ToolbarButton>
-        <ToolbarButton dark={dark} onClick={onToggleFullscreen}>
-          {isFullscreen ? "Collapse" : "Fullscreen"}
-        </ToolbarButton>
-      </div>
-      <p
-        className="px-2 pb-1 pt-2 text-sm font-medium"
-        style={{ color: dark ? "#e5e7eb" : "#111827" }}
-      >
-        Run completed
-      </p>
-      {hasGraph && (
-        <div className="relative w-full overflow-hidden" style={{ height: graphHeight }}>
-          <GraphViewer
-            graphspec={results.graphSpec as GraphSpec}
-            // Without these the panel takes the renderer's no-data floor: the
-            // concept's structure table and no data tab. `contracts` and
-            // `outputForm` are read together or not at all.
-            contracts={results.contracts ?? undefined}
-            outputForm={results.outputForm ?? undefined}
-            inputForm={results.inputForm ?? undefined}
-            initialDirection="LR"
-            initialShowControllers={true}
-            theme={dark ? "dark" : "light"}
-            showThemeToggle={false}
-            toolbarPosition={TOOLBAR_POSITION_FOR_VIEW}
-          />
-        </div>
-      )}
-      <div className="px-2 pb-2">
-        {imageUrl && !imageFailed ? (
-          <img
-            src={imageUrl}
-            alt="Run output"
-            className="mt-1 rounded-md"
-            style={{ maxWidth: "100%", maxHeight: isFullscreen ? 480 : 220 }}
-            onError={() => setImageFailed(true)}
-          />
-        ) : (
-          <pre
-            className="mt-1 overflow-auto rounded-md p-2 text-xs"
-            style={{
-              maxHeight: isFullscreen ? 320 : 160,
-              background: dark ? "rgba(31,41,55,0.6)" : "#f3f4f6",
-              color: dark ? "#e5e7eb" : "#111827",
-            }}
-          >
-            {formatPreview(preview)}
-          </pre>
-        )}
-        {results.content.truncated === true && (
-          <p className="mt-1 text-xs" style={{ color: "#6b7280" }}>
-            Preview truncated — ask the assistant for the parts you need.
-          </p>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function formatPreview(value: unknown): string {
-  if (typeof value === "string") {
-    return value;
-  }
-  return JSON.stringify(value, null, 2) ?? String(value);
-}
-
-const IMAGE_URL_PATTERN = /^https?:\/\/\S+\.(png|jpe?g|gif|webp|svg)(\?\S*)?$/i;
-
-/**
- * Narrow a polymorphic main output to a single displayable image URL: the
- * value itself, or a `url` / `public_url` field on an object that either
- * looks image-shaped or is accompanied by an `image/*` mime hint.
- */
-function narrowImageUrl(value: unknown): string | null {
-  if (typeof value === "string") {
-    return IMAGE_URL_PATTERN.test(value) ? value : null;
-  }
-  if (typeof value === "object" && value !== null) {
-    const record = value as Record<string, unknown>;
-    const candidate = [record.public_url, record.url].find(
-      (entry): entry is string => typeof entry === "string" && /^https?:\/\//.test(entry),
-    );
-    if (!candidate) {
-      return null;
-    }
-    const mime = [record.mime_type, record.content_type, record.mime].find(
-      (entry): entry is string => typeof entry === "string",
-    );
-    if (mime?.startsWith("image/") || IMAGE_URL_PATTERN.test(candidate)) {
-      return candidate;
-    }
-  }
-  return null;
 }

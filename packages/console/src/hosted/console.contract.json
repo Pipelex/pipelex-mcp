@@ -1502,12 +1502,18 @@
     {
       "name": "pipelex_show_method",
       "uri": "ui://views/ext-apps/run-graph.html",
-      "description": "Interactive run graph of the method (the dry-run graph from validation), plus an input form to run it.",
+      "description": "Interactive run graph of the method (the dry-run graph from validation), plus an input form to run it and the results of a run started from it.",
       "_meta": {
         "ui": {
           "csp": {
             "resourceDomains": [
-              "http://<skybridge dev host>"
+              "http://<skybridge dev host>",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-dev/",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-staging/",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-prod/",
+              "https://pipelex-app-dev.s3.us-west-2.amazonaws.com",
+              "https://pipelex-app-staging.s3.us-west-2.amazonaws.com",
+              "https://pipelex-app-prod.s3.us-west-2.amazonaws.com"
             ],
             "connectDomains": [
               "http://<skybridge dev host>",
@@ -1521,23 +1527,34 @@
             ],
             "baseUriDomains": [
               "http://<skybridge dev host>"
+            ],
+            "frameDomains": [
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-dev/",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-staging/",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-prod/",
+              "https://pipelex-app-dev.s3.us-west-2.amazonaws.com",
+              "https://pipelex-app-staging.s3.us-west-2.amazonaws.com",
+              "https://pipelex-app-prod.s3.us-west-2.amazonaws.com"
             ]
           },
           "domain": "http://<skybridge dev host>",
-          "description": "Interactive run graph of the method (the dry-run graph from validation), plus an input form to run it."
+          "description": "Interactive run graph of the method (the dry-run graph from validation), plus an input form to run it and the results of a run started from it."
         },
-        "openai/widgetDescription": "Interactive run graph of the method (the dry-run graph from validation), plus an input form to run it."
+        "openai/widgetDescription": "Interactive run graph of the method (the dry-run graph from validation), plus an input form to run it and the results of a run started from it."
       }
     },
     {
       "name": "pipelex_run",
       "uri": "ui://views/ext-apps/run-follow.html",
-      "description": "Live-following status card for the durable run.",
+      "description": "Live-following status card for the durable run, then its results.",
       "_meta": {
         "ui": {
           "csp": {
             "resourceDomains": [
               "http://<skybridge dev host>",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-dev/",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-staging/",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-prod/",
               "https://pipelex-app-dev.s3.us-west-2.amazonaws.com",
               "https://pipelex-app-staging.s3.us-west-2.amazonaws.com",
               "https://pipelex-app-prod.s3.us-west-2.amazonaws.com"
@@ -1548,12 +1565,20 @@
             ],
             "baseUriDomains": [
               "http://<skybridge dev host>"
+            ],
+            "frameDomains": [
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-dev/",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-staging/",
+              "https://s3.us-west-2.amazonaws.com/pipelex-app-prod/",
+              "https://pipelex-app-dev.s3.us-west-2.amazonaws.com",
+              "https://pipelex-app-staging.s3.us-west-2.amazonaws.com",
+              "https://pipelex-app-prod.s3.us-west-2.amazonaws.com"
             ]
           },
           "domain": "http://<skybridge dev host>",
-          "description": "Live-following status card for the durable run."
+          "description": "Live-following status card for the durable run, then its results."
         },
-        "openai/widgetDescription": "Live-following status card for the durable run."
+        "openai/widgetDescription": "Live-following status card for the durable run, then its results."
       }
     }
   ]

@@ -93,7 +93,7 @@ import type {
 } from "@pipelex/mcp-core/capabilities/upload-grant.js";
 import type { ApiContextPatch } from "@pipelex/mcp-core/capabilities/shared.js";
 import type { ToolDefinition } from "@pipelex/mcp-core/tool-definition.js";
-import { APP_BUCKET_REGIONAL_ORIGINS, UPLOAD_CONNECT_DOMAINS } from "./app-buckets.js";
+import { RUN_OUTPUT_SOURCES, UPLOAD_CONNECT_DOMAINS } from "./app-buckets.js";
 
 const NAMES = CONSOLE_TOOL_NAMES;
 
@@ -258,13 +258,19 @@ export const pipelexShowMethodTool = defineHostedTool({
   view: {
     component: "run-graph",
     description:
-      "Interactive run graph of the method (the dry-run graph from validation), plus an input form to run it.",
+      "Interactive run graph of the method (the dry-run graph from validation), plus an input form to run it and the results of a run started from it.",
     csp: {
       // The form sends a picked file straight to the app bucket with an
       // upload grant (pipelex_request_upload), so the view must be allowed to
-      // connect to it — nothing else. `./app-buckets.ts` says why both host
-      // forms are listed.
+      // connect to it. `./app-buckets.ts` says why both host forms are listed.
       connectDomains: UPLOAD_CONNECT_DOMAINS,
+      // A run started from the form shows its results here, so the output's
+      // images load from, and its documents preview in a frame from, the
+      // buckets the runtime signs run outputs against — as in run-follow.
+      // `frameDomains` is what makes ChatGPT's app directory review a listing
+      // more strictly, which matters only for a public listing.
+      resourceDomains: RUN_OUTPUT_SOURCES,
+      frameDomains: RUN_OUTPUT_SOURCES,
     },
   },
   _meta: {
@@ -360,13 +366,17 @@ export const pipelexRunTool = defineHostedTool({
   },
   view: {
     component: "run-follow",
-    description: "Live-following status card for the durable run.",
+    description: "Live-following status card for the durable run, then its results.",
     csp: {
-      // Run-output images are presigned URLs on the hosted platform's
-      // per-env storage buckets — a tight host allowlist, never a
-      // wildcard. Anything else in main_stuff stays CSP-blocked and the
-      // view falls back to the text preview.
-      resourceDomains: APP_BUCKET_REGIONAL_ORIGINS,
+      // Run-output images and documents are presigned URLs on the hosted
+      // platform's per-env storage buckets — a tight allowlist scoped to those
+      // buckets, never the shared regional endpoint or a wildcard
+      // (`./app-buckets.ts`). Images load as resources; the result renderer
+      // previews a PDF in a frame, which is what `frameDomains` allows, at the
+      // cost of a stricter review of a public ChatGPT listing. Anything else in
+      // the output stays CSP-blocked, and the renderer names the file instead.
+      resourceDomains: RUN_OUTPUT_SOURCES,
+      frameDomains: RUN_OUTPUT_SOURCES,
     },
   },
   _meta: {
