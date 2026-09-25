@@ -12,6 +12,7 @@ import {
 } from "./shared.js";
 import type { ApiConfig, AuthErrorTexture, ClassifyErrorOptions, ToolError } from "./shared.js";
 import { SizeGuardedPipelexApiClient, formatMib } from "./upload-ceiling.js";
+import { CONSOLE_TOOL_NAMES } from "./tool-names.js";
 
 /**
  * The host attachment object, declared with EXACTLY four properties and
@@ -295,7 +296,7 @@ function attachmentsSummary(ingested: IngestedAttachment[], succeeded: number): 
   const parts = ["# Attachments"];
   parts.push(
     succeeded === ingested.length
-      ? `Uploaded ${succeeded} attachment(s) to Pipelex storage. Fill these \`pipelex-storage://\` references into the \`mthds_inputs_template\` output and call \`mthds_run\` — a storage reference is already run-ready, so \`mthds_prepare_inputs\` can be skipped.`
+      ? `Uploaded ${succeeded} attachment(s) to Pipelex storage. Fill these \`pipelex-storage://\` references into the inputs template from \`${CONSOLE_TOOL_NAMES.showMethod}\` and call \`${CONSOLE_TOOL_NAMES.run}\` — a storage reference is already run-ready.`
       : `Uploaded ${succeeded} of ${ingested.length} attachment(s) to Pipelex storage. The successful ones are ready to use; the failures are listed below.`,
   );
 

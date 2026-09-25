@@ -255,8 +255,6 @@ describe("the workshop's contexts and dispatch", () => {
     expect(contexts.catalogWrite.saveRoot).toBe(rootDir);
     expect(contexts.run.artifactDownloadAvailable).toBe(true);
     expect(contexts.images.artifactDownloadAvailable).toBe(true);
-    // The workshop is co-located with the user's files, so it uploads them.
-    expect(contexts.prepare.allowUpload).toBe(true);
   });
 
   it("registers mthds_list_methods first with its read-only schema and dispatches it", async () => {

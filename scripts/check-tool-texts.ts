@@ -78,9 +78,25 @@ interface ShellReading {
   toolsListBytes: number;
 }
 
-async function readShell(shell: string, server: ConnectableServer): Promise<ShellReading> {
+/**
+ * What a host that renders MCP Apps views declares at `initialize`. The console
+ * tailors its instructions per handshake, so each variant is its own emitted
+ * text, and the one a views host receives is read through this declaration.
+ */
+const VIEWS_HOST_CAPABILITIES = {
+  extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] } },
+};
+
+async function readShell(
+  shell: string,
+  server: ConnectableServer,
+  capabilities: ConstructorParameters<typeof Client>[1] = undefined,
+): Promise<ShellReading> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "pipelex-mcp-check-tool-texts", version: "0.0.0" });
+  const client = new Client(
+    { name: "pipelex-mcp-check-tool-texts", version: "0.0.0" },
+    capabilities,
+  );
   await server.connect(serverTransport);
   await client.connect(clientTransport);
   try {
@@ -114,11 +130,19 @@ async function main(): Promise<void> {
     await readShell("console", createHostedServer(STAND_IN_OAUTH)),
     await readShell("workshop", createLocalServer()),
   ];
+  // The console's other instructions variant: only the instructions differ,
+  // so only they are read off this handshake.
+  const viewsHost = await readShell("console (views host)", createHostedServer(STAND_IN_OAUTH), {
+    capabilities: VIEWS_HOST_CAPABILITIES,
+  });
 
-  const emitted: EmittedText[] = readings.flatMap(({ shell, instructions, tools }) => [
-    { shell, name: "instructions", text: instructions },
-    ...tools.map((tool) => ({ shell, name: tool.name, text: tool.description ?? "" })),
-  ]);
+  const emitted: EmittedText[] = [
+    ...readings.flatMap(({ shell, instructions, tools }) => [
+      { shell, name: "instructions", text: instructions },
+      ...tools.map((tool) => ({ shell, name: tool.name, text: tool.description ?? "" })),
+    ]),
+    { shell: viewsHost.shell, name: "instructions", text: viewsHost.instructions },
+  ];
   const entries = budgetEmittedTexts(emitted);
 
   say(

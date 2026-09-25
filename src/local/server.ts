@@ -12,8 +12,10 @@ import type { LocalToolContexts, LocalToolDefinition } from "./tools.js";
 // Version is sourced from package.json so the MCP handshake always reports the
 // shipped release — the /release skill bumps package.json alone, and a
 // hardcoded copy here would silently drift (it did: 0.1.0 vs a 0.4.0 package).
+// The workshop is the Pipelex plugin's server, so it is named `pipelex-plugin`;
+// the hosted console, the Pipelex connector, is `pipelex`.
 export const LOCAL_SERVER_INFO = {
-  name: "pipelex-mcp",
+  name: "pipelex-plugin",
   version: pkg.version,
 } as const;
 
@@ -27,23 +29,24 @@ export const LOCAL_SERVER_INFO = {
  * the steps comes first.
  */
 export const LOCAL_SERVER_INSTRUCTIONS = [
-  "pipelex-mcp is the local workshop for executable AI methods written in MTHDS (.mthds).",
+  "This is the Pipelex plugin's local workshop for executable AI methods written in MTHDS (.mthds).",
   "The usual flow: `mthds_list_methods` to find a saved method, `mthds_validate`,",
   "`mthds_inputs_template` and fill it, `mthds_prepare_inputs`, `mthds_run`, then",
   "`mthds_run_status` and `mthds_run_results` with the run id, and finally `mthds_show_images`",
   "to see a picture it produced, or `mthds_download_artifacts` to save its output and files to disk.",
-  "`mthds_codegen` turns a method into typed code for the project you are in, and",
-  "`mthds_save_method` and `mthds_get_method` push a bundle to the catalog and pull one back.",
+  "When the Pipelex connector's `pipelex_*` tools are also present, use these `mthds_*` tools for all",
+  "method work and never mix the two servers: each can be signed in to a different organization.",
+  "`mthds_codegen` turns a method into typed code for your project, and `mthds_save_method`",
+  "and `mthds_get_method` push a bundle to the catalog and pull one back.",
   "Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`,",
   "`mthds_prepare_inputs`, `mthds_run`) takes its method one of three ways: files, a published",
-  "method's address as method_ref, or a catalog id (mt_…) as method_id.",
-  "An address or an id is resolved server-side, so no bundle enters the conversation.",
-  "Prefer the `{ path: string }` file form for workspace .mthds files: a path is resolved against",
-  "the directory this server was started in, and diagnostics name it.",
+  "method's address as method_ref, or a catalog id (mt_…) as method_id (the last two resolved server-side).",
+  "Prefer the `{ path: string }` file form for workspace .mthds files: a path resolves against",
+  "this server's working directory, and diagnostics name it.",
   "Inline `{ content: string, uri?: string }` files are accepted too.",
   "Call `mthds_list_methods` when the user asks what saved methods exist or names one without its",
   "mt_ id; choose by name and description, then pass the id on.",
-  "`mthds_run` executes on the hosted Pipelex API and spends inference credit.",
+  "`mthds_run` spends inference credit.",
   "A picture from `mthds_show_images` stays in the conversation for every turn that follows,",
   "so show one when it is asked for, not by reflex.",
   "This workshop has no views: report the structured result and the text summary to the user.",

@@ -18,6 +18,7 @@ import type {
   ErrorSummaries,
   ToolError,
 } from "./shared.js";
+import { CONSOLE_TOOL_NAMES } from "./tool-names.js";
 import { UPLOAD_GRANT_META_KEY, narrowUploadGrant } from "./upload-grant-shape.js";
 
 /**
@@ -240,7 +241,7 @@ function grantSummary(input: PipelexRequestUploadInput, grant: UploadGrant): str
     "# Upload grant",
     `Issued a one-time upload grant for "${asOneLine(input.filename)}" (${input.size} bytes), valid until ${grant.expires_at}. ` +
       `The console's run form sends the file straight to Pipelex storage with it; once stored, the file is \`${grant.uri}\`.`,
-    "This tool serves the run form, which holds the file. To use a file the user attached in the chat, call mthds_upload_attachments.",
+    `This tool serves the run form, which holds the file. To use a file the user attached in the chat, call ${CONSOLE_TOOL_NAMES.uploadAttachments}.`,
   ].join("\n\n");
 }
 

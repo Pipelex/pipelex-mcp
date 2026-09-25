@@ -202,8 +202,8 @@ It needs `WORKOS_AUTHKIT_DOMAIN` and `PIPELEX_MCP_RESOURCE_INDICATOR` in `.env` 
 Watch three things, in order, and report each:
 
 1. **It boots.** A throw here is `src/server.ts`'s own refusal (read the message — it names the fix) or `workosProvider` failing discovery against the new version.
-2. **The tools list.** Open `http://localhost:6843` and check every console tool is advertised, the console-only `mthds_upload_attachments` included. A registration-shape change can drop tools silently.
-3. **A tool runs and its view renders.** Call `mthds_validate` on a valid bundle: the structured verdict proves `extra.authInfo` still reaches `contextsForRequest` with the caller's token, and the `run-graph` view rendering proves the `_meta` channel survived. If Step 4b flagged anything about `_meta` or the hooks, this is the assertion; if the graph comes up empty, that is the 4b failure mode, not a bad bundle.
+2. **The tools list.** Open `http://localhost:6843` and check every console tool is advertised, the `pipelex_*` set from `pipelex_list_methods` to the app-only `pipelex_request_upload`, `pipelex_upload_attachments` included. A registration-shape change can drop tools silently.
+3. **A tool runs and its view renders.** Call `pipelex_show_method` on a saved method's id or a published address (the console takes no files): the structured result proves `extra.authInfo` still reaches `contextsForRequest` with the caller's token, and the `run-graph` view rendering proves the `_meta` channel survived. If Step 4b flagged anything about `_meta` or the hooks, this is the assertion; if the graph comes up empty for a method whose bundle declares a `main_pipe`, that is the 4b failure mode, not a bad method.
 
 One diagnosis to keep straight, because it wastes the most time: **a DevTools session lives only as long as its WorkOS access token, and only a page reload renews it.** After it expires, a tool call returns the console's 401 and DevTools shows nothing at all — which reads exactly like "the bump broke the tool". Reload the tab. Restarting `make dev` fixes nothing and strands the tab on "Connecting to server…".
 

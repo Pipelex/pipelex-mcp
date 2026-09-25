@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pipelex MCP — two servers, one tool set</title>
+<title>Pipelex MCP — two servers, two tool sets</title>
 <style>
   :root {
     --paper:      #F4F7F7;
@@ -336,9 +336,9 @@
 <div class="wrap">
 
 <header class="masthead">
-  <p class="eyebrow">pipelex-mcp · v0.12.0 · live on npm + Alpic</p>
+  <p class="eyebrow">pipelex-mcp · the Pipelex connector and the Pipelex plugin's server</p>
   <h1>MTHDS methods, inside any MCP host.</h1>
-  <p class="lede">One capability core, shipped as two servers: a <span class="chip local">local workshop</span> that desktop hosts spawn in your working directory, and a <span class="chip console">hosted console</span> you connect as a URL from ChatGPT or claude.ai on the web.</p>
+  <p class="lede">One capability core, shipped as two servers with two tool sets: a <span class="chip local">local workshop</span>, the Pipelex plugin's server that coding agents spawn in your working directory, and a <span class="chip console">hosted console</span>, the Pipelex connector you add by URL in ChatGPT or Claude.</p>
 </header>
 
 <main>
@@ -347,7 +347,7 @@
   <section aria-labelledby="tldr">
     <div class="tldr">
       <h2 id="tldr">TL;DR</h2>
-      <p>Discover, validate, prepare and <strong>durably run</strong> <code>.mthds</code> methods from inside the chat or the coding agent you already use — same eight tools, same names, same contracts on both servers. Pick <strong>one</strong> server per host: workshop where there's a filesystem, console everywhere else.</p>
+      <p>Find, show and <strong>durably run</strong> your methods from the chat you already use with the console's <code>pipelex_*</code> tools, or build, validate and run <code>.mthds</code> methods from your coding agent with the workshop's <code>mthds_*</code> tools. A host needs <strong>one</strong> of the two: the workshop where there's a project, the console everywhere else.</p>
       <div class="grid">
         <div class="cell">
           <p class="eyebrow">Local workshop → coding agents</p>
@@ -359,11 +359,11 @@
         <div class="cell">
           <p class="eyebrow">Hosted console → chat hosts</p>
           <pre><code>https://mcp.pipelex.com/mcp</code></pre>
-          <p style="font-size:.88rem;color:var(--ink-muted)">Add as a custom connector, then sign in with your Pipelex account. Ships interactive views + ChatGPT file attachments.</p>
+          <p style="font-size:.88rem;color:var(--ink-muted)">Add as a custom connector, then sign in with your Pipelex account. Runs saved and published methods by reference; ships interactive views + ChatGPT file attachments.</p>
         </div>
       </div>
       <div class="note">
-        <p><strong>The one rule:</strong> never connect a single host to both servers. Same tool names on both means ambiguous routing — and a claude.ai connector <em>syncs into Claude Code automatically</em>, so that happens by accident. See <a href="#gotchas">Gotchas</a>.</p>
+        <p><strong>You don't need both:</strong> a chat host takes the console, a coding agent takes the workshop. The two share no tool name, and when both reach one host — a claude.ai connector <em>syncs into Claude Code automatically</em> — both servers tell the model to use the workshop's <code>mthds_*</code> tools. See <a href="#gotchas">Gotchas</a>.</p>
       </div>
     </div>
   </section>
@@ -372,7 +372,7 @@
   <section aria-labelledby="tools">
     <div class="sec-head">
       <p class="eyebrow">The surface</p>
-      <h2 id="tools">Eight tools</h2>
+      <h2 id="tools">Two tool sets</h2>
     </div>
     <p>Every tool returns a <strong>structured verdict</strong> the agent can act on, plus a Markdown summary a human can read. Big payloads (method graphs, full outputs, per-pipe cost) ride a view-only channel, so the model never pays their tokens.</p>
     <div class="table-wrap">
@@ -382,27 +382,37 @@
         </thead>
         <tbody>
           <tr>
-            <td class="tool">mthds_list_methods</td>
+            <td class="tool">pipelex_list_methods<br>mthds_list_methods</td>
             <td>Your org's saved methods by name + description → the canonical <code>mt_…</code> id. Source-free: no method code ever crosses the conversation.</td>
             <td class="narrow"><span class="chip both">both</span></td>
           </tr>
           <tr>
+            <td class="tool">pipelex_show_method</td>
+            <td>A saved or published method before it runs: its signature and a fill-in inputs template for the model, and on ChatGPT or Claude its <strong>graph</strong> and an input form with a Run button for you.</td>
+            <td class="narrow"><span class="chip console">console</span> <span class="chip console">+ view</span></td>
+          </tr>
+          <tr>
             <td class="tool">mthds_validate</td>
-            <td>Stable verdict — <code>is_valid</code>, <code>is_runnable</code>, structured errors, pending signatures — from files or a method id. On the console, a valid verdict also renders the <strong>dry-run graph</strong>.</td>
-            <td class="narrow"><span class="chip both">both</span> <span class="chip console">+ view</span></td>
+            <td>Stable verdict — <code>is_valid</code>, <code>is_runnable</code>, structured errors, pending signatures, the main pipe's signature — from files, an address or a method id.</td>
+            <td class="narrow"><span class="chip local">workshop</span></td>
           </tr>
           <tr>
             <td class="tool">mthds_inputs_template</td>
             <td>A fill-in template of a pipe's declared inputs (JSON or TOML), with the concept and content shape of each.</td>
-            <td class="narrow"><span class="chip both">both</span></td>
+            <td class="narrow"><span class="chip local">workshop</span></td>
+          </tr>
+          <tr>
+            <td class="tool">mthds_codegen</td>
+            <td>Typed TypeScript or Python for a method's concepts, stamped and locked, returned or written straight into your project.</td>
+            <td class="narrow"><span class="chip local">workshop</span></td>
           </tr>
           <tr>
             <td class="tool">mthds_prepare_inputs</td>
-            <td>Turns filled, file-bearing inputs run-ready → <code>pipelex-storage://</code>. Workshop uploads local paths and bytes; console is pass-through only.</td>
-            <td class="narrow"><span class="chip both">both</span></td>
+            <td>Turns filled, file-bearing inputs run-ready → <code>pipelex-storage://</code>, uploading local paths and bytes.</td>
+            <td class="narrow"><span class="chip local">workshop</span></td>
           </tr>
           <tr>
-            <td class="tool">mthds_upload_attachments</td>
+            <td class="tool">pipelex_upload_attachments</td>
             <td>A file the user drops in the chat → <code>pipelex-storage://</code>, fetched and uploaded server-side. The bytes never enter the model's context.</td>
             <td class="narrow"><span class="chip console">console · ChatGPT</span></td>
           </tr>
@@ -412,19 +422,34 @@
             <td class="narrow"><span class="chip console">console · view</span></td>
           </tr>
           <tr>
-            <td class="tool">mthds_run</td>
-            <td>Starts a <strong>durable</strong> run and returns a <code>run_id</code> immediately — never blocks a tool call.</td>
+            <td class="tool">pipelex_run<br>mthds_run</td>
+            <td>Starts a <strong>durable</strong> run and returns a <code>run_id</code> immediately — never blocks a tool call. The console's runs a method by id or address and checks its own inputs; the workshop's also runs files.</td>
             <td class="narrow"><span class="chip both">both</span> <span class="chip console">+ view</span></td>
           </tr>
           <tr>
-            <td class="tool">mthds_run_status</td>
+            <td class="tool">pipelex_run_status<br>mthds_run_status</td>
             <td>Cheap lifecycle read by <code>run_id</code>. The console's view polls it itself — zero model turns.</td>
             <td class="narrow"><span class="chip both">both</span></td>
           </tr>
           <tr>
-            <td class="tool">mthds_run_results</td>
+            <td class="tool">pipelex_run_results<br>mthds_run_results</td>
             <td>Terminal outcome + run-level usage: cost in USD, tokens, inference calls.</td>
             <td class="narrow"><span class="chip both">both</span></td>
+          </tr>
+          <tr>
+            <td class="tool">pipelex_show_images<br>mthds_show_images</td>
+            <td>The pictures a completed run produced, as image content that stays in the conversation.</td>
+            <td class="narrow"><span class="chip both">both</span></td>
+          </tr>
+          <tr>
+            <td class="tool">mthds_download_artifacts</td>
+            <td>A completed run saved to disk: its output as <code>main_stuff.json</code>, and the files it produced.</td>
+            <td class="narrow"><span class="chip local">workshop</span></td>
+          </tr>
+          <tr>
+            <td class="tool">mthds_save_method<br>mthds_get_method</td>
+            <td>A bundle on disk saved to your organization's catalog, and a saved method's files brought back.</td>
+            <td class="narrow"><span class="chip local">workshop</span></td>
           </tr>
         </tbody>
       </table>
@@ -438,7 +463,7 @@
       <p class="eyebrow">How it fits together</p>
       <h2 id="arch">Two shells, one core</h2>
     </div>
-    <p>Both servers are thin shells over the same capability core, so tool names, schemas and contracts can't drift apart. Only the console adds views and host-specific plumbing; only the workshop can touch your filesystem.</p>
+    <p>Both servers are thin shells over the same capability core, which holds the API calls, the verdicts and the error classification. Each owns its tool table, its schemas and its instructions, and the two share no tool name. Only the console adds views and host-specific plumbing; only the workshop can touch your filesystem.</p>
     <figure>
       <div class="fig-body">
         <svg viewBox="0 0 880 400" role="img" aria-label="Coding agents connect over stdio to the local workshop; chat hosts connect over HTTPS to the hosted console; both shells call one shared capability core, which calls the Pipelex API.">
@@ -483,7 +508,7 @@
           <rect class="s-box" x="530" y="204" width="160" height="34" rx="4"/>
           <text class="s-sub" x="546" y="225">@pipelex/sdk client</text>
           <text class="s-sub" x="530" y="266">seams filled per shell:</text>
-          <text class="s-sub" x="530" y="284">file resolver · upload · views</text>
+          <text class="s-sub" x="530" y="284">file resolver · views · names</text>
 
           <path class="s-line" d="M462 73 H512" marker-end="url(#ar)"/>
           <path class="s-line" d="M462 283 H512" marker-end="url(#ar)"/>
@@ -504,7 +529,7 @@
           </defs>
         </svg>
       </div>
-      <figcaption>Same tools on both shells, apart from those only one shell can serve: on the console, <code>mthds_upload_attachments</code> (the host substitutes the attachment based on the declared schema, so on the workshop it would be structurally unreachable) and <code>pipelex_request_upload</code> (its caller is a view, and the workshop has none); on the workshop, the tools that need a working directory.</figcaption>
+      <figcaption>Two tool sets over one core: the console registers <code>pipelex_*</code> tools and names a method by reference only; the workshop registers <code>mthds_*</code> tools and also takes files. A tool only one server has turns on something the other lacks: the console's <code>pipelex_upload_attachments</code> takes an attachment only ChatGPT substitutes, and its <code>pipelex_request_upload</code> is called by a view; the workshop's download and catalog tools need a working directory.</figcaption>
     </figure>
 
     <div class="table-wrap">
@@ -513,9 +538,10 @@
           <tr><th scope="col"></th><th scope="col">Local workshop</th><th scope="col">Hosted console</th></tr>
         </thead>
         <tbody>
-          <tr><td class="narrow"><strong>Ships as</strong></td><td><code>@pipelex/mcp</code> on npm, spawned with <code>npx</code></td><td>A URL you add as a connector</td></tr>
-          <tr><td class="narrow"><strong>Files</strong></td><td><code>{ path }</code> — reads them off disk, near-constant token cost, diagnostics point at real files</td><td><code>{ content }</code> only — the model re-emits every file it submits</td></tr>
-          <tr><td class="narrow"><strong>Assets</strong></td><td>Uploads local paths, <code>data:</code> URLs and bytes</td><td>Pass-through only (<code>http(s)</code> / <code>pipelex-storage://</code>) — plus chat attachments on ChatGPT</td></tr>
+          <tr><td class="narrow"><strong>Ships as</strong></td><td><code>@pipelex/mcp</code> on npm, spawned with <code>npx</code>, server name <code>pipelex-plugin</code></td><td>A URL you add as a connector, server name <code>pipelex</code></td></tr>
+          <tr><td class="narrow"><strong>Tools</strong></td><td><code>mthds_*</code>: list, validate, template, codegen, prepare, run, images, download, save and pull</td><td><code>pipelex_*</code>: list, show, upload attachments, run, images</td></tr>
+          <tr><td class="narrow"><strong>Files</strong></td><td><code>{ path }</code> — reads them off disk, near-constant token cost, diagnostics point at real files</td><td>None — it names a method by its catalog id or its published address</td></tr>
+          <tr><td class="narrow"><strong>Assets</strong></td><td>Uploads local paths, <code>data:</code> URLs and bytes</td><td>Pass-through only (<code>http(s)</code> / <code>pipelex-storage://</code>), checked by <code>pipelex_run</code> — plus chat attachments on ChatGPT and files picked in the run form</td></tr>
           <tr><td class="narrow"><strong>Views</strong></td><td>None — tools-first, reports text + structured results</td><td><code>run-graph</code> (interactive method graph) and <code>run-follow</code> (live run status)</td></tr>
           <tr><td class="narrow"><strong>Auth</strong></td><td>A <code>plx_sk_</code> key in <code>PIPELEX_API_KEY</code>, set in the host's server config</td><td>You sign in with your Pipelex account — the console holds no key</td></tr>
         </tbody>
@@ -527,29 +553,29 @@
   <section aria-labelledby="flow">
     <div class="sec-head">
       <p class="eyebrow">The path a method takes</p>
-      <h2 id="flow">Name → verdict → inputs → run</h2>
+      <h2 id="flow">Name → signature → inputs → run</h2>
     </div>
     <figure>
       <div class="fig-body">
-        <svg viewBox="0 0 880 250" role="img" aria-label="Flow: list methods, then validate, then inputs template, then prepare inputs or upload attachments, then run, then status and results.">
+        <svg viewBox="0 0 880 330" role="img" aria-label="Flow: list methods; on the workshop, validate, then inputs template, then prepare inputs; on the console, show the method, with chat attachments uploaded first; then run, then status and results.">
           <text class="s-tag" x="8" y="22">DISCOVER</text>
           <rect class="s-box" x="8" y="32" width="150" height="52" rx="5"/>
-          <text class="s-sub" x="22" y="56">mthds_list_methods</text>
+          <text class="s-sub" x="22" y="56">…_list_methods</text>
           <text class="s-sub" x="22" y="73">name → mt_… id</text>
 
           <text class="s-tag" x="186" y="22">CHECK</text>
-          <rect class="s-box" x="186" y="32" width="150" height="52" rx="5"/>
+          <rect class="s-local" x="186" y="32" width="150" height="52" rx="5"/>
           <text class="s-sub" x="200" y="56">mthds_validate</text>
           <text class="s-sub" x="200" y="73">is_valid · is_runnable</text>
 
           <text class="s-tag" x="364" y="22">SHAPE</text>
-          <rect class="s-box" x="364" y="32" width="158" height="52" rx="5"/>
+          <rect class="s-local" x="364" y="32" width="158" height="52" rx="5"/>
           <text class="s-sub" x="378" y="56">mthds_inputs_template</text>
           <text class="s-sub" x="378" y="73">fill-in template</text>
 
           <text class="s-tag" x="550" y="22">EXECUTE</text>
           <rect class="s-box" x="550" y="32" width="150" height="52" rx="5"/>
-          <text class="s-sub" x="564" y="56">mthds_run</text>
+          <text class="s-sub" x="564" y="56">…_run</text>
           <text class="s-sub" x="564" y="73">→ run_id (durable)</text>
 
           <text class="s-tag" x="728" y="22">FOLLOW</text>
@@ -569,13 +595,21 @@
           <text class="s-sub" x="314" y="182">mthds_prepare_inputs</text>
           <text class="s-sub" x="314" y="199">local file → storage</text>
 
-          <rect class="s-console" x="470" y="158" width="164" height="52" rx="5"/>
-          <text class="s-sub" x="484" y="182">mthds_upload_attachments</text>
+          <rect class="s-console" x="470" y="158" width="180" height="52" rx="5"/>
+          <text class="s-sub" x="484" y="182">pipelex_upload_attachments</text>
           <text class="s-sub" x="484" y="199">chat attachment → storage</text>
 
-          <path class="s-line" d="M634 184 H660 V58" marker-end="url(#ar2)"/>
-          <text class="s-sub" x="150" y="188">pipelex-storage:// values</text>
-          <text class="s-sub" x="150" y="205">are already run-ready</text>
+          <path class="s-line" d="M650 184 H660 V84" marker-end="url(#ar2)"/>
+          <text class="s-sub" x="120" y="188">pipelex-storage:// values</text>
+          <text class="s-sub" x="120" y="205">are already run-ready</text>
+
+          <!-- console lane -->
+          <text class="s-tag" x="186" y="252">ON THE CONSOLE, IN ONE CALL</text>
+          <rect class="s-console" x="186" y="262" width="336" height="52" rx="5"/>
+          <text class="s-sub" x="200" y="286">pipelex_show_method</text>
+          <text class="s-sub" x="200" y="303">signature · inputs template · graph and form</text>
+          <path class="s-line" d="M83 84 V288 H186" marker-end="url(#ar2)"/>
+          <path class="s-line" d="M522 288 H680 V84" marker-end="url(#ar2)"/>
 
           <defs>
             <marker id="ar2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -584,7 +618,7 @@
           </defs>
         </svg>
       </div>
-      <figcaption>Every step accepts either submitted files or a saved method's <code>mt_…</code> id. Skip the asset step entirely when nothing in the inputs is a file.</figcaption>
+      <figcaption>On the workshop, every step takes submitted files, a published address or a saved method's <code>mt_…</code> id. On the console, <code>pipelex_show_method</code> takes the place of the check and the template in one call, and a method is named by its id or its address only. Skip the asset step entirely when nothing in the inputs is a file.</figcaption>
     </figure>
   </section>
 
@@ -594,7 +628,7 @@
       <p class="eyebrow"><span class="chip local">local workshop</span></p>
       <h2 id="install-local">Install it in your coding agent</h2>
     </div>
-    <p>Nothing to install globally — hosts spawn it on demand with <code>npx</code>. You need <strong>Node 24+</strong> and a <code>plx_sk_</code> platform key. The server name is yours; <code>pipelex</code> yields <code>mcp__pipelex__mthds_validate</code>-style tool names.</p>
+    <p>Nothing to install globally — hosts spawn it on demand with <code>npx</code>. You need <strong>Node 24+</strong> and a <code>plx_sk_</code> platform key. The registration name is yours; <code>pipelex</code> yields <code>mcp__pipelex__mthds_validate</code>-style tool names, and the server reports itself as <code>pipelex-plugin</code> whatever you call it.</p>
 
     <div class="tabs">
       <input type="radio" name="host" id="h-cc" checked>
@@ -676,6 +710,11 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
       <p class="eyebrow">Upgrading from a <code>?api_key=</code> connector</p>
       <p>Bring-your-own-key was removed in 0.12.0. A connector still registered with <code>?api_key=plx_sk_...</code> — or an <code>Authorization: Bearer plx_sk_...</code> header — no longer connects <em>at all</em>, rather than merely losing its tools. Remove it and re-add it by the plain URL above.</p>
     </div>
+
+    <div class="note warn">
+      <p class="eyebrow">Upgrading to the <code>pipelex_*</code> tools</p>
+      <p>The console's tools are now <code>pipelex_*</code>. A connector added before that still calls the old <code>mthds_*</code> names, which answer with an instruction to remove the Pipelex connector and add it again, and run nothing. Do that once and the current tools load.</p>
+    </div>
   </section>
 
   <!-- ============ PLAY ============ -->
@@ -687,10 +726,10 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
     <p>Once it's connected, you drive it in plain language — the agent picks the tools. A tour that exercises the whole surface:</p>
     <ol class="steps">
       <li><span class="step-body"><span class="say">"What Pipelex methods do I have?"</span> — the catalog, by name and description.</span></li>
-      <li><span class="step-body"><span class="say">"Validate ./methods/invoice.mthds"</span> — on the workshop, hand it the <em>path</em>; it reads the file itself. On the console, paste the contents.</span></li>
-      <li><span class="step-body"><span class="say">"Show me the graph"</span> — on ChatGPT or claude.ai the verdict brings the interactive method graph with it.</span></li>
+      <li><span class="step-body"><span class="say">"Show me the invoice method"</span> — on the console, its signature and inputs template, and on ChatGPT or Claude its interactive graph and an input form with a Run button.</span></li>
+      <li><span class="step-body"><span class="say">"Validate ./methods/invoice.mthds"</span> — on the workshop, hand it the <em>path</em>; it reads the file itself.</span></li>
       <li><span class="step-body"><span class="say">"What inputs does the main pipe need?"</span> — the fill-in template, concept by concept.</span></li>
-      <li><span class="step-body"><span class="say">"Run it on this PDF"</span> — attach the file in ChatGPT, or point at a local path in Claude Code.</span></li>
+      <li><span class="step-body"><span class="say">"Run it on this PDF"</span> — attach the file in ChatGPT, pick it in the form, or point at a local path in Claude Code.</span></li>
       <li><span class="step-body"><span class="say">"Is that run done yet?"</span> — then <span class="say">"What did it cost?"</span> for tokens, calls, and USD.</span></li>
     </ol>
     <div class="note">
@@ -706,12 +745,12 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
     </div>
     <div class="stack">
       <div class="note warn">
-        <p class="eyebrow">One host, one server</p>
-        <p>A claude.ai Pipelex connector <strong>syncs into Claude Code automatically</strong> — so if you also registered the workshop locally, both are live under the same tool names and nothing guarantees which one the model picks. In Claude Code, <code>/mcp</code> → expand <em>"Show unused connectors"</em> and disable Pipelex there (or <code>deniedMcpServers</code> per project).</p>
+        <p class="eyebrow">You don't need both</p>
+        <p>A claude.ai Pipelex connector <strong>syncs into Claude Code automatically</strong> — so a session with the plugin can have both servers. Their tool names no longer collide, and both tell the model to use the workshop's <code>mthds_*</code> tools there, but the list is twice as long for no added capability. In Claude Code, <code>/mcp</code> → expand <em>"Show unused connectors"</em> and disable Pipelex there (or <code>deniedMcpServers</code> per project).</p>
       </div>
       <div class="note warn">
         <p class="eyebrow">ChatGPT caches the tool list at add-time</p>
-        <p>It never re-issues <code>tools/list</code>. A newly shipped tool — or a changed tool description — stays invisible to an existing connector until you <strong>remove and re-add it</strong>. 0.12.0's move to OAuth needs exactly that — an existing bring-your-own-key connector cannot be upgraded in place.</p>
+        <p>It never re-issues <code>tools/list</code>. A newly shipped tool — or a changed tool description — stays invisible to an existing connector until you <strong>remove and re-add it</strong>. 0.12.0's move to OAuth needed exactly that, and so does the console's move to <code>pipelex_*</code> tools, whose old names now answer with that instruction.</p>
       </div>
       <div class="note warn">
         <p class="eyebrow">Attachments cap at 7 MiB, ChatGPT only</p>
@@ -719,7 +758,7 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
       </div>
       <div class="note warn">
         <p class="eyebrow">The console can't touch your filesystem</p>
-        <p>By design. It rejects <code>{ path }</code> items and refuses any input that would need an upload, pointing you at the workshop. That's what keeps a public endpoint from being turned into a file-read oracle by a prompt-injected path.</p>
+        <p>By design. It takes no files at all, and <code>pipelex_run</code> refuses any input that would need an upload, pointing at a URL, a storage reference or <code>pipelex_upload_attachments</code>. That's what keeps a public endpoint from being turned into a file-read oracle by a prompt-injected path.</p>
       </div>
     </div>
   </section>
@@ -735,15 +774,15 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
       <div class="details-body">
 
         <div class="diff-item">
-          <h3>1 · One files union, two behaviours</h3>
+          <h3>1 · One files union, on the workshop only</h3>
           <p class="path">src/capabilities/shared.ts</p>
           <pre class="diff"><code><span class="ctx">export const filesInputSchema = z.array(</span>
 <span class="ctx">  z.union([</span>
 <span class="ctx">    z.object({ content: z.string(), uri: z.string().nullable().optional() }),</span>
-<span class="add">+   z.object({ path: z.string() }),   // local workshop only</span>
+<span class="add">+   z.object({ path: z.string() }),   // read from disk by the workshop</span>
 <span class="ctx">  ]),</span>
 <span class="ctx">);</span></code></pre>
-          <p>Both shells register the identical schema, so the contract never forks. What a <code>{ path }</code> item <em>does</em> is decided by a seam, not the schema — which is why misrouting between the two servers self-diagnoses on the first call instead of failing as an opaque schema error.</p>
+          <p>Only the workshop's tools take this union; the console takes no files at all. What a <code>{ path }</code> item <em>does</em> is decided by a seam, the file resolver on the context, not by the schema — so a context without one refuses the item with an instructive error instead of an opaque schema failure.</p>
         </div>
 
         <div class="diff-item">
@@ -753,11 +792,11 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
 <span class="add">+ const resolver = localFileResolver(rootDir);          // reads { path } from disk</span>
 <span class="ctx">  return {</span>
 <span class="add">+   validation: { …, resolver, viewsAvailable: false },  // tools-first: no views</span>
-<span class="add">+   prepare: { …, resolver, allowUpload: true },         // uploads local assets</span>
+<span class="add">+   prepare: { …, resolver },                             // uploads local assets</span>
 <span class="ctx">    …</span>
 <span class="ctx">  };</span>
 <span class="ctx">}</span></code></pre>
-          <p>Each shell owns its tool table and builds its own contexts. The hosted console's builder, in <code>src/hosted/tools.ts</code>, states the opposite: no resolver, no upload, views on. Beside which tools each table holds, these settings are where the two deployments differ.</p>
+          <p>Each shell owns its tool table and builds its own contexts. The hosted console's builder, in <code>src/hosted/tools.ts</code>, states the opposite: no resolver, views on, and the console's own tool names on every context whose texts name a tool. Beside which tools each table holds, these settings are where the two servers differ.</p>
         </div>
 
         <div class="diff-item">
@@ -780,7 +819,7 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
 
         <div class="diff-item">
           <h3>5 · One <code>_meta</code> key is the entire attachment mechanism</h3>
-          <p class="path">src/hosted/server.ts</p>
+          <p class="path">src/hosted/tools.ts</p>
           <pre class="diff"><code><span class="ctx">_meta: {</span>
 <span class="add">+ "openai/fileParams": ["attachments"],</span>
 <span class="ctx">},</span></code></pre>
@@ -832,7 +871,7 @@ env = { PIPELEX_API_KEY = "plx_sk_..." }</code></pre>
 </main>
 
 <footer>
-  <span>pipelex-mcp v0.12.0</span>
+  <span>pipelex-mcp</span>
   <span>@pipelex/mcp on npm · console on Alpic</span>
   <span>full contracts: SPEC.md · what shipped: CHANGELOG.md</span>
 </footer>

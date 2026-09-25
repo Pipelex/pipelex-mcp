@@ -24,6 +24,8 @@ import { z } from "zod";
 
 import { BARE_APP_INFO } from "./client-identification.js";
 import type { AppInfoSource } from "./client-identification.js";
+import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
+import type { ToolNames } from "./tool-names.js";
 
 // The Makefile's console dev banner (CONSOLE_DEV_ENV) prints this same URL as "the server default" — keep the two in step.
 export const DEFAULT_API_URL = "https://api.pipelex.com";
@@ -51,13 +53,13 @@ export const filesInputSchema = z
         path: z
           .string()
           .describe(
-            "Filesystem path to a .mthds file, resolved by the local workshop server relative to its working directory. The hosted deployment cannot read files and rejects this form.",
+            "Filesystem path to a .mthds file, resolved relative to this server's working directory.",
           ),
       }),
     ]),
   )
   .describe(
-    "One or more submitted MTHDS files forming the method closure. Each item is either inline contents ({ content, uri? }) or a file path ({ path }, local workshop only).",
+    "One or more submitted MTHDS files forming the method closure. Each item is either inline contents ({ content, uri? }) or a file path ({ path }).",
   );
 
 /** A submitted file resolved to its contents — what the capabilities consume. */
@@ -374,9 +376,9 @@ export function buildApiConfig(env: ApiEnv = process.env): ApiConfig {
 
 /**
  * The bundle blueprint's declared `main_pipe`, qualified by the blueprint's
- * `domain` when it is authored bare — the fallback pipe both `mthds_validate`
- * and `mthds_prepare_inputs`'s console walk consult behind the runner's own
- * `default_pipe_ref`.
+ * `domain` when it is authored bare — the fallback pipe both the validate
+ * capability and the console's input walk (`console-inputs.ts`) consult behind
+ * the runner's own `default_pipe_ref`.
  *
  * Every read is defensive: `bundle_blueprint` is opaque transport (its schema
  * is the runtime's, not this server's), so a blueprint that is not an object,
@@ -532,6 +534,52 @@ export function validateMethodSelectorRequest(
 }
 
 /**
+ * Request-shape checks for a tool that names its method by reference only —
+ * the console's `pipelex_show_method` and `pipelex_run`, which take no files:
+ * exactly one of `method_id` / `method_ref`, neither blank. It is the
+ * `one_selector` rule of {@link validateMethodSelectorRequest} with the files
+ * arm gone, and its teaching text names only the two forms such a tool takes,
+ * since telling a caller to "submit files" to a tool with no `files` argument
+ * sends it after a parameter that does not exist.
+ */
+export function validateMethodReferenceRequest(selectors: MethodSelectors): ToolError[] {
+  const errors: ToolError[] = [];
+
+  if (selectors.method_ref !== undefined && selectors.method_ref.trim() === "") {
+    errors.push({
+      class: "input_domain",
+      location: "method_ref",
+      message: "method_ref must not be empty when supplied.",
+      hint: `Pass a published method's address — ${METHOD_REF_GRAMMAR} — or a saved method's catalog id (mt_…) as method_id instead.`,
+      retryable: false,
+    });
+  }
+
+  if (selectors.method_id !== undefined && selectors.method_id.trim() === "") {
+    errors.push({
+      class: "input_domain",
+      location: "method_id",
+      message: "method_id must not be empty when supplied.",
+      hint: "Pass the catalog id (mt_…) of a saved method, or a published method's address as method_ref instead.",
+      retryable: false,
+    });
+  }
+
+  if (selectors.method_ref === undefined && selectors.method_id === undefined) {
+    errors.push({
+      class: "input_domain",
+      location: "method_id",
+      message: "Provide a method_id or a method_ref.",
+      hint: `Pass the catalog id (mt_…) of a saved method as method_id, or a published method's address (${METHOD_REF_GRAMMAR}) as method_ref.`,
+      retryable: false,
+    });
+  }
+
+  errors.push(...validateSelectorExclusivity([], selectors, "one_selector"));
+  return errors;
+}
+
+/**
  * The illegal pairings per {@link SelectorRule}. Evaluated only on validly
  * supplied selectors (a blank one already earned its own error above), and
  * emitting one error per illegal pair so a three-selector request teaches both
@@ -614,14 +662,17 @@ function validateFileItems(files: SubmittedFile[]): ToolError[] {
 }
 
 /** Request-shape check on a run id (format stays server-owned). */
-export function validateRunIdRequest(runId: string): ToolError[] {
+export function validateRunIdRequest(
+  runId: string,
+  names: ToolNames = WORKSHOP_TOOL_NAMES,
+): ToolError[] {
   if (runId.trim() === "") {
     return [
       {
         class: "input_domain",
         location: "run_id",
         message: "run_id must not be empty.",
-        hint: "Pass the durable run id returned by mthds_run.",
+        hint: `Pass the durable run id returned by ${names.run}.`,
         retryable: false,
       },
     ];
@@ -1423,8 +1474,9 @@ interface ItemErrorTexture {
  * call mints fresh links.
  *
  * It lives here rather than in `artifacts.ts` because both fetching
- * capabilities need it, and `mthds_show_images` — which both shells register —
- * must not import the workshop-only download tool to get it.
+ * capabilities need it, and the image-display capability — which both shells
+ * register, as `mthds_show_images` and `pipelex_show_images` — must not import
+ * the workshop-only download tool to get it.
  */
 const ITEM_ERROR_TEXTURES: Record<string, ItemErrorTexture> = {
   invalid_storage_uri: {

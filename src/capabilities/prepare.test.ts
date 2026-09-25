@@ -10,15 +10,7 @@ import {
   UploadAuthenticationError,
   UploadTransportError,
 } from "@pipelex/sdk";
-import type {
-  InputForm,
-  MthdsFileItem,
-  PipelexValidationReport,
-  PipelexValidationResult,
-  PrepareInputsRequest,
-  PreparedInputs,
-  ValidateMethodSelector,
-} from "@pipelex/sdk";
+import type { MthdsFileItem, PrepareInputsRequest, PreparedInputs } from "@pipelex/sdk";
 
 import {
   prepareInputsResult,
@@ -28,162 +20,15 @@ import {
 } from "./prepare.js";
 import { DEFAULT_API_URL } from "./shared.js";
 
-/**
- * The input-form descriptor for a pipe with a file-bearing input (`photo`, an
- * image) and a text input (`question`).
- *
- * **The descriptor is the classifier, never the value's shape** — which is the
- * whole reason the console walk moved onto it. A `text` node merely NAMED `url`
- * is not a file position, and an OPTIONAL nested image field is one; both were
- * misread while the signature came from the rendered inputs template, whose
- * file signal was a `url`-bearing dict. `question` here is a `prose` node, and
- * nothing about a caller value can promote it to a file.
- */
-const demoInputForm: InputForm = {
-  "demo.main": {
-    fields: [
-      {
-        name: "photo",
-        kind: "image",
-        concept_ref: "native.Image",
-        required: true,
-        presence: "plain",
-        gating: true,
-      },
-      {
-        name: "question",
-        kind: "prose",
-        concept_ref: "native.Text",
-        required: true,
-        presence: "plain",
-        gating: true,
-      },
-    ],
-  },
-};
-
-/**
- * A descriptor for a declared-MULTIPLE file input (`Exhibit[]`). Multiplicity is
- * a `list` node whose `item` is the element descriptor — the plurality is stated
- * structurally, and the walk reuses `item` for every caller element.
- */
-const multipleInputForm: InputForm = {
-  "demo.main": {
-    fields: [
-      {
-        name: "exhibits",
-        kind: "list",
-        concept_ref: "demo.Exhibit",
-        required: true,
-        presence: "plain",
-        gating: true,
-        item: { kind: "document", concept_ref: "demo.Exhibit", required: true },
-      },
-    ],
-  },
-};
-
-/** A descriptor whose only file position is OPTIONAL and nested inside a structure. */
-const nestedOptionalInputForm: InputForm = {
-  "demo.main": {
-    fields: [
-      {
-        name: "dossier",
-        kind: "object",
-        concept_ref: "demo.Dossier",
-        required: true,
-        presence: "plain",
-        gating: true,
-        fields: [
-          { name: "title", kind: "text", required: true },
-          { name: "scan", kind: "document", concept_ref: "native.Document", required: false },
-        ],
-      },
-    ],
-  },
-};
-
-/** A descriptor with a `text` field merely NAMED `url` — never a file position. */
-const urlNamedTextInputForm: InputForm = {
-  "demo.main": {
-    fields: [
-      {
-        name: "url",
-        kind: "text",
-        concept_ref: "native.Text",
-        required: true,
-        presence: "plain",
-        gating: true,
-      },
-    ],
-  },
-};
-
-function reportWith(
-  inputForm: InputForm | undefined,
-  overrides: Partial<PipelexValidationReport> = {},
-): PipelexValidationReport {
-  return {
-    is_valid: true,
-    bundle_blueprint: { domain: "demo", main_pipe: "main" },
-    pipe_io_contracts: {},
-    ...(inputForm === undefined ? {} : { input_form: inputForm }),
-    graph_spec: {},
-    validated_pipes: [],
-    pending_signatures: [],
-    liftable_pipes: [],
-    warnings: [],
-    is_runnable: true,
-    message: "ok",
-    rendered_markdown: "# Valid",
-    ...overrides,
-  };
-}
-
-const invalidReport: PipelexValidationResult = {
-  is_valid: false,
-  message: "The closure did not validate.",
-  validation_errors: [
-    { category: "blueprint_validation", message: "Unknown pipe type", source: "bundle.mthds" },
-  ],
-  pending_signatures: [],
-  is_runnable: false,
-};
-
-/** The console arm's fake: `validate` answers a report, `prepareInputs` must never run. */
-function validateWith(
-  report: PipelexValidationResult,
-  capture?: (source: string[] | ValidateMethodSelector, views?: string[]) => void,
-) {
-  return {
-    async validate(
-      source: string[] | ValidateMethodSelector,
-      _allowSignatures?: boolean,
-      _mthdsSources?: string[],
-      _render?: string[],
-      views?: string[],
-    ): Promise<PipelexValidationResult> {
-      capture?.(source, views);
-      return report;
-    },
-    ...prepareInputsNotCalled,
-  };
-}
-
-/** Fake arms for tests whose request must never reach a given client method. */
-const validateNotCalled = {
-  async validate(): Promise<PipelexValidationResult> {
-    throw new Error("validate must not be called in this test");
-  },
-};
+/** Fake arm for tests whose request must never reach the SDK. */
 const prepareInputsNotCalled = {
   async prepareInputs(): Promise<PreparedInputs> {
     throw new Error("prepareInputs must not be called in this test");
   },
 };
-/** The workshop arm never resolves a signature itself — the SDK's walk owns that. */
+/** The SDK's walk reads the signature itself, so the whole fake is its `prepareInputs`. */
 function uploadWith(prepareInputs: (request: PrepareInputsRequest) => Promise<PreparedInputs>) {
-  return { ...validateNotCalled, prepareInputs };
+  return { prepareInputs };
 }
 
 const files = [{ content: 'domain = "demo"' }];
@@ -232,7 +77,7 @@ describe("prepareInputsResult", () => {
     expect(result.structuredContent.uploads).toEqual([]);
     expect(result.summary).toContain("No assets required uploading");
     expect(result.summary).toContain("```json");
-    // The console-selected default is deliberately NOT echoed, so the summary
+    // The default the SDK selected is deliberately NOT echoed, so the summary
     // must not claim one either.
     expect(result.summary).not.toContain("Resolved pipe");
   });
@@ -306,7 +151,7 @@ describe("validatePrepareInputsRequest", () => {
   });
 });
 
-describe("prepareMthdsInputs — workshop (allowUpload)", () => {
+describe("prepareMthdsInputs — the SDK upload walk", () => {
   it("hands the SDK the files selector as given, expanding nothing itself", async () => {
     let captured: PrepareInputsRequest | undefined;
 
@@ -314,7 +159,6 @@ describe("prepareMthdsInputs — workshop (allowUpload)", () => {
       { files, pipe_ref: "demo.main", inputs: { photo: "/tmp/a.png" } },
       {
         baseUrl: DEFAULT_API_URL,
-        allowUpload: true,
         client: uploadWith(async (request) => {
           captured = request;
           return {
@@ -353,7 +197,6 @@ describe("prepareMthdsInputs — workshop (allowUpload)", () => {
       },
       {
         baseUrl: DEFAULT_API_URL,
-        allowUpload: true,
         client: uploadWith(async (request) => {
           captured = request;
           return { inputs: {}, uploads: [] };
@@ -374,7 +217,6 @@ describe("prepareMthdsInputs — workshop (allowUpload)", () => {
       { method_id: "mt_123", inputs: {} },
       {
         baseUrl: DEFAULT_API_URL,
-        allowUpload: true,
         // `validateNotCalled` is doing real work here: were the capability still
         // expanding the id itself it would need a fetch leg, and this fake has none.
         client: uploadWith(async (request) => {
@@ -392,7 +234,6 @@ describe("prepareMthdsInputs — workshop (allowUpload)", () => {
       { files, inputs: { photo: "/tmp/big.png" } },
       {
         baseUrl: DEFAULT_API_URL,
-        allowUpload: true,
         client: uploadWith(async () => {
           throw new RejectedAssetError("too big", "big.png", 413);
         }),
@@ -410,7 +251,6 @@ describe("prepareMthdsInputs — workshop (allowUpload)", () => {
       { files, inputs: { photo: "/nope.png" } },
       {
         baseUrl: DEFAULT_API_URL,
-        allowUpload: true,
         client: uploadWith(async () => {
           throw new InvalidLocalSourceError("cannot read", "/nope.png");
         }),
@@ -426,7 +266,6 @@ describe("prepareMthdsInputs — workshop (allowUpload)", () => {
       { files, inputs: { photo: "/tmp/a.png" } },
       {
         baseUrl: DEFAULT_API_URL,
-        allowUpload: true,
         client: uploadWith(async () => {
           throw new UnsupportedUploadCapabilityError("no upload route");
         }),
@@ -442,7 +281,6 @@ describe("prepareMthdsInputs — workshop (allowUpload)", () => {
       { files, inputs: { photo: "/tmp/a.png" } },
       {
         baseUrl: DEFAULT_API_URL,
-        allowUpload: true,
         authError: { location: "authorization", hint: "reconnect the connector" },
         client: uploadWith(async () => {
           throw new UploadAuthenticationError("rejected", 401);
@@ -460,7 +298,6 @@ describe("prepareMthdsInputs — workshop (allowUpload)", () => {
       { files, inputs: { photo: "/tmp/a.png" } },
       {
         baseUrl: DEFAULT_API_URL,
-        allowUpload: true,
         client: uploadWith(async () => {
           throw new UploadTransportError("upstream died");
         }),
@@ -476,7 +313,6 @@ describe("prepareMthdsInputs — workshop (allowUpload)", () => {
       { files, inputs: {} },
       {
         baseUrl: DEFAULT_API_URL,
-        allowUpload: true,
         client: uploadWith(async () => {
           throw new InputPreparationError("the method signature did not resolve — boom");
         }),
@@ -490,533 +326,6 @@ describe("prepareMthdsInputs — workshop (allowUpload)", () => {
     expect(result.structuredContent).not.toHaveProperty("validation_errors");
   });
 });
-
-describe("prepareMthdsInputs — console (pass-through only)", () => {
-  it("reads the signature from validate with the input_form view and uploads nothing", async () => {
-    let capturedSource: string[] | ValidateMethodSelector | undefined;
-    let capturedViews: string[] | undefined;
-
-    const result = await prepareMthdsInputs(
-      { files, inputs: { photo: "https://cdn.example.com/a.png", question: "hi" } },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: validateWith(reportWith(demoInputForm), (source, views) => {
-          capturedSource = source;
-          capturedViews = views;
-        }),
-      },
-    );
-
-    // The console resolves the signature itself, from the descriptor — never
-    // from the rendered inputs template, and never by uploading.
-    expect(capturedSource).toEqual(['domain = "demo"']);
-    expect(capturedViews).toEqual(["input_form"]);
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.uploads).toEqual([]);
-    expect(result.structuredContent.inputs).toEqual({
-      photo: { url: "https://cdn.example.com/a.png" },
-      question: "hi",
-    });
-  });
-
-  it("forwards a method_ref address to validate as the selector", async () => {
-    let capturedSource: string[] | ValidateMethodSelector | undefined;
-
-    const result = await prepareMthdsInputs(
-      {
-        method_ref: PUBLISHED_REF,
-        inputs: { photo: "https://cdn.example.com/a.png" },
-      },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: validateWith(reportWith(demoInputForm), (source) => {
-          capturedSource = source;
-        }),
-      },
-    );
-
-    expect(capturedSource).toEqual({
-      method_ref: "github.com/Pipelex/methods/documents@v0.1.0",
-    });
-    expect(result.structuredContent.status).toBe("ok");
-  });
-
-  it("forwards a method_id to validate as the selector", async () => {
-    let capturedSource: string[] | ValidateMethodSelector | undefined;
-
-    const result = await prepareMthdsInputs(
-      { method_id: "mt_123", inputs: { photo: "https://cdn.example.com/a.png" } },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: validateWith(reportWith(demoInputForm), (source) => {
-          capturedSource = source;
-        }),
-      },
-    );
-
-    expect(capturedSource).toEqual({ method_id: "mt_123" });
-    expect(result.structuredContent.status).toBe("ok");
-  });
-
-  it("labels every content once any submitted file names a source", async () => {
-    let capturedSources: string[] | undefined;
-
-    await prepareMthdsInputs(
-      {
-        files: [{ content: 'domain = "demo"', uri: "a.mthds" }, { content: "# more" }],
-        inputs: {},
-      },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: {
-          async validate(
-            _source: string[] | ValidateMethodSelector,
-            _allowSignatures?: boolean,
-            mthdsSources?: string[],
-          ): Promise<PipelexValidationResult> {
-            capturedSources = mthdsSources;
-            return reportWith(demoInputForm);
-          },
-          ...prepareInputsNotCalled,
-        },
-      },
-    );
-
-    // A length-mismatched mthds_sources array is a server 422, so the unnamed
-    // file gets a deterministic inline label rather than being left out.
-    expect(capturedSources).toEqual(["a.mthds", "inline://file-2.mthds"]);
-  });
-
-  it("accepts the filled explicit {concept, content} envelope and re-wraps it", async () => {
-    const result = await prepareMthdsInputs(
-      {
-        files,
-        inputs: {
-          photo: { concept: "native.Image", content: { url: "https://cdn.example.com/a.png" } },
-          question: { concept: "native.Text", content: "hi" },
-        },
-      },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
-    );
-
-    // The envelope survives: `concept` rides through, only the inner content is rewritten.
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.uploads).toEqual([]);
-    expect(result.structuredContent.inputs).toEqual({
-      photo: { concept: "native.Image", content: { url: "https://cdn.example.com/a.png" } },
-      question: { concept: "native.Text", content: "hi" },
-    });
-  });
-
-  it("still refuses an upload-needing value nested inside an envelope", async () => {
-    const result = await prepareMthdsInputs(
-      { files, inputs: { photo: { concept: "native.Image", content: "./local/a.png" } } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
-    );
-
-    expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "inputs",
-    });
-  });
-
-  it("does not misread a structured concept that merely has concept+content fields", async () => {
-    // Exactly-two-keys is the envelope rule; a third key means it is ordinary structured content.
-    const result = await prepareMthdsInputs(
-      { files, inputs: { question: { concept: "x", content: "y", extra: 1 } } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
-    );
-
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.inputs).toEqual({
-      question: { concept: "x", content: "y", extra: 1 },
-    });
-  });
-
-  it("leaves a text field merely NAMED url untouched", async () => {
-    // One of the two misclassifications the descriptor fixes: the old
-    // template-guided walk read a `url`-bearing dict as the file signal, so a
-    // text input called `url` was rewritten to canonical file content — and on
-    // this arm, a plain sentence in it was refused as "a local file path".
-    const result = await prepareMthdsInputs(
-      { files, inputs: { url: "not a link, just prose" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(urlNamedTextInputForm)) },
-    );
-
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.inputs).toEqual({ url: "not a link, just prose" });
-  });
-
-  it("walks an OPTIONAL file field nested inside a structure", async () => {
-    // The other misclassification: an optional nested file field prepares
-    // exactly like a required one, because the descriptor states the kind at
-    // every depth and `required` is a layout fact, not a preparation one.
-    const result = await prepareMthdsInputs(
-      {
-        files,
-        inputs: { dossier: { title: "Case 7", scan: "https://cdn.example.com/scan.pdf" } },
-      },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(nestedOptionalInputForm)) },
-    );
-
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.inputs).toEqual({
-      dossier: { title: "Case 7", scan: { url: "https://cdn.example.com/scan.pdf" } },
-    });
-  });
-
-  it("refuses an upload-needing value at an optional nested file field", async () => {
-    const result = await prepareMthdsInputs(
-      { files, inputs: { dossier: { title: "Case 7", scan: "./local/scan.pdf" } } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(nestedOptionalInputForm)) },
-    );
-
-    expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("inputs");
-  });
-
-  it("walks every element of a declared-multiple file input inside an envelope", async () => {
-    const result = await prepareMthdsInputs(
-      {
-        files,
-        inputs: {
-          exhibits: {
-            concept: "demo.Exhibit",
-            content: ["https://cdn.example.com/a.pdf", "pipelex-storage://kept"],
-          },
-        },
-      },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(multipleInputForm)) },
-    );
-
-    // Every element is rewritten to canonical {url} content; the envelope survives.
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.uploads).toEqual([]);
-    expect(result.structuredContent.inputs).toEqual({
-      exhibits: {
-        concept: "demo.Exhibit",
-        content: [{ url: "https://cdn.example.com/a.pdf" }, { url: "pipelex-storage://kept" }],
-      },
-    });
-  });
-
-  it("walks every element of a declared-multiple file input filled compactly", async () => {
-    const result = await prepareMthdsInputs(
-      { files, inputs: { exhibits: ["https://cdn.example.com/a.pdf"] } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(multipleInputForm)) },
-    );
-
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.inputs).toEqual({
-      exhibits: [{ url: "https://cdn.example.com/a.pdf" }],
-    });
-  });
-
-  it("refuses an upload-needing element nested in a declared-multiple list", async () => {
-    const result = await prepareMthdsInputs(
-      {
-        files,
-        inputs: {
-          exhibits: {
-            concept: "demo.Exhibit",
-            content: ["https://cdn.example.com/a.pdf", "./local/b.pdf"],
-          },
-        },
-      },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(multipleInputForm)) },
-    );
-
-    expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "inputs",
-    });
-  });
-
-  it("passes an existing pipelex-storage:// reference through", async () => {
-    const result = await prepareMthdsInputs(
-      { files, inputs: { photo: "pipelex-storage://existing" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
-    );
-
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.inputs).toEqual({
-      photo: { url: "pipelex-storage://existing" },
-    });
-    expect(result.structuredContent.uploads).toEqual([]);
-  });
-
-  it("refuses a data: URL up front with an instructive input_domain at inputs", async () => {
-    const result = await prepareMthdsInputs(
-      { files, inputs: { photo: "data:image/png;base64,AAAA" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
-    );
-
-    expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("inputs");
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("npx @pipelex/mcp");
-  });
-
-  it("refuses a bare local path up front", async () => {
-    const result = await prepareMthdsInputs(
-      { files, inputs: { photo: "/tmp/a.png" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
-    );
-
-    expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("inputs");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("local file path");
-  });
-
-  it("surfaces an invalid closure as a no-verdict input_domain at the SELECTOR (no produced-invalid arm)", async () => {
-    const result = await prepareMthdsInputs(
-      { files, inputs: {} },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(invalidReport) },
-    );
-
-    expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.is_valid).toBe(false);
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    // Not `pipe_ref`: the closure is broken, which is a question about whatever
-    // named the method and never about a field the caller left empty.
-    expect(result.structuredContent.errors?.[0]?.location).toBe("files");
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("mthds_validate");
-    expect(result.structuredContent).not.toHaveProperty("validation_errors");
-  });
-
-  it("locates an invalid closure at method_ref when an address named the method", async () => {
-    const result = await prepareMthdsInputs(
-      { files: [], method_ref: PUBLISHED_REF, inputs: {} },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(invalidReport) },
-    );
-
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
-    // The hint must not send them to a `pipe_ref` they never typed.
-    expect(result.structuredContent.errors?.[0]?.hint).not.toContain("pipe_ref");
-  });
-
-  it("refuses a report with no input_form as a deployment fault, not the caller's", async () => {
-    // Without the descriptor every value would pass through unchecked, which on
-    // this arm means an upload refusal that never fires — the failure mode the
-    // whole boundary exists to prevent.
-    const result = await prepareMthdsInputs(
-      { files, inputs: { photo: "/tmp/a.png" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(undefined)) },
-    );
-
-    expect(result.structuredContent.status).toBe("error");
-    // `config`, because no request the caller can write works around it. It used
-    // to be `input_domain`@`pipe_ref`, under a hint that contradicted the
-    // message beside it.
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("input_form");
-  });
-
-  it("refuses a wire input_form of null the same way, rather than dying on Object.keys", async () => {
-    // The report is extension-open transport nothing validates at runtime, so a
-    // `null` really can arrive where the type says the slot is absent. Tested
-    // for the CLASS: as a raw TypeError this surfaced as a retryable `runtime`
-    // fault, which is the one reading the refusal exists to prevent.
-    const result = await prepareMthdsInputs(
-      { files, inputs: { photo: "/tmp/a.png" } },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: validateWith(
-          reportWith(undefined, {
-            input_form: null,
-          } as unknown as Partial<PipelexValidationReport>),
-        ),
-      },
-    );
-
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
-    expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
-  });
-
-  it("refuses a descriptor entry whose field list is unreadable", async () => {
-    const result = await prepareMthdsInputs(
-      { files, inputs: { photo: "/tmp/a.png" } },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: validateWith(
-          reportWith({ "demo.main": { fields: "nope" } } as unknown as InputForm),
-        ),
-      },
-    );
-
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("field list");
-  });
-
-  it("passes a malformed NESTED node through instead of throwing out of the walk", async () => {
-    // The walk's own contract: a malformed node falls to the pass-through arm.
-    // A stated `item: null` used to pass the `!== undefined` test and then have
-    // `.kind` read off it, and a null element of `fields` had `.name` read off
-    // it — both surfaced as a generic `runtime` fault.
-    const malformed = {
-      "demo.main": {
-        fields: [
-          { name: "gallery", kind: "list", item: null },
-          { name: "meta", kind: "object", fields: [null] },
-        ],
-      },
-    } as unknown as InputForm;
-
-    const result = await prepareMthdsInputs(
-      {
-        files,
-        inputs: { gallery: ["https://cdn.example.com/a.png"], meta: { title: "t" } },
-      },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(malformed)) },
-    );
-
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.inputs).toEqual({
-      gallery: ["https://cdn.example.com/a.png"],
-      meta: { title: "t" },
-    });
-  });
-
-  it("names an unusable value for what it is instead of calling it inline bytes", async () => {
-    const result = await prepareMthdsInputs(
-      { files, inputs: { photo: 42 } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
-    );
-
-    expect(result.structuredContent.errors?.[0]?.location).toBe("inputs");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("a number");
-    expect(result.structuredContent.errors?.[0]?.message).not.toContain("inline bytes");
-  });
-
-  it("still calls real inline bytes inline bytes", async () => {
-    const result = await prepareMthdsInputs(
-      { files, inputs: { photo: new Uint8Array([1, 2, 3]) } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
-    );
-
-    expect(result.structuredContent.errors?.[0]?.message).toContain("inline bytes");
-  });
-});
-
-describe("prepareMthdsInputs — console pipe selection (SDK parity)", () => {
-  const twoPipes: InputForm = {
-    "demo.main": demoInputForm["demo.main"],
-    "demo.other": { fields: [] },
-  };
-
-  it("refuses a bare pipe_ref, naming the declared pipes", async () => {
-    const result = await prepareMthdsInputs(
-      { files, pipe_ref: "main", inputs: {} },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
-    );
-
-    expect(result.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("qualified");
-  });
-
-  it("refuses a pipe_ref the method does not declare", async () => {
-    const result = await prepareMthdsInputs(
-      { files, pipe_ref: "demo.nope", inputs: {} },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
-    );
-
-    expect(result.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("demo.main");
-  });
-
-  it("prefers the runner's stated default_pipe_ref over the blueprint", async () => {
-    const report = reportWith(
-      { "demo.other": demoInputForm["demo.main"], "demo.main": { fields: [] } },
-      { default_pipe_ref: "demo.other" },
-    );
-
-    const result = await prepareMthdsInputs(
-      { files, inputs: { photo: "https://cdn.example.com/a.png" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(report) },
-    );
-
-    // Walked against `demo.other`'s descriptor — the blueprint names `demo.main`,
-    // whose descriptor declares no fields and would have left the value alone.
-    expect(result.structuredContent.inputs).toEqual({
-      photo: { url: "https://cdn.example.com/a.png" },
-    });
-  });
-
-  it("refuses a stated default_pipe_ref: null rather than falling through to the blueprint", async () => {
-    // The blueprint names `demo.main`, whose descriptor WOULD have guided a walk —
-    // this is the exact case the pre-0.19.0 ladder fell through on. A stated null is
-    // the server saying it determined no entry pipe, so the run route would refuse
-    // such a run, and preparing one would prepare a pipe the run will not execute.
-    const report = reportWith(demoInputForm, { default_pipe_ref: null });
-
-    const result = await prepareMthdsInputs(
-      { files, inputs: { photo: "https://cdn.example.com/a.png" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(report) },
-    );
-
-    expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("no entry pipe");
-    // Named, so the caller can pass one.
-    expect(result.structuredContent.errors?.[0]?.message).toContain("demo.main");
-  });
-
-  it("refuses a stated default_pipe_ref the input_form descriptor does not describe", async () => {
-    // One report, one pipe set, keyed both ways — a miss is the report contradicting
-    // itself, and falling through would silently prepare a different pipe.
-    const report = reportWith(demoInputForm, { default_pipe_ref: "demo.absent" });
-
-    const result = await prepareMthdsInputs(
-      { files, inputs: {} },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(report) },
-    );
-
-    expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("demo.absent");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("does not describe it");
-  });
-
-  it("falls back to the blueprint's main_pipe when no default is stated", async () => {
-    const result = await prepareMthdsInputs(
-      { files, inputs: { photo: "https://cdn.example.com/a.png" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(twoPipes)) },
-    );
-
-    expect(result.structuredContent.inputs).toEqual({
-      photo: { url: "https://cdn.example.com/a.png" },
-    });
-  });
-
-  it("requires pipe_ref when the closure settles no single default pipe", async () => {
-    const report = reportWith(twoPipes, { bundle_blueprint: { domain: "demo" } });
-
-    const result = await prepareMthdsInputs(
-      { files, inputs: {} },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(report) },
-    );
-
-    expect(result.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("no single default pipe");
-  });
-
-  it("takes the one declared pipe when nothing names a default", async () => {
-    const report = reportWith(demoInputForm, { bundle_blueprint: {} });
-
-    const result = await prepareMthdsInputs(
-      { files, inputs: { photo: "https://cdn.example.com/a.png" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(report) },
-    );
-
-    expect(result.structuredContent.inputs).toEqual({
-      photo: { url: "https://cdn.example.com/a.png" },
-    });
-  });
-});
-
 describe("prepareMthdsInputs — selector-shaped classification", () => {
   function apiError(status: number, code: string, errorDomain: string): ApiResponseError {
     return new ApiResponseError(
@@ -1037,12 +346,9 @@ describe("prepareMthdsInputs — selector-shaped classification", () => {
       { method_ref: "github.com/Pipelex/methods/nope@v9", inputs: {} },
       {
         baseUrl: DEFAULT_API_URL,
-        client: {
-          ...prepareInputsNotCalled,
-          async validate(): Promise<PipelexValidationResult> {
-            throw apiError(404, "not_found", "not_found");
-          },
-        },
+        client: uploadWith(async () => {
+          throw apiError(404, "not_found", "not_found");
+        }),
       },
     );
 
@@ -1055,12 +361,9 @@ describe("prepareMthdsInputs — selector-shaped classification", () => {
       { method_ref: "not-an-address", inputs: {} },
       {
         baseUrl: DEFAULT_API_URL,
-        client: {
-          ...prepareInputsNotCalled,
-          async validate(): Promise<PipelexValidationResult> {
-            throw apiError(422, "invalid_request", "input_domain");
-          },
-        },
+        client: uploadWith(async () => {
+          throw apiError(422, "invalid_request", "input_domain");
+        }),
       },
     );
 
@@ -1073,7 +376,6 @@ describe("prepareMthdsInputs — selector-shaped classification", () => {
       { method_id: "mt_missing", inputs: {} },
       {
         baseUrl: DEFAULT_API_URL,
-        allowUpload: true,
         client: uploadWith(async () => {
           throw apiError(404, "not_found", "not_found");
         }),
@@ -1091,7 +393,6 @@ describe("prepareMthdsInputs — selector-shaped classification", () => {
       { method_id: "mt_empty", inputs: {} },
       {
         baseUrl: DEFAULT_API_URL,
-        allowUpload: true,
         client: uploadWith(async () => {
           throw apiError(422, "invalid_request", "input_domain");
         }),
@@ -1111,7 +412,6 @@ describe("prepareMthdsInputs — selector-shaped classification", () => {
       { method_ref: PUBLISHED_REF, pipe_ref: "demo.nope", inputs: {} },
       {
         baseUrl: DEFAULT_API_URL,
-        allowUpload: true,
         client: uploadWith(async () => {
           throw new InputPreparationError('the method declares no pipe "demo.nope"');
         }),
@@ -1127,7 +427,6 @@ describe("prepareMthdsInputs — selector-shaped classification", () => {
       { method_id: "mt_123", inputs: {} },
       {
         baseUrl: DEFAULT_API_URL,
-        allowUpload: true,
         client: uploadWith(async () => {
           throw new InputPreparationError("the method declares no single default pipe");
         }),
@@ -1142,12 +441,9 @@ describe("prepareMthdsInputs — selector-shaped classification", () => {
       { method_ref: PUBLISHED_REF, inputs: {} },
       {
         baseUrl: DEFAULT_API_URL,
-        client: {
-          ...prepareInputsNotCalled,
-          async validate(): Promise<PipelexValidationResult> {
-            throw apiError(403, "CustomCodeRequiresSandbox", "forbidden");
-          },
-        },
+        client: uploadWith(async () => {
+          throw apiError(403, "CustomCodeRequiresSandbox", "forbidden");
+        }),
       },
     );
 
@@ -1168,7 +464,6 @@ describe("prepareMthdsInputs — selector-shaped classification", () => {
       { method_id: "mt_123", inputs: {} },
       {
         baseUrl: DEFAULT_API_URL,
-        allowUpload: true,
         client: uploadWith(async () => {
           throw apiError(402, "subscription_required", "forbidden");
         }),
@@ -1185,9 +480,8 @@ describe("prepareMthdsInputs — selector-shaped classification", () => {
     expect(result.summary).not.toMatch(/unreachable/);
   });
 });
-
 describe("prepareMthdsInputs — request shape and transport", () => {
-  const noClientLeg = { ...validateNotCalled, ...prepareInputsNotCalled };
+  const noClientLeg = prepareInputsNotCalled;
 
   it("rejects a request with no selector at all", async () => {
     const result = await prepareMthdsInputs(
@@ -1212,7 +506,7 @@ describe("prepareMthdsInputs — request shape and transport", () => {
     expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
   });
 
-  it("rejects { path } items instructively without a resolver (hosted)", async () => {
+  it("rejects { path } items instructively without a resolver", async () => {
     const result = await prepareMthdsInputs(
       { files: [{ path: "bundle.mthds" }], inputs: {} },
       { baseUrl: DEFAULT_API_URL, client: noClientLeg },
@@ -1229,7 +523,6 @@ describe("prepareMthdsInputs — request shape and transport", () => {
       { files: [{ path: "methods/bundle.mthds" }], inputs: {} },
       {
         baseUrl: DEFAULT_API_URL,
-        allowUpload: true,
         resolver: {
           async resolve() {
             return { ok: true, content: 'domain = "demo"' };
@@ -1253,12 +546,9 @@ describe("prepareMthdsInputs — request shape and transport", () => {
       { files, inputs: {} },
       {
         baseUrl: DEFAULT_API_URL,
-        client: {
-          ...prepareInputsNotCalled,
-          async validate(): Promise<PipelexValidationResult> {
-            throw new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED");
-          },
-        },
+        client: uploadWith(async () => {
+          throw new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED");
+        }),
       },
     );
 
@@ -1278,15 +568,6 @@ describe("prepareMthdsInputs — request shape and transport", () => {
     expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
   });
 });
-
-// Type-only: the fixtures must satisfy the SDK's own descriptor types, so a
-// standard change that reshapes a node fails here rather than drifting.
-const _typedFixtures: InputForm[] = [
-  demoInputForm,
-  multipleInputForm,
-  nestedOptionalInputForm,
-  urlNamedTextInputForm,
-];
-void _typedFixtures;
+// Type-only: the fixture must satisfy the SDK's own file item type.
 const _typedFiles: MthdsFileItem[] = files;
 void _typedFiles;

@@ -459,7 +459,7 @@ export const IMAGE_OUTPUT_LIST_BUNDLE_URI = "e2e/mcp_e2e_imggen_many.mthds";
 export const TINY_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
-/** An http(s) reference the console arm must pass through untouched. */
+/** An http(s) reference the console's input walk must pass through untouched. */
 export const PASS_THROUGH_URL = "https://example.com/pipelex-mcp-e2e.png";
 
 const MISSING_FIXTURE_HINT =

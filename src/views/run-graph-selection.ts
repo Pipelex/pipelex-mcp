@@ -4,7 +4,7 @@
  * and the artifact lookups; this module owns which pipe the form is for.
  */
 
-/** A pipe picked for the form: the bare code `mthds_run` takes, plus its domain for the contract lookup. */
+/** A pipe picked for the form: its code, plus its domain for the contract lookup and the `pipe_ref` `pipelex_run` takes. */
 export interface SelectedPipe {
   domain?: string;
   code: string;
@@ -17,8 +17,9 @@ export function parsePipeRef(ref: string): SelectedPipe {
 }
 
 /**
- * The pipe the form is for: the node the user last clicked, else the effective
- * entry pipe the verdict settled (`_meta.main_pipe_ref`), else **nothing**.
+ * The pipe the form is for: the node the user last clicked, else the pipe the
+ * show named or the effective entry pipe the verdict settled
+ * (`_meta.form_pipe_ref`, then `_meta.main_pipe_ref`), else **nothing**.
  *
  * There is deliberately no third arm. A verdict with no entry pipe — the server
  * stated `default_pipe_ref: null`, say, because the manifest names a pipe the
@@ -33,17 +34,17 @@ export function parsePipeRef(ref: string): SelectedPipe {
  */
 export function selectedPipeFor(
   pickedPipe: SelectedPipe | null,
-  mainPipeRef: string | null,
+  formPipeRef: string | null,
 ): SelectedPipe | null {
   if (pickedPipe) return pickedPipe;
-  if (mainPipeRef) return parsePipeRef(mainPipeRef);
+  if (formPipeRef) return parsePipeRef(formPipeRef);
   return null;
 }
 
 /**
  * The pipe the graph was built for, as a namespaced `pipe_ref`, read off the
  * graph itself: the dry run stamps `pipeline_ref.domain` and
- * `pipeline_ref.main_pipe` with the pipe it traced. On `mthds_validate` that is
+ * `pipeline_ref.main_pipe` with the pipe it traced. On `pipelex_show_method` that is
  * the bundle blueprint's declared `main_pipe` — the report's graph is
  * manifest-blind — so for a `method_ref` package whose `METHODS.toml` names a
  * different entry pipe it is NOT the pipe `_meta.main_pipe_ref` names.
