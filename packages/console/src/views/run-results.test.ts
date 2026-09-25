@@ -14,7 +14,6 @@ import {
   hasExecutedGraph,
   outputFieldFor,
   outputToRender,
-  resolveUrlFor,
   resultsFetchExhausted,
   runDurationSeconds,
   runResultsViewOf,
@@ -175,12 +174,21 @@ describe("withLinksFrom", () => {
   });
 });
 
-describe("resolveUrlFor", () => {
+describe("the resolver runResultsViewOf builds", () => {
+  const content: RunResultsStructuredContent = {
+    status: "ok",
+    run_id: "run_1",
+    state: "completed",
+    main_stuff: { text: "bounded" },
+    available_view_specs: ["run_graph"],
+  };
+  const resolverOf = (links: unknown) =>
+    runResultsViewOf(content, { resolved_urls: links }).resolveUrl;
   const picture = "pipelex-storage://runs/x/illustration.png";
   const link = "https://pipelex-app-dev.s3.amazonaws.com/runs/x/illustration.png?X-Amz-Expires=900";
 
   it("answers a reference it holds a link for, and undefined for any other", () => {
-    const resolve = resolveUrlFor({ [picture]: link });
+    const resolve = resolverOf({ [picture]: link });
     expect(resolve?.(picture)).toBe(link);
     // Undefined is the kernel's cue to fall back to the payload's public_url.
     expect(resolve?.("pipelex-storage://runs/x/other.png")).toBeUndefined();
@@ -189,16 +197,16 @@ describe("resolveUrlFor", () => {
   });
 
   it("reads anything but a map of https links as no resolver", () => {
-    expect(resolveUrlFor(undefined)).toBeUndefined();
-    expect(resolveUrlFor(null)).toBeUndefined();
-    expect(resolveUrlFor([link])).toBeUndefined();
-    expect(resolveUrlFor({})).toBeUndefined();
-    expect(resolveUrlFor({ [picture]: "javascript:alert(1)" })).toBeUndefined();
-    expect(resolveUrlFor({ [picture]: 42 })).toBeUndefined();
+    expect(resolverOf(undefined)).toBeUndefined();
+    expect(resolverOf(null)).toBeUndefined();
+    expect(resolverOf([link])).toBeUndefined();
+    expect(resolverOf({})).toBeUndefined();
+    expect(resolverOf({ [picture]: "javascript:alert(1)" })).toBeUndefined();
+    expect(resolverOf({ [picture]: 42 })).toBeUndefined();
   });
 
   it("keeps the https links of a map that also carries bad entries", () => {
-    const resolve = resolveUrlFor({ [picture]: link, other: "http://plain.example/x.png" });
+    const resolve = resolverOf({ [picture]: link, other: "http://plain.example/x.png" });
     expect(resolve?.(picture)).toBe(link);
     expect(resolve?.("other")).toBeUndefined();
   });

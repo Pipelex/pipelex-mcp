@@ -1301,6 +1301,7 @@ describe("startMthdsRun", () => {
       new ApiUnreachableError("network error", DEFAULT_API_URL, undefined),
       serverError(504),
       serverError(502),
+      serverError(408),
     ];
     for (const failure of failures) {
       const result = await startMthdsRun(
@@ -1314,9 +1315,11 @@ describe("startMthdsRun", () => {
   });
 
   it("keeps a start the server refused outright retryable", () => {
-    const error = classifyStartError(serverError(503), RUN_START_ERROR_OPTIONS);
-    expect(error.retryable).toBe(true);
-    expect(error.hint).not.toContain("the run may have started");
+    for (const status of [503, 429]) {
+      const error = classifyStartError(serverError(status), RUN_START_ERROR_OPTIONS);
+      expect(error.retryable).toBe(true);
+      expect(error.hint).not.toContain("the run may have started");
+    }
   });
 });
 
@@ -1972,6 +1975,36 @@ describe("freshStorageLinks", () => {
     );
 
     expect(fresh).toEqual({ links: undefined, partial: true });
+  });
+
+  it("asks for no further read when the route refuses in a way that would repeat", async () => {
+    const refused = (status: number) =>
+      new ApiResponseError(
+        `HTTP ${status}`,
+        `${DEFAULT_API_URL}/v1/resolve-storage-url/bulk`,
+        status,
+        "Refused",
+        "{}",
+        undefined,
+        undefined,
+        undefined, // validationErrors
+        undefined, // code
+      );
+    // A credential refused, or a deployment without the route: every later
+    // read would get the same answer, so none is asked for.
+    for (const status of [401, 403, 404]) {
+      const fresh = await freshStorageLinks(
+        { resolveStorageUrls: () => Promise.reject(refused(status)) },
+        [{ url: picture }],
+      );
+      expect(fresh).toEqual({ links: undefined, partial: false });
+    }
+    // A throttle may pass, so it is one.
+    const throttled = await freshStorageLinks(
+      { resolveStorageUrls: () => Promise.reject(refused(429)) },
+      [{ url: picture }],
+    );
+    expect(throttled).toEqual({ links: undefined, partial: true });
   });
 
   it("keeps only an https link the route minted for a reference it was asked for", async () => {

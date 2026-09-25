@@ -4,6 +4,10 @@ This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the
 
 ## [Unreleased]
 
+### Fixed
+
+- **A throttled or timed-out request is retryable**: An HTTP 429 or 408 from the Pipelex API now comes back as a retryable `runtime` error instead of a permanent one, so an agent polling `mthds_run_status` knows to try again. A `mthds_run` start that failed with a 408 stays not retryable, since the run may exist anyway, and a 429 on a start is retryable.
+
 ### Changed
 
 - **The workshop is released on its own track**: `@pipelex/mcp` versions, this changelog and the `vX.Y.Z` tags now describe the workshop alone. A workshop release publishes to npm without deploying the hosted console, which is now a separate package in this repository with its own version, changelog and `console-vX.Y.Z` tags, so none of its dependencies reach this one.

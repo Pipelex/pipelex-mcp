@@ -25,6 +25,7 @@ import type {
 import { z } from "zod";
 
 import {
+  BULK_RESOLVE_ERROR_OPTIONS,
   MAX_IMAGE_CANDIDATE_ENTRIES,
   METHOD_REF_GRAMMAR,
   buildApiConfig,
@@ -497,11 +498,12 @@ export interface RunResultsResult {
    */
   resolvedUrls?: Record<string, string>;
   /**
-   * Set, and only ever `true`, when a request for those links failed or ran
-   * out of time, so some reference went without one that a later read may
-   * mint (rides `_meta.resolved_urls_partial`). The views read the results
-   * again for it; a reference the route refused on its own item does not set
-   * it, since asking again would get the same answer.
+   * Set, and only ever `true`, when a request for those links failed in a way
+   * that may pass, or ran out of time, so some reference went without one
+   * that a later read may mint (rides `_meta.resolved_urls_partial`). The
+   * views read the results again for it. A refusal that asking again would
+   * repeat does not set it: the route refusing the credential or missing from
+   * the deployment, or refusing one reference on its own item.
    */
   resolvedUrlsPartial?: true;
 }
@@ -1431,8 +1433,8 @@ const START_NOT_SENT_CODES: ReadonlySet<string> = new Set([
  * creates a durable run that spends inference credit, and this client sends no
  * idempotency key, so retrying after a lost acknowledgement would start a second
  * run. That is the case for a timeout or a dropped connection after the request
- * went out, and for a 502 or 504, where the gateway answered for a request the
- * runner may have accepted.
+ * went out, and for a 502, a 504 or a 408, where something in front of the
+ * runner answered for a request it may have accepted.
  */
 export function classifyStartError(err: unknown, options: ClassifyErrorOptions): ToolError {
   const error = classifyError(err, options);
@@ -1448,7 +1450,12 @@ function startMayHaveRun(err: unknown): boolean {
   if (err instanceof ApiUnreachableError) {
     return err.code === undefined || !START_NOT_SENT_CODES.has(err.code);
   }
-  if (err instanceof ApiResponseError) return err.status === 502 || err.status === 504;
+  // A 408 is a request the server says it never received whole, but a proxy
+  // may answer it for one it forwarded, and a wrong retry here is a second
+  // paid run. A 429 is a throttle refusing the request before it runs.
+  if (err instanceof ApiResponseError) {
+    return err.status === 502 || err.status === 504 || err.status === 408;
+  }
   return false;
 }
 
@@ -1570,9 +1577,11 @@ export interface FreshStorageLinks {
   /** The link minted for each reference that got one; `undefined` when none did. */
   links: Record<string, string> | undefined;
   /**
-   * Whether a request failed or the deadline cut the walk short, so a later
-   * read may link what this one could not. A reference the route refused on
-   * its own item does not count: asking again gets the same answer.
+   * Whether a request failed in a way that may pass, or the deadline cut the
+   * walk short, so a later read may link what this one could not. A refusal
+   * that asking again would repeat does not count, whether of the whole
+   * request (a 401, a 403, a 404 from a deployment without the route) or of
+   * one reference on its own item.
    */
   partial: boolean;
 }
@@ -1597,7 +1606,9 @@ export interface FreshStorageLinks {
  * Best effort by design: the links are a view's convenience and never part of
  * the verdict, so a failed or slow request never fails the results. It stops
  * the walk, keeps what the earlier requests minted, and says so through
- * `partial`, which the views read the results again for. Only a link the route
+ * `partial`, which the views read the results again for — but only when the
+ * failure may pass, which is `classifyError`'s `retryable` verdict on it: the
+ * deadline, an unreachable API, a 5xx, a 408 or a 429. Only a link the route
  * actually minted is kept; an item it refused is left out.
  */
 export async function freshStorageLinks(
@@ -1614,8 +1625,10 @@ export async function freshStorageLinks(
     let answer: BulkResolvedStorageUrls;
     try {
       answer = await client.resolveStorageUrls({ uris: chunk }, { signal: deadline });
-    } catch {
-      partial = true;
+    } catch (err) {
+      // A refusal that would repeat ends the walk too, since every later
+      // request would get it, but asks the views for no further read.
+      partial = classifyError(err, BULK_RESOLVE_ERROR_OPTIONS).retryable;
       break;
     }
     keepMintedLinks(answer, new Set(chunk), links);

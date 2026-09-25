@@ -94,7 +94,21 @@ export function withLinksFrom(shown: RunResultsView, later: RunResultsView): Run
   };
 }
 
-/** The links and the kernel's resolver over them, built together so they never disagree. */
+/**
+ * The links and the kernel's `resolveUrl` over them, built together so they
+ * never disagree. The links are `_meta.resolved_urls`, the fresh link the
+ * console minted for each stored file when it read the results; the resolver
+ * is a lookup, because the kernel's resolver is synchronous by design: a host
+ * that must presign resolves the run's references in one batch and closes
+ * over the map.
+ *
+ * The files have to paint from these. The payload's own `public_url` is signed
+ * path-style on the shared regional S3 host, which no host's CSP scoped to a
+ * bucket, and it expires an hour after the run; these are signed on each
+ * bucket's own host, which the views' CSP names, and a remount reads new ones.
+ * A reference with no link answers `undefined`, which the kernel reads as "use
+ * the payload's `public_url`".
+ */
 function withLinks(
   links: ReadonlyMap<string, string>,
 ): Pick<RunResultsView, "links" | "resolveUrl"> {
@@ -102,24 +116,9 @@ function withLinks(
 }
 
 /**
- * The kernel's `resolveUrl` over `_meta.resolved_urls`, the fresh link the
- * console minted for each stored file when it read the results. A lookup,
- * because the kernel's resolver is synchronous by design: a host that must
- * presign resolves the run's references in one batch and closes over the map.
- *
- * The files have to paint from these. The payload's own `public_url` is signed
- * path-style on the shared regional S3 host, which no host's CSP scoped to a
- * bucket, and it expires an hour after the run; these are signed on each
- * bucket's own host, which the views' CSP names, and a remount reads new ones.
- * A reference with no link answers `undefined`, which the kernel reads as "use
- * the payload's `public_url`". Anything but a map of `https:` strings reads as
- * no links, since the value lands in an `<img src>`.
+ * `_meta.resolved_urls` narrowed to a map of `https:` links. Anything else
+ * reads as none, since the value lands in an `<img src>`.
  */
-export function resolveUrlFor(value: unknown): ResolveUrl | undefined {
-  return resolverOver(linksOf(value));
-}
-
-/** `_meta.resolved_urls` narrowed to a map of `https:` links; anything else reads as none. */
 function linksOf(value: unknown): Map<string, string> {
   const links = new Map<string, string>();
   if (typeof value !== "object" || value === null || Array.isArray(value)) return links;

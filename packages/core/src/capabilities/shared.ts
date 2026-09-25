@@ -1356,6 +1356,22 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     };
   }
 
+  // A throttle or a request that timed out on its way in: refused for its
+  // timing, not its content, so the same call may pass a moment later. Left to
+  // the unexpected-status arm below, a throttled status read stopped a live
+  // follow for good.
+  if (err.status === 429 || err.status === 408) {
+    return {
+      class: "runtime",
+      message,
+      hint:
+        err.status === 429
+          ? "The Pipelex API is limiting requests; try again in a moment."
+          : "The request timed out before the Pipelex API received it; try again.",
+      retryable: true,
+    };
+  }
+
   if (err.status >= 500) {
     return {
       class: "runtime",

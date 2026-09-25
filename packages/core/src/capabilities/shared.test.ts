@@ -812,6 +812,28 @@ describe("classifyError", () => {
     expect(error.retryable).toBe(true);
   });
 
+  it("classifies a throttle (429) or a request timeout (408) as runtime, retryable", () => {
+    // Refused for its timing, not its content: a poll loop must keep going.
+    for (const status of [429, 408]) {
+      const error = classifyError(
+        new ApiResponseError(
+          `HTTP ${status}`,
+          `${DEFAULT_API_URL}/v1/runs/run_1`,
+          status,
+          "Slow down",
+          "{}",
+          undefined,
+          undefined,
+          undefined, // validationErrors
+          undefined, // code
+        ),
+      );
+
+      expect(error.class).toBe("runtime");
+      expect(error.retryable).toBe(true);
+    }
+  });
+
   it("classifies an unexpected non-5xx status as runtime, not retryable", () => {
     const error = classifyError(
       new ApiResponseError(

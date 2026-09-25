@@ -257,7 +257,7 @@ function RunOutput({
         >
           <FieldPresentationProvider presentation="app">
             {/* Files paint from the fresh links the results carried, not the
-                payload's baked `public_url`; see `resolveUrlFor`. */}
+                payload's baked `public_url`; see `withLinks` in `run-results.ts`. */}
             <ResultEnvProvider resolveUrl={results.resolveUrl}>
               {field && oversizedLength === null ? (
                 <StuffViewer field={field} value={value} hideDownload />
@@ -291,11 +291,13 @@ function RunOutput({
         )
       )}
       {/* Said rather than left to a broken tile: a file with no fresh link
-          falls back to a link the CSP refuses. `useRunResults` is reading
-          the results again for the missing ones. */}
+          falls back to a link the CSP refuses. Worded so it stays true once
+          `useRunResults` has made its last read for the missing links
+          (`LINK_REREAD_DELAYS_MS`), and while the tab is hidden, when it
+          reads nothing. */}
       {results.linksPartial && (
         <p className="mt-1 text-xs" style={{ color: mutedColor }}>
-          Some of this output&apos;s files could not be linked yet, so they may not show.
+          Some of this output&apos;s files could not be linked, so they may not show.
         </p>
       )}
     </div>
