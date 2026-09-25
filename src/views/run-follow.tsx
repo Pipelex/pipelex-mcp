@@ -74,10 +74,10 @@ type RunFollowViewState = {
 };
 
 /**
- * The run-follow Skybridge view, registered on `mthds_run`. It follows a
- * durable run on its own — polling the read-only `mthds_run_status` through
+ * The run-follow Skybridge view, registered on `pipelex_run`. It follows a
+ * durable run on its own — polling the read-only `pipelex_run_status` through
  * `useCallTool` (no model turns, no conversation noise), then fetching
- * `mthds_run_results` once the run is terminal: the executed graph (from the
+ * `pipelex_run_results` once the run is terminal: the executed graph (from the
  * response's view-only `meta.graph_spec`) plus a compact output preview on
  * success, the failure message on a failed run. On resolving the terminal
  * outcome it hands the conversation back to the model once (the completion
@@ -87,9 +87,9 @@ type RunFollowViewState = {
  */
 export default function RunFollowView() {
   // Hooks run unconditionally before any early return.
-  const toolInfo = useToolInfo<"mthds_run">();
-  const { callToolAsync: statusAsync } = useCallTool("mthds_run_status");
-  const { callToolAsync: resultsAsync } = useCallTool("mthds_run_results");
+  const toolInfo = useToolInfo<"pipelex_run">();
+  const { callToolAsync: statusAsync } = useCallTool("pipelex_run_status");
+  const { callToolAsync: resultsAsync } = useCallTool("pipelex_run_results");
   const { theme, maxHeight, safeArea } = useLayout();
   const [displayMode, setDisplayMode] = useDisplayMode();
   const [viewState, setViewState] = useViewState<RunFollowViewState>({});
@@ -164,7 +164,7 @@ export default function RunFollowView() {
       if (content.status === "error") {
         const error = content.errors?.[0] ?? {
           class: "runtime" as const,
-          message: "mthds_run_results produced no verdict.",
+          message: "pipelex_run_results produced no verdict.",
           retryable: false,
         };
         if (isTransientPollError(error)) {

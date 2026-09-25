@@ -77,7 +77,7 @@ export const mthdsValidateInputSchema = {
  * decisions, and only the advert speaks for the entry pipe. Extend the enum
  * when a new view kind ships.
  */
-const viewSpecSchema = z.enum(["dry_run_graph", "input_form"]);
+export const viewSpecSchema = z.enum(["dry_run_graph", "input_form"]);
 
 /**
  * The structured-view opt-in sent on every `/validate` call, whatever the
@@ -88,7 +88,7 @@ const viewSpecSchema = z.enum(["dry_run_graph", "input_form"]);
  * absent — which is why "no images" and "unknown" have to be distinguishable
  * downstream.
  */
-const VALIDATE_VIEW_TOKENS = ["input_form", "output_form"] as const;
+export const VALIDATE_VIEW_TOKENS = ["input_form", "output_form"] as const;
 
 /**
  * The MTHDS standard's multiplicity vocabulary (`IOMultiplicity`), as a runtime
@@ -153,7 +153,7 @@ const ioMultiplicitySchema = z
  * the token-heavy part, and `mthds_inputs_template` / `mthds_codegen` are where
  * it belongs.
  */
-const mainPipeSignatureSchema = z.object({
+export const mainPipeSignatureSchema = z.object({
   pipe_ref: z
     .string()
     .describe("Namespaced ref (domain.pipe_code) of the pipe a run executes by default."),
@@ -350,7 +350,7 @@ export interface ValidationResult {
   mainPipeRef?: string;
 }
 
-interface ValidationClient {
+export interface ValidationClient {
   validateFiles(
     files: MthdsFile[],
     options?: ValidateFilesOptions,
@@ -399,7 +399,7 @@ const VALIDATE_ERROR_OPTIONS: ClassifyErrorOptions = {
  * route-independently in `classifyError`, off the runner's declared
  * `error_type`, and land at `methodLocation`.)
  */
-const VALIDATE_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
+export const VALIDATE_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/validate",
   methodLocation: "method_ref",
   badRequest: {
@@ -568,11 +568,22 @@ export function toolResult(result: ValidationResult) {
   };
 }
 
-export function validationResult(
+/**
+ * Everything a validation report projects to except the prose: the verdict,
+ * the signature, the view adverts and the view-only artifacts. Split out of
+ * {@link validationResult} so a tool that composes its own summary —
+ * `pipelex_show_method` — projects the report exactly as `mthds_validate` does.
+ *
+ * `pipeRef` names the pipe the signature and the form advert are for when the
+ * caller chose one; absent, it is the effective entry pipe
+ * ({@link defaultPipeRefOf}), which is what `mthds_validate` always uses.
+ */
+export function projectValidationReport(
   report: PipelexValidationResult,
   includeGraph: boolean,
   viewsAvailable = true,
-): ValidationResult {
+  pipeRef?: string,
+): Omit<ValidationResult, "summary"> {
   const structuredContent: ValidationStructuredContent = {
     status: "ok",
     is_valid: report.is_valid,
@@ -595,7 +606,7 @@ export function validationResult(
     // ref on EVERY valid verdict, views or not. The side effect is that
     // `_meta.main_pipe_ref` now also rides a valid non-runnable verdict, which
     // the view ignores.
-    mainPipeRef = defaultPipeRefOf(validReport);
+    mainPipeRef = pipeRef ?? defaultPipeRefOf(validReport);
     // The signature is the workshop's deliverable as much as the console's, so
     // it is independent of `viewsAvailable` and of `include_graph`, and a
     // pending-signature verdict carries it too — the shape is fully determined
@@ -654,12 +665,6 @@ export function validationResult(
     structuredContent.validation_errors = invalidReport.validation_errors;
   }
 
-  if (report.rendered_markdown == null) {
-    throw new Error("Validation report did not include rendered markdown.");
-  }
-
-  let summary = report.rendered_markdown;
-
   // Advertise the dry-run graph view to the model only when a graph spec was
   // actually produced (valid verdict + include_graph). The spec itself rides
   // `_meta`, which the model never sees — `available_view_specs` is the
@@ -671,6 +676,31 @@ export function validationResult(
   if (formAdvertised) {
     structuredContent.available_view_specs.push("input_form");
   }
+
+  return {
+    structuredContent,
+    graphSpec,
+    pipeIoContracts,
+    inputForm,
+    outputForm,
+    mainPipeRef,
+  };
+}
+
+export function validationResult(
+  report: PipelexValidationResult,
+  includeGraph: boolean,
+  viewsAvailable = true,
+): ValidationResult {
+  const projection = projectValidationReport(report, includeGraph, viewsAvailable);
+  const { structuredContent } = projection;
+
+  if (report.rendered_markdown == null) {
+    throw new Error("Validation report did not include rendered markdown.");
+  }
+
+  let summary = report.rendered_markdown;
+
   // Prose, because agents read the summary more reliably than the structured
   // fields — and because the summary is the one channel that reaches a ChatGPT
   // install whose cached tool list predates the schema change.
@@ -681,15 +711,7 @@ export function validationResult(
     summary += `\n\n## Views\n\n${viewsNote(structuredContent.available_view_specs)}`;
   }
 
-  return {
-    structuredContent,
-    summary,
-    graphSpec,
-    pipeIoContracts,
-    inputForm,
-    outputForm,
-    mainPipeRef,
-  };
+  return { ...projection, summary };
 }
 
 /** The prose counterpart of `available_view_specs`, for agents that read the summary. */
@@ -1006,7 +1028,7 @@ function orderedInputNames(inputForm: unknown, pipeRef: string): string[] {
  * `presence: "plain"`, so an optional list is not a shape a caller can be
  * offered, and only the output can carry both marks.
  */
-function signatureLine(signature: MainPipeSignature): string {
+export function signatureLine(signature: MainPipeSignature): string {
   const inputs = signature.inputs
     .map(
       (input) =>

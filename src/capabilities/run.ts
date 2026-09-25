@@ -28,6 +28,7 @@ import {
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
+  validateMethodReferenceRequest,
   validateMethodSelectorRequest,
   validateRunIdRequest,
 } from "./shared.js";
@@ -41,7 +42,9 @@ import type {
   SubmittedFileInput,
   ToolError,
 } from "./shared.js";
-import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
+import { prepareConsoleInputs } from "./console-inputs.js";
+import type { ConsoleInputsClient, ConsoleInputsSelector } from "./console-inputs.js";
+import { CONSOLE_TOOL_NAMES, WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 import type { ToolNames } from "./tool-names.js";
 
 /**
@@ -283,6 +286,46 @@ export function runResultsOutputSchemaFor(names: ToolNames) {
 
 export const mthdsRunResultsOutputSchema = runResultsOutputSchemaFor(WORKSHOP_TOOL_NAMES);
 
+/**
+ * `pipelex_run`'s input — the console's run, by reference only: no `files`, no
+ * `{ path }` arm, and the pipe selector spelled `pipe_ref` like on every other
+ * console tool (the run routes' own `pipe_code` is a wire detail the console
+ * keeps to itself).
+ */
+export const pipelexRunInputSchema = {
+  method_id: z
+    .string()
+    .optional()
+    .describe(
+      `Catalog id (mt_…) of a saved method in your organization, as ${CONSOLE_TOOL_NAMES.listMethods} returns it. Runs the method's CURRENT stored content. Supply exactly ONE of method_id / method_ref.`,
+    ),
+  method_ref: z
+    .string()
+    .optional()
+    .describe(
+      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side: the repository is fetched at the tag and the resolved commit SHA comes back as provenance. Supply exactly ONE of method_id / method_ref.`,
+    ),
+  pipe_ref: z
+    .string()
+    .optional()
+    .describe(
+      `The pipe to run, as a qualified domain.pipe_code, as ${CONSOLE_TOOL_NAMES.showMethod} reports it. Omit to run the method's entry pipe.`,
+    ),
+  inputs: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe(
+      `The method's inputs — ${CONSOLE_TOOL_NAMES.showMethod}'s template, filled. A file input takes an http(s) URL or a pipelex-storage:// reference; a file the user attached in the chat goes through ${CONSOLE_TOOL_NAMES.uploadAttachments} first.`,
+    ),
+};
+
+export interface PipelexRunInput {
+  method_id?: string;
+  method_ref?: string;
+  pipe_ref?: string;
+  inputs?: Record<string, unknown>;
+}
+
 export interface MthdsRunInput {
   files?: SubmittedFileInput[];
   method_ref?: string;
@@ -444,6 +487,9 @@ interface RunClient {
   getRunResult(runId: string): Promise<RunResultState>;
 }
 
+/** The console's run also reads the signature its input walk needs (test seam). */
+export type PipelexRunClient = RunClient & ConsoleInputsClient;
+
 export interface RunContext extends ApiConfig {
   client?: RunClient;
   /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
@@ -467,6 +513,19 @@ export interface RunContext extends ApiConfig {
 }
 
 export function buildRunContext(env = process.env): RunContext {
+  return buildApiConfig(env);
+}
+
+/**
+ * The console's run context: the shared one, with a client that can also serve
+ * the input walk `pipelex_run` performs before it starts. The status and
+ * results tools read the same context as a plain {@link RunContext}.
+ */
+export interface PipelexRunContext extends RunContext {
+  client?: PipelexRunClient;
+}
+
+export function buildPipelexRunContext(env = process.env): PipelexRunContext {
   return buildApiConfig(env);
 }
 
@@ -551,6 +610,38 @@ export const RUN_START_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
     hint: `Only address-form refs are supported (${METHOD_REF_GRAMMAR}); registry references are reserved until a method registry exists.`,
   },
   serverError: START_SERVER_ERROR,
+};
+
+/**
+ * `pipelex_run`'s start textures. The console names a method by reference only
+ * and has no validate or inputs-template tool, so its hints send the caller to
+ * the one tool that shows a method and its template.
+ */
+const CONSOLE_START_SERVER_ERROR = {
+  hint: `The hosted API reports start-time rejections (e.g. an invalid method or bad inputs) as a generic server error. Check the method with ${CONSOLE_TOOL_NAMES.showMethod} and the inputs against its template; if both pass, the platform itself may be having trouble.`,
+};
+
+export const PIPELEX_RUN_START_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
+  ...RUN_START_BY_REF_ERROR_OPTIONS,
+  badRequest: {
+    location: "method_ref",
+    hint: `Check the address and tag — ${METHOD_REF_GRAMMAR}. The tag must be a git tag on the repository (branches do not pin). If the address resolved, check pipe_ref and the inputs against ${CONSOLE_TOOL_NAMES.showMethod}'s template.`,
+  },
+  serverError: CONSOLE_START_SERVER_ERROR,
+};
+
+export const PIPELEX_RUN_START_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
+  route: "/v1/start",
+  methodLocation: "method_id",
+  badRequest: {
+    location: "method_id",
+    hint: `The saved method may have no MTHDS source yet. Check pipe_ref and the inputs against ${CONSOLE_TOOL_NAMES.showMethod}'s template.`,
+  },
+  notFound: {
+    location: "method_id",
+    hint: `No saved method with this id is visible to your organization. Check the id as ${CONSOLE_TOOL_NAMES.listMethods} returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.`,
+  },
+  serverError: CONSOLE_START_SERVER_ERROR,
 };
 
 /**
@@ -1216,6 +1307,92 @@ export async function startMthdsRun(
   }
 }
 
+/**
+ * `pipelex_run` — start a durable run of a method named by reference, after
+ * preparing its inputs with the console's own walk.
+ *
+ * The walk runs only when there are inputs to walk: with none, there is no
+ * file position to rewrite or refuse, and the one `POST /v1/validate` it costs
+ * would buy nothing. Its refusals stop the run before anything starts, so an
+ * input that would need an upload never costs inference credit. Only the pipe
+ * the caller named rides the start: the walk picks the same default the run
+ * route does, and naming it here would let a disagreement between the two run a
+ * pipe nobody chose.
+ */
+export async function startPipelexRun(
+  input: PipelexRunInput,
+  context: PipelexRunContext = buildPipelexRunContext(),
+): Promise<RunStartResult> {
+  const names = context.toolNames ?? CONSOLE_TOOL_NAMES;
+  const inputErrors = validatePipelexRunRequest(input);
+  if (inputErrors.length > 0) {
+    return startErrorResult("Run was not started: request input is invalid.", inputErrors);
+  }
+
+  const selector: ConsoleInputsSelector & ({ method_ref: string } | { method_id: string }) =
+    input.method_ref !== undefined
+      ? { method_ref: input.method_ref }
+      : { method_id: input.method_id ?? "" };
+  const startOptions =
+    "method_ref" in selector
+      ? PIPELEX_RUN_START_BY_REF_ERROR_OPTIONS
+      : PIPELEX_RUN_START_BY_ID_ERROR_OPTIONS;
+
+  let client: PipelexRunClient;
+  try {
+    client = context.client ?? createPipelexApiClient(context);
+  } catch (err) {
+    const error = classifyError(err, { ...startOptions, auth: context.authError });
+    return startErrorResult(startSummaryForError(error), [error]);
+  }
+
+  let inputs = input.inputs;
+  if (inputs !== undefined && Object.keys(inputs).length > 0) {
+    const prepared = await prepareConsoleInputs(
+      client,
+      {
+        selector,
+        ...(input.pipe_ref === undefined ? {} : { pipe_ref: input.pipe_ref }),
+        inputs,
+      },
+      context.authError,
+    );
+    if (!prepared.ok) {
+      return startErrorResult(summaryForToolError(prepared.error, INPUTS_ERROR_SUMMARIES), [
+        prepared.error,
+      ]);
+    }
+    inputs = prepared.inputs;
+  }
+
+  try {
+    const ack = await client.start({
+      ...selector,
+      ...(input.pipe_ref === undefined ? {} : { pipe_code: input.pipe_ref }),
+      ...(inputs === undefined ? {} : { inputs }),
+    });
+    return startResult(ack, context.viewsAvailable !== false, names);
+  } catch (err) {
+    const error = classifyError(err, { ...startOptions, auth: context.authError });
+    return startErrorResult(startSummaryForError(error), [error]);
+  }
+}
+
+/** Request-shape checks on `pipelex_run`: exactly one method reference, and a pipe_ref that is not blank. */
+export function validatePipelexRunRequest(input: PipelexRunInput): ToolError[] {
+  const errors = validateMethodReferenceRequest(input);
+  if (input.pipe_ref !== undefined && input.pipe_ref.trim() === "") {
+    errors.push({
+      class: "input_domain",
+      location: "pipe_ref",
+      message: "pipe_ref must not be empty when supplied.",
+      hint: "Pass a qualified domain.pipe_code, or omit pipe_ref to run the method's entry pipe.",
+      retryable: false,
+    });
+  }
+  return errors;
+}
+
 /** One cheap self-healing status read — `GET /v1/runs/{id}/status`. */
 export async function getMthdsRunStatus(
   input: RunIdInput,
@@ -1306,6 +1483,15 @@ function toStartOptions(input: ResolvedRunRequest): PipelexStartOptions {
     ...(input.method_id === undefined ? {} : { method_id: input.method_id }),
   };
 }
+
+/** Headlines for a run refused while its inputs were being prepared, before anything started. */
+const INPUTS_ERROR_SUMMARIES: ErrorSummaries = {
+  config:
+    "Run could not start: its inputs could not be checked — the Pipelex API is unreachable or misconfigured.",
+  input_domain: "Run was not started: its inputs could not be prepared as submitted.",
+  runtime: "Run could not start: checking its inputs failed on the Pipelex API.",
+  paywall: "Run could not start: the organization's Pipelex plan does not cover this call.",
+};
 
 const START_ERROR_SUMMARIES: ErrorSummaries = {
   config: "Run could not start: the Pipelex API is unreachable or misconfigured.",

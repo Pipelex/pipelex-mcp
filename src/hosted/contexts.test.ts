@@ -4,7 +4,7 @@ import { ClientAuthenticationError, PipelexApiClient, SDK_VERSION } from "@pipel
 
 import { listMthdsMethods } from "../capabilities/catalog.js";
 import { MCP_VERSION } from "../capabilities/client-identification.js";
-import { validateMthds } from "../capabilities/validate.js";
+import { showPipelexMethod } from "../capabilities/show.js";
 import { contextsForRequest } from "./contexts.js";
 import { buildHostedToolContexts } from "./tools.js";
 
@@ -15,10 +15,9 @@ describe("contextsForRequest", () => {
     const contexts = contextsForRequest(base, { token: "workos_access_token" });
 
     expect(contexts.catalog.apiKey).toBe("workos_access_token");
-    expect(contexts.validation.apiKey).toBe("workos_access_token");
-    expect(contexts.inputs.apiKey).toBe("workos_access_token");
-    expect(contexts.codegen.apiKey).toBe("workos_access_token");
-    expect(contexts.prepare.apiKey).toBe("workos_access_token");
+    expect(contexts.show.apiKey).toBe("workos_access_token");
+    // pipelex_run's input walk reads the method's signature on the same
+    // context, so one override funds both calls.
     expect(contexts.run.apiKey).toBe("workos_access_token");
     // The attachment ingest uploads to storage, so the signed-in caller's own
     // identity is what funds it — the console holds no key.
@@ -40,7 +39,7 @@ describe("contextsForRequest", () => {
     const contexts = contextsForRequest(base, { token: "workos_access_token" });
 
     expect(contexts.catalog.apiKey).toBe("workos_access_token");
-    expect(contexts.validation.apiKey).toBe("workos_access_token");
+    expect(contexts.show.apiKey).toBe("workos_access_token");
   });
 
   it("gives a rejected session the sign-in-again texture", () => {
@@ -48,15 +47,13 @@ describe("contextsForRequest", () => {
       token: "workos_access_token",
     });
 
-    expect(contexts.validation.authError?.location).toBe("authorization");
-    expect(contexts.validation.authError?.hint).toContain("sign in again");
-    expect(contexts.catalog.authError).toEqual(contexts.validation.authError);
-    expect(contexts.inputs.authError).toEqual(contexts.validation.authError);
-    expect(contexts.codegen.authError).toEqual(contexts.validation.authError);
-    expect(contexts.prepare.authError).toEqual(contexts.validation.authError);
-    expect(contexts.run.authError).toEqual(contexts.validation.authError);
-    expect(contexts.attachments.authError).toEqual(contexts.validation.authError);
-    expect(contexts.images.authError).toEqual(contexts.validation.authError);
+    expect(contexts.show.authError?.location).toBe("authorization");
+    expect(contexts.show.authError?.hint).toContain("sign in again");
+    expect(contexts.catalog.authError).toEqual(contexts.show.authError);
+    expect(contexts.run.authError).toEqual(contexts.show.authError);
+    expect(contexts.attachments.authError).toEqual(contexts.show.authError);
+    expect(contexts.images.authError).toEqual(contexts.show.authError);
+    expect(contexts.uploadGrant.authError).toEqual(contexts.show.authError);
   });
 
   it("clears a server-held env key when no verified token reached the handler", () => {
@@ -71,14 +68,11 @@ describe("contextsForRequest", () => {
     // `options.apiKey ?? process.env.PIPELEX_API_KEY`, so an absent key falls
     // back to the deployment's env. See the behavioral test below — asserting
     // this field alone does not prove the guarantee.
-    expect(contexts.catalog.apiKey).toBe("");
-    expect(contexts.validation.apiKey).toBe("");
-    expect(contexts.codegen.apiKey).toBe("");
-    expect(contexts.run.apiKey).toBe("");
-    expect(contexts.attachments.apiKey).toBe("");
-    expect(contexts.images.apiKey).toBe("");
-    expect(contexts.validation.authError?.location).toBe("authorization");
-    expect(contexts.validation.authError?.hint).toContain("no verified sign-in");
+    for (const [name, context] of Object.entries(contexts)) {
+      expect(context.apiKey, name).toBe("");
+    }
+    expect(contexts.show.authError?.location).toBe("authorization");
+    expect(contexts.show.authError?.hint).toContain("no verified sign-in");
   });
 
   it("preserves the console's own settings through the override", () => {
@@ -86,16 +80,15 @@ describe("contextsForRequest", () => {
 
     const contexts = contextsForRequest(base, { token: "workos_access_token" });
 
-    // Views on; no filesystem, so no `{ path }` resolver and no write root;
-    // no uploads through mthds_prepare_inputs; no download tool to name.
-    expect(contexts.validation.viewsAvailable).toBe(true);
+    // Views on; no filesystem, so no `{ path }` resolver; no download tool to
+    // name; and every text in the console's own tool names.
     expect(contexts.run.viewsAvailable).toBe(true);
-    expect(contexts.validation.resolver).toBeUndefined();
     expect(contexts.run.resolver).toBeUndefined();
-    expect(contexts.codegen.saveRoot).toBeUndefined();
-    expect(contexts.prepare.allowUpload).toBe(false);
     expect(contexts.run.artifactDownloadAvailable).toBe(false);
     expect(contexts.images.artifactDownloadAvailable).toBe(false);
+    expect(contexts.catalog.toolNames?.shell).toBe("console");
+    expect(contexts.run.toolNames?.shell).toBe("console");
+    expect(contexts.images.toolNames?.shell).toBe("console");
   });
 });
 
@@ -157,14 +150,12 @@ describe("console auth failures through a capability", () => {
       token: "workos_access_token",
     });
 
-    const result = await validateMthds(
-      { files: [{ content: 'domain = "demo"\n' }] },
+    const result = await showPipelexMethod(
+      { method_id: "mt_demo" },
       {
-        ...contexts.validation,
+        ...contexts.show,
         client: {
-          validate: () =>
-            Promise.reject(new Error("validate (selector leg) must not be called in this test")),
-          validateFiles: () => Promise.reject(new ClientAuthenticationError("Unauthorized")),
+          validate: () => Promise.reject(new ClientAuthenticationError("Unauthorized")),
         },
       },
     );
@@ -231,7 +222,7 @@ describe("the console's User-Agent", () => {
     // Every member of the console's context set, so a context added to it later
     // is covered without editing this list.
     const all = Object.values(contexts);
-    expect(all).toHaveLength(9);
+    expect(all).toHaveLength(6);
     for (const context of all) {
       expect(context.appInfo?.().details).toEqual(["console", "host=openai"]);
     }

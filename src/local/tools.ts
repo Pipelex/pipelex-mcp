@@ -156,9 +156,10 @@ export function buildLocalToolContexts(
     // `saveRoot` is the working directory on every writer: codegen resolves
     // `output_dir` against it, as the download tool resolves `dir`.
     codegen: { ...buildCodegenContext(env), resolver, saveRoot: rootDir },
-    // The workshop is co-located with the user's files, so it uploads
-    // file-bearing inputs (local paths, data: URLs, bytes).
-    prepare: { ...buildPrepareContext(env), resolver, allowUpload: true },
+    // The workshop is co-located with the user's files, so its prepare tool
+    // uploads file-bearing inputs (local paths, data: URLs, bytes); the
+    // console has no prepare tool at all.
+    prepare: { ...buildPrepareContext(env), resolver },
     // The results summary names mthds_download_artifacts, which exists here.
     run: {
       ...buildRunContext(env),

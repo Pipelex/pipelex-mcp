@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import { ApiResponseError, ApiUnreachableError, MissingMainStuffError } from "@pipelex/sdk";
 import type {
@@ -6,6 +7,8 @@ import type {
   MethodProvenance,
   OutputForm,
   PipeIOContracts,
+  PipelexValidationReport,
+  PipelexValidationResult,
   RunRead,
   RunResults,
   RunResultStart,
@@ -14,6 +17,7 @@ import type {
   PipelexStartOptions,
   TokensUsageRecord,
   UsageSummary,
+  ValidateMethodSelector,
 } from "@pipelex/sdk";
 
 import {
@@ -25,17 +29,22 @@ import {
   projectRunUsage,
   projectUsageByPipe,
   resultsResult,
+  runIdInputSchemaFor,
+  runResultsOutputSchemaFor,
+  runStartOutputSchemaFor,
   RUN_RESULTS_ERROR_OPTIONS,
   RUN_START_ERROR_OPTIONS,
   RUN_STATUS_ERROR_OPTIONS,
   runResultsToolResult,
   startMthdsRun,
+  startPipelexRun,
   startResult,
   statusResult,
   validateRunRequest,
 } from "./run.js";
-import type { RunContext } from "./run.js";
+import type { PipelexRunContext, RunContext } from "./run.js";
 import { classifyError, DEFAULT_API_URL, MAX_IMAGE_CANDIDATE_ENTRIES } from "./shared.js";
+import { CONSOLE_TOOL_NAMES } from "./tool-names.js";
 
 const RUN_ID = "01JRUN0000000000000000TEST";
 
@@ -1827,5 +1836,212 @@ describe("startMthdsRun path submissions", () => {
     expect(result.structuredContent.errors?.[0]?.location).toBe("files[0].path");
     expect(result.structuredContent.errors?.[0]?.hint).toContain("npx @pipelex/mcp");
     expect(result.summary).toBe("Run was not started: request input is invalid.");
+  });
+});
+
+// ── the console's run: `pipelex_run` ────────────────────────────────
+
+describe("startPipelexRun", () => {
+  /** A signature with one image input and one text input, for the walk to read. */
+  const WALK_FORM: InputForm = {
+    "demo.main": {
+      fields: [
+        {
+          name: "photo",
+          kind: "image",
+          concept_ref: "native.Image",
+          required: true,
+          presence: "plain",
+          gating: true,
+        },
+        {
+          name: "question",
+          kind: "prose",
+          concept_ref: "native.Text",
+          required: true,
+          presence: "plain",
+          gating: true,
+        },
+      ],
+    },
+  };
+
+  const WALK_REPORT: PipelexValidationReport = {
+    is_valid: true,
+    bundle_blueprint: { domain: "demo", main_pipe: "main" },
+    pipe_io_contracts: {},
+    input_form: WALK_FORM,
+    graph_spec: {},
+    validated_pipes: [],
+    pending_signatures: [],
+    liftable_pipes: [],
+    warnings: [],
+    is_runnable: true,
+    message: "ok",
+  };
+
+  interface Recorded {
+    validated: Array<string[] | ValidateMethodSelector>;
+    started: PipelexStartOptions[];
+  }
+
+  /** A console run context whose client serves the walk's read and the start, recording both. */
+  function consoleContext(
+    options: { report?: PipelexValidationResult; start?: () => Promise<RunResultStart> } = {},
+  ): { context: PipelexRunContext; recorded: Recorded } {
+    const recorded: Recorded = { validated: [], started: [] };
+    const context: PipelexRunContext = {
+      baseUrl: DEFAULT_API_URL,
+      toolNames: CONSOLE_TOOL_NAMES,
+      client: {
+        ...NEVER_CLIENT,
+        async validate(source: string[] | ValidateMethodSelector) {
+          recorded.validated.push(source);
+          return options.report ?? WALK_REPORT;
+        },
+        start(startOptions: PipelexStartOptions) {
+          recorded.started.push(startOptions);
+          return options.start?.() ?? Promise.resolve({ pipeline_run_id: RUN_ID });
+        },
+      },
+    };
+    return { context, recorded };
+  }
+
+  it("walks the inputs against the method's signature, then starts it by reference", async () => {
+    const { context, recorded } = consoleContext();
+
+    const result = await startPipelexRun(
+      {
+        method_id: "mt_demo",
+        pipe_ref: "demo.main",
+        inputs: { photo: "https://example.com/cat.png", question: "why?" },
+      },
+      context,
+    );
+
+    // The walk reads the signature of the same method the run starts.
+    expect(recorded.validated).toEqual([{ method_id: "mt_demo" }]);
+    // The console's `pipe_ref` rides the run route's `pipe_code`, and the file
+    // input arrives in the shape the run needs.
+    expect(recorded.started).toEqual([
+      {
+        method_id: "mt_demo",
+        pipe_code: "demo.main",
+        inputs: {
+          photo: { url: "https://example.com/cat.png" },
+          question: "why?",
+        },
+      },
+    ]);
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.run_id).toBe(RUN_ID);
+  });
+
+  it("refuses an upload-needing value before anything starts, naming the attachment tool", async () => {
+    const { context, recorded } = consoleContext();
+
+    const result = await startPipelexRun(
+      { method_ref: "github.com/acme/methods@v1", inputs: { photo: "/etc/passwd", question: "x" } },
+      context,
+    );
+
+    expect(recorded.started).toEqual([]);
+    expect(result.structuredContent.status).toBe("error");
+    const error = result.structuredContent.errors?.[0];
+    expect(error?.class).toBe("input_domain");
+    expect(error?.location).toBe("inputs");
+    expect(error?.hint).toContain("pipelex_upload_attachments");
+    expect(JSON.stringify(result)).not.toContain("mthds_");
+  });
+
+  it("reads no signature when there are no inputs to walk", async () => {
+    const { context, recorded } = consoleContext();
+
+    await startPipelexRun({ method_ref: "github.com/acme/methods@v1" }, context);
+    await startPipelexRun({ method_id: "mt_demo", inputs: {} }, context);
+
+    expect(recorded.validated).toEqual([]);
+    expect(recorded.started).toEqual([
+      { method_ref: "github.com/acme/methods@v1" },
+      { method_id: "mt_demo", inputs: {} },
+    ]);
+  });
+
+  it("requires exactly one method reference, before any call", async () => {
+    const { context, recorded } = consoleContext();
+
+    const neither = await startPipelexRun({ inputs: {} }, context);
+    const both = await startPipelexRun(
+      { method_id: "mt_demo", method_ref: "github.com/acme/methods@v1" },
+      context,
+    );
+    const blankPipe = await startPipelexRun({ method_id: "mt_demo", pipe_ref: " " }, context);
+
+    expect(neither.structuredContent.errors?.[0]?.location).toBe("method_id");
+    expect(both.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(blankPipe.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
+    expect(recorded.validated).toEqual([]);
+    expect(recorded.started).toEqual([]);
+  });
+
+  it("points a refused start at the console's own tools", async () => {
+    const { context } = consoleContext({
+      start: () =>
+        Promise.reject(
+          new ApiResponseError(
+            "HTTP 422",
+            `${DEFAULT_API_URL}/v1/start`,
+            422,
+            "Unprocessable Entity",
+            "{}",
+            "error",
+            "bad inputs",
+            undefined,
+            undefined,
+          ),
+        ),
+    });
+
+    const result = await startPipelexRun({ method_id: "mt_demo" }, context);
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
+    expect(result.structuredContent.errors?.[0]?.hint).toContain("pipelex_show_method");
+    expect(JSON.stringify(result)).not.toContain("mthds_");
+  });
+
+  it("follows its run with the console's status tool", async () => {
+    const { context } = consoleContext();
+
+    const result = await startPipelexRun({ method_id: "mt_demo" }, context);
+
+    expect(result.summary).toContain("pipelex_run_status");
+    expect(result.summary).not.toContain("mthds_");
+  });
+});
+
+describe("the run family in the console's names", () => {
+  it("names no workshop tool in a status, a result or a schema", () => {
+    const status = statusResult(runRead({ status: "RUNNING" }), CONSOLE_TOOL_NAMES);
+    const results = resultsResult(
+      {
+        state: "completed",
+        pipeline_run_id: RUN_ID,
+        result: { pipeline_run_id: RUN_ID, main_stuff: { answer: 42 } },
+      } as RunResultState,
+      false,
+      false,
+      CONSOLE_TOOL_NAMES,
+    );
+    const schemas = JSON.stringify([
+      z.toJSONSchema(z.object(runIdInputSchemaFor(CONSOLE_TOOL_NAMES))),
+      z.toJSONSchema(runStartOutputSchemaFor(CONSOLE_TOOL_NAMES)),
+      z.toJSONSchema(runResultsOutputSchemaFor(CONSOLE_TOOL_NAMES)),
+    ]);
+
+    for (const text of [JSON.stringify(status), JSON.stringify(results), schemas]) {
+      expect(text).not.toContain("mthds_");
+    }
   });
 });

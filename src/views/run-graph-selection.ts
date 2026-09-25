@@ -4,7 +4,7 @@
  * and the artifact lookups; this module owns which pipe the form is for.
  */
 
-/** A pipe picked for the form: the bare code `mthds_run` takes, plus its domain for the contract lookup. */
+/** A pipe picked for the form: its code, plus its domain for the contract lookup and the `pipe_ref` `pipelex_run` takes. */
 export interface SelectedPipe {
   domain?: string;
   code: string;
@@ -43,7 +43,7 @@ export function selectedPipeFor(
 /**
  * The pipe the graph was built for, as a namespaced `pipe_ref`, read off the
  * graph itself: the dry run stamps `pipeline_ref.domain` and
- * `pipeline_ref.main_pipe` with the pipe it traced. On `mthds_validate` that is
+ * `pipeline_ref.main_pipe` with the pipe it traced. On `pipelex_show_method` that is
  * the bundle blueprint's declared `main_pipe` — the report's graph is
  * manifest-blind — so for a `method_ref` package whose `METHODS.toml` names a
  * different entry pipe it is NOT the pipe `_meta.main_pipe_ref` names.

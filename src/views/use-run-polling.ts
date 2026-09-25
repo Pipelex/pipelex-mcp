@@ -28,13 +28,13 @@ export interface RunPollingSnapshot {
   hardError: ToolError | null;
 }
 
-/** The slice of `useCallTool("mthds_run_status")` the poll loop consumes. */
+/** The slice of `useCallTool("pipelex_run_status")` the poll loop consumes. */
 export type StatusFetcher = (args: {
   run_id: string;
 }) => Promise<{ structuredContent: RunStatusStructuredContent }>;
 
 /**
- * Self-polling loop over `mthds_run_status` for one durable run: no model
+ * Self-polling loop over `pipelex_run_status` for one durable run: no model
  * turns, no conversation noise. Cadence and the transient-vs-hard error split
  * live in `run-polling.ts` (pure, unit-tested); this hook owns the timers.
  * Pauses while the tab is hidden (one immediate read on return), stops on a
@@ -106,7 +106,7 @@ export function useRunPolling(
       if (content.status === "error") {
         const error = content.errors?.[0] ?? {
           class: "runtime" as const,
-          message: "mthds_run_status produced no verdict.",
+          message: "pipelex_run_status produced no verdict.",
           retryable: false,
         };
         if (isTransientPollError(error)) {

@@ -534,6 +534,52 @@ export function validateMethodSelectorRequest(
 }
 
 /**
+ * Request-shape checks for a tool that names its method by reference only —
+ * the console's `pipelex_show_method` and `pipelex_run`, which take no files:
+ * exactly one of `method_id` / `method_ref`, neither blank. It is the
+ * `one_selector` rule of {@link validateMethodSelectorRequest} with the files
+ * arm gone, and its teaching text names only the two forms such a tool takes,
+ * since telling a caller to "submit files" to a tool with no `files` argument
+ * sends it after a parameter that does not exist.
+ */
+export function validateMethodReferenceRequest(selectors: MethodSelectors): ToolError[] {
+  const errors: ToolError[] = [];
+
+  if (selectors.method_ref !== undefined && selectors.method_ref.trim() === "") {
+    errors.push({
+      class: "input_domain",
+      location: "method_ref",
+      message: "method_ref must not be empty when supplied.",
+      hint: `Pass a published method's address — ${METHOD_REF_GRAMMAR} — or a saved method's catalog id (mt_…) as method_id instead.`,
+      retryable: false,
+    });
+  }
+
+  if (selectors.method_id !== undefined && selectors.method_id.trim() === "") {
+    errors.push({
+      class: "input_domain",
+      location: "method_id",
+      message: "method_id must not be empty when supplied.",
+      hint: "Pass the catalog id (mt_…) of a saved method, or a published method's address as method_ref instead.",
+      retryable: false,
+    });
+  }
+
+  if (selectors.method_ref === undefined && selectors.method_id === undefined) {
+    errors.push({
+      class: "input_domain",
+      location: "method_id",
+      message: "Provide a method_id or a method_ref.",
+      hint: `Pass the catalog id (mt_…) of a saved method as method_id, or a published method's address (${METHOD_REF_GRAMMAR}) as method_ref.`,
+      retryable: false,
+    });
+  }
+
+  errors.push(...validateSelectorExclusivity([], selectors, "one_selector"));
+  return errors;
+}
+
+/**
  * The illegal pairings per {@link SelectorRule}. Evaluated only on validly
  * supplied selectors (a blank one already earned its own error above), and
  * emitting one error per illegal pair so a three-selector request teaches both
