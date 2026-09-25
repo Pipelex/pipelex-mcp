@@ -7,6 +7,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { ClientCapabilities } from "@modelcontextprotocol/sdk/types.js";
 import type { OAuthConfig } from "skybridge/server";
 
 import pkg from "../package.json" with { type: "json" };
@@ -38,14 +39,17 @@ export type ListedTool = Awaited<ReturnType<Client["listTools"]>>["tools"][numbe
 /**
  * Connect an in-memory MCP client to a shell. `clientInfo` is what the client
  * declares on `initialize` — the host identity the workshop's `User-Agent`
- * reads — and defaults to a neutral test name.
+ * reads — and defaults to a neutral test name. `capabilities` is what it
+ * declares it can do, which the console reads to tailor its instructions;
+ * absent, the client declares nothing.
  */
 export async function connectClient(
   server: TestServer,
   clientInfo: { name: string; version: string } = { name: "pipelex-mcp-test", version: "0.0.0" },
+  capabilities?: ClientCapabilities,
 ) {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client(clientInfo);
+  const client = new Client(clientInfo, capabilities === undefined ? undefined : { capabilities });
 
   await server.connect(serverTransport);
   await client.connect(clientTransport);

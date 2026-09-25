@@ -967,7 +967,7 @@ describe("the produces-images signal", () => {
     });
 
     it("rides a valid verdict whose signatures are still pending", () => {
-      // Independent of `is_runnable` and of `include_graph`, like the rest of
+      // Independent of `is_runnable` and of `includeGraph`, like the rest of
       // the signature: the output's shape is settled before the signatures are.
       const result = validationResult(
         {
@@ -1262,10 +1262,11 @@ describe("validateMthds", () => {
           { content: 'domain = "demo"', uri: "bundle.mthds" },
           { content: 'main_pipe = "main"', uri: null },
         ],
-        include_graph: false,
       },
       {
         baseUrl: DEFAULT_API_URL,
+        // The workshop's context: it renders no views.
+        viewsAvailable: false,
         client: {
           ...selectorValidateNotCalled,
           async validateFiles(files, options) {
@@ -1289,8 +1290,8 @@ describe("validateMthds", () => {
       views: ["input_form", "output_form"],
     });
     expect(result.structuredContent.status).toBe("ok");
-    // include_graph: false drops the graph view only; the form stays.
-    expect(result.structuredContent.available_view_specs).toEqual(["input_form"]);
+    // A shell that renders no views gets neither the graph nor the form.
+    expect(result.structuredContent.available_view_specs).toEqual([]);
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
     expect(result.graphSpec).toBeUndefined();
   });

@@ -1,8 +1,20 @@
 {
   "name": "@pipelex/mcp",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "The MCP server inside the Pipelex plugin: validate, prepare and run AI methods on Pipelex from a coding agent.",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol", "pipelex", "mthds", "ai-methods", "coding-agent", "claude-code", "codex", "cursor", "mistral-vibe"],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "pipelex",
+    "mthds",
+    "ai-methods",
+    "coding-agent",
+    "claude-code",
+    "codex",
+    "cursor",
+    "mistral-vibe"
+  ],
   "license": "Elastic-2.0",
   "repository": {
     "type": "git",
@@ -35,20 +47,20 @@
     "smoke": "tsx --env-file-if-exists=.env scripts/smoke.ts",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "seed:e2e-fixture": "tsx --env-file-if-exists=.env scripts/seed-e2e-fixture.ts",
-    "check": "npm run lint && npm run format:check && npm run check:tool-texts && npm run build && npm run check:cascade && npm run build:local && npm run typecheck",
-    "build": "skybridge build",
+    "check": "npm run lint && npm run format:check && npm run check:tool-texts && npm run build && npm run check:bundle && npm run check:cascade && npm run build:local && npm run typecheck",
+    "build": "skybridge build && node scripts/emit-server-bundle.mjs",
+    "check:bundle": "node scripts/check-server-bundle.mjs",
     "check:cascade": "node scripts/check-cascade.mjs",
     "check:tool-texts": "tsx scripts/check-tool-texts.ts",
     "build:local": "tsup",
     "prepack": "npm run build:local",
-    "start": "skybridge start",
+    "start": "NODE_ENV=production node dist/server.bundle.js",
     "deploy": "alpic deploy"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@pipelex/sdk": "^0.24.0",
+    "@pipelex/sdk": "^0.25.1",
     "mthds": "^0.25.0",
-    "skybridge": "^1.4.1",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -69,6 +81,7 @@
     "prettier": "^3.8.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "skybridge": "^1.4.1",
     "sonner": "^2.0.7",
     "tailwindcss": "^4.2.4",
     "tsup": "^8.5.1",

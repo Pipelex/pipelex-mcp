@@ -1,10 +1,10 @@
 # Registering the workshop in a host
 
-The workshop is this repository's stdio server. This page gives its registration in each host that spawns it, the environment variables it reads, and the working directory it is bound to. On Claude Code and Codex, the [Pipelex plugin](https://github.com/Pipelex/pipelex-plugins) runs this server for you, beside the skills that build methods, so register it by hand only where you do not use the plugin, and never beside it. A chatbot adds the hosted console by its address instead: see [Which server, for which host](../README.md#which-server-for-which-host).
+The workshop is this repository's stdio server. This page gives its registration in each host that spawns it, the environment variables it reads, and the working directory it is bound to. On Claude Code and Codex, the [Pipelex plugin](https://github.com/Pipelex/pipelex-plugins) runs this server for you, beside the skills that build methods, so register it by hand only where you do not use the plugin, and never beside it. A chatbot adds the hosted console, the Pipelex connector, by its address instead: see [Which server, for which host](../README.md#which-server-for-which-host). The connector's tools are `pipelex_*` and the workshop's are `mthds_*`, so a host that ends up with both, as Claude Code does when a claude.ai connector syncs into it, can tell them apart, and the workshop's instructions tell the model to use its `mthds_*` tools for all method work there.
 
 The workshop is published as [`@pipelex/mcp`](https://www.npmjs.com/package/@pipelex/mcp). Hosts spawn it on demand with `npx -y @pipelex/mcp` (bin `pipelex-mcp`); you do not install it globally. It needs **Node.js 24.14.1 or later** and a `PIPELEX_API_KEY` (a `plx_sk_` platform key, created in your console at [app.pipelex.com](https://app.pipelex.com)): against the hosted Pipelex API every tool needs one, and only a local `pipelex-api` runner started without authentication answers `mthds_validate`, `mthds_inputs_template` and `mthds_codegen` without a key.
 
-The registration name is yours to choose; these snippets use `pipelex` (which yields `mcp__pipelex__mthds_validate`-style tool names).
+The registration name is yours to choose; these snippets use `pipelex` (which yields `mcp__pipelex__mthds_validate`-style tool names). Whatever you call it, the server reports itself as `pipelex-plugin` in its MCP handshake.
 
 ## Claude Code
 

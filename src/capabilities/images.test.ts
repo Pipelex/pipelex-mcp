@@ -1,17 +1,21 @@
 import { ApiResponseError, ApiUnreachableError, ArtifactFetchError } from "@pipelex/sdk";
 import type { FetchArtifactOptions, RunResultState } from "@pipelex/sdk";
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 
 import {
   INLINE_IMAGES_DEADLINE_MS,
   INLINE_IMAGE_TIMEOUT_MS,
   buildImagesContext,
   selectCandidates,
+  showImagesInputSchemaFor,
+  showImagesOutputSchemaFor,
   showImagesToolResult,
   showMthdsRunImages,
   validateShowImagesRequest,
 } from "./images.js";
 import type { ImagesClient, ImagesContext } from "./images.js";
+import { CONSOLE_TOOL_NAMES } from "./tool-names.js";
 import {
   DEFAULT_API_URL,
   INLINE_IMAGES_BUDGET,
@@ -880,5 +884,26 @@ describe("showImagesToolResult", () => {
 
     expect(tool.isError).toBe(true);
     expect(tool.content.map((item) => item.type)).toEqual(["text"]);
+  });
+});
+
+describe("pipelex_show_images, the console's twin", () => {
+  it("names only the console's tools in its schemas and refusals", () => {
+    const schemas = JSON.stringify([
+      z.toJSONSchema(z.object(showImagesInputSchemaFor(CONSOLE_TOOL_NAMES))),
+      z.toJSONSchema(showImagesOutputSchemaFor(CONSOLE_TOOL_NAMES)),
+    ]);
+    const refusals = JSON.stringify([
+      ...validateShowImagesRequest({ run_id: "  " }, CONSOLE_TOOL_NAMES),
+      ...validateShowImagesRequest(
+        { run_id: RUN_ID, images: [COVER], indices: [0] },
+        CONSOLE_TOOL_NAMES,
+      ),
+    ]);
+
+    expect(schemas).toContain("pipelex_run_results");
+    for (const text of [schemas, refusals]) {
+      expect(text).not.toContain("mthds_");
+    }
   });
 });

@@ -1,7 +1,7 @@
 {
   "initialize": {
     "serverInfo": {
-      "name": "pipelex-mcp",
+      "name": "pipelex-plugin",
       "version": "<package.json version>"
     },
     "capabilities": {
@@ -9,7 +9,7 @@
         "listChanged": true
       }
     },
-    "instructions": "pipelex-mcp is the local workshop for executable AI methods written in MTHDS (.mthds). The usual flow: `mthds_list_methods` to find a saved method, `mthds_validate`, `mthds_inputs_template` and fill it, `mthds_prepare_inputs`, `mthds_run`, then `mthds_run_status` and `mthds_run_results` with the run id, and finally `mthds_show_images` to see a picture it produced, or `mthds_download_artifacts` to save its output and files to disk. `mthds_codegen` turns a method into typed code for the project you are in, and `mthds_save_method` and `mthds_get_method` push a bundle to the catalog and pull one back. Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`, `mthds_run`) takes its method one of three ways: files, a published method's address as method_ref, or a catalog id (mt_…) as method_id. An address or an id is resolved server-side, so no bundle enters the conversation. Prefer the `{ path: string }` file form for workspace .mthds files: a path is resolved against the directory this server was started in, and diagnostics name it. Inline `{ content: string, uri?: string }` files are accepted too. Call `mthds_list_methods` when the user asks what saved methods exist or names one without its mt_ id; choose by name and description, then pass the id on. `mthds_run` executes on the hosted Pipelex API and spends inference credit. A picture from `mthds_show_images` stays in the conversation for every turn that follows, so show one when it is asked for, not by reflex. This workshop has no views: report the structured result and the text summary to the user."
+    "instructions": "This is the Pipelex plugin's local workshop for executable AI methods written in MTHDS (.mthds). The usual flow: `mthds_list_methods` to find a saved method, `mthds_validate`, `mthds_inputs_template` and fill it, `mthds_prepare_inputs`, `mthds_run`, then `mthds_run_status` and `mthds_run_results` with the run id, and finally `mthds_show_images` to see a picture it produced, or `mthds_download_artifacts` to save its output and files to disk. When the Pipelex connector's `pipelex_*` tools are also present, use these `mthds_*` tools for all method work and never mix the two servers: each can be signed in to a different organization. `mthds_codegen` turns a method into typed code for your project, and `mthds_save_method` and `mthds_get_method` push a bundle to the catalog and pull one back. Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`, `mthds_run`) takes its method one of three ways: files, a published method's address as method_ref, or a catalog id (mt_…) as method_id (the last two resolved server-side). Prefer the `{ path: string }` file form for workspace .mthds files: a path resolves against this server's working directory, and diagnostics name it. Inline `{ content: string, uri?: string }` files are accepted too. Call `mthds_list_methods` when the user asks what saved methods exist or names one without its mt_ id; choose by name and description, then pass the id on. `mthds_run` spends inference credit. A picture from `mthds_show_images` stays in the conversation for every turn that follows, so show one when it is asked for, not by reflex. This workshop has no views: report the structured result and the text summary to the user."
   },
   "tools": [
     {
@@ -200,7 +200,7 @@
                   "properties": {
                     "path": {
                       "type": "string",
-                      "description": "Filesystem path to a .mthds file, resolved by the local workshop server relative to its working directory. The hosted deployment cannot read files and rejects this form."
+                      "description": "Filesystem path to a .mthds file, resolved relative to this server's working directory."
                     }
                   },
                   "required": [
@@ -209,7 +209,7 @@
                 }
               ]
             },
-            "description": "One or more submitted MTHDS files forming the method closure. Each item is either inline contents ({ content, uri? }) or a file path ({ path }, local workshop only)."
+            "description": "One or more submitted MTHDS files forming the method closure. Each item is either inline contents ({ content, uri? }) or a file path ({ path })."
           },
           "method_ref": {
             "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side: the repository is fetched at the tag and the package's own file names label the diagnostics; no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.",
@@ -218,10 +218,6 @@
           "method_id": {
             "description": "Catalog id (mt_…) of a registered method. Validates the method's CURRENT stored content server-side — requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_ref / method_id.",
             "type": "string"
-          },
-          "include_graph": {
-            "description": "Whether to include graph_spec in successful responses. Defaults to true.",
-            "type": "boolean"
           }
         },
         "$schema": "http://json-schema.org/draft-07/schema#"
@@ -461,7 +457,7 @@
                   "properties": {
                     "path": {
                       "type": "string",
-                      "description": "Filesystem path to a .mthds file, resolved by the local workshop server relative to its working directory. The hosted deployment cannot read files and rejects this form."
+                      "description": "Filesystem path to a .mthds file, resolved relative to this server's working directory."
                     }
                   },
                   "required": [
@@ -470,7 +466,7 @@
                 }
               ]
             },
-            "description": "One or more submitted MTHDS files forming the method closure. Each item is either inline contents ({ content, uri? }) or a file path ({ path }, local workshop only)."
+            "description": "One or more submitted MTHDS files forming the method closure. Each item is either inline contents ({ content, uri? }) or a file path ({ path })."
           },
           "method_ref": {
             "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.",
@@ -604,7 +600,7 @@
     },
     {
       "name": "mthds_codegen",
-      "description": "Generate typed code for an MTHDS method: its concept set projected into typed models by the Pipelex codegen engine, stamped and locked so the written tree can be checked offline. Supply exactly ONE of files / method_ref / method_id — never several; an address or an id is resolved server-side, so no bundle enters the conversation. target is required and has no default — choose it from the project, and the user's explicit request wins: ts-zod for a TypeScript or JavaScript project (a package.json, .ts sources); python-pydantic for a Python project that consumes run results without a Pipelex runtime; python-structures for writing a Pipelex host or a @pipe_func implementation. On the local workshop, pass output_dir (a DEDICATED generated directory, such as src/generated/<method>/) to write the tree to disk, so the bytes never enter the conversation; the hosted console does not take output_dir. Without output_dir, write every returned artifact at its path and the lock as codegen.lock beside them, VERBATIM — any byte change breaks the stamp and the lock.",
+      "description": "Generate typed code for an MTHDS method: its concept set projected into typed models by the Pipelex codegen engine, stamped and locked so the written tree can be checked offline. Supply exactly ONE of files / method_ref / method_id — never several; an address or an id is resolved server-side, so no bundle enters the conversation. target is required and has no default — choose it from the project, and the user's explicit request wins: ts-zod for a TypeScript or JavaScript project (a package.json, .ts sources); python-pydantic for a Python project that consumes run results without a Pipelex runtime; python-structures for writing a Pipelex host or a @pipe_func implementation. Pass output_dir (a DEDICATED generated directory, such as src/generated/<method>/) to write the tree to disk, so the bytes never enter the conversation. Without output_dir, write every returned artifact at its path and the lock as codegen.lock beside them, VERBATIM — any byte change breaks the stamp and the lock.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -640,7 +636,7 @@
                   "properties": {
                     "path": {
                       "type": "string",
-                      "description": "Filesystem path to a .mthds file, resolved by the local workshop server relative to its working directory. The hosted deployment cannot read files and rejects this form."
+                      "description": "Filesystem path to a .mthds file, resolved relative to this server's working directory."
                     }
                   },
                   "required": [
@@ -649,7 +645,7 @@
                 }
               ]
             },
-            "description": "One or more submitted MTHDS files forming the method closure. Each item is either inline contents ({ content, uri? }) or a file path ({ path }, local workshop only)."
+            "description": "One or more submitted MTHDS files forming the method closure. Each item is either inline contents ({ content, uri? }) or a file path ({ path })."
           },
           "method_ref": {
             "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.",
@@ -669,7 +665,7 @@
             "description": "Which typed projection to emit. Required, no default — choose it from the calling context, and the user's explicit request wins: ts-zod for a TypeScript or JavaScript project (a package.json, .ts sources) — zod schemas and inferred types in types.ts plus a parse/serialize binder per concept in binder.ts, depending only on zod; keep both files (types.ts + binder.ts); python-pydantic for a Python project that consumes run results without a Pipelex runtime — plain pydantic BaseModels, depending only on pydantic (models.py); python-structures for writing a Pipelex host or a @pipe_func implementation — runtime StructuredContent subclasses (structures.py). Field keys are snake_case in every target."
           },
           "output_dir": {
-            "description": "LOCAL WORKSHOP ONLY. Write the generated tree straight to disk instead of returning its content, so the bytes never enter the conversation. A directory relative to the server's working directory, created if missing and required to stay inside it (no absolute paths, no `..`). Use a DEDICATED generated directory such as `src/generated/<method>/`: this tool overwrites files it generated (they carry a codegen stamp) and the codegen.lock beside them, and refuses the whole write rather than touch anything else. The hosted console takes no output_dir.",
+            "description": "Write the generated tree straight to disk instead of returning its content, so the bytes never enter the conversation. A directory relative to the server's working directory, created if missing and required to stay inside it (no absolute paths, no `..`). Use a DEDICATED generated directory such as `src/generated/<method>/`: this tool overwrites files it generated (they carry a codegen stamp) and the codegen.lock beside them, and refuses the whole write rather than touch anything else.",
             "type": "string"
           }
         },
@@ -864,7 +860,7 @@
     },
     {
       "name": "mthds_prepare_inputs",
-      "description": "Prepare a pipe's FILLED inputs for a run — upload file-bearing values (local paths, data: URLs, bytes) to Pipelex storage and rewrite them to pipelex-storage:// so they are run-ready. http(s) URLs and existing pipelex-storage:// references pass through unchanged; an inputs set that is already all pass-through can skip this and go straight to mthds_run. Name the method as files, as a published method's address via method_ref, or as a registered method's catalog id via method_id — exactly ONE of the three, never several — plus the filled inputs from mthds_inputs_template. The local workshop uploads local/byte assets with your API key; the hosted console is pass-through only and refuses upload-needing inputs (use a URL, a pipelex-storage:// reference, or the local workshop).",
+      "description": "Prepare a pipe's FILLED inputs for a run — upload file-bearing values (local paths, data: URLs, bytes) to Pipelex storage and rewrite them to pipelex-storage:// so they are run-ready. http(s) URLs and existing pipelex-storage:// references pass through unchanged; an inputs set that is already all pass-through can skip this and go straight to mthds_run. Name the method as files, as a published method's address via method_ref, or as a registered method's catalog id via method_id — exactly ONE of the three, never several — plus the filled inputs from mthds_inputs_template. Uploads are made with your API key.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -900,7 +896,7 @@
                   "properties": {
                     "path": {
                       "type": "string",
-                      "description": "Filesystem path to a .mthds file, resolved by the local workshop server relative to its working directory. The hosted deployment cannot read files and rejects this form."
+                      "description": "Filesystem path to a .mthds file, resolved relative to this server's working directory."
                     }
                   },
                   "required": [
@@ -909,7 +905,7 @@
                 }
               ]
             },
-            "description": "One or more submitted MTHDS files forming the method closure. Each item is either inline contents ({ content, uri? }) or a file path ({ path }, local workshop only)."
+            "description": "One or more submitted MTHDS files forming the method closure. Each item is either inline contents ({ content, uri? }) or a file path ({ path })."
           },
           "method_ref": {
             "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0 — the signature source. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.",
@@ -1067,7 +1063,7 @@
                   "properties": {
                     "path": {
                       "type": "string",
-                      "description": "Filesystem path to a .mthds file, resolved by the local workshop server relative to its working directory. The hosted deployment cannot read files and rejects this form."
+                      "description": "Filesystem path to a .mthds file, resolved relative to this server's working directory."
                     }
                   },
                   "required": [
@@ -1076,7 +1072,7 @@
                 }
               ]
             },
-            "description": "One or more submitted MTHDS files forming the method closure. Each item is either inline contents ({ content, uri? }) or a file path ({ path }, local workshop only)."
+            "description": "One or more submitted MTHDS files forming the method closure. Each item is either inline contents ({ content, uri? }) or a file path ({ path })."
           },
           "method_ref": {
             "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side: the repository is fetched at the tag and the resolved commit SHA comes back as provenance. A complete run source of its own — it pairs with NOTHING (not files, not method_id).",
@@ -2112,7 +2108,7 @@
                   "properties": {
                     "path": {
                       "type": "string",
-                      "description": "Filesystem path to a .mthds file, resolved by the local workshop server relative to its working directory. The hosted deployment cannot read files and rejects this form."
+                      "description": "Filesystem path to a .mthds file, resolved relative to this server's working directory."
                     }
                   },
                   "required": [

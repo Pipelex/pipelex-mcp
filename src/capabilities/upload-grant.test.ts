@@ -247,7 +247,7 @@ describe("requestUploadToolResult", () => {
     expect(modelFacing).not.toContain("X-Amz-Signature");
     expect(modelFacing).not.toContain("x-amz-meta-uploaded-by");
     expect(result.content[0].text).toContain(GRANT.uri);
-    expect(result.content[0].text).toContain("mthds_upload_attachments");
+    expect(result.content[0].text).toContain("pipelex_upload_attachments");
   });
 
   it("carries no _meta on a refusal", async () => {

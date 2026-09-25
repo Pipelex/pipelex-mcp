@@ -1,4 +1,10 @@
-import { collectArtifacts, isTerminalRunStatus, summarizeUsage } from "@pipelex/sdk";
+import {
+  ApiResponseError,
+  ApiUnreachableError,
+  collectArtifacts,
+  isTerminalRunStatus,
+  summarizeUsage,
+} from "@pipelex/sdk";
 import type {
   MethodProvenance,
   PipelexRunResultStart,
@@ -28,6 +34,7 @@ import {
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
+  validateMethodReferenceRequest,
   validateMethodSelectorRequest,
   validateRunIdRequest,
 } from "./shared.js";
@@ -41,6 +48,10 @@ import type {
   SubmittedFileInput,
   ToolError,
 } from "./shared.js";
+import { prepareConsoleInputs } from "./console-inputs.js";
+import type { ConsoleInputsClient, ConsoleInputsSelector } from "./console-inputs.js";
+import { CONSOLE_TOOL_NAMES, WORKSHOP_TOOL_NAMES } from "./tool-names.js";
+import type { ToolNames } from "./tool-names.js";
 
 /**
  * The hosted run lifecycle statuses. The `Record<RunStatus, true>` shape ties
@@ -60,7 +71,9 @@ const RUN_STATUS_SET: Record<RunStatus, true> = {
 
 export const runStatusSchema = z.enum(Object.keys(RUN_STATUS_SET) as [RunStatus, ...RunStatus[]]);
 
-const runIdInputField = z.string().describe("The durable run id returned by mthds_run.");
+function runIdInputField(names: ToolNames) {
+  return z.string().describe(`The durable run id returned by ${names.run}.`);
+}
 
 export const mthdsRunInputSchema = {
   files: filesInputSchema.optional(),
@@ -90,13 +103,17 @@ export const mthdsRunInputSchema = {
     ),
 };
 
-export const mthdsRunStatusInputSchema = {
-  run_id: runIdInputField,
-};
+/**
+ * The input schema of the status and results tools alike, its description
+ * naming the run tool of the shell that registers it.
+ */
+export function runIdInputSchemaFor(names: ToolNames) {
+  return { run_id: runIdInputField(names) };
+}
 
-export const mthdsRunResultsInputSchema = {
-  run_id: runIdInputField,
-};
+export const mthdsRunStatusInputSchema = runIdInputSchemaFor(WORKSHOP_TOOL_NAMES);
+
+export const mthdsRunResultsInputSchema = runIdInputSchemaFor(WORKSHOP_TOOL_NAMES);
 
 /**
  * Identifiers of the renderable views a start result can drive (same
@@ -126,28 +143,33 @@ const methodProvenanceSchema = z.object({
     ),
 });
 
-const runStartStructuredContentSchema = z.object({
-  status: z.enum(["ok", "error"]),
-  run_id: z
-    .string()
-    .optional()
-    .describe("The durable run id — the handle for mthds_run_status and mthds_run_results."),
-  run_status: runStatusSchema
-    .optional()
-    .describe("Initial lifecycle state from the start ack, when the server includes one."),
-  created_at: z.string().optional(),
-  method_provenance: methodProvenanceSchema
-    .optional()
-    .describe("method_ref runs only — the address, tag, and resolved commit SHA that was fetched."),
-  available_view_specs: z
-    .array(runViewSpecSchema)
-    .describe(
-      'Renderable views available for this result. Contains "live_run_status" when a live-following status card is available; empty otherwise.',
-    ),
-  errors: z.array(toolErrorSchema).optional(),
-});
+/** The start result's schema, naming the follow-up tools of the shell that registers it. */
+export function runStartOutputSchemaFor(names: ToolNames) {
+  return z.object({
+    status: z.enum(["ok", "error"]),
+    run_id: z
+      .string()
+      .optional()
+      .describe(`The durable run id — the handle for ${names.runStatus} and ${names.runResults}.`),
+    run_status: runStatusSchema
+      .optional()
+      .describe("Initial lifecycle state from the start ack, when the server includes one."),
+    created_at: z.string().optional(),
+    method_provenance: methodProvenanceSchema
+      .optional()
+      .describe(
+        "method_ref runs only — the address, tag, and resolved commit SHA that was fetched.",
+      ),
+    available_view_specs: z
+      .array(runViewSpecSchema)
+      .describe(
+        'Renderable views available for this result. Contains "live_run_status" when a live-following status card is available; empty otherwise.',
+      ),
+    errors: z.array(toolErrorSchema).optional(),
+  });
+}
 
-export const mthdsRunOutputSchema = runStartStructuredContentSchema;
+export const mthdsRunOutputSchema = runStartOutputSchemaFor(WORKSHOP_TOOL_NAMES);
 
 const runStatusStructuredContentSchema = z.object({
   status: z.enum(["ok", "error"]),
@@ -210,60 +232,105 @@ const runUsageSchema = z.object({
     ),
 });
 
-const runResultsStructuredContentSchema = z.object({
-  status: z.enum(["ok", "error"]),
-  run_id: z.string().optional(),
-  state: z
-    .enum(["running", "completed", "failed"])
-    .optional()
-    .describe(
-      'The result lookup outcome: "running" (no result yet), "completed" (main output below), "failed" (terminal non-COMPLETED).',
-    ),
-  retry_after_seconds: z
-    .number()
-    .nullable()
-    .optional()
-    .describe('State "running" only — check again after this many seconds.'),
-  run_status: runStatusSchema
-    .optional()
-    .describe('State "failed" only — the terminal lifecycle status.'),
-  failure_message: z.string().optional().describe('State "failed" only.'),
-  main_stuff: z
-    .unknown()
-    .optional()
-    .describe(
-      'State "completed" only — the resolved main output, bounded to a serialized cap (see truncated).',
-    ),
-  truncated: z
-    .boolean()
-    .optional()
-    .describe("True when main_stuff was bounded down; the full output rides the view-only _meta."),
-  image_candidates: z
-    .array(z.string())
-    .optional()
-    .describe(
-      'State "completed" only, and only when the output references stored files — the pipelex-storage:// references whose storage key looks like an image, as they appear in the output. A free in-memory prefilter over the FULL output, so a reference pruned out of main_stuff still appears here; nothing was fetched and nothing was read, so this is a shortlist, not a verdict. Bounded — see image_candidates_omitted. Pass one of these (or its index in this list) to mthds_show_images to see the picture.',
-    ),
-  image_candidates_omitted: z
-    .number()
-    .optional()
-    .describe(
-      'State "completed" only, and only when something was left out — how many image candidates past the listed ones this result does not enumerate. They are still on the run: mthds_show_images walks the full set.',
-    ),
-  usage: runUsageSchema
-    .optional()
-    .describe(
-      'State "completed" only — token and USD-cost aggregates for the run, always present: read its state first. The full per-call record list rides the view-only _meta.tokens_usages.',
-    ),
-  available_view_specs: z
-    .array(resultsViewSpecSchema)
-    .describe(
-      'Renderable views available for this result. Contains "run_graph" when the executed method graph is available to display; empty otherwise.',
-    ),
-  errors: z.array(toolErrorSchema).optional(),
-});
+/** The results tool's schema, naming the image tool of the shell that registers it. */
+export function runResultsOutputSchemaFor(names: ToolNames) {
+  return z.object({
+    status: z.enum(["ok", "error"]),
+    run_id: z.string().optional(),
+    state: z
+      .enum(["running", "completed", "failed"])
+      .optional()
+      .describe(
+        'The result lookup outcome: "running" (no result yet), "completed" (main output below), "failed" (terminal non-COMPLETED).',
+      ),
+    retry_after_seconds: z
+      .number()
+      .nullable()
+      .optional()
+      .describe('State "running" only — check again after this many seconds.'),
+    run_status: runStatusSchema
+      .optional()
+      .describe('State "failed" only — the terminal lifecycle status.'),
+    failure_message: z.string().optional().describe('State "failed" only.'),
+    main_stuff: z
+      .unknown()
+      .optional()
+      .describe(
+        'State "completed" only — the resolved main output, bounded to a serialized cap (see truncated).',
+      ),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        "True when main_stuff was bounded down; the full output rides the view-only _meta.",
+      ),
+    image_candidates: z
+      .array(z.string())
+      .optional()
+      .describe(
+        `State "completed" only, and only when the output references stored files — the pipelex-storage:// references whose storage key looks like an image, as they appear in the output. A free in-memory prefilter over the FULL output, so a reference pruned out of main_stuff still appears here; nothing was fetched and nothing was read, so this is a shortlist, not a verdict. Bounded — see image_candidates_omitted. Pass one of these (or its index in this list) to ${names.showImages} to see the picture.`,
+      ),
+    image_candidates_omitted: z
+      .number()
+      .optional()
+      .describe(
+        `State "completed" only, and only when something was left out — how many image candidates past the listed ones this result does not enumerate. They are still on the run: ${names.showImages} walks the full set.`,
+      ),
+    usage: runUsageSchema
+      .optional()
+      .describe(
+        'State "completed" only — token and USD-cost aggregates for the run, always present: read its state first. The full per-call record list rides the view-only _meta.tokens_usages.',
+      ),
+    available_view_specs: z
+      .array(resultsViewSpecSchema)
+      .describe(
+        'Renderable views available for this result. Contains "run_graph" when the executed method graph is available to display; empty otherwise.',
+      ),
+    errors: z.array(toolErrorSchema).optional(),
+  });
+}
 
-export const mthdsRunResultsOutputSchema = runResultsStructuredContentSchema;
+export const mthdsRunResultsOutputSchema = runResultsOutputSchemaFor(WORKSHOP_TOOL_NAMES);
+
+/**
+ * `pipelex_run`'s input — the console's run, by reference only: no `files`, no
+ * `{ path }` arm, and the pipe selector spelled `pipe_ref` like on every other
+ * console tool (the run routes' own `pipe_code` is a wire detail the console
+ * keeps to itself).
+ */
+export const pipelexRunInputSchema = {
+  method_id: z
+    .string()
+    .optional()
+    .describe(
+      `Catalog id (mt_…) of a saved method in your organization, as ${CONSOLE_TOOL_NAMES.listMethods} returns it. Runs the method's CURRENT stored content. Supply exactly ONE of method_id / method_ref.`,
+    ),
+  method_ref: z
+    .string()
+    .optional()
+    .describe(
+      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side: the repository is fetched at the tag and the resolved commit SHA comes back as provenance. Supply exactly ONE of method_id / method_ref.`,
+    ),
+  pipe_ref: z
+    .string()
+    .optional()
+    .describe(
+      `The pipe to run, as a qualified domain.pipe_code, as ${CONSOLE_TOOL_NAMES.showMethod} reports it. Omit to run the method's entry pipe.`,
+    ),
+  inputs: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe(
+      `The method's inputs — ${CONSOLE_TOOL_NAMES.showMethod}'s template, filled. A file input takes an http(s) URL or a pipelex-storage:// reference; a file the user attached in the chat goes through ${CONSOLE_TOOL_NAMES.uploadAttachments} first.`,
+    ),
+};
+
+export interface PipelexRunInput {
+  method_id?: string;
+  method_ref?: string;
+  pipe_ref?: string;
+  inputs?: Record<string, unknown>;
+}
 
 export interface MthdsRunInput {
   files?: SubmittedFileInput[];
@@ -426,6 +493,9 @@ interface RunClient {
   getRunResult(runId: string): Promise<RunResultState>;
 }
 
+/** The console's run also reads the signature its input walk needs (test seam). */
+export type PipelexRunClient = RunClient & ConsoleInputsClient;
+
 export interface RunContext extends ApiConfig {
   client?: RunClient;
   /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
@@ -442,11 +512,26 @@ export interface RunContext extends ApiConfig {
    * matters, and a model that does not know the tool retypes the output.
    */
   artifactDownloadAvailable?: boolean;
+  /** The tool names this shell's texts use; the workshop's when absent. */
+  toolNames?: ToolNames;
   /** Deployment-specific auth-failure texture (the hosted console overrides it per request); default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
 
 export function buildRunContext(env = process.env): RunContext {
+  return buildApiConfig(env);
+}
+
+/**
+ * The console's run context: the shared one, with a client that can also serve
+ * the input walk `pipelex_run` performs before it starts. The status and
+ * results tools read the same context as a plain {@link RunContext}.
+ */
+export interface PipelexRunContext extends RunContext {
+  client?: PipelexRunClient;
+}
+
+export function buildPipelexRunContext(env = process.env): PipelexRunContext {
   return buildApiConfig(env);
 }
 
@@ -533,22 +618,77 @@ export const RUN_START_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
   serverError: START_SERVER_ERROR,
 };
 
-const UNKNOWN_RUN_HINT =
-  "No run with this id is known to the configured API. Check the run_id returned by mthds_run, and that PIPELEX_BASE_URL points at the deployment that started it.";
-
-const MALFORMED_RUN_ID_HINT = "Pass the run_id exactly as returned by mthds_run.";
-
-export const RUN_STATUS_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/runs/{id}/status",
-  badRequest: { location: "run_id", hint: MALFORMED_RUN_ID_HINT },
-  notFound: { location: "run_id", hint: UNKNOWN_RUN_HINT },
+/**
+ * `pipelex_run`'s start textures. The console names a method by reference only
+ * and has no validate or inputs-template tool, so its hints send the caller to
+ * the one tool that shows a method and its template.
+ */
+const CONSOLE_START_SERVER_ERROR = {
+  hint: `The hosted API reports start-time rejections (e.g. an invalid method or bad inputs) as a generic server error. Check the method with ${CONSOLE_TOOL_NAMES.showMethod} and the inputs against its template; if both pass, the platform itself may be having trouble.`,
 };
 
-export const RUN_RESULTS_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/runs/{id}/results",
-  badRequest: { location: "run_id", hint: MALFORMED_RUN_ID_HINT },
-  notFound: { location: "run_id", hint: UNKNOWN_RUN_HINT },
+export const PIPELEX_RUN_START_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
+  ...RUN_START_BY_REF_ERROR_OPTIONS,
+  badRequest: {
+    location: "method_ref",
+    hint: `Check the address and tag — ${METHOD_REF_GRAMMAR}. The tag must be a git tag on the repository (branches do not pin). If the address resolved, check pipe_ref and the inputs against ${CONSOLE_TOOL_NAMES.showMethod}'s template.`,
+  },
+  serverError: CONSOLE_START_SERVER_ERROR,
 };
+
+export const PIPELEX_RUN_START_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
+  route: "/v1/start",
+  methodLocation: "method_id",
+  badRequest: {
+    location: "method_id",
+    hint: `The saved method may have no MTHDS source yet. Check pipe_ref and the inputs against ${CONSOLE_TOOL_NAMES.showMethod}'s template.`,
+  },
+  notFound: {
+    location: "method_id",
+    hint: `No saved method with this id is visible to your organization. Check the id as ${CONSOLE_TOOL_NAMES.listMethods} returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.`,
+  },
+  serverError: CONSOLE_START_SERVER_ERROR,
+};
+
+/**
+ * What an unknown run id means to the caller. The workshop's operator is its
+ * user, so the deployment the key points at is theirs to check; the console's
+ * deployment is not the caller's to change, and what they can check is which
+ * organization they are signed in to.
+ */
+function unknownRunHint(names: ToolNames): string {
+  return names.shell === "workshop"
+    ? `No run with this id is known to the configured API. Check the run_id returned by ${names.run}, and that PIPELEX_BASE_URL points at the deployment that started it.`
+    : `No run with this id is visible to your organization. Check the run_id returned by ${names.run}: a run started in another organization is not visible from this one.`;
+}
+
+function malformedRunIdHint(names: ToolNames): string {
+  return `Pass the run_id exactly as returned by ${names.run}.`;
+}
+
+/** The status route's classify options, in the vocabulary of the shell that reads them. */
+export function runStatusErrorOptions(names: ToolNames): ClassifyErrorOptions {
+  return {
+    route: "/v1/runs/{id}/status",
+    badRequest: { location: "run_id", hint: malformedRunIdHint(names) },
+    notFound: { location: "run_id", hint: unknownRunHint(names) },
+  };
+}
+
+/** The results route's classify options, in the vocabulary of the shell that reads them. */
+export function runResultsErrorOptions(names: ToolNames): ClassifyErrorOptions {
+  return {
+    route: "/v1/runs/{id}/results",
+    badRequest: { location: "run_id", hint: malformedRunIdHint(names) },
+    notFound: { location: "run_id", hint: unknownRunHint(names) },
+  };
+}
+
+export const RUN_STATUS_ERROR_OPTIONS: ClassifyErrorOptions =
+  runStatusErrorOptions(WORKSHOP_TOOL_NAMES);
+
+export const RUN_RESULTS_ERROR_OPTIONS: ClassifyErrorOptions =
+  runResultsErrorOptions(WORKSHOP_TOOL_NAMES);
 
 /** Request-shape checks on the mthds_run input, after `{ path }` resolution. */
 export function validateRunRequest(input: ResolvedRunRequest): ToolError[] {
@@ -779,7 +919,11 @@ function narrowMethodProvenance(value: unknown): MethodProvenance | undefined {
  * echoed in the summary). A produced ack advertises the `live_run_status` view
  * only when the invoking shell registered run-follow.
  */
-export function startResult(ack: PipelexRunResultStart, viewsAvailable = true): RunStartResult {
+export function startResult(
+  ack: PipelexRunResultStart,
+  viewsAvailable = true,
+  names: ToolNames = WORKSHOP_TOOL_NAMES,
+): RunStartResult {
   const runStatus = narrowRunStatus(ack.state);
   const createdAt = narrowString(ack.created_at);
   const provenance = narrowMethodProvenance(ack.method_provenance);
@@ -803,12 +947,12 @@ export function startResult(ack: PipelexRunResultStart, viewsAvailable = true): 
     );
   }
   summaryParts.push(
-    "Check on it with `mthds_run_status` (one cheap read — honor its retry hint instead of polling in a tight loop), and fetch the outcome with `mthds_run_results` once it is terminal.",
+    `Check on it with \`${names.runStatus}\` (one cheap read — honor its retry hint instead of polling in a tight loop), and fetch the outcome with \`${names.runResults}\` once it is terminal.`,
   );
   if (viewsAvailable) {
     summaryParts.push(
       "## Views",
-      "A live status card follows this run on its own (polling, then the results); the user is already watching it — no need to poll on their behalf.",
+      `If this host shows views (the server instructions say whether it does), a live status card follows this run on its own (polling, then the results) and the user is already watching it, so there is no need to poll on their behalf. If it shows none, give the user the run id and check on the run with \`${names.runStatus}\` when they ask.`,
     );
   }
 
@@ -816,7 +960,10 @@ export function startResult(ack: PipelexRunResultStart, viewsAvailable = true): 
 }
 
 /** Project a self-healing status read. A terminal non-COMPLETED status is a produced verdict. */
-export function statusResult(read: RunRead): RunStatusResult {
+export function statusResult(
+  read: RunRead,
+  names: ToolNames = WORKSHOP_TOOL_NAMES,
+): RunStatusResult {
   const isTerminal = isTerminalRunStatus(read.status);
 
   const structuredContent: RunStatusStructuredContent = {
@@ -832,17 +979,17 @@ export function statusResult(read: RunRead): RunStatusResult {
     ...(read.finished_at === undefined ? {} : { finished_at: read.finished_at }),
   };
 
-  return { structuredContent, summary: statusSummary(read, isTerminal) };
+  return { structuredContent, summary: statusSummary(read, isTerminal, names) };
 }
 
-function statusSummary(read: RunRead, isTerminal: boolean): string {
+function statusSummary(read: RunRead, isTerminal: boolean, names: ToolNames): string {
   const lines: string[] = [];
 
   if (isTerminal) {
     lines.push(
       read.status === "COMPLETED"
-        ? `Run \`${read.pipeline_run_id}\` is COMPLETED. Fetch the output with \`mthds_run_results\`.`
-        : `Run \`${read.pipeline_run_id}\` ended ${read.status}. \`mthds_run_results\` returns the failure details.`,
+        ? `Run \`${read.pipeline_run_id}\` is COMPLETED. Fetch the output with \`${names.runResults}\`.`
+        : `Run \`${read.pipeline_run_id}\` ended ${read.status}. \`${names.runResults}\` returns the failure details.`,
     );
   } else {
     const seconds = read.retry_after_seconds ?? DEFAULT_RETRY_SECONDS;
@@ -868,6 +1015,7 @@ export function resultsResult(
   state: RunResultState,
   viewsAvailable = true,
   artifactDownloadAvailable = false,
+  names: ToolNames = WORKSHOP_TOOL_NAMES,
 ): RunResultsResult {
   switch (state.state) {
     case "running":
@@ -878,6 +1026,7 @@ export function resultsResult(
         state.result,
         viewsAvailable,
         artifactDownloadAvailable,
+        names,
       );
     case "failed":
       return failedResult(state.pipeline_run_id, state.status, state.message);
@@ -903,6 +1052,7 @@ function completedResult(
   result: RunResults,
   viewsAvailable: boolean,
   artifactDownloadAvailable: boolean,
+  names: ToolNames,
 ): RunResultsResult {
   // The SDK guarantees a non-null main_stuff on a completed run (it throws
   // MissingMainStuffError otherwise); reaching here without one is a contract
@@ -989,6 +1139,7 @@ function completedResult(
       stored.length,
       candidates.length,
       artifactDownloadAvailable,
+      names,
     ),
     graphSpec,
     pipeIoContracts,
@@ -1020,6 +1171,7 @@ function completedSummary(
   storedFiles: number,
   imageCandidates: number,
   artifactDownloadAvailable: boolean,
+  names: ToolNames,
 ): string {
   const fence =
     typeof bounded === "string"
@@ -1031,7 +1183,7 @@ function completedSummary(
     parts.push(truncationNote(viewsAvailable, artifactDownloadAvailable));
   }
   const stored = [
-    storedFilesNote(storedFiles, imageCandidates),
+    storedFilesNote(storedFiles, imageCandidates, names),
     artifactDownloadAvailable ? saveNote(storedFiles, truncated) : undefined,
   ].filter((sentence): sentence is string => sentence !== undefined);
   if (stored.length > 0) parts.push(stored.join(" "));
@@ -1062,7 +1214,11 @@ function truncationNote(viewsAvailable: boolean, artifactDownloadAvailable: bool
  * `mthds_show_images` is registered on both; nothing is said when the output
  * references no stored file.
  */
-function storedFilesNote(storedFiles: number, imageCandidates: number): string | undefined {
+function storedFilesNote(
+  storedFiles: number,
+  imageCandidates: number,
+  names: ToolNames,
+): string | undefined {
   if (storedFiles === 0) return undefined;
 
   const parts = [
@@ -1072,7 +1228,7 @@ function storedFilesNote(storedFiles: number, imageCandidates: number): string |
   ];
   if (imageCandidates > 0) {
     parts.push(
-      "To see one, call `mthds_show_images` with this run id — it returns the picture itself, which then stays in this conversation for every turn that follows, so ask for it when someone wants to look at it rather than by reflex.",
+      `To see one, call \`${names.showImages}\` with this run id — it returns the picture itself, which then stays in this conversation for every turn that follows, so ask for it when someone wants to look at it rather than by reflex.`,
     );
   }
   return parts.join(" ");
@@ -1150,11 +1306,155 @@ export async function startMthdsRun(
 
   try {
     const ack = await runClient(context).start(toStartOptions(request));
-    return startResult(ack, context.viewsAvailable !== false);
+    return startResult(ack, context.viewsAvailable !== false, context.toolNames);
   } catch (err) {
-    const error = classifyError(err, { ...classifyOptions, auth: context.authError });
+    const error = classifyStartError(err, { ...classifyOptions, auth: context.authError });
     return startErrorResult(startSummaryForError(error), [error]);
   }
+}
+
+/**
+ * `pipelex_run` — start a durable run of a method named by reference, after
+ * preparing its inputs with the console's own walk.
+ *
+ * The walk runs only when there are inputs to walk: with none, there is no
+ * file position to rewrite or refuse, and the one `POST /v1/validate` it costs
+ * would buy nothing. Its refusals stop the run before anything starts, so an
+ * input that would need an upload never costs inference credit. Only the pipe
+ * the caller named rides the start: the walk picks the same default the run
+ * route does, and naming it here would let a disagreement between the two run a
+ * pipe nobody chose.
+ */
+export async function startPipelexRun(
+  input: PipelexRunInput,
+  context: PipelexRunContext = buildPipelexRunContext(),
+): Promise<RunStartResult> {
+  const names = context.toolNames ?? CONSOLE_TOOL_NAMES;
+  const inputErrors = validatePipelexRunRequest(input);
+  if (inputErrors.length > 0) {
+    return startErrorResult("Run was not started: request input is invalid.", inputErrors);
+  }
+
+  const selector: ConsoleInputsSelector & ({ method_ref: string } | { method_id: string }) =
+    input.method_ref !== undefined
+      ? { method_ref: input.method_ref }
+      : { method_id: input.method_id ?? "" };
+  const startOptions =
+    "method_ref" in selector
+      ? PIPELEX_RUN_START_BY_REF_ERROR_OPTIONS
+      : PIPELEX_RUN_START_BY_ID_ERROR_OPTIONS;
+
+  let client: PipelexRunClient;
+  try {
+    client = context.client ?? createPipelexApiClient(context);
+  } catch (err) {
+    const error = classifyError(err, { ...startOptions, auth: context.authError });
+    return startErrorResult(startSummaryForError(error), [error]);
+  }
+
+  // Trimmed once, so the walk checks and the start runs the same pipe.
+  const pipeRef = input.pipe_ref?.trim();
+  let inputs = input.inputs;
+  if (inputs !== undefined && Object.keys(inputs).length > 0) {
+    const prepared = await prepareConsoleInputs(
+      client,
+      {
+        selector,
+        ...(pipeRef === undefined ? {} : { pipe_ref: pipeRef }),
+        inputs,
+      },
+      context.authError,
+    );
+    if (!prepared.ok) {
+      return startErrorResult(summaryForToolError(prepared.error, walkHeadlines(prepared.error)), [
+        prepared.error,
+      ]);
+    }
+    inputs = prepared.inputs;
+  }
+
+  try {
+    const ack = await client.start({
+      ...selector,
+      ...(pipeRef === undefined ? {} : { pipe_code: pipeRef }),
+      ...(inputs === undefined ? {} : { inputs }),
+    });
+    return startResult(ack, context.viewsAvailable !== false, names);
+  } catch (err) {
+    const error = classifyStartError(err, { ...startOptions, auth: context.authError });
+    return startErrorResult(startSummaryForError(error), [error]);
+  }
+}
+
+/**
+ * Network codes that mean the start request never reached the server, so no
+ * run can exist and a retry is safe. Anything else an unreachable API reports
+ * (the SDK's own timeout, a reset connection, no code at all) may have come
+ * after the server accepted the request.
+ */
+const START_NOT_SENT_CODES: ReadonlySet<string> = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+
+/**
+ * Classify a failed start, refusing a retry when the run may exist. A start
+ * creates a durable run that spends inference credit, and this client sends no
+ * idempotency key, so retrying after a lost acknowledgement would start a second
+ * run. That is the case for a timeout or a dropped connection after the request
+ * went out, and for a 502 or 504, where the gateway answered for a request the
+ * runner may have accepted.
+ */
+export function classifyStartError(err: unknown, options: ClassifyErrorOptions): ToolError {
+  const error = classifyError(err, options);
+  if (!error.retryable || !startMayHaveRun(err)) return error;
+  return {
+    ...error,
+    retryable: false,
+    hint: "The request may have reached the server before the answer was lost, so the run may have started anyway. Check before starting it again: a second start would be a second run, spending inference credit again.",
+  };
+}
+
+function startMayHaveRun(err: unknown): boolean {
+  if (err instanceof ApiUnreachableError) {
+    return err.code === undefined || !START_NOT_SENT_CODES.has(err.code);
+  }
+  if (err instanceof ApiResponseError) return err.status === 502 || err.status === 504;
+  return false;
+}
+
+/**
+ * Request-shape checks on `pipelex_run`: exactly one method reference, and a
+ * pipe_ref that is neither blank nor bare. The qualified rule is checked here
+ * rather than left to the input walk, because the walk runs only when there are
+ * inputs: a run with none would otherwise send a bare code to `/v1/start`, whose
+ * runner resolves one across domains.
+ */
+export function validatePipelexRunRequest(input: PipelexRunInput): ToolError[] {
+  const errors = validateMethodReferenceRequest(input);
+  const pipeRef = input.pipe_ref?.trim();
+  if (pipeRef === "") {
+    errors.push({
+      class: "input_domain",
+      location: "pipe_ref",
+      message: "pipe_ref must not be empty when supplied.",
+      hint: "Pass a qualified domain.pipe_code, or omit pipe_ref to run the method's entry pipe.",
+      retryable: false,
+    });
+  } else if (pipeRef !== undefined && !pipeRef.includes(".")) {
+    errors.push({
+      class: "input_domain",
+      location: "pipe_ref",
+      message: `pipe_ref must be qualified (domain.pipe_code), got the bare "${pipeRef}".`,
+      hint: `Pass the pipe as ${CONSOLE_TOOL_NAMES.showMethod} names it, or omit pipe_ref to run the method's entry pipe.`,
+      retryable: false,
+    });
+  }
+  return errors;
 }
 
 /** One cheap self-healing status read — `GET /v1/runs/{id}/status`. */
@@ -1162,16 +1462,17 @@ export async function getMthdsRunStatus(
   input: RunIdInput,
   context: RunContext = buildRunContext(),
 ): Promise<RunStatusResult> {
-  const inputErrors = validateRunIdRequest(input.run_id);
+  const names = context.toolNames ?? WORKSHOP_TOOL_NAMES;
+  const inputErrors = validateRunIdRequest(input.run_id, names);
   if (inputErrors.length > 0) {
     return statusErrorResult("Run status was not read: request input is invalid.", inputErrors);
   }
 
   try {
     const read = await runClient(context).getRunStatus(input.run_id);
-    return statusResult(read);
+    return statusResult(read, names);
   } catch (err) {
-    const error = classifyError(err, { ...RUN_STATUS_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, { ...runStatusErrorOptions(names), auth: context.authError });
     return statusErrorResult(statusSummaryForError(error), [error]);
   }
 }
@@ -1181,7 +1482,8 @@ export async function getMthdsRunResults(
   input: RunIdInput,
   context: RunContext = buildRunContext(),
 ): Promise<RunResultsResult> {
-  const inputErrors = validateRunIdRequest(input.run_id);
+  const names = context.toolNames ?? WORKSHOP_TOOL_NAMES;
+  const inputErrors = validateRunIdRequest(input.run_id, names);
   if (inputErrors.length > 0) {
     return resultsErrorResult("Run results were not read: request input is invalid.", inputErrors);
   }
@@ -1190,7 +1492,7 @@ export async function getMthdsRunResults(
   try {
     state = await runClient(context).getRunResult(input.run_id);
   } catch (err) {
-    const error = classifyError(err, { ...RUN_RESULTS_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, { ...runResultsErrorOptions(names), auth: context.authError });
     return resultsErrorResult(resultsSummaryForError(error), [error]);
   }
 
@@ -1202,6 +1504,7 @@ export async function getMthdsRunResults(
       state,
       context.viewsAvailable !== false,
       context.artifactDownloadAvailable === true,
+      names,
     );
   } catch (err) {
     return resultsErrorResult(
@@ -1244,6 +1547,29 @@ function toStartOptions(input: ResolvedRunRequest): PipelexStartOptions {
     ...(input.method_id === undefined ? {} : { method_id: input.method_id }),
   };
 }
+
+/**
+ * The walk reads the method before the start does, so it also meets the
+ * start's own failures: an unknown id, an address that does not resolve, a
+ * refused sign-in. Those keep the start's headlines, and only a fault in the
+ * inputs or the pipe is headlined as one, since a host that shows only the
+ * first line would otherwise send the model to fix inputs that were fine.
+ */
+function walkHeadlines(error: ToolError): ErrorSummaries {
+  const location = error.location ?? "";
+  return location === "pipe_ref" || location === "inputs" || location.startsWith("inputs.")
+    ? INPUTS_ERROR_SUMMARIES
+    : START_ERROR_SUMMARIES;
+}
+
+/** Headlines for a run refused while its inputs were being prepared, before anything started. */
+const INPUTS_ERROR_SUMMARIES: ErrorSummaries = {
+  config:
+    "Run could not start: its inputs could not be checked — the Pipelex API is unreachable or misconfigured.",
+  input_domain: "Run was not started: its inputs could not be prepared as submitted.",
+  runtime: "Run could not start: checking its inputs failed on the Pipelex API.",
+  paywall: "Run could not start: the organization's Pipelex plan does not cover this call.",
+};
 
 const START_ERROR_SUMMARIES: ErrorSummaries = {
   config: "Run could not start: the Pipelex API is unreachable or misconfigured.",

@@ -41,19 +41,19 @@ const TOOLBAR_POSITION_FOR_VIEW: ToolbarPosition = TOOLBAR_POSITION.TOP_LEFT;
  * method's run graph (delivered view-only on `_meta`, read here as
  * `responseMetadata.graph_spec`) with mthds-ui's `GraphViewer`, the same
  * component `pipelex-app` ships. It is the generic renderer for any run graph:
- * today `mthds_validate` feeds it the **dry-run graph** (the method structure
- * from the validation dry run); a future `mthds_run` can register the same
- * component to surface a **live-run graph** (with execution status). Invalid
- * verdicts, pending-signature verdicts with no graph, and `include_graph: false`
- * calls fall back to a compact, non-crashing empty state.
+ * today `pipelex_show_method` feeds it the **dry-run graph** (the method
+ * structure from the validation dry run); a future run tool can register the
+ * same component to surface a **live-run graph** (with execution status).
+ * Invalid verdicts and pending-signature verdicts with no graph fall back to a
+ * compact, non-crashing empty state.
  *
  * On a runnable verdict it also renders the method's **input form** below the
  * graph — mthds-ui's `RunPanel` over the wire input-form descriptor riding
  * `responseMetadata.input_form` (the derivation, since kernel 0.5.0), with the
  * per-pipe IO contracts (`responseMetadata.pipe_io_contracts`) co-walked
- * beside it. The form is for the effective entry pipe
- * (`responseMetadata.main_pipe_ref`); clicking a pipe node in the graph
- * switches it. With no entry pipe settled no form opens on its own —
+ * beside it. The form is for the pipe the show named, else the effective entry
+ * pipe (`responseMetadata.form_pipe_ref`, then `main_pipe_ref`); clicking a
+ * pipe node in the graph switches it. With no entry pipe settled no form opens on its own —
  * `selectedPipeFor` never substitutes a pipe of the view's own choosing — but
  * the artifacts still ride, so clicking a pipe node still produces its form.
  * The graph is the bundle's declared main pipe, which a `method_ref` package's
@@ -65,16 +65,16 @@ const TOOLBAR_POSITION_FOR_VIEW: ToolbarPosition = TOOLBAR_POSITION.TOP_LEFT;
  * to Pipelex storage, so the bytes never cross the conversation or the server
  * (`./run-graph-upload.ts`). A failed upload is said under the form, because
  * the panel itself discards the failure silently.
- * Run starts the method through `mthds_run` with the same
- * `files` / `method_ref` / `method_id` the validation was called with, then follows the run
- * by polling `mthds_run_status` and hands the conversation back to the model
- * on the terminal outcome, exactly as `run-follow` does.
+ * Run starts the method through `pipelex_run` with the same `method_ref` or
+ * `method_id` the show was called with and the pipe the form is for, then
+ * follows the run by polling `pipelex_run_status` and hands the conversation
+ * back to the model on the terminal outcome, exactly as `run-follow` does.
  */
 export default function RunGraphView() {
   // Hooks run unconditionally before any early return.
-  const toolInfo = useToolInfo<"mthds_validate">();
-  const { callToolAsync: startRun } = useCallTool("mthds_run");
-  const { callToolAsync: statusAsync } = useCallTool("mthds_run_status");
+  const toolInfo = useToolInfo<"pipelex_show_method">();
+  const { callToolAsync: startRun } = useCallTool("pipelex_run");
+  const { callToolAsync: statusAsync } = useCallTool("pipelex_run_status");
   const { callToolAsync: requestUploadAsync } = useCallTool("pipelex_request_upload");
   const { theme, maxHeight, safeArea } = useLayout();
   const [displayMode, setDisplayMode] = useDisplayMode();
@@ -86,15 +86,21 @@ export default function RunGraphView() {
   // to "no form" rather than throwing — the lookups below just miss.
   const contracts = (responseMetadata?.pipe_io_contracts ?? null) as PipeIOContracts | null;
   const inputForm = (responseMetadata?.input_form ?? null) as InputForm | null;
+  // The method's entry pipe, which the caption names, and the pipe the form
+  // opens on, which is the one the show named when it named one.
   const mainPipeRef =
     typeof responseMetadata?.main_pipe_ref === "string" ? responseMetadata.main_pipe_ref : null;
+  const formPipeRef =
+    typeof responseMetadata?.form_pipe_ref === "string"
+      ? responseMetadata.form_pipe_ref
+      : mainPipeRef;
 
   const [pickedPipe, setPickedPipe] = useState<SelectedPipe | null>(null);
   // Clicked node, else the entry pipe, else nothing — never the first pipe the
   // contract map happens to hold (see `selectedPipeFor`).
   const selectedPipe = useMemo<SelectedPipe | null>(
-    () => selectedPipeFor(pickedPipe, mainPipeRef),
-    [pickedPipe, mainPipeRef],
+    () => selectedPipeFor(pickedPipe, formPipeRef),
+    [pickedPipe, formPipeRef],
   );
   // `RunPanel` treats `contract` as referentially significant (uploads in
   // flight are abandoned on a new reference), so look it up once per selection.
@@ -187,7 +193,7 @@ export default function RunGraphView() {
   }, [runId, polling.phase, polling.runStatus, sendFollowUpMessage]);
 
   if (!toolInfo.isSuccess) {
-    return <EmptyState message="Validating…" maxHeight={maxHeight} />;
+    return <EmptyState message="Loading the method…" maxHeight={maxHeight} />;
   }
 
   const { output, input } = toolInfo;
@@ -197,7 +203,12 @@ export default function RunGraphView() {
   const graphSpec = (toolInfo.responseMetadata.graph_spec ?? null) as GraphSpec | null;
 
   if (output.status !== "ok" || !output.is_valid) {
-    return <EmptyState message="Validation failed — no graph to display." maxHeight={maxHeight} />;
+    return (
+      <EmptyState
+        message="The method does not validate — no graph to display."
+        maxHeight={maxHeight}
+      />
+    );
   }
   const hasGraph = Boolean(graphSpec && graphSpec.nodes?.length);
   // The form needs both artifacts: the descriptor drives the derivation, the
@@ -233,28 +244,43 @@ export default function RunGraphView() {
     setUploadErrors({});
   };
 
+  const pipeLabel = selectedPipe
+    ? selectedPipe.domain
+      ? `${selectedPipe.domain}.${selectedPipe.code}`
+      : selectedPipe.code
+    : undefined;
+  // The method the show was called with, as the result echoes it (the input as
+  // a fallback). The run resolves it again, so a method saved again or a tag
+  // moved since the show runs its new content: nothing pins a revision yet.
+  const methodSelector = methodSelectorOf(output, input);
+
   const handleRun = (apiInputs: Record<string, unknown>) => {
-    if (!selectedPipe) return;
+    if (!selectedPipe || !methodSelector || !pipeLabel) return;
     // Synchronously, before any await — the panel's duplicate-run guard.
     setStarting(true);
     setStartError(null);
     setRunId(undefined);
     void (async () => {
       try {
-        // Forward the validation's own selector: a run started from the form
-        // executes exactly what was validated — files, an address, or an id.
+        // The pipe goes by its qualified ref, the one the form was built for:
+        // `pipelex_run` prepares the inputs against that pipe's signature.
         const response = await startRun({
-          ...(input?.files ? { files: input.files } : {}),
-          ...(input?.method_ref ? { method_ref: input.method_ref } : {}),
-          ...(input?.method_id ? { method_id: input.method_id } : {}),
-          pipe_code: selectedPipe.code,
+          ...methodSelector,
+          pipe_ref: pipeLabel,
           inputs: apiInputs,
         });
         const ack = response.structuredContent;
         if (ack.status === "ok" && ack.run_id) {
           setRunId(ack.run_id);
         } else {
-          setStartError(ack.errors?.[0]?.message ?? "The run could not be started.");
+          // The hint rides along: after a start whose outcome is unknown it is
+          // what tells the user the run may exist before they press Run again.
+          const error = ack.errors?.[0];
+          setStartError(
+            error === undefined
+              ? "The run could not be started."
+              : [error.message, error.hint].filter(Boolean).join(" "),
+          );
         }
       } catch (err) {
         setStartError(err instanceof Error ? err.message : "The run could not be started.");
@@ -264,11 +290,6 @@ export default function RunGraphView() {
     })();
   };
 
-  const pipeLabel = selectedPipe
-    ? selectedPipe.domain
-      ? `${selectedPipe.domain}.${selectedPipe.code}`
-      : selectedPipe.code
-    : undefined;
   // The graph is built for the bundle's declared main pipe; the form defaults
   // to the entry pipe. Say so when they are not the same pipe.
   const graphCaption = hasGraph
@@ -417,4 +438,20 @@ function EmptyState({ message, maxHeight }: { message: string; maxHeight: number
       {message}
     </div>
   );
+}
+
+/**
+ * The method a show named, as `pipelex_run` takes it: exactly one of
+ * `method_id` / `method_ref`. Read from the result's echo first, since that is
+ * what the server resolved, and from the call's input otherwise.
+ */
+function methodSelectorOf(
+  output: { method_id?: string; method_ref?: string },
+  input: { method_id?: string; method_ref?: string } | undefined,
+): { method_id: string } | { method_ref: string } | undefined {
+  const methodId = output.method_id ?? input?.method_id;
+  if (methodId) return { method_id: methodId };
+  const methodRef = output.method_ref ?? input?.method_ref;
+  if (methodRef) return { method_ref: methodRef };
+  return undefined;
 }

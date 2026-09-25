@@ -4,7 +4,7 @@
 <!-- Generated from the Pipelex onboarding source; this region is replaced from https://raw.githubusercontent.com/Pipelex/.github/main/onboarding/rendered/mcp-route.md — do not edit it here. -->
 ## Get started
 
-Pipelex lets you build AI methods with your coding agent and run them anywhere — from your agent or your chatbot via MCP, as a webapp, or via API in any software. This repository is the Pipelex MCP: it connects your chatbot to your Pipelex account and the methods saved there.
+Pipelex lets you build AI methods with your coding agent and run them anywhere: as an MCP for chatbots, as a webapp for people, or via API for your software. This repository is the Pipelex MCP: it connects your chatbot to your Pipelex account and the methods saved there.
 
 **Chatbots** — ChatGPT, Claude. Add the Pipelex MCP in your chatbot's settings by the address below — in Claude, that is **Add custom connector** — then sign in with your Pipelex account when asked. Nothing to install and no key: the Pipelex MCP runs on your signed-in session.
 
@@ -31,7 +31,7 @@ Other hosts, and the reference for developers, start at [Which server, for which
 
 ## Which server, for which host
 
-A host takes one of two things, never both: the Pipelex plugin on a coding agent, the Pipelex MCP on a chatbot. The table applies that rule host by host. A host wired to both is the one configuration to avoid — [One host, one server](#one-host-one-server) says why, and how the Pipelex MCP added in Claude reaches Claude Code without anyone choosing it.
+A host needs one of two things, not both: the Pipelex plugin on a coding agent, the Pipelex MCP on a chatbot. The table applies that rule host by host. [You don't need both](#you-dont-need-both) says what happens when the Pipelex MCP added in Claude reaches Claude Code without anyone choosing it.
 
 | Host | Tool | How to connect |
 |---|---|---|
@@ -47,52 +47,60 @@ A host that spawns MCP servers but takes no plugin, such as Cursor, can run the 
 
 ## What this repository is
 
-Pipelex MCP exposes registered-method discovery, MTHDS validation, inputs projection and preparation, and durable method runs to MCP hosts, wrapping the Pipelex API through the `@pipelex/sdk` `PipelexApiClient`. It ships as **two servers from one repo and one capability core**:
+Pipelex MCP connects MCP hosts to Pipelex methods, wrapping the Pipelex API through the `@pipelex/sdk` `PipelexApiClient`. It ships as **two servers with two tool sets, over one capability core**:
 
-- **Hosted console** — a [Skybridge](https://docs.skybridge.tech) HTTP server, deployed on Alpic, for remote-connector hosts. Registers the Skybridge views.
-- **Local workshop** — an npm-distributed stdio server (`@pipelex/mcp`, bin `pipelex-mcp`) that coding-agent hosts spawn via `npx`. Its headline feature is the `{ path }` file arm: it reads `.mthds` files from disk instead of having the model hand-copy their contents.
+- **The console**, the Pipelex connector (server name `pipelex`): a [Skybridge](https://docs.skybridge.tech) HTTP server, deployed on Alpic, for chat hosts. Its tools are `pipelex_*`, and it names a method by reference only, a saved method's catalog id or a published method's address: it finds a method, shows it, takes a file attached in the chat, and runs it. It registers the Skybridge views.
+- **The workshop**, the Pipelex plugin's server (server name `pipelex-plugin`): an npm-distributed stdio server (`@pipelex/mcp`, bin `pipelex-mcp`) that coding-agent hosts spawn via `npx`. Its tools are `mthds_*`, and they also validate a method, template its inputs, generate typed code for it, prepare its files, and save it to the catalog and pull it back. Its headline feature is the `{ path }` file arm: it reads `.mthds` files from disk instead of having the model hand-copy their contents.
 
 The console is the Pipelex MCP of the get-started above, at `mcp.pipelex.com`, and the workshop is the MCP server the Pipelex plugin runs. The rest of this page calls them by the names the code uses.
 
 ## Tools
 
-Both servers register the same tools, under the same names and contracts, apart from the few that only one of them can serve. [The tools reference](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md) gives each tool's input, result and behavior, and why those exceptions exist.
+Each server registers its own tools, and no tool name is registered by both. [The tools reference](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md) gives each tool's input, result and behavior.
 
-| Tool | Registered on | What it does |
-|---|---|---|
-| [`mthds_list_methods`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_list_methods) | both servers | List the methods saved in your organization's catalog by name, description and id, never their source. |
-| [`mthds_validate`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_validate) | both servers | Validate a method given as files, a published address or a catalog id; on the console, a valid verdict shows the method graph in the `run-graph` view. |
-| [`mthds_inputs_template`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_inputs_template) | both servers | Return a fill-in template of a pipe's declared inputs. |
-| [`mthds_codegen`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_codegen) | both servers | Generate typed TypeScript or Python for a method's concepts, stamped and locked; the workshop can write the tree straight to disk. |
-| [`mthds_prepare_inputs`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_prepare_inputs) | both servers | Make filled inputs run-ready: the workshop uploads local files to Pipelex storage, and the console passes URLs and storage references through. |
-| [`mthds_upload_attachments`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_upload_attachments--hosted-console-only) | console | Turn a file attached in a ChatGPT conversation into a run-ready `pipelex-storage://` reference. |
-| [`pipelex_request_upload`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#pipelex_request_upload--hosted-console-only-called-by-the-view) | console | Issue the one-time upload grant the `run-graph` view's run form uses for a file the user picks; hidden from the model on hosts that honour the MCP Apps `ui.visibility` key. |
-| [`mthds_run`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_run--mthds_run_status--mthds_run_results) | both servers | Start a durable run on the hosted Pipelex API and return its `run_id` at once. |
-| [`mthds_run_status`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_run--mthds_run_status--mthds_run_results) | both servers | Read a run's lifecycle state by its `run_id`. |
-| [`mthds_run_results`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_run--mthds_run_status--mthds_run_results) | both servers | Fetch a run's outcome, and list for free which of its stored files look like images. |
-| [`mthds_show_images`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_show_images) | both servers | Show the pictures a completed run produced, as image content that stays in the conversation. |
-| [`mthds_download_artifacts`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#saving-a-run-to-disk-local-workshop-only) | workshop | Save a completed run to disk: its output as `main_stuff.json`, and the files it produced. |
-| [`mthds_save_method`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_save_method--mthds_get_method--local-workshop-only) | workshop | Validate a bundle and save it to your organization's catalog, linking the directory to the saved method when the bundle was given by path. |
-| [`mthds_get_method`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_save_method--mthds_get_method--local-workshop-only) | workshop | Bring a saved method's files back, to disk or inline. |
+The console's tools:
 
-## The two deployments, and the `{ path }` arm
+| Tool | What it does |
+|---|---|
+| [`pipelex_list_methods`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#pipelex_list_methods) | List the methods saved in your organization's catalog by name, description and id, never their source. |
+| [`pipelex_show_method`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#pipelex_show_method) | Show a saved or published method before running it: its signature and a fill-in inputs template for the model, and on a host that renders views, its graph and an input form with a Run button for you. |
+| [`pipelex_upload_attachments`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#pipelex_upload_attachments) | Turn a file attached in a ChatGPT conversation into a run-ready `pipelex-storage://` reference. |
+| [`pipelex_run`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#pipelex_run) | Start a durable run of a method named by its id or its address, and return its `run_id` at once; file inputs are URLs or storage references. |
+| [`pipelex_run_status`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#pipelex_run_status--pipelex_run_results) | Read a run's lifecycle state by its `run_id`. |
+| [`pipelex_run_results`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#pipelex_run_status--pipelex_run_results) | Fetch a run's outcome, and list for free which of its stored files look like images. |
+| [`pipelex_show_images`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#pipelex_show_images) | Show the pictures a completed run produced, as image content that stays in the conversation. |
+| [`pipelex_request_upload`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#pipelex_request_upload) | Issue the one-time upload grant the `run-graph` view's run form uses for a file the user picks; hidden from the model on hosts that honour the MCP Apps `ui.visibility` key. |
 
-MCP tool arguments are generated token-by-token by the host LLM — there is no other channel from the conversation to the server. So submitting a bundle's `.mthds` contents to the **hosted** server means the model re-emits every file as output tokens (slow on large bundles, re-paid every repair-loop iteration and every tool in the chain, and not guaranteed byte-identical to what's on disk). The **local** server sidesteps this: the host spawns it in your workspace, so it can read files from disk given only a path.
+The workshop's tools:
 
-The shared submitted-files shape accepts two item forms — inline content or a file path:
+| Tool | What it does |
+|---|---|
+| [`mthds_list_methods`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_list_methods) | List the methods saved in your organization's catalog by name, description and id, never their source. |
+| [`mthds_validate`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_validate) | Validate a method given as files, a published address or a catalog id, and return its main pipe's typed signature. |
+| [`mthds_inputs_template`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_inputs_template) | Return a fill-in template of a pipe's declared inputs. |
+| [`mthds_codegen`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_codegen) | Generate typed TypeScript or Python for a method's concepts, stamped and locked, returned or written straight to disk. |
+| [`mthds_prepare_inputs`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_prepare_inputs) | Make filled inputs run-ready, uploading local files to Pipelex storage. |
+| [`mthds_run`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_run--mthds_run_status--mthds_run_results) | Start a durable run on the hosted Pipelex API from files, an address or an id, and return its `run_id` at once. |
+| [`mthds_run_status`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_run--mthds_run_status--mthds_run_results) | Read a run's lifecycle state by its `run_id`. |
+| [`mthds_run_results`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_run--mthds_run_status--mthds_run_results) | Fetch a run's outcome, and list for free which of its stored files look like images. |
+| [`mthds_show_images`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_show_images) | Show the pictures a completed run produced, as image content that stays in the conversation. |
+| [`mthds_download_artifacts`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_download_artifacts) | Save a completed run to disk: its output as `main_stuff.json`, and the files it produced. |
+| [`mthds_save_method`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_save_method--mthds_get_method) | Validate a bundle and save it to your organization's catalog, linking the directory to the saved method when the bundle was given by path. |
+| [`mthds_get_method`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_save_method--mthds_get_method) | Bring a saved method's files back, to disk or inline. |
+
+## Files on the workshop, by path
+
+MCP tool arguments are generated token-by-token by the host LLM — there is no other channel from the conversation to the server. So submitting a bundle's `.mthds` contents inline means the model re-emits every file as output tokens (slow on large bundles, re-paid every repair-loop iteration and every tool in the chain, and not guaranteed byte-identical to what's on disk). The workshop sidesteps this: the host spawns it in your workspace, so it can read files from disk given only a path. The console takes no files at all, since a chatbot runs a saved or published method by reference.
+
+The workshop's files-taking tools accept two item forms — inline content or a file path:
 
 ```ts
 type SubmittedFileInput = { content: string; uri?: string | null } | { path: string };
 ```
 
-Both servers register this same union, so the tool contract never forks; what differs is behavior:
+The workshop resolves `{ path }` items from disk before invoking the capability — near-constant token cost regardless of bundle size, byte-accurate reads, and real provenance (the resolved item carries `uri` = the submitted path, so diagnostics locate to files you can open and edit). Inline `{ content, uri? }` items stay accepted, for a bundle the agent holds only in the conversation. An item is one arm or the other; on a malformed item carrying both keys, `content` wins (first-match union semantics) and `path` is ignored.
 
-- The **workshop resolves `{ path }` from disk** before invoking the capability — near-constant token cost regardless of bundle size, byte-accurate reads, and real provenance (the resolved item carries `uri` = the submitted path, so diagnostics locate to files you can open and edit). Inline `{ content, uri? }` items stay accepted for parity.
-- The **console rejects `{ path }` items** with an instructive `input_domain` error located at `files[i].path`: this deployment cannot read files; resubmit as `{ content, uri? }`, or use the local workshop (`npx @pipelex/mcp`).
-
-An item is one arm or the other; on a malformed item carrying both keys, `content` wins (first-match union semantics) and `path` is ignored.
-
-**Path trust boundary (workshop).** `{ path }` values resolve relative to the server's working directory. Each `{ path }` argument is contracted to one extension, `.mthds` for every bundle argument and `.py` for `mthds_save_method`'s `python`, so any other extension is rejected **before any filesystem access** (a prompt-injected `.env` or key-file path is never opened), and the resolved target (symlinks followed) must live inside the working-directory subtree. `mthds_save_method` adds one more bound: every `{ path }` item must sit at or under the directory of its first `files` item, which must itself be a `{ path }`. A wrong extension, an escape, a missing file and a non-regular file come back as `input_domain` errors located at the item (`files[i].path`, or `python[i].path`).
+**Path trust boundary.** `{ path }` values resolve relative to the server's working directory. Each `{ path }` argument is contracted to one extension, `.mthds` for every bundle argument and `.py` for `mthds_save_method`'s `python`, so any other extension is rejected **before any filesystem access** (a prompt-injected `.env` or key-file path is never opened), and the resolved target (symlinks followed) must live inside the working-directory subtree. `mthds_save_method` adds one more bound: every `{ path }` item must sit at or under the directory of its first `files` item, which must itself be a `{ path }`. A wrong extension, an escape, a missing file and a non-regular file come back as `input_domain` errors located at the item (`files[i].path`, or `python[i].path`).
 
 ## Local workshop: start it
 
@@ -122,30 +130,30 @@ On a coding agent, prefer the **local workshop**, which the Pipelex plugin bring
 
 ## Chat attachments (ChatGPT only)
 
-The workshop reads a user's file from disk: a local path given as an input value is uploaded to Pipelex storage by `mthds_prepare_inputs`. The console has no filesystem, so it gets it a different way: **ChatGPT's Apps runtime rewrites the model's reference to an attached file into a signed-URL object** before the call reaches the server. `mthds_upload_attachments` takes that channel — it fetches the bytes server-side and uploads them to Pipelex storage under your signed-in account, returning only small URI strings. **The bytes never enter the model's context**, which is the whole reason console-side upload is allowed here at all.
+The workshop reads a user's file from disk: a local path given as an input value is uploaded to Pipelex storage by `mthds_prepare_inputs`. The console has no filesystem, so it gets it a different way: **ChatGPT's Apps runtime rewrites the model's reference to an attached file into a signed-URL object** before the call reaches the server. `pipelex_upload_attachments` takes that channel — it fetches the bytes server-side and uploads them to Pipelex storage under your signed-in account, returning only small URI strings. **The bytes never enter the model's context**, which is the whole reason console-side upload is allowed here at all.
 
 The flow, on the console:
 
 ```
 user attaches a PDF in the chat
-  → mthds_upload_attachments   → pipelex-storage://… uris
-  → fill the uris into the mthds_inputs_template output
-  → mthds_run
+  → pipelex_upload_attachments   → pipelex-storage://… uris
+  → fill the uris into pipelex_show_method's inputs template
+  → pipelex_run
 ```
 
-`mthds_prepare_inputs` can be **skipped** — a `pipelex-storage://` value is already run-ready. Nothing else in the flow changes.
+A `pipelex-storage://` value is already run-ready, so `pipelex_run` takes it as it is. Nothing else in the flow changes.
 
 What to know before you rely on it:
 
-- **Re-add the console in ChatGPT to get it.** ChatGPT caches a server's tool list when you add it and never refreshes it, so a newly shipped tool (or a changed tool description) stays invisible to an existing installation until you remove the console and add it again.
+- **Re-add the console in ChatGPT to get it.** ChatGPT caches a server's tool list when you add it and never refreshes it, so a newly shipped tool (or a changed tool description) stays invisible to an existing installation until you remove the console and add it again. An installation older than the console's `pipelex_*` tools calls names that no longer exist, and each answers with that same instruction.
 - **7 MiB per attachment.** This is a transport ceiling, not a product choice: `POST /v1/upload` takes a base64 body behind an AWS API Gateway HTTP API, whose 10 MiB request quota divides by base64's 4/3 inflation to ~7.5 MiB decoded. (The app-level 50 MiB `MAX_UPLOAD_MIB` is unreachable through the public gateway — don't quote it for an attachment. A file picked in the method view's run form never crosses the gateway, and up to 50 MiB it is accepted.) ChatGPT hands over much larger files happily, so expect to meet this; the refusal fires before any bytes are fetched and names the limit.
-- **ChatGPT only.** claude.ai injects no file reference into a connector call, and MCP has nothing in-spec. On any other host the model can only fabricate a URL, which [the fetch boundary](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_upload_attachments--hosted-console-only) refuses — that refusal is also the "this host cannot attach files, ask for an `http(s)` URL" diagnostic.
+- **ChatGPT only.** claude.ai injects no file reference into a connector call, and MCP has nothing in-spec. On any other host the model can only fabricate a URL, which [the fetch boundary](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#pipelex_upload_attachments) refuses — that refusal is also the "this host cannot attach files, ask for an `http(s)` URL" diagnostic.
 
-## One host, one server
+## You don't need both
 
-A host should be connected to **one** Pipelex server, never both. Same tool names on both means a both-installed host has ambiguous routing (nothing guarantees the model picks the local one), contradictory schemas under identical names (the workshop accepts `{ path }`, the console rejects it), and doubled tool registrations for no added capability.
+A chat host takes the console, and a coding agent takes the workshop through the Pipelex plugin; no host needs both. The two share no tool name, so a host that has both can tell them apart, and both servers' instructions tell the model to use the plugin's `mthds_*` tools for all method work whenever they are present, and never to mix the two. The console runs on your sign-in and the workshop on an API key, and the two can select different organizations: a method saved from the workshop is visible from the console only when both select the same one.
 
-The trap that gets you there without choosing it: **the console added in claude.ai syncs into Claude Code automatically.** A user signed into claude.ai with the console enabled gets the hosted tools in coding sessions alongside the workshop, whether the Pipelex plugin brought it or you registered it by hand. When you run the workshop, turn the console off for those sessions:
+The way to end up with both without choosing it: **the console added in claude.ai syncs into Claude Code automatically.** A user signed into claude.ai with the console enabled gets the connector's tools in coding sessions beside the workshop's. That is harmless, but it doubles the tool list for no added capability, so you can turn the console off for those sessions:
 
 - In Claude Code, `/mcp` is the entry point. A connector you haven't signed into is collapsed behind a **"Show unused connectors"** row (Claude Code v2.1.161+) — expand it to find Pipelex.
 - Config alternatives: per-project `deniedMcpServers` in `.claude/settings.json`, or global `disableClaudeAiConnectors: true` in user settings.
