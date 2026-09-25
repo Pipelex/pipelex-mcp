@@ -13,6 +13,7 @@ import type { InputForm, OutputForm, PipeIOContracts, RunField } from "@pipelex/
 import type { GraphSpec } from "@pipelex/mthds-ui";
 
 import type { RunResultsStructuredContent, RunUsage } from "@pipelex/mcp-core/capabilities/run.js";
+import type { ToolError } from "@pipelex/mcp-core/capabilities/shared.js";
 import { graphPipeRefOf, parsePipeRef } from "./run-graph-selection.js";
 
 /** A settled results fetch: the structured verdict plus the view-only artifacts it carried on `_meta`. */
@@ -217,6 +218,30 @@ export function outputToRender(full: unknown, bounded: unknown): OutputToRender 
   return length > FULL_OUTPUT_RENDER_BUDGET
     ? { value: bounded, oversizedLength: length }
     : { value: full, oversizedLength: null };
+}
+
+/**
+ * How many times one run's results are read before the fetch stops and says
+ * so. On the poll ladder that is a little over two minutes, longer when the
+ * server hints a wait, and far past the mid-write race a retry exists for. A
+ * fetch that never settled would hold the form's Run button for as long as the
+ * view stayed open, and again after every remount, since the run it follows is
+ * persisted.
+ */
+export const RESULTS_FETCH_MAX_ATTEMPTS = 40;
+
+/**
+ * The error a results fetch settles on once {@link RESULTS_FETCH_MAX_ATTEMPTS}
+ * reads have not produced the results, naming what the last one ran into. It
+ * is not retryable in the view; a remount starts a fresh fetch.
+ */
+export function resultsFetchExhausted(lastProblem: string): ToolError {
+  return {
+    class: "runtime",
+    message: `The results were still unreadable after ${RESULTS_FETCH_MAX_ATTEMPTS} attempts (${lastProblem}).`,
+    hint: "Reopen this view to try again, or ask the assistant for this run's results.",
+    retryable: false,
+  };
 }
 
 /** Friendly words for the terminal statuses a run can fail with. */

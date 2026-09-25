@@ -6,7 +6,7 @@ This is the changelog of the hosted console: the Pipelex MCP that chat hosts rea
 
 ### Added
 
-- **A run's output in the method form's view**: A run started from the `run-graph` view's form now shows its results in the form's place once it completes, with the executed graph replacing the dry-run one and the form folded behind "Edit inputs and run again". The user no longer has to ask the assistant to fetch the results. The view keeps the run in host-persisted view state, so reopening the conversation shows the run's results again, and it holds Run disabled until those results are read.
+- **A run's output in the method form's view**: A run started from the `run-graph` view's form now shows its results in the form's place once it completes, with the executed graph replacing the dry-run one and the form folded behind "Edit inputs and run again". The user no longer has to ask the assistant to fetch the results. The view keeps the run in host-persisted view state, so reopening the conversation shows the run's results again, with the form on the pipe that ran; each press of Run clears that state first, so a failed start never brings an older run back. Run stays disabled until the results are read, or until their fetch gives up after a little over two minutes of reads and says so.
 
 ### Changed
 

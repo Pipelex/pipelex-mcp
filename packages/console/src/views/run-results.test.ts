@@ -5,6 +5,7 @@ import type { OutputForm, PipeIOContracts } from "@pipelex/mthds-ui/form";
 import type { RunResultsStructuredContent, RunUsage } from "@pipelex/mcp-core/capabilities/run.js";
 import {
   FULL_OUTPUT_RENDER_BUDGET,
+  RESULTS_FETCH_MAX_ATTEMPTS,
   completedHeadline,
   executedPipeRefOf,
   failedHeadline,
@@ -13,6 +14,7 @@ import {
   hasExecutedGraph,
   outputFieldFor,
   outputToRender,
+  resultsFetchExhausted,
   runDurationSeconds,
   runResultsViewOf,
 } from "./run-results.js";
@@ -223,6 +225,17 @@ describe("outputToRender", () => {
 
   it("uses the bounded copy when the response carried no full output", () => {
     expect(outputToRender(undefined, [1, 2])).toEqual({ value: [1, 2], oversizedLength: null });
+  });
+});
+
+describe("resultsFetchExhausted", () => {
+  it("settles on a final error that names the attempts and what the last one ran into", () => {
+    const error = resultsFetchExhausted("the run was still writing them");
+    expect(error.retryable).toBe(false);
+    expect(error.class).toBe("runtime");
+    expect(error.message).toContain(`${RESULTS_FETCH_MAX_ATTEMPTS} attempts`);
+    expect(error.message).toContain("the run was still writing them");
+    expect(error.hint).toMatch(/Reopen this view/);
   });
 });
 

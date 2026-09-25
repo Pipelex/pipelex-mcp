@@ -19,7 +19,12 @@ import { useDisplayMode, useLayout, useViewState } from "skybridge/web";
 import { useCallTool, useToolInfo } from "../helpers.js";
 import { RunResultsPanel } from "./components/run-results-panel.js";
 import { ToolbarButton } from "./components/toolbar-button.js";
-import { graphCaptionFor, graphPipeRefOf, selectedPipeFor } from "./run-graph-selection.js";
+import {
+  graphCaptionFor,
+  graphPipeRefOf,
+  parsePipeRef,
+  selectedPipeFor,
+} from "./run-graph-selection.js";
 import type { SelectedPipe } from "./run-graph-selection.js";
 import { formRunInFlight, formViewStage, runStatusLineFor } from "./run-graph-stage.js";
 import type { RunStatusLine } from "./run-graph-stage.js";
@@ -44,7 +49,9 @@ const TOOLBAR_POSITION_FOR_VIEW: ToolbarPosition = TOOLBAR_POSITION.TOP_LEFT;
  * Host-persisted view state: the handle on the run the form last started, and
  * the pipe it was started for. It is what lets a remount — a reopened
  * conversation, a host re-render — follow that run again and show its results,
- * since the view sends the conversation no message carrying the run id.
+ * since the view sends the conversation no message carrying the run id. Each
+ * press of Run clears it first, so after a start that failed there is nothing
+ * to restore.
  */
 type RunGraphViewState = {
   run_id?: string;
@@ -169,7 +176,9 @@ export default function RunGraphView() {
   // A remount finds the run the form last started in view state and follows it
   // again: one status read, then its results, as `run-follow` does from its tool
   // output. Once per mount, since the host may hand the state over after the
-  // first render, and never over a run the user has started in this mount.
+  // first render, and never over a run the user has started in this mount. The
+  // pipe that ran becomes the form's pipe again, so "Edit inputs and run again"
+  // opens the form it was run from, which may be a node the user had clicked.
   const restoredRef = useRef(false);
   const persistedRunId = viewState?.run_id;
   const persistedPipeRef = viewState?.run_pipe_ref;
@@ -177,7 +186,12 @@ export default function RunGraphView() {
     if (restoredRef.current || typeof persistedRunId !== "string") return;
     restoredRef.current = true;
     setRunId(persistedRunId);
-    setRunPipeRef(typeof persistedPipeRef === "string" ? persistedPipeRef : null);
+    if (typeof persistedPipeRef === "string") {
+      setRunPipeRef(persistedPipeRef);
+      setPickedPipe(parsePipeRef(persistedPipeRef));
+    } else {
+      setRunPipeRef(null);
+    }
   }, [persistedRunId, persistedPipeRef]);
 
   // `useCallTool`'s caller changes identity per render; pin the latest so the
@@ -306,8 +320,12 @@ export default function RunGraphView() {
     if (!selectedPipe || !methodSelector || !pipeLabel) return;
     // Synchronously, before any await — the panel's duplicate-run guard.
     setStarting(true);
-    // A run started here replaces whatever a remount would have restored.
+    // A run started here replaces whatever a remount would have restored, and
+    // the persisted run goes now rather than on success: a start that fails
+    // must not bring an older run's results back on the next remount, where
+    // they would read as this attempt's.
     restoredRef.current = true;
+    void setViewState((prev) => ({ ...prev, run_id: undefined, run_pipe_ref: undefined }));
     setStartError(null);
     setRunId(undefined);
     setRunPipeRef(pipeLabel);

@@ -3,7 +3,11 @@ import { useEffect, useRef, useState } from "react";
 import type { RunResultsStructuredContent } from "@pipelex/mcp-core/capabilities/run.js";
 import type { ToolError } from "@pipelex/mcp-core/capabilities/shared.js";
 import { isTransientPollError, nextPollDelayMs } from "./run-polling.js";
-import { runResultsViewOf } from "./run-results.js";
+import {
+  RESULTS_FETCH_MAX_ATTEMPTS,
+  resultsFetchExhausted,
+  runResultsViewOf,
+} from "./run-results.js";
 import type { RunResultsView } from "./run-results.js";
 
 /** The slice of `useCallTool("pipelex_run_results")` the fetch loop consumes. */
@@ -36,6 +40,9 @@ const NOTHING: RunResultsSnapshot = { results: null, error: null };
  * race or hiccup backs off instead of hammering the endpoint at the ladder's
  * first rung. Same visibility discipline as the status loop: nothing is
  * scheduled while the tab is hidden, and one immediate fetch runs on return.
+ * After {@link RESULTS_FETCH_MAX_ATTEMPTS} reads without the results, the loop
+ * settles on an error naming what the last one ran into, which frees the form's
+ * Run button and puts the failure on screen.
  *
  * The snapshot is stamped with the run it answers for, so a view that starts
  * another run sees nothing until that run's own results are read — never the
@@ -61,8 +68,19 @@ export function useRunResults(
     let cancelled = false;
     let done = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let attempts = 0;
+    // What the last read ran into, for the error the loop settles on when it stops.
+    let lastProblem = "no answer yet";
     const retry = (retryAfterSeconds?: number | null) => {
-      if (cancelled || done || document.visibilityState === "hidden") {
+      if (cancelled || done) {
+        return;
+      }
+      if (attempts >= RESULTS_FETCH_MAX_ATTEMPTS) {
+        done = true;
+        setSettled({ runId, results: null, error: resultsFetchExhausted(lastProblem) });
+        return;
+      }
+      if (document.visibilityState === "hidden") {
         return;
       }
       timer = setTimeout(
@@ -79,14 +97,16 @@ export function useRunResults(
         return;
       }
       inFlight = true;
+      attempts += 1;
       let content: RunResultsStructuredContent;
       let meta: Record<string, unknown> | undefined;
       try {
         const response = await fetchRef.current({ run_id: runId });
         content = response.structuredContent;
         meta = response.meta;
-      } catch {
+      } catch (err) {
         inFlight = false;
+        lastProblem = err instanceof Error ? err.message : "the call failed";
         retry();
         return;
       }
@@ -101,6 +121,7 @@ export function useRunResults(
           retryable: false,
         };
         if (isTransientPollError(error)) {
+          lastProblem = error.message;
           retry();
         } else {
           done = true;
@@ -109,6 +130,7 @@ export function useRunResults(
         return;
       }
       if (content.state === "running") {
+        lastProblem = "the run was still writing them";
         retry(content.retry_after_seconds);
         return;
       }

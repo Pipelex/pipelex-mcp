@@ -29,7 +29,8 @@ export interface FormViewStage {
  * the Run button disabled while the run is live, and the status line under it
  * says where the run stands. Once a completed run's results are read, the
  * results take the form's place and the form folds behind "Edit inputs and run
- * again", which brings it back with the values the user entered; the dry-run
+ * again", which brings it back with the values the user entered in this mount
+ * (a remount keeps the run and its pipe, not the values); the dry-run
  * graph gives way to the executed one, which carries the values and each
  * step's status. A failed run shows its failure and keeps the form open, since
  * changing the inputs is the likely next step, and keeps the dry-run graph,
