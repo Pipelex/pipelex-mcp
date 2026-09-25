@@ -20,10 +20,10 @@ function allowedBy(sources: readonly string[], link: string): boolean {
 }
 
 describe("RUN_OUTPUT_SOURCES", () => {
-  it("allows a run output link in the path-style form the runtime signs", () => {
-    // The shape measured on a completed api-dev run's results on 2026-09-25.
+  it("allows the fresh link the platform's bulk resolve route mints", () => {
+    // The shape measured on the route's answer against api-dev on 2026-09-25.
     const link =
-      "https://s3.us-west-2.amazonaws.com/pipelex-app-dev/runs/run_x/staged.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=20260924T054225Z&X-Amz-Expires=3600";
+      "https://pipelex-app-dev.s3.amazonaws.com/org_x/runs/run_x/staged.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=20260925T110925Z&X-Amz-Expires=900";
     expect(allowedBy(RUN_OUTPUT_SOURCES, link)).toBe(true);
   });
 
@@ -33,14 +33,19 @@ describe("RUN_OUTPUT_SOURCES", () => {
     ).toBe(true);
   });
 
-  it("scopes the shared regional endpoint to the app buckets", () => {
+  it("names each bucket's own host and never the shared regional endpoint", () => {
+    for (const source of RUN_OUTPUT_SOURCES) {
+      const url = new URL(source);
+      expect(url.pathname).toBe("/");
+      expect(source).toBe(url.origin);
+      expect(url.hostname.startsWith("pipelex-app-")).toBe(true);
+    }
     expect(
-      allowedBy(RUN_OUTPUT_SOURCES, "https://s3.us-west-2.amazonaws.com/someone-else/x.png"),
+      allowedBy(RUN_OUTPUT_SOURCES, "https://s3.us-west-2.amazonaws.com/pipelex-app-dev/x.png"),
     ).toBe(false);
-    expect(
-      allowedBy(RUN_OUTPUT_SOURCES, "https://s3.us-west-2.amazonaws.com/pipelex-app-dev-x/a.png"),
-    ).toBe(false);
-    expect(RUN_OUTPUT_SOURCES).not.toContain("https://s3.us-west-2.amazonaws.com");
+    expect(allowedBy(RUN_OUTPUT_SOURCES, "https://someone-else.s3.amazonaws.com/x.png")).toBe(
+      false,
+    );
   });
 });
 

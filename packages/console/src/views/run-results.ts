@@ -11,6 +11,7 @@
 import { buildResultField, getPipeIOContract, getPipeOutputForm } from "@pipelex/mthds-ui/form";
 import type { InputForm, OutputForm, PipeIOContracts, RunField } from "@pipelex/mthds-ui/form";
 import type { GraphSpec } from "@pipelex/mthds-ui";
+import type { ResolveUrl } from "@pipelex/mthds-ui/form/react";
 
 import type { RunResultsStructuredContent, RunUsage } from "@pipelex/mcp-core/capabilities/run.js";
 import type { ToolError } from "@pipelex/mcp-core/capabilities/shared.js";
@@ -33,6 +34,13 @@ export interface RunResultsView {
   inputForm: InputForm | null;
   /** The full, unbounded main output (`_meta.main_stuff`); `content.main_stuff` is the bounded copy. */
   mainStuff: unknown;
+  /**
+   * The kernel's resolver over the fresh links the results carried
+   * (`_meta.resolved_urls`), for the output and the executed graph alike, or
+   * undefined when they carried none. Built once per read, so it keeps one
+   * identity for as long as the result is on screen.
+   */
+  resolveUrl: ResolveUrl | undefined;
 }
 
 /**
@@ -52,7 +60,32 @@ export function runResultsViewOf(
     outputForm: (meta?.output_form ?? null) as OutputForm | null,
     inputForm: (meta?.input_form ?? null) as InputForm | null,
     mainStuff: meta?.main_stuff,
+    resolveUrl: resolveUrlFor(meta?.resolved_urls),
   };
+}
+
+/**
+ * The kernel's `resolveUrl` over `_meta.resolved_urls`, the fresh link the
+ * console minted for each stored file when it read the results. A lookup,
+ * because the kernel's resolver is synchronous by design: a host that must
+ * presign resolves the run's references in one batch and closes over the map.
+ *
+ * The files have to paint from these. The payload's own `public_url` is signed
+ * path-style on the shared regional S3 host, which no host's CSP scoped to a
+ * bucket, and it expires an hour after the run; these are signed on each
+ * bucket's own host, which the views' CSP names, and a remount reads new ones.
+ * A reference with no link answers `undefined`, which the kernel reads as "use
+ * the payload's `public_url`". Anything but a map of `https:` strings reads as
+ * no links, since the value lands in an `<img src>`.
+ */
+export function resolveUrlFor(value: unknown): ResolveUrl | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const links = new Map<string, string>();
+  for (const [reference, link] of Object.entries(value)) {
+    if (typeof link === "string" && link.startsWith("https://")) links.set(reference, link);
+  }
+  if (links.size === 0) return undefined;
+  return (url) => links.get(url);
 }
 
 /** Whether the result carries an executed graph with at least one node to draw. */

@@ -185,7 +185,7 @@ When `inputs` is given, the tool checks them against the pipe's declared signatu
 
 ### `pipelex_run_status` / `pipelex_run_results`
 
-The console's names for the run lifecycle reads, with the contract of `mthds_run_status` and `mthds_run_results` below. On the console, a completed result also carries the full output, the executed graph and the artifacts that describe its data on the view-only `_meta` channel, which is what lets both views render the output and show each graph node's actual value; the summary names `pipelex_show_images` when the run stored pictures; and an unknown run id reads as a run not visible to your organization. There is no download tool on the console: the user downloads a run's files from the app's UI.
+The console's names for the run lifecycle reads, with the contract of `mthds_run_status` and `mthds_run_results` below. On the console, a completed result also carries the full output, the executed graph and the artifacts that describe its data on the view-only `_meta` channel, which is what lets both views render the output and show each graph node's actual value, plus `_meta.resolved_urls`, a fresh link for each stored file the output and the graph reference, minted at read time, which is what the views paint images and preview documents from; the summary names `pipelex_show_images` when the run stored pictures; and an unknown run id reads as a run not visible to your organization. There is no download tool on the console: the user downloads a run's files from the app's UI.
 
 ### `pipelex_show_images`
 

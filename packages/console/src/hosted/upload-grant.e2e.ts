@@ -9,12 +9,21 @@
  * `run-graph` view's CSP lets a page connect to. That last check is the one a
  * unit test cannot make: the platform picked the global S3 host rather than the
  * regional one the runtime uses, and nothing but a live grant says so.
+ *
+ * The grant's reference also serves the check the views' images rest on: the
+ * results paint from fresh links the bulk resolve route mints, and the host it
+ * signs on must be one `RUN_OUTPUT_SOURCES` names. The route presigns without
+ * reading the object, so an unsent grant's reference is enough, and this stays
+ * write-free. It is the check whose absence let the views ship pointing at a
+ * host no image was ever served from.
  */
 
 import { describe, expect, it } from "vitest";
 
-import { UPLOAD_CONNECT_DOMAINS } from "./app-buckets.js";
+import { RUN_OUTPUT_SOURCES, UPLOAD_CONNECT_DOMAINS } from "./app-buckets.js";
 import { liveApiConfig } from "@pipelex/mcp-core/capabilities/e2e-support.js";
+import { freshStorageLinks } from "@pipelex/mcp-core/capabilities/run.js";
+import { createPipelexApiClient } from "@pipelex/mcp-core/capabilities/shared.js";
 import { requestPipelexUpload } from "@pipelex/mcp-core/capabilities/upload-grant.js";
 
 const context = liveApiConfig();
@@ -41,6 +50,24 @@ describe("pipelex_request_upload (live)", () => {
     const origin = new URL(grant?.url ?? "").origin;
     if (!origin.startsWith("http://")) {
       expect(UPLOAD_CONNECT_DOMAINS).toContain(origin);
+    }
+  });
+
+  it("resolves a stored reference to a fresh link on a host both run views may load", async () => {
+    const minted = await requestPipelexUpload(
+      { filename: "pipelex-mcp-e2e.png", content_type: "image/png", size: 68 },
+      context,
+    );
+    const reference = minted.grant?.uri;
+    expect(reference, minted.summary).toBeDefined();
+
+    const links = await freshStorageLinks(createPipelexApiClient(context), [{ url: reference }]);
+
+    const link = links?.[reference ?? ""];
+    expect(link, "the bulk resolve route minted no link").toBeDefined();
+    const origin = new URL(link ?? "").origin;
+    if (!origin.startsWith("http://")) {
+      expect(RUN_OUTPUT_SOURCES).toContain(origin);
     }
   });
 

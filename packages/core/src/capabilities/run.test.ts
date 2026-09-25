@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { ApiResponseError, ApiUnreachableError, MissingMainStuffError } from "@pipelex/sdk";
+import {
+  ApiResponseError,
+  ApiUnreachableError,
+  BULK_RESOLVE_MAX_URIS,
+  MissingMainStuffError,
+} from "@pipelex/sdk";
 import type {
+  BulkResolvedStorageUrls,
+  BulkResolveStorageUrlsInput,
   InputForm,
   MethodProvenance,
   OutputForm,
@@ -24,6 +31,7 @@ import {
   boundMainStuff,
   classifyStartError,
   ELLIPSIS_MARKER,
+  freshStorageLinks,
   getMthdsRunResults,
   getMthdsRunStatus,
   MAIN_STUFF_CAP,
@@ -1167,13 +1175,31 @@ interface FakeRunClient {
   start(options: PipelexStartOptions): Promise<RunResultStart>;
   getRunStatus(runId: string): Promise<RunRead>;
   getRunResult(runId: string): Promise<RunResultState>;
+  resolveStorageUrls(
+    input: BulkResolveStorageUrlsInput,
+    options?: { signal?: AbortSignal },
+  ): Promise<BulkResolvedStorageUrls>;
 }
 
 const NEVER_CLIENT: FakeRunClient = {
   start: () => Promise.reject(new Error("start must not be called")),
   getRunStatus: () => Promise.reject(new Error("getRunStatus must not be called")),
   getRunResult: () => Promise.reject(new Error("getRunResult must not be called")),
+  resolveStorageUrls: () => Promise.reject(new Error("resolveStorageUrls must not be called")),
 };
+
+/** The bulk resolve route's answer for each reference, minted on each bucket's own host. */
+function mintedLinks(input: BulkResolveStorageUrlsInput): Promise<BulkResolvedStorageUrls> {
+  return Promise.resolve({
+    items: input.uris.map((uri) => ({
+      uri,
+      url: `https://pipelex-app-dev.s3.amazonaws.com/${uri.slice("pipelex-storage://".length)}?X-Amz-Expires=900`,
+      expires_at: "2026-09-25T12:00:00Z",
+      content_type: "image/png",
+      error: null,
+    })),
+  });
+}
 
 function contextWith(overrides: Partial<FakeRunClient>): RunContext {
   return {
@@ -1720,6 +1746,47 @@ describe("getMthdsRunResults", () => {
     expect(result.graphSpec).toEqual({ nodes: [] });
   });
 
+  it("puts a fresh link for each stored file on _meta when the shell has views", async () => {
+    const picture = "pipelex-storage://runs/x/illustration.png";
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: { pipeline_run_id: RUN_ID, main_stuff: { image: { url: picture } } },
+    };
+    const context = contextWith({
+      getRunResult: () => Promise.resolve(state),
+      resolveStorageUrls: mintedLinks,
+    });
+
+    const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
+
+    expect(toolResult._meta.resolved_urls).toEqual({
+      [picture]:
+        "https://pipelex-app-dev.s3.amazonaws.com/runs/x/illustration.png?X-Amz-Expires=900",
+    });
+    expect(JSON.stringify(toolResult.structuredContent)).not.toContain("s3.amazonaws.com");
+  });
+
+  it("resolves nothing on a shell without views", async () => {
+    const state: RunResultState = {
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: { image: { url: "pipelex-storage://runs/x/illustration.png" } },
+      },
+    };
+    const context = {
+      ...contextWith({ getRunResult: () => Promise.resolve(state) }),
+      viewsAvailable: false,
+    };
+
+    const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.state).toBe("completed");
+    expect(result.resolvedUrls).toBeUndefined();
+  });
+
   it("does not call the client on a blank run_id", async () => {
     const result = await getMthdsRunResults({ run_id: "" }, contextWith({}));
 
@@ -1764,6 +1831,108 @@ describe("getMthdsRunResults", () => {
       "Run results could not be read: the organization's Pipelex plan does not cover this call.",
     );
     expect(result.summary).not.toMatch(/unreachable/);
+  });
+});
+
+describe("freshStorageLinks", () => {
+  const picture = "pipelex-storage://runs/x/illustration.png";
+  const step = "pipelex-storage://runs/x/step.png";
+
+  it("resolves the output's references, then the graph's, once each, in one request", async () => {
+    const asked: string[][] = [];
+    let signal: AbortSignal | undefined;
+    const links = await freshStorageLinks(
+      {
+        resolveStorageUrls: (input, options) => {
+          asked.push(input.uris);
+          signal = options?.signal;
+          return mintedLinks(input);
+        },
+      },
+      [{ image: { url: picture }, again: picture }, { nodes: [{ value: { url: step } }, picture] }],
+    );
+
+    expect(asked).toEqual([[picture, step]]);
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(links).toEqual({
+      [picture]:
+        "https://pipelex-app-dev.s3.amazonaws.com/runs/x/illustration.png?X-Amz-Expires=900",
+      [step]: "https://pipelex-app-dev.s3.amazonaws.com/runs/x/step.png?X-Amz-Expires=900",
+    });
+  });
+
+  it("asks for at most one bulk request's worth, the output's first", async () => {
+    const many = Array.from(
+      { length: BULK_RESOLVE_MAX_URIS + 5 },
+      (_unused, index) => `pipelex-storage://runs/x/frame-${index}.png`,
+    );
+    let asked: string[] = [];
+    await freshStorageLinks(
+      {
+        resolveStorageUrls: (input) => {
+          asked = input.uris;
+          return mintedLinks(input);
+        },
+      },
+      [many, { url: step }],
+    );
+
+    expect(asked).toEqual(many.slice(0, BULK_RESOLVE_MAX_URIS));
+  });
+
+  it("makes no request when nothing is stored", async () => {
+    const links = await freshStorageLinks(NEVER_CLIENT, [{ answer: 42 }, undefined]);
+
+    expect(links).toBeUndefined();
+  });
+
+  it("goes without links when the route fails, rather than failing the results", async () => {
+    const links = await freshStorageLinks(
+      {
+        resolveStorageUrls: () =>
+          Promise.reject(new ApiUnreachableError("down", DEFAULT_API_URL, "ECONNREFUSED")),
+      },
+      [{ url: picture }],
+    );
+
+    expect(links).toBeUndefined();
+  });
+
+  it("keeps only an https link the route minted for a reference it was asked for", async () => {
+    const other = "pipelex-storage://runs/x/other.png";
+    const links = await freshStorageLinks(
+      {
+        resolveStorageUrls: () =>
+          Promise.resolve({
+            items: [
+              {
+                uri: picture,
+                url: null,
+                expires_at: null,
+                content_type: null,
+                error: { code: "not_found", message: "gone" },
+              },
+              {
+                uri: step,
+                url: "javascript:alert(1)",
+                expires_at: "2026-09-25T12:00:00Z",
+                content_type: null,
+                error: null,
+              },
+              {
+                uri: other,
+                url: "https://pipelex-app-dev.s3.amazonaws.com/runs/x/other.png",
+                expires_at: "2026-09-25T12:00:00Z",
+                content_type: null,
+                error: null,
+              },
+            ],
+          } as unknown as BulkResolvedStorageUrls),
+      },
+      [{ a: { url: picture }, b: { url: step } }],
+    );
+
+    expect(links).toBeUndefined();
   });
 });
 

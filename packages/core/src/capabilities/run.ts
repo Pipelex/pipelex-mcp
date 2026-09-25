@@ -1,11 +1,14 @@
 import {
   ApiResponseError,
   ApiUnreachableError,
+  BULK_RESOLVE_MAX_URIS,
   collectArtifacts,
   isTerminalRunStatus,
   summarizeUsage,
 } from "@pipelex/sdk";
 import type {
+  BulkResolvedStorageUrls,
+  BulkResolveStorageUrlsInput,
   MethodProvenance,
   PipelexRunResultStart,
   PipelexStartOptions,
@@ -484,6 +487,15 @@ export interface RunResultsResult {
    * the run reported no usage list.
    */
   usageByPipe?: PipeUsage[];
+  /**
+   * A fresh link for each stored file a completed output references, keyed by
+   * its `pipelex-storage://` reference, for the views only (rides
+   * `_meta.resolved_urls`). The views paint files from these rather than from
+   * the payload's baked `public_url`, which the runtime signs path-style on the
+   * shared regional S3 host, where no host's CSP matches a bucket, and which
+   * expires an hour after the run. See `freshStorageLinks`.
+   */
+  resolvedUrls?: Record<string, string>;
 }
 
 /** The slice of `PipelexApiClient` the run capabilities call (test seam). */
@@ -491,6 +503,11 @@ interface RunClient {
   start(options: PipelexStartOptions): Promise<PipelexRunResultStart>;
   getRunStatus(runId: string): Promise<RunRead>;
   getRunResult(runId: string): Promise<RunResultState>;
+  /** The bulk resolve route, `POST /v1/resolve-storage-url/bulk`: fresh links for a completed output's files. */
+  resolveStorageUrls(
+    input: BulkResolveStorageUrlsInput,
+    options?: { signal?: AbortSignal },
+  ): Promise<BulkResolvedStorageUrls>;
 }
 
 /** The console's run also reads the signature its input walk needs (test seam). */
@@ -1499,10 +1516,12 @@ export async function getMthdsRunResults(
   // The API responded; projecting it must not be reported as an unreachable
   // API. A malformed report (a completed result missing main_stuff) is a
   // reachable contract violation, surfaced as a runtime no-verdict error.
+  const viewsAvailable = context.viewsAvailable !== false;
+  let projected: RunResultsResult;
   try {
-    return resultsResult(
+    projected = resultsResult(
       state,
-      context.viewsAvailable !== false,
+      viewsAvailable,
       context.artifactDownloadAvailable === true,
       names,
     );
@@ -1520,6 +1539,75 @@ export async function getMthdsRunResults(
       ],
     );
   }
+
+  if (viewsAvailable && state.state === "completed") {
+    const links = await freshStorageLinks(runClient(context), [
+      state.result.main_stuff,
+      state.result.graph_spec,
+    ]);
+    if (links !== undefined) projected.resolvedUrls = links;
+  }
+  return projected;
+}
+
+/** How long the results wait on the bulk resolve route before the views go without fresh links. */
+export const VIEW_LINKS_TIMEOUT_MS = 5_000;
+
+/**
+ * Fresh links for the stored files a completed run references, for the views
+ * to paint from: the output's references first, then the executed graph's,
+ * deduplicated, and at most one bulk request's worth (`BULK_RESOLVE_MAX_URIS`),
+ * so a results read pays one round trip at most.
+ *
+ * The baked `public_url` cannot serve. The runtime signs it path-style on the
+ * shared regional endpoint (`s3.us-west-2.amazonaws.com/<bucket>/…`), where a
+ * CSP could scope a bucket only by path, and no host kept the path; it also
+ * expires an hour after the run, so a reopened conversation painted nothing.
+ * The platform signs these on each bucket's own host
+ * (`<bucket>.s3.amazonaws.com`, measured against api-dev on 2026-09-25), which
+ * the views' CSP names as a plain origin, and a view that remounts reads the
+ * results again and gets new ones.
+ *
+ * Best effort by design: the links are a view's convenience and never part of
+ * the verdict, so a refused, failed or slow resolve leaves the result as it was,
+ * and a reference without a link falls back to its `public_url` in the kernel.
+ * Only a link the route actually minted is kept; an item it refused is left out.
+ */
+export async function freshStorageLinks(
+  client: Pick<RunClient, "resolveStorageUrls">,
+  sources: readonly unknown[],
+): Promise<Record<string, string> | undefined> {
+  const uris = [...new Set(sources.flatMap((source) => collectArtifacts(source)))].slice(
+    0,
+    BULK_RESOLVE_MAX_URIS,
+  );
+  if (uris.length === 0) return undefined;
+  let answer: BulkResolvedStorageUrls;
+  try {
+    answer = await client.resolveStorageUrls(
+      { uris },
+      { signal: AbortSignal.timeout(VIEW_LINKS_TIMEOUT_MS) },
+    );
+  } catch {
+    return undefined;
+  }
+  const requested = new Set(uris);
+  const links: Record<string, string> = {};
+  // Narrowed rather than trusted: the answer is written into a page's <img src>.
+  for (const item of Array.isArray(answer?.items) ? (answer.items as unknown[]) : []) {
+    if (typeof item !== "object" || item === null) continue;
+    const { uri, url, error } = item as Record<string, unknown>;
+    if (error != null) continue;
+    if (
+      typeof uri === "string" &&
+      requested.has(uri) &&
+      typeof url === "string" &&
+      url.startsWith("https://")
+    ) {
+      links[uri] = url;
+    }
+  }
+  return Object.keys(links).length === 0 ? undefined : links;
 }
 
 // `/v1/start` takes no source labels — the MCP surface's `uri` feeds only our
@@ -1668,6 +1756,9 @@ export function runResultsToolResult(result: RunResultsResult) {
       main_stuff: result.mainStuff,
       tokens_usages: result.tokensUsages,
       usage_by_pipe: result.usageByPipe,
+      // Not an API field: the fresh link for each stored reference, which the
+      // views paint from (see `freshStorageLinks`).
+      resolved_urls: result.resolvedUrls,
     },
   };
 }

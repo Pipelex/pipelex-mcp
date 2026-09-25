@@ -265,8 +265,9 @@ export const pipelexShowMethodTool = defineHostedTool({
       // connect to it. `./app-buckets.ts` says why both host forms are listed.
       connectDomains: UPLOAD_CONNECT_DOMAINS,
       // A run started from the form shows its results here, so the output's
-      // images load from, and its documents preview in a frame from, the
-      // buckets the runtime signs run outputs against — as in run-follow.
+      // images load from, and its documents preview in a frame from, each app
+      // bucket's own host, where the fresh links the results carry point — as
+      // in run-follow.
       // `frameDomains` is what makes ChatGPT's app directory review a listing
       // more strictly, which matters only for a public listing.
       resourceDomains: RUN_OUTPUT_SOURCES,
@@ -368,10 +369,10 @@ export const pipelexRunTool = defineHostedTool({
     component: "run-follow",
     description: "Live-following status card for the durable run, then its results.",
     csp: {
-      // Run-output images and documents are presigned URLs on the hosted
-      // platform's per-env storage buckets — a tight allowlist scoped to those
-      // buckets, never the shared regional endpoint or a wildcard
-      // (`./app-buckets.ts`). Images load as resources; the result renderer
+      // Run-output images and documents paint from the fresh presigned links
+      // the results carry, on the hosted platform's per-env storage buckets —
+      // a tight allowlist of each bucket's own host, never the shared regional
+      // endpoint or a wildcard (`./app-buckets.ts`). Images load as resources; the result renderer
       // previews a PDF in a frame, which is what `frameDomains` allows, at the
       // cost of a stricter review of a public ChatGPT listing. Anything else in
       // the output stays CSP-blocked, and the renderer names the file instead.
