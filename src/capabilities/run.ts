@@ -41,6 +41,8 @@ import type {
   SubmittedFileInput,
   ToolError,
 } from "./shared.js";
+import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
+import type { ToolNames } from "./tool-names.js";
 
 /**
  * The hosted run lifecycle statuses. The `Record<RunStatus, true>` shape ties
@@ -60,7 +62,9 @@ const RUN_STATUS_SET: Record<RunStatus, true> = {
 
 export const runStatusSchema = z.enum(Object.keys(RUN_STATUS_SET) as [RunStatus, ...RunStatus[]]);
 
-const runIdInputField = z.string().describe("The durable run id returned by mthds_run.");
+function runIdInputField(names: ToolNames) {
+  return z.string().describe(`The durable run id returned by ${names.run}.`);
+}
 
 export const mthdsRunInputSchema = {
   files: filesInputSchema.optional(),
@@ -90,13 +94,17 @@ export const mthdsRunInputSchema = {
     ),
 };
 
-export const mthdsRunStatusInputSchema = {
-  run_id: runIdInputField,
-};
+/**
+ * The input schema of the status and results tools alike, its description
+ * naming the run tool of the shell that registers it.
+ */
+export function runIdInputSchemaFor(names: ToolNames) {
+  return { run_id: runIdInputField(names) };
+}
 
-export const mthdsRunResultsInputSchema = {
-  run_id: runIdInputField,
-};
+export const mthdsRunStatusInputSchema = runIdInputSchemaFor(WORKSHOP_TOOL_NAMES);
+
+export const mthdsRunResultsInputSchema = runIdInputSchemaFor(WORKSHOP_TOOL_NAMES);
 
 /**
  * Identifiers of the renderable views a start result can drive (same
@@ -126,28 +134,33 @@ const methodProvenanceSchema = z.object({
     ),
 });
 
-const runStartStructuredContentSchema = z.object({
-  status: z.enum(["ok", "error"]),
-  run_id: z
-    .string()
-    .optional()
-    .describe("The durable run id — the handle for mthds_run_status and mthds_run_results."),
-  run_status: runStatusSchema
-    .optional()
-    .describe("Initial lifecycle state from the start ack, when the server includes one."),
-  created_at: z.string().optional(),
-  method_provenance: methodProvenanceSchema
-    .optional()
-    .describe("method_ref runs only — the address, tag, and resolved commit SHA that was fetched."),
-  available_view_specs: z
-    .array(runViewSpecSchema)
-    .describe(
-      'Renderable views available for this result. Contains "live_run_status" when a live-following status card is available; empty otherwise.',
-    ),
-  errors: z.array(toolErrorSchema).optional(),
-});
+/** The start result's schema, naming the follow-up tools of the shell that registers it. */
+export function runStartOutputSchemaFor(names: ToolNames) {
+  return z.object({
+    status: z.enum(["ok", "error"]),
+    run_id: z
+      .string()
+      .optional()
+      .describe(`The durable run id — the handle for ${names.runStatus} and ${names.runResults}.`),
+    run_status: runStatusSchema
+      .optional()
+      .describe("Initial lifecycle state from the start ack, when the server includes one."),
+    created_at: z.string().optional(),
+    method_provenance: methodProvenanceSchema
+      .optional()
+      .describe(
+        "method_ref runs only — the address, tag, and resolved commit SHA that was fetched.",
+      ),
+    available_view_specs: z
+      .array(runViewSpecSchema)
+      .describe(
+        'Renderable views available for this result. Contains "live_run_status" when a live-following status card is available; empty otherwise.',
+      ),
+    errors: z.array(toolErrorSchema).optional(),
+  });
+}
 
-export const mthdsRunOutputSchema = runStartStructuredContentSchema;
+export const mthdsRunOutputSchema = runStartOutputSchemaFor(WORKSHOP_TOOL_NAMES);
 
 const runStatusStructuredContentSchema = z.object({
   status: z.enum(["ok", "error"]),
@@ -210,60 +223,65 @@ const runUsageSchema = z.object({
     ),
 });
 
-const runResultsStructuredContentSchema = z.object({
-  status: z.enum(["ok", "error"]),
-  run_id: z.string().optional(),
-  state: z
-    .enum(["running", "completed", "failed"])
-    .optional()
-    .describe(
-      'The result lookup outcome: "running" (no result yet), "completed" (main output below), "failed" (terminal non-COMPLETED).',
-    ),
-  retry_after_seconds: z
-    .number()
-    .nullable()
-    .optional()
-    .describe('State "running" only — check again after this many seconds.'),
-  run_status: runStatusSchema
-    .optional()
-    .describe('State "failed" only — the terminal lifecycle status.'),
-  failure_message: z.string().optional().describe('State "failed" only.'),
-  main_stuff: z
-    .unknown()
-    .optional()
-    .describe(
-      'State "completed" only — the resolved main output, bounded to a serialized cap (see truncated).',
-    ),
-  truncated: z
-    .boolean()
-    .optional()
-    .describe("True when main_stuff was bounded down; the full output rides the view-only _meta."),
-  image_candidates: z
-    .array(z.string())
-    .optional()
-    .describe(
-      'State "completed" only, and only when the output references stored files — the pipelex-storage:// references whose storage key looks like an image, as they appear in the output. A free in-memory prefilter over the FULL output, so a reference pruned out of main_stuff still appears here; nothing was fetched and nothing was read, so this is a shortlist, not a verdict. Bounded — see image_candidates_omitted. Pass one of these (or its index in this list) to mthds_show_images to see the picture.',
-    ),
-  image_candidates_omitted: z
-    .number()
-    .optional()
-    .describe(
-      'State "completed" only, and only when something was left out — how many image candidates past the listed ones this result does not enumerate. They are still on the run: mthds_show_images walks the full set.',
-    ),
-  usage: runUsageSchema
-    .optional()
-    .describe(
-      'State "completed" only — token and USD-cost aggregates for the run, always present: read its state first. The full per-call record list rides the view-only _meta.tokens_usages.',
-    ),
-  available_view_specs: z
-    .array(resultsViewSpecSchema)
-    .describe(
-      'Renderable views available for this result. Contains "run_graph" when the executed method graph is available to display; empty otherwise.',
-    ),
-  errors: z.array(toolErrorSchema).optional(),
-});
+/** The results tool's schema, naming the image tool of the shell that registers it. */
+export function runResultsOutputSchemaFor(names: ToolNames) {
+  return z.object({
+    status: z.enum(["ok", "error"]),
+    run_id: z.string().optional(),
+    state: z
+      .enum(["running", "completed", "failed"])
+      .optional()
+      .describe(
+        'The result lookup outcome: "running" (no result yet), "completed" (main output below), "failed" (terminal non-COMPLETED).',
+      ),
+    retry_after_seconds: z
+      .number()
+      .nullable()
+      .optional()
+      .describe('State "running" only — check again after this many seconds.'),
+    run_status: runStatusSchema
+      .optional()
+      .describe('State "failed" only — the terminal lifecycle status.'),
+    failure_message: z.string().optional().describe('State "failed" only.'),
+    main_stuff: z
+      .unknown()
+      .optional()
+      .describe(
+        'State "completed" only — the resolved main output, bounded to a serialized cap (see truncated).',
+      ),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        "True when main_stuff was bounded down; the full output rides the view-only _meta.",
+      ),
+    image_candidates: z
+      .array(z.string())
+      .optional()
+      .describe(
+        `State "completed" only, and only when the output references stored files — the pipelex-storage:// references whose storage key looks like an image, as they appear in the output. A free in-memory prefilter over the FULL output, so a reference pruned out of main_stuff still appears here; nothing was fetched and nothing was read, so this is a shortlist, not a verdict. Bounded — see image_candidates_omitted. Pass one of these (or its index in this list) to ${names.showImages} to see the picture.`,
+      ),
+    image_candidates_omitted: z
+      .number()
+      .optional()
+      .describe(
+        `State "completed" only, and only when something was left out — how many image candidates past the listed ones this result does not enumerate. They are still on the run: ${names.showImages} walks the full set.`,
+      ),
+    usage: runUsageSchema
+      .optional()
+      .describe(
+        'State "completed" only — token and USD-cost aggregates for the run, always present: read its state first. The full per-call record list rides the view-only _meta.tokens_usages.',
+      ),
+    available_view_specs: z
+      .array(resultsViewSpecSchema)
+      .describe(
+        'Renderable views available for this result. Contains "run_graph" when the executed method graph is available to display; empty otherwise.',
+      ),
+    errors: z.array(toolErrorSchema).optional(),
+  });
+}
 
-export const mthdsRunResultsOutputSchema = runResultsStructuredContentSchema;
+export const mthdsRunResultsOutputSchema = runResultsOutputSchemaFor(WORKSHOP_TOOL_NAMES);
 
 export interface MthdsRunInput {
   files?: SubmittedFileInput[];
@@ -442,6 +460,8 @@ export interface RunContext extends ApiConfig {
    * matters, and a model that does not know the tool retypes the output.
    */
   artifactDownloadAvailable?: boolean;
+  /** The tool names this shell's texts use; the workshop's when absent. */
+  toolNames?: ToolNames;
   /** Deployment-specific auth-failure texture (the hosted console overrides it per request); default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
@@ -533,22 +553,45 @@ export const RUN_START_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
   serverError: START_SERVER_ERROR,
 };
 
-const UNKNOWN_RUN_HINT =
-  "No run with this id is known to the configured API. Check the run_id returned by mthds_run, and that PIPELEX_BASE_URL points at the deployment that started it.";
+/**
+ * What an unknown run id means to the caller. The workshop's operator is its
+ * user, so the deployment the key points at is theirs to check; the console's
+ * deployment is not the caller's to change, and what they can check is which
+ * organization they are signed in to.
+ */
+function unknownRunHint(names: ToolNames): string {
+  return names.shell === "workshop"
+    ? `No run with this id is known to the configured API. Check the run_id returned by ${names.run}, and that PIPELEX_BASE_URL points at the deployment that started it.`
+    : `No run with this id is visible to your organization. Check the run_id returned by ${names.run}: a run started in another organization is not visible from this one.`;
+}
 
-const MALFORMED_RUN_ID_HINT = "Pass the run_id exactly as returned by mthds_run.";
+function malformedRunIdHint(names: ToolNames): string {
+  return `Pass the run_id exactly as returned by ${names.run}.`;
+}
 
-export const RUN_STATUS_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/runs/{id}/status",
-  badRequest: { location: "run_id", hint: MALFORMED_RUN_ID_HINT },
-  notFound: { location: "run_id", hint: UNKNOWN_RUN_HINT },
-};
+/** The status route's classify options, in the vocabulary of the shell that reads them. */
+export function runStatusErrorOptions(names: ToolNames): ClassifyErrorOptions {
+  return {
+    route: "/v1/runs/{id}/status",
+    badRequest: { location: "run_id", hint: malformedRunIdHint(names) },
+    notFound: { location: "run_id", hint: unknownRunHint(names) },
+  };
+}
 
-export const RUN_RESULTS_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/runs/{id}/results",
-  badRequest: { location: "run_id", hint: MALFORMED_RUN_ID_HINT },
-  notFound: { location: "run_id", hint: UNKNOWN_RUN_HINT },
-};
+/** The results route's classify options, in the vocabulary of the shell that reads them. */
+export function runResultsErrorOptions(names: ToolNames): ClassifyErrorOptions {
+  return {
+    route: "/v1/runs/{id}/results",
+    badRequest: { location: "run_id", hint: malformedRunIdHint(names) },
+    notFound: { location: "run_id", hint: unknownRunHint(names) },
+  };
+}
+
+export const RUN_STATUS_ERROR_OPTIONS: ClassifyErrorOptions =
+  runStatusErrorOptions(WORKSHOP_TOOL_NAMES);
+
+export const RUN_RESULTS_ERROR_OPTIONS: ClassifyErrorOptions =
+  runResultsErrorOptions(WORKSHOP_TOOL_NAMES);
 
 /** Request-shape checks on the mthds_run input, after `{ path }` resolution. */
 export function validateRunRequest(input: ResolvedRunRequest): ToolError[] {
@@ -779,7 +822,11 @@ function narrowMethodProvenance(value: unknown): MethodProvenance | undefined {
  * echoed in the summary). A produced ack advertises the `live_run_status` view
  * only when the invoking shell registered run-follow.
  */
-export function startResult(ack: PipelexRunResultStart, viewsAvailable = true): RunStartResult {
+export function startResult(
+  ack: PipelexRunResultStart,
+  viewsAvailable = true,
+  names: ToolNames = WORKSHOP_TOOL_NAMES,
+): RunStartResult {
   const runStatus = narrowRunStatus(ack.state);
   const createdAt = narrowString(ack.created_at);
   const provenance = narrowMethodProvenance(ack.method_provenance);
@@ -803,7 +850,7 @@ export function startResult(ack: PipelexRunResultStart, viewsAvailable = true): 
     );
   }
   summaryParts.push(
-    "Check on it with `mthds_run_status` (one cheap read — honor its retry hint instead of polling in a tight loop), and fetch the outcome with `mthds_run_results` once it is terminal.",
+    `Check on it with \`${names.runStatus}\` (one cheap read — honor its retry hint instead of polling in a tight loop), and fetch the outcome with \`${names.runResults}\` once it is terminal.`,
   );
   if (viewsAvailable) {
     summaryParts.push(
@@ -816,7 +863,10 @@ export function startResult(ack: PipelexRunResultStart, viewsAvailable = true): 
 }
 
 /** Project a self-healing status read. A terminal non-COMPLETED status is a produced verdict. */
-export function statusResult(read: RunRead): RunStatusResult {
+export function statusResult(
+  read: RunRead,
+  names: ToolNames = WORKSHOP_TOOL_NAMES,
+): RunStatusResult {
   const isTerminal = isTerminalRunStatus(read.status);
 
   const structuredContent: RunStatusStructuredContent = {
@@ -832,17 +882,17 @@ export function statusResult(read: RunRead): RunStatusResult {
     ...(read.finished_at === undefined ? {} : { finished_at: read.finished_at }),
   };
 
-  return { structuredContent, summary: statusSummary(read, isTerminal) };
+  return { structuredContent, summary: statusSummary(read, isTerminal, names) };
 }
 
-function statusSummary(read: RunRead, isTerminal: boolean): string {
+function statusSummary(read: RunRead, isTerminal: boolean, names: ToolNames): string {
   const lines: string[] = [];
 
   if (isTerminal) {
     lines.push(
       read.status === "COMPLETED"
-        ? `Run \`${read.pipeline_run_id}\` is COMPLETED. Fetch the output with \`mthds_run_results\`.`
-        : `Run \`${read.pipeline_run_id}\` ended ${read.status}. \`mthds_run_results\` returns the failure details.`,
+        ? `Run \`${read.pipeline_run_id}\` is COMPLETED. Fetch the output with \`${names.runResults}\`.`
+        : `Run \`${read.pipeline_run_id}\` ended ${read.status}. \`${names.runResults}\` returns the failure details.`,
     );
   } else {
     const seconds = read.retry_after_seconds ?? DEFAULT_RETRY_SECONDS;
@@ -868,6 +918,7 @@ export function resultsResult(
   state: RunResultState,
   viewsAvailable = true,
   artifactDownloadAvailable = false,
+  names: ToolNames = WORKSHOP_TOOL_NAMES,
 ): RunResultsResult {
   switch (state.state) {
     case "running":
@@ -878,6 +929,7 @@ export function resultsResult(
         state.result,
         viewsAvailable,
         artifactDownloadAvailable,
+        names,
       );
     case "failed":
       return failedResult(state.pipeline_run_id, state.status, state.message);
@@ -903,6 +955,7 @@ function completedResult(
   result: RunResults,
   viewsAvailable: boolean,
   artifactDownloadAvailable: boolean,
+  names: ToolNames,
 ): RunResultsResult {
   // The SDK guarantees a non-null main_stuff on a completed run (it throws
   // MissingMainStuffError otherwise); reaching here without one is a contract
@@ -989,6 +1042,7 @@ function completedResult(
       stored.length,
       candidates.length,
       artifactDownloadAvailable,
+      names,
     ),
     graphSpec,
     pipeIoContracts,
@@ -1020,6 +1074,7 @@ function completedSummary(
   storedFiles: number,
   imageCandidates: number,
   artifactDownloadAvailable: boolean,
+  names: ToolNames,
 ): string {
   const fence =
     typeof bounded === "string"
@@ -1031,7 +1086,7 @@ function completedSummary(
     parts.push(truncationNote(viewsAvailable, artifactDownloadAvailable));
   }
   const stored = [
-    storedFilesNote(storedFiles, imageCandidates),
+    storedFilesNote(storedFiles, imageCandidates, names),
     artifactDownloadAvailable ? saveNote(storedFiles, truncated) : undefined,
   ].filter((sentence): sentence is string => sentence !== undefined);
   if (stored.length > 0) parts.push(stored.join(" "));
@@ -1062,7 +1117,11 @@ function truncationNote(viewsAvailable: boolean, artifactDownloadAvailable: bool
  * `mthds_show_images` is registered on both; nothing is said when the output
  * references no stored file.
  */
-function storedFilesNote(storedFiles: number, imageCandidates: number): string | undefined {
+function storedFilesNote(
+  storedFiles: number,
+  imageCandidates: number,
+  names: ToolNames,
+): string | undefined {
   if (storedFiles === 0) return undefined;
 
   const parts = [
@@ -1072,7 +1131,7 @@ function storedFilesNote(storedFiles: number, imageCandidates: number): string |
   ];
   if (imageCandidates > 0) {
     parts.push(
-      "To see one, call `mthds_show_images` with this run id — it returns the picture itself, which then stays in this conversation for every turn that follows, so ask for it when someone wants to look at it rather than by reflex.",
+      `To see one, call \`${names.showImages}\` with this run id — it returns the picture itself, which then stays in this conversation for every turn that follows, so ask for it when someone wants to look at it rather than by reflex.`,
     );
   }
   return parts.join(" ");
@@ -1150,7 +1209,7 @@ export async function startMthdsRun(
 
   try {
     const ack = await runClient(context).start(toStartOptions(request));
-    return startResult(ack, context.viewsAvailable !== false);
+    return startResult(ack, context.viewsAvailable !== false, context.toolNames);
   } catch (err) {
     const error = classifyError(err, { ...classifyOptions, auth: context.authError });
     return startErrorResult(startSummaryForError(error), [error]);
@@ -1162,16 +1221,17 @@ export async function getMthdsRunStatus(
   input: RunIdInput,
   context: RunContext = buildRunContext(),
 ): Promise<RunStatusResult> {
-  const inputErrors = validateRunIdRequest(input.run_id);
+  const names = context.toolNames ?? WORKSHOP_TOOL_NAMES;
+  const inputErrors = validateRunIdRequest(input.run_id, names);
   if (inputErrors.length > 0) {
     return statusErrorResult("Run status was not read: request input is invalid.", inputErrors);
   }
 
   try {
     const read = await runClient(context).getRunStatus(input.run_id);
-    return statusResult(read);
+    return statusResult(read, names);
   } catch (err) {
-    const error = classifyError(err, { ...RUN_STATUS_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, { ...runStatusErrorOptions(names), auth: context.authError });
     return statusErrorResult(statusSummaryForError(error), [error]);
   }
 }
@@ -1181,7 +1241,8 @@ export async function getMthdsRunResults(
   input: RunIdInput,
   context: RunContext = buildRunContext(),
 ): Promise<RunResultsResult> {
-  const inputErrors = validateRunIdRequest(input.run_id);
+  const names = context.toolNames ?? WORKSHOP_TOOL_NAMES;
+  const inputErrors = validateRunIdRequest(input.run_id, names);
   if (inputErrors.length > 0) {
     return resultsErrorResult("Run results were not read: request input is invalid.", inputErrors);
   }
@@ -1190,7 +1251,7 @@ export async function getMthdsRunResults(
   try {
     state = await runClient(context).getRunResult(input.run_id);
   } catch (err) {
-    const error = classifyError(err, { ...RUN_RESULTS_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, { ...runResultsErrorOptions(names), auth: context.authError });
     return resultsErrorResult(resultsSummaryForError(error), [error]);
   }
 
@@ -1202,6 +1263,7 @@ export async function getMthdsRunResults(
       state,
       context.viewsAvailable !== false,
       context.artifactDownloadAvailable === true,
+      names,
     );
   } catch (err) {
     return resultsErrorResult(

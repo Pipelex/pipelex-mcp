@@ -1,5 +1,6 @@
 import type { ErrorClass } from "./shared.js";
 import { formatMib } from "./upload-ceiling.js";
+import { CONSOLE_TOOL_NAMES } from "./tool-names.js";
 
 /**
  * The attachment fetch boundary — the hosted console's analogue of the local
@@ -72,8 +73,7 @@ const OPENAI_BLOB_HOST_PATTERN = /^oaisdmntpr[a-z0-9]+\.blob\.core\.windows\.net
  */
 const OPENAI_CONTENT_DOMAIN = "oaiusercontent.com";
 
-const WRONG_HOST_HINT =
-  "Only files the user attached in a ChatGPT conversation can be ingested — the host supplies the signed URL, it is never one to construct. On any other host, ask the user for an http(s) URL to the file and pass that to mthds_prepare_inputs instead.";
+const WRONG_HOST_HINT = `Only files the user attached in a ChatGPT conversation can be ingested — the host supplies the signed URL, it is never one to construct. On any other host, ask the user for an http(s) URL to the file and pass that as the input's value to ${CONSOLE_TOOL_NAMES.run} instead.`;
 
 /**
  * True for a host this boundary will fetch from. `hostname` is already
@@ -293,7 +293,7 @@ function tooLargeFailure(declaredBytes: number | undefined): AttachmentFetchFail
   return {
     class: "input_domain",
     message: `The attachment is over the ${formatMib(MAX_ATTACHMENT_BYTES)} limit for files ingested this way.${size}`,
-    hint: `Pipelex storage accepts uploads up to ${formatMib(MAX_ATTACHMENT_BYTES)} through this channel. Ask the user for a smaller file, or for an http(s) URL to it that can be passed to mthds_prepare_inputs instead.`,
+    hint: `Pipelex storage accepts uploads up to ${formatMib(MAX_ATTACHMENT_BYTES)} through this channel. Ask the user for a smaller file, or for an http(s) URL to it that can be passed to ${CONSOLE_TOOL_NAMES.run} instead.`,
     retryable: false,
   };
 }

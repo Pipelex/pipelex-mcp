@@ -24,6 +24,8 @@ import { z } from "zod";
 
 import { BARE_APP_INFO } from "./client-identification.js";
 import type { AppInfoSource } from "./client-identification.js";
+import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
+import type { ToolNames } from "./tool-names.js";
 
 // The Makefile's console dev banner (CONSOLE_DEV_ENV) prints this same URL as "the server default" — keep the two in step.
 export const DEFAULT_API_URL = "https://api.pipelex.com";
@@ -614,14 +616,17 @@ function validateFileItems(files: SubmittedFile[]): ToolError[] {
 }
 
 /** Request-shape check on a run id (format stays server-owned). */
-export function validateRunIdRequest(runId: string): ToolError[] {
+export function validateRunIdRequest(
+  runId: string,
+  names: ToolNames = WORKSHOP_TOOL_NAMES,
+): ToolError[] {
   if (runId.trim() === "") {
     return [
       {
         class: "input_domain",
         location: "run_id",
         message: "run_id must not be empty.",
-        hint: "Pass the durable run id returned by mthds_run.",
+        hint: `Pass the durable run id returned by ${names.run}.`,
         retryable: false,
       },
     ];
