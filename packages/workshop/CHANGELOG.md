@@ -1,26 +1,28 @@
 # Changelog
 
+This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the Pipelex plugin runs. Up to and including 0.19.0 every release also deployed the hosted console at the same version, so those entries describe both servers. After 0.19.0 the console is released on a track of its own, recorded in [its changelog](../console/CHANGELOG.md) and tagged `console-vX.Y.Z`, while this file and the `vX.Y.Z` tags cover the workshop alone.
+
 ## [Unreleased]
 
 ### Changed
 
-- **`@pipelex/sdk` 0.24.0 → 0.25.1**: The SDK dropped a gateway-key surface this server never called, so nothing here changes; the bump keeps the console release on the current client.
+- **The workshop is released on its own track**: `@pipelex/mcp` versions, this changelog and the `vX.Y.Z` tags now describe the workshop alone. A workshop release publishes to npm without deploying the hosted console, which has its own version, changelog and `console-vX.Y.Z` tags.
 
-- **The console is the Pipelex connector, with its own `pipelex_*` tools (Breaking)**: The hosted console now reports the server name `pipelex` instead of `pipelex-mcp`, registers `pipelex_list_methods`, `pipelex_show_method`, `pipelex_upload_attachments`, `pipelex_run`, `pipelex_run_status`, `pipelex_run_results`, `pipelex_show_images` and the app-only `pipelex_request_upload`, and names a method by its catalog id or its published address only: `pipelex_show_method` returns the signature and a fill-in inputs template and, on a host that renders views, the graph and the run form, while `pipelex_run` checks its own file inputs, which take an `http(s)` URL or a `pipelex-storage://` reference. Its instructions now differ between a host that shows the form and one that does not. **Every existing connector installation must remove the Pipelex connector and add it again, once**: until then its cached tool list calls the old `mthds_*` names, which run nothing and answer with that same instruction.
+- **`@pipelex/sdk` 0.24.0 → 0.25.1**: The SDK dropped a gateway-key surface this server never called, so nothing here changes.
 
 - **The workshop reports the server name `pipelex-plugin` (Breaking)**: The local workshop, the server the Pipelex plugin runs, now names itself `pipelex-plugin` in its MCP handshake instead of `pipelex-mcp`, and the texts of its tools no longer describe the console. Its instructions now tell the model to use its `mthds_*` tools for all method work when the connector's `pipelex_*` tools are present too, and never to mix the two servers.
 
 - **The README's pitch names who each way of running a method is for**: it now says a method runs "as an MCP for chatbots, as a webapp for people, or via API for your software", instead of "from your agent or your chatbot via MCP, as a webapp, or via API in any software".
 
-- **`npx @pipelex/mcp` no longer installs React, Vite or Skybridge**: The package's runtime dependencies are now only what the workshop imports, so a production install is about a quarter of its former size and no longer carries React, React DOM, Vite, nodemon, the Skybridge devtools or the advisories that came with them. The hosted console starts from a self-contained bundle of its server instead of resolving Skybridge from `node_modules`, which is what let Skybridge become a development dependency.
+- **`npx @pipelex/mcp` no longer installs React, Vite or Skybridge**: The package's runtime dependencies are now only what the workshop imports, so a production install is about a quarter of its former size and no longer carries React, React DOM, Vite, nodemon, the Skybridge devtools or the advisories that came with them. The hosted console is now a separate package in this repository, so none of its dependencies reach this one.
+
+- **The executable moved to `dist/main.js` (Breaking)**: The `pipelex-mcp` bin now points at `dist/main.js` instead of `dist/local/main.js`. A host that starts the workshop with `npx @pipelex/mcp` or through the bin is unaffected; one that runs the file by its path must use the new one, which in a checkout of this repository is `packages/workshop/dist/main.js` (built by `make build-local`).
 
 ### Fixed
 
 - **A start that may have created a run is no longer marked retryable**: When `mthds_run` fails with a timeout, a connection lost after the request went out, or a 502 or 504, its error now carries `retryable: false` and a hint that the run may have started, because starting it again would be a second run spending inference credit. A connection refused before anything was sent stays retryable.
 
 ### Removed
-
-- **Validation, inputs templates, code generation, input preparation and file arguments on the console (Breaking)**: `mthds_validate`, `mthds_inputs_template`, `mthds_codegen` and `mthds_prepare_inputs` are gone from the hosted console, and no console tool takes `files` or `output_dir` any more. All of them remain on the workshop, the Pipelex plugin's server.
 
 - **`mthds_validate`'s `include_graph` (Breaking)**: The workshop renders no views, so the argument never changed its result there, and the console, which draws the graph, no longer has a validate tool. A call that passes it now leaves it unread.
 
