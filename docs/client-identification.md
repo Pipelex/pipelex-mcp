@@ -12,7 +12,7 @@ pipelex-mcp/<version> (console; host=openai) pipelex-sdk-js/<sdk version> node/<
 pipelex-mcp/<version> (console) pipelex-sdk-js/<sdk version> node/<version> (linux; x64)
 ```
 
-`<version>` is the package version, read from `package.json` so it cannot drift from the release. The first word of the comment is the shell: `workshop` for the local stdio server that coding-agent hosts spawn with `npx @pipelex/mcp`, `console` for the hosted Skybridge server that remote connectors reach. The `host=` parameter names the AI host driving the call and is left out when the server cannot tell.
+`<version>` is the package version, read from `package.json` so it cannot drift from the release. The first word of the comment is the shell: `workshop` for the local stdio server that coding-agent hosts spawn with `npx @pipelex/mcp`, `console` for the hosted Skybridge server that remote connectors reach. The product token is `pipelex-mcp` on both, although the two report different server names in their MCP handshake, `pipelex-plugin` for the workshop and `pipelex` for the console: the token names this repository's product, and the comment says which of its servers sent the request. The `host=` parameter names the AI host driving the call and is left out when the server cannot tell.
 
 The server does not build the header itself. It passes an `appInfo` of `{ name: "pipelex-mcp", version, details: [<shell>, "host=<host>"] }` to `PipelexApiClient`, and the SDK renders it in front of its own tokens (see the SDK's own `docs/client-identification.md`).
 
@@ -43,4 +43,4 @@ What the rules do not catch: a class whose name does not end in `ApiClient` that
 
 ## Requests that deliberately carry no identity
 
-Requests to third parties keep their own `User-Agent`, as the convention requires. The attachment fetch boundary downloads a file from the host's signed link with no headers at all, and the SDK fetches a presigned object-store link for `mthds_show_images` and `mthds_download_artifacts` with no header either. Only requests to the Pipelex API are identified.
+Requests to third parties keep their own `User-Agent`, as the convention requires. The attachment fetch boundary downloads a file from the host's signed link with no headers at all, and the SDK fetches a presigned object-store link for the image tools (`pipelex_show_images`, `mthds_show_images`) and for `mthds_download_artifacts` with no header either. Only requests to the Pipelex API are identified.
