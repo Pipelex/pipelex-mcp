@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { useDisplayMode, useLayout, useSendFollowUpMessage, useViewState } from "skybridge/web";
 
 import { useCallTool, useToolInfo } from "../helpers.js";
+import { RenderBoundary } from "./components/render-boundary.js";
 import { RunResultsPanel } from "./components/run-results-panel.js";
 import { terminalFollowUpPrompt } from "./run-notify.js";
 import { runDurationSeconds } from "./run-results.js";
@@ -61,6 +62,14 @@ type RunFollowViewState = {
  * card is as resumable as the run itself.
  */
 export default function RunFollowView() {
+  return (
+    <RenderBoundary what="This view">
+      <RunFollow />
+    </RenderBoundary>
+  );
+}
+
+function RunFollow() {
   // Hooks run unconditionally before any early return.
   const toolInfo = useToolInfo<"pipelex_run">();
   const { callToolAsync: statusAsync } = useCallTool("pipelex_run_status");
