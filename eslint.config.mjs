@@ -62,6 +62,12 @@ export default [
     files: ["src/capabilities/attachment-fetch.ts"],
     rules: { "pipelex/no-raw-fetch": "off" },
   },
+  // The bundle boot check fetches the console it has just started on loopback,
+  // never the Pipelex API.
+  {
+    files: ["scripts/check-server-bundle.mjs"],
+    rules: { "pipelex/no-raw-fetch": "off" },
+  },
   // Unit tests build clients directly to test them, and stub the global fetch.
   {
     files: ["src/**/*.test.ts"],

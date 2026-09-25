@@ -34,7 +34,7 @@ make dev            - Start Skybridge dev server on port $(CONSOLE_PORT) unless 
 make dev-local      - Start the local stdio server from TypeScript
 make inspect-local  - Open MCP Inspector against the local stdio server
 make dev-tunnel     - Start Skybridge dev server with tunnel (same port and .env rules as dev)
-make start          - Start the built app
+make start          - Start the built console from its server bundle, as Alpic does
 make deploy         - Deploy the hosted console to Alpic Production (from a clean main)
 make deploy-prod    - Same as deploy
 make deploy-staging - Deploy the working tree to the Alpic Staging console

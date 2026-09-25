@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **`npx @pipelex/mcp` no longer installs React, Vite or Skybridge**: The package's runtime dependencies are now only what the workshop imports, so a production install is about a quarter of its former size and no longer carries React, React DOM, Vite, nodemon, the Skybridge devtools or the advisories that came with them. The hosted console starts from a self-contained bundle of its server instead of resolving Skybridge from `node_modules`, which is what let Skybridge become a development dependency.
+
 ## [0.19.0] - 2026-09-24
 
 ### Highlights

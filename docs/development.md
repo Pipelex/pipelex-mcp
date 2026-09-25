@@ -62,10 +62,12 @@ make inspect-local   # open MCP Inspector against it
 ## Build
 
 ```bash
-npm run build        # Skybridge app (regenerates .skybridge/views.d.ts first)
+npm run build        # Skybridge app (regenerates .skybridge/views.d.ts first), then dist/server.bundle.js
 npm run build:local  # tsup → dist/local/main.js (the npm-distributed bin)
-npm run check        # lint + format:check + check:tool-texts + build + check:cascade + build:local + typecheck
+npm run check        # lint + format:check + check:tool-texts + build + check:bundle + check:cascade + build:local + typecheck
 ```
+
+**The console starts from one self-contained file, `dist/server.bundle.js`.** `skybridge build` ends by writing a Vercel build output whose function is an esbuild bundle of the whole server, every package inlined but the dev-only `vite` and `@skybridge/devtools`, whose code paths it strips; `npm run build` copies that bundle into `dist/` (`scripts/emit-server-bundle.mjs`), and both `alpic.json` and the `Dockerfile` start it. Nothing reads `skybridge` from `node_modules` at run time, so it is a devDependency, and `npx @pipelex/mcp` no longer installs it or its peers (React, React DOM, Vite, nodemon). The bundle's path is Skybridge's Vercel output rather than a promised interface, so `check:bundle` (`scripts/check-server-bundle.mjs`) copies the bundle alone into an empty directory, boots it there against a local stand-in for the AuthKit discovery document and its keys, and asserts that it answers its OAuth metadata, refuses an anonymous call, and serves the tools and views the console's contract snapshot pins. It never touches the network.
 
 `mthds_validate` registers the `run-graph` view (`src/views/run-graph.tsx`), which satisfies Skybridge's "≥1 view entry" production-build requirement. The Skybridge build scans `src/views/` and regenerates `.skybridge/views.d.ts` (the view-name registry) as its first step, so `npm run check` runs `build` before the standalone `typecheck` — the registry must exist for `tsc` to resolve the registered view name. The local build follows and `prepack` rebuilds it, so a pack/publish can never ship a stale or absent bin.
 
