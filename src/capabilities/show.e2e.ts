@@ -28,13 +28,20 @@ const SERVES_SELECTORS = await apiAdvertisesExtension("method_ref");
 
 const context: ShowContext = liveApiConfig();
 
-/** The view-only keys the `run-graph` view reads, every one of them carrying something. */
-function expectViewArtifacts(meta: Record<string, unknown>) {
-  for (const key of ["graph_spec", "pipe_io_contracts", "input_form", "output_form"]) {
+/** The view-only keys the `run-graph` view's form reads, every one of them carrying something. */
+function expectFormArtifacts(meta: Record<string, unknown>) {
+  for (const key of ["pipe_io_contracts", "input_form", "output_form"]) {
     expect(meta[key], `_meta.${key}`).toBeTypeOf("object");
     expect(meta[key], `_meta.${key}`).not.toBeNull();
   }
   expect(meta.main_pipe_ref).toBeTypeOf("string");
+}
+
+/** The form's keys, and the dry-run graph beside them. */
+function expectViewArtifacts(meta: Record<string, unknown>) {
+  expectFormArtifacts(meta);
+  expect(meta.graph_spec, "_meta.graph_spec").toBeTypeOf("object");
+  expect(meta.graph_spec, "_meta.graph_spec").not.toBeNull();
 }
 
 describe.skipIf(!SERVES_SELECTORS)("pipelex_show_method (live)", () => {
@@ -56,7 +63,7 @@ describe.skipIf(!SERVES_SELECTORS)("pipelex_show_method (live)", () => {
     expectViewArtifacts(result._meta as Record<string, unknown>);
   });
 
-  it("shows a published method by address, with its template and every view artifact", async () => {
+  it("shows a published method by address, with its template and its form", async () => {
     // `/v1/validate` resolves an address through the execution-locus gate, so
     // this is the Python-free package (see `PYTHON_FREE_METHOD_REF`).
     const result = showToolResult(
@@ -72,6 +79,14 @@ describe.skipIf(!SERVES_SELECTORS)("pipelex_show_method (live)", () => {
     // why naming it is the point), and the template is for that pipe.
     expect(content.pipe_ref).toBe("documents.extract_document_markdown");
     expect(Object.keys(content.inputs ?? {}).length).toBeGreaterThan(0);
-    expectViewArtifacts(result._meta as Record<string, unknown>);
+    // No graph here, and that is the API's documented answer rather than a
+    // loss on this side: the route dry-runs the bundle's own `main_pipe`, and
+    // this package declares its entry pipe only in its manifest, so
+    // `graph_spec` is null while `default_pipe_ref` names the pipe. The form
+    // and the template still come, and the view renders the form alone. The
+    // ask to graph the manifest's entry pipe is L-260925-012c15; when it
+    // lands, this becomes `expectViewArtifacts` like the by-id leg.
+    expectFormArtifacts(result._meta as Record<string, unknown>);
+    expect(content.available_view_specs).toEqual(["input_form"]);
   });
 });
