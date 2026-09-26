@@ -10,6 +10,7 @@ This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the
 
 ### Changed
 
+- **The README's get-started sends a chatbot newcomer to sign up first and runs a published method**: The chatbot route now opens with signing up at app.pipelex.com, its example run names the published `invoice_extraction` method by address on a sample invoice that exists instead of an `example.com` link that answered 404, and a new paragraph says where methods come from. The hosted console's sign-in section says the account is created at app.pipelex.com, which also sets up the organization every tool call works in.
 - **The workshop is released on its own track**: `@pipelex/mcp` versions, this changelog and the `vX.Y.Z` tags now describe the workshop alone. A workshop release publishes to npm without deploying the hosted console, which is now a separate package in this repository with its own version, changelog and `console-vX.Y.Z` tags, so none of its dependencies reach this one.
 
 - **The executable moved to `dist/main.js` (Breaking)**: The `pipelex-mcp` bin now points at `dist/main.js` instead of `dist/local/main.js`. A host that starts the workshop with `npx @pipelex/mcp` or through the bin is unaffected; one that runs the file by its path must use the new one, which in a checkout of this repository is `packages/workshop/dist/main.js` (built by `make build-local`).
