@@ -11,7 +11,7 @@ This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the
 
 ### Fixed
 
-- **A start that failed with a 500 is no longer marked retryable**: The platform now relays a runner's failed start as an HTTP 500 rather than a 502, and the runner can fail after Temporal has already recorded the start, so a `mthds_run` that fails with a 500 comes back not retryable, with the hint to check whether the run started before starting it again. A 500 from any other route stays retryable.
+- **A start that failed with a 500 is no longer marked retryable**: The platform now relays a runner's failed start as an HTTP 500 rather than a 502, and the runner can fail after Temporal has already recorded the start, so a `mthds_run` that fails with a 500 comes back not retryable, with the hint to check whether the run started before starting it again. A 500 from any other route stays retryable. Every start that may have run (a timeout, a lost connection, a 500, 502, 504 or 408) now also opens its result with "Run may have started" instead of "Run could not be started".
 - **A throttled or timed-out request is retryable**: An HTTP 429 or 408 from the Pipelex API now comes back as a retryable `runtime` error instead of a permanent one, so an agent polling `mthds_run_status` knows to try again. A `mthds_run` start that failed with a 408 stays not retryable, since the run may exist anyway, and a 429 on a start is retryable.
 
 ### Changed
