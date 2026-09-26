@@ -492,9 +492,8 @@ export interface RunResultsResult {
    * A fresh link for each stored file a completed output references, keyed by
    * its `pipelex-storage://` reference, for the views only (rides
    * `_meta.resolved_urls`). The views paint files from these rather than from
-   * the payload's baked `public_url`, which the runtime signs path-style on the
-   * shared regional S3 host, where no host's CSP matches a bucket, and which
-   * expires an hour after the run. See `freshStorageLinks`.
+   * the payload's baked `public_url`, which expires an hour after the run. See
+   * `freshStorageLinks`.
    */
   resolvedUrls?: Record<string, string>;
   /**
@@ -1592,16 +1591,16 @@ export interface FreshStorageLinks {
  * deduplicated, asked for `BULK_RESOLVE_MAX_URIS` at a time, one request
  * after another, all under one {@link VIEW_LINKS_TIMEOUT_MS} deadline.
  *
- * The baked `public_url` cannot serve. The runtime signs it path-style on the
- * shared regional endpoint (`s3.us-west-2.amazonaws.com/<bucket>/…`), where a
- * CSP could scope a bucket only by path, and no host kept the path; it also
- * expires an hour after the run, so a reopened conversation painted nothing.
- * The platform signs these on each bucket's own host
- * (`<bucket>.s3.amazonaws.com`, measured against api-dev on 2026-09-25), which
- * the views' CSP names as a plain origin, and a view that remounts reads the
- * results again and gets new ones. Because the CSP refuses the baked link, a
- * reference left without a fresh one paints nothing, which is why every
- * reference is asked for rather than the first request's worth.
+ * The baked `public_url` cannot serve for long. The runtime signs it on the
+ * bucket's regional host, which the views' CSP allows (from `pipelex` 0.66.0;
+ * before, it signed path-style on the shared regional endpoint, which no CSP
+ * can scope to a bucket), but it expires an hour after the run, so a reopened
+ * conversation painted nothing. The platform signs these on each bucket's own
+ * host (`<bucket>.s3.amazonaws.com`, measured against api-dev on 2026-09-25),
+ * which the CSP names as a plain origin, and a view that remounts reads the
+ * results again and gets new ones. A reference left without a fresh one falls
+ * back to the baked link and paints nothing once that has expired, which is
+ * why every reference is asked for rather than the first request's worth.
  *
  * Best effort by design: the links are a view's convenience and never part of
  * the verdict, so a failed or slow request never fails the results. It stops
