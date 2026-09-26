@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { START_MAY_HAVE_RUN_HINT } from "@pipelex/mcp-core/capabilities/start-outcome.js";
+
 import { RECORDED_FAILED_RUNS } from "@pipelex/mcp-core/capabilities/failed-run-fixtures.js";
 import type { RecordedFailedRun } from "@pipelex/mcp-core/capabilities/failed-run-fixtures.js";
 import { runFailureOf } from "@pipelex/mcp-core/capabilities/run-failure.js";
@@ -106,6 +108,16 @@ describe("runStatusLineFor", () => {
         polling: { phase: "polling", runStatus: "RUNNING", health: "retrying", hardError: null },
       }),
     ).toEqual({ text: "Run run_1: RUNNING (retrying…)", tone: "info" });
+  });
+
+  it("says a start that may have run may have started, never that it could not start", () => {
+    const line = runStatusLineFor({
+      ...base,
+      startError: `The Pipelex API returned an error. ${START_MAY_HAVE_RUN_HINT}`,
+    });
+
+    expect(line?.text).toMatch(/^The run may have started: /);
+    expect(line?.text).not.toMatch(/Could not start/);
   });
 
   it("says the results are being fetched once the run is terminal", () => {
