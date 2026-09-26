@@ -78,7 +78,7 @@ The workshop's tools:
 | Tool | What it does |
 |---|---|
 | [`mthds_list_methods`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_list_methods) | List the methods saved in your organization's catalog by name, description and id, never their source. |
-| [`mthds_validate`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_validate) | Validate a method given as files, a published address or a catalog id, and return its main pipe's typed signature. |
+| [`mthds_validate`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_validate) | Validate a method given as files, a published address or a catalog id, return its main pipe's typed signature, and write its flowchart as an HTML page beside files given by path. |
 | [`mthds_inputs_template`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_inputs_template) | Return a fill-in template of a pipe's declared inputs. |
 | [`mthds_codegen`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_codegen) | Generate typed TypeScript or Python for a method's concepts, stamped and locked, returned or written straight to disk. |
 | [`mthds_prepare_inputs`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_prepare_inputs) | Make filled inputs run-ready, uploading local files to Pipelex storage. |

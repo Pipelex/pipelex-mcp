@@ -74,6 +74,15 @@ describe("the Pipelex API boundary lint rules", () => {
     expect(
       await boundaryViolations(code, "packages/core/src/capabilities/attachment-fetch.ts"),
     ).toEqual([]);
+    // The graph page's live check fetches its pinned CDN files; the shipped
+    // module it checks is not exempt.
+    expect(
+      await boundaryViolations(code, "packages/core/src/capabilities/graph-page.e2e.ts"),
+    ).toEqual([]);
+    expect(await boundaryViolations(code, "packages/core/src/capabilities/graph-page.ts")).toEqual([
+      "pipelex/no-raw-fetch",
+      "pipelex/no-raw-fetch",
+    ]);
   });
 
   it("allow the factory and a call through an injected fetcher", async () => {

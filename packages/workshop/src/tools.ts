@@ -60,6 +60,7 @@ import {
   mthdsCodegenOutputSchema,
 } from "@pipelex/mcp-core/capabilities/codegen.js";
 import type { CodegenContext, MthdsCodegenInput } from "@pipelex/mcp-core/capabilities/codegen.js";
+import { GRAPH_PAGE_FILENAME } from "@pipelex/mcp-core/capabilities/graph-page.js";
 import {
   buildImagesContext,
   mthdsShowImagesInputSchema,
@@ -146,9 +147,11 @@ export function buildLocalToolContexts(
   const resolver = localFileResolver(rootDir);
   const pythonResolver = localFileResolver(rootDir, ".py");
 
-  // One object, used by mthds_validate and by mthds_save_method's validation
-  // leg alike — not a second one built from the same parts, since two
-  // hand-synced copies diverge the moment a field is added to one.
+  // One base, shared by mthds_save_method's validation leg and mthds_validate
+  // — not a second context built from the same parts, since two hand-synced
+  // copies diverge the moment a field is added to one. Only mthds_validate's
+  // copy adds `saveRoot`, which is what writes the method's graph page: the
+  // save's result never reports a page, so its validation leg writes none.
   const validation: ValidationContext = {
     ...buildValidationContext(env),
     resolver,
@@ -164,7 +167,7 @@ export function buildLocalToolContexts(
       validation,
       saveRoot: rootDir,
     },
-    validation,
+    validation: { ...validation, saveRoot: rootDir },
     inputs: { ...buildInputsContext(env), resolver },
     // `saveRoot` is the working directory on every writer: codegen resolves
     // `output_dir` against it, as the download tool resolves `dir`.
@@ -252,12 +255,21 @@ export const mthdsValidateTool = defineTool({
     "Supply exactly ONE of files / method_ref / method_id — never several. " +
     "Addresses and ids are resolved server-side, so no bundle enters the conversation; a by-id call validates the method's CURRENT stored content. " +
     "A valid verdict carries the main pipe's typed signature (main_pipe): its ref, each declared input with the concept it expects and how many items, and the concept it produces — " +
-    "type a call site from that instead of guessing the shapes of a method you cannot read.",
+    "type a call site from that instead of guessing the shapes of a method you cannot read. " +
+    `Files given as { path } also get the method's flowchart written beside them as ${GRAPH_PAGE_FILENAME}, a standalone page the user can open in a browser (graph_page: false skips it); the result says where.`,
   inputSchema: mthdsValidateInputSchema,
   outputSchema: mthdsValidateOutputSchema,
   annotations: {
     title: "Validate MTHDS files",
-    readOnlyHint: true,
+    // It writes the method's graph page beside `{ path }` files.
+    readOnlyHint: false,
+    // Not destructive, though a rewrite replaces the previous page: the only
+    // file it ever replaces is a page carrying its own generator mark, whose
+    // whole content is derived from the .mthds files beside it, so nothing a
+    // person wrote is lost and the next validation writes it again. A foreign
+    // file at that name is refused, never replaced. The hint is also what a
+    // host gates confirmation on — Codex asks before every destructive call —
+    // and this is the call a design loop makes after every edit.
     destructiveHint: false,
     openWorldHint: false,
   },

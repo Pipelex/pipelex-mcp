@@ -164,7 +164,7 @@
     },
     {
       "name": "mthds_validate",
-      "description": "Validate an MTHDS method with the Pipelex API — from submitted file contents, from a published method's address passed as method_ref, or from a registered method's catalog id (mt_…) passed as method_id. Supply exactly ONE of files / method_ref / method_id — never several. Addresses and ids are resolved server-side, so no bundle enters the conversation; a by-id call validates the method's CURRENT stored content. A valid verdict carries the main pipe's typed signature (main_pipe): its ref, each declared input with the concept it expects and how many items, and the concept it produces — type a call site from that instead of guessing the shapes of a method you cannot read.",
+      "description": "Validate an MTHDS method with the Pipelex API — from submitted file contents, from a published method's address passed as method_ref, or from a registered method's catalog id (mt_…) passed as method_id. Supply exactly ONE of files / method_ref / method_id — never several. Addresses and ids are resolved server-side, so no bundle enters the conversation; a by-id call validates the method's CURRENT stored content. A valid verdict carries the main pipe's typed signature (main_pipe): its ref, each declared input with the concept it expects and how many items, and the concept it produces — type a call site from that instead of guessing the shapes of a method you cannot read. Files given as { path } also get the method's flowchart written beside them as method-graph.html, a standalone page the user can open in a browser (graph_page: false skips it); the result says where.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -218,6 +218,10 @@
           "method_id": {
             "description": "Catalog id (mt_…) of a registered method. Validates the method's CURRENT stored content server-side — requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_ref / method_id.",
             "type": "string"
+          },
+          "graph_page": {
+            "description": "Whether to write the method's flowchart, method-graph.html, beside files given as { path } (default true): a standalone page that embeds the files and draws the graph when opened in a browser. It is rewritten on every validation and never replaces a file this tool did not write. Pass false to leave the directory untouched.",
+            "type": "boolean"
           }
         },
         "$schema": "http://json-schema.org/draft-07/schema#"
@@ -352,6 +356,65 @@
             ],
             "additionalProperties": false
           },
+          "graph_page": {
+            "description": "The method's flowchart as a standalone HTML page (method-graph.html) beside the validated files, which the user can open in a browser. Present when every file was given as { path } and graph_page was not false, whatever the verdict; absent otherwise.",
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Where the page is, or would have been, relative to the working directory."
+              },
+              "written": {
+                "type": "boolean",
+                "description": "Whether this call wrote the page."
+              },
+              "error": {
+                "description": "Why the page was not written. It never changes the verdict.",
+                "type": "object",
+                "properties": {
+                  "class": {
+                    "type": "string",
+                    "enum": [
+                      "input_domain",
+                      "config",
+                      "runtime"
+                    ]
+                  },
+                  "kind": {
+                    "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call.",
+                    "type": "string",
+                    "enum": [
+                      "paywall"
+                    ]
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "hint": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean",
+                    "description": "True when retrying the same call may succeed; false for permanent conditions."
+                  }
+                },
+                "required": [
+                  "class",
+                  "message",
+                  "retryable"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "path",
+              "written"
+            ],
+            "additionalProperties": false
+          },
           "validation_errors": {
             "type": "array",
             "items": {}
@@ -411,7 +474,7 @@
       },
       "annotations": {
         "title": "Validate MTHDS files",
-        "readOnlyHint": true,
+        "readOnlyHint": false,
         "destructiveHint": false,
         "openWorldHint": false
       },

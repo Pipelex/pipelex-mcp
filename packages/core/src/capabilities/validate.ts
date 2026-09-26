@@ -12,6 +12,8 @@ import type {
 } from "@pipelex/sdk";
 import { z } from "zod";
 
+import { GRAPH_PAGE_FILENAME, graphPageSection, writeGraphPage } from "./graph-page.js";
+import type { GraphPageFile, GraphPageOutcome } from "./graph-page.js";
 import {
   METHOD_REF_GRAMMAR,
   asRecord,
@@ -51,6 +53,12 @@ export const mthdsValidateInputSchema = {
     .optional()
     .describe(
       "Catalog id (mt_…) of a registered method. Validates the method's CURRENT stored content server-side — requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_ref / method_id.",
+    ),
+  graph_page: z
+    .boolean()
+    .optional()
+    .describe(
+      `Whether to write the method's flowchart, ${GRAPH_PAGE_FILENAME}, beside files given as { path } (default true): a standalone page that embeds the files and draws the graph when opened in a browser. It is rewritten on every validation and never replaces a file this tool did not write. Pass false to leave the directory untouched.`,
     ),
 };
 
@@ -217,6 +225,20 @@ const validationStructuredContentSchema = z.object({
     .describe(
       "The main pipe's signature: its ref, each declared input with the concept it expects, and the concept it produces. Present on every valid verdict for which the server settled an effective entry pipe — for a published method, the one its manifest names. Absent means no entry pipe was settled, not that the method declares none. Type a call site from this instead of guessing the shapes.",
     ),
+  graph_page: z
+    .object({
+      path: z
+        .string()
+        .describe("Where the page is, or would have been, relative to the working directory."),
+      written: z.boolean().describe("Whether this call wrote the page."),
+      error: toolErrorSchema
+        .optional()
+        .describe("Why the page was not written. It never changes the verdict."),
+    })
+    .optional()
+    .describe(
+      `The method's flowchart as a standalone HTML page (${GRAPH_PAGE_FILENAME}) beside the validated files, which the user can open in a browser. Present when every file was given as { path } and graph_page was not false, whatever the verdict; absent otherwise.`,
+    ),
   validation_errors: z.array(z.unknown()).optional(),
   errors: z.array(toolErrorSchema).optional(),
 });
@@ -227,6 +249,8 @@ export interface MthdsValidateInput {
   files?: SubmittedFileInput[];
   method_ref?: string;
   method_id?: string;
+  /** Default true; only a context with a `saveRoot` writes the page at all. */
+  graph_page?: boolean;
 }
 
 /** The validate request after `{ path }` resolution — what the checks and the API call consume. */
@@ -278,13 +302,29 @@ export interface ValidationStructuredContent {
   pending_signatures: string[];
   available_view_specs: ViewSpec[];
   main_pipe?: MainPipeSignature;
+  graph_page?: GraphPageStructuredContent;
   validation_errors?: unknown[];
   errors?: ToolError[];
+}
+
+/** The model-facing half of a {@link GraphPageOutcome}: `created` shapes the prose only. */
+export interface GraphPageStructuredContent {
+  path: string;
+  written: boolean;
+  error?: ToolError;
 }
 
 export interface ValidationResult {
   structuredContent: ValidationStructuredContent;
   summary: string;
+  /**
+   * What became of the method's graph page, when this validation wrote one or
+   * tried to. Kept beside `summary` rather than folded into it because
+   * {@link toolResult} renders its section after the error list: a page can be
+   * written when the API refused to produce a verdict, and its note must not
+   * sit between the headline and the errors it summarizes.
+   */
+  graphPage?: GraphPageOutcome;
   /**
    * Graph payload for the Skybridge view only. It rides the tool result's
    * `_meta` (never `structuredContent`), so the model never pays its tokens —
@@ -372,6 +412,15 @@ export interface ValidationContext extends ApiConfig {
   viewsAvailable?: boolean;
   /** Deployment-specific auth-failure texture (the hosted console overrides it per request); default env-var wording when absent. */
   authError?: AuthErrorTexture;
+  /**
+   * The working directory the method's graph page is written under — the same
+   * name and meaning as `CodegenContext.saveRoot`. Set, a validation of files
+   * that were all given as `{ path }` writes {@link GRAPH_PAGE_FILENAME} beside
+   * them unless the caller passes `graph_page: false`. Absent, nothing is
+   * written: the console has no working directory, and `mthds_save_method`'s
+   * validation leg must not write a file its own result never reports.
+   */
+  saveRoot?: string;
 }
 
 export function buildValidationContext(env = process.env): ValidationContext {
@@ -455,6 +504,61 @@ export async function validateMthds(
     return errorResult("Validation was not run: request input is invalid.", inputErrors);
   }
 
+  const result = await validateRequest(request, context);
+  const saveRoot = context.saveRoot;
+  const pageFiles = graphPageFilesOf(input, request.files);
+  if (saveRoot === undefined || pageFiles === undefined) {
+    return result;
+  }
+  // Written whatever the verdict, and even when the API produced none: the
+  // page draws from the files it embeds, not from the report, so an invalid
+  // method or an unreachable API is no reason to leave a stale page in place.
+  const graphPage = await writeGraphPage(saveRoot, pageFiles);
+  return {
+    ...result,
+    structuredContent: { ...result.structuredContent, graph_page: graphPageContentOf(graphPage) },
+    graphPage,
+  };
+}
+
+/**
+ * The files the graph page embeds, with the paths they were given at: only
+ * when the caller did not opt out and EVERY item came as `{ path }`. An inline
+ * item has no directory to write beside, and a page embedding some of the
+ * method's files but not others would draw a different method from the one
+ * validated.
+ */
+function graphPageFilesOf(
+  input: MthdsValidateInput,
+  resolved: SubmittedFile[],
+): GraphPageFile[] | undefined {
+  if (input.graph_page === false) {
+    return undefined;
+  }
+  const submitted = input.files ?? [];
+  const pageFiles: GraphPageFile[] = [];
+  for (const [index, file] of submitted.entries()) {
+    const content = resolved[index]?.content;
+    if ("content" in file || content === undefined) {
+      return undefined;
+    }
+    pageFiles.push({ path: file.path, content });
+  }
+  return pageFiles.length > 0 ? pageFiles : undefined;
+}
+
+function graphPageContentOf(outcome: GraphPageOutcome): GraphPageStructuredContent {
+  const content: GraphPageStructuredContent = { path: outcome.path, written: outcome.written };
+  if (outcome.error !== undefined) {
+    content.error = outcome.error;
+  }
+  return content;
+}
+
+async function validateRequest(
+  request: ResolvedValidateRequest,
+  context: ValidationContext,
+): Promise<ValidationResult> {
   // Classify options follow the request's selector shape — each failure
   // locates at the field that caused it.
   const classifyOptions =
@@ -537,9 +641,14 @@ function summaryForError(error: ToolError): string {
 }
 
 export function toolResult(result: ValidationResult) {
+  const [text] = toolResultContent(result.summary, result.structuredContent.errors);
+  const content =
+    result.graphPage === undefined
+      ? [text]
+      : [{ ...text, text: `${text.text}\n\n${graphPageSection(result.graphPage)}` }];
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(result.summary, result.structuredContent.errors),
+    content,
     isError: result.structuredContent.status === "error",
     // View-only channel: the graph rides `_meta`, never `structuredContent`, so
     // the model never pays its tokens. `_meta` still travels on the raw MCP

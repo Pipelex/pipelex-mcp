@@ -193,7 +193,7 @@ The console's name for the image tool, with the contract of [`mthds_show_images`
 
 ## The workshop's tools (`pipelex-plugin`)
 
-Every workshop call runs on the `plx_sk_` key in `PIPELEX_API_KEY`. The method-taking tools take a method three ways: `files`, a published method's address as `method_ref`, or a catalog id as `method_id`. `files` uses `SubmittedFileInput`, `{ content: string; uri?: string | null } | { path: string }`, described in [Files on the workshop, by path](../README.md#files-on-the-workshop-by-path). The workshop registers no views, so every `available_view_specs` it returns is empty and none of its results carries the graph or a form on `_meta`.
+Every workshop call runs on the `plx_sk_` key in `PIPELEX_API_KEY`. The method-taking tools take a method three ways: `files`, a published method's address as `method_ref`, or a catalog id as `method_id`. `files` uses `SubmittedFileInput`, `{ content: string; uri?: string | null } | { path: string }`, described in [Files on the workshop, by path](../README.md#files-on-the-workshop-by-path). The workshop registers no views, so every `available_view_specs` it returns is empty and none of its results carries the graph or a form on `_meta`; `mthds_validate` writes the method's flowchart as an HTML page instead (see [the method graph page](#mthds_validate)).
 
 ### `mthds_list_methods`
 
@@ -220,6 +220,7 @@ No method source crosses the conversation in this flow.
   files?: SubmittedFileInput[];
   method_ref?: string;         // published method address — github.com/<owner>/<repo>[/<selector>][@<tag>]
   method_id?: string;          // catalog id (mt_…) of a registered method
+  graph_page?: boolean;        // default true: write method-graph.html beside { path } files
 }
 
 // structuredContent
@@ -246,6 +247,11 @@ No method source crosses the conversation in this flow.
       images?: string[];           // where images sit; [] = none, absent = unknown
     };
   };
+  graph_page?: {                   // when every file came as { path } and graph_page was not false
+    path: string;                  // relative to the working directory
+    written: boolean;
+    error?: ToolError;             // why it was not written; the verdict is unaffected
+  };
   validation_errors?: unknown[];
   errors?: ToolError[];
 }
@@ -256,6 +262,8 @@ No method source crosses the conversation in this flow.
 `output.images` answers "will this method produce pictures?" before anything runs. It lists where images sit inside the produced output, as paths from its root: `$` is the output itself, `$.name` a field of it, `$[]` an element of a list, `$[].name` a field of one — so a top-level `Image` output is `["$"]`, an `Image[]` is `["$[]"]`, and the question is `images.length > 0`. It is read from the MTHDS standard's output-form descriptor, which the capability requests from the API, so it costs nothing at run time. An empty array and an absent member are **different answers**: `[]` means the output was described and holds no image, while absence means nothing described it — unknown, not none. The rendered summary line says it too, as a trailing ` (produces images)`.
 
 The graph and the form's artifacts are view-only data, and the workshop renders no views, so a workshop verdict never carries them; on the console, `pipelex_show_method` runs the same projection and delivers them to the `run-graph` view. The MCP `content` text is the API's rendered summary, with the signature line appended. The three source forms are **mutually exclusive — supply exactly one**. `method_ref` validates a published method by its address (`github.com/<owner>/<repo>[/<selector>][@<tag>]`, e.g. `github.com/Pipelex/methods/documents@v0.1.0`); `method_id` validates a registered method by its catalog id (requires an API key, since the catalog is org-scoped). Both are **server pass-throughs**: the selector rides the `/v1/validate` body and the hosted API resolves it — no method source enters the conversation.
+
+**The method graph page.** The workshop shows no views, so it gives the builder the flowchart as a file instead: when every item of `files` is a `{ path }`, the call writes `method-graph.html` into the directory holding them (the deepest one holding them all, when they span several) and reports it under `graph_page`. The page embeds the `.mthds` files as validated and loads `@pipelex/mthds-ui`'s standalone viewer and elkjs from jsDelivr, pinned by exact version and Subresource Integrity, and the viewer builds the static graph in the browser, the way a Mermaid page carries its diagram's text. So it opens from disk with no server and no Pipelex install, needs a network connection to draw, and draws a method that does not validate too, with the notes reading its source turned up. It is written whatever the verdict, even when the API produced none, and each validation of the files rewrites it, so it never shows an older version of the method. The write goes through the workshop's write boundary and follows `mthds_codegen`'s policy rather than the download tool's: it replaces only a page carrying its own generator mark, and a file it did not write at that name, a symlink or a directory is left untouched and reported as `graph_page.error`. A page that could not be written never changes the verdict. Inline `{ content }` files, `method_ref` and `method_id` write nothing, and `graph_page: false` skips the page. The summary's `## Method graph` section says where the page is, and on its first write that it is a generated file a project under version control may want to ignore.
 
 ### `mthds_inputs_template`
 

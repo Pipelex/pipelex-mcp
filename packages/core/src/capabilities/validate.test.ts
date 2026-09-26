@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
 
 import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
 import type {
@@ -13,9 +17,11 @@ import type {
   ValidateMethodSelector,
 } from "@pipelex/sdk";
 
+import { GRAPH_PAGE_FILENAME, GRAPH_PAGE_MARK } from "./graph-page.js";
 import { DEFAULT_API_URL } from "./shared.js";
 import type { FileResolver } from "./shared.js";
 import { imageFieldPaths, toolResult, validateMthds, validationResult } from "./validate.js";
+import type { ValidationClient, ValidationContext } from "./validate.js";
 
 /** Fake selector arm for tests whose request must never reach the selector leg. */
 const selectorValidateNotCalled = {
@@ -1807,5 +1813,191 @@ describe("validateMthds by selector (server pass-through)", () => {
 
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.location).toBe("files");
+  });
+});
+
+describe("the method graph page", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })),
+    );
+  });
+
+  /** A working directory holding the bundle, and a context that validates and writes under it. */
+  async function workshopContext(
+    client: ValidationClient,
+  ): Promise<{ root: string; context: ValidationContext }> {
+    const root = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), "pipelex-validate-page-")),
+    );
+    tempDirs.push(root);
+    await fs.mkdir(path.join(root, "methods/demo"), { recursive: true });
+    await fs.writeFile(path.join(root, "methods/demo/bundle.mthds"), 'domain = "demo"', "utf8");
+    const resolver: FileResolver = {
+      async resolve(submitted) {
+        return { ok: true, content: await fs.readFile(path.join(root, submitted), "utf8") };
+      },
+    };
+    return {
+      root,
+      context: {
+        baseUrl: DEFAULT_API_URL,
+        client,
+        resolver,
+        viewsAvailable: false,
+        saveRoot: root,
+      },
+    };
+  }
+
+  function answering(report: PipelexValidationResult): ValidationClient {
+    return {
+      ...selectorValidateNotCalled,
+      async validateFiles() {
+        return report;
+      },
+    };
+  }
+
+  const PAGE = path.join("methods", "demo", GRAPH_PAGE_FILENAME);
+  const BY_PATH = { files: [{ path: "methods/demo/bundle.mthds" }] };
+
+  async function pageExists(root: string): Promise<boolean> {
+    return fs.stat(path.join(root, PAGE)).then(
+      () => true,
+      () => false,
+    );
+  }
+
+  it("writes the page beside { path } files and reports it after the verdict", async () => {
+    const { root, context } = await workshopContext(answering(validReport));
+
+    const result = toolResult(await validateMthds(BY_PATH, context));
+
+    expect(result.isError).toBe(false);
+    expect(result.structuredContent).toMatchObject({
+      is_valid: true,
+      graph_page: { path: PAGE, written: true },
+    });
+    expect(result.structuredContent.graph_page).not.toHaveProperty("created");
+    const [block] = result.content;
+    expect(block.text.startsWith(`# Valid${MAIN_PIPE_NOTE}\n\n## Method graph\n\nWrote`)).toBe(
+      true,
+    );
+    const page = await fs.readFile(path.join(root, PAGE), "utf8");
+    expect(page).toContain(GRAPH_PAGE_MARK);
+    expect(page).toContain('"name":"bundle.mthds"');
+  });
+
+  it("says a rewritten page is a rewrite", async () => {
+    const { context } = await workshopContext(answering(validReport));
+    await validateMthds(BY_PATH, context);
+
+    const result = toolResult(await validateMthds(BY_PATH, context));
+
+    expect(result.content[0].text).toContain("## Method graph\n\nRewrote");
+  });
+
+  it("writes it on an invalid verdict, which the page draws with its notes", async () => {
+    const { root, context } = await workshopContext(answering(invalidReport));
+
+    const result = await validateMthds(BY_PATH, context);
+
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      is_valid: false,
+      graph_page: { written: true },
+    });
+    expect(await pageExists(root)).toBe(true);
+  });
+
+  it("writes it when the API produced no verdict, and reports it after the errors", async () => {
+    const { root, context } = await workshopContext({
+      ...selectorValidateNotCalled,
+      async validateFiles() {
+        throw new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED");
+      },
+    });
+
+    const result = toolResult(await validateMthds(BY_PATH, context));
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      status: "error",
+      graph_page: { path: PAGE, written: true },
+    });
+    const text = result.content[0].text;
+    expect(text.indexOf("connection refused")).toBeLessThan(text.indexOf("## Method graph"));
+    expect(await pageExists(root)).toBe(true);
+  });
+
+  it("keeps the verdict when the page cannot be written, and says why", async () => {
+    const { root, context } = await workshopContext(answering(validReport));
+    await fs.writeFile(path.join(root, PAGE), "somebody else's page", "utf8");
+
+    const result = toolResult(await validateMthds(BY_PATH, context));
+
+    expect(result.isError).toBe(false);
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      is_valid: true,
+      graph_page: {
+        path: PAGE,
+        written: false,
+        error: { class: "input_domain", location: "graph_page" },
+      },
+    });
+    expect(result.structuredContent.errors).toBeUndefined();
+    expect(result.content[0].text).toContain("the verdict above stands");
+    expect(await fs.readFile(path.join(root, PAGE), "utf8")).toBe("somebody else's page");
+  });
+
+  it("writes nothing when the caller opts out", async () => {
+    const { root, context } = await workshopContext(answering(validReport));
+
+    const result = await validateMthds({ ...BY_PATH, graph_page: false }, context);
+
+    expect(result.structuredContent.graph_page).toBeUndefined();
+    expect(result.graphPage).toBeUndefined();
+    expect(await pageExists(root)).toBe(false);
+  });
+
+  it("writes nothing for inline files, or a bundle only partly given as paths", async () => {
+    const { root, context } = await workshopContext(answering(validReport));
+
+    const inline = await validateMthds({ files: [{ content: 'domain = "demo"' }] }, context);
+    const mixed = await validateMthds(
+      { files: [...BY_PATH.files, { content: 'domain = "demo"', uri: "extra.mthds" }] },
+      context,
+    );
+
+    expect(inline.structuredContent.graph_page).toBeUndefined();
+    expect(mixed.structuredContent.graph_page).toBeUndefined();
+    expect(await fs.readdir(root)).toEqual(["methods"]);
+    expect(await pageExists(root)).toBe(false);
+  });
+
+  it("writes nothing from a context without a save root — the save's validation leg", async () => {
+    const { root, context } = await workshopContext(answering(validReport));
+
+    const result = await validateMthds(BY_PATH, { ...context, saveRoot: undefined });
+
+    expect(result.structuredContent.graph_page).toBeUndefined();
+    expect(await pageExists(root)).toBe(false);
+  });
+
+  it("writes nothing for a request refused before the API call", async () => {
+    const { root, context } = await workshopContext({
+      ...validateFilesNotCalled,
+      ...selectorValidateNotCalled,
+    });
+
+    const result = await validateMthds({ ...BY_PATH, method_id: "mt_demo" }, context);
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.graph_page).toBeUndefined();
+    expect(await pageExists(root)).toBe(false);
   });
 });
