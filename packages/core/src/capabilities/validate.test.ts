@@ -1954,6 +1954,27 @@ describe("the method graph page", () => {
     expect(await fs.readFile(path.join(root, PAGE), "utf8")).toBe("somebody else's page");
   });
 
+  it("claims no verdict when neither the API nor the page produced anything", async () => {
+    const { root, context } = await workshopContext({
+      ...selectorValidateNotCalled,
+      async validateFiles() {
+        throw new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED");
+      },
+    });
+    await fs.writeFile(path.join(root, PAGE), "somebody else's page", "utf8");
+
+    const result = toolResult(await validateMthds(BY_PATH, context));
+
+    expect(result.structuredContent).toMatchObject({
+      status: "error",
+      graph_page: { path: PAGE, written: false },
+    });
+    const text = result.content[0].text;
+    const section = text.slice(text.indexOf("## Method graph"));
+    expect(section).toContain("the result above is unaffected");
+    expect(section).not.toContain("verdict");
+  });
+
   it("writes nothing when the caller opts out", async () => {
     const { root, context } = await workshopContext(answering(validReport));
 

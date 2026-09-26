@@ -319,7 +319,10 @@ describe("writeGraphPage", () => {
 
 describe("graphPageSection", () => {
   it("says what a new page is, where it is, and that it is generated", () => {
-    const section = graphPageSection({ path: "m/method-graph.html", written: true, created: true });
+    const section = graphPageSection(
+      { path: "m/method-graph.html", written: true, created: true },
+      true,
+    );
 
     expect(section).toMatch(
       /^## Method graph\n\nWrote the method's flowchart to `m\/method-graph\.html`/,
@@ -329,26 +332,35 @@ describe("graphPageSection", () => {
   });
 
   it("only says where a rewritten page is", () => {
-    expect(graphPageSection({ path: "method-graph.html", written: true, created: false })).toBe(
+    expect(
+      graphPageSection({ path: "method-graph.html", written: true, created: false }, true),
+    ).toBe(
       "## Method graph\n\nRewrote the method's flowchart at `method-graph.html`: open it in a browser to see the graph.",
     );
   });
 
-  it("says why a page was not written, and that the verdict stands", () => {
-    const outcome: GraphPageOutcome = {
-      path: "method-graph.html",
-      written: false,
-      error: {
-        class: "input_domain",
-        location: "graph_page",
-        message: "It is\nsomebody else's.",
-        hint: "Move it.",
-        retryable: false,
-      },
-    };
+  const refused: GraphPageOutcome = {
+    path: "method-graph.html",
+    written: false,
+    error: {
+      class: "input_domain",
+      location: "graph_page",
+      message: "It is\nsomebody else's.",
+      hint: "Move it.",
+      retryable: false,
+    },
+  };
 
-    expect(graphPageSection(outcome)).toBe(
+  it("says why a page was not written, and that the verdict stands", () => {
+    expect(graphPageSection(refused, true)).toBe(
       "## Method graph\n\nThe method's flowchart page was not written to `method-graph.html`; the verdict above stands. It is somebody else's.\n\n*Hint: Move it.*",
     );
+  });
+
+  it("claims no verdict where the API produced none", () => {
+    const section = graphPageSection(refused, false);
+
+    expect(section).toContain("; the result above is unaffected. It is somebody else's.");
+    expect(section).not.toContain("verdict");
   });
 });

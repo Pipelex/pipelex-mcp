@@ -645,7 +645,12 @@ export function toolResult(result: ValidationResult) {
   const content =
     result.graphPage === undefined
       ? [text]
-      : [{ ...text, text: `${text.text}\n\n${graphPageSection(result.graphPage)}` }];
+      : [
+          {
+            ...text,
+            text: `${text.text}\n\n${graphPageSection(result.graphPage, result.structuredContent.status === "ok")}`,
+          },
+        ];
   return {
     structuredContent: result.structuredContent,
     content,

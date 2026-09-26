@@ -401,15 +401,20 @@ async function readHead(absolute: string): Promise<string> {
  * The page's section in the validation summary. A first write says what the
  * file is, since the user did not ask for it by name and it is new in their
  * tree; a rewrite only says where it is. A page that was not written says why,
- * and that the verdict above it stands.
+ * and that the result above it is unaffected: the verdict, when the API
+ * produced one, and otherwise the errors, since saying a verdict stands where
+ * none exists would invite the model to report one.
  */
-export function graphPageSection(outcome: GraphPageOutcome): string {
+export function graphPageSection(outcome: GraphPageOutcome, verdictProduced: boolean): string {
   const where = `\`${asOneLine(outcome.path)}\``;
   if (!outcome.written) {
+    const unaffected = verdictProduced
+      ? "the verdict above stands"
+      : "the result above is unaffected";
     const reason = outcome.error === undefined ? "" : ` ${asOneLine(outcome.error.message)}`;
     const hint =
       outcome.error?.hint === undefined ? "" : `\n\n*Hint: ${asOneLine(outcome.error.hint)}*`;
-    return `## Method graph\n\nThe method's flowchart page was not written to ${where}; the verdict above stands.${reason}${hint}`;
+    return `## Method graph\n\nThe method's flowchart page was not written to ${where}; ${unaffected}.${reason}${hint}`;
   }
   if (outcome.created === true) {
     return (
