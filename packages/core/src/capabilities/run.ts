@@ -53,6 +53,13 @@ import type {
   ToolError,
 } from "./shared.js";
 import { prepareConsoleInputs } from "./console-inputs.js";
+import {
+  boundedFailureText,
+  FAILURE_MESSAGE_MAX_CODE_POINTS,
+  failureSummaryLines,
+  runFailureOf,
+} from "./run-failure.js";
+import type { RunFailure } from "./run-failure.js";
 import type { ConsoleInputsClient, ConsoleInputsSelector } from "./console-inputs.js";
 import { CONSOLE_TOOL_NAMES, WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 import type { ToolNames } from "./tool-names.js";
@@ -175,6 +182,64 @@ export function runStartOutputSchemaFor(names: ToolNames) {
 
 export const mthdsRunOutputSchema = runStartOutputSchemaFor(WORKSHOP_TOOL_NAMES);
 
+/**
+ * Why a run failed, from the error report the runner stored on it: the
+ * `failure` member of every failed arm in the run family (the status tool on a
+ * terminal status other than COMPLETED, and the results, image and download
+ * tools' `failed` state). Present only when the run stored a report; its fields
+ * are each present only when the report carried them. The provider's raw
+ * metadata is left out.
+ */
+export const runFailureSchema = z.object({
+  run_id: z.string(),
+  error_type: z
+    .string()
+    .optional()
+    .describe("The runner's exception class name, for the support line; never match on it."),
+  title: z.string().optional().describe("The stable human label of the error class."),
+  message: z
+    .string()
+    .optional()
+    .describe(
+      "What went wrong, as the runner wrote it. It can quote the provider's raw text, so tell the user the title and the next step rather than this verbatim.",
+    ),
+  error_domain: z
+    .string()
+    .optional()
+    .describe(
+      'Who can fix it: "input" (the caller\'s method or inputs), "config" (a configuration change), "runtime" (nobody beforehand).',
+    ),
+  error_category: z
+    .string()
+    .optional()
+    .describe("The finer class of an inference failure (transient, configuration, content, …)."),
+  retryable: z
+    .boolean()
+    .optional()
+    .describe(
+      "Whether running it again unchanged can succeed, as the report states it. Absent: the report does not say, which is not false.",
+    ),
+  user_action: z
+    .object({
+      kind: z
+        .string()
+        .describe(
+          "wait_and_retry, change_input, change_model, check_billing, check_credentials, contact_support or unknown.",
+        ),
+      detail: z
+        .string()
+        .describe(
+          "The advice in words. A wait_and_retry kind carries this server's own sentence, since the runner's is worded for a run still retrying.",
+        ),
+    })
+    .optional()
+    .describe("The next step the report advises."),
+  finished_at: z.string().optional().describe("When the run ended."),
+});
+
+const FAILURE_FIELD_DESCRIPTION =
+  "Present when the run stored an error report: why it failed, what to do next, whether running it again can help, and what to give support.";
+
 const runStatusStructuredContentSchema = z.object({
   status: z.enum(["ok", "error"]),
   run_id: z.string().optional(),
@@ -194,6 +259,9 @@ const runStatusStructuredContentSchema = z.object({
     .describe("Server backoff hint — check again after this many seconds."),
   created_at: z.string().optional(),
   finished_at: z.string().nullable().optional(),
+  failure: runFailureSchema
+    .optional()
+    .describe(`Terminal statuses other than COMPLETED only. ${FAILURE_FIELD_DESCRIPTION}`),
   errors: z.array(toolErrorSchema).optional(),
 });
 
@@ -255,7 +323,13 @@ export function runResultsOutputSchemaFor(names: ToolNames) {
     run_status: runStatusSchema
       .optional()
       .describe('State "failed" only — the terminal lifecycle status.'),
-    failure_message: z.string().optional().describe('State "failed" only.'),
+    failure_message: z
+      .string()
+      .optional()
+      .describe('State "failed" only — the platform\'s one-sentence account of the ending.'),
+    failure: runFailureSchema
+      .optional()
+      .describe(`State "failed" only. ${FAILURE_FIELD_DESCRIPTION}`),
     main_stuff: z
       .unknown()
       .optional()
@@ -380,6 +454,8 @@ export interface RunStatusStructuredContent {
   retry_after_seconds?: number | null;
   created_at?: string;
   finished_at?: string | null;
+  /** Terminal statuses other than COMPLETED, when the run stored an error report. */
+  failure?: RunFailure;
   errors?: ToolError[];
 }
 
@@ -408,6 +484,8 @@ export interface RunResultsStructuredContent {
   retry_after_seconds?: number | null;
   run_status?: RunStatus;
   failure_message?: string;
+  /** State "failed" only, when the run stored an error report. */
+  failure?: RunFailure;
   main_stuff?: unknown;
   truncated?: boolean;
   image_candidates?: string[];
@@ -510,7 +588,7 @@ export interface RunResultsResult {
 /** The slice of `PipelexApiClient` the run capabilities call (test seam). */
 interface RunClient {
   start(options: PipelexStartOptions): Promise<PipelexRunResultStart>;
-  getRunStatus(runId: string): Promise<RunRead>;
+  getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   getRunResult(runId: string): Promise<RunResultState>;
   /** The bulk resolve route, `POST /v1/resolve-storage-url/bulk`: fresh links for a completed output's files. */
   resolveStorageUrls(
@@ -985,12 +1063,22 @@ export function startResult(
   return { structuredContent, summary: summaryParts.join("\n\n") };
 }
 
-/** Project a self-healing status read. A terminal non-COMPLETED status is a produced verdict. */
+/**
+ * Project a self-healing status read. A terminal non-COMPLETED status is a
+ * produced verdict, and it carries why the run ended: the status read is where
+ * the platform serves the run's stored error report (`RunRead.error`), so the
+ * `failure` object and the summary's sentences come from it. A read whose report
+ * is `null` or malformed carries the status alone, and the summary says so.
+ */
 export function statusResult(
   read: RunRead,
   names: ToolNames = WORKSHOP_TOOL_NAMES,
 ): RunStatusResult {
   const isTerminal = isTerminalRunStatus(read.status);
+  const ended = isTerminal && read.status !== "COMPLETED";
+  const failure = ended
+    ? runFailureOf(read.pipeline_run_id, read.error, read.finished_at)
+    : undefined;
 
   const structuredContent: RunStatusStructuredContent = {
     status: "ok",
@@ -1003,19 +1091,27 @@ export function statusResult(
       : { retry_after_seconds: read.retry_after_seconds }),
     created_at: read.created_at,
     ...(read.finished_at === undefined ? {} : { finished_at: read.finished_at }),
+    ...(failure === undefined ? {} : { failure }),
   };
 
-  return { structuredContent, summary: statusSummary(read, isTerminal, names) };
+  return { structuredContent, summary: statusSummary(read, isTerminal, failure, names) };
 }
 
-function statusSummary(read: RunRead, isTerminal: boolean, names: ToolNames): string {
+function statusSummary(
+  read: RunRead,
+  isTerminal: boolean,
+  failure: RunFailure | undefined,
+  names: ToolNames,
+): string {
   const lines: string[] = [];
 
   if (isTerminal) {
     lines.push(
       read.status === "COMPLETED"
         ? `Run \`${read.pipeline_run_id}\` is COMPLETED. Fetch the output with \`${names.runResults}\`.`
-        : `Run \`${read.pipeline_run_id}\` ended ${read.status}. \`${names.runResults}\` returns the failure details.`,
+        : failureSummaryLines(read.pipeline_run_id, read.status, failure, read.finished_at).join(
+            "\n",
+          ),
     );
   } else {
     const seconds = read.retry_after_seconds ?? DEFAULT_RETRY_SECONDS;
@@ -1036,12 +1132,15 @@ function statusSummary(read: RunRead, isTerminal: boolean, names: ToolNames): st
 /**
  * Project a one-shot result lookup. All three arms are produced verdicts
  * (`status: "ok"`): "no result yet" and "it failed" are answers, not errors.
+ * A failed arm is projected with `failedRead`, the status read that follows it
+ * (see {@link readFailedRun}), when the caller made one.
  */
 export function resultsResult(
   state: RunResultState,
   viewsAvailable = true,
   artifactDownloadAvailable = false,
   names: ToolNames = WORKSHOP_TOOL_NAMES,
+  failedRead?: RunRead,
 ): RunResultsResult {
   switch (state.state) {
     case "running":
@@ -1055,7 +1154,7 @@ export function resultsResult(
         names,
       );
     case "failed":
-      return failedResult(state.pipeline_run_id, state.status, state.message);
+      return failedResult(state, failedRead);
   }
 }
 
@@ -1277,22 +1376,119 @@ function saveNote(storedFiles: number, truncated: boolean): string | undefined {
   return "To keep this output on disk, call `mthds_download_artifacts` with this run id: it writes it verbatim as `main_stuff.json` under `runs/<run_id>/`. Never retype it into a file yourself.";
 }
 
-function failedResult(runId: string, status: RunStatus, message: string): RunResultsResult {
+function failedResult(state: FailedRunState, failedRead: RunRead | undefined): RunResultsResult {
+  const runId = state.pipeline_run_id;
+  const failure = failureOfFailedArm(state, failedRead);
   return {
     structuredContent: {
       status: "ok",
       run_id: runId,
       state: "failed",
-      run_status: status,
-      failure_message: message,
+      run_status: state.status,
+      failure_message: failureMessageOf(state),
+      ...(failure === undefined ? {} : { failure }),
       available_view_specs: [],
     },
     summary: [
       "# Run failed",
-      `Run \`${runId}\` ended ${status}: ${message}`,
+      failedArmSummaryLines(state, failure, failedRead).join("\n"),
       "No graph is available for failed runs.",
     ].join("\n\n"),
   };
+}
+
+/** The failed arm of the results read. */
+export type FailedRunState = Extract<RunResultState, { state: "failed" }>;
+
+/**
+ * The failed arm's `message`, the platform's account of the ending, bounded like
+ * the report's own message: once the platform relays the report on the `409`,
+ * the account quotes that message whole.
+ */
+export function failureMessageOf(state: FailedRunState): string {
+  return boundedFailureText(state.message, FAILURE_MESSAGE_MAX_CODE_POINTS);
+}
+
+/**
+ * Why a run whose results read came back failed ended: the `failure` object
+ * built from the report the failed arm carries, or, when it carries none, from
+ * the one the status read that followed it served. The results route relays the
+ * run's stored report only from the platform release that added it to its
+ * `409`, while the status read has always served it, so a failed arm with no
+ * report is not yet evidence that the run has none. The time the run ended comes
+ * from the status read alone, since the failed arm does not carry it.
+ */
+export function failureOfFailedArm(
+  state: FailedRunState,
+  failedRead: RunRead | undefined,
+): RunFailure | undefined {
+  const finishedAt = failedRead?.finished_at;
+  return (
+    runFailureOf(state.pipeline_run_id, state.error, finishedAt) ??
+    runFailureOf(state.pipeline_run_id, failedRead?.error, finishedAt)
+  );
+}
+
+/**
+ * The model's account of a failed results arm, from {@link failureOfFailedArm}'s
+ * `failure`. When there is none and the status read that should have followed
+ * failed, the report is said to be unknown rather than missing, since the arm
+ * alone cannot tell a run that stored no report from a platform that does not
+ * relay it.
+ */
+export function failedArmSummaryLines(
+  state: FailedRunState,
+  failure: RunFailure | undefined,
+  failedRead: RunRead | undefined,
+): string[] {
+  return failureSummaryLines(
+    state.pipeline_run_id,
+    state.status,
+    failure,
+    failedRead?.finished_at,
+    failedRead !== undefined,
+  );
+}
+
+/**
+ * How long the status read after a failed results arm may take before the
+ * result goes out without it. Far under the SDK's own 30 s poll timeout, since
+ * the read only adds to an answer already in hand.
+ */
+export const FAILED_RUN_READ_TIMEOUT_MS = 5_000;
+
+/**
+ * The one status read that follows a failed results arm, for the time the run
+ * ended and for the report when the arm carried none. Best effort: a read that
+ * fails, or takes longer than `timeoutMs`, leaves the failure to what the arm
+ * itself carried, since the arm is already a verdict and a second request must
+ * never turn it into an error or hold it back. The deadline both aborts the
+ * request and stops waiting for it, so a client that ignores the signal cannot
+ * hold the result either.
+ */
+export async function readFailedRun(
+  client: { getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead> },
+  runId: string,
+  timeoutMs: number = FAILED_RUN_READ_TIMEOUT_MS,
+): Promise<RunRead | undefined> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve(undefined);
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      client.getRunStatus(runId, { signal: controller.signal }),
+      deadline,
+    ]);
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ── capabilities ────────────────────────────────────────────────────
@@ -1526,6 +1722,10 @@ export async function getMthdsRunResults(
     const error = classifyError(err, { ...runResultsErrorOptions(names), auth: context.authError });
     return resultsErrorResult(resultsSummaryForError(error), [error]);
   }
+  const failedRead =
+    state.state === "failed"
+      ? await readFailedRun(runClient(context), state.pipeline_run_id)
+      : undefined;
 
   // The API responded; projecting it must not be reported as an unreachable
   // API. A malformed report (a completed result missing main_stuff) is a
@@ -1538,6 +1738,7 @@ export async function getMthdsRunResults(
       viewsAvailable,
       context.artifactDownloadAvailable === true,
       names,
+      failedRead,
     );
   } catch (err) {
     return resultsErrorResult(

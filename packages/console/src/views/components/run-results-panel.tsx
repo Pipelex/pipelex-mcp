@@ -14,6 +14,11 @@ import type { GraphSpec, ToolbarPosition } from "@pipelex/mthds-ui";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSendFollowUpMessage } from "skybridge/web";
 
+import {
+  failureDisplayOf,
+  failureSummaryLines,
+} from "@pipelex/mcp-core/capabilities/run-failure.js";
+import type { RunFailure } from "@pipelex/mcp-core/capabilities/run-failure.js";
 import { CONSOLE_TOOL_NAMES } from "@pipelex/mcp-core/capabilities/tool-names.js";
 import { terminalFollowUpPrompt } from "../run-notify.js";
 import {
@@ -25,6 +30,7 @@ import {
   outputToRender,
 } from "../run-results.js";
 import type { RunResultsView } from "../run-results.js";
+import { FailureDetails } from "./failure-details.js";
 import { RenderBoundary } from "./render-boundary.js";
 import { ToolbarButton } from "./toolbar-button.js";
 
@@ -43,7 +49,10 @@ const FADE_MASK = "linear-gradient(to bottom, black 72%, transparent)";
  * A run's settled results, as both run views show them: a header line with the
  * duration and the cost, then the output, then — in fullscreen — the executed
  * graph. A failed run shows its failure in the same card, without a graph,
- * since the hosted plane produces none for a failed run.
+ * since the hosted plane produces none for a failed run: why it failed, what to
+ * do next and a line to copy for support, from the report's title and user
+ * action (`failureDisplayOf`). The report's message never shows here, since it
+ * can carry a provider's raw text; the model reads it through `data-llm`.
  *
  * The output is the form kernel's `StuffViewer` in the `app` presentation, the
  * component every other Pipelex surface renders results with, over the field
@@ -66,6 +75,8 @@ export function RunResultsPanel({
   results,
   requestedPipeRef,
   durationSeconds,
+  finishedAt,
+  statusFailure,
   dark,
   isFullscreen,
   onToggleFullscreen,
@@ -78,6 +89,14 @@ export function RunResultsPanel({
   /** The pipe the run was started with, when the caller named one. */
   requestedPipeRef: string | null;
   durationSeconds: number | null;
+  /** When the run ended, from the status read: the support line's time when the results carry no report. */
+  finishedAt: string | null | undefined;
+  /**
+   * The failure the status read carried, for when the results read carries
+   * none: the results tool follows its failed arm with a status read of its
+   * own, which can fail where the view's polling read did not.
+   */
+  statusFailure: RunFailure | undefined;
   dark: boolean;
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
@@ -95,8 +114,19 @@ export function RunResultsPanel({
   const headline = failed
     ? failedHeadline(results.content.run_status, durationSeconds)
     : completedHeadline(durationSeconds, results.content.usage);
+  const failure = failed ? (results.content.failure ?? statusFailure) : undefined;
+  // The model reads the report's message here; the person reads the display below.
   const llm = failed
-    ? `Run ${runId}: ${headline.toLowerCase()} — ${results.content.failure_message ?? "no failure message"}.`
+    ? [
+        `Run ${runId}: ${headline.toLowerCase()}.`,
+        ...failureSummaryLines(
+          runId,
+          results.content.run_status ?? "FAILED",
+          failure,
+          finishedAt,
+        ).slice(1),
+        "The user sees the reason, the next step and the support line in this view.",
+      ].join(" ")
     : `Run ${runId}: ${headline.toLowerCase()}. Its output is shown to the user in this view; ${CONSOLE_TOOL_NAMES.runResults} with the run id returns it when a question needs the values.`;
 
   return (
@@ -116,9 +146,12 @@ export function RunResultsPanel({
         </div>
       </div>
       {failed ? (
-        <p className="text-xs" style={{ color: palette.error }}>
-          {results.content.failure_message ?? "The run did not complete."}
-        </p>
+        <FailureDetails
+          failure={failureDisplayOf(runId, failure, finishedAt)}
+          color={palette.error}
+          mutedColor={palette.muted}
+          dark={dark}
+        />
       ) : (
         <>
           <RunOutput

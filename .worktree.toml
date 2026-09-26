@@ -1,0 +1,16 @@
+# Read only by `wt` — the grammar is the workspace's docs/workspace/worktrees.md, "What a repo declares".
+
+# Three workspace members require `@pipelex/sdk` (the core, the workshop and the console), and npm hoists
+# the one copy they share to the repository root, so a sprint pin needs only one site. It goes in the core:
+# the core is where the capability code that reads the SDK lives, and it is private and never published, so
+# a git source there can never reach the manifest of the workshop that npm publishes. The other two keep
+# their registry range, which the pinned commit satisfies as long as its version stays inside it, and they
+# resolve to the same hoisted copy; `tests/workspace-manifests.test.ts` holds that one-copy property on the
+# lockfile while a pin stands. The collapse is never a one-site replace: the release moves the range of all
+# three members together, which is what `make use-npm-sdk` does. It moves `mthds` too when the released SDK
+# requires a newer one than the core and the workshop declare: the pinned SDK commit already carries its own
+# `mthds` (a git source at 0.27.0), which npm nests under the SDK beside the root's 0.25 copy, and
+# `make use-npm-sdk` alone would leave those two copies in place.
+[pins."@pipelex/sdk"]
+site     = "packages/core/package.json"
+collapse = "make use-npm-sdk VERSION=<version>"

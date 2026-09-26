@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import type { RunFailure } from "@pipelex/mcp-core/capabilities/run-failure.js";
 import type { RunStatusStructuredContent } from "@pipelex/mcp-core/capabilities/run.js";
 import type { ToolError } from "@pipelex/mcp-core/capabilities/shared.js";
 import { isTransientPollError, nextPollDelayMs } from "./run-polling.js";
@@ -33,6 +34,13 @@ export interface RunPollingSnapshot {
    */
   createdAt?: string;
   finishedAt?: string | null;
+  /**
+   * Why the run ended, once a read found it terminal on a status other than
+   * COMPLETED and the run stored an error report (`pipelex_run_status`'s
+   * `failure`). It is what the form view's status line says before the
+   * results arrive, or when they cannot be fetched.
+   */
+  failure?: RunFailure;
 }
 
 /** The slice of `useCallTool("pipelex_run_status")` the poll loop consumes. */
@@ -150,6 +158,7 @@ export function useRunPolling(
         hardError: null,
         createdAt: content.created_at,
         finishedAt: content.finished_at,
+        ...(content.failure === undefined ? {} : { failure: content.failure }),
       });
       if (!terminal) {
         schedule(content.retry_after_seconds);
