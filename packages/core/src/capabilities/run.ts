@@ -1623,13 +1623,18 @@ const START_NOT_SENT_CODES: ReadonlySet<string> = new Set([
   "UND_ERR_CONNECT_TIMEOUT",
 ]);
 
+/** HTTP statuses from `/v1/start` after which the run may exist; see {@link startMayHaveRun}. */
+const START_MAY_HAVE_RUN_STATUSES: ReadonlySet<number> = new Set([500, 502, 504, 408]);
+
 /**
  * Classify a failed start, refusing a retry when the run may exist. A start
  * creates a durable run that spends inference credit, and this client sends no
  * idempotency key, so retrying after a lost acknowledgement would start a second
  * run. That is the case for a timeout or a dropped connection after the request
- * went out, and for a 502, a 504 or a 408, where something in front of the
- * runner answered for a request it may have accepted.
+ * went out; for a 502, a 504 or a 408, where something in front of the runner
+ * answered for a request it may have accepted; and for a 500, which the platform
+ * relays from the runner when its start call failed, and which can arrive after
+ * Temporal has already recorded the start.
  */
 export function classifyStartError(err: unknown, options: ClassifyErrorOptions): ToolError {
   const error = classifyError(err, options);
@@ -1647,9 +1652,13 @@ function startMayHaveRun(err: unknown): boolean {
   }
   // A 408 is a request the server says it never received whole, but a proxy
   // may answer it for one it forwarded, and a wrong retry here is a second
-  // paid run. A 429 is a throttle refusing the request before it runs.
+  // paid run. A 500 is the runner's own failed start, relayed as it came since
+  // pipelex-server#145 (a 502 before): the runner wraps a failed Temporal start
+  // call in PipelexBridgeDispatchError whether or not the workflow began. A 429
+  // is a throttle refusing the request before it runs, and a 503 a platform
+  // that could not take it.
   if (err instanceof ApiResponseError) {
-    return err.status === 502 || err.status === 504 || err.status === 408;
+    return START_MAY_HAVE_RUN_STATUSES.has(err.status);
   }
   return false;
 }

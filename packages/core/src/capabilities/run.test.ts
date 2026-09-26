@@ -1453,6 +1453,9 @@ describe("startMthdsRun", () => {
       serverError(504),
       serverError(502),
       serverError(408),
+      // The platform relays a runner's failed start as a 500 since
+      // pipelex-server#145, and the runner may have recorded the start first.
+      serverError(500),
     ];
     for (const failure of failures) {
       const result = await startMthdsRun(
@@ -1463,6 +1466,32 @@ describe("startMthdsRun", () => {
       expect(error?.retryable).toBe(false);
       expect(error?.hint).toContain("the run may have started");
     }
+  });
+
+  it("refuses a retry of a 500 on either shell's start, and nowhere else", async () => {
+    // With no inputs pipelex_run skips its walk, so the start is the only call.
+    const consoleContext: PipelexRunContext = {
+      baseUrl: DEFAULT_API_URL,
+      toolNames: CONSOLE_TOOL_NAMES,
+      client: {
+        ...NEVER_CLIENT,
+        validate: () => Promise.reject(new Error("validate must not be called")),
+        start: () => Promise.reject(serverError(500)),
+      },
+    };
+    const pipelexStart = await startPipelexRun({ method_id: "mt_demo" }, consoleContext);
+    const startError = pipelexStart.structuredContent.errors?.[0];
+    expect(startError?.retryable).toBe(false);
+    expect(startError?.hint).toContain("the run may have started");
+
+    // A 500 from the status route reads nothing into being and stays retryable.
+    const status = await getMthdsRunStatus(
+      { run_id: RUN_ID },
+      contextWith({ getRunStatus: () => Promise.reject(serverError(500)) }),
+    );
+    const statusError = status.structuredContent.errors?.[0];
+    expect(statusError?.retryable).toBe(true);
+    expect(statusError?.hint ?? "").not.toContain("the run may have started");
   });
 
   it("keeps a start the server refused outright retryable", () => {
