@@ -38,7 +38,7 @@ describe("FailureDetails", () => {
 
     expect(text).toContain("Why: LLM completion");
     expect(text).toContain(
-      "What to do: The provider rejected the request — review the prompt, parameters, and inputs. Running it again unchanged will fail the same way.",
+      "What to do: The provider rejected the request — review the prompt, parameters, and inputs. The report does not expect running it again unchanged to help.",
     );
     expect(text).toContain(
       `For support:Run ${statusRead.pipeline_run_id} · LLMCompletionError · ended ${statusRead.finished_at ?? ""}`,

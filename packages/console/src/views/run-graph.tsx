@@ -484,6 +484,7 @@ function RunGraph() {
             requestedPipeRef={runPipeRef}
             durationSeconds={runDurationSeconds(polling.createdAt, polling.finishedAt)}
             finishedAt={polling.finishedAt}
+            statusFailure={polling.failure}
             dark={dark}
             isFullscreen={isFullscreen}
             onToggleFullscreen={() => void setDisplayMode(isFullscreen ? "inline" : "fullscreen")}

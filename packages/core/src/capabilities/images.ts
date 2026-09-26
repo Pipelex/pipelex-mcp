@@ -2,9 +2,9 @@ import { ArtifactFetchError } from "@pipelex/sdk";
 import type { FetchArtifactOptions, RunRead, RunResultState, RunStatus } from "@pipelex/sdk";
 import { z } from "zod";
 
-import { failureSummaryLines } from "./run-failure.js";
 import type { RunFailure } from "./run-failure.js";
 import {
+  failedArmSummaryLines,
   failureOfFailedArm,
   readFailedRun,
   runFailureSchema,
@@ -253,7 +253,7 @@ export interface ShowImagesResult {
 export interface ImagesClient {
   getRunResult(runId: string): Promise<RunResultState>;
   /** Read once after a failed results arm, for when the run ended and its report (`readFailedRun`). */
-  getRunStatus(runId: string): Promise<RunRead>;
+  getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   fetchArtifact(uri: string, options?: FetchArtifactOptions): Promise<Response>;
 }
 
@@ -812,7 +812,7 @@ function failedResult(state: FailedRunState, failedRead: RunRead | undefined): S
     },
     summary: [
       "# No images",
-      failureSummaryLines(runId, state.status, failure, failedRead?.finished_at).join("\n"),
+      failedArmSummaryLines(state, failure, failedRead).join("\n"),
       "A failed run produces no images to show.",
     ].join("\n\n"),
     imageBlocks: [],

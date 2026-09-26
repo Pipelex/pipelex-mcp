@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -31,12 +31,14 @@ import {
   boundMainStuff,
   classifyStartError,
   ELLIPSIS_MARKER,
+  FAILED_RUN_READ_TIMEOUT_MS,
   freshStorageLinks,
   getMthdsRunResults,
   getMthdsRunStatus,
   MAIN_STUFF_CAP,
   projectRunUsage,
   projectUsageByPipe,
+  readFailedRun,
   resultsResult,
   runIdInputSchemaFor,
   runResultsOutputSchemaFor,
@@ -412,7 +414,9 @@ describe("statusResult", () => {
     expect(result.summary).toContain(
       "What to do: The provider rejected the request — review the prompt, parameters, and inputs.",
     );
-    expect(result.summary).toContain("Retry: Running it again unchanged will fail the same way.");
+    expect(result.summary).toContain(
+      "Retry: The report does not expect running it again unchanged to help.",
+    );
     expect(result.summary).toContain(
       `For support: Run ${statusRead.pipeline_run_id} · LLMCompletionError · ended 2026-09-23T15:16:37.856067+00:00`,
     );
@@ -938,13 +942,20 @@ describe("resultsResult", () => {
   });
 
   it("projects a failed run with no report as a produced ok verdict with its status", () => {
-    const result = resultsResult({
+    const failedArm: RunResultState = {
       state: "failed",
       pipeline_run_id: RUN_ID,
       status: "FAILED",
       message: "Run finished with status FAILED; no result available",
       error: null,
-    });
+    };
+    const result = resultsResult(
+      failedArm,
+      true,
+      false,
+      WORKSHOP_TOOL_NAMES,
+      runRead({ status: "FAILED", error: null }),
+    );
 
     expect(result.structuredContent).toEqual({
       status: "ok",
@@ -957,6 +968,19 @@ describe("resultsResult", () => {
     expect(result.summary).toContain(`Run \`${RUN_ID}\` ended FAILED.`);
     expect(result.summary).toContain("the run stored no error report");
     expect(result.summary).toMatch(/no graph/i);
+  });
+
+  it("says the reason is unknown, not missing, when the status read after a bare failed arm failed", () => {
+    const result = resultsResult({
+      state: "failed",
+      pipeline_run_id: RUN_ID,
+      status: "FAILED",
+      message: "Run finished with status FAILED; no result available",
+      error: null,
+    });
+
+    expect(result.summary).toContain("Why: unknown for now");
+    expect(result.summary).not.toContain("stored no error report");
   });
 
   it("carries the report the failed arm relays, with when the run ended from the status read", () => {
@@ -978,7 +1002,9 @@ describe("resultsResult", () => {
     expect(result.summary).toContain("# Run failed");
     expect(result.summary).toContain("Why: LLM completion — ");
     expect(result.summary).toContain("What to do: The provider rejected the request");
-    expect(result.summary).toContain("Retry: Running it again unchanged will fail the same way.");
+    expect(result.summary).toContain(
+      "Retry: The report does not expect running it again unchanged to help.",
+    );
     expect(result.summary).toContain(
       `For support: Run ${statusRead.pipeline_run_id} · LLMCompletionError · ended ${statusRead.finished_at ?? ""}`,
     );
@@ -1283,7 +1309,7 @@ describe("boundMainStuff", () => {
 // Structural mirror of the RunClient seam in run.ts.
 interface FakeRunClient {
   start(options: PipelexStartOptions): Promise<RunResultStart>;
-  getRunStatus(runId: string): Promise<RunRead>;
+  getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   getRunResult(runId: string): Promise<RunResultState>;
   resolveStorageUrls(
     input: BulkResolveStorageUrlsInput,
@@ -1893,6 +1919,71 @@ describe("getMthdsRunResults", () => {
     expect(result.summary).toContain(
       `For support: Run ${relayedArm.pipeline_run_id} · ExtractJobFailureError`,
     );
+  });
+
+  it("says the reason is unknown when neither the arm nor the failed status read carries a report", async () => {
+    const { resultsArm } = RECORDED_FAILED_RUNS.llmCompletion;
+    const context = contextWith({
+      getRunResult: () => Promise.resolve(resultsArm),
+      getRunStatus: () =>
+        Promise.reject(
+          new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED"),
+        ),
+    });
+
+    const result = await getMthdsRunResults({ run_id: resultsArm.pipeline_run_id }, context);
+
+    expect(result.structuredContent.state).toBe("failed");
+    expect(result.structuredContent).not.toHaveProperty("failure");
+    expect(result.summary).toContain("Why: unknown for now");
+    expect(result.summary).not.toContain("stored no error report");
+  });
+
+  describe("the status read's deadline", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("sends the failed verdict without the read once the deadline passes", async () => {
+      vi.useFakeTimers();
+      const { relayedArm } = RECORDED_FAILED_RUNS.llmCompletion;
+      let signal: AbortSignal | undefined;
+      const context = contextWith({
+        getRunResult: () => Promise.resolve(relayedArm),
+        // A read that never answers and ignores its signal: the deadline must hold anyway.
+        getRunStatus: (_runId: string, options?: { signal?: AbortSignal }) => {
+          signal = options?.signal;
+          return new Promise<RunRead>(() => undefined);
+        },
+      });
+
+      const pending = getMthdsRunResults({ run_id: relayedArm.pipeline_run_id }, context);
+      await vi.advanceTimersByTimeAsync(FAILED_RUN_READ_TIMEOUT_MS);
+      const result = await pending;
+
+      expect(signal?.aborted).toBe(true);
+      expect(result.structuredContent.state).toBe("failed");
+      expect(result.structuredContent.failure).toMatchObject({ error_type: "LLMCompletionError" });
+      expect(result.structuredContent.failure).not.toHaveProperty("finished_at");
+    });
+
+    it("returns the read when it answers in time, and aborts nothing", async () => {
+      const { statusRead } = RECORDED_FAILED_RUNS.llmCompletion;
+      let signal: AbortSignal | undefined;
+
+      const read = await readFailedRun(
+        {
+          getRunStatus: (_runId, options) => {
+            signal = options?.signal;
+            return Promise.resolve(statusRead);
+          },
+        },
+        statusRead.pipeline_run_id,
+      );
+
+      expect(read).toBe(statusRead);
+      expect(signal?.aborted).toBe(false);
+    });
   });
 
   it("reads no status for a completed or a running result", async () => {

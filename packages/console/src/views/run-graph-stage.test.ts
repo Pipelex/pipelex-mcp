@@ -160,7 +160,7 @@ describe("runStatusLineFor", () => {
       failure: {
         reason: "LLM completion",
         nextStep: "The provider rejected the request — review the prompt, parameters, and inputs.",
-        retry: "Running it again unchanged will fail the same way.",
+        retry: "The report does not expect running it again unchanged to help.",
         support: `Run ${statusRead.pipeline_run_id} · LLMCompletionError · ended ${statusRead.finished_at ?? ""}`,
       },
     });

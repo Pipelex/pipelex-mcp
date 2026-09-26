@@ -78,7 +78,11 @@ function declared(manifest: Manifest): [string, string][] {
   ];
 }
 
-/** The commit a git-source spec pins (`github:owner/repo#<sha>`, `git+https://…#<sha>`), or undefined for a registry range. */
+/**
+ * What follows the `#` of a git-source spec (`github:owner/repo#<sha>`,
+ * `git+https://…#<sha>`), the empty string when it names no ref, or undefined
+ * for a registry range.
+ */
 function pinnedCommit(spec: string): string | undefined {
   if (!/^(github:|git\+|git:)/.test(spec)) return undefined;
   return spec.split("#")[1] ?? "";
@@ -148,9 +152,10 @@ describe("the workspace's manifests", () => {
   });
 
   it("carry one range for a package that several of them name", () => {
+    // A sprint pin's own spec is held by the one-copy test below; the registry
+    // ranges the other members keep beside it must still agree with each other.
     const split = [...specsByPackage()]
-      .filter(([, set]) => set.size > 1)
-      .filter(([, set]) => [...set].every((spec) => pinnedCommit(spec) === undefined))
+      .filter(([, set]) => [...set].filter((spec) => pinnedCommit(spec) === undefined).length > 1)
       .map(([name]) => name);
     expect(split).toEqual([]);
   });
@@ -159,8 +164,11 @@ describe("the workspace's manifests", () => {
     for (const [name, set] of specsByPackage()) {
       const commits = [...set].map(pinnedCommit).filter((commit) => commit !== undefined);
       if (commits.length === 0) continue;
-      // One commit, never two pins of one package at different commits.
+      // One commit, never two pins of one package at different commits, and a
+      // full SHA: `wt pin` writes one, and a branch or a bare repository would
+      // let the check below pass on whatever the branch pointed at.
       expect(commits, `${name}: pinned at more than one commit`).toHaveLength(1);
+      expect(commits[0], `${name}: a pin names a full commit SHA`).toMatch(/^[0-9a-f]{40}$/);
       const copies = lockedCopies(name);
       expect(
         copies.map(({ key }) => key),

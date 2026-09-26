@@ -790,7 +790,9 @@ describe("showMthdsRunImages", () => {
     expect(result.structuredContent.failure).not.toHaveProperty("provider_metadata");
     expect(result.summary).toContain("Why: LLM completion — ");
     expect(result.summary).toContain("What to do: The provider rejected the request");
-    expect(result.summary).toContain("Retry: Running it again unchanged will fail the same way.");
+    expect(result.summary).toContain(
+      "Retry: The report does not expect running it again unchanged to help.",
+    );
     expect(result.summary).toContain(
       `For support: Run ${statusRead.pipeline_run_id} · LLMCompletionError · ended ${statusRead.finished_at ?? ""}`,
     );

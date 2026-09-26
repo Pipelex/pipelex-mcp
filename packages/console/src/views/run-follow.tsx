@@ -187,9 +187,7 @@ function RunFollow() {
     return (
       <Card
         title={
-          endedWithoutCompleting
-            ? `Run ${STATUS_LABELS[polling.runStatus ?? ""]?.toLowerCase() ?? "failed"}`
-            : "Could not fetch the results"
+          endedWithoutCompleting ? endedTitle(polling.runStatus) : "Could not fetch the results"
         }
         note={resultsError.message}
         hint={resultsError.hint}
@@ -229,6 +227,7 @@ function RunFollow() {
           requestedPipeRef={toolInfo.input?.pipe_ref ?? null}
           durationSeconds={runDurationSeconds(polling.createdAt, polling.finishedAt)}
           finishedAt={polling.finishedAt}
+          statusFailure={polling.failure}
           dark={dark}
           isFullscreen={isFullscreen}
           onToggleFullscreen={() => void setDisplayMode(isFullscreen ? "inline" : "fullscreen")}
@@ -237,6 +236,23 @@ function RunFollow() {
           graphHeight={Math.max(Math.floor(available * 0.7), 320)}
         />
       </div>
+    );
+  }
+
+  // A run that ended without completing, while its results are still being
+  // read (a transient error retries for a while): the status read already says
+  // why, so the card says it now rather than spin with a bare "Failed…".
+  if (endedWithoutCompleting) {
+    return (
+      <Card
+        title={endedTitle(polling.runStatus)}
+        note="Fetching the run's results…"
+        tone="error"
+        maxHeight={maxHeight}
+        dark={dark}
+        failure={failureDisplayOf(runId, polling.failure, polling.finishedAt)}
+        llm={`Run ${runId}: ended ${polling.runStatus ?? "without completing"}; its results are being fetched. The user sees the reason, the next step and the support line in this view.`}
+      />
     );
   }
 
@@ -252,6 +268,11 @@ function RunFollow() {
       llm={`Run ${runId}: ${polling.runStatus ?? "starting"}, ${elapsedSeconds}s elapsed. The card follows it live.`}
     />
   );
+}
+
+/** The card title of a run that ended without completing: "Run failed", "Run timed out", … */
+function endedTitle(status: string | undefined): string {
+  return `Run ${STATUS_LABELS[status ?? ""]?.toLowerCase() ?? "failed"}`;
 }
 
 /** Shared compact card for live, error, and failure states. */

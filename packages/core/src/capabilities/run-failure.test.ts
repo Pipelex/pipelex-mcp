@@ -89,18 +89,27 @@ describe("the retry advice", () => {
   it("never advises running it again when the report says it cannot succeed", () => {
     const failure = failureOf(llmCompletion);
 
-    expect(retryAdviceOf(failure)).toBe("Running it again unchanged will fail the same way.");
+    expect(retryAdviceOf(failure)).toBe(
+      "The report does not expect running it again unchanged to help.",
+    );
     expect(failureSummaryLines(failure.run_id, "FAILED", failure).join("\n")).not.toMatch(
       /can succeed|run it again\./i,
     );
-    // A wait-and-retry kind the report contradicts says nothing, rather than advise a retry.
-    expect(
-      nextStepOf({
-        run_id: "run_x",
-        retryable: false,
-        user_action: { kind: "wait_and_retry", detail: "" },
-      }),
-    ).toBeUndefined();
+    // A wait-and-retry kind the report contradicts says nothing, worded or not,
+    // rather than advise a retry: Azure's AMBIGUOUS category words exactly this.
+    for (const detail of ["", "Transient provider error — the system will retry automatically."]) {
+      expect(
+        nextStepOf({
+          run_id: "run_x",
+          retryable: false,
+          user_action: { kind: "wait_and_retry", detail },
+        }),
+      ).toBeUndefined();
+    }
+  });
+
+  it("words a false retry flag as the report's expectation, never as a certainty", () => {
+    expect(retryAdviceOf(failureOf(llmCompletion))).not.toMatch(/will fail/i);
   });
 
   it("says a retry can help when the report says so", () => {
@@ -110,9 +119,16 @@ describe("the retry advice", () => {
 
 describe("nextStepOf", () => {
   it("relays the report's own advice when it words one", () => {
-    expect(nextStepOf(failureOf(extractJobFailure))).toBe(
-      "Transient provider error — the system will retry automatically.",
+    expect(nextStepOf(failureOf(llmCompletion))).toBe(
+      "The provider rejected the request — review the prompt, parameters, and inputs.",
     );
+  });
+
+  it("never relays that the system will retry a run that has ended", () => {
+    // The runner words wait_and_retry for a pipe still inside its retries; the
+    // stored report of a finished run is not one, so its own sentence stands in.
+    expect(extractJobFailure.statusRead.error?.user_action?.detail).toMatch(/retry automatically/);
+    expect(nextStepOf(failureOf(extractJobFailure))).toBe("Wait a moment, then run it again.");
   });
 
   it("chooses a sentence by the action's kind when it carries no detail", () => {
@@ -152,7 +168,7 @@ describe("failureSummaryLines", () => {
       "Run `run_aa422fd5-59ef-4801-a585-09e6a961e80f` ended FAILED.",
       `Why: LLM completion — ${failure.message ?? ""}`,
       "What to do: The provider rejected the request — review the prompt, parameters, and inputs.",
-      "Retry: Running it again unchanged will fail the same way.",
+      "Retry: The report does not expect running it again unchanged to help.",
       "For support: Run run_aa422fd5-59ef-4801-a585-09e6a961e80f · LLMCompletionError · ended 2026-09-23T15:16:37.856067+00:00",
     ]);
   });
@@ -172,6 +188,15 @@ describe("failureSummaryLines", () => {
       "For support: Run run_x · ended 2026-09-24T10:38:04Z",
     ]);
   });
+
+  it("says the reason is unknown, not missing, when the report could not be read", () => {
+    const lines = failureSummaryLines("run_x", "FAILED", undefined, undefined, false);
+
+    expect(lines).toContain(
+      "Why: unknown for now, since the run's error report could not be read; reading the run's status again returns it.",
+    );
+    expect(lines.join("\n")).not.toContain("stored no error report");
+  });
 });
 
 describe("failureDisplayOf", () => {
@@ -184,7 +209,7 @@ describe("failureDisplayOf", () => {
     expect(display).toEqual({
       reason: "LLM completion",
       nextStep: "The provider rejected the request — review the prompt, parameters, and inputs.",
-      retry: "Running it again unchanged will fail the same way.",
+      retry: "The report does not expect running it again unchanged to help.",
       support:
         "Run run_aa422fd5-59ef-4801-a585-09e6a961e80f · LLMCompletionError · ended 2026-09-23T15:16:37.856067+00:00",
     });

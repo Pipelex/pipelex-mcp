@@ -579,7 +579,7 @@ export interface RunResultsResult {
 /** The slice of `PipelexApiClient` the run capabilities call (test seam). */
 interface RunClient {
   start(options: PipelexStartOptions): Promise<PipelexRunResultStart>;
-  getRunStatus(runId: string): Promise<RunRead>;
+  getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   getRunResult(runId: string): Promise<RunResultState>;
   /** The bulk resolve route, `POST /v1/resolve-storage-url/bulk`: fresh links for a completed output's files. */
   resolveStorageUrls(
@@ -1382,7 +1382,7 @@ function failedResult(state: FailedRunState, failedRead: RunRead | undefined): R
     },
     summary: [
       "# Run failed",
-      failureSummaryLines(runId, state.status, failure, failedRead?.finished_at).join("\n"),
+      failedArmSummaryLines(state, failure, failedRead).join("\n"),
       "No graph is available for failed runs.",
     ].join("\n\n"),
   };
@@ -1412,19 +1412,64 @@ export function failureOfFailedArm(
 }
 
 /**
+ * The model's account of a failed results arm, from {@link failureOfFailedArm}'s
+ * `failure`. When there is none and the status read that should have followed
+ * failed, the report is said to be unknown rather than missing, since the arm
+ * alone cannot tell a run that stored no report from a platform that does not
+ * relay it.
+ */
+export function failedArmSummaryLines(
+  state: FailedRunState,
+  failure: RunFailure | undefined,
+  failedRead: RunRead | undefined,
+): string[] {
+  return failureSummaryLines(
+    state.pipeline_run_id,
+    state.status,
+    failure,
+    failedRead?.finished_at,
+    failedRead !== undefined,
+  );
+}
+
+/**
+ * How long the status read after a failed results arm may take before the
+ * result goes out without it. Far under the SDK's own 30 s poll timeout, since
+ * the read only adds to an answer already in hand.
+ */
+export const FAILED_RUN_READ_TIMEOUT_MS = 5_000;
+
+/**
  * The one status read that follows a failed results arm, for the time the run
  * ended and for the report when the arm carried none. Best effort: a read that
- * fails leaves the failure to what the arm itself carried, since the arm is
- * already a verdict and a second request must never turn it into an error.
+ * fails, or takes longer than `timeoutMs`, leaves the failure to what the arm
+ * itself carried, since the arm is already a verdict and a second request must
+ * never turn it into an error or hold it back. The deadline both aborts the
+ * request and stops waiting for it, so a client that ignores the signal cannot
+ * hold the result either.
  */
 export async function readFailedRun(
-  client: { getRunStatus(runId: string): Promise<RunRead> },
+  client: { getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead> },
   runId: string,
+  timeoutMs: number = FAILED_RUN_READ_TIMEOUT_MS,
 ): Promise<RunRead | undefined> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve(undefined);
+    }, timeoutMs);
+  });
   try {
-    return await client.getRunStatus(runId);
+    return await Promise.race([
+      client.getRunStatus(runId, { signal: controller.signal }),
+      deadline,
+    ]);
   } catch {
     return undefined;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

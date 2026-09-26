@@ -14,9 +14,9 @@ import type {
 } from "@pipelex/sdk";
 import { z } from "zod";
 
-import { failureSummaryLines } from "./run-failure.js";
 import type { RunFailure } from "./run-failure.js";
 import {
+  failedArmSummaryLines,
   failureOfFailedArm,
   readFailedRun,
   RUN_RESULTS_ERROR_OPTIONS,
@@ -252,7 +252,7 @@ export interface ArtifactsResult {
 export interface ArtifactClient {
   getRunResult(runId: string): Promise<RunResultState>;
   /** Read once after a failed results arm, for when the run ended and its report (`readFailedRun`). */
-  getRunStatus(runId: string): Promise<RunRead>;
+  getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   downloadArtifacts(request: DownloadArtifactsRequest): Promise<DownloadArtifactsResult>;
 }
 
@@ -637,7 +637,7 @@ function failedResult(state: FailedRunState, failedRead: RunRead | undefined): A
     },
     summary: [
       "# Nothing saved",
-      failureSummaryLines(runId, state.status, failure, failedRead?.finished_at).join("\n"),
+      failedArmSummaryLines(state, failure, failedRead).join("\n"),
       "A failed run produces no output and no files to save.",
     ].join("\n\n"),
   };

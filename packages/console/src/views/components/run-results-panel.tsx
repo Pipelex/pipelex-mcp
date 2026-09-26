@@ -18,6 +18,7 @@ import {
   failureDisplayOf,
   failureSummaryLines,
 } from "@pipelex/mcp-core/capabilities/run-failure.js";
+import type { RunFailure } from "@pipelex/mcp-core/capabilities/run-failure.js";
 import { CONSOLE_TOOL_NAMES } from "@pipelex/mcp-core/capabilities/tool-names.js";
 import { terminalFollowUpPrompt } from "../run-notify.js";
 import {
@@ -75,6 +76,7 @@ export function RunResultsPanel({
   requestedPipeRef,
   durationSeconds,
   finishedAt,
+  statusFailure,
   dark,
   isFullscreen,
   onToggleFullscreen,
@@ -89,6 +91,12 @@ export function RunResultsPanel({
   durationSeconds: number | null;
   /** When the run ended, from the status read: the support line's time when the results carry no report. */
   finishedAt: string | null | undefined;
+  /**
+   * The failure the status read carried, for when the results read carries
+   * none: the results tool follows its failed arm with a status read of its
+   * own, which can fail where the view's polling read did not.
+   */
+  statusFailure: RunFailure | undefined;
   dark: boolean;
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
@@ -106,7 +114,7 @@ export function RunResultsPanel({
   const headline = failed
     ? failedHeadline(results.content.run_status, durationSeconds)
     : completedHeadline(durationSeconds, results.content.usage);
-  const failure = failed ? results.content.failure : undefined;
+  const failure = failed ? (results.content.failure ?? statusFailure) : undefined;
   // The model reads the report's message here; the person reads the display below.
   const llm = failed
     ? [

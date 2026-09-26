@@ -115,23 +115,39 @@ const NEXT_STEP_BY_KIND: Readonly<Record<string, string>> = {
 
 /**
  * What to do next: the report's own advice when it words one, else the sentence
- * its `kind` calls for, else `undefined`. A `wait_and_retry` kind on a report
- * that says a retry cannot succeed yields nothing, since the two disagree and
- * the retry flag is the one that decides.
+ * its `kind` calls for, else `undefined`.
+ *
+ * A `wait_and_retry` kind is the exception, and always takes this module's own
+ * sentence. The runner words that kind's advice for a pipe still inside its own
+ * retries ("the system will retry automatically"), which is false once the
+ * report is the stored account of a run that has ended: nothing retries a
+ * finished run. And on a report whose `retryable` is `false` the kind yields
+ * nothing at all, since the two disagree and the retry flag is the one that
+ * decides.
  */
 export function nextStepOf(failure: RunFailure | undefined): string | undefined {
   const action = failure?.user_action;
   if (action === undefined) return undefined;
+  if (action.kind === "wait_and_retry") {
+    return failure?.retryable === false ? undefined : NEXT_STEP_BY_KIND.wait_and_retry;
+  }
   const detail = action.detail.trim();
   if (detail !== "") return detail;
-  if (action.kind === "wait_and_retry" && failure?.retryable === false) return undefined;
   return NEXT_STEP_BY_KIND[action.kind];
 }
 
-/** Whether running it again can help, from the report's `retryable` alone; `undefined` when it does not say. */
+/**
+ * Whether running it again can help, from the report's `retryable` alone;
+ * `undefined` when it does not say. A `false` is worded as the report's
+ * expectation and never as a certainty: the runner sets it for a failure it
+ * could not classify as well as for one that will surely recur, so it means
+ * "not expected to help", not "will fail".
+ */
 export function retryAdviceOf(failure: RunFailure | undefined): string | undefined {
   if (failure?.retryable === true) return "Running it again can succeed.";
-  if (failure?.retryable === false) return "Running it again unchanged will fail the same way.";
+  if (failure?.retryable === false) {
+    return "The report does not expect running it again unchanged to help.";
+  }
   return undefined;
 }
 
@@ -156,18 +172,23 @@ export function supportLineOf(
  * The failure as the model reads it in a result summary, one labelled sentence
  * per line: that the run ended and how, why (the report's title and message),
  * what to do, whether running it again can help, and what to give support. A run
- * with no report says so, and still gives the support line.
+ * with no report says so, and still gives the support line. `reportRead` is
+ * `false` when the read that would have carried the report failed, so that an
+ * absent report is said to be unknown rather than missing.
  */
 export function failureSummaryLines(
   runId: string,
   status: RunStatus,
   failure: RunFailure | undefined,
   finishedAt?: string | null,
+  reportRead = true,
 ): string[] {
   const lines = [`Run \`${runId}\` ended ${status}.`];
   if (failure === undefined) {
     lines.push(
-      "Why: the run stored no error report, so its status is all that is known about why it ended.",
+      reportRead
+        ? "Why: the run stored no error report, so its status is all that is known about why it ended."
+        : "Why: unknown for now, since the run's error report could not be read; reading the run's status again returns it.",
     );
   } else {
     const why = [failure.title, failure.message].filter(
