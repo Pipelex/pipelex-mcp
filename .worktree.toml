@@ -5,6 +5,9 @@
 # the core is where the capability code that reads the SDK lives, and it is private and never published, so
 # a git source there can never reach the manifest of the workshop that npm publishes. The other two keep
 # their registry range, which the pinned commit satisfies as long as its version stays inside it, and they
-# resolve to the same hoisted copy.
+# resolve to the same hoisted copy; `tests/workspace-manifests.test.ts` holds that one-copy property on the
+# lockfile while a pin stands. The collapse is never a one-site replace: the release moves the range of all
+# three members together, which is what `make use-npm-sdk` does.
 [pins."@pipelex/sdk"]
-site = "packages/core/package.json"
+site     = "packages/core/package.json"
+collapse = "make use-npm-sdk VERSION=<version>"

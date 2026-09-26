@@ -20,6 +20,17 @@ import { describe, expect, it } from "vitest";
  * A package named by several manifests carries one range in all of them, so a
  * dependency bump that reaches only some of them fails here rather than
  * installing two versions side by side.
+ *
+ * A sprint pin is the one exception, and it is held to the property the rule
+ * exists for rather than to its spelling. While a sprint builds against an
+ * unreleased branch, `wt pin` writes a git source into the one manifest
+ * `.worktree.toml` names as the site (the core, for `@pipelex/sdk`), and the other
+ * members keep their registry range. npm then installs the pinned commit once, at
+ * the root, because its version sits inside those ranges; were it outside them,
+ * npm would nest a registry copy beside it, and the two copies are exactly the
+ * failure the rule prevents. So for a pinned package the lockfile must hold one
+ * copy, resolved from the pinned commit. A pin never reaches a base branch, so on
+ * `dev` and `main` every package takes the plain rule.
  */
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -34,6 +45,10 @@ interface Manifest {
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
+}
+
+interface Lockfile {
+  packages: Record<string, { version?: string; resolved?: string }>;
 }
 
 function read(relative: string): Manifest {
@@ -63,6 +78,33 @@ function declared(manifest: Manifest): [string, string][] {
   ];
 }
 
+/** The commit a git-source spec pins (`github:owner/repo#<sha>`, `git+https://…#<sha>`), or undefined for a registry range. */
+function pinnedCommit(spec: string): string | undefined {
+  if (!/^(github:|git\+|git:)/.test(spec)) return undefined;
+  return spec.split("#")[1] ?? "";
+}
+
+const lockfile = JSON.parse(readFileSync(path.join(ROOT, "package-lock.json"), "utf8")) as Lockfile;
+
+/** Every copy of `name` the lockfile installs, hoisted or nested. */
+function lockedCopies(name: string): { key: string; resolved: string }[] {
+  return Object.entries(lockfile.packages)
+    .filter(([key]) => key === `node_modules/${name}` || key.endsWith(`/node_modules/${name}`))
+    .map(([key, entry]) => ({ key, resolved: entry.resolved ?? "" }));
+}
+
+/** Every spec each package carries across the root and the members, keyed by package. */
+function specsByPackage(): Map<string, Set<string>> {
+  const specs = new Map<string, Set<string>>();
+  for (const manifest of [root, ...members.map(({ manifest }) => manifest)]) {
+    for (const [name, range] of declared(manifest)) {
+      if (WORKSPACE_NAMES.has(name)) continue;
+      specs.set(name, (specs.get(name) ?? new Set()).add(range));
+    }
+  }
+  return specs;
+}
+
 describe("the workspace's manifests", () => {
   it("name the three packages the repository ships from", () => {
     expect([...WORKSPACE_NAMES].sort()).toEqual([
@@ -87,7 +129,15 @@ describe("the workspace's manifests", () => {
   });
 
   it("have the workshop declare every runtime dependency of the core it inlines", () => {
-    expect(workshop.dependencies).toMatchObject(core.dependencies ?? {});
+    // A sprint pin in the core leaves the workshop on its registry range; the
+    // one-copy check below is what holds the two together while it stands.
+    const expected = Object.fromEntries(
+      Object.entries(core.dependencies ?? {}).map(([name, spec]) => [
+        name,
+        pinnedCommit(spec) === undefined ? spec : expect.any(String),
+      ]),
+    );
+    expect(workshop.dependencies).toMatchObject(expected);
   });
 
   it("keep skybridge to the console", () => {
@@ -98,15 +148,28 @@ describe("the workspace's manifests", () => {
   });
 
   it("carry one range for a package that several of them name", () => {
-    const ranges = new Map<string, Set<string>>();
-    for (const manifest of [root, ...members.map(({ manifest }) => manifest)]) {
-      for (const [name, range] of declared(manifest)) {
-        if (WORKSPACE_NAMES.has(name)) continue;
-        ranges.set(name, (ranges.get(name) ?? new Set()).add(range));
-      }
-    }
-    const split = [...ranges].filter(([, set]) => set.size > 1).map(([name]) => name);
+    const split = [...specsByPackage()]
+      .filter(([, set]) => set.size > 1)
+      .filter(([, set]) => [...set].every((spec) => pinnedCommit(spec) === undefined))
+      .map(([name]) => name);
     expect(split).toEqual([]);
+  });
+
+  it("install a sprint-pinned package once, from the pinned commit", () => {
+    for (const [name, set] of specsByPackage()) {
+      const commits = [...set].map(pinnedCommit).filter((commit) => commit !== undefined);
+      if (commits.length === 0) continue;
+      // One commit, never two pins of one package at different commits.
+      expect(commits, `${name}: pinned at more than one commit`).toHaveLength(1);
+      const copies = lockedCopies(name);
+      expect(
+        copies.map(({ key }) => key),
+        `${name}: the lockfile installs more than one copy`,
+      ).toEqual([`node_modules/${name}`]);
+      expect(copies[0]?.resolved, `${name}: the installed copy is not the pinned commit`).toContain(
+        `#${commits[0]}`,
+      );
+    }
   });
 
   it("pin each workspace package where it is declared to the version the member carries", () => {
