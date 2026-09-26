@@ -970,6 +970,21 @@ describe("resultsResult", () => {
     expect(result.summary).toMatch(/no graph/i);
   });
 
+  it("bounds the failed arm's account of the ending, which quotes the report's message once relayed", () => {
+    const result = resultsResult({
+      state: "failed",
+      pipeline_run_id: RUN_ID,
+      status: "FAILED",
+      message: `Run finished with status FAILED: ${"y".repeat(100_000)}`,
+      error: { error_type: "LLMCompletionError", message: "y".repeat(100_000) },
+    });
+
+    expect(result.structuredContent.failure_message?.length).toBeLessThan(2_100);
+    expect(result.structuredContent.failure_message).toMatch(/more characters left out\]$/);
+    expect(result.structuredContent.failure?.message?.length).toBeLessThan(2_100);
+    expect(result.summary.length).toBeLessThan(3_000);
+  });
+
   it("says the reason is unknown, not missing, when the status read after a bare failed arm failed", () => {
     const result = resultsResult({
       state: "failed",

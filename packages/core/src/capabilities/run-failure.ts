@@ -59,10 +59,39 @@ export interface RunFailure {
 }
 
 /**
+ * The most of a report's `message` a result carries, in Unicode code points.
+ * The runner embeds whatever its exception said, unbounded: a structured output
+ * that still failed after its re-asks quotes every validation error, and a
+ * provider SDK's error quotes the whole response body, so one report can run to
+ * hundreds of kilobytes, and the message reaches the model in the summary and in
+ * `structuredContent` both. The head says what went wrong; the rest is a
+ * provider's detail the model cannot act on.
+ */
+export const FAILURE_MESSAGE_MAX_CODE_POINTS = 2_000;
+
+/** The most of any other text field of a report a result carries, in Unicode code points. */
+export const FAILURE_FIELD_MAX_CODE_POINTS = 300;
+
+/**
+ * `value` cut to `max` Unicode code points, with a note saying how much was
+ * left out, or `value` itself when it fits. Code points, so a cut never splits
+ * a character.
+ */
+export function boundedFailureText(value: string, max: number): string {
+  const points = Array.from(value);
+  if (points.length <= max) return value;
+  return `${points.slice(0, max).join("")}… [${points.length - max} more characters left out]`;
+}
+
+/**
  * The `failure` object for a run, from its stored report, or `undefined` when
  * there is none to carry: a `null` report (a run the platform finalized itself),
  * one that is not an object, and one carrying none of the fields that say what
- * happened (`error_type`, `title`, `message`, `user_action`).
+ * happened (`error_type`, `title`, `message`, `user_action`). Every text field
+ * is bounded (`FAILURE_MESSAGE_MAX_CODE_POINTS` for the message,
+ * `FAILURE_FIELD_MAX_CODE_POINTS` for the rest), and a `wait_and_retry` action
+ * carries this module's own advice rather than the runner's, for the reason
+ * {@link nextStepOf} gives.
  */
 export function runFailureOf(
   runId: string,
@@ -70,10 +99,15 @@ export function runFailureOf(
   finishedAt?: string | null,
 ): RunFailure | undefined {
   if (!isRecord(report)) return undefined;
-  const errorType = text(report.error_type);
-  const title = text(report.title);
-  const message = text(report.message);
-  const userAction = userActionOf(report.user_action);
+  const errorType = field(report.error_type);
+  const title = field(report.title);
+  const rawMessage = text(report.message);
+  const message =
+    rawMessage === undefined
+      ? undefined
+      : boundedFailureText(rawMessage, FAILURE_MESSAGE_MAX_CODE_POINTS);
+  const retryable = typeof report.retryable === "boolean" ? report.retryable : undefined;
+  const userAction = userActionOf(report.user_action, retryable);
   if (
     errorType === undefined &&
     title === undefined &&
@@ -82,9 +116,8 @@ export function runFailureOf(
   ) {
     return undefined;
   }
-  const errorDomain = text(report.error_domain);
-  const errorCategory = text(report.error_category);
-  const retryable = typeof report.retryable === "boolean" ? report.retryable : undefined;
+  const errorDomain = field(report.error_domain);
+  const errorCategory = field(report.error_category);
   const ended = text(finishedAt);
   return {
     run_id: runId,
@@ -104,7 +137,7 @@ export function runFailureOf(
  * this table does not know (`unknown`, or one the runner adds) says nothing
  * rather than guess.
  */
-const NEXT_STEP_BY_KIND: Readonly<Record<string, string>> = {
+const NEXT_STEP_BY_KIND: Readonly<Record<string, string>> & { wait_and_retry: string } = {
   wait_and_retry: "Wait a moment, then run it again.",
   change_input: "Change the inputs, then start a new run.",
   change_model: "Choose another model for the pipe that failed, then start a new run.",
@@ -242,16 +275,35 @@ export function failureDisplayOf(
   };
 }
 
-function userActionOf(value: unknown): RunFailureUserAction | undefined {
+/**
+ * The report's user action, bounded. A `wait_and_retry` kind carries this
+ * module's own sentence, or no advice when the report says a retry cannot help:
+ * the runner words that kind for a pipe still inside its own retries ("the
+ * system will retry automatically"), which the model would otherwise read here
+ * about a run that has ended.
+ */
+function userActionOf(
+  value: unknown,
+  retryable: boolean | undefined,
+): RunFailureUserAction | undefined {
   if (!isRecord(value)) return undefined;
-  const kind = text(value.kind);
+  const kind = field(value.kind);
   if (kind === undefined || typeof value.detail !== "string") return undefined;
-  return { kind, detail: value.detail };
+  if (kind === "wait_and_retry") {
+    return { kind, detail: retryable === false ? "" : NEXT_STEP_BY_KIND.wait_and_retry };
+  }
+  return { kind, detail: boundedFailureText(value.detail, FAILURE_FIELD_MAX_CODE_POINTS) };
 }
 
 /** A non-blank string, as given; anything else reads as absent. */
 function text(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+/** A non-blank string bounded to `FAILURE_FIELD_MAX_CODE_POINTS`; anything else reads as absent. */
+function field(value: unknown): string | undefined {
+  const given = text(value);
+  return given === undefined ? undefined : boundedFailureText(given, FAILURE_FIELD_MAX_CODE_POINTS);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

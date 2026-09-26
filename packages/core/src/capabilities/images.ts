@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { RunFailure } from "./run-failure.js";
 import {
   failedArmSummaryLines,
+  failureMessageOf,
   failureOfFailedArm,
   readFailedRun,
   runFailureSchema,
@@ -807,7 +808,7 @@ function failedResult(state: FailedRunState, failedRead: RunRead | undefined): S
       run_id: runId,
       state: "failed",
       run_status: state.status,
-      failure_message: state.message,
+      failure_message: failureMessageOf(state),
       ...(failure === undefined ? {} : { failure }),
     },
     summary: [

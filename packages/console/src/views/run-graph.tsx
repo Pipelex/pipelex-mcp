@@ -538,14 +538,17 @@ function RunGraph() {
  */
 function StatusLine({ line, dark }: { line: RunStatusLine | null; dark: boolean }) {
   if (!line) return null;
-  const color = line.tone === "error" ? "#b91c1c" : "#6b7280";
+  // The results panel's palette: the light greys and reds fall under 3:1 on a
+  // dark host surface, where the failure block is the view's main content.
+  const muted = dark ? "#9ca3af" : "#6b7280";
+  const color = line.tone === "error" ? (dark ? "#fca5a5" : "#b91c1c") : muted;
   return (
     <div className="mt-2 space-y-1 px-1">
       <p className="text-xs" style={{ color }}>
         {line.text}
       </p>
       {line.failure ? (
-        <FailureDetails failure={line.failure} color={color} mutedColor="#6b7280" dark={dark} />
+        <FailureDetails failure={line.failure} color={color} mutedColor={muted} dark={dark} />
       ) : null}
     </div>
   );

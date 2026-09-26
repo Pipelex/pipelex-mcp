@@ -53,7 +53,12 @@ import type {
   ToolError,
 } from "./shared.js";
 import { prepareConsoleInputs } from "./console-inputs.js";
-import { failureSummaryLines, runFailureOf } from "./run-failure.js";
+import {
+  boundedFailureText,
+  FAILURE_MESSAGE_MAX_CODE_POINTS,
+  failureSummaryLines,
+  runFailureOf,
+} from "./run-failure.js";
 import type { RunFailure } from "./run-failure.js";
 import type { ConsoleInputsClient, ConsoleInputsSelector } from "./console-inputs.js";
 import { CONSOLE_TOOL_NAMES, WORKSHOP_TOOL_NAMES } from "./tool-names.js";
@@ -221,7 +226,11 @@ export const runFailureSchema = z.object({
         .describe(
           "wait_and_retry, change_input, change_model, check_billing, check_credentials, contact_support or unknown.",
         ),
-      detail: z.string().describe("The advice in words."),
+      detail: z
+        .string()
+        .describe(
+          "The advice in words. A wait_and_retry kind carries this server's own sentence, since the runner's is worded for a run still retrying.",
+        ),
     })
     .optional()
     .describe("The next step the report advises."),
@@ -1376,7 +1385,7 @@ function failedResult(state: FailedRunState, failedRead: RunRead | undefined): R
       run_id: runId,
       state: "failed",
       run_status: state.status,
-      failure_message: state.message,
+      failure_message: failureMessageOf(state),
       ...(failure === undefined ? {} : { failure }),
       available_view_specs: [],
     },
@@ -1390,6 +1399,15 @@ function failedResult(state: FailedRunState, failedRead: RunRead | undefined): R
 
 /** The failed arm of the results read. */
 export type FailedRunState = Extract<RunResultState, { state: "failed" }>;
+
+/**
+ * The failed arm's `message`, the platform's account of the ending, bounded like
+ * the report's own message: once the platform relays the report on the `409`,
+ * the account quotes that message whole.
+ */
+export function failureMessageOf(state: FailedRunState): string {
+  return boundedFailureText(state.message, FAILURE_MESSAGE_MAX_CODE_POINTS);
+}
 
 /**
  * Why a run whose results read came back failed ended: the `failure` object

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import { RECORDED_FAILED_RUNS } from "./failed-run-fixtures.js";
 import {
+  FAILURE_FIELD_MAX_CODE_POINTS,
+  FAILURE_MESSAGE_MAX_CODE_POINTS,
   failureDisplayOf,
   failureSummaryLines,
   nextStepOf,
@@ -75,6 +77,75 @@ describe("runFailureOf", () => {
     });
 
     expect(failure).toEqual({ run_id: "run_x", title: "LLM completion" });
+  });
+});
+
+describe("runFailureOf's bounds", () => {
+  it("cuts an unbounded message to its cap, saying how much it left out", () => {
+    // A structured output that failed after its re-asks quotes every validation
+    // error; one such report measured over 400,000 characters.
+    const message = `Structured output failed: ${"x".repeat(200_000)}`;
+    const failure = runFailureOf("run_x", { error_type: "LLMCompletionError", message });
+
+    expect(Array.from(failure?.message ?? "").length).toBeLessThan(
+      FAILURE_MESSAGE_MAX_CODE_POINTS + 60,
+    );
+    expect(failure?.message).toMatch(
+      /^Structured output failed: x+… \[\d+ more characters left out\]$/,
+    );
+    expect(failureSummaryLines("run_x", "FAILED", failure).join("\n").length).toBeLessThan(
+      FAILURE_MESSAGE_MAX_CODE_POINTS + 500,
+    );
+  });
+
+  it("bounds every other text field, and never splits a character", () => {
+    const long = "é🙂".repeat(FAILURE_FIELD_MAX_CODE_POINTS);
+    const failure = runFailureOf("run_x", {
+      error_type: long,
+      title: long,
+      error_domain: long,
+      error_category: long,
+      user_action: { kind: "change_input", detail: long },
+    });
+
+    for (const value of [
+      failure?.error_type,
+      failure?.title,
+      failure?.error_domain,
+      failure?.error_category,
+      failure?.user_action?.detail,
+    ]) {
+      expect(value?.startsWith("é🙂".repeat(FAILURE_FIELD_MAX_CODE_POINTS / 2))).toBe(true);
+      expect(value).toMatch(/… \[\d+ more characters left out\]$/);
+      expect(value).not.toMatch(/\uFFFD/);
+    }
+  });
+
+  it("carries a message that fits whole", () => {
+    expect(failureOf(llmCompletion).message).toBe(llmCompletion.statusRead.error?.message);
+  });
+});
+
+describe("the wait_and_retry action", () => {
+  it("carries this server's own advice in structuredContent, never that the system will retry", () => {
+    const failure = failureOf(extractJobFailure);
+
+    expect(failure.user_action).toEqual({
+      kind: "wait_and_retry",
+      detail: "Wait a moment, then run it again.",
+    });
+    expect(JSON.stringify(failure)).not.toMatch(/retry automatically/);
+  });
+
+  it("carries no advice when the report says a retry cannot help", () => {
+    const failure = runFailureOf("run_x", {
+      error_type: "AmbiguousError",
+      retryable: false,
+      user_action: { kind: "wait_and_retry", detail: "The system will retry automatically." },
+    });
+
+    expect(failure?.user_action).toEqual({ kind: "wait_and_retry", detail: "" });
+    expect(nextStepOf(failure)).toBeUndefined();
   });
 });
 

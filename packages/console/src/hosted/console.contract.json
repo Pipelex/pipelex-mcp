@@ -901,7 +901,7 @@
                   },
                   "detail": {
                     "type": "string",
-                    "description": "The advice in words."
+                    "description": "The advice in words. A wait_and_retry kind carries this server's own sentence, since the runner's is worded for a run still retrying."
                   }
                 },
                 "required": [
@@ -1091,7 +1091,7 @@
                   },
                   "detail": {
                     "type": "string",
-                    "description": "The advice in words."
+                    "description": "The advice in words. A wait_and_retry kind carries this server's own sentence, since the runner's is worded for a run still retrying."
                   }
                 },
                 "required": [
@@ -1390,7 +1390,7 @@
                   },
                   "detail": {
                     "type": "string",
-                    "description": "The advice in words."
+                    "description": "The advice in words. A wait_and_retry kind carries this server's own sentence, since the runner's is worded for a run still retrying."
                   }
                 },
                 "required": [
