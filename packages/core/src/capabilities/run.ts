@@ -1639,12 +1639,22 @@ const START_MAY_HAVE_RUN_STATUSES: ReadonlySet<number> = new Set([500, 502, 504,
 export function classifyStartError(err: unknown, options: ClassifyErrorOptions): ToolError {
   const error = classifyError(err, options);
   if (!error.retryable || !startMayHaveRun(err)) return error;
-  return {
-    ...error,
-    retryable: false,
-    hint: "The request may have reached the server before the answer was lost, so the run may have started anyway. Check before starting it again: a second start would be a second run, spending inference credit again.",
-  };
+  return { ...error, retryable: false, hint: START_MAY_HAVE_RUN_HINT };
 }
+
+/**
+ * The hint on a start that may have run. It is worded for every such failure: a
+ * lost answer, a gateway's answer for a request it forwarded, and the runner's
+ * own 500, where an answer did arrive but the start may have been recorded first.
+ * {@link classifyStartError} is the only place that sets it, so
+ * {@link startSummaryForError} reads it as the marker for the headline too.
+ */
+const START_MAY_HAVE_RUN_HINT =
+  "The request may have reached the server, so the run may have started before this failure. Check before starting it again: a second start would be a second run, spending inference credit again.";
+
+/** The headline of a start that may have run, which must not say the run did not start. */
+const START_MAY_HAVE_RUN_SUMMARY =
+  "Run may have started: the start failed after the request may have reached the Pipelex API, so check before starting it again.";
 
 function startMayHaveRun(err: unknown): boolean {
   if (err instanceof ApiUnreachableError) {
@@ -1943,6 +1953,10 @@ const RESULTS_ERROR_SUMMARIES: ErrorSummaries = {
 };
 
 function startSummaryForError(error: ToolError): string {
+  // A may-have-run start keeps its class for machine consumers, but its headline
+  // is the one line some hosts show the agent, and "could not be started" would
+  // invite the second paid run the hint warns against.
+  if (error.hint === START_MAY_HAVE_RUN_HINT) return START_MAY_HAVE_RUN_SUMMARY;
   return summaryForToolError(error, START_ERROR_SUMMARIES);
 }
 

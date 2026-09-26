@@ -1465,6 +1465,9 @@ describe("startMthdsRun", () => {
       const error = result.structuredContent.errors?.[0];
       expect(error?.retryable).toBe(false);
       expect(error?.hint).toContain("the run may have started");
+      // The headline some hosts show alone must not say the run did not start.
+      expect(result.summary).toMatch(/^Run may have started/);
+      expect(result.summary).not.toMatch(/could not (be )?start/);
     }
   });
 
@@ -1483,6 +1486,7 @@ describe("startMthdsRun", () => {
     const startError = pipelexStart.structuredContent.errors?.[0];
     expect(startError?.retryable).toBe(false);
     expect(startError?.hint).toContain("the run may have started");
+    expect(pipelexStart.summary).toMatch(/^Run may have started/);
 
     // A 500 from the status route reads nothing into being and stays retryable.
     const status = await getMthdsRunStatus(
@@ -1494,12 +1498,17 @@ describe("startMthdsRun", () => {
     expect(statusError?.hint ?? "").not.toContain("the run may have started");
   });
 
-  it("keeps a start the server refused outright retryable", () => {
+  it("keeps a start the server refused outright retryable", async () => {
     for (const status of [503, 429]) {
       const error = classifyStartError(serverError(status), RUN_START_ERROR_OPTIONS);
       expect(error.retryable).toBe(true);
       expect(error.hint).not.toContain("the run may have started");
     }
+    const refused = await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }] },
+      contextWith({ start: () => Promise.reject(serverError(503)) }),
+    );
+    expect(refused.summary).not.toMatch(/may have started/);
   });
 });
 
