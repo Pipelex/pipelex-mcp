@@ -52,8 +52,9 @@ import {
   validateRunRequest,
 } from "./run.js";
 import type { PipelexRunContext, RunContext } from "./run.js";
+import { RECORDED_FAILED_RUNS } from "./failed-run-fixtures.js";
 import { classifyError, DEFAULT_API_URL, MAX_IMAGE_CANDIDATE_ENTRIES } from "./shared.js";
-import { CONSOLE_TOOL_NAMES } from "./tool-names.js";
+import { CONSOLE_TOOL_NAMES, WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 
 const RUN_ID = "01JRUN0000000000000000TEST";
 
@@ -385,6 +386,74 @@ describe("statusResult", () => {
     expect(result.structuredContent.run_status).toBe("FAILED");
     expect(result.structuredContent.is_terminal).toBe(true);
     expect(result.structuredContent).not.toHaveProperty("errors");
+  });
+
+  it("carries why a failed run ended, from the report its status read serves", () => {
+    const { statusRead } = RECORDED_FAILED_RUNS.llmCompletion;
+    const result = statusResult(statusRead);
+
+    expect(result.structuredContent.failure).toEqual({
+      run_id: statusRead.pipeline_run_id,
+      error_type: "LLMCompletionError",
+      title: "LLM completion",
+      message: statusRead.error?.message,
+      error_domain: "config",
+      error_category: "configuration",
+      retryable: false,
+      user_action: {
+        kind: "change_input",
+        detail: "The provider rejected the request — review the prompt, parameters, and inputs.",
+      },
+      finished_at: "2026-09-23T15:16:37.856067+00:00",
+    });
+    expect(result.structuredContent.failure).not.toHaveProperty("provider_metadata");
+    // The reason, the next step, the retry advice and the support line, in the summary.
+    expect(result.summary).toContain(`Why: LLM completion — ${statusRead.error?.message ?? ""}`);
+    expect(result.summary).toContain(
+      "What to do: The provider rejected the request — review the prompt, parameters, and inputs.",
+    );
+    expect(result.summary).toContain("Retry: Running it again unchanged will fail the same way.");
+    expect(result.summary).toContain(
+      `For support: Run ${statusRead.pipeline_run_id} · LLMCompletionError · ended 2026-09-23T15:16:37.856067+00:00`,
+    );
+    // No promise of details elsewhere: the details are here.
+    expect(result.summary).not.toContain("returns the failure details");
+  });
+
+  it("makes no retry claim for a report that does not say", () => {
+    const result = statusResult(RECORDED_FAILED_RUNS.sandboxProvisioning.statusRead);
+
+    expect(result.structuredContent.failure).not.toHaveProperty("retryable");
+    expect(result.summary).toContain(
+      "Why: Sandbox provisioning — Could not provision a Daytona box",
+    );
+    expect(result.summary).not.toMatch(/Retry:|run it again|can succeed/);
+  });
+
+  it("carries the status alone, and says so, when the read has no report or a malformed one", () => {
+    for (const error of [null, undefined, "boom", { provider_metadata: { message: "raw" } }]) {
+      const result = statusResult(
+        runRead({
+          status: "CANCELLED",
+          finished_at: "2026-07-15T10:05:00Z",
+          error: error as never,
+        }),
+      );
+
+      expect(result.structuredContent).not.toHaveProperty("failure");
+      expect(result.structuredContent.run_status).toBe("CANCELLED");
+      expect(result.summary).toContain("the run stored no error report");
+      expect(result.summary).toContain(`For support: Run ${RUN_ID} · ended 2026-07-15T10:05:00Z`);
+    }
+  });
+
+  it("carries no failure on a completed run or a live one, whatever the read holds", () => {
+    const report = RECORDED_FAILED_RUNS.llmCompletion.statusRead.error;
+    for (const status of ["COMPLETED", "RUNNING"] as const) {
+      expect(statusResult(runRead({ status, error: report })).structuredContent).not.toHaveProperty(
+        "failure",
+      );
+    }
   });
 
   it("derives is_terminal from the whole RunStatus set", () => {
@@ -868,12 +937,13 @@ describe("resultsResult", () => {
     expect(() => resultsResult(state)).toThrow(/main_stuff/);
   });
 
-  it("projects a failed run as a produced ok verdict with the failure details", () => {
+  it("projects a failed run with no report as a produced ok verdict with its status", () => {
     const result = resultsResult({
       state: "failed",
       pipeline_run_id: RUN_ID,
       status: "FAILED",
-      message: "Pipe demo.main raised.",
+      message: "Run finished with status FAILED; no result available",
+      error: null,
     });
 
     expect(result.structuredContent).toEqual({
@@ -881,12 +951,52 @@ describe("resultsResult", () => {
       run_id: RUN_ID,
       state: "failed",
       run_status: "FAILED",
-      failure_message: "Pipe demo.main raised.",
+      failure_message: "Run finished with status FAILED; no result available",
       available_view_specs: [],
     });
-    expect(result.summary).toContain("FAILED");
-    expect(result.summary).toContain("Pipe demo.main raised.");
+    expect(result.summary).toContain(`Run \`${RUN_ID}\` ended FAILED.`);
+    expect(result.summary).toContain("the run stored no error report");
     expect(result.summary).toMatch(/no graph/i);
+  });
+
+  it("carries the report the failed arm relays, with when the run ended from the status read", () => {
+    const { relayedArm, statusRead } = RECORDED_FAILED_RUNS.llmCompletion;
+    const result = resultsResult(relayedArm, true, false, WORKSHOP_TOOL_NAMES, {
+      ...statusRead,
+      error: null,
+    });
+
+    expect(result.structuredContent.failure_message).toBe(relayedArm.message);
+    expect(result.structuredContent.failure).toMatchObject({
+      run_id: statusRead.pipeline_run_id,
+      error_type: "LLMCompletionError",
+      title: "LLM completion",
+      retryable: false,
+      finished_at: statusRead.finished_at,
+    });
+    expect(result.structuredContent.failure).not.toHaveProperty("provider_metadata");
+    expect(result.summary).toContain("# Run failed");
+    expect(result.summary).toContain("Why: LLM completion — ");
+    expect(result.summary).toContain("What to do: The provider rejected the request");
+    expect(result.summary).toContain("Retry: Running it again unchanged will fail the same way.");
+    expect(result.summary).toContain(
+      `For support: Run ${statusRead.pipeline_run_id} · LLMCompletionError · ended ${statusRead.finished_at ?? ""}`,
+    );
+  });
+
+  it("takes the report from the status read when the failed arm carries none", () => {
+    const { resultsArm, statusRead } = RECORDED_FAILED_RUNS.sandboxProvisioning;
+    const result = resultsResult(resultsArm, true, false, WORKSHOP_TOOL_NAMES, statusRead);
+
+    expect(result.structuredContent.failure).toEqual({
+      run_id: statusRead.pipeline_run_id,
+      error_type: "SandboxProvisioningError",
+      title: "Sandbox provisioning",
+      message: statusRead.error?.message,
+      finished_at: statusRead.finished_at,
+    });
+    expect(result.summary).toContain("What to do: the report names no next step.");
+    expect(result.summary).not.toMatch(/Retry:/);
   });
 });
 
@@ -1730,6 +1840,75 @@ describe("getMthdsRunStatus", () => {
 });
 
 describe("getMthdsRunResults", () => {
+  it("follows a failed arm with one status read, for the report and when the run ended", async () => {
+    const { resultsArm, statusRead } = RECORDED_FAILED_RUNS.llmCompletion;
+    const statusReads: string[] = [];
+    const context = contextWith({
+      getRunResult: () => Promise.resolve(resultsArm),
+      getRunStatus: (runId: string) => {
+        statusReads.push(runId);
+        return Promise.resolve(statusRead);
+      },
+    });
+
+    const result = await getMthdsRunResults({ run_id: statusRead.pipeline_run_id }, context);
+
+    expect(statusReads).toEqual([statusRead.pipeline_run_id]);
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.state).toBe("failed");
+    expect(result.structuredContent.failure_message).toBe(
+      "Run finished with status FAILED; no result available",
+    );
+    expect(result.structuredContent.failure).toMatchObject({
+      error_type: "LLMCompletionError",
+      title: "LLM completion",
+      retryable: false,
+      finished_at: statusRead.finished_at,
+    });
+    expect(result.summary).toContain("What to do: The provider rejected the request");
+  });
+
+  it("keeps the failed verdict when the status read that follows it fails", async () => {
+    const { relayedArm } = RECORDED_FAILED_RUNS.extractJobFailure;
+    const context = contextWith({
+      getRunResult: () => Promise.resolve(relayedArm),
+      getRunStatus: () =>
+        Promise.reject(
+          new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED"),
+        ),
+    });
+
+    const result = await getMthdsRunResults({ run_id: relayedArm.pipeline_run_id }, context);
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.state).toBe("failed");
+    expect(result.structuredContent.failure).toMatchObject({
+      error_type: "ExtractJobFailureError",
+      retryable: true,
+      user_action: { kind: "wait_and_retry" },
+    });
+    // The arm does not carry when the run ended, so the support line goes without it.
+    expect(result.structuredContent.failure).not.toHaveProperty("finished_at");
+    expect(result.summary).toContain("Retry: Running it again can succeed.");
+    expect(result.summary).toContain(
+      `For support: Run ${relayedArm.pipeline_run_id} · ExtractJobFailureError`,
+    );
+  });
+
+  it("reads no status for a completed or a running result", async () => {
+    const running: RunResultState = {
+      state: "running",
+      pipeline_run_id: RUN_ID,
+      retry_after_seconds: 3,
+    };
+    const result = await getMthdsRunResults(
+      { run_id: RUN_ID },
+      contextWith({ getRunResult: () => Promise.resolve(running) }),
+    );
+
+    expect(result.structuredContent.state).toBe("running");
+  });
+
   it("fetches and projects a completed result by id", async () => {
     const state: RunResultState = {
       state: "completed",

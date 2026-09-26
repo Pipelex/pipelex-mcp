@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDisplayMode, useLayout, useViewState } from "skybridge/web";
 
 import { useCallTool, useToolInfo } from "../helpers.js";
+import { FailureDetails } from "./components/failure-details.js";
 import { RenderBoundary } from "./components/render-boundary.js";
 import { RunResultsPanel } from "./components/run-results-panel.js";
 import { ToolbarButton } from "./components/toolbar-button.js";
@@ -482,6 +483,7 @@ function RunGraph() {
             results={results}
             requestedPipeRef={runPipeRef}
             durationSeconds={runDurationSeconds(polling.createdAt, polling.finishedAt)}
+            finishedAt={polling.finishedAt}
             dark={dark}
             isFullscreen={isFullscreen}
             onToggleFullscreen={() => void setDisplayMode(isFullscreen ? "inline" : "fullscreen")}
@@ -521,23 +523,30 @@ function RunGraph() {
               {message}
             </p>
           ))}
-          <StatusLine line={statusLine} />
+          <StatusLine line={statusLine} dark={dark} />
         </div>
       ) : null}
     </div>
   );
 }
 
-/** One line under the form: what the run started from it is doing. */
-function StatusLine({ line }: { line: RunStatusLine | null }) {
+/**
+ * One line under the form: what the run started from it is doing. A run that
+ * ended without completing adds why, what to do and the support line beneath
+ * it, in the block the results panel shows them in.
+ */
+function StatusLine({ line, dark }: { line: RunStatusLine | null; dark: boolean }) {
   if (!line) return null;
+  const color = line.tone === "error" ? "#b91c1c" : "#6b7280";
   return (
-    <p
-      className="mt-2 px-1 text-xs"
-      style={{ color: line.tone === "error" ? "#b91c1c" : "#6b7280" }}
-    >
-      {line.text}
-    </p>
+    <div className="mt-2 space-y-1 px-1">
+      <p className="text-xs" style={{ color }}>
+        {line.text}
+      </p>
+      {line.failure ? (
+        <FailureDetails failure={line.failure} color={color} mutedColor="#6b7280" dark={dark} />
+      ) : null}
+    </div>
   );
 }
 

@@ -1,5 +1,5 @@
 import { ApiResponseError, ApiUnreachableError, ArtifactFetchError } from "@pipelex/sdk";
-import type { FetchArtifactOptions, RunResultState } from "@pipelex/sdk";
+import type { FetchArtifactOptions, RunRead, RunResultState } from "@pipelex/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -15,6 +15,7 @@ import {
   validateShowImagesRequest,
 } from "./images.js";
 import type { ImagesClient, ImagesContext } from "./images.js";
+import { RECORDED_FAILED_RUNS } from "./failed-run-fixtures.js";
 import { CONSOLE_TOOL_NAMES } from "./tool-names.js";
 import {
   DEFAULT_API_URL,
@@ -88,12 +89,18 @@ function imageResponse(
   });
 }
 
+/** The status read a failed arm is followed by; every other arm must not make one. */
+function noStatusRead(): Promise<RunRead> {
+  return Promise.reject(new Error("getRunStatus must not be called"));
+}
+
 function fakeClient(
   answers: Record<string, Answer>,
   state: RunResultState = completedRun(),
 ): { client: ImagesClient; fetches: FetchRecord[] } {
   const fetches: FetchRecord[] = [];
   const client: ImagesClient = {
+    getRunStatus: noStatusRead,
     getRunResult: () => Promise.resolve(state),
     fetchArtifact: (uri, options) => {
       fetches.push({ uri, options });
@@ -594,6 +601,7 @@ describe("showMthdsRunImages", () => {
     // turn this tool's own time budget into a `status: "error"` no-verdict.
     const fetches: string[] = [];
     const client: ImagesClient = {
+      getRunStatus: noStatusRead,
       getRunResult: () => Promise.resolve(completedRun()),
       fetchArtifact: (uri, options) => {
         fetches.push(uri);
@@ -736,6 +744,7 @@ describe("showMthdsRunImages", () => {
 
   it("produces a verdict, not an error, for a run that is still running", async () => {
     const client: ImagesClient = {
+      getRunStatus: noStatusRead,
       getRunResult: () =>
         Promise.resolve({ state: "running", pipeline_run_id: RUN_ID, retry_after_seconds: 5 }),
       fetchArtifact: () => Promise.reject(new Error("must not fetch")),
@@ -752,27 +761,62 @@ describe("showMthdsRunImages", () => {
     expect(result.summary).toContain("~5s");
   });
 
-  it("produces a verdict, not an error, for a failed run", async () => {
+  it("produces a verdict, not an error, for a failed run, saying why it failed", async () => {
+    const { resultsArm, statusRead } = RECORDED_FAILED_RUNS.llmCompletion;
     const client: ImagesClient = {
-      getRunResult: () =>
-        Promise.resolve({
-          state: "failed",
-          pipeline_run_id: RUN_ID,
-          status: "FAILED",
-          message: "the model refused",
-        }),
+      getRunStatus: () => Promise.resolve(statusRead),
+      getRunResult: () => Promise.resolve(resultsArm),
       fetchArtifact: () => Promise.reject(new Error("must not fetch")),
     };
 
-    const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
+    const result = await showMthdsRunImages(
+      { run_id: statusRead.pipeline_run_id },
+      context(client),
+    );
 
     expect(result.structuredContent).toMatchObject({
       status: "ok",
       state: "failed",
       run_status: "FAILED",
-      failure_message: "the model refused",
+      failure_message: resultsArm.message,
+      failure: {
+        run_id: statusRead.pipeline_run_id,
+        error_type: "LLMCompletionError",
+        title: "LLM completion",
+        retryable: false,
+        finished_at: statusRead.finished_at,
+      },
     });
+    expect(result.structuredContent.failure).not.toHaveProperty("provider_metadata");
+    expect(result.summary).toContain("Why: LLM completion — ");
+    expect(result.summary).toContain("What to do: The provider rejected the request");
+    expect(result.summary).toContain("Retry: Running it again unchanged will fail the same way.");
+    expect(result.summary).toContain(
+      `For support: Run ${statusRead.pipeline_run_id} · LLMCompletionError · ended ${statusRead.finished_at ?? ""}`,
+    );
     expect(result.imageBlocks).toEqual([]);
+  });
+
+  it("takes the report from the failed arm when it relays one", async () => {
+    const { relayedArm } = RECORDED_FAILED_RUNS.sandboxProvisioning;
+    const client: ImagesClient = {
+      getRunStatus: () => Promise.reject(new Error("status unavailable")),
+      getRunResult: () => Promise.resolve(relayedArm),
+      fetchArtifact: () => Promise.reject(new Error("must not fetch")),
+    };
+
+    const result = await showMthdsRunImages(
+      { run_id: relayedArm.pipeline_run_id },
+      context(client),
+    );
+
+    expect(result.structuredContent.failure).toEqual({
+      run_id: relayedArm.pipeline_run_id,
+      error_type: "SandboxProvisioningError",
+      title: "Sandbox provisioning",
+      message: relayedArm.error?.message,
+    });
+    expect(result.summary).not.toMatch(/Retry:/);
   });
 
   it("produces an empty verdict, and fetches nothing, for a run with no candidate", async () => {
@@ -821,6 +865,7 @@ describe("showMthdsRunImages", () => {
 
   it("classifies an unreachable API as a no-verdict rather than a walk", async () => {
     const client: ImagesClient = {
+      getRunStatus: noStatusRead,
       getRunResult: () =>
         Promise.reject(new ApiUnreachableError("refused", DEFAULT_API_URL, "ECONNREFUSED")),
       fetchArtifact: () => Promise.reject(new Error("must not fetch")),
@@ -838,6 +883,7 @@ describe("showMthdsRunImages", () => {
 
   it("reports a completed result with no main_stuff as a runtime no-verdict", async () => {
     const client: ImagesClient = {
+      getRunStatus: noStatusRead,
       getRunResult: () =>
         Promise.resolve({
           state: "completed",

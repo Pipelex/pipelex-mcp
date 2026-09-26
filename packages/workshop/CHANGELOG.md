@@ -6,6 +6,7 @@ This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the
 
 ### Added
 
+- **A failed run says why, what to do and what to give support**: `mthds_run_status` on a terminal status other than COMPLETED, and the `failed` state of `mthds_run_results`, `mthds_show_images` and `mthds_download_artifacts`, now carry a `failure` object from the error report the runner stored on the run (`error_type`, `title`, `message`, `error_domain`, `error_category`, `retryable`, `user_action`, the run id and when the run ended), and their summaries say why the run failed, what to do next, whether running it again can help (only when the report says) and a support line with the run id, the error type and the time. A run with no stored report carries its status alone and says so.
 - **`mthds_validate` writes the method's flowchart as `method-graph.html`**: When every file is given as `{ path }`, validation also writes a standalone HTML page beside them that embeds the `.mthds` files and draws the method's graph when opened in a browser, loading its viewer from jsDelivr pinned by version and integrity hash. It is written whatever the verdict, rewritten on every validation, never replaces a file it did not write, and is reported under the new `graph_page` member of the result; pass `graph_page: false` to skip it. The tool is no longer annotated read-only.
 
 ### Fixed

@@ -1,8 +1,17 @@
 import { ArtifactFetchError } from "@pipelex/sdk";
-import type { FetchArtifactOptions, RunResultState, RunStatus } from "@pipelex/sdk";
+import type { FetchArtifactOptions, RunRead, RunResultState, RunStatus } from "@pipelex/sdk";
 import { z } from "zod";
 
-import { runResultsErrorOptions, runStatusSchema } from "./run.js";
+import { failureSummaryLines } from "./run-failure.js";
+import type { RunFailure } from "./run-failure.js";
+import {
+  failureOfFailedArm,
+  readFailedRun,
+  runFailureSchema,
+  runResultsErrorOptions,
+  runStatusSchema,
+} from "./run.js";
+import type { FailedRunState } from "./run.js";
 import {
   BULK_RESOLVE_ERROR_OPTIONS,
   INLINE_IMAGES_BUDGET,
@@ -159,7 +168,15 @@ export function showImagesOutputSchemaFor(names: ToolNames) {
     run_status: runStatusSchema
       .optional()
       .describe('State "failed" only — the terminal lifecycle status.'),
-    failure_message: z.string().optional().describe('State "failed" only.'),
+    failure_message: z
+      .string()
+      .optional()
+      .describe('State "failed" only — the platform\'s one-sentence account of the ending.'),
+    failure: runFailureSchema
+      .optional()
+      .describe(
+        `State "failed" only, when the run stored an error report — the same object ${names.runResults} carries: why it failed, what to do next, whether running it again can help, and what to give support.`,
+      ),
     images: z
       .array(shownImageSchema)
       .optional()
@@ -208,6 +225,8 @@ export interface ShowImagesStructuredContent {
   retry_after_seconds?: number | null;
   run_status?: RunStatus;
   failure_message?: string;
+  /** State "failed" only, when the run stored an error report. */
+  failure?: RunFailure;
   images?: ShownImageEntry[];
   omitted?: number;
   all_inlined?: boolean;
@@ -233,6 +252,8 @@ export interface ShowImagesResult {
  */
 export interface ImagesClient {
   getRunResult(runId: string): Promise<RunResultState>;
+  /** Read once after a failed results arm, for when the run ended and its report (`readFailedRun`). */
+  getRunStatus(runId: string): Promise<RunRead>;
   fetchArtifact(uri: string, options?: FetchArtifactOptions): Promise<Response>;
 }
 
@@ -328,7 +349,7 @@ export async function showMthdsRunImages(
     case "running":
       return runningResult(state.pipeline_run_id, state.retry_after_seconds, names);
     case "failed":
-      return failedResult(state.pipeline_run_id, state.status, state.message);
+      return failedResult(state, await readFailedRun(client, state.pipeline_run_id));
     case "completed":
       break;
   }
@@ -777,18 +798,21 @@ function runningResult(
   };
 }
 
-function failedResult(runId: string, status: RunStatus, message: string): ShowImagesResult {
+function failedResult(state: FailedRunState, failedRead: RunRead | undefined): ShowImagesResult {
+  const runId = state.pipeline_run_id;
+  const failure = failureOfFailedArm(state, failedRead);
   return {
     structuredContent: {
       status: "ok",
       run_id: runId,
       state: "failed",
-      run_status: status,
-      failure_message: message,
+      run_status: state.status,
+      failure_message: state.message,
+      ...(failure === undefined ? {} : { failure }),
     },
     summary: [
       "# No images",
-      `Run \`${runId}\` ended ${status}: ${message}`,
+      failureSummaryLines(runId, state.status, failure, failedRead?.finished_at).join("\n"),
       "A failed run produces no images to show.",
     ].join("\n\n"),
     imageBlocks: [],

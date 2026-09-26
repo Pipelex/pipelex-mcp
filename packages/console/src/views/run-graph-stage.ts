@@ -5,6 +5,9 @@
  * going, then the results in the form's place.
  */
 
+import { failureDisplayOf } from "@pipelex/mcp-core/capabilities/run-failure.js";
+import type { RunFailureDisplay } from "@pipelex/mcp-core/capabilities/run-failure.js";
+
 import type { RunPollingSnapshot } from "./use-run-polling.js";
 
 /** How a run started from the form ended, once its results have been read: `null` until then. */
@@ -95,11 +98,20 @@ export function formRunInFlight({
 export interface RunStatusLine {
   text: string;
   tone: "info" | "error";
+  /**
+   * Why a run that ended without completing failed, what to do and the line
+   * for support, which the view shows under the line in the same block the
+   * results panel uses. Built from the report's title and user action, never
+   * its message, which can carry a provider's raw text.
+   */
+  failure?: RunFailureDisplay;
 }
 
 /**
  * The line under the form while a run started from it has no results to show.
- * Once the results are read, the panel says everything and the line goes.
+ * Once the results are read, the panel says everything and the line goes. A
+ * run that ended without completing says why at once, from the status read's
+ * report, since its results add nothing to that and may not arrive at all.
  */
 export function runStatusLineFor({
   runId,
@@ -112,7 +124,8 @@ export function runStatusLineFor({
   runId: string | undefined;
   starting: boolean;
   startError: string | null;
-  polling: Pick<RunPollingSnapshot, "phase" | "runStatus" | "health" | "hardError">;
+  polling: Pick<RunPollingSnapshot, "phase" | "runStatus" | "health" | "hardError"> &
+    Partial<Pick<RunPollingSnapshot, "failure" | "finishedAt">>;
   hasResults: boolean;
   resultsError: string | null;
 }): RunStatusLine | null {
@@ -126,6 +139,18 @@ export function runStatusLineFor({
     };
   }
   if (polling.phase === "terminal") {
+    if (polling.runStatus !== undefined && polling.runStatus !== "COMPLETED") {
+      const failure = failureDisplayOf(runId, polling.failure, polling.finishedAt);
+      const ended = `Run ${runId} ${endedWords(polling.runStatus)}: ${asSentence(failure.reason)}`;
+      return {
+        text:
+          resultsError === null
+            ? `${ended} Fetching the results…`
+            : `${ended} Its results could not be fetched: ${resultsError}`,
+        tone: "error",
+        failure,
+      };
+    }
     return resultsError === null
       ? {
           text: `Run ${runId} ${endedWords(polling.runStatus)}. Fetching the results…`,
@@ -143,6 +168,11 @@ export function runStatusLineFor({
         ? " (retrying…)"
         : "";
   return { text: `Run ${runId}: ${polling.runStatus ?? "starting"}${suffix}`, tone: "info" };
+}
+
+/** The text with a closing full stop, unless it already ends a sentence. */
+function asSentence(text: string): string {
+  return /[.!?…]$/.test(text.trim()) ? text.trim() : `${text.trim()}.`;
 }
 
 function endedWords(runStatus: RunPollingSnapshot["runStatus"]): string {

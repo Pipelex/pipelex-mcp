@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+import { RECORDED_FAILED_RUNS } from "@pipelex/mcp-core/capabilities/failed-run-fixtures.js";
+import type { RecordedFailedRun } from "@pipelex/mcp-core/capabilities/failed-run-fixtures.js";
+import { runFailureOf } from "@pipelex/mcp-core/capabilities/run-failure.js";
+
 import { formRunInFlight, formViewStage, runStatusLineFor } from "./run-graph-stage.js";
 
 describe("formViewStage", () => {
@@ -119,12 +123,100 @@ describe("runStatusLineFor", () => {
       runStatusLineFor({
         ...base,
         runId: "run_1",
-        polling: { phase: "terminal", runStatus: "FAILED", health: null, hardError: null },
+        polling: { phase: "terminal", runStatus: "COMPLETED", health: null, hardError: null },
         resultsError: "The session expired.",
       }),
     ).toEqual({
-      text: "Run run_1 ended with status FAILED, but its results could not be fetched: The session expired.",
+      text: "Run run_1 completed, but its results could not be fetched: The session expired.",
       tone: "error",
+    });
+  });
+
+  /** The status line for a recorded failed run, as the status read's `failure` reaches the view. */
+  function failedLine(recorded: RecordedFailedRun, resultsError: string | null = null) {
+    const read = recorded.statusRead;
+    return runStatusLineFor({
+      ...base,
+      runId: read.pipeline_run_id,
+      polling: {
+        phase: "terminal",
+        runStatus: read.status,
+        health: null,
+        hardError: null,
+        failure: runFailureOf(read.pipeline_run_id, read.error, read.finished_at),
+        finishedAt: read.finished_at,
+      },
+      resultsError,
+    });
+  }
+
+  it("says why the LLMCompletionError run failed, what to do and the line for support", () => {
+    const { statusRead } = RECORDED_FAILED_RUNS.llmCompletion;
+    const line = failedLine(RECORDED_FAILED_RUNS.llmCompletion);
+
+    expect(line).toEqual({
+      text: `Run ${statusRead.pipeline_run_id} ended with status FAILED: LLM completion. Fetching the results…`,
+      tone: "error",
+      failure: {
+        reason: "LLM completion",
+        nextStep: "The provider rejected the request — review the prompt, parameters, and inputs.",
+        retry: "Running it again unchanged will fail the same way.",
+        support: `Run ${statusRead.pipeline_run_id} · LLMCompletionError · ended ${statusRead.finished_at ?? ""}`,
+      },
+    });
+  });
+
+  it("says why the SandboxProvisioningError run failed, even when its results cannot be fetched", () => {
+    const { statusRead } = RECORDED_FAILED_RUNS.sandboxProvisioning;
+    const line = failedLine(RECORDED_FAILED_RUNS.sandboxProvisioning, "The session expired.");
+
+    expect(line).toEqual({
+      text: `Run ${statusRead.pipeline_run_id} ended with status FAILED: Sandbox provisioning. Its results could not be fetched: The session expired.`,
+      tone: "error",
+      failure: {
+        reason: "Sandbox provisioning",
+        nextStep: "If you need help, contact support with the line below.",
+        support: `Run ${statusRead.pipeline_run_id} · SandboxProvisioningError · ended ${statusRead.finished_at ?? ""}`,
+      },
+    });
+  });
+
+  it("never puts the report's message or the provider's text in the line", () => {
+    for (const recorded of [
+      RECORDED_FAILED_RUNS.llmCompletion,
+      RECORDED_FAILED_RUNS.sandboxProvisioning,
+    ]) {
+      const line = failedLine(recorded, "The session expired.");
+      const shown = JSON.stringify(line);
+
+      expect(shown).not.toContain(recorded.statusRead.error?.message ?? "never");
+      for (const fragment of ["HTTP 412", "Error code", "Daytona", "Snapshot"]) {
+        expect(shown).not.toContain(fragment);
+      }
+    }
+  });
+
+  it("says a run that ended with no report has no recorded reason, and still gives the support line", () => {
+    expect(
+      runStatusLineFor({
+        ...base,
+        runId: "run_1",
+        polling: {
+          phase: "terminal",
+          runStatus: "CANCELLED",
+          health: null,
+          hardError: null,
+          finishedAt: "2026-09-24T10:38:04Z",
+        },
+      }),
+    ).toEqual({
+      text: "Run run_1 ended with status CANCELLED: No reason was recorded for this run. Fetching the results…",
+      tone: "error",
+      failure: {
+        reason: "No reason was recorded for this run.",
+        nextStep: "If you need help, contact support with the line below.",
+        support: "Run run_1 · ended 2026-09-24T10:38:04Z",
+      },
     });
   });
 
