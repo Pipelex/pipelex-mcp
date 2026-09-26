@@ -102,12 +102,11 @@ export function withLinksFrom(shown: RunResultsView, later: RunResultsView): Run
  * that must presign resolves the run's references in one batch and closes
  * over the map.
  *
- * The files have to paint from these. The payload's own `public_url` is signed
- * path-style on the shared regional S3 host, which no host's CSP scoped to a
- * bucket, and it expires an hour after the run; these are signed on each
- * bucket's own host, which the views' CSP names, and a remount reads new ones.
- * A reference with no link answers `undefined`, which the kernel reads as "use
- * the payload's `public_url`".
+ * The files paint from these because the payload's own `public_url` expires an
+ * hour after the run, while a remount reads new ones; both are signed on a
+ * bucket's own host, which the views' CSP names. A reference with no link
+ * answers `undefined`, which the kernel reads as "use the payload's
+ * `public_url`", and that paints until the baked link expires.
  */
 function withLinks(
   links: ReadonlyMap<string, string>,

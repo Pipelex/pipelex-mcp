@@ -10,19 +10,22 @@
  *   bulk resolve route mints (measured on 2026-09-25), which is where both
  *   views load a run's images and frame its documents from, since the console
  *   puts a fresh link for each stored file on the results' `_meta`;
- * - the regional virtual-hosted form, `<bucket>.s3.us-west-2.amazonaws.com`,
- *   is what the same signing produces once an endpoint is pinned, so pinning it
- *   later does not blank every picture or break every upload.
+ * - the runtime (`pipelex` from 0.66.0) signs a run's baked `public_url` on
+ *   the REGIONAL virtual-hosted form, `<bucket>.s3.us-west-2.amazonaws.com`
+ *   (measured against api-dev on 2026-09-26), which is also what the platform's
+ *   signing produces once an endpoint is pinned. So a baked link the kernel
+ *   falls back to paints until it expires, an hour after the run for an output,
+ *   and so does a link a method writes into an HTML output's markup, which no
+ *   fresh link can replace.
  *
- * What is deliberately NOT here is the runtime's own link. `pipelex`'s S3
- * provider signs a run's baked `public_url` PATH-style on the shared regional
- * endpoint (`s3.us-west-2.amazonaws.com/<bucket>/<key>`), a host every bucket
- * in the region shares. A bucket there can be scoped only by path, and no host
- * kept the path: the console shipped such entries (`2617d86`), and the Dev
- * console's acceptance on 2026-09-25 showed a run's outputs with no images. An
- * origin alone would let a view load from, and leak data in a URL to, any
- * bucket anyone owns there, so the views paint from the platform's fresh links
- * instead and a baked link that the kernel falls back to stays blocked.
+ * What is deliberately NOT here is the shared regional endpoint,
+ * `s3.us-west-2.amazonaws.com`, where the runtime signed PATH-style before
+ * 0.66.0 (`s3.us-west-2.amazonaws.com/<bucket>/<key>`) and still does for a
+ * bucket name that cannot be a hostname, which none of these is. A bucket there
+ * can be scoped only by path, and no host kept the path: the console shipped
+ * such entries (`2617d86`), and the Dev console's acceptance on 2026-09-25
+ * showed a run's outputs with no images. An origin alone would let a view load
+ * from, and leak data in a URL to, any bucket anyone owns there.
  *
  * Kept free of Skybridge so the live suite can import it.
  */
