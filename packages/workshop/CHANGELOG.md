@@ -4,6 +4,10 @@ This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the
 
 ## [Unreleased]
 
+### Added
+
+- **`mthds_validate` writes the method's flowchart as `method-graph.html`**: When every file is given as `{ path }`, validation also writes a standalone HTML page beside them that embeds the `.mthds` files and draws the method's graph when opened in a browser, loading its viewer from jsDelivr pinned by version and integrity hash. It is written whatever the verdict, rewritten on every validation, never replaces a file it did not write, and is reported under the new `graph_page` member of the result; pass `graph_page: false` to skip it. The tool is no longer annotated read-only.
+
 ### Fixed
 
 - **A throttled or timed-out request is retryable**: An HTTP 429 or 408 from the Pipelex API now comes back as a retryable `runtime` error instead of a permanent one, so an agent polling `mthds_run_status` knows to try again. A `mthds_run` start that failed with a 408 stays not retryable, since the run may exist anyway, and a 429 on a start is retryable.

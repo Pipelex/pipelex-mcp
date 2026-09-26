@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { recordedTsZodReport } from "@pipelex/mcp-core/capabilities/codegen-fixture.js";
 import { CODEGEN_TARGETS } from "@pipelex/mcp-core/capabilities/codegen.js";
+import { GRAPH_PAGE_FILENAME } from "@pipelex/mcp-core/capabilities/graph-page.js";
 import {
   FLOW_HEAD_LENGTH,
   connectClient,
@@ -258,15 +259,20 @@ describe("the workshop's contexts and dispatch", () => {
 
     const contexts = buildLocalToolContexts({ PIPELEX_BASE_URL: "http://127.0.0.1:8081" }, rootDir);
 
-    // One validation context, shared — not a second one built from the same
-    // parts. Two hand-synced copies diverge the moment a field is added to
-    // one, so `mthds_save_method`'s validation leg would quietly stop agreeing
-    // with `mthds_validate`.
-    expect(contexts.catalogWrite.validation).toBe(contexts.validation);
+    // One validation base — not a second context built from the same parts.
+    // Two hand-synced copies diverge the moment a field is added to one, so
+    // `mthds_save_method`'s validation leg would quietly stop agreeing with
+    // `mthds_validate`. The two differ by `saveRoot` alone, which is what
+    // writes the method's graph page: the save's result never reports one.
+    const { saveRoot: validationSaveRoot, ...validationBase } = contexts.validation;
+    expect(validationBase).toEqual(contexts.catalogWrite.validation);
+    expect(contexts.validation.resolver).toBe(contexts.catalogWrite.validation.resolver);
+    expect(validationSaveRoot).toBe(rootDir);
+    expect(contexts.catalogWrite.validation.saveRoot).toBeUndefined();
 
     // One working directory, every consumer — the download tool's save root,
-    // codegen's `output_dir` root, the catalog pull's write root, and the
-    // results summary's nudge.
+    // codegen's `output_dir` root, the catalog pull's write root, the graph
+    // page's root (above), and the results summary's nudge.
     expect(contexts.artifacts.saveRoot).toBe(rootDir);
     expect(contexts.codegen.saveRoot).toBe(rootDir);
     expect(contexts.catalogWrite.saveRoot).toBe(rootDir);
@@ -407,17 +413,22 @@ describe("the workshop's contexts and dispatch", () => {
         status: "ok",
         is_valid: true,
         available_view_specs: [],
+        graph_page: { path: GRAPH_PAGE_FILENAME, written: true },
       });
       expect(result._meta?.graph_spec).toBeUndefined();
       // The signature DOES ride the workshop — it is deliberately not on the
       // views branch, since this is the shell an integrating agent uses — so
       // the summary carries its `## Main pipe` section and no `## Views` note.
-      // That contrast is what this asserts: no view advert, but the signature.
-      expect(result.content).toEqual([
-        { type: "text", text: "# Valid\n\n## Main pipe\n\n`demo.main() -> native.Text`" },
-      ]);
+      // That contrast is what this asserts: no view advert, but the signature,
+      // and the flowchart as a page on disk in place of the view.
+      const [block] = result.content as { type: string; text: string }[];
+      expect(block?.text).toMatch(
+        /^# Valid\n\n## Main pipe\n\n`demo\.main\(\) -> native\.Text`\n\n## Method graph\n\nWrote the method's flowchart to `method-graph\.html`/,
+      );
       expect(result._meta?.pipe_io_contracts).toBeUndefined();
       expect(result._meta?.input_form).toBeUndefined();
+      const page = await fs.readFile(path.join(rootDir, GRAPH_PAGE_FILENAME), "utf8");
+      expect(page).toContain('{"name":"bundle.mthds","content":"domain = \\"demo\\""}');
     } finally {
       await close();
     }

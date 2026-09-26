@@ -73,6 +73,12 @@ export default [
     files: ["packages/console/scripts/check-server-bundle.mjs"],
     rules: { "pipelex/no-raw-fetch": "off" },
   },
+  // The graph page's live check fetches the public CDN files the page pins,
+  // never the Pipelex API.
+  {
+    files: ["packages/core/src/capabilities/graph-page.e2e.ts"],
+    rules: { "pipelex/no-raw-fetch": "off" },
+  },
   // Unit tests build clients directly to test them, and stub the global fetch.
   {
     files: ["**/*.test.ts"],
