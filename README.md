@@ -6,7 +6,7 @@
 
 Pipelex lets you build AI methods with your coding agent and run them anywhere: as an MCP for chatbots, as a webapp for people, or via API for your software. This repository is the Pipelex MCP: it connects your chatbot to your Pipelex account and the methods saved there.
 
-**Chatbots** — ChatGPT, Claude. Add the Pipelex MCP in your chatbot's settings by the address below — in Claude, that is **Add custom connector** — then sign in with your Pipelex account when asked. Nothing to install and no key: the Pipelex MCP runs on your signed-in session.
+**Chatbots** — ChatGPT, Claude. Sign up at [app.pipelex.com](https://app.pipelex.com). Add the Pipelex MCP in your chatbot's settings by the address below — in Claude, that is **Add custom connector** — then sign in with your Pipelex account when asked. Nothing to install and no key: the Pipelex MCP runs on your signed-in session.
 
 ```
 https://mcp.pipelex.com/mcp
@@ -18,9 +18,11 @@ https://mcp.pipelex.com/mcp
 
 > What methods do I have?
 >
-> Run the invoice method on https://example.com/invoice.pdf
+> Run github.com/Pipelex/methods/invoice_extraction@v0.1.1 on https://raw.githubusercontent.com/Pipelex/pipelex-cookbook/main/assets/extract_proof_of_purchase/restaurant_invoice.pdf
 
 You get a run id straight away, and you can ask for its status, its results or the files it produced at any time.
+
+Your new account comes with one method to try. A published method, such as those in the [Pipelex methods repository](https://github.com/Pipelex/methods), runs from its address with nothing to save. Your own methods come from the Pipelex plugin: build one in a coding agent and save it to your account, and your chatbot lists it and runs it by name.
 
 Give the file as a URL the Pipelex MCP can reach. In ChatGPT you can attach it to the conversation instead and ask for a run on it; Claude has no way yet to hand the Pipelex MCP a file you attached.
 
@@ -120,7 +122,7 @@ The hosted console holds **no server-side API key** and there is nothing to past
 https://mcp.pipelex.com/mcp
 ```
 
-That is the address to register, in every host.
+That is the address to register, in every host. If you have no Pipelex account yet, create one at [app.pipelex.com](https://app.pipelex.com) before you add the console: signing up there also sets up the organization every tool call works in.
 
 Sign-in is OAuth through WorkOS AuthKit, which the console's MCP host drives for you — ChatGPT, claude.ai and Claude Desktop handle the handshake themselves, including picking the organization you want to work in. Your verified session is what authorizes every call the console makes on your behalf, so the catalog you see and the runs you spend are your own. The token never travels through tool arguments, so it never enters the model's context.
 
