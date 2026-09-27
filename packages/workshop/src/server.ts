@@ -44,6 +44,7 @@ export const LOCAL_SERVER_INSTRUCTIONS = [
   "method work and never mix the two servers: each can be signed in to a different organization.",
   "`mthds_codegen` turns a method into typed code for your project, and `mthds_save_method`",
   "and `mthds_get_method` push a bundle to the catalog and pull one back.",
+  "`mthds_models` lists and checks model references.",
   "Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`,",
   "`mthds_prepare_inputs`, `mthds_run`) takes its method one of three ways: files, a published",
   "method's address as method_ref, or a catalog id (mt_…) as method_id (the last two resolved server-side).",

@@ -52,7 +52,7 @@ A host that spawns MCP servers but takes no plugin, such as Cursor, can run the 
 Pipelex MCP connects MCP hosts to Pipelex methods, wrapping the Pipelex API through the `@pipelex/sdk` `PipelexApiClient`. It ships as **two servers with two tool sets, over one capability core**:
 
 - **The console**, the Pipelex connector (server name `pipelex`): a [Skybridge](https://docs.skybridge.tech) HTTP server, deployed on Alpic, for chat hosts. Its tools are `pipelex_*`, and it names a method by reference only, a saved method's catalog id or a published method's address: it finds a method, shows it, takes a file attached in the chat, and runs it. It registers the Skybridge views.
-- **The workshop**, the Pipelex plugin's server (server name `pipelex-plugin`): an npm-distributed stdio server (`@pipelex/mcp`, bin `pipelex-mcp`) that coding-agent hosts spawn via `npx`. Its tools are `mthds_*`, and they also validate a method, template its inputs, generate typed code for it, prepare its files, and save it to the catalog and pull it back. Its headline feature is the `{ path }` file arm: it reads `.mthds` files from disk instead of having the model hand-copy their contents.
+- **The workshop**, the Pipelex plugin's server (server name `pipelex-plugin`): an npm-distributed stdio server (`@pipelex/mcp`, bin `pipelex-mcp`) that coding-agent hosts spawn via `npx`. Its tools are `mthds_*`, and they also validate a method, template its inputs, generate typed code for it, prepare its files, look up the model references it can name, and save it to the catalog and pull it back. Its headline feature is the `{ path }` file arm: it reads `.mthds` files from disk instead of having the model hand-copy their contents.
 
 The console is the Pipelex MCP of the get-started above, at `mcp.pipelex.com`, and the workshop is the MCP server the Pipelex plugin runs. The rest of this page calls them by the names the code uses. The two are released separately, each with its own version and changelog.
 
@@ -78,6 +78,7 @@ The workshop's tools:
 | Tool | What it does |
 |---|---|
 | [`mthds_list_methods`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_list_methods) | List the methods saved in your organization's catalog by name, description and id, never their source. |
+| [`mthds_models`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_models) | List the model references a pipe can name, or check one before writing it into a method. |
 | [`mthds_validate`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_validate) | Validate a method given as files, a published address or a catalog id, return its main pipe's typed signature, and write its flowchart as an HTML page beside files given by path. |
 | [`mthds_inputs_template`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_inputs_template) | Return a fill-in template of a pipe's declared inputs. |
 | [`mthds_codegen`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_codegen) | Generate typed TypeScript or Python for a method's concepts, stamped and locked, returned or written straight to disk. |

@@ -78,6 +78,14 @@ import {
 } from "@pipelex/mcp-core/capabilities/inputs.js";
 import type { InputsContext, MthdsInputsInput } from "@pipelex/mcp-core/capabilities/inputs.js";
 import {
+  buildModelsContext,
+  modelsToolResult,
+  mthdsModelsInputSchema,
+  mthdsModelsOutputSchema,
+  readMthdsModels,
+} from "@pipelex/mcp-core/capabilities/models.js";
+import type { ModelsContext, MthdsModelsInput } from "@pipelex/mcp-core/capabilities/models.js";
+import {
   buildPrepareContext,
   mthdsPrepareInputsInputSchema,
   mthdsPrepareInputsOutputSchema,
@@ -122,6 +130,7 @@ import { localFileResolver } from "./files.js";
 /** The capability contexts the workshop's tools run over — one per capability it registers. */
 export interface LocalToolContexts {
   catalog: CatalogContext;
+  models: ModelsContext;
   catalogWrite: CatalogWriteContext;
   validation: ValidationContext;
   inputs: InputsContext;
@@ -160,6 +169,7 @@ export function buildLocalToolContexts(
 
   return {
     catalog: buildCatalogContext(env),
+    models: buildModelsContext(env),
     catalogWrite: {
       ...buildCatalogWriteContext(env),
       resolver,
@@ -206,6 +216,7 @@ export function patchLocalApiContexts(
 ): LocalToolContexts {
   return {
     catalog: { ...base.catalog, ...patch },
+    models: { ...base.models, ...patch },
     catalogWrite: {
       ...base.catalogWrite,
       ...patch,
@@ -244,6 +255,40 @@ export const mthdsListMethodsTool = defineTool({
   },
   async handler(input: MthdsListMethodsInput, contexts: LocalToolContexts) {
     return catalogToolResult(await listMthdsMethods(input, contexts.catalog));
+  },
+});
+
+/**
+ * Workshop-only: a chatbot runs methods and never writes a pipe's `model`
+ * field, so the console has no use for the deck.
+ *
+ * The description carries the account caveat on purpose. The deck is what the
+ * runner can route to, and a gateway can still refuse a listed model for this
+ * account when a run starts; a model that read the list as the account's would
+ * offer a model that fails only once credit is being spent.
+ */
+const MODELS_DESCRIPTION = [
+  "Look up the model references a method's pipes can name in their model field — presets ($), aliases (@) and waterfalls (~) — or check one reference before writing it into a method.",
+  "Without reference it lists the deck, all of it or one category: llm for a PipeLLM, extract for a PipeExtract, img_gen for a PipeImgGen, search for a PipeSearch.",
+  "With reference it says whether that reference resolves, and when it does not, the nearest names and the right sigil for a name that exists as another kind (best-claude exists as @best-claude).",
+  "Call it when the user names a model or asks which ones exist, and check any reference the user typed. A pipe needs no model field unless the user wants one; when they do, prefer a preset.",
+  "The deck is what the runner can serve, not what this account may use: a run can still refuse a listed model.",
+  "It reads the deck and nothing else; no inference credit is spent.",
+].join(" ");
+
+export const mthdsModelsTool = defineTool({
+  name: "mthds_models",
+  description: MODELS_DESCRIPTION,
+  inputSchema: mthdsModelsInputSchema,
+  outputSchema: mthdsModelsOutputSchema,
+  annotations: {
+    title: "List and check model references",
+    readOnlyHint: true,
+    destructiveHint: false,
+    openWorldHint: false,
+  },
+  async handler(input: MthdsModelsInput, contexts: LocalToolContexts) {
+    return modelsToolResult(await readMthdsModels(input, contexts.models));
   },
 });
 
@@ -573,6 +618,7 @@ export const mthdsGetMethodTool = defineTool({
 /** The workshop's table, in the order a host lists it. */
 export const localToolDefinitions = [
   mthdsListMethodsTool,
+  mthdsModelsTool,
   mthdsValidateTool,
   mthdsInputsTemplateTool,
   mthdsCodegenTool,
