@@ -25,6 +25,19 @@ describe("hasPathsFrontmatter", () => {
     expect(hasPathsFrontmatter(SCOPED_RULE)).toBe(true);
   });
 
+  it("accepts an unindented block list and a flow list", () => {
+    expect(hasPathsFrontmatter('---\npaths:\n- "packages/core/src/x.ts"\n---\n# A rule\n')).toBe(
+      true,
+    );
+    expect(hasPathsFrontmatter('---\npaths: ["packages/core/src/x.ts"]\n---\n# A rule\n')).toBe(
+      true,
+    );
+  });
+
+  it("refuses an empty flow list", () => {
+    expect(hasPathsFrontmatter("---\npaths: []\n---\n# A rule\n")).toBe(false);
+  });
+
   it("refuses a rule with no frontmatter", () => {
     expect(hasPathsFrontmatter("# A rule\n\npaths:\n  - x\n")).toBe(false);
   });
@@ -67,12 +80,20 @@ describe("budgetInstructionFiles", () => {
 
 describe("failingEntries", () => {
   it("passes a file exactly at its ceiling and fails one a code point over", () => {
+    const ruleAt = (length: number): string =>
+      SCOPED_RULE + "a".repeat(length - [...SCOPED_RULE].length);
     const entries = budgetInstructionFiles([
       { path: "CLAUDE.md", text: "a".repeat(CLAUDE_MD_CEILING) },
-      { path: ".claude/rules/big.md", text: SCOPED_RULE + "a".repeat(RULE_CEILING) },
+      { path: ".claude/rules/at.md", text: ruleAt(RULE_CEILING) },
+      { path: "CLAUDE.md", text: "a".repeat(CLAUDE_MD_CEILING + 1) },
+      { path: ".claude/rules/over.md", text: ruleAt(RULE_CEILING + 1) },
     ]);
 
-    expect(failingEntries(entries).map((entry) => entry.path)).toEqual([".claude/rules/big.md"]);
+    expect(entries.map((entry) => entry.headroom)).toEqual([0, 0, -1, -1]);
+    expect(failingEntries(entries).map((entry) => entry.path)).toEqual([
+      "CLAUDE.md",
+      ".claude/rules/over.md",
+    ]);
   });
 
   it("fails a rule that is not path-scoped, whatever its size", () => {

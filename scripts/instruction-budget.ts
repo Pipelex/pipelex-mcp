@@ -65,12 +65,17 @@ export function isRulePath(path: string): boolean {
 
 /**
  * Whether a rule's frontmatter scopes it to paths: a leading `---` block
- * holding a `paths:` key followed by at least one list item.
+ * holding a `paths:` key with at least one entry, as a YAML block list
+ * (`paths:` then `- "…"` lines, indented or not) or a flow list
+ * (`paths: ["…"]`). An empty list scopes nothing, so it does not count.
  */
 export function hasPathsFrontmatter(text: string): boolean {
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
   if (match === null) return false;
-  return /^paths:[ \t]*\r?\n[ \t]+- \S/m.test(match[1] ?? "");
+  const frontmatter = match[1] ?? "";
+  const blockList = /^paths:[ \t]*\r?\n[ \t]*- \S/m;
+  const flowList = /^paths:[ \t]*\[[ \t]*[^\]\s]/m;
+  return blockList.test(frontmatter) || flowList.test(frontmatter);
 }
 
 /** Measure every file against its ceiling, in the order given. */

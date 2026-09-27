@@ -16,7 +16,7 @@ The workshop reads `.mthds` files from the user's workspace and writes into it: 
 
 ## Containment is shared, policy never is
 
-`workspace-boundary.ts` holds the whole of what the writers have in common: `isInsideRoot` (containment without creation) and `resolveSaveDir` (containment plus the one `mkdir`). The directory is real-path-checked on its deepest *existing* ancestor **before** `mkdir` — a check only afterwards lets a symlinked ancestor create directories outside the workspace — and again after. Only the resulting real directory is handed on. **Containment only — never policy.**
+`workspace-boundary.ts` holds the whole of what the writers have in common: `isInsideRoot` and `containedPath` (containment without creation), `resolveSaveDir` (containment plus the one `mkdir` of the target directory) and `createContainedSubdirectory` (the same for a destination's parent). Containment code a writer needs goes there, never into a writer. The directory is real-path-checked on its deepest *existing* ancestor **before** `mkdir` — a check only afterwards lets a symlinked ancestor create directories outside the workspace — and again after. Only the resulting real directory is handed on. **Containment only — never policy.**
 
 Above that the rules are **inverted, deliberately**, so never write one shared "write a file" helper: it would either suffix a regeneration or let a download clobber.
 
@@ -27,10 +27,10 @@ Above that the rules are **inverted, deliberately**, so never write one shared "
 ## The codegen writer
 
 - **Inspect destinations with `lstat`**, so a symlink is foreign by construction: an overwrite through one writes wherever it points. The download tool never had this exposure, because `wx` refuses an existing path outright.
-- **Contain every destination and the lock before writing any**, with `isInsideRoot` alone, creating nothing, so a refusal leaves the tree byte-identical, directories included. A symlink, a directory or an unstamped file at a destination refuses the WHOLE write as `input_domain`@`output_dir`.
+- **Contain every destination and the lock before writing any**, with `containedPath` alone, creating nothing, so a refusal leaves the tree as it was but for the target directory `resolveSaveDir`, the one call that creates anything, may have made. A symlink, a directory or an unstamped file at a destination refuses the WHOLE write as `input_domain`@`output_dir`.
 - **`hasCodegenStamp` is a one-function mirror** of the SDK's internal `hasStamp` (source of truth `pipelex/pipelex/codegen/stamp.py`), kept to one function so the swap is one line once the SDK exports it.
 - **The lock's ownership test pins the `# codegen.lock` prefix, not the engine's full header sentence.** The SDK's lock parser ignores the trailing prose (`LOCK_KEYS` is `lock_version`, `crate_fingerprint`, `engine_version`, `artifacts`), so nothing fails if someone rewords it, while a verbatim match would turn every regeneration into a "foreign file" refusal on a file this tool wrote itself.
-- **`lock_filename` must be exactly `codegen.lock`.** It is joined under the write directory, so `../../…` would otherwise reach `writeFile` uncontained.
+- **`lock_filename` must be exactly `codegen.lock`.** That keeps the lock where `pipelex codegen check` looks for it, stops it aliasing an artifact path (the preflight never learns the lock's filename, so it cannot see that), and keeps a `../../…` name from reaching a model on the inline arm, which has no containment of its own. The writer still contains the lock itself.
 
 ## A codegen response is preflighted before either arm hands its bytes anywhere
 

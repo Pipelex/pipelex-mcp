@@ -31,7 +31,7 @@ Prerequisites:
 | `WORKOS_AUTHKIT_DOMAIN` | the AuthKit domain, e.g. `<tenant>.authkit.app` |
 | `PIPELEX_MCP_RESOURCE_INDICATOR` | the server **origin with a trailing slash** — `http://localhost:6843/`, not `.../mcp` |
 
-The Resource Indicator must also be registered in the WorkOS dashboard (Connect → Configuration), along with Dynamic Client Registration. It becomes the issued token's `aud`, and the server verifies it byte-for-byte — registering the `/mcp` path or dropping the trailing slash yields tokens that never validate. The startup check rejects both mistakes with a message naming the fix, rather than letting every tool call fail later at audience verification.
+The Resource Indicator must also be registered in the WorkOS dashboard (Connect → Configuration), along with Dynamic Client Registration. It becomes the issued token's `aud`, and the server verifies it byte-for-byte — registering the `/mcp` path or dropping the trailing slash yields tokens that never validate. The startup check rejects both mistakes with a message naming the fix, rather than letting every tool call fail later at audience verification. Behind a tunnel (`make dev-tunnel`), the indicator is the tunnel's origin with a trailing slash rather than `http://localhost:6843/`, and that is the value to set in `.env` and register in the dashboard.
 
 If you only need to work on the capability core, **use `make dev-local` instead** — the workshop shell shares the same capabilities, authenticates with a plain `PIPELEX_API_KEY`, and needs no WorkOS setup at all.
 
@@ -84,7 +84,7 @@ make inspect-local   # open MCP Inspector against it
 ```bash
 npm run build        # the console: Skybridge app (regenerates .skybridge/views.d.ts first), then dist/server.bundle.js, under packages/console
 npm run build:local  # the workshop: tsup → packages/workshop/dist/main.js (the npm-distributed bin)
-npm run check        # lint + format:check + check:tool-texts + build + check:bundle + check:cascade + build:local + typecheck
+npm run check        # lint + format:check + check:instructions + check:tool-texts + build + check:bundle + check:cascade + build:local + typecheck
 ```
 
 ### What `make check` runs, and in what order
@@ -130,7 +130,7 @@ The workshop keeps the plain `v` because it is the published package, and its ex
 
 Work in progress accumulates under each changelog's `## [Unreleased]` — don't mint a new `## [x.y.z]` heading per commit. Mint it (and the tag) only when you actually release that server at that version; the newest versioned heading must then match its `package.json`'s `version`. To cut a release, use the **`/release` skill** (`.claude/skills/release/`): it asks which server ships, promotes that changelog's `## [Unreleased]` to `## [x.y.z]`, bumps that server's `package.json`, regenerates `package-lock.json`, and opens the release PR into `main` that the CI gates expect. Note the version-string split: the `v` and `console-v` prefixes are on the branch name, git tag, and PR title only — never in `package.json` or the `## [x.y.z]` changelog heading.
 
-`0.1.0` is the first tagged release. It **retires the `v0.x` prototype-increment track** (`../docs/mcp/archive/2026-06-design/02-delivery/v0.x-prototype-plan.md`): the milestones once called v0.1 / v0.2 / v0.3 were build increments, not package versions, and all shipped together as `0.1.0`. Use the changelog + semver from here on, not the v0.x numbering. `../docs/mcp/cold-start.md` remains the cold-start brief for resuming work; the two changelogs are the source of truth for what has shipped.
+`0.1.0` is the first tagged release. It **retires the `v0.x` prototype-increment track** (`docs/mcp/archive/2026-06-design/02-delivery/v0.x-prototype-plan.md` in the private Pipelex workspace): the milestones once called v0.1 / v0.2 / v0.3 were build increments, not package versions, and all shipped together as `0.1.0`. Use the changelog + semver from here on, not the v0.x numbering. The workspace's `docs/mcp/cold-start.md` remains the cold-start brief for resuming work; the two changelogs are the source of truth for what has shipped.
 
 Merging a release pull request into `main` is what ships a version, of the one server its branch names: the release workflow reads each server's version at the merge commit, publishes the workshop to npm or deploys the console to Alpic when that server's version rose, and tags the commit with that server's tag. A release of one server never ships the other. The `/release` skill cuts a release and asks which server ships, and [CI and releases](#ci-and-releases) below describes the release workflow and its guards.
 

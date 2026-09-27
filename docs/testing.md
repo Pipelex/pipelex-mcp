@@ -52,6 +52,6 @@ A failure in either detector means the *shipped* client disagrees with the *live
 
 ## The Makefile's own tests
 
-**The live targets' resolution is pinned the same way, by `tests/make-live-recipe.test.ts`**: it runs `make -f` from a temp directory holding its own `.env`, reads the preflight's target line under `make -n`, and checks that the ambient `PIPELEX_BASE_URL` / `PIPELEX_API_KEY` change nothing, the precedence of the `PIPELEX_E2E_*` pair, that the key is never printed, and the refusal of the old names on the command line.
-
 **The console dev recipe has a hermetic test of its own, `tests/make-dev-recipe.test.ts`.** Makefile logic that reads configuration is untested by construction, so the test runs `make -n dev` / `make -n dev-tunnel` (which prints a recipe without executing it) and asserts the precedence order and the `--port` pin, then executes the recipe's prelude under `sh` in a temp directory with a free port to check every guard verdict: each Resource Indicator shape, a held port (loopback-bound too, where `lsof` exists), a port that is not a number, and `.env` versus shell versus command-line precedence for the API target and for the port. It spawns `make` with a minimal environment so a parent `make test` cannot leak `MAKEFLAGS` or its own overrides into it.
+
+**The live targets' resolution is pinned the same way, by `tests/make-live-recipe.test.ts`**: it runs `make -f` from a temp directory holding its own `.env`, reads the preflight's target line under `make -n`, and checks that the ambient `PIPELEX_BASE_URL` / `PIPELEX_API_KEY` change nothing, the precedence of the `PIPELEX_E2E_*` pair, that the key is never printed, and the refusal of the old names on the command line.

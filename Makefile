@@ -316,9 +316,8 @@ clean:
 # --- The console dev loop ---
 # `make dev` runs THIS checkout's console, so `.env` is its configuration and
 # the ambient shell is not: the recipe sources `.env` ahead of `npm run dev`,
-# which lets a value in the file win over one the shell already exports. That
-# is the inverse of the live targets' precedence above, on purpose. Those are
-# aimed at an API from outside, so the shell is the override there. Here,
+# which lets a value in the file win over one the shell already exports, the
+# order the live targets above use for their own `PIPELEX_E2E_*` pair too. Here,
 # Node's `--env-file-if-exists` in `nodemon.json` cannot override an inherited
 # variable, and a `PIPELEX_BASE_URL` exported in a shell profile for other
 # tools was silently sending the console to a different deployment than the

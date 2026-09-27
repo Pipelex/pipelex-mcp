@@ -26,15 +26,27 @@ const say = (text = ""): void => {
   process.stdout.write(`${text}\n`);
 };
 
+/**
+ * Every Markdown file under `.claude/rules/`, its subdirectories included,
+ * since Claude Code discovers rules recursively: a nested rule this walk
+ * missed would load unmeasured and unscoped.
+ */
+function ruleFilesUnder(relativeDir: string): string[] {
+  return readdirSync(path.join(REPO_ROOT, relativeDir), { withFileTypes: true }).flatMap(
+    (entry) => {
+      const relative = `${relativeDir}/${entry.name}`;
+      if (entry.isDirectory()) return ruleFilesUnder(relative);
+      return entry.isFile() && entry.name.endsWith(".md") ? [relative] : [];
+    },
+  );
+}
+
 function readInstructionFiles(): InstructionFile[] {
   const read = (relative: string): InstructionFile => ({
     path: relative,
     text: readFileSync(path.join(REPO_ROOT, relative), "utf8"),
   });
-  const rules = readdirSync(path.join(REPO_ROOT, RULES_DIR), { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
-    .map((entry) => `${RULES_DIR}/${entry.name}`)
-    .sort();
+  const rules = ruleFilesUnder(RULES_DIR).sort();
   return [read("CLAUDE.md"), ...rules.map(read)];
 }
 
