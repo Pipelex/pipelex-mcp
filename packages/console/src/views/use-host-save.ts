@@ -3,11 +3,7 @@ import type { DownloadDisplay } from "@pipelex/mthds-ui/form/react";
 import { useEffect, useMemo, useState } from "react";
 import { McpAppBridge, useDownload, useOpenExternal } from "skybridge/web";
 
-import {
-  downloadDisplayFor,
-  saveThroughHostDownload,
-  saveThroughOpenLink,
-} from "./host-save.js";
+import { downloadDisplayFor, saveThroughHostDownload, saveThroughOpenLink } from "./host-save.js";
 import type { HostSaveSupport } from "./host-save.js";
 
 /**

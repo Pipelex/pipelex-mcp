@@ -61,7 +61,7 @@ const CDN = "https://cdn.jsdelivr.net/npm";
  * version and both hashes against the installed package, and
  * `graph-page.e2e.ts` checks the hashes against the files jsDelivr serves.
  */
-export const GRAPH_VIEWER_VERSION = "0.26.0";
+export const GRAPH_VIEWER_VERSION = "0.27.0";
 
 /** The layout engine the standalone viewer expects as a global, at the version mthds-ui depends on. */
 export const ELKJS_VERSION = "0.11.1";
@@ -77,7 +77,7 @@ export const GRAPH_PAGE_ASSETS = {
   },
   viewerScript: {
     url: `${CDN}/@pipelex/mthds-ui@${GRAPH_VIEWER_VERSION}/dist/standalone/graph-viewer.js`,
-    integrity: "sha384-5mGlGAGu2lvVfKNfv4ED4S+RxWaTWON0DTQ8/XnXZidBIN+hz8PmuuHol2qhwDhF",
+    integrity: "sha384-Ph9EyLtFeVH9JZxAqjGrGsbL9V5lHlOuxeTrlQgK0DDPkt/8M55DkTlR5Qb53lS6",
   },
 } as const satisfies Record<string, PinnedAsset>;
 

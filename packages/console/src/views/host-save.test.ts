@@ -38,7 +38,11 @@ describe("downloadContentOf", () => {
   it("embeds inline content under a file URI whose last segment is the planned name", () => {
     expect(downloadContentOf(JSON_COPY)).toEqual({
       type: "resource",
-      resource: { uri: "file:///report.json", mimeType: "application/json", text: '{"title": "Q3"}' },
+      resource: {
+        uri: "file:///report.json",
+        mimeType: "application/json",
+        text: '{"title": "Q3"}',
+      },
     });
   });
 
