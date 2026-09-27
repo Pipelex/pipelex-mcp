@@ -1,7 +1,8 @@
 // The kernel's result renderer, through `@pipelex/mthds-ui/form/react`, which
-// re-exports it whole and imports its prebuilt stylesheet — never
-// `@pipelex/mthds-form` directly, which would put a second copy of its React
-// contexts in the tree (`FieldPresentationProvider` among them).
+// re-exports it whole (its classes are compiled by this app's Tailwind, see
+// `src/index.css`) — never `@pipelex/mthds-form` directly, which would put a
+// second copy of its React contexts in the tree (`FieldPresentationProvider`
+// among them).
 import {
   FieldPresentationProvider,
   JsonView,
@@ -289,8 +290,8 @@ function RunOutput({
             : undefined
         }
       >
-        {/* `.dark` re-resolves the kernel's token bridge against the host
-            theme's dark block, as `RunPanel` does for the form. */}
+        {/* `.dark` puts the kernel's controls under the host theme's dark
+            block, as `RunPanel` does for the form. */}
         <div
           ref={contentRef}
           className={["text-foreground", dark && "dark"].filter(Boolean).join(" ")}

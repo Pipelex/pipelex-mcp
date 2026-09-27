@@ -1,6 +1,8 @@
-import { promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -8,13 +10,13 @@ import {
   GRAPH_PAGE_ASSETS,
   GRAPH_PAGE_FILENAME,
   GRAPH_PAGE_MARK,
+  GRAPH_VIEWER_VERSION,
   deepestCommonDirectory,
   graphPageSection,
   renderGraphPage,
-  serializeMthdsSourcesEmbed,
   writeGraphPage,
 } from "./graph-page.js";
-import type { GraphPageOutcome, MethodSource } from "./graph-page.js";
+import type { GraphPageOutcome } from "./graph-page.js";
 
 /**
  * The writer runs against real `mkdtemp` working directories: what it
@@ -61,37 +63,38 @@ function embeddedSources(page: string): unknown {
 
 const BUNDLE = 'domain = "demo"\nmain_pipe = "main"\n';
 
-describe("serializeMthdsSourcesEmbed", () => {
-  it("escapes every less-than sign, so no method text can end the element", () => {
-    const sources: MethodSource[] = [
-      {
-        name: "bundle.mthds",
-        content: 'prompt = "</script><script>alert(1)</script> <!-- </SCRIPT > </script/"',
-      },
-    ];
-    const embed = serializeMthdsSourcesEmbed(sources);
+/**
+ * The installed `@pipelex/mthds-ui`, found the way Node's resolver walks up
+ * `node_modules`: its `exports` map offers neither `package.json` nor the
+ * standalone files, and the workspace hoists it to the repository root.
+ */
+function installedMthdsUi(): string {
+  for (let dir = path.dirname(fileURLToPath(import.meta.url)); ; dir = path.dirname(dir)) {
+    const candidate = path.join(dir, "node_modules", "@pipelex", "mthds-ui");
+    if (existsSync(path.join(candidate, "package.json"))) return candidate;
+    if (path.dirname(dir) === dir) throw new Error("@pipelex/mthds-ui is not installed");
+  }
+}
 
-    expect(embed).not.toContain("<");
-    expect(JSON.parse(embed)).toEqual(sources);
-  });
+describe("the viewer the page pins", () => {
+  // The embed is written by the installed mthds-ui's serializer, so the page
+  // must load the viewer from that same release; and a bump that forgot the
+  // hashes would leave every page blank, which the live suite alone would see.
+  it("is the installed @pipelex/mthds-ui, byte for byte", async () => {
+    const dir = installedMthdsUi();
+    const manifest = JSON.parse(await fs.readFile(path.join(dir, "package.json"), "utf8")) as {
+      version: string;
+    };
+    expect(manifest.version).toBe(GRAPH_VIEWER_VERSION);
 
-  it("keeps only the name and the content", () => {
-    const embed = serializeMthdsSourcesEmbed([
-      { name: "bundle.mthds", content: BUNDLE, extra: "dropped" } as MethodSource,
-    ]);
-
-    expect(JSON.parse(embed)).toEqual([{ name: "bundle.mthds", content: BUNDLE }]);
-  });
-
-  it("refuses a list the viewer would refuse", () => {
-    expect(() => serializeMthdsSourcesEmbed([])).toThrow(/at least one file/);
-    expect(() => serializeMthdsSourcesEmbed([{ name: "", content: BUNDLE }])).toThrow(/a name/);
-    expect(() =>
-      serializeMthdsSourcesEmbed([
-        { name: "bundle.mthds", content: BUNDLE },
-        { name: "bundle.mthds", content: BUNDLE },
-      ]),
-    ).toThrow(/twice/);
+    for (const [asset, file] of [
+      [GRAPH_PAGE_ASSETS.viewerStylesheet, "graph-viewer.css"],
+      [GRAPH_PAGE_ASSETS.viewerScript, "graph-viewer.js"],
+    ] as const) {
+      const bytes = await fs.readFile(path.join(dir, "dist", "standalone", file));
+      const integrity = `sha384-${createHash("sha384").update(bytes).digest("base64")}`;
+      expect(integrity, file).toBe(asset.integrity);
+    }
   });
 });
 
@@ -126,6 +129,19 @@ describe("renderGraphPage", () => {
     expect(page).toContain('<div id="app-container"><div id="root">');
     expect(embeddedSources(page)).toEqual([{ name: "bundle.mthds", content: BUNDLE }]);
     expect(page).toContain('<script type="application/json" id="pipelex-config">{');
+  });
+
+  it("keeps method text that quotes a closing script tag inside the embed", () => {
+    const sources = [
+      {
+        name: "bundle.mthds",
+        content: 'prompt = "</script><script>alert(1)</script> <!-- </SCRIPT > </script/"',
+      },
+    ];
+    const quoting = renderGraphPage("demo", sources);
+
+    expect(embeddedSources(quoting)).toEqual(sources);
+    expect(quoting).not.toContain("alert(1)</script>");
   });
 
   it("escapes the title as HTML", () => {

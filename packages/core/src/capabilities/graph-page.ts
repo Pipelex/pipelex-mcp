@@ -2,6 +2,9 @@ import { promises as fs } from "node:fs";
 import type { Stats } from "node:fs";
 import path from "node:path";
 
+import { MTHDS_SOURCES_EMBED_ID, serializeMthdsSourcesEmbed } from "@pipelex/mthds-ui/static-graph";
+import type { MthdsSource } from "@pipelex/mthds-ui/static-graph";
+
 import { asOneLine } from "./shared.js";
 import type { ToolError } from "./shared.js";
 import { errorMessage, isInsideRoot, isMissingPathError } from "./workspace-boundary.js";
@@ -48,13 +51,15 @@ export interface PinnedAsset {
 const CDN = "https://cdn.jsdelivr.net/npm";
 
 /**
- * The viewer build the page loads. It is the first `@pipelex/mthds-ui` release
- * whose standalone bundle reads the `mthds-sources` embed, and the embed
- * writer below follows that release's contract. Moving it means moving the
- * three hashes with it (`graph-page.e2e.ts` fetches the files and checks them)
- * and re-reading the embed contract for the new version.
+ * The viewer build the page loads, which must be the `@pipelex/mthds-ui`
+ * version this repository installs: the page's `mthds-sources` element is
+ * written by that version's `serializeMthdsSourcesEmbed`, and the viewer at the
+ * same version is the reader that function is kept in step with. Moving it
+ * means moving the viewer's two hashes with it. `graph-page.test.ts` checks the
+ * version and both hashes against the installed package, and
+ * `graph-page.e2e.ts` checks the hashes against the files jsDelivr serves.
  */
-export const GRAPH_VIEWER_VERSION = "0.25.0";
+export const GRAPH_VIEWER_VERSION = "0.26.0";
 
 /** The layout engine the standalone viewer expects as a global, at the version mthds-ui depends on. */
 export const ELKJS_VERSION = "0.11.1";
@@ -62,7 +67,7 @@ export const ELKJS_VERSION = "0.11.1";
 export const GRAPH_PAGE_ASSETS = {
   viewerStylesheet: {
     url: `${CDN}/@pipelex/mthds-ui@${GRAPH_VIEWER_VERSION}/dist/standalone/graph-viewer.css`,
-    integrity: "sha384-28wM4YgT7W2uUld6tPfYbX+a/7+SU8f8Ax8hh33ai+twYehLegCV9004Jc6iFCoj",
+    integrity: "sha384-gslj/GPu4dd1j4bHBlsw9gyFQ5KBD2yWs2t73E8/tsUAaWkEEWUmQ63wrrAz+BPe",
   },
   elkScript: {
     url: `${CDN}/elkjs@${ELKJS_VERSION}/lib/elk.bundled.js`,
@@ -70,7 +75,7 @@ export const GRAPH_PAGE_ASSETS = {
   },
   viewerScript: {
     url: `${CDN}/@pipelex/mthds-ui@${GRAPH_VIEWER_VERSION}/dist/standalone/graph-viewer.js`,
-    integrity: "sha384-60WI1qFjHBdbY7xo4/3TSjYc1pyLOoXGtauipAZcPn02h/ilZ27cfM8VguIhAXCQ",
+    integrity: "sha384-5mGlGAGu2lvVfKNfv4ED4S+RxWaTWON0DTQ8/XnXZidBIN+hz8PmuuHol2qhwDhF",
   },
 } as const satisfies Record<string, PinnedAsset>;
 
@@ -93,52 +98,12 @@ export const GRAPH_PAGE_MARK = '<meta name="generator" content="@pipelex/mcp met
 /** Only the head of an existing file is read: a foreign file is never loaded whole just to be refused. */
 const HEAD_BYTES = 1024;
 
-/** One `.mthds` file as the embed carries it: its name relative to the page, and its text. */
-export interface MethodSource {
-  name: string;
-  content: string;
-}
-
 /**
- * The text of the page's `mthds-sources` element: a JSON array of
- * `{ name, content }`, with every `<` written as `<` so that no method
- * text — a prompt quoting `</script>`, or a `<!--` — can end the element early
- * or change how the HTML parser tokenizes it. JSON reads the escape back as
- * `<`. Escaping every `<`, rather than matching `</script>`, is what makes it
- * hold: the parser also ends the element on `</script ` and `</script/`, in any
- * case.
- *
- * A one-function mirror of `@pipelex/mthds-ui/static-graph`'s export of the
- * same name, which checks the same contract. The workshop does not import it
- * because declaring `@pipelex/mthds-ui` in the workshop's manifest, even as a
- * devDependency the build inlines, would force the console onto the same range
- * (`tests/workspace-manifests.test.ts` holds one range per package), and the
- * release carrying the export changes the console's stylesheet contract. The
- * contract is public and documented for hosts that write the element
- * themselves; once the console is on that release, this becomes an import.
- *
- * Throws on a list the viewer would refuse, since only a programming error
- * here can produce one: {@link writeGraphPage} names every file itself.
+ * JSON made safe inside a `<script>` element: every `<` written as `\u003c`,
+ * which JSON reads back as `<`, so no text can end the element early, whatever
+ * spelling of `</script` it uses, or open a `<!--`. The `mthds-sources` element
+ * gets the same escape from mthds-ui's serializer.
  */
-export function serializeMthdsSourcesEmbed(sources: readonly MethodSource[]): string {
-  if (sources.length === 0) {
-    throw new Error("The mthds-sources embed needs at least one file.");
-  }
-  const names = new Set<string>();
-  for (const source of sources) {
-    if (source.name === "") {
-      throw new Error("Every file in the mthds-sources embed needs a name.");
-    }
-    if (names.has(source.name)) {
-      throw new Error(`The mthds-sources embed names ${source.name} twice.`);
-    }
-    names.add(source.name);
-  }
-  return escapeForScriptElement(
-    JSON.stringify(sources.map(({ name, content }) => ({ name, content }))),
-  );
-}
-
 function escapeForScriptElement(json: string): string {
   return json.replaceAll("<", "\\u003c");
 }
@@ -166,7 +131,7 @@ function scriptTag(asset: PinnedAsset): string {
  * until then is what a reader sees when the viewer never arrives — offline, or
  * a CDN file that failed its integrity check — since mounting replaces it.
  */
-export function renderGraphPage(title: string, sources: readonly MethodSource[]): string {
+export function renderGraphPage(title: string, sources: readonly MthdsSource[]): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -179,7 +144,7 @@ ${stylesheetTag(GRAPH_PAGE_ASSETS.viewerStylesheet)}
 </head>
 <body>
 <div id="app-container"><div id="root"><p style="font-family: system-ui, sans-serif; margin: 2rem;">Loading the method graph. This page loads its viewer from cdn.jsdelivr.net, so it needs a network connection.</p></div></div>
-<script type="application/json" id="mthds-sources">${serializeMthdsSourcesEmbed(sources)}</script>
+<script type="application/json" id="${MTHDS_SOURCES_EMBED_ID}">${serializeMthdsSourcesEmbed(sources)}</script>
 <script type="application/json" id="pipelex-config">${escapeForScriptElement(JSON.stringify(VIEWER_CONFIG))}</script>
 ${scriptTag(GRAPH_PAGE_ASSETS.elkScript)}
 ${scriptTag(GRAPH_PAGE_ASSETS.viewerScript)}
@@ -271,7 +236,7 @@ export async function writeGraphPage(
   // One entry per file NAME: the same file submitted twice (`a.mthds` and
   // `./a.mthds`) is validated twice but drawn once, where the viewer would
   // refuse the repeated name outright.
-  const sources: MethodSource[] = [];
+  const sources: MthdsSource[] = [];
   const seen = new Set<string>();
   for (const { dir, file, content } of located) {
     const name = path.relative(pageDir, path.join(dir, file)).split(path.sep).join("/");
