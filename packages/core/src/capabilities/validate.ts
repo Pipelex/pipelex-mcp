@@ -440,7 +440,8 @@ const VALIDATE_ERROR_OPTIONS: ClassifyErrorOptions = {
  * caller's own selector, located at `method_ref`. (The execution-locus gate's
  * two 403s — the structures refusal and the sandbox refusal — are classified
  * route-independently in `classifyError`, off the runner's declared
- * `error_type`, and land at `methodLocation`.)
+ * `error_type`: the sandbox refusal at `methodLocation`, the structures
+ * refusal at `method_ref`.)
  */
 export const VALIDATE_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/validate",

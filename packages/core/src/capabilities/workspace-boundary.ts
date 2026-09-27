@@ -73,6 +73,43 @@ export async function checkDeepestExistingAncestor(
   }
 }
 
+/** The joined destination when it stays inside `dir`; `undefined` when it escapes or is `dir` itself. */
+export function containedPath(dir: string, relative: string): string | undefined {
+  const absolute = path.resolve(dir, relative);
+  return isInsideRoot(dir, absolute) && absolute !== dir ? absolute : undefined;
+}
+
+/**
+ * Create a destination's parent directory under `dir`, contained on real paths
+ * BEFORE anything is created and again after.
+ *
+ * `mkdir -p dir/link/sub`, with `link` a symlink pointing out of `dir`, creates
+ * `sub` at the link's target, so a real-path check that ran only afterwards
+ * would report an escape it had already made. That is the same
+ * deepest-existing-ancestor rule `resolveSaveDir` applies to the directory
+ * itself. `escaped` is the caller's wording for an escape, since each writer
+ * names its own directory.
+ *
+ * Returns a message on failure, `undefined` on success.
+ */
+export async function createContainedSubdirectory(
+  dir: string,
+  parent: string,
+  escaped: string,
+): Promise<string | undefined> {
+  const ancestor = await checkDeepestExistingAncestor(dir, parent);
+  if (!ancestor.ok) {
+    return ancestor.reason === "escape" ? escaped : errorMessage(ancestor.err);
+  }
+  try {
+    await fs.mkdir(parent, { recursive: true });
+    // Closes the window between the check and the creation.
+    return isInsideRoot(dir, await fs.realpath(parent)) ? undefined : escaped;
+  } catch (err) {
+    return errorMessage(err);
+  }
+}
+
 export type SaveDirResolution =
   | { ok: true; root: string; dir: string }
   | { ok: false; error: ToolError };
@@ -91,10 +128,11 @@ export type SaveDirResolution =
  * actually typed. Failures are `input_domain` there — except an unusable
  * `saveRoot`, which is the deployment's fault, not the caller's.
  *
- * This is the ONE call in either writer that creates a directory, and it
- * creates only the requested one. Containment without creation is
- * {@link isInsideRoot}, which is what lets a caller contain every destination
- * before deciding whether to write any of them.
+ * This is the one call that creates the target directory, and it creates
+ * only the requested one; a destination's missing parents inside it are
+ * created at write time by {@link createContainedSubdirectory}. Containment
+ * without creation is {@link containedPath}, which is what lets a caller
+ * contain every destination before deciding whether to write any of them.
  */
 export async function resolveSaveDir(
   saveRoot: string,
