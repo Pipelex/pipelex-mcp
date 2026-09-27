@@ -151,7 +151,7 @@ agent-test:
 # because the hermetic suite cannot see the failure that actually breaks this
 # server: every capability reaches @pipelex/sdk through a hand-written narrow
 # interface that the unit tests fake, so a wire-shape change on the API side
-# fails nothing at all. See CLAUDE.md -> "Detecting API drift".
+# fails nothing at all. See docs/testing.md -> "Detecting API drift".
 #
 #   smoke            - the whole path a host exercises, through the stdio shell
 #   test-e2e         - every capability's free path; WRITES PNGs to storage AND updates
@@ -418,8 +418,8 @@ start:
 # --- Release-only publish/deploy (break-glass) ---
 # A release ships from the merge of its pull request into main, through
 # release.yml, one server at a time: a workshop release publishes to npm, a
-# console release deploys to Alpic (see CLAUDE.md "Versioning & changelog" and
-# the /release skill). These two targets are the escape hatches for a CI outage,
+# console release deploys to Alpic (see docs/development.md "CI and releases"
+# and the /release skill). These two targets are the escape hatches for a CI outage,
 # and each ships one server only. check-release-ready demands a clean main, and
 # check-no-local-deps refuses a @pipelex file: link, which would ship a broken
 # install (npm) or fail to resolve on Alpic's build machine (deploy).
