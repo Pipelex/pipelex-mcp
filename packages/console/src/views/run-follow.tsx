@@ -3,7 +3,11 @@ import "@/index.css";
 import { useEffect, useMemo, useRef } from "react";
 import { useDisplayMode, useLayout, useSendFollowUpMessage, useViewState } from "skybridge/web";
 
+import { failureDisplayOf } from "@pipelex/mcp-core/capabilities/run-failure.js";
+import type { RunFailureDisplay } from "@pipelex/mcp-core/capabilities/run-failure.js";
+
 import { useCallTool, useToolInfo } from "../helpers.js";
+import { FailureDetails } from "./components/failure-details.js";
 import { RenderBoundary } from "./components/render-boundary.js";
 import { RunResultsPanel } from "./components/run-results-panel.js";
 import { terminalFollowUpPrompt } from "./run-notify.js";
@@ -54,8 +58,9 @@ type RunFollowViewState = {
  * `useCallTool` (no model turns, no conversation noise), then fetching
  * `pipelex_run_results` once the run is terminal and showing it in the results
  * panel the form view shares: the output rendered by the form kernel, and the
- * executed graph in fullscreen, on success; the failure message on a failed
- * run. On resolving the terminal outcome it hands the conversation back to the
+ * executed graph in fullscreen, on success; on a failed run, why it failed,
+ * what to do next and a line to copy for support, from the run's stored error
+ * report, and never the report's message or the provider's raw text. On resolving the terminal outcome it hands the conversation back to the
  * model once (the completion handoff — see the notify effect), since here the
  * model started the run and is expected to report on it. On remount it
  * re-resolves by id — one status poll; if terminal, one results fetch — so the
@@ -171,16 +176,30 @@ function RunFollow() {
     );
   }
 
+  // A run that ended without completing says why from its status read even
+  // when its results cannot be fetched: the results would add nothing to it.
+  const endedWithoutCompleting =
+    polling.phase === "terminal" &&
+    polling.runStatus !== undefined &&
+    polling.runStatus !== "COMPLETED";
+
   if (resultsError) {
     return (
       <Card
-        title="Could not fetch the results"
+        title={
+          endedWithoutCompleting ? endedTitle(polling.runStatus) : "Could not fetch the results"
+        }
         note={resultsError.message}
         hint={resultsError.hint}
         tone="error"
         maxHeight={maxHeight}
         dark={dark}
-        llm={`Run ${runId}: terminal, but the results fetch failed (${resultsError.class}).`}
+        failure={
+          endedWithoutCompleting
+            ? failureDisplayOf(runId, polling.failure, polling.finishedAt)
+            : undefined
+        }
+        llm={`Run ${runId}: terminal (${polling.runStatus ?? "unknown status"}), but the results fetch failed (${resultsError.class}).`}
       />
     );
   }
@@ -207,6 +226,8 @@ function RunFollow() {
           results={results}
           requestedPipeRef={toolInfo.input?.pipe_ref ?? null}
           durationSeconds={runDurationSeconds(polling.createdAt, polling.finishedAt)}
+          finishedAt={polling.finishedAt}
+          statusFailure={polling.failure}
           dark={dark}
           isFullscreen={isFullscreen}
           onToggleFullscreen={() => void setDisplayMode(isFullscreen ? "inline" : "fullscreen")}
@@ -215,6 +236,23 @@ function RunFollow() {
           graphHeight={Math.max(Math.floor(available * 0.7), 320)}
         />
       </div>
+    );
+  }
+
+  // A run that ended without completing, while its results are still being
+  // read (a transient error retries for a while): the status read already says
+  // why, so the card says it now rather than spin with a bare "Failed…".
+  if (endedWithoutCompleting) {
+    return (
+      <Card
+        title={endedTitle(polling.runStatus)}
+        note="Fetching the run's results…"
+        tone="error"
+        maxHeight={maxHeight}
+        dark={dark}
+        failure={failureDisplayOf(runId, polling.failure, polling.finishedAt)}
+        llm={`Run ${runId}: ended ${polling.runStatus ?? "without completing"}; its results are being fetched. The user sees the reason, the next step and the support line in this view.`}
+      />
     );
   }
 
@@ -232,6 +270,11 @@ function RunFollow() {
   );
 }
 
+/** The card title of a run that ended without completing: "Run failed", "Run timed out", … */
+function endedTitle(status: string | undefined): string {
+  return `Run ${STATUS_LABELS[status ?? ""]?.toLowerCase() ?? "failed"}`;
+}
+
 /** Shared compact card for live, error, and failure states. */
 function Card({
   title,
@@ -241,6 +284,7 @@ function Card({
   spinner = false,
   maxHeight,
   dark,
+  failure,
   llm,
 }: {
   title?: string;
@@ -250,6 +294,8 @@ function Card({
   spinner?: boolean;
   maxHeight: number | undefined;
   dark: boolean;
+  /** Why the run failed, shown above the note when the run ended without completing. */
+  failure?: RunFailureDisplay;
   llm?: string;
 }) {
   const palette =
@@ -274,7 +320,7 @@ function Card({
         borderColor: palette.border,
         background: palette.background,
         color: palette.color,
-        maxHeight: Math.min(maxHeight ?? 160, 160),
+        maxHeight: failure ? undefined : Math.min(maxHeight ?? 160, 160),
       }}
     >
       {spinner && (
@@ -286,6 +332,14 @@ function Card({
       )}
       <div className="min-w-0 space-y-0.5">
         {title && <p className="font-medium">{title}</p>}
+        {failure && (
+          <FailureDetails
+            failure={failure}
+            color={palette.color}
+            mutedColor={palette.color}
+            dark={dark}
+          />
+        )}
         {note && <p className="text-xs opacity-90">{note}</p>}
         {hint && <p className="text-xs opacity-75">{hint}</p>}
       </div>

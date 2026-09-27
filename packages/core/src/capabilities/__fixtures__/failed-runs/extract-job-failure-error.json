@@ -1,0 +1,39 @@
+{
+  "status_read": {
+    "pipeline_run_id": "run_01d36d12-a66e-4055-89ed-4f5661a87f16",
+    "status": "FAILED",
+    "created_at": "2026-09-24T02:05:13.891637Z",
+    "finished_at": "2026-09-24T02:05:29.339549+00:00",
+    "degraded": false,
+    "pipe_code": null,
+    "error": {
+      "provider_metadata": {
+        "message": "Error code: 500 - Invalid response received from openrouter: {\"detail\":\"Internal server error\"}",
+        "provider": "gateway",
+        "status_code": "500",
+        "sdk_exception_type": "InternalServerError",
+        "request_id": "69d70c5b-bc59-4c85-9495-8b6aeb9d2f42"
+      },
+      "error_type": "ExtractJobFailureError",
+      "model": "azure-document-intelligence",
+      "error_domain": "runtime",
+      "retryable": true,
+      "error_category": "transient",
+      "provider": "pipelex_gateway",
+      "message": "gateway inference failed for model 'azure-document-intelligence → SDK\\[gateway_extract]•Backend\\[pipelex_gateway]•Model\\[adi/prebuilt-layout]' (HTTP 500): Error code: 500 - Invalid response received from openrouter: {\"detail\":\"Internal server error\"}",
+      "title": "Extract job failure",
+      "type_uri": "https://docs.pipelex.com/latest/errors/extract-job-failure-error/",
+      "user_action": {
+        "detail": "Transient provider error — the system will retry automatically.",
+        "kind": "wait_and_retry"
+      }
+    }
+  },
+  "results_arm": {
+    "state": "failed",
+    "pipeline_run_id": "run_01d36d12-a66e-4055-89ed-4f5661a87f16",
+    "status": "FAILED",
+    "message": "Run finished with status FAILED; no result available",
+    "error": null
+  }
+}

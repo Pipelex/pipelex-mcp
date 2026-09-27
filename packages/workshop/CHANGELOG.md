@@ -6,6 +6,7 @@ This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the
 
 ### Added
 
+- **A failed run says why, what to do and what to give support**: `mthds_run_status` on a terminal status other than COMPLETED, and the `failed` state of `mthds_run_results`, `mthds_show_images` and `mthds_download_artifacts`, now carry a `failure` object from the error report the runner stored on the run (`error_type`, `title`, `message`, `error_domain`, `error_category`, `retryable`, `user_action`, the run id and when the run ended), and their summaries say why the run failed, what to do next, whether running it again can help (only when the report says) and a support line with the run id, the error type and the time. A run with no stored report carries its status alone and says so.
 - **`mthds_validate` writes the method's flowchart as `method-graph.html`**: When every file is given as `{ path }`, validation also writes a standalone HTML page beside them that embeds the `.mthds` files and draws the method's graph when opened in a browser, loading its viewer from jsDelivr pinned by version and integrity hash. It is written whatever the verdict, rewritten on every validation, never replaces a file it did not write, and is reported under the new `graph_page` member of the result; pass `graph_page: false` to skip it. The tool is no longer annotated read-only.
 
 ### Fixed
@@ -14,6 +15,7 @@ This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the
 
 ### Changed
 
+- **`@pipelex/sdk` 0.25.1 → 0.26.0 and `mthds` 0.25.0 → 0.28.0**: The SDK's failed results read now carries the run's stored error report, which the failed state of `mthds_run_results`, `mthds_show_images` and `mthds_download_artifacts` reads before falling back to a status read of the run. `mthds` moves with it, since this SDK requires 0.28.0.
 - **The README's get-started sends a chatbot newcomer to sign up first and runs a published method**: The chatbot route now opens with signing up at app.pipelex.com, its example run names the published `invoice_extraction` method by address on a sample invoice that exists instead of an `example.com` link that answered 404, and a new paragraph says where methods come from. The hosted console's sign-in section says the account is created at app.pipelex.com, which also sets up the organization every tool call works in.
 - **The workshop is released on its own track**: `@pipelex/mcp` versions, this changelog and the `vX.Y.Z` tags now describe the workshop alone. A workshop release publishes to npm without deploying the hosted console, which is now a separate package in this repository with its own version, changelog and `console-vX.Y.Z` tags, so none of its dependencies reach this one.
 

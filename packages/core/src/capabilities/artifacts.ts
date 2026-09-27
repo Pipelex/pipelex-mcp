@@ -8,12 +8,23 @@ import type {
   DownloadArtifactsRequest,
   DownloadArtifactsResult,
   DownloadedArtifact,
+  RunRead,
   RunResultState,
   RunStatus,
 } from "@pipelex/sdk";
 import { z } from "zod";
 
-import { RUN_RESULTS_ERROR_OPTIONS, runStatusSchema } from "./run.js";
+import type { RunFailure } from "./run-failure.js";
+import {
+  failedArmSummaryLines,
+  failureMessageOf,
+  failureOfFailedArm,
+  readFailedRun,
+  RUN_RESULTS_ERROR_OPTIONS,
+  runFailureSchema,
+  runStatusSchema,
+} from "./run.js";
+import type { FailedRunState } from "./run.js";
 import {
   BULK_RESOLVE_ERROR_OPTIONS,
   allowsPlainHttp,
@@ -150,7 +161,15 @@ const artifactsStructuredContentSchema = z.object({
   run_status: runStatusSchema
     .optional()
     .describe('State "failed" only — the terminal lifecycle status.'),
-  failure_message: z.string().optional().describe('State "failed" only.'),
+  failure_message: z
+    .string()
+    .optional()
+    .describe('State "failed" only — the platform\'s one-sentence account of the ending.'),
+  failure: runFailureSchema
+    .optional()
+    .describe(
+      'State "failed" only, when the run stored an error report — the same object mthds_run_results carries: why it failed, what to do next, whether running it again can help, and what to give support.',
+    ),
   scope: z
     .enum(["main_stuff", "working_memory"])
     .optional()
@@ -215,6 +234,8 @@ export interface ArtifactsStructuredContent {
   retry_after_seconds?: number | null;
   run_status?: RunStatus;
   failure_message?: string;
+  /** State "failed" only, when the run stored an error report. */
+  failure?: RunFailure;
   scope?: ArtifactScope;
   output?: SavedOutput;
   artifacts?: SavedArtifactEntry[];
@@ -231,6 +252,8 @@ export interface ArtifactsResult {
 /** The slice of `PipelexApiClient` this capability calls (test seam). */
 export interface ArtifactClient {
   getRunResult(runId: string): Promise<RunResultState>;
+  /** Read once after a failed results arm, for when the run ended and its report (`readFailedRun`). */
+  getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   downloadArtifacts(request: DownloadArtifactsRequest): Promise<DownloadArtifactsResult>;
 }
 
@@ -361,7 +384,7 @@ export async function downloadMthdsArtifacts(
     case "running":
       return runningResult(state.pipeline_run_id, state.retry_after_seconds);
     case "failed":
-      return failedResult(state.pipeline_run_id, state.status, state.message);
+      return failedResult(state, await readFailedRun(client, state.pipeline_run_id));
     case "completed":
       break;
   }
@@ -601,18 +624,21 @@ function runningResult(runId: string, retryAfterSeconds: number | null): Artifac
   };
 }
 
-function failedResult(runId: string, status: RunStatus, message: string): ArtifactsResult {
+function failedResult(state: FailedRunState, failedRead: RunRead | undefined): ArtifactsResult {
+  const runId = state.pipeline_run_id;
+  const failure = failureOfFailedArm(state, failedRead);
   return {
     structuredContent: {
       status: "ok",
       run_id: runId,
       state: "failed",
-      run_status: status,
-      failure_message: message,
+      run_status: state.status,
+      failure_message: failureMessageOf(state),
+      ...(failure === undefined ? {} : { failure }),
     },
     summary: [
       "# Nothing saved",
-      `Run \`${runId}\` ended ${status}: ${message}`,
+      failedArmSummaryLines(state, failure, failedRead).join("\n"),
       "A failed run produces no output and no files to save.",
     ].join("\n\n"),
   };

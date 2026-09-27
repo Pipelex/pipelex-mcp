@@ -13,6 +13,7 @@ import type {
   DownloadArtifactsRequest,
   DownloadArtifactsResult,
   DownloadedArtifact,
+  RunRead,
   RunResults,
   RunResultState,
 } from "@pipelex/sdk";
@@ -25,6 +26,7 @@ import {
   validateArtifactsRequest,
 } from "./artifacts.js";
 import type { ArtifactClient, ArtifactsContext } from "./artifacts.js";
+import { RECORDED_FAILED_RUNS } from "./failed-run-fixtures.js";
 import { DEFAULT_API_URL } from "./shared.js";
 
 const RUN_ID = "01JRUN0000000000000000TEST";
@@ -106,12 +108,22 @@ function verdictOf(artifacts: DownloadedArtifact[]): DownloadArtifactsResult {
 const PICTURE_ONLY = { url: PICTURE_URI };
 const PICTURE_ONLY_FILE = path.join(RUN_DIR, "main_stuff.png");
 
-/** A client over a fixed run state whose download is `download`; every download request is recorded. */
+/** The status read a failed arm is followed by; every other arm must not make one. */
+function noStatusRead(): Promise<RunRead> {
+  return Promise.reject(new Error("getRunStatus must not be called"));
+}
+
+/**
+ * A client over a fixed run state whose download is `download`; every download
+ * request is recorded. `statusRead` answers the status read a failed arm is
+ * followed by.
+ */
 function fakeClient(
   state: RunResultState,
   download: (
     request: DownloadArtifactsRequest,
   ) => Promise<DownloadArtifactsResult> = savingDownload,
+  statusRead?: RunRead,
 ) {
   const requests: DownloadArtifactsRequest[] = [];
   const reads: string[] = [];
@@ -120,6 +132,7 @@ function fakeClient(
       reads.push(runId);
       return Promise.resolve(state);
     },
+    getRunStatus: statusRead === undefined ? noStatusRead : () => Promise.resolve(statusRead),
     downloadArtifacts(request) {
       requests.push(request);
       return download(request);
@@ -184,6 +197,7 @@ describe("downloadMthdsArtifacts", () => {
   it("refuses instructively with no working directory, without calling the API", async () => {
     let calls = 0;
     const client: ArtifactClient = {
+      getRunStatus: noStatusRead,
       getRunResult() {
         calls += 1;
         return Promise.resolve(completedState({}));
@@ -231,27 +245,58 @@ describe("downloadMthdsArtifacts", () => {
     expect(await fs.readdir(root)).toEqual([]);
   });
 
-  it("reports a failed run as a produced verdict with no files", async () => {
+  it("reports a failed run as a produced verdict with no files, saying why it failed", async () => {
     const root = await makeTempDir();
-    const { client, requests } = fakeClient({
-      state: "failed",
-      pipeline_run_id: RUN_ID,
-      status: "FAILED",
-      message: "boom",
-    });
+    const { resultsArm, statusRead } = RECORDED_FAILED_RUNS.sandboxProvisioning;
+    const { client, requests } = fakeClient(resultsArm, savingDownload, statusRead);
 
-    const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
+    const result = await downloadMthdsArtifacts(
+      { run_id: statusRead.pipeline_run_id },
+      contextIn(root, client),
+    );
 
     expect(result.structuredContent).toEqual({
       status: "ok",
-      run_id: RUN_ID,
+      run_id: statusRead.pipeline_run_id,
       state: "failed",
       run_status: "FAILED",
-      failure_message: "boom",
+      failure_message: "Run finished with status FAILED; no result available",
+      failure: {
+        run_id: statusRead.pipeline_run_id,
+        error_type: "SandboxProvisioningError",
+        title: "Sandbox provisioning",
+        message: statusRead.error?.message,
+        finished_at: statusRead.finished_at,
+      },
     });
+    expect(result.summary).toContain("Why: Sandbox provisioning — Could not provision");
+    expect(result.summary).toContain("What to do: the report names no next step.");
+    expect(result.summary).not.toMatch(/Retry:/);
+    expect(result.summary).toContain(
+      `For support: Run ${statusRead.pipeline_run_id} · SandboxProvisioningError · ended ${statusRead.finished_at ?? ""}`,
+    );
     expect(result.summary).toContain("produces no output and no files");
     expect(requests).toEqual([]);
     expect(await fs.readdir(root)).toEqual([]);
+  });
+
+  it("carries the report a failed arm relays, retry advice included", async () => {
+    const root = await makeTempDir();
+    const { relayedArm, statusRead } = RECORDED_FAILED_RUNS.extractJobFailure;
+    const { client } = fakeClient(relayedArm, savingDownload, { ...statusRead, error: null });
+
+    const result = await downloadMthdsArtifacts(
+      { run_id: relayedArm.pipeline_run_id },
+      contextIn(root, client),
+    );
+
+    expect(result.structuredContent.failure).toMatchObject({
+      error_type: "ExtractJobFailureError",
+      retryable: true,
+      user_action: { kind: "wait_and_retry" },
+      finished_at: statusRead.finished_at,
+    });
+    expect(result.summary).toContain("Retry: Running it again can succeed.");
   });
 
   it("saves the output of a completed run that references no stored file, and downloads nothing", async () => {
@@ -784,6 +829,7 @@ describe("downloadMthdsArtifacts", () => {
   it("classifies an unknown run id as input_domain at run_id (no verdict)", async () => {
     const root = await makeTempDir();
     const client: ArtifactClient = {
+      getRunStatus: noStatusRead,
       getRunResult: () => Promise.reject(apiError(`/v1/runs/${RUN_ID}/results`, 404, "Not found")),
       downloadArtifacts: () => Promise.reject(new Error("must not be called")),
     };
@@ -802,6 +848,7 @@ describe("downloadMthdsArtifacts", () => {
   it("classifies an unreachable API as retryable config", async () => {
     const root = await makeTempDir();
     const client: ArtifactClient = {
+      getRunStatus: noStatusRead,
       getRunResult: () =>
         Promise.reject(
           new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED"),

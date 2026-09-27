@@ -9,8 +9,8 @@
     "./*.js": "./src/*.ts"
   },
   "dependencies": {
-    "@pipelex/sdk": "^0.25.1",
-    "mthds": "^0.25.0",
+    "@pipelex/sdk": "^0.26.0",
+    "mthds": "^0.28.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

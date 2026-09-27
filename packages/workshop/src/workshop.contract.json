@@ -1367,6 +1367,66 @@
               }
             ]
           },
+          "failure": {
+            "description": "Terminal statuses other than COMPLETED only. Present when the run stored an error report: why it failed, what to do next, whether running it again can help, and what to give support.",
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "type": "string"
+              },
+              "error_type": {
+                "description": "The runner's exception class name, for the support line; never match on it.",
+                "type": "string"
+              },
+              "title": {
+                "description": "The stable human label of the error class.",
+                "type": "string"
+              },
+              "message": {
+                "description": "What went wrong, as the runner wrote it. It can quote the provider's raw text, so tell the user the title and the next step rather than this verbatim.",
+                "type": "string"
+              },
+              "error_domain": {
+                "description": "Who can fix it: \"input\" (the caller's method or inputs), \"config\" (a configuration change), \"runtime\" (nobody beforehand).",
+                "type": "string"
+              },
+              "error_category": {
+                "description": "The finer class of an inference failure (transient, configuration, content, …).",
+                "type": "string"
+              },
+              "retryable": {
+                "description": "Whether running it again unchanged can succeed, as the report states it. Absent: the report does not say, which is not false.",
+                "type": "boolean"
+              },
+              "user_action": {
+                "description": "The next step the report advises.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "description": "wait_and_retry, change_input, change_model, check_billing, check_credentials, contact_support or unknown."
+                  },
+                  "detail": {
+                    "type": "string",
+                    "description": "The advice in words. A wait_and_retry kind carries this server's own sentence, since the runner's is worded for a run still retrying."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "detail"
+                ],
+                "additionalProperties": false
+              },
+              "finished_at": {
+                "description": "When the run ended.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "run_id"
+            ],
+            "additionalProperties": false
+          },
           "errors": {
             "type": "array",
             "items": {
@@ -1490,8 +1550,68 @@
             ]
           },
           "failure_message": {
-            "description": "State \"failed\" only.",
+            "description": "State \"failed\" only — the platform's one-sentence account of the ending.",
             "type": "string"
+          },
+          "failure": {
+            "description": "State \"failed\" only. Present when the run stored an error report: why it failed, what to do next, whether running it again can help, and what to give support.",
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "type": "string"
+              },
+              "error_type": {
+                "description": "The runner's exception class name, for the support line; never match on it.",
+                "type": "string"
+              },
+              "title": {
+                "description": "The stable human label of the error class.",
+                "type": "string"
+              },
+              "message": {
+                "description": "What went wrong, as the runner wrote it. It can quote the provider's raw text, so tell the user the title and the next step rather than this verbatim.",
+                "type": "string"
+              },
+              "error_domain": {
+                "description": "Who can fix it: \"input\" (the caller's method or inputs), \"config\" (a configuration change), \"runtime\" (nobody beforehand).",
+                "type": "string"
+              },
+              "error_category": {
+                "description": "The finer class of an inference failure (transient, configuration, content, …).",
+                "type": "string"
+              },
+              "retryable": {
+                "description": "Whether running it again unchanged can succeed, as the report states it. Absent: the report does not say, which is not false.",
+                "type": "boolean"
+              },
+              "user_action": {
+                "description": "The next step the report advises.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "description": "wait_and_retry, change_input, change_model, check_billing, check_credentials, contact_support or unknown."
+                  },
+                  "detail": {
+                    "type": "string",
+                    "description": "The advice in words. A wait_and_retry kind carries this server's own sentence, since the runner's is worded for a run still retrying."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "detail"
+                ],
+                "additionalProperties": false
+              },
+              "finished_at": {
+                "description": "When the run ended.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "run_id"
+            ],
+            "additionalProperties": false
           },
           "main_stuff": {
             "description": "State \"completed\" only — the resolved main output, bounded to a serialized cap (see truncated)."
@@ -1725,8 +1845,68 @@
             ]
           },
           "failure_message": {
-            "description": "State \"failed\" only.",
+            "description": "State \"failed\" only — the platform's one-sentence account of the ending.",
             "type": "string"
+          },
+          "failure": {
+            "description": "State \"failed\" only, when the run stored an error report — the same object mthds_run_results carries: why it failed, what to do next, whether running it again can help, and what to give support.",
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "type": "string"
+              },
+              "error_type": {
+                "description": "The runner's exception class name, for the support line; never match on it.",
+                "type": "string"
+              },
+              "title": {
+                "description": "The stable human label of the error class.",
+                "type": "string"
+              },
+              "message": {
+                "description": "What went wrong, as the runner wrote it. It can quote the provider's raw text, so tell the user the title and the next step rather than this verbatim.",
+                "type": "string"
+              },
+              "error_domain": {
+                "description": "Who can fix it: \"input\" (the caller's method or inputs), \"config\" (a configuration change), \"runtime\" (nobody beforehand).",
+                "type": "string"
+              },
+              "error_category": {
+                "description": "The finer class of an inference failure (transient, configuration, content, …).",
+                "type": "string"
+              },
+              "retryable": {
+                "description": "Whether running it again unchanged can succeed, as the report states it. Absent: the report does not say, which is not false.",
+                "type": "boolean"
+              },
+              "user_action": {
+                "description": "The next step the report advises.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "description": "wait_and_retry, change_input, change_model, check_billing, check_credentials, contact_support or unknown."
+                  },
+                  "detail": {
+                    "type": "string",
+                    "description": "The advice in words. A wait_and_retry kind carries this server's own sentence, since the runner's is worded for a run still retrying."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "detail"
+                ],
+                "additionalProperties": false
+              },
+              "finished_at": {
+                "description": "When the run ended.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "run_id"
+            ],
+            "additionalProperties": false
           },
           "images": {
             "description": "State \"completed\" only — one entry per candidate considered, in the order they were considered: the order you named them when images or indices was given, else discovery order. Bounded — see omitted. Branch on inlined, never on the presence of an image block.",
@@ -1945,8 +2125,68 @@
             ]
           },
           "failure_message": {
-            "description": "State \"failed\" only.",
+            "description": "State \"failed\" only — the platform's one-sentence account of the ending.",
             "type": "string"
+          },
+          "failure": {
+            "description": "State \"failed\" only, when the run stored an error report — the same object mthds_run_results carries: why it failed, what to do next, whether running it again can help, and what to give support.",
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "type": "string"
+              },
+              "error_type": {
+                "description": "The runner's exception class name, for the support line; never match on it.",
+                "type": "string"
+              },
+              "title": {
+                "description": "The stable human label of the error class.",
+                "type": "string"
+              },
+              "message": {
+                "description": "What went wrong, as the runner wrote it. It can quote the provider's raw text, so tell the user the title and the next step rather than this verbatim.",
+                "type": "string"
+              },
+              "error_domain": {
+                "description": "Who can fix it: \"input\" (the caller's method or inputs), \"config\" (a configuration change), \"runtime\" (nobody beforehand).",
+                "type": "string"
+              },
+              "error_category": {
+                "description": "The finer class of an inference failure (transient, configuration, content, …).",
+                "type": "string"
+              },
+              "retryable": {
+                "description": "Whether running it again unchanged can succeed, as the report states it. Absent: the report does not say, which is not false.",
+                "type": "boolean"
+              },
+              "user_action": {
+                "description": "The next step the report advises.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "description": "wait_and_retry, change_input, change_model, check_billing, check_credentials, contact_support or unknown."
+                  },
+                  "detail": {
+                    "type": "string",
+                    "description": "The advice in words. A wait_and_retry kind carries this server's own sentence, since the runner's is worded for a run still retrying."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "detail"
+                ],
+                "additionalProperties": false
+              },
+              "finished_at": {
+                "description": "When the run ended.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "run_id"
+            ],
+            "additionalProperties": false
           },
           "scope": {
             "description": "State \"completed\" only — which of the run's outputs was walked for stored-file references. Always \"main_stuff\", the run's main output: artifacts.length is the count of references found there.",
