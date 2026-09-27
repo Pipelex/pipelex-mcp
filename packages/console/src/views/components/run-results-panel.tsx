@@ -12,6 +12,8 @@ import {
 import { GraphViewer } from "@pipelex/mthds-ui/graph/react";
 import { TOOLBAR_POSITION } from "@pipelex/mthds-ui";
 import type { GraphSpec, ToolbarPosition } from "@pipelex/mthds-ui";
+import type { RunField, SaveFiles } from "@pipelex/mthds-ui/form";
+import type { ResolveUrl } from "@pipelex/mthds-ui/form/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSendFollowUpMessage } from "skybridge/web";
 
@@ -31,6 +33,7 @@ import {
   outputToRender,
 } from "../run-results.js";
 import type { RunResultsView } from "../run-results.js";
+import { saveWholeOutput } from "../host-save.js";
 import { useHostSave } from "../use-host-save.js";
 import { FailureDetails } from "./failure-details.js";
 import { RenderBoundary } from "./render-boundary.js";
@@ -169,6 +172,7 @@ export function RunResultsPanel({
             bounded={!isFullscreen}
             onReadMore={onToggleFullscreen}
             mutedColor={palette.muted}
+            errorColor={palette.error}
           />
           {isFullscreen && showGraph && hasExecutedGraph(results) && (
             <div className="pt-2">
@@ -249,6 +253,7 @@ function RunOutput({
   bounded,
   onReadMore,
   mutedColor,
+  errorColor,
 }: {
   results: RunResultsView;
   hostSave: ReturnType<typeof useHostSave>;
@@ -257,6 +262,7 @@ function RunOutput({
   bounded: boolean;
   onReadMore: () => void;
   mutedColor: string;
+  errorColor: string;
 }) {
   const pipeRef = executedPipeRefOf(results.graphSpec, requestedPipeRef);
   // One derivation per result: the kernel treats the field as the identity of
@@ -344,10 +350,22 @@ function RunOutput({
         </button>
       )}
       {oversizedLength !== null ? (
-        <p className="mt-1 text-xs" style={{ color: mutedColor }}>
-          This output is about {Math.ceil(oversizedLength / 1024)} KiB, more than this view renders
-          at once, so only its first part is shown, as JSON.
-        </p>
+        <>
+          <p className="mt-1 text-xs" style={{ color: mutedColor }}>
+            This output is about {Math.ceil(oversizedLength / 1024)} KiB, more than this view
+            renders at once, so only its first part is shown, as JSON.
+          </p>
+          {field && hostSave.downloads.result && (
+            <WholeOutputDownload
+              field={field}
+              value={results.mainStuff}
+              resolveUrl={results.resolveUrl}
+              saveFiles={hostSave.saveFiles}
+              mutedColor={mutedColor}
+              errorColor={errorColor}
+            />
+          )}
+        </>
       ) : (
         !field && (
           <p className="mt-1 text-xs" style={{ color: mutedColor }}>
@@ -366,5 +384,68 @@ function RunOutput({
         </p>
       )}
     </div>
+  );
+}
+
+type WholeOutputSave =
+  | { state: "idle" | "saving" }
+  | { state: "missed"; names: string[] }
+  | { state: "failed" };
+
+/**
+ * The Download an output past the render budget would otherwise lack: the
+ * kernel's own control belongs to the viewer the budget keeps from rendering,
+ * so this one plans from the full output (`saveWholeOutput`) and says what did
+ * not go out. It is drawn only where the host takes the whole-result download,
+ * since the plan always carries the JSON copy, which only a download request
+ * can deliver.
+ */
+function WholeOutputDownload({
+  field,
+  value,
+  resolveUrl,
+  saveFiles,
+  mutedColor,
+  errorColor,
+}: {
+  field: RunField;
+  value: unknown;
+  resolveUrl: ResolveUrl | undefined;
+  saveFiles: SaveFiles;
+  mutedColor: string;
+  errorColor: string;
+}) {
+  const [save, setSave] = useState<WholeOutputSave>({ state: "idle" });
+  const onDownload = () => {
+    setSave({ state: "saving" });
+    // The planner walks a payload nothing validated, so a throw is a failure
+    // to report, never a crash of the panel.
+    saveWholeOutput(field, value, { baseName: field.name, resolveUrl, saveFiles })
+      .then((names) => setSave(names.length > 0 ? { state: "missed", names } : { state: "idle" }))
+      .catch(() => setSave({ state: "failed" }));
+  };
+  return (
+    <>
+      <button
+        type="button"
+        onClick={onDownload}
+        disabled={save.state === "saving"}
+        className="mt-1 cursor-pointer text-xs underline disabled:cursor-default"
+        style={{ color: mutedColor }}
+      >
+        {save.state === "saving" ? "Saving…" : "Download the whole output"}
+      </button>
+      {save.state === "missed" && (
+        <p className="mt-1 text-xs" style={{ color: errorColor }}>
+          {save.names.length === 1 ? "1 file" : `${save.names.length} files`} could not be saved:{" "}
+          {save.names.join(", ")}.
+        </p>
+      )}
+      {save.state === "failed" && (
+        <p className="mt-1 text-xs" style={{ color: errorColor }}>
+          The output could not be saved.
+        </p>
+      )}
+    </>
   );
 }

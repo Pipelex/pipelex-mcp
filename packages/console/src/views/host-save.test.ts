@@ -1,4 +1,5 @@
-import type { SaveFile } from "@pipelex/mthds-ui/form";
+import { buildResultField } from "@pipelex/mthds-ui/form";
+import type { SaveFile, SaveFiles } from "@pipelex/mthds-ui/form";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -6,6 +7,7 @@ import {
   downloadDisplayFor,
   saveThroughHostDownload,
   saveThroughOpenLink,
+  saveWholeOutput,
 } from "./host-save.js";
 import type { HostDownload } from "./host-save.js";
 
@@ -72,6 +74,13 @@ describe("saveThroughHostDownload", () => {
     expect(result.failed.map((failure) => failure.file)).toEqual([IMAGE, JSON_COPY]);
   });
 
+  it("fails every file of a request the host never answered, rather than rejecting", async () => {
+    const download = vi.fn<HostDownload>().mockRejectedValue(new Error("Request timed out"));
+    const result = await saveThroughHostDownload(download)([IMAGE, JSON_COPY]);
+    expect(result.failed.map((failure) => failure.file)).toEqual([IMAGE, JSON_COPY]);
+    expect(result.failed[0]!.reason).toBe("The host did not answer the download request");
+  });
+
   it("sends no request for an empty plan", async () => {
     const download = vi.fn<HostDownload>();
     expect(await saveThroughHostDownload(download)([])).toEqual({ failed: [] });
@@ -85,6 +94,45 @@ describe("saveThroughOpenLink", () => {
     const result = await saveThroughOpenLink(openLink)([IMAGE, JSON_COPY]);
     expect(openLink).toHaveBeenCalledExactlyOnceWith(IMAGE.url);
     expect(result.failed.map((failure) => failure.file)).toEqual([JSON_COPY]);
+  });
+
+  it("fails a link the host refused to open and still opens the next", async () => {
+    const other = {
+      ...IMAGE,
+      name: "report-output-figures-1.png",
+      url: "https://bucket.example/b.png",
+    };
+    const openLink = vi.fn().mockImplementationOnce(() => {
+      throw new Error("refused");
+    });
+    const result = await saveThroughOpenLink(openLink)([IMAGE, other]);
+    expect(openLink).toHaveBeenCalledTimes(2);
+    expect(result.failed.map((failure) => failure.file)).toEqual([IMAGE]);
+  });
+});
+
+describe("saveWholeOutput", () => {
+  const field = buildResultField(
+    { field: { name: "report", kind: "prose", concept_ref: "native.Text", required: true } },
+    { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+  );
+  const full = { text: "the whole output, not the bounded copy the panel shows" };
+
+  it("plans the full value and hands the plan to the host's delivery", async () => {
+    const saveFiles = vi.fn<SaveFiles>().mockResolvedValue({ failed: [] });
+    const missed = await saveWholeOutput(field, full, { baseName: "report", saveFiles });
+    expect(missed).toEqual([]);
+    const [files] = saveFiles.mock.calls[0]!;
+    expect(files.map((file) => file.name)).toEqual(["report.json"]);
+    expect(JSON.parse(files[0]!.text!)).toEqual(full);
+  });
+
+  it("names every file the delivery did not hand over", async () => {
+    const saveFiles: SaveFiles = (files) =>
+      Promise.resolve({ failed: files.map((file) => ({ file })) });
+    expect(await saveWholeOutput(field, full, { baseName: "report", saveFiles })).toEqual([
+      "report.json",
+    ]);
   });
 });
 
