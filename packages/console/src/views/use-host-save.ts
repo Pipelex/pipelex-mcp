@@ -1,8 +1,10 @@
 import type { SaveFiles } from "@pipelex/mthds-ui/form";
 import type { DownloadDisplay } from "@pipelex/mthds-ui/form/react";
 import { useEffect, useMemo, useState } from "react";
+import type { MouseEvent } from "react";
 import { McpAppBridge, useDownload, useOpenExternal } from "skybridge/web";
 
+import { fileRelayLink, storedFileLinkOf } from "./file-relay.js";
 import { downloadDisplayFor, saveThroughHostDownload, saveThroughOpenLink } from "./host-save.js";
 import type { HostSaveSupport } from "./host-save.js";
 
@@ -35,23 +37,43 @@ function useHostSaveSupport(): HostSaveSupport {
 
 /**
  * The results panel's save seam for this host: the delivery the kernel's
- * download controls hand their files to, and which of those controls to draw.
+ * download controls hand their files to, which of those controls to draw, and
+ * `routeFileLinks`, a click-capture handler for a subtree that renders the
+ * kernel's plain links to stored files, which opens a click on one through the
+ * relay rather than letting the host open the bare presigned link.
  */
-export function useHostSave(): { saveFiles: SaveFiles; downloads: DownloadDisplay } {
+export function useHostSave(): {
+  saveFiles: SaveFiles;
+  downloads: DownloadDisplay;
+  routeFileLinks: (event: MouseEvent) => void;
+} {
   const support = useHostSaveSupport();
   const { download } = useDownload();
   const openExternal = useOpenExternal();
   return useMemo(() => {
-    // A stored file's link is presigned, and its signature covers every query
-    // parameter. ChatGPT appends `redirectUrl=<the conversation>` to a link it
-    // opens unless told not to, whatever `redirect_domains` says, and S3 then
-    // answers SignatureDoesNotMatch (measured 2026-09-28). An MCP Apps host
-    // ignores the option.
-    const openLink = (href: string) => openExternal(href, { redirectUrl: false });
+    // A stored file opens through the relay page, since ChatGPT breaks a
+    // presigned link it opens directly (`file-relay.ts`). `redirectUrl: false`
+    // asks ChatGPT not to append the conversation to the relay link, which
+    // would otherwise reach the console's access logs; whether it honours the
+    // option is unmeasured, and the relay works either way. An MCP Apps host
+    // ignores it.
+    const openLink = (href: string) =>
+      openExternal(fileRelayLink(window.skybridge.serverUrl, href), { redirectUrl: false });
     return {
       saveFiles:
         support === "download" ? saveThroughHostDownload(download) : saveThroughOpenLink(openLink),
       downloads: downloadDisplayFor(support),
+      routeFileLinks: (event: MouseEvent) => {
+        if (event.button !== 0) return;
+        const href = storedFileLinkOf(event.target);
+        if (href === undefined) return;
+        // The host opens a plain link's click itself, so stopping the event
+        // here also keeps a host listener that bubbles, and ignores
+        // `defaultPrevented`, from opening the bare link beside the relay.
+        event.preventDefault();
+        event.stopPropagation();
+        openLink(href);
+      },
     };
   }, [support, download, openExternal]);
 }

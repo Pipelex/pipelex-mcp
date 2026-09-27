@@ -73,7 +73,9 @@ const FADE_MASK = "linear-gradient(to bottom, black 72%, transparent)";
  * sandboxed view frame refuses. A host that takes `ui/download-file` receives
  * the files as one request; one that does not opens each stored file's link,
  * and the controls that could only save inline content are not drawn there.
- * The fullscreen graph's data panel takes the same seam.
+ * The fullscreen graph's data panel takes the same seam, and a click on one of
+ * the kernel's plain links to a stored file, an image preview or a file's name,
+ * is opened through the host the same way (`routeFileLinks`).
  *
  * Everything shown here was fetched by the view and goes to the view alone:
  * none of it enters the model's context. The model gets one line through
@@ -140,7 +142,11 @@ export function RunResultsPanel({
     : `Run ${runId}: ${headline.toLowerCase()}. Its output is shown to the user in this view; ${CONSOLE_TOOL_NAMES.runResults} with the run id returns it when a question needs the values.`;
 
   return (
-    <section data-llm={llm} className="w-full space-y-2 px-2 pb-2 pt-2">
+    <section
+      data-llm={llm}
+      className="w-full space-y-2 px-2 pb-2 pt-2"
+      onClickCapture={hostSave.routeFileLinks}
+    >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm font-medium" style={{ color: failed ? palette.error : palette.text }}>
           <span aria-hidden="true">{failed ? "✕ " : "✓ "}</span>

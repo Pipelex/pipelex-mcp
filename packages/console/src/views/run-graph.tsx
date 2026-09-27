@@ -442,7 +442,11 @@ function RunGraph() {
         {isFullscreen ? "Collapse" : "Fullscreen"}
       </ToolbarButton>
       {executedGraph ? (
-        <div className="relative w-full overflow-hidden" style={{ height: graphHeight }}>
+        <div
+          className="relative w-full overflow-hidden"
+          style={{ height: graphHeight }}
+          onClickCapture={hostSave.routeFileLinks}
+        >
           {/* Keyed by run, so a later run's graph mounts fresh rather than
               inheriting the previous one's viewport and selection. */}
           <RenderBoundary what="The run's graph" resetKey={executedGraph.graphSpec}>
