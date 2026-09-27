@@ -52,9 +52,13 @@ export function useHostSave(): {
   const openExternal = useOpenExternal();
   return useMemo(() => {
     // A stored file opens through the relay page, since ChatGPT breaks a
-    // presigned link it opens directly (`file-relay.ts`).
+    // presigned link it opens directly (`file-relay.ts`). `redirectUrl: false`
+    // asks ChatGPT not to append the conversation to the relay link, which
+    // would otherwise reach the console's access logs; whether it honours the
+    // option is unmeasured, and the relay works either way. An MCP Apps host
+    // ignores it.
     const openLink = (href: string) =>
-      openExternal(fileRelayLink(window.skybridge.serverUrl, href));
+      openExternal(fileRelayLink(window.skybridge.serverUrl, href), { redirectUrl: false });
     return {
       saveFiles:
         support === "download" ? saveThroughHostDownload(download) : saveThroughOpenLink(openLink),
@@ -63,7 +67,11 @@ export function useHostSave(): {
         if (event.button !== 0) return;
         const href = storedFileLinkOf(event.target);
         if (href === undefined) return;
+        // The host opens a plain link's click itself, so stopping the event
+        // here also keeps a host listener that bubbles, and ignores
+        // `defaultPrevented`, from opening the bare link beside the relay.
         event.preventDefault();
+        event.stopPropagation();
         openLink(href);
       },
     };
