@@ -325,6 +325,53 @@ describe("the workshop's contexts and dispatch", () => {
     }
   });
 
+  it("registers mthds_models as a read with two optional arguments and dispatches a check", async () => {
+    const contexts = buildLocalToolContexts({ PIPELEX_API_KEY: "plx_sk_test" });
+    const asked: Array<string | undefined> = [];
+    contexts.models.client = {
+      async models(category) {
+        asked.push(category);
+        return { models: [{ name: "writing-factual", type: "llm" }], aliases: {}, waterfalls: {} };
+      },
+    };
+
+    const { client, close } = await connectClient(createLocalServer({ contexts }));
+    try {
+      const tool = (await client.listTools()).tools.find(
+        (candidate) => candidate.name === "mthds_models",
+      );
+      const schema = tool?.inputSchema as { required?: string[]; properties?: object };
+
+      // It reads the deck and nothing else, and only from the configured API.
+      expect(tool?.annotations).toMatchObject({
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      });
+      expect(schema.required ?? []).toEqual([]);
+      expect(Object.keys(schema.properties ?? {}).sort()).toEqual(["category", "reference"]);
+      // The account caveat is the one thing a model reading the deck would
+      // otherwise take for granted.
+      expect(tool?.description).toContain("not what this account may use");
+
+      const result = await client.callTool({
+        name: "mthds_models",
+        arguments: { reference: "$writing-factul", category: "llm" },
+      });
+
+      expect(asked).toEqual([undefined]);
+      expect(result.structuredContent).toMatchObject({
+        status: "ok",
+        reference: "$writing-factul",
+        resolution: "not_found",
+        suggestions: ["$writing-factual"],
+      });
+      expect(result._meta).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+
   it("dispatches mthds_codegen with the artifacts on content and nothing on _meta", async () => {
     const contexts = buildLocalToolContexts({ PIPELEX_API_KEY: "plx_sk_test" });
     contexts.codegen.client = {

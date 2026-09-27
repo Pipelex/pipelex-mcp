@@ -72,8 +72,9 @@ Both servers list the catalog: `pipelex_list_methods` on the console, `mthds_lis
 | Show a run's pictures | `pipelex_show_images` | `mthds_show_images` |
 | Save a run to disk | none | `mthds_download_artifacts` |
 | Save a method to the catalog, and pull one back | none | `mthds_save_method`, `mthds_get_method` |
+| List the model deck and check a model reference | none | `mthds_models` |
 
-**Why the console has fewer tools.** A chatbot runs methods; it does not author them. Inline bundles are cumbersome and error-prone for a chatbot, so the console names a method by reference only and no console tool takes `files`, which also removes the `{ path }` arm the console could only ever refuse. It has no validate tool: `pipelex_show_method` reports whether a method can run, and a failure deeper than the dry run surfaces when the run fails. It has no codegen, because a chatbot has no project to write generated types into, and no prepare tool, because on a server that never uploads, preparation only reshapes references, which `pipelex_run` does itself. The workshop keeps every tool and behaviour it had before the console became the connector. What changed there is its server name, its instructions, the sentences in its tool texts that described the console, and `mthds_validate`'s `include_graph`, which was dropped because the workshop never returned a graph.
+**Why the console has fewer tools.** A chatbot runs methods; it does not author them. Inline bundles are cumbersome and error-prone for a chatbot, so the console names a method by reference only and no console tool takes `files`, which also removes the `{ path }` arm the console could only ever refuse. It has no validate tool: `pipelex_show_method` reports whether a method can run, and a failure deeper than the dry run surfaces when the run fails. It has no codegen, because a chatbot has no project to write generated types into, no prepare tool, because on a server that never uploads, preparation only reshapes references, which `pipelex_run` does itself, and no model-deck tool, because a pipe's `model` field is written only while a method is authored. The workshop keeps every tool and behaviour it had before the console became the connector. What changed there is its server name, its instructions, the sentences in its tool texts that described the console, and `mthds_validate`'s `include_graph`, which was dropped because the workshop never returned a graph.
 
 **One tool name means one contract.** A name both servers registered would have to carry the same input schema, output schema and annotations on both, which `tests/tool-names.test.ts` enforces; when two servers' contracts for a tool diverge, the tool gets a different name on one of them. Since the console's tools became `pipelex_*`, no name is shared, and the test is what keeps a future shared name honest. The description is outside that rule, because it is how each server tells its own audience when to call the tool.
 
@@ -489,7 +490,7 @@ The walk stops *attempting* at the count, stops *inlining* at the first picture 
 **Server instructions**: Each server sets a short MCP `instructions` string that hosts surface to the model. It is the map, not the manual, and it is front-loaded, because a host that cuts keeps the head: it opens with what the server is for and the order of the steps, states the ways to name a method once, and ends with the rules that hold everywhere — a run spends inference credit, and a picture the image tool returns stays in the conversation for every turn that follows, so it is shown when someone wants to look at it rather than by reflex. The instructions embed no catalog, because the console's auth is request-scoped and a host may cache instructions. Both servers' instructions tell the model to use the plugin's `mthds_*` tools for all method work when both servers are present, and never to mix the two (see Two servers, two contracts). Beyond that, each server's text says what only it does:
 
 - **The console's** open with "The Pipelex connector runs executable AI methods…", give the flow — `pipelex_list_methods`, `pipelex_show_method`, `pipelex_upload_attachments` when the user attached files, `pipelex_run`, the status and results tools, `pipelex_show_images` — say that the two method-taking tools take a catalog id or a published address, prompt a catalog search proactively as well as reactively (a saved method may fit the task), say what a file input takes, and close with one sentence that depends on the host and is chosen per handshake (see The handshake, in the console's part).
-- **The workshop's** open with "This is the Pipelex plugin's local workshop…", give the flow — `mthds_list_methods`, `mthds_validate`, `mthds_inputs_template`, `mthds_prepare_inputs`, `mthds_run`, the status and results tools, then `mthds_show_images` or `mthds_download_artifacts` — name `mthds_codegen` and the catalog pair, state the three ways to name a method once for every method-taking tool, prefer the `{ path }` file form, prompt a catalog search reactively only, and say there are no views.
+- **The workshop's** open with "This is the Pipelex plugin's local workshop…", give the flow — `mthds_list_methods`, `mthds_validate`, `mthds_inputs_template`, `mthds_prepare_inputs`, `mthds_run`, the status and results tools, then `mthds_show_images` or `mthds_download_artifacts` — name `mthds_codegen`, the catalog pair and `mthds_models`, state the three ways to name a method once for every method-taking tool, prefer the `{ path }` file form, prompt a catalog search reactively only, and say there are no views.
 
 **The selector sentence names every method-taking tool and every selector it takes**, because a sentence that named `method_id` and omitted `method_ref` told the model a published method could not be validated, templated, prepared or run — so the by-address flow was never offered, however fully the tools supported it. Each server's contract test holds that, and holds that the step order is complete, in order, near the head of the text. Everything per-tool stays out: when to call a tool, and the contract rules needed before calling it (which forms may be combined, what an absent `method_id` means to a save), live in the tool `description`; parameter detail, such as the address grammar, lives in the field descriptions.
 
@@ -818,7 +819,7 @@ The console registers two Skybridge views; the workshop registers none.
 
 ### What the workshop registers
 
-The workshop registers, in this order: `mthds_list_methods`, `mthds_validate`, `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`, `mthds_run`, `mthds_run_status`, `mthds_run_results`, `mthds_show_images`, `mthds_download_artifacts`, `mthds_save_method` and `mthds_get_method`. It is the server for building and integrating a method: every method-taking tool takes `files` beside the two selectors, it reads the working directory the host started it in, and it writes into it. Its tools are the ones it had before the console became the connector, with the changes listed where the split is described; its instructions now say that its `mthds_*` tools are the ones to use for all method work when the connector's `pipelex_*` tools are present too.
+The workshop registers, in this order: `mthds_list_methods`, `mthds_models`, `mthds_validate`, `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`, `mthds_run`, `mthds_run_status`, `mthds_run_results`, `mthds_show_images`, `mthds_download_artifacts`, `mthds_save_method` and `mthds_get_method`. It is the server for building and integrating a method: every method-taking tool takes `files` beside the two selectors, it reads the working directory the host started it in, and it writes into it. Its tools are the ones it had before the console became the connector, with the changes listed where the split is described; its instructions now say that its `mthds_*` tools are the ones to use for all method work when the connector's `pipelex_*` tools are present too.
 
 **It registers no views.** None of its results carries the graph or the form's artifacts on `_meta`, and `available_view_specs` is always empty on every tool that declares it. The text summaries carry the whole flow, and the one picture a builder needs, the method's flowchart, reaches them as a file: `mthds_validate` writes it beside the `{ path }` files it validates, as a standalone HTML page (see The method graph page).
 
@@ -826,6 +827,8 @@ Three of its tools exist on the workshop only, because each turns on a working d
 
 - **`mthds_download_artifacts`.** It saves a run — its main output and its produced files — under the server's working directory (see Artifact Download Scope). The console has no working directory and never writes a file — its users download run outputs from the app's UI — so there the tool would have nowhere to save to.
 - **`mthds_save_method` and `mthds_get_method`** (see Catalog Write Scope). The filesystem is not optional on either side of these two: the save submits the bundle in the `{ path }` form and finishes by writing the link file that makes the next save an update rather than a duplicate, and the get exists to bring sources to disk. The console's users reach both gestures in the webapp's editor.
+
+A fourth, `mthds_models`, is the workshop's for another reason: it serves the writing of a pipe's `model` field, and a chatbot runs methods without authoring them (see Model Deck Scope).
 
 ### The files union and the path trust boundaries
 
@@ -848,6 +851,66 @@ All three gates are checked on the *submitted* items, before any read, which is 
 **Path trust boundary (write side).** The tools that write into the user's workspace — `mthds_download_artifacts` saves a run, `mthds_codegen` writes a generated tree under `output_dir`, the catalog pair pulls a method's sources and leaves a link file, `mthds_validate` writes the method graph page beside the files it read — share one containment routine, on real paths, enforced on both sides of the one `mkdir`. A lexical check refuses `..` escapes and absolute paths before the filesystem is touched; then the deepest *existing* ancestor of the target directory is real-path-checked **before** `mkdir`, so a symlink inside the workspace pointing outside cannot have directories created at its target; then the created directory is real-path-checked again, which closes the window between the two. Refusals are `input_domain` at the caller's own field (`dir`, `output_dir`). Containment is also available *without* creation, which is what lets a writer contain every destination before deciding whether to write any of them.
 
 **What the writers do NOT share is policy, and they must not.** `mthds_download_artifacts` never overwrites — neither the `main_stuff.json` it writes itself nor the files the SDK downloads beside it — because a collision there means two different files. `mthds_codegen` must overwrite its own previous output and only that, because its paths come from the engine and the lock hashes them. The method graph page takes codegen's side, for the same reason: it is regenerated on every validation and must land on the same name. One shared "write a file" helper would either suffix a regeneration or let a download clobber. Each scope states its own policy; the boundary above is all that is common.
+
+### Model Deck Scope (`mthds_models`)
+
+`mthds_models` reads the model deck, the model references a method's pipes can name in their `model` field, through `@pipelex/sdk`'s `models()` (`GET /v1/models`, the MTHDS Protocol's `ModelDeck`), and either lists it or checks one reference against it. It is read-only, has no view and no `_meta`, and spends no inference credit. It replaces what the CLI era's `mthds-agent models` and `mthds-agent check-model` gave an authoring agent, which the CLI-free plugin reaches only through this server.
+
+The public MCP input is:
+
+```ts
+{
+  category?: "llm" | "extract" | "img_gen" | "search"; // for a PipeLLM, PipeExtract, PipeImgGen, PipeSearch
+  reference?: string; // $preset, @alias, ~waterfall, a bare handle, or a preset:/alias:/waterfall:/handle: prefix
+}
+```
+
+Without `reference` the tool lists the deck; with it, it checks that reference. The category enum is closed against the protocol's `ModelCategory` in both directions, so a category the protocol gains or drops fails this repository's build rather than reaching a model unexplained.
+
+**What the deck holds.** On the Pipelex runner, the protocol's flat `models` list carries the presets, each stamped with its category, and two extensions keyed by category carry the rest: `aliases` (an alias's name to its model handle) and `waterfalls` (a waterfall's name to the handles it tries in order). The same alias name can exist in several categories pointing at different models, which is why the extensions are keyed by category and why the tool answers per category. **The deck lists no model handle as such**: a handle appears only as an alias's target or a waterfall's step.
+
+**Listing.** A listing asks the route for the category when one is given, and projects one entry per category in scope, in the protocol's order, each present even when it is empty:
+
+```ts
+{
+  status: "ok";
+  category?: ModelCategory;
+  deck: Array<{
+    category: ModelCategory;
+    presets: string[];
+    aliases: Array<{ reference: string; target: string }>;
+    waterfalls: Array<{ reference: string; fallbacks: string[] }>;
+  }>;
+}
+```
+
+Every reference is written as it is typed in a method (`$writing-factual`, `@best-gpt`, `~robust-llm`), in the runner's order. The summary repeats the deck by category, names each category's pipe type, says what each kind of reference is for and that presets are the ones to prefer, and ends with how to check a reference.
+
+**Checking.** A check parses the reference as the runner does (`ModelReference.parse`): a sigil, else a spelled-out namespace, else a bare handle. A blank reference, and a sigil or namespace with nothing after it, are `input_domain` at `reference`, refused before any call. The check then reads the **whole** deck, whatever the category, so that a reference missing from the category asked about can still be placed in the one that holds it, and answers:
+
+```ts
+{
+  status: "ok";
+  category?: ModelCategory;
+  reference: string; // the caller's, trimmed
+  kind: "preset" | "alias" | "waterfall" | "handle";
+  resolution: "resolved" | "not_found" | "unconfirmed";
+  matches: Array<{ category: ModelCategory; target?: string; fallbacks?: string[]; via?: string[] }>;
+  suggestions: string[];
+  other_kinds: string[];
+  other_categories: ModelCategory[];
+}
+```
+
+- `resolved`: the reference names something in the categories checked. `matches` says where, with an alias's model, a waterfall's steps, or, for a handle, the aliases and waterfalls that name it.
+- `not_found`: a preset, alias or waterfall the deck does not hold. This is definitive, since the deck lists every one of them.
+- `unconfirmed`: a bare handle that no alias or waterfall names. The deck cannot settle it either way, so the tool never calls a handle `not_found`. Validation checks a handle against the runner's full model list, and the summary says so.
+
+On `not_found` and `unconfirmed`, `suggestions` holds the nearest names, up to five of the same kind and then up to three of each other kind; `other_kinds` holds the same name under another sigil (`best-claude` exists as `@best-claude`); and, when a category was named, `other_categories` holds the categories where the same reference resolves (`$gen-image` checked as `llm` resolves in `img_gen`). All three are empty on `resolved`. The nearest names are difflib's `get_close_matches` at the runner's own cutoffs (0.5 within the kind, 0.7 across kinds), ported and held to Python's output, including the order of a tie, so they are the names a failed validation of the same reference suggests. The summary puts the wrong sigil first, since it is the likeliest fault.
+
+**The deck is not the account.** The deck is what the runner can route to, not what the caller's account may use: a gateway can refuse a listed model when a run starts, after validation has passed. The tool description and every summary say so. An account-level check belongs to hosted validation, not to this tool.
+
+**Malformed and failed reads.** What arrives is checked rather than trusted. A deck that is not an object, a missing `models` list, an entry without a name, and an extension that is present but shaped wrong are a non-retryable `runtime` no-verdict. An entry whose category is absent, null or unknown is skipped, as is an extension's category the tool does not know, and an absent extension reads as empty, since `aliases` and `waterfalls` are the runner's rather than the protocol's. A 400 or 422 is classified by request shape, as the catalog's is: with a category sent it is `input_domain` at `category`, and otherwise it is the platform's missing active organization, `config` at the credential. An unreachable API, a refused credential, a paywall, a missing route and a server fault take the shared arms.
 
 ### Validation Scope (`mthds_validate`)
 
@@ -1327,6 +1390,14 @@ The structured output is:
 - **Annotations**: Read-only, non-destructive, no open-world publishing.
 - **View**: none — bounded catalog metadata is read directly by the model.
 
+**Tool: `mthds_models`** — workshop only (see What the workshop registers)
+
+- **Input**: `{ category?, reference? }` — a category narrows either use; without `reference` the tool lists the deck, and with it, it checks that reference (see Model Deck Scope).
+- **Output**: `{ status, category?, deck?, reference?, kind?, resolution?, matches?, suggestions?, other_kinds?, other_categories?, errors? }` in `structuredContent`, plus a text summary that repeats the deck by category or states the check's answer, and says that the deck is what the runner can serve rather than what the account may use. No `_meta`, no `available_view_specs`.
+- **Behavior**: Reads `GET /v1/models` through the SDK, passing the category on a listing and reading the whole deck on a check. A preset, alias or waterfall the deck lacks is `not_found`; a bare handle no alias or waterfall names is `unconfirmed`, never `not_found`. A miss carries the nearest names, the same name under another sigil and, when a category was named, the categories where the reference resolves.
+- **Annotations**: Read-only, non-destructive, no open-world publishing.
+- **View**: none.
+
 **Tool: `mthds_validate`**
 
 - **Input**: `{ files?, method_ref?, method_id?, graph_page? }` — exactly one of `files` / `method_ref` / `method_id` (see Method Selectors and Validation Scope)
@@ -1461,6 +1532,13 @@ Validate MTHDS files:
 2. The assistant submits the files to `mthds_validate` — `{ path }` items, or inline contents with optional provenance URIs (see The files union).
 3. The tool returns structured validation facts plus a text summary that the assistant can use to repair the files. For `{ path }` files it has also written the method's flowchart, `method-graph.html`, beside them, and says where; the assistant tells the user where to open it when they want to see the method.
 4. The assistant may repeat the same flow after editing the submitted source content, which rewrites the page.
+
+Name a model in a method:
+
+1. The user names a model while the assistant writes or edits a method, or asks which models a pipe can use.
+2. The assistant calls `mthds_models` with the pipe's category to see the deck and offers a preset where one fits; a pipe the user named no model for keeps no `model` field.
+3. For a reference the user typed, the assistant calls `mthds_models` with `reference`. On `not_found` it offers the nearest names or the right sigil; on `unconfirmed` it writes the handle and lets validation check it.
+4. The assistant validates the method, which checks every reference against the runner's full model list. A run can still be refused a listed model by the account's gateway, which the tool has said.
 
 Prepare inputs for a method:
 
