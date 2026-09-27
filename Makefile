@@ -151,7 +151,7 @@ agent-test:
 # because the hermetic suite cannot see the failure that actually breaks this
 # server: every capability reaches @pipelex/sdk through a hand-written narrow
 # interface that the unit tests fake, so a wire-shape change on the API side
-# fails nothing at all. See CLAUDE.md -> "Detecting API drift".
+# fails nothing at all. See docs/testing.md -> "Detecting API drift".
 #
 #   smoke            - the whole path a host exercises, through the stdio shell
 #   test-e2e         - every capability's free path; WRITES PNGs to storage AND updates
@@ -316,9 +316,8 @@ clean:
 # --- The console dev loop ---
 # `make dev` runs THIS checkout's console, so `.env` is its configuration and
 # the ambient shell is not: the recipe sources `.env` ahead of `npm run dev`,
-# which lets a value in the file win over one the shell already exports. That
-# is the inverse of the live targets' precedence above, on purpose. Those are
-# aimed at an API from outside, so the shell is the override there. Here,
+# which lets a value in the file win over one the shell already exports, the
+# order the live targets above use for their own `PIPELEX_E2E_*` pair too. Here,
 # Node's `--env-file-if-exists` in `nodemon.json` cannot override an inherited
 # variable, and a `PIPELEX_BASE_URL` exported in a shell profile for other
 # tools was silently sending the console to a different deployment than the
@@ -418,8 +417,8 @@ start:
 # --- Release-only publish/deploy (break-glass) ---
 # A release ships from the merge of its pull request into main, through
 # release.yml, one server at a time: a workshop release publishes to npm, a
-# console release deploys to Alpic (see CLAUDE.md "Versioning & changelog" and
-# the /release skill). These two targets are the escape hatches for a CI outage,
+# console release deploys to Alpic (see docs/development.md "CI and releases"
+# and the /release skill). These two targets are the escape hatches for a CI outage,
 # and each ships one server only. check-release-ready demands a clean main, and
 # check-no-local-deps refuses a @pipelex file: link, which would ship a broken
 # install (npm) or fail to resolve on Alpic's build machine (deploy).

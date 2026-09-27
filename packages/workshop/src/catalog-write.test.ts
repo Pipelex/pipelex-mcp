@@ -836,7 +836,7 @@ describe("the pull writes only what it may", () => {
   });
 
   it("refuses a symlinked destination instead of writing through it", async () => {
-    // `containedInDir` is lexical, so the joined path looks contained while
+    // `containedPath` is lexical, so the joined path looks contained while
     // `writeFile` lands at the link's target — outside the workspace entirely.
     // The link's target holds exactly what the pull would write, so the
     // ownership guard finds nothing differing and passes — which is the only

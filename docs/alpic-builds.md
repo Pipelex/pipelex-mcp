@@ -17,7 +17,7 @@ The builder runs one install at the repository root, from the lockfile, and that
 - The install adds far more packages than the lockfile's production closure holds. A build of `94755a6` printed `added 732 packages`, while that commit's lockfile has only 461 entries outside `devDependencies`. The difference from the lockfile's full size is the platform-specific optional packages a Linux x64 install skips.
 - The build that follows runs `vite build` with the console's `vite.config.ts` (at the root when these builds ran, in `packages/console/` since the workspace split), which loads `@vitejs/plugin-react` and `@tailwindcss/vite` at config time. Both are declared only in `devDependencies`, and the build succeeds.
 
-So the console's build-only packages belong in its `devDependencies` (see the dependency convention in `CLAUDE.md`), and Alpic builds the console with them: in the workspace, the root install installs every member's devDependencies too. Deployments `dpl_swlz0ucxswfo5lpsadwtj` and `dpl_3akp84bj6j7456rfxn4yw` both show it.
+So the console's build-only packages belong in its `devDependencies` (see [What each package declares](architecture.md#what-each-package-declares)), and Alpic builds the console with them: in the workspace, the root install installs every member's devDependencies too. Deployments `dpl_swlz0ucxswfo5lpsadwtj` and `dpl_3akp84bj6j7456rfxn4yw` both show it.
 
 ## What the running image contains
 
