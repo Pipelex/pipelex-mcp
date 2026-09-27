@@ -92,6 +92,17 @@ const SAME_KIND_CUTOFF = 0.5;
 const OTHER_KIND_MATCHES = 3;
 const OTHER_KIND_CUTOFF = 0.7;
 
+/**
+ * The longest reference the tool takes. No model name comes near it (the
+ * longest the runner knows is about sixty characters), and a reference over
+ * three times a candidate's length cannot reach the nearest-name cutoff, so it
+ * refuses nothing a method could use. It bounds the work of the match, which
+ * is linear in the reference's length for every candidate, and it keeps the
+ * word under the 200 characters from which difflib's junk heuristic would
+ * apply, so the port below stays exact (see `similarity`).
+ */
+export const MAX_REFERENCE_LENGTH = 199;
+
 const categorySchema = z.enum(MODEL_CATEGORY_VALUES);
 
 export const mthdsModelsInputSchema = {
@@ -102,6 +113,7 @@ export const mthdsModelsInputSchema = {
     ),
   reference: z
     .string()
+    .max(MAX_REFERENCE_LENGTH)
     .optional()
     .describe(
       "A model reference to check, exactly as it would be written in a pipe's model field: $preset, @alias, ~waterfall, or a bare model handle (preset:, alias:, waterfall: and handle: prefixes work too). Omit it to list the deck instead.",
@@ -248,7 +260,7 @@ export async function readMthdsModels(
         class: "input_domain",
         ...(issue.path.length === 0 ? {} : { location: issue.path.join(".") }),
         message: issue.message,
-        hint: `Use category as one of ${MODEL_CATEGORY_VALUES.join(", ")}, and reference as text.`,
+        hint: `Use category as one of ${MODEL_CATEGORY_VALUES.join(", ")}, and reference as text of at most ${MAX_REFERENCE_LENGTH} characters.`,
         retryable: false,
       })),
     );
@@ -259,7 +271,13 @@ export async function readMthdsModels(
   if (parsedInput.data.reference !== undefined) {
     const parsed = parseModelReference(parsedInput.data.reference);
     if (!parsed.ok) {
-      return errorResult("Model reference was not checked: it is empty.", [parsed.error]);
+      // The headline names the fault the error names: a bare "$" is not empty,
+      // and a model told it sent nothing would send the same "$" again.
+      const fault =
+        parsedInput.data.reference.trim() === ""
+          ? "it is empty"
+          : "it has no name after its prefix";
+      return errorResult(`Model reference was not checked: ${fault}.`, [parsed.error]);
     }
     reference = parsed.reference;
   }
@@ -598,8 +616,9 @@ export function closeMatches(
  * strings share in their matching blocks, over their total length. The blocks
  * are found as difflib finds them — the longest common run, earliest in `a` and
  * then in `b` on a tie, then the same on each side of it. difflib's junk
- * heuristic applies only from 200 characters, which no model name reaches, so it
- * is left out.
+ * heuristic is left out: `get_close_matches` applies it to the word, which is
+ * `b` here, and only from 200 characters, while `MAX_REFERENCE_LENGTH` keeps a
+ * reference, and so the name it carries, below that.
  */
 export function similarity(a: string, b: string): number {
   const left = Array.from(a);

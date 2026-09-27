@@ -861,7 +861,7 @@ The public MCP input is:
 ```ts
 {
   category?: "llm" | "extract" | "img_gen" | "search"; // for a PipeLLM, PipeExtract, PipeImgGen, PipeSearch
-  reference?: string; // $preset, @alias, ~waterfall, a bare handle, or a preset:/alias:/waterfall:/handle: prefix
+  reference?: string; // $preset, @alias, ~waterfall, a bare handle, or a preset:/alias:/waterfall:/handle: prefix; at most 199 characters
 }
 ```
 
@@ -886,7 +886,7 @@ Without `reference` the tool lists the deck; with it, it checks that reference. 
 
 Every reference is written as it is typed in a method (`$writing-factual`, `@best-gpt`, `~robust-llm`), in the runner's order. The summary repeats the deck by category, names each category's pipe type, says what each kind of reference is for and that presets are the ones to prefer, and ends with how to check a reference.
 
-**Checking.** A check parses the reference as the runner does (`ModelReference.parse`): a sigil, else a spelled-out namespace, else a bare handle. A blank reference, and a sigil or namespace with nothing after it, are `input_domain` at `reference`, refused before any call. The check then reads the **whole** deck, whatever the category, so that a reference missing from the category asked about can still be placed in the one that holds it, and answers:
+**Checking.** A check parses the reference as the runner does (`ModelReference.parse`): a sigil, else a spelled-out namespace, else a bare handle. A blank reference, a sigil or namespace with nothing after it, and a reference longer than 199 characters are `input_domain` at `reference`, refused before any call, and the summary names which of the faults it was. The bound refuses nothing a method could name, since no model name comes near it, and it bounds the work of the nearest-name match, which grows with the reference's length. The check then reads the **whole** deck, whatever the category, so that a reference missing from the category asked about can still be placed in the one that holds it, and answers:
 
 ```ts
 {

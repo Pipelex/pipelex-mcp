@@ -220,7 +220,7 @@ Lists the model deck, the references a pipe's `model` field can name, or checks 
 ```ts
 {
   category?: "llm" | "extract" | "img_gen" | "search";
-  reference?: string;
+  reference?: string; // at most 199 characters
 }
 ```
 

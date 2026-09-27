@@ -5,6 +5,7 @@ import { MODEL_CATEGORIES } from "mthds/protocol";
 import type { ModelCategory, ModelDeck } from "mthds/protocol";
 
 import {
+  MAX_REFERENCE_LENGTH,
   MODEL_CATEGORY_VALUES,
   closeMatches,
   modelsToolResult,
@@ -359,19 +360,39 @@ describe("checking a reference", () => {
     });
   });
 
-  it.each(["", "   ", "$", "@", "~", "preset:", "handle:"])(
-    "refuses %j as an empty reference without calling the API",
-    async (reference) => {
-      const { result, recorded } = await check(reference);
+  it.each([
+    ["", "it is empty"],
+    ["   ", "it is empty"],
+    ["$", "it has no name after its prefix"],
+    ["@", "it has no name after its prefix"],
+    ["~", "it has no name after its prefix"],
+    ["preset:", "it has no name after its prefix"],
+    ["handle:", "it has no name after its prefix"],
+  ])("refuses %j without calling the API, saying %s", async (reference, fault) => {
+    const { result, recorded } = await check(reference);
 
-      expect(recorded.calls).toEqual([]);
-      expect(firstError(result)).toMatchObject({
-        class: "input_domain",
-        location: "reference",
-        retryable: false,
-      });
-    },
-  );
+    expect(recorded.calls).toEqual([]);
+    expect(result.summary).toBe(`Model reference was not checked: ${fault}.`);
+    expect(firstError(result)).toMatchObject({
+      class: "input_domain",
+      location: "reference",
+      retryable: false,
+    });
+  });
+
+  it("refuses a reference longer than the bound without calling the API", async () => {
+    const atBound = await check(`$${"a".repeat(MAX_REFERENCE_LENGTH - 1)}`);
+    expect(atBound.structured).toMatchObject({ status: "ok", resolution: "not_found" });
+
+    const { result, recorded } = await check(`$${"a".repeat(MAX_REFERENCE_LENGTH)}`);
+    expect(recorded.calls).toEqual([]);
+    expect(firstError(result)).toMatchObject({
+      class: "input_domain",
+      location: "reference",
+      retryable: false,
+    });
+    expect(firstError(result)?.hint).toContain(`at most ${MAX_REFERENCE_LENGTH} characters`);
+  });
 });
 
 describe("parseModelReference", () => {
