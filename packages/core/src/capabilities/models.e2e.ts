@@ -42,11 +42,19 @@ describe("mthds_models against the live API", () => {
     expect(listing.deck.flatMap((each) => each.aliases).length).toBeGreaterThan(0);
   });
 
-  it("asks the route for one category and gets that category alone", async () => {
-    const listing = await liveListing("img_gen");
+  it("asks the route for each category and gets that category's share of the whole deck", async () => {
+    const whole = await liveListing();
 
-    expect(listing.category).toBe("img_gen");
-    expect(listing.deck.map((each) => each.category)).toEqual(["img_gen"]);
+    for (const category of MODEL_CATEGORY_VALUES) {
+      const listing = await liveListing(category);
+      // The tool scopes a listing to its category itself, so the shape alone
+      // proves nothing: the entry is held to the unfiltered deck's, which
+      // catches a `?type=` filter that drops or mislabels what it should keep.
+      expect(listing.category).toBe(category);
+      expect(listing.deck, category).toEqual(
+        whole.deck.filter((each) => each.category === category),
+      );
+    }
   });
 
   it("resolves a listed preset and suggests it for a mistyped one", async () => {
