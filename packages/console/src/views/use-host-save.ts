@@ -21,6 +21,8 @@ function useHostSaveSupport(): HostSaveSupport {
       .then((app) => {
         if (live) setSupport(app.getHostCapabilities()?.downloadFile ? "download" : "open-link");
       })
+      // A failed handshake resolves with no capabilities and lands on
+      // open-link above; this covers a bridge that rejects instead.
       .catch(() => {
         if (live) setSupport("open-link");
       });
@@ -39,14 +41,17 @@ export function useHostSave(): { saveFiles: SaveFiles; downloads: DownloadDispla
   const support = useHostSaveSupport();
   const { download } = useDownload();
   const openExternal = useOpenExternal();
-  return useMemo(
-    () => ({
+  return useMemo(() => {
+    // A stored file's link is presigned, and its signature covers every query
+    // parameter. ChatGPT appends `redirectUrl=<the conversation>` to a link it
+    // opens unless told not to, whatever `redirect_domains` says, and S3 then
+    // answers SignatureDoesNotMatch (measured 2026-09-28). An MCP Apps host
+    // ignores the option.
+    const openLink = (href: string) => openExternal(href, { redirectUrl: false });
+    return {
       saveFiles:
-        support === "download"
-          ? saveThroughHostDownload(download)
-          : saveThroughOpenLink((href) => openExternal(href)),
+        support === "download" ? saveThroughHostDownload(download) : saveThroughOpenLink(openLink),
       downloads: downloadDisplayFor(support),
-    }),
-    [support, download, openExternal],
-  );
+    };
+  }, [support, download, openExternal]);
 }
