@@ -6,6 +6,7 @@
  */
 
 import { failureDisplayOf } from "@pipelex/mcp-core/capabilities/run-failure.js";
+import { START_MAY_HAVE_RUN_HINT } from "@pipelex/mcp-core/capabilities/start-outcome.js";
 import type { RunFailureDisplay } from "@pipelex/mcp-core/capabilities/run-failure.js";
 
 import type { RunPollingSnapshot } from "./use-run-polling.js";
@@ -129,7 +130,14 @@ export function runStatusLineFor({
   hasResults: boolean;
   resultsError: string | null;
 }): RunStatusLine | null {
-  if (startError) return { text: `Could not start the run: ${startError}`, tone: "error" };
+  if (startError) {
+    // The start error carries its hint; a may-have-run one must not open by
+    // saying the run did not start, which is what invites a second paid run.
+    const prefix = startError.includes(START_MAY_HAVE_RUN_HINT)
+      ? "The run may have started"
+      : "Could not start the run";
+    return { text: `${prefix}: ${startError}`, tone: "error" };
+  }
   if (starting) return { text: "Starting the run…", tone: "info" };
   if (!runId || hasResults) return null;
   if (polling.phase === "hard_error") {

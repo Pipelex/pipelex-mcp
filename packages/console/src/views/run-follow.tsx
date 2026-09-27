@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { useDisplayMode, useLayout, useSendFollowUpMessage, useViewState } from "skybridge/web";
 
 import { failureDisplayOf } from "@pipelex/mcp-core/capabilities/run-failure.js";
+import { startMayHaveRunError } from "@pipelex/mcp-core/capabilities/start-outcome.js";
 import type { RunFailureDisplay } from "@pipelex/mcp-core/capabilities/run-failure.js";
 
 import { useCallTool, useToolInfo } from "../helpers.js";
@@ -149,15 +150,22 @@ function RunFollow() {
 
   if (!runId) {
     const startError = output?.errors?.[0];
+    // A start that may have run must never read as one that did not: the next
+    // step either reader takes after "did not start" is a second paid run.
+    const mayHaveRun = startMayHaveRunError(startError);
     return (
       <Card
-        title="Run did not start"
+        title={mayHaveRun ? "Run may have started" : "Run did not start"}
         note={startError?.message ?? "The run could not be started."}
         hint={startError?.hint}
         tone="error"
         maxHeight={maxHeight}
         dark={dark}
-        llm="The run did not start; the tool result carries the error details."
+        llm={
+          mayHaveRun
+            ? "The start failed after the request may have reached the server, so the run may have started; check before starting it again. The tool result carries the details."
+            : "The run did not start; the tool result carries the error details."
+        }
       />
     );
   }
