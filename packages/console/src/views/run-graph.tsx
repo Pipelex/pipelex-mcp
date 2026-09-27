@@ -378,10 +378,12 @@ function RunGraph() {
     })();
   };
 
-  // The dry-run graph is built for the bundle's declared main pipe; the form
-  // defaults to the entry pipe. Say so when they are not the same pipe. The
-  // executed graph gets no caption: it is of the pipe that ran, which is the
-  // one the results below it are for.
+  // The dry-run graph is of the pipe the dry run traced: the entry pipe on a
+  // current deployment, the bundle's declared main pipe on one older than
+  // pipelex-api 0.27.5. The form defaults to the entry pipe, so say so when
+  // they are not the same pipe, which only that older deployment produces.
+  // The executed graph gets no caption: it is of the pipe that ran, which is
+  // the one the results below it are for.
   const graphCaption =
     hasGraph && executedGraph === null
       ? graphCaptionFor(

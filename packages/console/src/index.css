@@ -49,7 +49,16 @@
    Every other colour the kernel reads (`background`, `primary`, `muted-foreground`, …)
    is one alpic defines under the same name, so re-theming alpic moves the form with it.
    If a kernel release starts using a colour alpic lacks, `npm run check:cascade` names
-   the missing class; map it here the same way. */
+   the missing class; map it here the same way.
+
+   ONE EXCEPTION, inside RunPanel: its `<form>` sets the graph palette inline, and that
+   palette defines `--color-accent` (`#8BE9FD` dark, `#0284c7` light). Every `bg-accent`
+   variant compiles to `var(--color-accent)` resolved on the element, so under the form
+   it takes the graph's colour in BOTH themes while `accent-foreground` stays alpic's.
+   Nothing reads the pair there today — the kernel's `SelectItem` portals to
+   `document.body`, and `EnumField` overrides the toggle's accent classes — but a
+   control that stops overriding them, or a `SelectContent` given a `container`, would
+   paint the graph's accent under alpic's foreground. */
 @theme inline {
   --color-input: var(--color-border);
   --color-secondary: var(--color-muted);

@@ -25,8 +25,10 @@ import { errorMessage, isInsideRoot, isMissingPathError } from "./workspace-boun
  *
  * The viewer and elkjs load from jsDelivr, pinned by exact version and by
  * Subresource Integrity, so the page keeps drawing the same way and the browser
- * refuses a file that changed. Nothing of mthds-ui is vendored into the
- * workshop's tarball, which is why the page needs a connection to draw.
+ * refuses a file that changed. Of mthds-ui, only the embed serializer from
+ * `@pipelex/mthds-ui/static-graph` is inlined into the workshop's
+ * `dist/main.js`; the viewer and elkjs are not in the tarball, which is why
+ * the page needs a connection to draw.
  *
  * The write policy is `mthds_codegen`'s, not `mthds_download_artifacts`': the
  * page is regenerated on every validation and must land on the same name, so it
