@@ -3,6 +3,7 @@ import type { DownloadDisplay } from "@pipelex/mthds-ui/form/react";
 import { useEffect, useMemo, useState } from "react";
 import { McpAppBridge, useDownload, useOpenExternal } from "skybridge/web";
 
+import { fileRelayLink } from "./file-relay.js";
 import { downloadDisplayFor, saveThroughHostDownload, saveThroughOpenLink } from "./host-save.js";
 import type { HostSaveSupport } from "./host-save.js";
 
@@ -42,12 +43,10 @@ export function useHostSave(): { saveFiles: SaveFiles; downloads: DownloadDispla
   const { download } = useDownload();
   const openExternal = useOpenExternal();
   return useMemo(() => {
-    // A stored file's link is presigned, and its signature covers every query
-    // parameter. ChatGPT appends `redirectUrl=<the conversation>` to a link it
-    // opens unless told not to, whatever `redirect_domains` says, and S3 then
-    // answers SignatureDoesNotMatch (measured 2026-09-28). An MCP Apps host
-    // ignores the option.
-    const openLink = (href: string) => openExternal(href, { redirectUrl: false });
+    // A stored file opens through the relay page, since ChatGPT breaks a
+    // presigned link it opens directly (`file-relay.ts`).
+    const openLink = (href: string) =>
+      openExternal(fileRelayLink(window.skybridge.serverUrl, href));
     return {
       saveFiles:
         support === "download" ? saveThroughHostDownload(download) : saveThroughOpenLink(openLink),

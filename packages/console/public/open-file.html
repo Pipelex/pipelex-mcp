@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="robots" content="noindex" />
+    <title>Pipelex file</title>
+  </head>
+  <body>
+    <p id="status">Opening the file…</p>
+    <script>
+      // The console's views open a stored file through this page on a host that
+      // takes no download request (src/views/file-relay.ts). The file's link is
+      // presigned, and its signature covers every query parameter, while ChatGPT
+      // appends `redirectUrl=<the conversation>` to any link a view opens,
+      // `redirectUrl: false` or not. So the view opens this page with the link
+      // percent-encoded in the fragment, where the parameter cannot reach it and
+      // no server logs it, and the page replaces itself with the link unchanged.
+      //
+      // Only a link to one of the app buckets is followed, so the page is no open
+      // redirect. The list is `RUN_OUTPUT_SOURCES` in src/hosted/app-buckets.ts,
+      // and src/views/file-relay.test.ts fails when the two differ.
+      var FILE_SOURCES = [
+        "https://pipelex-app-dev.s3.amazonaws.com",
+        "https://pipelex-app-staging.s3.amazonaws.com",
+        "https://pipelex-app-prod.s3.amazonaws.com",
+        "https://pipelex-app-dev.s3.us-west-2.amazonaws.com",
+        "https://pipelex-app-staging.s3.us-west-2.amazonaws.com",
+        "https://pipelex-app-prod.s3.us-west-2.amazonaws.com"
+      ];
+
+      // A host that appends by concatenation rather than to the query puts its
+      // parameter after the fragment, and the encoded link holds no raw `?` or
+      // `&`, so the link is everything before the first one.
+      var fragment = location.hash.slice(1);
+      var end = fragment.search(/[?&]/);
+      var fileLink = null;
+      try {
+        fileLink = decodeURIComponent(end === -1 ? fragment : fragment.slice(0, end));
+        var parsed = new URL(fileLink);
+        if (parsed.protocol !== "https:" || FILE_SOURCES.indexOf(parsed.origin) === -1) {
+          fileLink = null;
+        }
+      } catch (error) {
+        fileLink = null;
+      }
+
+      if (fileLink !== null) {
+        location.replace(fileLink);
+      } else {
+        document.getElementById("status").textContent =
+          "This link does not point to a Pipelex file.";
+      }
+    </script>
+  </body>
+</html>
