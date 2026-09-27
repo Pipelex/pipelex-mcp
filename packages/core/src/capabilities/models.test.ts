@@ -462,23 +462,29 @@ describe("failures", () => {
     }
   });
 
-  it("blames the category for a bad request that carried one, and the credential otherwise", async () => {
-    const withCategory = await readMthdsModels(
+  it("blames the category for the runner's 422, and the credential for the platform's 400", async () => {
+    const refusedCategory = await readMthdsModels(
       { category: "llm" },
       contextFailing(apiError(422, "Invalid model category")),
     );
-    expect(firstError(withCategory)).toMatchObject({
+    expect(firstError(refusedCategory)).toMatchObject({
       class: "input_domain",
       location: "category",
     });
 
-    // A check sends no category, whatever the caller named.
-    const check = await readMthdsModels(
-      { category: "llm", reference: "$vision" },
-      contextFailing(apiError(400, "No active organization")),
-    );
-    expect(firstError(check)).toMatchObject({ class: "config", location: "PIPELEX_API_KEY" });
-    expect(firstError(check)?.hint).toContain("active organization");
+    // A missing organization is the credential's fault, with a valid category
+    // on the wire or none: a check sends no category, whatever the caller named.
+    for (const input of [
+      { category: "llm" as const },
+      { category: "llm" as const, reference: "$vision" },
+    ]) {
+      const orgless = await readMthdsModels(
+        input,
+        contextFailing(apiError(400, "Organization context required")),
+      );
+      expect(firstError(orgless)).toMatchObject({ class: "config", location: "PIPELEX_API_KEY" });
+      expect(firstError(orgless)?.hint).toContain("active organization");
+    }
   });
 
   it("names the plan on a paywall, the route on a 404 and retries a server fault", async () => {

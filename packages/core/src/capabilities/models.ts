@@ -27,6 +27,7 @@
  * them, so it never writes a `model` field.
  */
 
+import { ApiResponseError } from "@pipelex/sdk";
 import type { ModelCategory, ModelDeck } from "mthds/protocol";
 import { z } from "zod";
 
@@ -292,7 +293,7 @@ export async function readMthdsModels(
     // becomes a classified error rather than a rejected handler.
     wire = await modelsClient(context).models(reference === undefined ? category : undefined);
   } catch (err) {
-    const error = classifyError(err, modelsErrorOptions(context, reference, category));
+    const error = classifyError(err, modelsErrorOptions(context, err));
     return errorResult(summaryForToolError(error, ERROR_SUMMARIES), [error]);
   }
 
@@ -799,29 +800,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * The 400/422 arm is picked by request shape, as the catalog's is. With a
- * category on the wire the likelier fault is the category, which the runner
- * refuses as a 422, although the enum this tool declares keeps that out of reach
- * unless the two drift apart. Without one, the only bad request left is the
- * platform's missing active-organization context, which is a credential fault.
+ * The 400/422 arm is picked by status, as the upload grant's is, because the
+ * two refusals come from two layers. A 422 is the runner's, and its only one on
+ * this route is a `type` it does not know, which only a listing with a category
+ * sends, and which the enum this tool declares keeps out of reach unless the two
+ * drift apart. A 400 is the platform's missing active-organization refusal: the
+ * route takes a user credential alone today and never answers it, but the
+ * refusal is the platform's on every organization-scoped route, and it would
+ * arrive with a category or without one, so the category must not take the
+ * blame for it.
  */
-function modelsErrorOptions(
-  context: ModelsContext,
-  reference: ParsedReference | undefined,
-  category: ModelCategory | undefined,
-): ClassifyErrorOptions {
-  const sentCategory = reference === undefined && category !== undefined;
+function modelsErrorOptions(context: ModelsContext, err: unknown): ClassifyErrorOptions {
+  const orgless = err instanceof ApiResponseError && err.status === 400;
   return {
     route: "/v1/models",
-    badRequest: sentCategory
+    badRequest: orgless
       ? {
-          location: "category",
-          hint: `The API refused the category. Use one of ${MODEL_CATEGORY_VALUES.join(", ")}, or omit it to list every category.`,
-        }
-      : {
           class: "config",
           location: context.authError?.location ?? "PIPELEX_API_KEY",
           hint: "The model deck needs an active organization context. Use a platform key minted for the intended organization, then retry.",
+        }
+      : {
+          location: "category",
+          hint: `The API refused the category. Use one of ${MODEL_CATEGORY_VALUES.join(", ")}, or omit it to list every category.`,
         },
     auth: context.authError,
   };
