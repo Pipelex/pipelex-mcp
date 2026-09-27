@@ -55,13 +55,9 @@
             "maximum": 9007199254740991
           },
           "next_cursor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "methods": {
@@ -79,13 +75,9 @@
                   "type": "boolean"
                 },
                 "description": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
+                  "type": [
+                    "string",
+                    "null"
                   ]
                 },
                 "description_truncated": {
@@ -685,15 +677,11 @@
                 "description": "The package's resolved full address."
               },
               "tag": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "The requested tag; null for a bare address (default branch at HEAD)."
+                "description": "The requested tag; null for a bare address (default branch at HEAD).",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "commit_sha": {
                 "type": "string",
@@ -838,26 +826,18 @@
           },
           "retry_after_seconds": {
             "description": "Server backoff hint — check again after this many seconds.",
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "number",
+              "null"
             ]
           },
           "created_at": {
             "type": "string"
           },
           "finished_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "failure": {
@@ -1023,13 +1003,9 @@
           },
           "retry_after_seconds": {
             "description": "State \"running\" only — check again after this many seconds.",
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "number",
+              "null"
             ]
           },
           "run_status": {
@@ -1142,45 +1118,33 @@
                 "description": "Which reading the totals describe — read it first: \"records\" (inference calls were recorded), \"no_inference\" (the run made no inference, so the cost is 0), \"unavailable\" (the run reported no usage; the totals are null and assembly_error says whether that is because usage assembly broke)."
               },
               "cost_usd": {
-                "anyOf": [
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "Σ per-call USD cost across the run, null-aware: under state \"records\", null when NO call was priced (own-GPU / mock / dry run); 0 under \"no_inference\"; null under \"unavailable\", where nothing is known."
+                "description": "Σ per-call USD cost across the run, null-aware: under state \"records\", null when NO call was priced (own-GPU / mock / dry run); 0 under \"no_inference\"; null under \"unavailable\", where nothing is known.",
+                "type": [
+                  "number",
+                  "null"
+                ]
               },
               "cost_partial": {
                 "description": "True when some calls were priced and others were not — cost_usd is then a lower bound.",
                 "type": "boolean"
               },
               "tokens": {
-                "anyOf": [
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "The run's input tokens plus its output tokens; null when no call reported either. Cached-input and reasoning subsets are excluded to avoid double-counting."
+                "description": "The run's input tokens plus its output tokens; null when no call reported either. Cached-input and reasoning subsets are excluded to avoid double-counting.",
+                "type": [
+                  "number",
+                  "null"
+                ]
               },
               "calls": {
                 "type": "number",
                 "description": "Number of inference calls recorded (0 → the run did no inference)."
               },
               "assembly_error": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "The runner's usage-assembly failure for this run (the SDK's usage_assembly_error); null when assembly did not fail."
+                "description": "The runner's usage-assembly failure for this run (the SDK's usage_assembly_error); null when assembly did not fail.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -1322,13 +1286,9 @@
           },
           "retry_after_seconds": {
             "description": "State \"running\" only — check again after this many seconds.",
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "number",
+              "null"
             ]
           },
           "run_status": {

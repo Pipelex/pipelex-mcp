@@ -63,7 +63,7 @@ describe.skipIf(!SERVES_SELECTORS)("pipelex_show_method (live)", () => {
     expectViewArtifacts(result._meta as Record<string, unknown>);
   });
 
-  it("shows a published method by address, with its template and its form", async () => {
+  it("shows a published method by address, with its template and every view artifact", async () => {
     // `/v1/validate` resolves an address through the execution-locus gate, so
     // this is the Python-free package (see `PYTHON_FREE_METHOD_REF`).
     const result = showToolResult(
@@ -79,14 +79,10 @@ describe.skipIf(!SERVES_SELECTORS)("pipelex_show_method (live)", () => {
     // why naming it is the point), and the template is for that pipe.
     expect(content.pipe_ref).toBe("documents.extract_document_markdown");
     expect(Object.keys(content.inputs ?? {}).length).toBeGreaterThan(0);
-    // No graph here, and that is the API's documented answer rather than a
-    // loss on this side: the route dry-runs the bundle's own `main_pipe`, and
-    // this package declares its entry pipe only in its manifest, so
-    // `graph_spec` is null while `default_pipe_ref` names the pipe. The form
-    // and the template still come, and the view renders the form alone. The
-    // ask to graph the manifest's entry pipe is L-260925-012c15; when it
-    // lands, this becomes `expectViewArtifacts` like the by-id leg.
-    expectFormArtifacts(result._meta as Record<string, unknown>);
-    expect(content.available_view_specs).toEqual(["input_form"]);
+    // This package declares its entry pipe only in its manifest, and the route
+    // dry-runs that pipe when the bundle names no `main_pipe`, so the graph
+    // comes as it does for a saved method.
+    expect(content.available_view_specs).toEqual(["dry_run_graph", "input_form"]);
+    expectViewArtifacts(result._meta as Record<string, unknown>);
   });
 });

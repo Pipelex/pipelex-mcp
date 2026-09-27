@@ -45,9 +45,10 @@ export function selectedPipeFor(
  * The pipe the graph was built for, as a namespaced `pipe_ref`, read off the
  * graph itself: the dry run stamps `pipeline_ref.domain` and
  * `pipeline_ref.main_pipe` with the pipe it traced. On `pipelex_show_method` that is
- * the bundle blueprint's declared `main_pipe` — the report's graph is
- * manifest-blind — so for a `method_ref` package whose `METHODS.toml` names a
- * different entry pipe it is NOT the pipe `_meta.main_pipe_ref` names.
+ * the entry pipe `_meta.main_pipe_ref` names, manifest included, on a current
+ * deployment; one older than pipelex-api 0.27.5 traces the bundle blueprint's
+ * declared `main_pipe` instead, so there, for a `method_ref` package whose
+ * `METHODS.toml` names a different entry pipe, the two differ.
  *
  * Both halves must be non-empty strings, the same test pipelex applies when it
  * reads the ref back; anything less is `null`, and the view then says nothing
@@ -67,11 +68,13 @@ export function graphPipeRefOf(graphSpec: unknown): string | null {
  * The caption under the graph when it shows a different pipe from the entry
  * pipe, or `null` when there is nothing to say.
  *
- * The graph is the bundle's declared main pipe; the entry pipe
+ * The graph is the pipe the dry run traced, which a deployment older than
+ * pipelex-api 0.27.5 takes from the bundle's declared main pipe; the entry pipe
  * (`_meta.main_pipe_ref`) is what a selector-less run executes and what the
- * form opens on. When the two agree — every bundle without a manifest that
- * overrides its entry — nothing is rendered. When they differ the graph is kept
- * and labelled rather than withheld, and both refs are spelled out.
+ * form opens on. When the two agree — always on a current deployment, and on an
+ * older one for every bundle without a manifest that overrides its entry —
+ * nothing is rendered. When they differ the graph is kept and labelled rather
+ * than withheld, and both refs are spelled out.
  *
  * The second sentence follows the form actually on screen, so the caption stays
  * true after a click: it says the form runs the entry pipe only while it does

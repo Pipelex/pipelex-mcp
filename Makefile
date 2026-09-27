@@ -519,14 +519,16 @@ te: test-e2e
 # The per-package targets act on one, and take VERSION=x.y.z to pin an npm version.
 #
 # Each package is installed into exactly the workspace members that declare it,
-# never into the root: @pipelex/mthds-ui into the console alone, whose views are
-# its only importer, and @pipelex/sdk into the core, the workshop and the
-# console, which carry the same range (tests/workspace-manifests.test.ts fails
-# when they drift apart). npm updates an entry in the block it already sits in,
-# so a bump keeps @pipelex/sdk in `dependencies` everywhere. What reaches every
-# `npx @pipelex/mcp` install is the workshop's `dependencies` alone, so read the
-# diff of packages/workshop/package.json before committing a bump.
-UI_WORKSPACES := --workspace @pipelex/mcp-console
+# never into the root, and both go into all three members, which carry the same
+# range (tests/workspace-manifests.test.ts fails when they drift apart). npm
+# updates an entry in the block it already sits in, so a bump keeps @pipelex/sdk
+# in `dependencies` everywhere and @pipelex/mthds-ui in the core's and the
+# workshop's `devDependencies`: the console's views import it at runtime, while
+# the core imports only its `./static-graph` embed serializer, which tsup inlines
+# into the workshop's bundle. What reaches every `npx @pipelex/mcp` install is the
+# workshop's `dependencies` alone, so read the diff of
+# packages/workshop/package.json before committing a bump.
+UI_WORKSPACES := --workspace @pipelex/mcp-core --workspace @pipelex/mcp --workspace @pipelex/mcp-console
 SDK_WORKSPACES := --workspace @pipelex/mcp-core --workspace @pipelex/mcp --workspace @pipelex/mcp-console
 
 use-local: use-local-ui use-local-sdk
@@ -543,7 +545,7 @@ use-npm-ui:
 	@VERSION="$${VERSION:-latest}" && \
 	echo "Installing @pipelex/mthds-ui@$$VERSION from npm" && \
 	npm install $(UI_WORKSPACES) @pipelex/mthds-ui@$$VERSION && \
-	echo "Switched to npm @pipelex/mthds-ui@$$VERSION. Review the diff, then commit packages/console/package.json + package-lock.json."
+	echo "Switched to npm @pipelex/mthds-ui@$$VERSION. Review the diff, then commit packages/*/package.json + package-lock.json."
 
 use-local-sdk:
 	@if [ ! -d $(PIPELEX_SDK_DIR) ]; then echo "ERROR: $(PIPELEX_SDK_DIR) not found. Clone it next to pipelex-mcp."; exit 1; fi
