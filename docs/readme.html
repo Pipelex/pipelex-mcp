@@ -392,6 +392,11 @@
             <td class="narrow"><span class="chip console">console</span> <span class="chip console">+ view</span></td>
           </tr>
           <tr>
+            <td class="tool">mthds_models</td>
+            <td>The model references a pipe can name — presets, aliases, waterfalls — by category, or one reference checked before it goes into a method, with the nearest names when it does not resolve.</td>
+            <td class="narrow"><span class="chip local">workshop</span></td>
+          </tr>
+          <tr>
             <td class="tool">mthds_validate</td>
             <td>Stable verdict — <code>is_valid</code>, <code>is_runnable</code>, structured errors, pending signatures, the main pipe's signature — from files, an address or a method id.</td>
             <td class="narrow"><span class="chip local">workshop</span></td>
@@ -539,7 +544,7 @@
         </thead>
         <tbody>
           <tr><td class="narrow"><strong>Ships as</strong></td><td><code>@pipelex/mcp</code> on npm, spawned with <code>npx</code>, server name <code>pipelex-plugin</code></td><td>A URL you add as a connector, server name <code>pipelex</code></td></tr>
-          <tr><td class="narrow"><strong>Tools</strong></td><td><code>mthds_*</code>: list, validate, template, codegen, prepare, run, images, download, save and pull</td><td><code>pipelex_*</code>: list, show, upload attachments, run, images</td></tr>
+          <tr><td class="narrow"><strong>Tools</strong></td><td><code>mthds_*</code>: list, models, validate, template, codegen, prepare, run, images, download, save and pull</td><td><code>pipelex_*</code>: list, show, upload attachments, run, images</td></tr>
           <tr><td class="narrow"><strong>Files</strong></td><td><code>{ path }</code> — reads them off disk, near-constant token cost, diagnostics point at real files</td><td>None — it names a method by its catalog id or its published address</td></tr>
           <tr><td class="narrow"><strong>Assets</strong></td><td>Uploads local paths, <code>data:</code> URLs and bytes</td><td>Pass-through only (<code>http(s)</code> / <code>pipelex-storage://</code>), checked by <code>pipelex_run</code> — plus chat attachments on ChatGPT and files picked in the run form</td></tr>
           <tr><td class="narrow"><strong>Views</strong></td><td>None — tools-first, reports text + structured results</td><td><code>run-graph</code> (interactive method graph) and <code>run-follow</code> (live run status)</td></tr>

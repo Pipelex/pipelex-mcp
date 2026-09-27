@@ -20,8 +20,12 @@
  * The check mirrors the runner's own (`pipelex/cogt/models/model_suggestion.py`,
  * behind `pipelex-agent check-model` and validation's "did you mean"): the same
  * sigils, the same namespace prefixes, and `closeMatches`, a port of difflib's
- * `get_close_matches`, at the same cutoffs, so the names suggested here are the
- * ones a failed validation of the same reference would suggest.
+ * `get_close_matches`, at the same cutoffs. The candidates are where the two
+ * part. For a preset, an alias or a waterfall checked in one category they are
+ * the runner's, so the names suggested here are the ones a failed validation of
+ * the same reference would suggest. But the runner matches a handle against
+ * every model of the pipe's type, which the deck does not list, and it checks
+ * within one type, where a check here with no category pools every category.
  *
  * The console has no such tool: a chatbot runs methods rather than authoring
  * them, so it never writes a `model` field.
