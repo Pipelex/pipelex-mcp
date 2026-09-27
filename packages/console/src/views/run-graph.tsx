@@ -80,10 +80,11 @@ type RunGraphViewState = {
  * pipe node in the graph switches it. With no entry pipe settled no form opens on its own —
  * `selectedPipeFor` never substitutes a pipe of the view's own choosing — but
  * the artifacts still ride, so clicking a pipe node still produces its form.
- * The graph is the bundle's declared main pipe, which a `method_ref` package's
- * manifest can override as the entry pipe: when the two differ the graph stays
- * and a caption under it names both (`graphCaptionFor`), so the diagram is
- * never silently of a different pipe from the form below it.
+ * The graph is the entry pipe's dry run on a current deployment, but the
+ * bundle's declared main pipe on one older than pipelex-api 0.27.5, where a
+ * `method_ref` package's manifest can name a different entry pipe: when the two
+ * differ the graph stays and a caption under it names both (`graphCaptionFor`),
+ * so the diagram is never silently of a different pipe from the form below it.
  * A file-bearing input takes a file the user picks: the form asks the console
  * for an upload grant (`pipelex_request_upload`) and sends the file straight
  * to Pipelex storage, so the bytes never cross the conversation or the server
