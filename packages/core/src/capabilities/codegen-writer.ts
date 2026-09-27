@@ -8,9 +8,9 @@ import type { CodegenDrift, CodegenTreeFile } from "@pipelex/sdk";
 import { PRUNED_DIRECTORIES } from "./shared.js";
 import type { ToolError } from "./shared.js";
 import {
-  checkDeepestExistingAncestor,
+  containedPath,
+  createContainedSubdirectory,
   errorMessage,
-  isInsideRoot,
   isMissingPathError,
   resolveSaveDir,
 } from "./workspace-boundary.js";
@@ -73,7 +73,7 @@ export function isCodegenLock(text: string): boolean {
 // ── walk bounds ─────────────────────────────────────────────────────
 
 /**
- * `output_dir: "."` is legal — {@link isInsideRoot} is true for the root
+ * `output_dir: "."` is legal — `isInsideRoot` is true for the root
  * itself — so the post-write walk must not be free to read a whole repository
  * into memory: `runCodegenCheck` takes every file's text as a `string`, and
  * this is a stdio server the host keeps alive for the session. The byte
@@ -159,7 +159,7 @@ export async function writeCodegenTree(request: CodegenWriteRequest): Promise<Co
     isLock: boolean;
   }[] = [];
   for (const artifact of request.artifacts) {
-    const contained = containedDestination(dir, artifact.path);
+    const contained = containedPath(dir, artifact.path);
     if (contained === undefined) {
       return { ok: false, error: escapedArtifactError(artifact.path) };
     }
@@ -170,7 +170,7 @@ export async function writeCodegenTree(request: CodegenWriteRequest): Promise<Co
       isLock: false,
     });
   }
-  const lockDestination = containedDestination(dir, request.lockFilename);
+  const lockDestination = containedPath(dir, request.lockFilename);
   if (lockDestination === undefined) {
     return { ok: false, error: escapedArtifactError(request.lockFilename) };
   }
@@ -250,12 +250,6 @@ export async function writeCodegenTree(request: CodegenWriteRequest): Promise<Co
     orphansTruncated: verification.orphansTruncated,
     drifts: verification.report.drifts.filter((drift) => drift.category !== "orphan"),
   };
-}
-
-/** The joined destination when it stays inside `dir`; `undefined` when it escapes. */
-function containedDestination(dir: string, relative: string): string | undefined {
-  const absolute = path.resolve(dir, relative);
-  return isInsideRoot(dir, absolute) && absolute !== dir ? absolute : undefined;
 }
 
 type Inspection =
@@ -341,36 +335,16 @@ async function readHead(absolute: string): Promise<string | undefined> {
 }
 
 /**
- * Create an artifact's sub-directory, contained on real paths BEFORE anything
- * is created and again after: `mkdir -p` through a symlinked component inside
- * the generated directory would otherwise create the missing levels at the
- * link's target, and a check that ran only afterwards would refuse a write
- * that had already put directories outside the workspace. That is the same
- * deepest-existing-ancestor rule `resolveSaveDir` applies to `output_dir`
- * itself, which is why both call the one routine in `workspace-boundary.ts`.
- *
- * Returns a message on failure, `undefined` on success. No target emits a
+ * Create an artifact's sub-directory through `workspace-boundary.ts`, which
+ * contains it on real paths before and after the `mkdir`. No target emits a
  * nested artifact today; this is what keeps that safe if one starts to.
  */
-async function createSubdirectory(dir: string, parent: string): Promise<string | undefined> {
-  const escaped = `the artifact's directory ${path.relative(dir, parent)} resolves outside the generated directory`;
-
-  const ancestor = await checkDeepestExistingAncestor(dir, parent);
-  if (!ancestor.ok) {
-    return ancestor.reason === "escape" ? escaped : errorMessage(ancestor.err);
-  }
-
-  try {
-    await fs.mkdir(parent, { recursive: true });
-    // Closes the window between the check and the creation.
-    const real = await fs.realpath(parent);
-    if (!isInsideRoot(dir, real)) {
-      return escaped;
-    }
-    return undefined;
-  } catch (err) {
-    return errorMessage(err);
-  }
+function createSubdirectory(dir: string, parent: string): Promise<string | undefined> {
+  return createContainedSubdirectory(
+    dir,
+    parent,
+    `the artifact's directory ${path.relative(dir, parent)} resolves outside the generated directory`,
+  );
 }
 
 // ── the post-write check ────────────────────────────────────────────
