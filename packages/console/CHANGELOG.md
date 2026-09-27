@@ -2,7 +2,7 @@
 
 This is the changelog of the hosted console: the Pipelex MCP that chat hosts reach at `https://mcp.pipelex.com/mcp`, deployed to Alpic. Up to and including 0.20.0 the console was released together with the workshop, `@pipelex/mcp`, under one version, and those releases are recorded in [the workshop's changelog](../workshop/CHANGELOG.md). After 0.20.0 the console has its own version, this changelog, and `console-vX.Y.Z` tags.
 
-## [Unreleased]
+## [0.20.1] - 2026-09-27
 
 ### Added
 
