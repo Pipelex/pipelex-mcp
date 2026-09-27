@@ -15,6 +15,7 @@ This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the
 
 ### Changed
 
+- **`@pipelex/sdk` 0.25.1 → 0.26.0 and `mthds` 0.25.0 → 0.28.0**: The SDK's failed results read now carries the run's stored error report, which the failed state of `mthds_run_results`, `mthds_show_images` and `mthds_download_artifacts` reads before falling back to a status read of the run. `mthds` moves with it, since this SDK requires 0.28.0.
 - **The README's get-started sends a chatbot newcomer to sign up first and runs a published method**: The chatbot route now opens with signing up at app.pipelex.com, its example run names the published `invoice_extraction` method by address on a sample invoice that exists instead of an `example.com` link that answered 404, and a new paragraph says where methods come from. The hosted console's sign-in section says the account is created at app.pipelex.com, which also sets up the organization every tool call works in.
 - **The workshop is released on its own track**: `@pipelex/mcp` versions, this changelog and the `vX.Y.Z` tags now describe the workshop alone. A workshop release publishes to npm without deploying the hosted console, which is now a separate package in this repository with its own version, changelog and `console-vX.Y.Z` tags, so none of its dependencies reach this one.
 
