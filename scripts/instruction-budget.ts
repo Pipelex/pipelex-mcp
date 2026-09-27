@@ -30,6 +30,8 @@
  * hermetic suite covers it; the script only reads the files and reports.
  */
 
+import { parse as parseYaml } from "yaml";
+
 import { textLength } from "./tool-text-budget.js";
 
 /** The ceiling on `CLAUDE.md`, which every session opened here loads. */
@@ -64,18 +66,30 @@ export function isRulePath(path: string): boolean {
 }
 
 /**
- * Whether a rule's frontmatter scopes it to paths: a leading `---` block
- * holding a `paths:` key with at least one entry, as a YAML block list
- * (`paths:` then `- "…"` lines, indented or not) or a flow list
- * (`paths: ["…"]`). An empty list scopes nothing, so it does not count.
+ * Whether a rule's frontmatter scopes it to paths: a leading `---` block that
+ * parses as YAML and holds a `paths` key naming at least one glob, as a list
+ * of strings or as the comma-separated string Claude Code also accepts.
+ *
+ * The frontmatter is parsed rather than matched, because Claude Code ignores
+ * frontmatter that does not parse and loads the rule as if it had no `paths`:
+ * a pattern match would pass an unfinished `paths: [foo` that loads into
+ * every session. An empty list, a blank entry or a comment-only item scopes
+ * nothing, so none of them counts.
  */
 export function hasPathsFrontmatter(text: string): boolean {
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
   if (match === null) return false;
-  const frontmatter = match[1] ?? "";
-  const blockList = /^paths:[ \t]*\r?\n[ \t]*- \S/m;
-  const flowList = /^paths:[ \t]*\[[ \t]*[^\]\s]/m;
-  return blockList.test(frontmatter) || flowList.test(frontmatter);
+  let frontmatter: unknown;
+  try {
+    frontmatter = parseYaml(match[1] ?? "");
+  } catch {
+    return false;
+  }
+  if (typeof frontmatter !== "object" || frontmatter === null) return false;
+  const paths: unknown = (frontmatter as Record<string, unknown>).paths;
+  const globs = typeof paths === "string" ? paths.split(",") : paths;
+  if (!Array.isArray(globs) || globs.length === 0) return false;
+  return globs.every((glob) => typeof glob === "string" && glob.trim() !== "");
 }
 
 /** Measure every file against its ceiling, in the order given. */

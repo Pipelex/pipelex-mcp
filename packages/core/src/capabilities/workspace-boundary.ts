@@ -128,10 +128,11 @@ export type SaveDirResolution =
  * actually typed. Failures are `input_domain` there — except an unusable
  * `saveRoot`, which is the deployment's fault, not the caller's.
  *
- * This is the ONE call in either writer that creates a directory, and it
- * creates only the requested one. Containment without creation is
- * {@link isInsideRoot}, which is what lets a caller contain every destination
- * before deciding whether to write any of them.
+ * This is the one call that creates the target directory, and it creates
+ * only the requested one; a destination's missing parents inside it are
+ * created at write time by {@link createContainedSubdirectory}. Containment
+ * without creation is {@link containedPath}, which is what lets a caller
+ * contain every destination before deciding whether to write any of them.
  */
 export async function resolveSaveDir(
   saveRoot: string,

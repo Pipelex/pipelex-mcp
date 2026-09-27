@@ -186,8 +186,10 @@ const PREPARE_ERROR_OPTIONS: ClassifyErrorOptions = {
  * address still answers on `mthds_inputs_template` and `mthds_codegen`, which
  * reach their crate another way. Both of the gate's refusals are classified
  * route-independently in `classifyError`, off the `error_type` the runner
- * declares, and both land at `methodLocation` — never in the generic 401/403
- * arm, which sent a caller with a perfectly good credential to mint a key.
+ * declares — the sandbox refusal at `methodLocation`, the structures refusal,
+ * which only a fetched package can trigger, at `method_ref` — and never in the
+ * generic 401/403 arm, which sent a caller with a perfectly good credential to
+ * mint a key.
  */
 const PREPARE_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/validate",

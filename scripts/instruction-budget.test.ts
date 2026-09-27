@@ -34,8 +34,23 @@ describe("hasPathsFrontmatter", () => {
     );
   });
 
+  it("accepts the comma-separated string form", () => {
+    expect(hasPathsFrontmatter('---\npaths: "src/**/*.ts, lib/**/*.ts"\n---\n# A rule\n')).toBe(
+      true,
+    );
+  });
+
   it("refuses an empty flow list", () => {
     expect(hasPathsFrontmatter("---\npaths: []\n---\n# A rule\n")).toBe(false);
+  });
+
+  it("refuses frontmatter that does not parse, which Claude Code ignores", () => {
+    expect(hasPathsFrontmatter("---\npaths: [foo\n---\n# A rule\n")).toBe(false);
+  });
+
+  it("refuses a list whose only item is a comment or blank", () => {
+    expect(hasPathsFrontmatter("---\npaths:\n  - # TODO\n---\n# A rule\n")).toBe(false);
+    expect(hasPathsFrontmatter('---\npaths:\n  - ""\n---\n# A rule\n')).toBe(false);
   });
 
   it("refuses a rule with no frontmatter", () => {

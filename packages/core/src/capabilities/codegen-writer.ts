@@ -141,8 +141,9 @@ const utf8 = new TextEncoder();
 const strictDecoder = new TextDecoder("utf-8", { fatal: true });
 
 export async function writeCodegenTree(request: CodegenWriteRequest): Promise<CodegenWriteResult> {
-  // 1. Contain the directory. This is the one call that creates anything, and
-  //    it creates only `output_dir` itself.
+  // 1. Contain the directory. This is the one call that creates it, and it
+  //    creates only `output_dir` itself; an artifact's missing parents are
+  //    created at write time, in step 4.
   const target = await resolveSaveDir(request.root, request.outputDir, "output_dir");
   if (!target.ok) {
     return { ok: false, error: target.error };

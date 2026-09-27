@@ -525,7 +525,7 @@ Two tools carry a bundle between the working directory and the organization's ca
 
 ## Result streams
 
-Every result carries its machine contract on `structuredContent` and a Markdown summary on `content`. What the model need not read rides `_meta`, which a host does not put in front of it: on both servers a completed run's full output and its per-call usage records, and on the console the graph, the form's artifacts and the fresh links its views paint files from. `structuredContent.available_view_specs` names the views a result can drive. [SPEC.md](../SPEC.md#the-result-streams) states the rule.
+Every result carries its machine contract on `structuredContent` and a Markdown summary on `content`. What the model need not read rides `_meta`, which a host does not put in front of it: on both servers a completed run's full output and its per-call usage records, and a valid verdict's entry pipe (`main_pipe_ref`), and on the console the graph, the form's artifacts and the fresh links its views paint files from. `structuredContent.available_view_specs` names the views a result can drive. [SPEC.md](../SPEC.md#the-result-streams) states the rule.
 
 ## Success and verdict discipline
 

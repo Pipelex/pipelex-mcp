@@ -10,7 +10,7 @@
  * Exit code: 0 when every file passes, 1 otherwise, naming each failure.
  */
 
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -28,17 +28,22 @@ const say = (text = ""): void => {
 
 /**
  * Every Markdown file under `.claude/rules/`, its subdirectories included,
- * since Claude Code discovers rules recursively: a nested rule this walk
- * missed would load unmeasured and unscoped.
+ * since Claude Code discovers rules recursively and follows symlinks there: a
+ * nested or linked rule this walk missed would load unmeasured and unscoped.
+ * `statSync` follows a link, and a directory already walked on its real path
+ * is not walked again, so a link cycle ends.
  */
-function ruleFilesUnder(relativeDir: string): string[] {
-  return readdirSync(path.join(REPO_ROOT, relativeDir), { withFileTypes: true }).flatMap(
-    (entry) => {
-      const relative = `${relativeDir}/${entry.name}`;
-      if (entry.isDirectory()) return ruleFilesUnder(relative);
-      return entry.isFile() && entry.name.endsWith(".md") ? [relative] : [];
-    },
-  );
+function ruleFilesUnder(relativeDir: string, walked = new Set<string>()): string[] {
+  const absoluteDir = path.join(REPO_ROOT, relativeDir);
+  const realDir = realpathSync(absoluteDir);
+  if (walked.has(realDir)) return [];
+  walked.add(realDir);
+  return readdirSync(absoluteDir).flatMap((name) => {
+    const relative = `${relativeDir}/${name}`;
+    const stats = statSync(path.join(REPO_ROOT, relative));
+    if (stats.isDirectory()) return ruleFilesUnder(relative, walked);
+    return stats.isFile() && name.endsWith(".md") ? [relative] : [];
+  });
 }
 
 function readInstructionFiles(): InstructionFile[] {
