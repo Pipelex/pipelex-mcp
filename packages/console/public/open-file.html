@@ -10,13 +10,14 @@
   <body>
     <p id="status">Opening the file…</p>
     <script>
-      // The console's views open a stored file through this page on a host that
-      // takes no download request (src/views/file-relay.ts). The file's link is
+      // The console's views open a stored file through this page, for a file's
+      // download button on a host that takes no download request and for a click
+      // on a file's plain link (src/views/file-relay.ts). The file's link is
       // presigned, and its signature covers every query parameter, while ChatGPT
-      // appends `redirectUrl=<the conversation>` to any link a view opens,
-      // `redirectUrl: false` or not. So the view opens this page with the link
-      // percent-encoded in the fragment, where the parameter cannot reach it and
-      // no server logs it, and the page replaces itself with the link unchanged.
+      // appends `redirectUrl=<the conversation>` to a link a view opens. So the
+      // view opens this page with the link percent-encoded in the fragment, where
+      // the parameter cannot reach it and no server logs it, and the page
+      // replaces itself with the link unchanged.
       //
       // Only a link to one of the app buckets is followed, so the page is no open
       // redirect. The list is `RUN_OUTPUT_SOURCES` in src/hosted/app-buckets.ts,

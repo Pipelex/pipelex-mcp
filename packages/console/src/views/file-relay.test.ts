@@ -4,7 +4,7 @@ import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 
 import { RUN_OUTPUT_SOURCES } from "../hosted/app-buckets.js";
-import { FILE_RELAY_PAGE, fileRelayLink } from "./file-relay.js";
+import { FILE_RELAY_PAGE, fileRelayLink, storedFileLinkOf } from "./file-relay.js";
 
 const SERVER_URL = "https://console.example";
 
@@ -54,6 +54,38 @@ describe("fileRelayLink", () => {
     const elsewhere = "https://example.com/report.pdf?page=2";
     expect(fileRelayLink(SERVER_URL, elsewhere)).toBe(elsewhere);
     expect(fileRelayLink(SERVER_URL, "not a link")).toBe("not a link");
+  });
+});
+
+/**
+ * A clicked element inside `ancestors`, the nearest first, as far as
+ * `storedFileLinkOf` reads it: `closest("a[href]")` finds the nearest anchor
+ * with a link, whose `href` a browser reports absolute.
+ */
+function clickedInside(...ancestors: { tag: string; href?: string }[]) {
+  return {
+    closest: (selector: string) => {
+      expect(selector).toBe("a[href]");
+      return ancestors.find((node) => node.tag === "a" && node.href !== undefined) ?? null;
+    },
+  };
+}
+
+describe("storedFileLinkOf", () => {
+  it("finds the stored file a click on an image preview or a file's name opens", () => {
+    expect(storedFileLinkOf(clickedInside({ tag: "img" }, { tag: "a", href: STORED }))).toBe(
+      STORED,
+    );
+    expect(storedFileLinkOf(clickedInside({ tag: "a", href: STORED }))).toBe(STORED);
+  });
+
+  it("leaves a click that opens anything else to the page", () => {
+    expect(storedFileLinkOf(clickedInside({ tag: "a", href: "https://example.com/doc" }))).toBe(
+      undefined,
+    );
+    expect(storedFileLinkOf(clickedInside({ tag: "button" }))).toBe(undefined);
+    expect(storedFileLinkOf(null)).toBe(undefined);
+    expect(storedFileLinkOf({})).toBe(undefined);
   });
 });
 
