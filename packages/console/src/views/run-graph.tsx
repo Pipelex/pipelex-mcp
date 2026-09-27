@@ -38,6 +38,7 @@ import {
 } from "./run-graph-upload.js";
 import type { GrantRequest, GrantToolResponse, UploadErrors } from "./run-graph-upload.js";
 import { hasExecutedGraph, runDurationSeconds } from "./run-results.js";
+import { useHostSave } from "./use-host-save.js";
 import { useRunPolling } from "./use-run-polling.js";
 import { useRunResults } from "./use-run-results.js";
 
@@ -183,6 +184,9 @@ function RunGraph() {
     polling.phase === "terminal",
     resultsAsync,
   );
+  // The executed graph's data panel downloads through the host, as the
+  // results panel does.
+  const hostSave = useHostSave();
 
   // A remount finds the run the form last started in view state and follows it
   // again: one status read, then its results, as `run-follow` does from its tool
@@ -451,6 +455,8 @@ function RunGraph() {
               outputForm={executedGraph.outputForm ?? undefined}
               inputForm={executedGraph.inputForm ?? undefined}
               resolveUrl={executedGraph.resolveUrl}
+              saveFiles={hostSave.saveFiles}
+              downloads={hostSave.downloads}
               initialDirection="LR"
               initialShowControllers={true}
               theme={theme}

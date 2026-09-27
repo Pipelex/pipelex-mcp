@@ -31,6 +31,7 @@ import {
   outputToRender,
 } from "../run-results.js";
 import type { RunResultsView } from "../run-results.js";
+import { useHostSave } from "../use-host-save.js";
 import { FailureDetails } from "./failure-details.js";
 import { RenderBoundary } from "./render-boundary.js";
 import { ToolbarButton } from "./toolbar-button.js";
@@ -63,9 +64,13 @@ const FADE_MASK = "linear-gradient(to bottom, black 72%, transparent)";
  * (`outputToRender`), when the bounded copy is shown as JSON and the panel says
  * so. When the result cannot describe its output — an older runner, or a pipe
  * the panel cannot identify — it is shown as JSON too, and the panel says why.
- * The kernel's Download control is hidden: it saves through an object URL and
- * a clicked link, falling back to a popup, and a host's sandboxed view frame
- * blocks all three.
+ * The kernel's download controls, the whole-result Download and each file's
+ * own button, deliver through the host (`useHostSave`), because the kernel's
+ * default saves through an object URL and a clicked link, which the host's
+ * sandboxed view frame refuses. A host that takes `ui/download-file` receives
+ * the files as one request; one that does not opens each stored file's link,
+ * and the controls that could only save inline content are not drawn there.
+ * The fullscreen graph's data panel takes the same seam.
  *
  * Everything shown here was fetched by the view and goes to the view alone:
  * none of it enters the model's context. The model gets one line through
@@ -108,6 +113,7 @@ export function RunResultsPanel({
   graphHeight: number;
 }) {
   const failed = results.content.state === "failed";
+  const hostSave = useHostSave();
   const palette = dark
     ? { text: "#e5e7eb", muted: "#9ca3af", error: "#fca5a5" }
     : { text: "#111827", muted: "#6b7280", error: "#991b1b" };
@@ -157,6 +163,7 @@ export function RunResultsPanel({
         <>
           <RunOutput
             results={results}
+            hostSave={hostSave}
             requestedPipeRef={requestedPipeRef}
             dark={dark}
             bounded={!isFullscreen}
@@ -183,6 +190,8 @@ export function RunResultsPanel({
                     outputForm={results.outputForm ?? undefined}
                     inputForm={results.inputForm ?? undefined}
                     resolveUrl={results.resolveUrl}
+                    saveFiles={hostSave.saveFiles}
+                    downloads={hostSave.downloads}
                     initialDirection="LR"
                     initialShowControllers={true}
                     theme={dark ? "dark" : "light"}
@@ -234,6 +243,7 @@ function SummarizeButton({
 /** The output, rendered by the kernel; cut with a fade past the inline bound. */
 function RunOutput({
   results,
+  hostSave,
   requestedPipeRef,
   dark,
   bounded,
@@ -241,6 +251,7 @@ function RunOutput({
   mutedColor,
 }: {
   results: RunResultsView;
+  hostSave: ReturnType<typeof useHostSave>;
   requestedPipeRef: string | null;
   dark: boolean;
   bounded: boolean;
@@ -299,7 +310,11 @@ function RunOutput({
           <FieldPresentationProvider presentation="app">
             {/* Files paint from the fresh links the results carried, not the
                 payload's baked `public_url`; see `withLinks` in `run-results.ts`. */}
-            <ResultEnvProvider resolveUrl={results.resolveUrl}>
+            <ResultEnvProvider
+              resolveUrl={results.resolveUrl}
+              saveFiles={hostSave.saveFiles}
+              downloads={hostSave.downloads}
+            >
               {field && oversizedLength === null ? (
                 // The JSON view is the floor a failed rendering falls to, so
                 // the output stays readable whatever the kernel made of it.
@@ -309,7 +324,7 @@ function RunOutput({
                   fallback={<JsonView value={value} />}
                   mutedColor={mutedColor}
                 >
-                  <StuffViewer field={field} value={value} hideDownload />
+                  <StuffViewer field={field} value={value} />
                 </RenderBoundary>
               ) : (
                 <JsonView value={value} />
