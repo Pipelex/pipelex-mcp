@@ -2,21 +2,22 @@
 /**
  * check-cascade.mjs — assert COMPUTED cascade outcomes in the built console stylesheet.
  *
- * Why this exists, precisely. The console bundles two Tailwind builds: this app's, and
- * the form kernel's prebuilt sheet that `@pipelex/mthds-ui/form/react` imports as a side
- * effect inside `@layer mthds-form`. Which of them wins a given declaration is decided by
- * the layer order `src/index.css` declares — and getting it wrong is silent in both
- * directions. With the kernel too low, Tailwind's preflight beats every kernel-only
- * utility and each control in RunPanel renders with no surface and no padding, inside a
- * panel whose own chrome is unlayered and still looks correct. With it too high, the
- * kernel's `.hidden` beats the host's `.sm:inline` and its theme sublayer replaces the
- * app's fonts. Both states build green.
+ * Why this exists, precisely. The run form's controls are the form kernel's
+ * (`@pipelex/mthds-form`, reached through `@pipelex/mthds-ui`), styled with Tailwind
+ * classes that live in the kernel's shipped JavaScript. Since mthds-ui 0.25.0 this app's
+ * own Tailwind compiles them, told where to look by `@pipelex/mthds-ui/tailwind.css` and
+ * against this app's theme, `@alpic-ai/ui/theme`. Every way that goes wrong is silent:
+ * a scan that finds nothing, or a colour the theme does not name, simply leaves the
+ * class out, and a control renders with no surface inside a panel whose own chrome is
+ * styled and still looks correct. Both states build green.
  *
- * The obvious check — "is `@layer mthds-form` named before `@layer theme`?" — does not
- * work, and that is not a style preference. It is a position check, and it PASSES in the
- * state where every control is invisible. Worse, lightningcss deletes the `@layer a, b;`
- * statement altogether and honours it by hoisting the blocks, so the names the source
- * writes never appear in the output to be read back.
+ * Until 0.24.0 the kernel arrived instead as a second, prebuilt Tailwind build inside
+ * `@layer mthds-form`, which `src/index.css` had to rank by hand between Tailwind's
+ * preflight and its utilities. That is why this check resolves winners rather than
+ * reading positions: the obvious check — "is `@layer mthds-form` named before
+ * `@layer theme`?" — PASSED in the state where every control was invisible, and
+ * lightningcss deletes the `@layer a, b;` statement anyway, honouring it by hoisting the
+ * blocks, so the names the source writes never reach the output to be read back.
  *
  * So this resolves the real thing: for a synthetic element, which declaration actually
  * wins one property — `!important`, then layer rank, then specificity, then document
@@ -25,16 +26,17 @@
  * `.px-5{padding-inline:…}`, a comparison a property-name diff misses.
  *
  * It reads only built bytes, so a toolchain change — lightningcss hoisting, a Tailwind
- * bump, a new mthds-ui sheet — is in scope by construction. What it cannot do is notice
- * a NEW kernel-only utility nobody asserts on; the CHECKS list is the contract, and it
- * is meant to be read and extended.
+ * bump, a new mthds-ui sheet — is in scope by construction.
  *
- * It also checks the one input that makes the whole build lose classes without a word:
- * every `@source` in `src/index.css` must name a directory that exists, and one inside a
- * package must name the copy Node resolves. The console is a member of an npm workspace,
+ * It also checks the two inputs that make the whole build lose classes without a word.
+ * Every `@source` in `src/index.css` must name a directory that exists, and one inside a
+ * package must name the copy Node resolves: the console is a member of an npm workspace,
  * so its packages are hoisted to the repository root's `node_modules`; a path written
  * relative to the member resolved to nothing once, and Tailwind dropped `@alpic-ai/ui`'s
- * component classes while the build stayed green.
+ * component classes while the build stayed green. And every class in the kernel's own
+ * prebuilt sheet must appear in this build: that sheet is the kernel's complete list of
+ * what its controls use, so a missed scan path or a colour missing from the theme shows
+ * up as a named class rather than as a control nobody looked at.
  *
  * Usage: node scripts/check-cascade.mjs [built.css]
  * With no argument it resolves the stylesheet from dist/assets/.vite/manifest.json,
@@ -53,13 +55,13 @@ const warn = (text) => process.stderr.write(`${text}\n`);
 const ROOT = path.resolve(import.meta.dirname, "..");
 
 /**
- * The directory Node resolves a package to from the console, walking up the
- * `node_modules` directories the way its resolver does. In the workspace the install
+ * The directory Node resolves a package to from the console (or from `from`), walking up
+ * the `node_modules` directories the way its resolver does. In the workspace the install
  * hoists the console's packages to the repository root, so a path relative to this
  * package finds nothing, and both Tailwind and this check used to skip it silently.
  */
-function packageDir(name) {
-  for (let dir = ROOT; ; dir = path.dirname(dir)) {
+function packageDir(name, from = ROOT) {
+  for (let dir = from; ; dir = path.dirname(dir)) {
     const candidate = path.join(dir, "node_modules", name);
     if (fs.existsSync(path.join(candidate, "package.json"))) return fs.realpathSync(candidate);
     if (path.dirname(dir) === dir) return undefined;
@@ -473,11 +475,14 @@ const PLAIN_ROUNDED = el("div", ["rounded-md"]);
 const RESPONSIVE = el("span", ["hidden", "sm:inline"], { viewport: 1280 });
 
 /**
- * Spacing utilities the kernel's controls rely on. Some the host also generates and some
- * only the kernel has; which side wins is not the assertion. The assertion is that
- * preflight's `*{margin:0;padding:0}` does NOT, since that is what collapsed every
- * control to zero padding when `mthds-form` was ranked below `base`.
+ * Spacing utilities the kernel's controls rely on. The assertion is that preflight's
+ * `*{margin:0;padding:0}` does NOT win, which is what collapsed every control to zero
+ * padding for the one commit the kernel's old prebuilt sheet was ranked below `base`.
+ * The utilities are this build's own now, so this holds Tailwind's `base` < `utilities`
+ * order to account after any toolchain change rather than guarding a hand-set rank.
  */
+/** `bg-input` as `src/index.css` maps it: `@theme inline` compiles it to alpic's border colour. */
+const CONTROL_SURFACE = (v) => /var\(--color-(input|border)\)/.test(v);
 const SPACING_SURVIVES_PREFLIGHT = [
   ["p-2.5", "padding-top"],
   ["px-5", "padding-left"],
@@ -495,25 +500,15 @@ const SPACING_SURVIVES_PREFLIGHT = [
 ]);
 
 const CHECKS = [
-  // --- the kernel must outrank the host's preflight (mthds-form above `base`) ---
-  ["control surface (input.bg-input)", INPUT, "background-color", (v) => /var\(--input\)/.test(v)],
-  [
-    "control surface (textarea.bg-input)",
-    TEXTAREA,
-    "background-color",
-    (v) => /var\(--input\)/.test(v),
-  ],
-  [
-    "control surface (SelectTrigger button)",
-    SELECT_TRIGGER,
-    "background-color",
-    (v) => /var\(--input\)/.test(v),
-  ],
+  // --- the kernel's controls are compiled here, and outrank the preflight ---
+  ["control surface (input.bg-input)", INPUT, "background-color", CONTROL_SURFACE],
+  ["control surface (textarea.bg-input)", TEXTAREA, "background-color", CONTROL_SURFACE],
+  ["control surface (SelectTrigger button)", SELECT_TRIGGER, "background-color", CONTROL_SURFACE],
   [
     "segmented enum item surface",
     ENUM_ITEM,
     "background-color",
-    (v) => /var\(--(color-)?(input|primary)\)/.test(v),
+    (v) => CONTROL_SURFACE(v) || /var\(--color-primary\)/.test(v),
   ],
   [
     "switch track when checked",
@@ -527,11 +522,11 @@ const CHECKS = [
   ["control text colour", INPUT, "color", (v) => v !== "inherit"],
   ...SPACING_SURVIVES_PREFLIGHT,
 
-  // --- the host must outrank the kernel for classes both sides define (below `utilities`) ---
+  // --- one copy of each class: the app's theme sets the radius, a variant beats the bare utility ---
   ["host radius wins on a plain div", PLAIN_ROUNDED, "border-radius", (v) => /--radius-md/.test(v)],
   ["responsive hidden/sm:inline at >=40rem", RESPONSIVE, "display", (v) => v === "inline"],
 
-  // --- the app's fonts must survive the kernel's theme sublayer (pinned unlayered) ---
+  // --- the app's fonts reach :root (the kernel's old prebuilt sheet replaced them there) ---
   ["app font token wins on :root", ROOT_EL, "--font-sans", (v) => /Inter/.test(v)],
   ["app mono token wins on :root", ROOT_EL, "--font-mono", (v) => /JetBrains/.test(v)],
 ];
@@ -618,40 +613,46 @@ if (order.includes("properties") && order.includes("utilities")) {
     ]);
 }
 
-// src/index.css pins --font-sans / --font-mono unlayered, because the kernel's theme
-// sublayer would otherwise take them wherever mthds-form sits. A pinned literal goes
-// stale in silence, so assert it still matches the theme package it was copied from.
-const alpicDir = packageDir("@alpic-ai/ui");
-const alpicTokens = alpicDir && path.join(alpicDir, "src/styles/tokens.css");
-if (!alpicTokens || !fs.existsSync(alpicTokens)) {
-  fail("the pinned font tokens can be compared with @alpic-ai/ui", [
-    alpicDir
-      ? `${alpicTokens} is missing: @alpic-ai/ui moved its tokens.`
-      : "@alpic-ai/ui does not resolve from the console.",
+// The kernel's prebuilt sheet is a complete Tailwind build of what its controls use, so
+// its `utilities` layer is the kernel's own list of the classes this build must carry.
+// Resolve it from mthds-ui's directory, which is where the copy the views import lives
+// whether npm hoisted it or nested it. A class missing here is one Tailwind never
+// generated: a scan path that found nothing, or a colour `@alpic-ai/ui/theme` does not
+// name (map it in src/index.css's `@theme inline` block).
+const uiDir = packageDir("@pipelex/mthds-ui");
+const kernelDir = uiDir && packageDir("@pipelex/mthds-form", uiDir);
+const kernelSheet = kernelDir && path.join(kernelDir, "dist/styles.css");
+if (!kernelSheet || !fs.existsSync(kernelSheet)) {
+  fail("every kernel utility is compiled into this build", [
+    kernelDir
+      ? `${kernelSheet} is missing: the kernel moved its prebuilt sheet.`
+      : "@pipelex/mthds-form does not resolve from @pipelex/mthds-ui.",
   ]);
 } else {
-  const src = fs.readFileSync(alpicTokens, "utf8");
-  const norm = (s) => s.replace(/\s+/g, " ").trim();
-  for (const token of ["--font-sans", "--font-mono"]) {
-    const declared = src.match(new RegExp(`${token}\\s*:\\s*([^;]+);`));
-    const { winner } = resolve(ROOT_EL, token);
-    if (!declared || !winner) {
-      fail(`${token} tracks @alpic-ai/ui`, [
-        declared
-          ? "no winning declaration in the build"
-          : "not declared in @alpic-ai/ui tokens.css",
-      ]);
-      continue;
+  const classesOf = (ruleList, layer) => {
+    const out = new Set();
+    for (const rule of ruleList) {
+      if (rule.kind !== "rule" || (layer && rule.topLayer !== layer)) continue;
+      for (const [, cls] of rule.selector.matchAll(/\.((?:\\.|[A-Za-z0-9_-])+)/g))
+        out.add(unescape(cls));
     }
-    if (norm(declared[1]) === norm(winner.value)) {
-      say(`PASS  ${token} matches @alpic-ai/ui's own tokens.css`);
-    } else {
-      fail(`${token} matches @alpic-ai/ui's own tokens.css`, [
-        `alpic declares: ${norm(declared[1])}`,
-        `the build resolves: ${norm(winner.value)}`,
-        "The pinned copy in src/index.css has drifted; update it to alpic's value.",
-      ]);
-    }
+    return out;
+  };
+  const kernelClasses = classesOf(parse(fs.readFileSync(kernelSheet, "utf8")).rules, "utilities");
+  const buildClasses = classesOf(rules);
+  const missing = [...kernelClasses].filter((cls) => !buildClasses.has(cls)).sort();
+  const name = `every kernel utility is compiled into this build (${kernelClasses.size} classes)`;
+  if (kernelClasses.size === 0) {
+    fail(name, [`${path.relative(ROOT, kernelSheet)} has no utilities layer to compare against.`]);
+  } else if (missing.length === 0) {
+    say(`PASS  ${name}`);
+    say(`        from ${path.relative(ROOT, kernelSheet)}`);
+  } else {
+    fail(name, [
+      `${missing.length} missing: ${missing.slice(0, 12).join(" ")}${missing.length > 12 ? " …" : ""}`,
+      "A colour class names a colour src/index.css must map; a missing batch means",
+      "@pipelex/mthds-ui/tailwind.css scanned nothing (see its note on nested installs).",
+    ]);
   }
 }
 

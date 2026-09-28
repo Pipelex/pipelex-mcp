@@ -304,6 +304,66 @@ async function checkListMethods(client: Client): Promise<void> {
   );
 }
 
+/**
+ * The model deck, read and checked through the real server: the LLM presets it
+ * lists, and one of them checked back. An empty list here is the drift this
+ * catches, the presets arriving without a category the tool can place.
+ */
+async function checkModels(client: Client): Promise<void> {
+  section("mthds_models");
+
+  let listed: ToolCallResult;
+  try {
+    listed = await callTool(client, "mthds_models", { category: "llm" });
+  } catch (err) {
+    fail("mthds_models listing call", errorMessage(err));
+    return;
+  }
+  if (listed.isError === true) {
+    reportToolFailure("mthds_models listing", listed);
+    return;
+  }
+
+  const deck = isRecord(listed.structuredContent) ? listed.structuredContent.deck : undefined;
+  const llm = Array.isArray(deck) ? deck[0] : undefined;
+  const presets =
+    isRecord(llm) && Array.isArray(llm.presets)
+      ? llm.presets.filter((preset): preset is string => typeof preset === "string")
+      : [];
+  if (
+    !expect(
+      presets.length > 0,
+      "llm presets",
+      `expected at least one, got ${describe(listed.structuredContent)}`,
+      `${presets.length} listed`,
+    )
+  ) {
+    return;
+  }
+
+  const preset = presets[0] as string;
+  let checked: ToolCallResult;
+  try {
+    checked = await callTool(client, "mthds_models", { reference: preset });
+  } catch (err) {
+    fail("mthds_models check call", errorMessage(err));
+    return;
+  }
+  if (checked.isError === true) {
+    reportToolFailure("mthds_models check", checked);
+    return;
+  }
+  const resolution = isRecord(checked.structuredContent)
+    ? checked.structuredContent.resolution
+    : undefined;
+  expect(
+    resolution === "resolved",
+    "check a listed preset",
+    `expected "resolved", got ${describe(resolution)}`,
+    preset,
+  );
+}
+
 async function checkValidate(client: Client): Promise<void> {
   section("mthds_validate");
 
@@ -639,6 +699,7 @@ async function main(): Promise<void> {
     const advertised = (await client.listTools()).tools.map((tool) => tool.name);
     const required = [
       "mthds_list_methods",
+      "mthds_models",
       "mthds_validate",
       "mthds_inputs_template",
       "mthds_codegen",
@@ -657,6 +718,7 @@ async function main(): Promise<void> {
 
     if (missing.length === 0) {
       await checkListMethods(client);
+      await checkModels(client);
       await checkValidate(client);
       await checkInputsTemplate(client);
       await checkCodegen(client);

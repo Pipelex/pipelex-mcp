@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { errorMessage, isInsideRoot, isMissingPathError } from "./workspace-boundary.js";
+import { errorMessage, isMissingPathError } from "./workspace-boundary.js";
 
 /**
  * `pipelex-method.json` — the file that makes a directory *this* saved method,
@@ -268,10 +268,4 @@ export async function bundleFilesIn(dir: string): Promise<string[]> {
     .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".mthds"))
     .map((entry) => entry.name)
     .sort();
-}
-
-/** The joined destination when it stays inside `dir`; `undefined` when it escapes. */
-export function containedInDir(dir: string, relative: string): string | undefined {
-  const absolute = path.resolve(dir, relative);
-  return isInsideRoot(dir, absolute) && absolute !== dir ? absolute : undefined;
 }

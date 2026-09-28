@@ -12,7 +12,6 @@ import {
   apiHostOf,
   buildMethodLink,
   bundleFilesIn,
-  containedInDir,
   existingDestinations,
   foreignEntryReason,
   readMethodLink,
@@ -43,7 +42,8 @@ import type {
 import { validateMthds } from "./validate.js";
 import type { ValidationContext } from "./validate.js";
 import {
-  checkDeepestExistingAncestor,
+  containedPath,
+  createContainedSubdirectory,
   errorMessage,
   isInsideRoot,
   isMissingPathError,
@@ -954,7 +954,7 @@ async function writtenResult(
   const destinations: { file: MethodFile; name: string; absolute: string }[] = [];
   const claimed = new Map<string, string>();
   for (const file of all) {
-    const absolute = containedInDir(dir, file.name);
+    const absolute = containedPath(dir, file.name);
     if (absolute === undefined) {
       return storedNameRefusal(file.name, "it leaves the output directory");
     }
@@ -989,7 +989,7 @@ async function writtenResult(
     ]);
   }
 
-  // `containedInDir` is lexical — it joins and compares strings. A destination
+  // `containedPath` is lexical — it joins and compares strings. A destination
   // that is a symlink passes it and then sends `writeFile` to the link's
   // target, which is how a pull wrote outside the workspace entirely. Inspect
   // every destination on REAL entries before anything is created or written,
@@ -1319,27 +1319,16 @@ function storedNameRefusal(name: string, reason: string): GetMethodResult {
 }
 
 /**
- * Create a destination's parent, refusing a symlinked component first.
- *
- * `mkdir -p dir/link/sub`, with `link` a symlink pointing out of `dir`, creates
- * `sub` at the link's target — so the real-path check has to run BEFORE the
- * creation, not after, where it would report an escape it had already made.
- * Same rule, same routine, as `resolveSaveDir` and `codegen-writer.ts`.
+ * Create a destination's parent through `workspace-boundary.ts`, which refuses
+ * a symlinked component before the `mkdir` and checks the real path again
+ * after it, as `resolveSaveDir` and `codegen-writer.ts` do.
  */
-async function createSubdirectory(dir: string, parent: string): Promise<string | undefined> {
-  const escaped = `its directory \`${path.relative(dir, parent)}\` resolves outside output_dir`;
-
-  const ancestor = await checkDeepestExistingAncestor(dir, parent);
-  if (!ancestor.ok) {
-    return ancestor.reason === "escape" ? escaped : errorMessage(ancestor.err);
-  }
-  try {
-    await fs.mkdir(parent, { recursive: true });
-    // Closes the window between the check and the creation.
-    return isInsideRoot(dir, await fs.realpath(parent)) ? undefined : escaped;
-  } catch (err) {
-    return errorMessage(err);
-  }
+function createSubdirectory(dir: string, parent: string): Promise<string | undefined> {
+  return createContainedSubdirectory(
+    dir,
+    parent,
+    `its directory \`${path.relative(dir, parent)}\` resolves outside output_dir`,
+  );
 }
 
 /**

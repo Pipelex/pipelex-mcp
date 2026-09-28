@@ -6,8 +6,8 @@
 #
 # Adapted from the sibling TS repos, with one deliberate difference: pipelex-mcp
 # changelog headings have NO prefix — `## [X.Y.Z] - YYYY-MM-DD`. The `v` and the
-# `console-v` live on the branch name and the git tag only (see CLAUDE.md and
-# the /release skill). The branch ref is read into env: and never interpolated
+# `console-v` live on the branch name and the git tag only (see
+# docs/development.md and the /release skill). The branch ref is read into env: and never interpolated
 # into the shell.
 name: Changelog Version Check
 

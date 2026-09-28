@@ -1,7 +1,8 @@
 // The kernel's result renderer, through `@pipelex/mthds-ui/form/react`, which
-// re-exports it whole and imports its prebuilt stylesheet — never
-// `@pipelex/mthds-form` directly, which would put a second copy of its React
-// contexts in the tree (`FieldPresentationProvider` among them).
+// re-exports it whole (its classes are compiled by this app's Tailwind, see
+// `src/index.css`) — never `@pipelex/mthds-form` directly, which would put a
+// second copy of its React contexts in the tree (`FieldPresentationProvider`
+// among them).
 import {
   FieldPresentationProvider,
   JsonView,
@@ -11,6 +12,8 @@ import {
 import { GraphViewer } from "@pipelex/mthds-ui/graph/react";
 import { TOOLBAR_POSITION } from "@pipelex/mthds-ui";
 import type { GraphSpec, ToolbarPosition } from "@pipelex/mthds-ui";
+import type { RunField, SaveFiles } from "@pipelex/mthds-ui/form";
+import type { ResolveUrl } from "@pipelex/mthds-ui/form/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSendFollowUpMessage } from "skybridge/web";
 
@@ -28,8 +31,11 @@ import {
   hasExecutedGraph,
   outputFieldFor,
   outputToRender,
+  saveBaseNameOf,
 } from "../run-results.js";
 import type { RunResultsView } from "../run-results.js";
+import { saveWholeOutput } from "../host-save.js";
+import { useHostSave } from "../use-host-save.js";
 import { FailureDetails } from "./failure-details.js";
 import { RenderBoundary } from "./render-boundary.js";
 import { ToolbarButton } from "./toolbar-button.js";
@@ -62,9 +68,15 @@ const FADE_MASK = "linear-gradient(to bottom, black 72%, transparent)";
  * (`outputToRender`), when the bounded copy is shown as JSON and the panel says
  * so. When the result cannot describe its output — an older runner, or a pipe
  * the panel cannot identify — it is shown as JSON too, and the panel says why.
- * The kernel's Download control is hidden: it saves through an object URL and
- * a clicked link, falling back to a popup, and a host's sandboxed view frame
- * blocks all three.
+ * The kernel's download controls, the whole-result Download and each file's
+ * own button, deliver through the host (`useHostSave`), because the kernel's
+ * default saves through an object URL and a clicked link, which the host's
+ * sandboxed view frame refuses. A host that takes `ui/download-file` receives
+ * the files as one request; one that does not opens each stored file's link,
+ * and the controls that could only save inline content are not drawn there.
+ * The fullscreen graph's data panel takes the same seam, and a click on one of
+ * the kernel's plain links to a stored file, an image preview or a file's name,
+ * is opened through the host the same way (`routeFileLinks`).
  *
  * Everything shown here was fetched by the view and goes to the view alone:
  * none of it enters the model's context. The model gets one line through
@@ -107,6 +119,7 @@ export function RunResultsPanel({
   graphHeight: number;
 }) {
   const failed = results.content.state === "failed";
+  const hostSave = useHostSave();
   const palette = dark
     ? { text: "#e5e7eb", muted: "#9ca3af", error: "#fca5a5" }
     : { text: "#111827", muted: "#6b7280", error: "#991b1b" };
@@ -130,7 +143,11 @@ export function RunResultsPanel({
     : `Run ${runId}: ${headline.toLowerCase()}. Its output is shown to the user in this view; ${CONSOLE_TOOL_NAMES.runResults} with the run id returns it when a question needs the values.`;
 
   return (
-    <section data-llm={llm} className="w-full space-y-2 px-2 pb-2 pt-2">
+    <section
+      data-llm={llm}
+      className="w-full space-y-2 px-2 pb-2 pt-2"
+      onClickCapture={hostSave.routeFileLinks}
+    >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm font-medium" style={{ color: failed ? palette.error : palette.text }}>
           <span aria-hidden="true">{failed ? "✕ " : "✓ "}</span>
@@ -156,11 +173,13 @@ export function RunResultsPanel({
         <>
           <RunOutput
             results={results}
+            hostSave={hostSave}
             requestedPipeRef={requestedPipeRef}
             dark={dark}
             bounded={!isFullscreen}
             onReadMore={onToggleFullscreen}
             mutedColor={palette.muted}
+            errorColor={palette.error}
           />
           {isFullscreen && showGraph && hasExecutedGraph(results) && (
             <div className="pt-2">
@@ -182,6 +201,8 @@ export function RunResultsPanel({
                     outputForm={results.outputForm ?? undefined}
                     inputForm={results.inputForm ?? undefined}
                     resolveUrl={results.resolveUrl}
+                    saveFiles={hostSave.saveFiles}
+                    downloads={hostSave.downloads}
                     initialDirection="LR"
                     initialShowControllers={true}
                     theme={dark ? "dark" : "light"}
@@ -233,18 +254,22 @@ function SummarizeButton({
 /** The output, rendered by the kernel; cut with a fade past the inline bound. */
 function RunOutput({
   results,
+  hostSave,
   requestedPipeRef,
   dark,
   bounded,
   onReadMore,
   mutedColor,
+  errorColor,
 }: {
   results: RunResultsView;
+  hostSave: ReturnType<typeof useHostSave>;
   requestedPipeRef: string | null;
   dark: boolean;
   bounded: boolean;
   onReadMore: () => void;
   mutedColor: string;
+  errorColor: string;
 }) {
   const pipeRef = executedPipeRefOf(results.graphSpec, requestedPipeRef);
   // One derivation per result: the kernel treats the field as the identity of
@@ -253,6 +278,8 @@ function RunOutput({
     () => outputFieldFor(results.contracts, results.outputForm, pipeRef),
     [results.contracts, results.outputForm, pipeRef],
   );
+  // Saved files are named after the pipe that ran, not the field's `output`.
+  const saveBaseName = saveBaseNameOf(pipeRef) ?? undefined;
   // The full output rides `_meta`; the bounded copy stands in past the render
   // budget, and for a response that somehow carried none.
   const { value, oversizedLength } = useMemo(
@@ -289,8 +316,8 @@ function RunOutput({
             : undefined
         }
       >
-        {/* `.dark` re-resolves the kernel's token bridge against the host
-            theme's dark block, as `RunPanel` does for the form. */}
+        {/* `.dark` puts the kernel's controls under the host theme's dark
+            block, as `RunPanel` does for the form. */}
         <div
           ref={contentRef}
           className={["text-foreground", dark && "dark"].filter(Boolean).join(" ")}
@@ -298,7 +325,11 @@ function RunOutput({
           <FieldPresentationProvider presentation="app">
             {/* Files paint from the fresh links the results carried, not the
                 payload's baked `public_url`; see `withLinks` in `run-results.ts`. */}
-            <ResultEnvProvider resolveUrl={results.resolveUrl}>
+            <ResultEnvProvider
+              resolveUrl={results.resolveUrl}
+              saveFiles={hostSave.saveFiles}
+              downloads={hostSave.downloads}
+            >
               {field && oversizedLength === null ? (
                 // The JSON view is the floor a failed rendering falls to, so
                 // the output stays readable whatever the kernel made of it.
@@ -308,7 +339,7 @@ function RunOutput({
                   fallback={<JsonView value={value} />}
                   mutedColor={mutedColor}
                 >
-                  <StuffViewer field={field} value={value} hideDownload />
+                  <StuffViewer field={field} value={value} downloadBaseName={saveBaseName} />
                 </RenderBoundary>
               ) : (
                 <JsonView value={value} />
@@ -328,10 +359,23 @@ function RunOutput({
         </button>
       )}
       {oversizedLength !== null ? (
-        <p className="mt-1 text-xs" style={{ color: mutedColor }}>
-          This output is about {Math.ceil(oversizedLength / 1024)} KiB, more than this view renders
-          at once, so only its first part is shown, as JSON.
-        </p>
+        <>
+          <p className="mt-1 text-xs" style={{ color: mutedColor }}>
+            This output is about {Math.ceil(oversizedLength / 1024)} KiB, more than this view
+            renders at once, so only its first part is shown, as JSON.
+          </p>
+          {field && hostSave.downloads.result && (
+            <WholeOutputDownload
+              field={field}
+              baseName={saveBaseName ?? field.name}
+              value={results.mainStuff}
+              resolveUrl={results.resolveUrl}
+              saveFiles={hostSave.saveFiles}
+              mutedColor={mutedColor}
+              errorColor={errorColor}
+            />
+          )}
+        </>
       ) : (
         !field && (
           <p className="mt-1 text-xs" style={{ color: mutedColor }}>
@@ -350,5 +394,70 @@ function RunOutput({
         </p>
       )}
     </div>
+  );
+}
+
+type WholeOutputSave =
+  | { state: "idle" | "saving" }
+  | { state: "missed"; names: string[] }
+  | { state: "failed" };
+
+/**
+ * The Download an output past the render budget would otherwise lack: the
+ * kernel's own control belongs to the viewer the budget keeps from rendering,
+ * so this one plans from the full output (`saveWholeOutput`) and says what did
+ * not go out. It is drawn only where the host takes the whole-result download,
+ * since the plan always carries the JSON copy, which only a download request
+ * can deliver.
+ */
+function WholeOutputDownload({
+  field,
+  baseName,
+  value,
+  resolveUrl,
+  saveFiles,
+  mutedColor,
+  errorColor,
+}: {
+  field: RunField;
+  baseName: string;
+  value: unknown;
+  resolveUrl: ResolveUrl | undefined;
+  saveFiles: SaveFiles;
+  mutedColor: string;
+  errorColor: string;
+}) {
+  const [save, setSave] = useState<WholeOutputSave>({ state: "idle" });
+  const onDownload = () => {
+    setSave({ state: "saving" });
+    // The planner walks a payload nothing validated, so a throw is a failure
+    // to report, never a crash of the panel.
+    saveWholeOutput(field, value, { baseName, resolveUrl, saveFiles })
+      .then((names) => setSave(names.length > 0 ? { state: "missed", names } : { state: "idle" }))
+      .catch(() => setSave({ state: "failed" }));
+  };
+  return (
+    <>
+      <button
+        type="button"
+        onClick={onDownload}
+        disabled={save.state === "saving"}
+        className="mt-1 cursor-pointer text-xs underline disabled:cursor-default"
+        style={{ color: mutedColor }}
+      >
+        {save.state === "saving" ? "Saving…" : "Download the whole output"}
+      </button>
+      {save.state === "missed" && (
+        <p className="mt-1 text-xs" style={{ color: errorColor }}>
+          {save.names.length === 1 ? "1 file" : `${save.names.length} files`} could not be saved:{" "}
+          {save.names.join(", ")}.
+        </p>
+      )}
+      {save.state === "failed" && (
+        <p className="mt-1 text-xs" style={{ color: errorColor }}>
+          The output could not be saved.
+        </p>
+      )}
+    </>
   );
 }

@@ -38,6 +38,7 @@ import {
 } from "./run-graph-upload.js";
 import type { GrantRequest, GrantToolResponse, UploadErrors } from "./run-graph-upload.js";
 import { hasExecutedGraph, runDurationSeconds } from "./run-results.js";
+import { useHostSave } from "./use-host-save.js";
 import { useRunPolling } from "./use-run-polling.js";
 import { useRunResults } from "./use-run-results.js";
 
@@ -80,10 +81,11 @@ type RunGraphViewState = {
  * pipe node in the graph switches it. With no entry pipe settled no form opens on its own —
  * `selectedPipeFor` never substitutes a pipe of the view's own choosing — but
  * the artifacts still ride, so clicking a pipe node still produces its form.
- * The graph is the bundle's declared main pipe, which a `method_ref` package's
- * manifest can override as the entry pipe: when the two differ the graph stays
- * and a caption under it names both (`graphCaptionFor`), so the diagram is
- * never silently of a different pipe from the form below it.
+ * The graph is the entry pipe's dry run on a current deployment, but the
+ * bundle's declared main pipe on one older than pipelex-api 0.27.5, where a
+ * `method_ref` package's manifest can name a different entry pipe: when the two
+ * differ the graph stays and a caption under it names both (`graphCaptionFor`),
+ * so the diagram is never silently of a different pipe from the form below it.
  * A file-bearing input takes a file the user picks: the form asks the console
  * for an upload grant (`pipelex_request_upload`) and sends the file straight
  * to Pipelex storage, so the bytes never cross the conversation or the server
@@ -182,6 +184,9 @@ function RunGraph() {
     polling.phase === "terminal",
     resultsAsync,
   );
+  // The executed graph's data panel downloads through the host, as the
+  // results panel does.
+  const hostSave = useHostSave();
 
   // A remount finds the run the form last started in view state and follows it
   // again: one status read, then its results, as `run-follow` does from its tool
@@ -377,10 +382,12 @@ function RunGraph() {
     })();
   };
 
-  // The dry-run graph is built for the bundle's declared main pipe; the form
-  // defaults to the entry pipe. Say so when they are not the same pipe. The
-  // executed graph gets no caption: it is of the pipe that ran, which is the
-  // one the results below it are for.
+  // The dry-run graph is of the pipe the dry run traced: the entry pipe on a
+  // current deployment, the bundle's declared main pipe on one older than
+  // pipelex-api 0.27.5. The form defaults to the entry pipe, so say so when
+  // they are not the same pipe, which only that older deployment produces.
+  // The executed graph gets no caption: it is of the pipe that ran, which is
+  // the one the results below it are for.
   const graphCaption =
     hasGraph && executedGraph === null
       ? graphCaptionFor(
@@ -435,7 +442,11 @@ function RunGraph() {
         {isFullscreen ? "Collapse" : "Fullscreen"}
       </ToolbarButton>
       {executedGraph ? (
-        <div className="relative w-full overflow-hidden" style={{ height: graphHeight }}>
+        <div
+          className="relative w-full overflow-hidden"
+          style={{ height: graphHeight }}
+          onClickCapture={hostSave.routeFileLinks}
+        >
           {/* Keyed by run, so a later run's graph mounts fresh rather than
               inheriting the previous one's viewport and selection. */}
           <RenderBoundary what="The run's graph" resetKey={executedGraph.graphSpec}>
@@ -448,6 +459,8 @@ function RunGraph() {
               outputForm={executedGraph.outputForm ?? undefined}
               inputForm={executedGraph.inputForm ?? undefined}
               resolveUrl={executedGraph.resolveUrl}
+              saveFiles={hostSave.saveFiles}
+              downloads={hostSave.downloads}
               initialDirection="LR"
               initialShowControllers={true}
               theme={theme}

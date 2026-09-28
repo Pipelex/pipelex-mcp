@@ -9,7 +9,7 @@
         "listChanged": true
       }
     },
-    "instructions": "This is the Pipelex plugin's local workshop for executable AI methods written in MTHDS (.mthds). The usual flow: `mthds_list_methods` to find a saved method, `mthds_validate`, `mthds_inputs_template` and fill it, `mthds_prepare_inputs`, `mthds_run`, then `mthds_run_status` and `mthds_run_results` with the run id, and finally `mthds_show_images` to see a picture it produced, or `mthds_download_artifacts` to save its output and files to disk. When the Pipelex connector's `pipelex_*` tools are also present, use these `mthds_*` tools for all method work and never mix the two servers: each can be signed in to a different organization. `mthds_codegen` turns a method into typed code for your project, and `mthds_save_method` and `mthds_get_method` push a bundle to the catalog and pull one back. Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`, `mthds_run`) takes its method one of three ways: files, a published method's address as method_ref, or a catalog id (mt_…) as method_id (the last two resolved server-side). Prefer the `{ path: string }` file form for workspace .mthds files: a path resolves against this server's working directory, and diagnostics name it. Inline `{ content: string, uri?: string }` files are accepted too. Call `mthds_list_methods` when the user asks what saved methods exist or names one without its mt_ id; choose by name and description, then pass the id on. `mthds_run` spends inference credit. A picture from `mthds_show_images` stays in the conversation for every turn that follows, so show one when it is asked for, not by reflex. This workshop has no views: report the structured result and the text summary to the user."
+    "instructions": "This is the Pipelex plugin's local workshop for executable AI methods written in MTHDS (.mthds). The usual flow: `mthds_list_methods` to find a saved method, `mthds_validate`, `mthds_inputs_template` and fill it, `mthds_prepare_inputs`, `mthds_run`, then `mthds_run_status` and `mthds_run_results` with the run id, and `mthds_show_images` to see a picture it produced or `mthds_download_artifacts` to save its output and files. A method only turns the inputs it is given into results; fetching from mail, drives or business systems, running on a schedule and writing back are up to whatever calls it. When the Pipelex connector's `pipelex_*` tools are also present, use these `mthds_*` tools for all method work and never mix the two servers: each can be signed in to a different organization. `mthds_codegen` turns a method into typed code, `mthds_models` lists and checks model references, and `mthds_save_method` and `mthds_get_method` push a bundle to the catalog and pull one back. Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`, `mthds_run`) takes its method as files, a published address as method_ref, or a catalog id (mt_…) as method_id, the last two resolved server-side. Prefer `{ path: string }` files to inline content: a path resolves against this server's working directory, and diagnostics name it. Call `mthds_list_methods` when the user asks what saved methods exist or names one without its mt_ id; choose by name and description, then pass the id on. `mthds_run` spends inference credit. A picture from `mthds_show_images` stays in the conversation for every turn that follows, so show one when it is asked for, not by reflex. This workshop has no views, so report each result to the user yourself."
   },
   "tools": [
     {
@@ -52,13 +52,9 @@
             "maximum": 9007199254740991
           },
           "next_cursor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "methods": {
@@ -76,13 +72,9 @@
                   "type": "boolean"
                 },
                 "description": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
+                  "type": [
+                    "string",
+                    "null"
                   ]
                 },
                 "description_truncated": {
@@ -163,6 +155,259 @@
       }
     },
     {
+      "name": "mthds_models",
+      "description": "Look up the model references a method's pipes can name in their model field — presets ($), aliases (@) and waterfalls (~) — or check one reference before writing it into a method. Without reference it lists the deck, all of it or one category: llm for a PipeLLM, extract for a PipeExtract, img_gen for a PipeImgGen, search for a PipeSearch. With reference it says whether that reference resolves, and when it does not, the nearest names and the right sigil for a name that exists as another kind (best-claude exists as @best-claude). Call it when the user names a model or asks which ones exist, and check any reference the user typed. A pipe needs no model field unless the user wants one; when they do, prefer a preset. The deck is what the runner can serve, not what this account may use: a run can still refuse a listed model. It reads the deck and nothing else; no inference credit is spent.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "description": "Only this category: llm for a PipeLLM, extract for a PipeExtract, img_gen for a PipeImgGen, search for a PipeSearch. Omit it for every category.",
+            "type": "string",
+            "enum": [
+              "llm",
+              "extract",
+              "img_gen",
+              "search"
+            ]
+          },
+          "reference": {
+            "description": "A model reference to check, exactly as it would be written in a pipe's model field: $preset, @alias, ~waterfall, or a bare model handle (preset:, alias:, waterfall: and handle: prefixes work too). Omit it to list the deck instead.",
+            "type": "string",
+            "maxLength": 199
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "error"
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "llm",
+              "extract",
+              "img_gen",
+              "search"
+            ]
+          },
+          "deck": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "enum": [
+                    "llm",
+                    "extract",
+                    "img_gen",
+                    "search"
+                  ]
+                },
+                "presets": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "aliases": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "reference": {
+                        "type": "string"
+                      },
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "reference",
+                      "target"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "waterfalls": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "reference": {
+                        "type": "string"
+                      },
+                      "fallbacks": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "reference",
+                      "fallbacks"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "category",
+                "presets",
+                "aliases",
+                "waterfalls"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "reference": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "preset",
+              "alias",
+              "waterfall",
+              "handle"
+            ]
+          },
+          "resolution": {
+            "type": "string",
+            "enum": [
+              "resolved",
+              "not_found",
+              "unconfirmed"
+            ]
+          },
+          "matches": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "enum": [
+                    "llm",
+                    "extract",
+                    "img_gen",
+                    "search"
+                  ]
+                },
+                "target": {
+                  "type": "string"
+                },
+                "fallbacks": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "via": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "category"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "suggestions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "other_kinds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "other_categories": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "llm",
+                "extract",
+                "img_gen",
+                "search"
+              ]
+            }
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "class": {
+                  "type": "string",
+                  "enum": [
+                    "input_domain",
+                    "config",
+                    "runtime"
+                  ]
+                },
+                "kind": {
+                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call.",
+                  "type": "string",
+                  "enum": [
+                    "paywall"
+                  ]
+                },
+                "location": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "hint": {
+                  "type": "string"
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "description": "True when retrying the same call may succeed; false for permanent conditions."
+                }
+              },
+              "required": [
+                "class",
+                "message",
+                "retryable"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "List and check model references",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "mthds_validate",
       "description": "Validate an MTHDS method with the Pipelex API — from submitted file contents, from a published method's address passed as method_ref, or from a registered method's catalog id (mt_…) passed as method_id. Supply exactly ONE of files / method_ref / method_id — never several. Addresses and ids are resolved server-side, so no bundle enters the conversation; a by-id call validates the method's CURRENT stored content. A valid verdict carries the main pipe's typed signature (main_pipe): its ref, each declared input with the concept it expects and how many items, and the concept it produces — type a call site from that instead of guessing the shapes of a method you cannot read. Files given as { path } also get the method's flowchart written beside them as method-graph.html, a standalone page the user can open in a browser (graph_page: false skips it); the result says where.",
       "inputSchema": {
@@ -181,13 +426,9 @@
                     },
                     "uri": {
                       "description": "Optional provenance URI for diagnostics.",
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
+                      "type": [
+                        "string",
+                        "null"
                       ]
                     }
                   },
@@ -501,13 +742,9 @@
                     },
                     "uri": {
                       "description": "Optional provenance URI for diagnostics.",
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
+                      "type": [
+                        "string",
+                        "null"
                       ]
                     }
                   },
@@ -680,13 +917,9 @@
                     },
                     "uri": {
                       "description": "Optional provenance URI for diagnostics.",
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
+                      "type": [
+                        "string",
+                        "null"
                       ]
                     }
                   },
@@ -940,13 +1173,9 @@
                     },
                     "uri": {
                       "description": "Optional provenance URI for diagnostics.",
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
+                      "type": [
+                        "string",
+                        "null"
                       ]
                     }
                   },
@@ -1107,13 +1336,9 @@
                     },
                     "uri": {
                       "description": "Optional provenance URI for diagnostics.",
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
+                      "type": [
+                        "string",
+                        "null"
                       ]
                     }
                   },
@@ -1200,15 +1425,11 @@
                 "description": "The package's resolved full address."
               },
               "tag": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "The requested tag; null for a bare address (default branch at HEAD)."
+                "description": "The requested tag; null for a bare address (default branch at HEAD).",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "commit_sha": {
                 "type": "string",
@@ -1345,26 +1566,18 @@
           },
           "retry_after_seconds": {
             "description": "Server backoff hint — check again after this many seconds.",
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "number",
+              "null"
             ]
           },
           "created_at": {
             "type": "string"
           },
           "finished_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "failure": {
@@ -1526,13 +1739,9 @@
           },
           "retry_after_seconds": {
             "description": "State \"running\" only — check again after this many seconds.",
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "number",
+              "null"
             ]
           },
           "run_status": {
@@ -1645,45 +1854,33 @@
                 "description": "Which reading the totals describe — read it first: \"records\" (inference calls were recorded), \"no_inference\" (the run made no inference, so the cost is 0), \"unavailable\" (the run reported no usage; the totals are null and assembly_error says whether that is because usage assembly broke)."
               },
               "cost_usd": {
-                "anyOf": [
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "Σ per-call USD cost across the run, null-aware: under state \"records\", null when NO call was priced (own-GPU / mock / dry run); 0 under \"no_inference\"; null under \"unavailable\", where nothing is known."
+                "description": "Σ per-call USD cost across the run, null-aware: under state \"records\", null when NO call was priced (own-GPU / mock / dry run); 0 under \"no_inference\"; null under \"unavailable\", where nothing is known.",
+                "type": [
+                  "number",
+                  "null"
+                ]
               },
               "cost_partial": {
                 "description": "True when some calls were priced and others were not — cost_usd is then a lower bound.",
                 "type": "boolean"
               },
               "tokens": {
-                "anyOf": [
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "The run's input tokens plus its output tokens; null when no call reported either. Cached-input and reasoning subsets are excluded to avoid double-counting."
+                "description": "The run's input tokens plus its output tokens; null when no call reported either. Cached-input and reasoning subsets are excluded to avoid double-counting.",
+                "type": [
+                  "number",
+                  "null"
+                ]
               },
               "calls": {
                 "type": "number",
                 "description": "Number of inference calls recorded (0 → the run did no inference)."
               },
               "assembly_error": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "The runner's usage-assembly failure for this run (the SDK's usage_assembly_error); null when assembly did not fail."
+                "description": "The runner's usage-assembly failure for this run (the SDK's usage_assembly_error); null when assembly did not fail.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -1821,13 +2018,9 @@
           },
           "retry_after_seconds": {
             "description": "State \"running\" only — check again after this many seconds.",
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "number",
+              "null"
             ]
           },
           "run_status": {
@@ -2101,13 +2294,9 @@
           },
           "retry_after_seconds": {
             "description": "State \"running\" only — check again after this many seconds.",
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "number",
+              "null"
             ]
           },
           "run_status": {
@@ -2242,13 +2431,9 @@
                 },
                 "content_type": {
                   "description": "The platform's content type for the stored object; null when it has none.",
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
+                  "type": [
+                    "string",
+                    "null"
                   ]
                 },
                 "size": {
@@ -2392,13 +2577,9 @@
                     },
                     "uri": {
                       "description": "Optional provenance URI for diagnostics.",
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
+                      "type": [
+                        "string",
+                        "null"
                       ]
                     }
                   },
@@ -2445,13 +2626,9 @@
                     },
                     "uri": {
                       "description": "Optional provenance URI for diagnostics.",
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
+                      "type": [
+                        "string",
+                        "null"
                       ]
                     }
                   },

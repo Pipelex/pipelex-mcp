@@ -52,7 +52,7 @@ A host that spawns MCP servers but takes no plugin, such as Cursor, can run the 
 Pipelex MCP connects MCP hosts to Pipelex methods, wrapping the Pipelex API through the `@pipelex/sdk` `PipelexApiClient`. It ships as **two servers with two tool sets, over one capability core**:
 
 - **The console**, the Pipelex connector (server name `pipelex`): a [Skybridge](https://docs.skybridge.tech) HTTP server, deployed on Alpic, for chat hosts. Its tools are `pipelex_*`, and it names a method by reference only, a saved method's catalog id or a published method's address: it finds a method, shows it, takes a file attached in the chat, and runs it. It registers the Skybridge views.
-- **The workshop**, the Pipelex plugin's server (server name `pipelex-plugin`): an npm-distributed stdio server (`@pipelex/mcp`, bin `pipelex-mcp`) that coding-agent hosts spawn via `npx`. Its tools are `mthds_*`, and they also validate a method, template its inputs, generate typed code for it, prepare its files, and save it to the catalog and pull it back. Its headline feature is the `{ path }` file arm: it reads `.mthds` files from disk instead of having the model hand-copy their contents.
+- **The workshop**, the Pipelex plugin's server (server name `pipelex-plugin`): an npm-distributed stdio server (`@pipelex/mcp`, bin `pipelex-mcp`) that coding-agent hosts spawn via `npx`. Its tools are `mthds_*`, and they also validate a method, template its inputs, generate typed code for it, prepare its files, look up the model references it can name, and save it to the catalog and pull it back. Its headline feature is the `{ path }` file arm: it reads `.mthds` files from disk instead of having the model hand-copy their contents.
 
 The console is the Pipelex MCP of the get-started above, at `mcp.pipelex.com`, and the workshop is the MCP server the Pipelex plugin runs. The rest of this page calls them by the names the code uses. The two are released separately, each with its own version and changelog.
 
@@ -78,6 +78,7 @@ The workshop's tools:
 | Tool | What it does |
 |---|---|
 | [`mthds_list_methods`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_list_methods) | List the methods saved in your organization's catalog by name, description and id, never their source. |
+| [`mthds_models`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_models) | List the model references a pipe can name, or check one before writing it into a method. |
 | [`mthds_validate`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_validate) | Validate a method given as files, a published address or a catalog id, return its main pipe's typed signature, and write its flowchart as an HTML page beside files given by path. |
 | [`mthds_inputs_template`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_inputs_template) | Return a fill-in template of a pipe's declared inputs. |
 | [`mthds_codegen`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_codegen) | Generate typed TypeScript or Python for a method's concepts, stamped and locked, returned or written straight to disk. |
@@ -158,13 +159,16 @@ A chat host takes the console, and a coding agent takes the workshop through the
 The way to end up with both without choosing it: **the console added in claude.ai syncs into Claude Code automatically.** A user signed into claude.ai with the console enabled gets the connector's tools in coding sessions beside the workshop's. That is harmless, but it doubles the tool list for no added capability, so you can turn the console off for those sessions:
 
 - In Claude Code, `/mcp` is the entry point. A connector you haven't signed into is collapsed behind a **"Show unused connectors"** row (Claude Code v2.1.161+) — expand it to find Pipelex.
-- Config alternatives: per-project `deniedMcpServers` in `.claude/settings.json`, or global `disableClaudeAiConnectors: true` in user settings.
+- For one project, list it under `deniedMcpServers` in `.claude/settings.json`.
+
+Avoid `disableClaudeAiConnectors: true` for this. It turns off the console, but also every other connector on your Claude account, such as Gmail, Google Drive and Calendar, and those are what an agent uses to fetch a method's inputs from your mail or files and to deliver its results.
 
 ## Documentation
 
 - [Tools reference](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md): every tool's input, structured result and behavior, and which server registers it.
 - [Registering the workshop in a host](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/hosts.md): the configuration for Claude Code, Codex, Cursor, Claude Desktop and Mistral Vibe, the environment variables the workshop reads, and the working directory it is bound to.
 - [Developing pipelex-mcp](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/development.md): running the console locally, the build, the test suites and versioning.
+- [Architecture](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/architecture.md) and [Testing](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/testing.md): how the two servers and their shared core are built, module by module, and how they are tested, the live drift detectors included.
 - [Client identification](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/client-identification.md): the `User-Agent` every request to the Pipelex API carries, naming this server, its shell and the host behind it.
 - [The specification](https://github.com/Pipelex/pipelex-mcp/blob/main/SPEC.md): the source of truth for the full tool contracts, verdict discipline and view behavior.
 - [An illustrated overview](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/readme.html) of the two servers, the tool surface, the flow a method takes and the sharp edges, as an HTML page to download and open in a browser.

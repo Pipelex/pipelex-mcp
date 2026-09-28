@@ -220,13 +220,13 @@ That ships the **working tree** (not a branch) to the Dev environment and restor
 
 ## Step 9 — Sync the prose that names Skybridge behavior
 
-This repo's `CLAUDE.md` carries several paragraphs that are statements *about Skybridge*, not about this repo, and a bump can falsify them without touching a line of code. Check each one you have reason to doubt:
+This repo's docs carry several paragraphs that are statements *about Skybridge*, not about this repo, and a bump can falsify them without touching a line of code. Check each one you have reason to doubt:
 
 ```bash
-grep -rn "Skybridge\|skybridge" CLAUDE.md README.md docs/ SPEC.md
+grep -rn "Skybridge\|skybridge" README.md docs/ SPEC.md .claude/rules/ CLAUDE.md
 ```
 
-The ones most exposed are the pinned-port paragraph (Skybridge's default port and its walk-up-when-busy behavior), the `nodemon.json` note (that it replaces the watch defaults), the DevTools token-lifetime note, and the `dependencies` paragraph, which explains why `skybridge` belongs to the console alone and names the server bundle's path. Record *why* something moved, not only that it did.
+The ones most exposed are in `docs/development.md` — the pinned-port paragraph (Skybridge's default port and its walk-up-when-busy behavior), the `nodemon.json` note (that it replaces the watch defaults), the DevTools token-lifetime note and the server-bundle paragraph — and in `docs/architecture.md`'s "What each package declares", which explains why `skybridge` belongs to the console alone and names the server bundle's path; `.claude/rules/manifests.md` repeats that last rule in brief. Record *why* something moved in the doc that owns it, not only that it did, and never in `CLAUDE.md`, which is a map held to a ceiling.
 
 Two more, both flag-don't-fix:
 

@@ -264,6 +264,8 @@ export const pipelexShowMethodTool = defineHostedTool({
       // upload grant (pipelex_request_upload), so the view must be allowed to
       // connect to it. `./app-buckets.ts` says why both host forms are listed.
       connectDomains: UPLOAD_CONNECT_DOMAINS,
+      // The same hosts serve a stored output file, which the results panel
+      // reads to hand its bytes to a host that downloads (as in run-follow).
       // A run started from the form shows its results here, so the output's
       // images load from, and its documents preview in a frame from, each app
       // bucket's own host, where the fresh links the results carry point — as
@@ -376,6 +378,10 @@ export const pipelexRunTool = defineHostedTool({
       // previews a PDF in a frame, which is what `frameDomains` allows, at the
       // cost of a stricter review of a public ChatGPT listing. Anything else in
       // the output stays CSP-blocked, and the renderer names the file instead.
+      // The results panel reads a stored file's bytes from the same hosts to
+      // hand them to a host that downloads (`views/stored-file-bytes.ts`),
+      // which is what `connectDomains` allows.
+      connectDomains: RUN_OUTPUT_SOURCES,
       resourceDomains: RUN_OUTPUT_SOURCES,
       frameDomains: RUN_OUTPUT_SOURCES,
     },

@@ -199,6 +199,24 @@ describe("the workshop's instructions", () => {
     }
   });
 
+  it("say what a method leaves to whatever calls it", async () => {
+    const { client, close } = await connectClient(createLocalServer());
+
+    try {
+      // An agent that goes straight to the tools reads no skill, so this is
+      // where it learns that "read my mail every morning and post the digest"
+      // is a method plus the mail read, the schedule and the post around it.
+      const instructions = client.getInstructions() ?? "";
+
+      expect(instructions).toContain("only turns the inputs it is given into results");
+      for (const reach of ["mail, drives or business systems", "on a schedule", "writing back"]) {
+        expect(instructions).toContain(reach);
+      }
+    } finally {
+      await close();
+    }
+  });
+
   it("name the tools only the workshop has, and not the console's", async () => {
     const { client, close } = await connectClient(createLocalServer());
 
@@ -325,6 +343,53 @@ describe("the workshop's contexts and dispatch", () => {
     }
   });
 
+  it("registers mthds_models as a read with two optional arguments and dispatches a check", async () => {
+    const contexts = buildLocalToolContexts({ PIPELEX_API_KEY: "plx_sk_test" });
+    const asked: Array<string | undefined> = [];
+    contexts.models.client = {
+      async models(category) {
+        asked.push(category);
+        return { models: [{ name: "writing-factual", type: "llm" }], aliases: {}, waterfalls: {} };
+      },
+    };
+
+    const { client, close } = await connectClient(createLocalServer({ contexts }));
+    try {
+      const tool = (await client.listTools()).tools.find(
+        (candidate) => candidate.name === "mthds_models",
+      );
+      const schema = tool?.inputSchema as { required?: string[]; properties?: object };
+
+      // It reads the deck and nothing else, and only from the configured API.
+      expect(tool?.annotations).toMatchObject({
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      });
+      expect(schema.required ?? []).toEqual([]);
+      expect(Object.keys(schema.properties ?? {}).sort()).toEqual(["category", "reference"]);
+      // The account caveat is the one thing a model reading the deck would
+      // otherwise take for granted.
+      expect(tool?.description).toContain("not what this account may use");
+
+      const result = await client.callTool({
+        name: "mthds_models",
+        arguments: { reference: "$writing-factul", category: "llm" },
+      });
+
+      expect(asked).toEqual([undefined]);
+      expect(result.structuredContent).toMatchObject({
+        status: "ok",
+        reference: "$writing-factul",
+        resolution: "not_found",
+        suggestions: ["$writing-factual"],
+      });
+      expect(result._meta).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+
   it("dispatches mthds_codegen with the artifacts on content and nothing on _meta", async () => {
     const contexts = buildLocalToolContexts({ PIPELEX_API_KEY: "plx_sk_test" });
     contexts.codegen.client = {
@@ -377,8 +442,8 @@ describe("the workshop's contexts and dispatch", () => {
 
     const { client, close } = await connectClient(createLocalServer({ contexts }));
     try {
-      expect(client.getInstructions()).toContain("Prefer the `{ path: string }` file form");
-      expect(client.getInstructions()).toContain("Inline `{ content: string, uri?: string }`");
+      expect(client.getInstructions()).toContain("Prefer `{ path: string }` files");
+      expect(client.getInstructions()).toContain("files to inline content");
       expect(client.getInstructions()).toContain("has no views");
     } finally {
       await close();
@@ -455,7 +520,7 @@ describe("the workshop's contexts and dispatch", () => {
       expect(listed.tools.map((tool) => tool.name)).toEqual(
         localToolDefinitions.map((definition) => definition.name),
       );
-      expect(client.getInstructions()).toContain("Prefer the `{ path: string }` file form");
+      expect(client.getInstructions()).toContain("Prefer `{ path: string }` files");
     } finally {
       await client.close();
     }

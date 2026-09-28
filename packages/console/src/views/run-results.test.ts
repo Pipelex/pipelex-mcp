@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { buildResultField, planStuffSave } from "@pipelex/mthds-ui/form";
 import type { OutputForm, PipeIOContracts } from "@pipelex/mthds-ui/form";
 
 import type { RunResultsStructuredContent, RunUsage } from "@pipelex/mcp-core/capabilities/run.js";
@@ -17,6 +18,7 @@ import {
   resultsFetchExhausted,
   runDurationSeconds,
   runResultsViewOf,
+  saveBaseNameOf,
   withLinksFrom,
 } from "./run-results.js";
 
@@ -229,6 +231,42 @@ describe("executedPipeRefOf", () => {
     expect(executedPipeRefOf(undefined, "  ")).toBeNull();
     // A half-stamped ref is no ref.
     expect(executedPipeRefOf({ pipeline_ref: { main_pipe: "main" } }, undefined)).toBeNull();
+  });
+});
+
+describe("saveBaseNameOf", () => {
+  it("names the saved files after the executed pipe's code, without its domain", () => {
+    expect(saveBaseNameOf("portraits.generate_portrait")).toBe("generate_portrait");
+    expect(saveBaseNameOf("acme.legal.review")).toBe("review");
+    expect(saveBaseNameOf("main")).toBe("main");
+  });
+
+  it("leaves the kernel's own default when no pipe is known", () => {
+    expect(saveBaseNameOf(null)).toBeNull();
+    expect(saveBaseNameOf("demo.")).toBeNull();
+  });
+
+  it("saves a one-image output as the pipe's own file, with no root segment after it", () => {
+    // Through the kernel the panel renders with, so a lockfile that slips back
+    // below `@pipelex/mthds-form` 0.12.1 fails here: that kernel saved this
+    // image as `generate_portrait-output.png`.
+    // An image's payload schema has several members, so the kernel reads the
+    // object itself as the file rather than unwrapping one of them.
+    const field = buildResultField(
+      { field: { name: "output", kind: "image", concept_ref: "native.Image", required: true } },
+      {
+        type: "object",
+        properties: {
+          url: { type: "string" },
+          public_url: { type: ["string", "null"] },
+          filename: { type: ["string", "null"] },
+        },
+        required: ["url"],
+      },
+    );
+    const baseName = saveBaseNameOf("portraits.generate_portrait")!;
+    const plan = planStuffSave(field, { url: "https://cdn.example/a.png" }, { baseName });
+    expect(plan.files.map((file) => file.name)).toEqual(["generate_portrait.png"]);
   });
 });
 
