@@ -13,34 +13,42 @@
 // (`eslint.config.mjs` exempts this file).
 import { isStoredFileLink } from "./file-relay.js";
 
-/**
- * The largest stored file a view reads to embed, since the bytes travel base64
- * in one message to the host. A larger file goes to the host as a link.
- */
-export const INLINE_SAVE_MAX_BYTES = 32 * 1024 * 1024;
+/** A stored file's bytes as the host takes them: base64, and how many bytes that is. */
+export interface StoredFileBytes {
+  blob: string;
+  byteLength: number;
+}
 
 /**
- * Reads a stored file for the host: its bytes, base64, or `undefined` when the
- * view cannot or should not embed it: a link to anywhere but an app bucket, a
- * refused or failed read, or a file past {@link INLINE_SAVE_MAX_BYTES}. Never
- * throws, so a caller falls back to handing the host the link.
+ * Reads a stored file for the host, or answers `undefined` when the view
+ * cannot or should not embed it: a link to anywhere but an app bucket, a
+ * refused or failed read (a bucket whose CORS does not admit it included), or
+ * a file past `maxBytes`. Never throws, so a caller falls back to handing the
+ * host the link.
  */
-export type ReadStoredFile = (url: string) => Promise<string | undefined>;
+export type ReadStoredFile = (
+  url: string,
+  maxBytes: number,
+) => Promise<StoredFileBytes | undefined>;
 
 /** {@link ReadStoredFile} over `fetchImpl`, the browser's `fetch` in the views. */
 export function storedFileReader(fetchImpl: typeof fetch = fetch): ReadStoredFile {
-  return async (url) => {
+  return async (url, maxBytes) => {
     if (!isStoredFileLink(url)) return undefined;
     try {
-      const response = await fetchImpl(url);
+      // The kernel paints an image with a plain `<img>` from this same link,
+      // and S3 answers that request with no CORS headers, so a response the
+      // browser cached then would fail this read's CORS check.
+      const response = await fetchImpl(url, { cache: "no-store" });
       if (!response.ok) return undefined;
       const declared = Number(response.headers.get("content-length"));
-      if (declared > INLINE_SAVE_MAX_BYTES) {
+      if (declared > maxBytes) {
         await response.body?.cancel();
         return undefined;
       }
       const bytes = new Uint8Array(await response.arrayBuffer());
-      return bytes.byteLength > INLINE_SAVE_MAX_BYTES ? undefined : base64Of(bytes);
+      if (bytes.byteLength > maxBytes) return undefined;
+      return { blob: base64Of(bytes), byteLength: bytes.byteLength };
     } catch {
       return undefined;
     }

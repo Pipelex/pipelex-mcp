@@ -22,6 +22,13 @@ import type { DownloadDisplay } from "@pipelex/mthds-ui/form/react";
 import type { ReadStoredFile } from "./stored-file-bytes.js";
 
 /**
+ * How many bytes of stored files one download request embeds, since they
+ * travel base64 in a single message to the host. The files are read in plan
+ * order, and each one past what is left goes as its link.
+ */
+export const INLINE_SAVE_BUDGET_BYTES = 32 * 1024 * 1024;
+
+/**
  * One entry of a `ui/download-file` request, as Skybridge's `useDownload`
  * takes it: a link the host fetches, or content carried inline.
  */
@@ -52,8 +59,9 @@ export type HostSaveSupport = "download" | "open-link" | "unknown";
  * host names the saved file after: inline content (the JSON copy, an HTML
  * page) as text, and a stored file as the bytes the view read from its fresh
  * link (`blob`, base64), since claude.ai saves embedded content but not a link
- * (`stored-file-bytes.ts`). A stored file the view could not read goes as the
- * link, for a host that fetches one itself.
+ * (`stored-file-bytes.ts`). A stored file the view could not read, or did not
+ * for the request's {@link INLINE_SAVE_BUDGET_BYTES}, goes as the link, for a
+ * host that fetches one itself.
  */
 export function downloadContentOf(file: SaveFile, blob?: string): HostDownloadContent {
   const uri = `file:///${encodeURIComponent(file.name)}`;
@@ -74,8 +82,9 @@ export function downloadContentOf(file: SaveFile, blob?: string): HostDownloadCo
  * after its timeout, which a reader who leaves the host's confirmation open
  * for a minute reaches. The kernel reads a rejection the same way, but
  * `saveWholeOutput` calls a delivery directly, so each one keeps the kernel's
- * contract of reporting a file rather than throwing. Each stored file is read
- * first, all at once, so its bytes can go embedded (`downloadContentOf`).
+ * contract of reporting a file rather than throwing. The stored files are read
+ * first, one after another, so their bytes can go embedded
+ * (`downloadContentOf`) and the frame never holds more than the budget.
  */
 export function saveThroughHostDownload(
   download: HostDownload,
@@ -87,14 +96,16 @@ export function saveThroughHostDownload(
       failed: files.map((file) => ({ file, reason })),
     });
     try {
-      const contents = await Promise.all(
-        files.map(async (file) =>
-          downloadContentOf(
-            file,
-            file.url === undefined ? undefined : await readStoredFile(file.url),
-          ),
-        ),
-      );
+      const contents: HostDownloadContent[] = [];
+      let budget = INLINE_SAVE_BUDGET_BYTES;
+      for (const file of files) {
+        const read =
+          file.url === undefined || budget <= 0
+            ? undefined
+            : await readStoredFile(file.url, budget);
+        if (read !== undefined) budget -= read.byteLength;
+        contents.push(downloadContentOf(file, read?.blob));
+      }
       const { isError } = await download({ contents });
       return isError ? failAll("The host did not save the file") : { failed: [] };
     } catch {

@@ -3,6 +3,7 @@ import type { SaveFile, SaveFiles } from "@pipelex/mthds-ui/form";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  INLINE_SAVE_BUDGET_BYTES,
   downloadContentOf,
   downloadDisplayFor,
   saveThroughHostDownload,
@@ -73,15 +74,31 @@ describe("downloadContentOf", () => {
 describe("saveThroughHostDownload", () => {
   it("sends the whole plan as one request, a stored file's bytes embedded, and reports nothing failed when the host saves it", async () => {
     const download = vi.fn<HostDownload>().mockResolvedValue({});
-    const readStoredFile = vi.fn().mockResolvedValue("iVBORw0KGgo=");
+    const readStoredFile = vi.fn().mockResolvedValue({ blob: "iVBORw0KGgo=", byteLength: 8 });
     const result = await saveThroughHostDownload(download, readStoredFile)([IMAGE, JSON_COPY]);
-    expect(readStoredFile).toHaveBeenCalledExactlyOnceWith(IMAGE.url);
+    expect(readStoredFile).toHaveBeenCalledExactlyOnceWith(IMAGE.url, INLINE_SAVE_BUDGET_BYTES);
     expect(download).toHaveBeenCalledTimes(1);
     expect(download.mock.calls[0]![0].contents).toEqual([
       downloadContentOf(IMAGE, "iVBORw0KGgo="),
       downloadContentOf(JSON_COPY),
     ]);
     expect(result).toEqual({ failed: [] });
+  });
+
+  it("embeds stored files only up to the request's budget, in plan order, and links the rest", async () => {
+    const download = vi.fn<HostDownload>().mockResolvedValue({});
+    const second = { ...IMAGE, name: "report-output-figures-1.png", url: `${IMAGE.url}&b` };
+    const third = { ...IMAGE, name: "report-output-figures-2.png", url: `${IMAGE.url}&c` };
+    const readStoredFile = vi.fn((_url: string, maxBytes: number) =>
+      Promise.resolve({ blob: "QUFB", byteLength: maxBytes }),
+    );
+    await saveThroughHostDownload(download, readStoredFile)([IMAGE, second, third]);
+    expect(readStoredFile).toHaveBeenCalledTimes(1);
+    expect(download.mock.calls[0]![0].contents).toEqual([
+      downloadContentOf(IMAGE, "QUFB"),
+      downloadContentOf(second),
+      downloadContentOf(third),
+    ]);
   });
 
   it("hands over the link of a stored file the view could not read", async () => {
