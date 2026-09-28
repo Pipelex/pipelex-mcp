@@ -159,7 +159,9 @@ A chat host takes the console, and a coding agent takes the workshop through the
 The way to end up with both without choosing it: **the console added in claude.ai syncs into Claude Code automatically.** A user signed into claude.ai with the console enabled gets the connector's tools in coding sessions beside the workshop's. That is harmless, but it doubles the tool list for no added capability, so you can turn the console off for those sessions:
 
 - In Claude Code, `/mcp` is the entry point. A connector you haven't signed into is collapsed behind a **"Show unused connectors"** row (Claude Code v2.1.161+) — expand it to find Pipelex.
-- Config alternatives: per-project `deniedMcpServers` in `.claude/settings.json`, or global `disableClaudeAiConnectors: true` in user settings.
+- For one project, list it under `deniedMcpServers` in `.claude/settings.json`.
+
+Avoid `disableClaudeAiConnectors: true` for this. It turns off the console, but also every other connector on your Claude account, such as Gmail, Google Drive and Calendar, and those are what an agent uses to fetch a method's inputs from your mail or files and to deliver its results.
 
 ## Documentation
 
