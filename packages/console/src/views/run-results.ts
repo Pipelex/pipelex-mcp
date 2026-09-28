@@ -164,6 +164,25 @@ export function executedPipeRefOf(
 }
 
 /**
+ * The name a run's saved files go under: the executed pipe's code, so a run of
+ * `portraits.generate_portrait` whose output is one image saves it as
+ * `generate_portrait.png`, and a richer output's JSON copy as
+ * `generate_portrait.json`. It is `null` when no pipe is known, and the kernel
+ * then names the files after the field, which is `output` for every pipe.
+ *
+ * The code alone, never the domain: it is what the reader chose to run and what
+ * the graph labels the step with, and a dotted name would read as an extension.
+ * It names a file outright only since kernel `@pipelex/mthds-form` 0.12.1,
+ * which stopped repeating the result's root segment after the base name; before
+ * it, this would have saved `generate_portrait-output.png`.
+ */
+export function saveBaseNameOf(pipeRef: string | null): string | null {
+  if (!pipeRef) return null;
+  const code = parsePipeRef(pipeRef).code.trim();
+  return code ? code : null;
+}
+
+/**
  * The field the kernel renders the output through, or `null` when the result
  * cannot describe it — the panel then shows the payload as JSON.
  *
