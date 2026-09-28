@@ -19,13 +19,16 @@ import type {
 } from "@pipelex/mthds-ui/form";
 import type { DownloadDisplay } from "@pipelex/mthds-ui/form/react";
 
+import type { ReadStoredFile } from "./stored-file-bytes.js";
+
 /**
  * One entry of a `ui/download-file` request, as Skybridge's `useDownload`
  * takes it: a link the host fetches, or content carried inline.
  */
 export type HostDownloadContent =
   | { type: "resource_link"; uri: string; name: string; mimeType: string }
-  | { type: "resource"; resource: { uri: string; mimeType: string; text: string } };
+  | { type: "resource"; resource: { uri: string; mimeType: string; text: string } }
+  | { type: "resource"; resource: { uri: string; mimeType: string; blob: string } };
 
 /** Skybridge's `download`: `{ isError: true }` when the host declined or cannot. */
 export type HostDownload = (params: {
@@ -43,25 +46,24 @@ export type HostOpenLink = (href: string) => void;
 export type HostSaveSupport = "download" | "open-link" | "unknown";
 
 /**
- * The request entry for one planned file. A stored file goes as a link, which
- * the host fetches itself, since the frame cannot make that cross-origin fetch;
- * the fresh link the panel resolved is what the plan carries. Inline content,
- * the JSON copy and an HTML page, goes embedded, under a `file:` URI whose last
- * segment is the planned name, because an embedded resource has no name field
- * and that segment is what a host names the saved file after.
+ * The request entry for one planned file. Everything the view holds goes
+ * embedded, under a `file:` URI whose last segment is the planned name,
+ * because an embedded resource has no name field and that segment is what a
+ * host names the saved file after: inline content (the JSON copy, an HTML
+ * page) as text, and a stored file as the bytes the view read from its fresh
+ * link (`blob`, base64), since claude.ai saves embedded content but not a link
+ * (`stored-file-bytes.ts`). A stored file the view could not read goes as the
+ * link, for a host that fetches one itself.
  */
-export function downloadContentOf(file: SaveFile): HostDownloadContent {
-  if (file.url !== undefined) {
-    return { type: "resource_link", uri: file.url, name: file.name, mimeType: file.mimeType };
+export function downloadContentOf(file: SaveFile, blob?: string): HostDownloadContent {
+  const uri = `file:///${encodeURIComponent(file.name)}`;
+  if (file.url === undefined) {
+    return { type: "resource", resource: { uri, mimeType: file.mimeType, text: file.text } };
   }
-  return {
-    type: "resource",
-    resource: {
-      uri: `file:///${encodeURIComponent(file.name)}`,
-      mimeType: file.mimeType,
-      text: file.text,
-    },
-  };
+  if (blob !== undefined) {
+    return { type: "resource", resource: { uri, mimeType: file.mimeType, blob } };
+  }
+  return { type: "resource_link", uri: file.url, name: file.name, mimeType: file.mimeType };
 }
 
 /**
@@ -72,16 +74,28 @@ export function downloadContentOf(file: SaveFile): HostDownloadContent {
  * after its timeout, which a reader who leaves the host's confirmation open
  * for a minute reaches. The kernel reads a rejection the same way, but
  * `saveWholeOutput` calls a delivery directly, so each one keeps the kernel's
- * contract of reporting a file rather than throwing.
+ * contract of reporting a file rather than throwing. Each stored file is read
+ * first, all at once, so its bytes can go embedded (`downloadContentOf`).
  */
-export function saveThroughHostDownload(download: HostDownload): SaveFiles {
+export function saveThroughHostDownload(
+  download: HostDownload,
+  readStoredFile: ReadStoredFile,
+): SaveFiles {
   return async (files) => {
     if (files.length === 0) return { failed: [] };
     const failAll = (reason: string): SaveResult => ({
       failed: files.map((file) => ({ file, reason })),
     });
     try {
-      const { isError } = await download({ contents: files.map(downloadContentOf) });
+      const contents = await Promise.all(
+        files.map(async (file) =>
+          downloadContentOf(
+            file,
+            file.url === undefined ? undefined : await readStoredFile(file.url),
+          ),
+        ),
+      );
+      const { isError } = await download({ contents });
       return isError ? failAll("The host did not save the file") : { failed: [] };
     } catch {
       return failAll("The host did not answer the download request");
