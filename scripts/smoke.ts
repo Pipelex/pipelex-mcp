@@ -11,7 +11,7 @@
  * in this repo noticed.
  *
  * What it does: spawns the workshop stdio server the way a host does
- * (`tsx src/local/main.ts`), completes the MCP handshake, then calls the
+ * (`tsx packages/workshop/src/main.ts`), completes the MCP handshake, then calls the
  * read-only tools against the configured API and asserts on their
  * `structuredContent`. Nothing here executes a method, so a run spends no
  * inference credit and is safe to run unattended (a scheduled canary reuses it).
@@ -32,10 +32,10 @@ import {
   getDefaultEnvironment,
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-import { LIVE_API_KEY_ENV, liveApiTarget } from "../src/capabilities/e2e-support.js";
+import { LIVE_API_KEY_ENV, liveApiTarget } from "@pipelex/mcp-core/capabilities/e2e-support.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const SERVER_ENTRYPOINT = path.join(REPO_ROOT, "src", "local", "main.ts");
+const SERVER_ENTRYPOINT = path.join(REPO_ROOT, "packages", "workshop", "src", "main.ts");
 const TSX_BIN = path.join(REPO_ROOT, "node_modules", ".bin", "tsx");
 
 /** Generous: a cold hosted API can take seconds, and a hang must still end in a verdict. */
@@ -301,6 +301,66 @@ async function checkListMethods(client: Client): Promise<void> {
     "projection invariant",
     `method source or org fields leaked at ${leaked.join(", ")}`,
     "no source, stored inputs/outputs, or org fields anywhere in the result",
+  );
+}
+
+/**
+ * The model deck, read and checked through the real server: the LLM presets it
+ * lists, and one of them checked back. An empty list here is the drift this
+ * catches, the presets arriving without a category the tool can place.
+ */
+async function checkModels(client: Client): Promise<void> {
+  section("mthds_models");
+
+  let listed: ToolCallResult;
+  try {
+    listed = await callTool(client, "mthds_models", { category: "llm" });
+  } catch (err) {
+    fail("mthds_models listing call", errorMessage(err));
+    return;
+  }
+  if (listed.isError === true) {
+    reportToolFailure("mthds_models listing", listed);
+    return;
+  }
+
+  const deck = isRecord(listed.structuredContent) ? listed.structuredContent.deck : undefined;
+  const llm = Array.isArray(deck) ? deck[0] : undefined;
+  const presets =
+    isRecord(llm) && Array.isArray(llm.presets)
+      ? llm.presets.filter((preset): preset is string => typeof preset === "string")
+      : [];
+  if (
+    !expect(
+      presets.length > 0,
+      "llm presets",
+      `expected at least one, got ${describe(listed.structuredContent)}`,
+      `${presets.length} listed`,
+    )
+  ) {
+    return;
+  }
+
+  const preset = presets[0] as string;
+  let checked: ToolCallResult;
+  try {
+    checked = await callTool(client, "mthds_models", { reference: preset });
+  } catch (err) {
+    fail("mthds_models check call", errorMessage(err));
+    return;
+  }
+  if (checked.isError === true) {
+    reportToolFailure("mthds_models check", checked);
+    return;
+  }
+  const resolution = isRecord(checked.structuredContent)
+    ? checked.structuredContent.resolution
+    : undefined;
+  expect(
+    resolution === "resolved",
+    "check a listed preset",
+    `expected "resolved", got ${describe(resolution)}`,
+    preset,
   );
 }
 
@@ -639,6 +699,7 @@ async function main(): Promise<void> {
     const advertised = (await client.listTools()).tools.map((tool) => tool.name);
     const required = [
       "mthds_list_methods",
+      "mthds_models",
       "mthds_validate",
       "mthds_inputs_template",
       "mthds_codegen",
@@ -657,6 +718,7 @@ async function main(): Promise<void> {
 
     if (missing.length === 0) {
       await checkListMethods(client);
+      await checkModels(client);
       await checkValidate(client);
       await checkInputsTemplate(client);
       await checkCodegen(client);

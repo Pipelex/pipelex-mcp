@@ -6,21 +6,23 @@
 
 Pipelex lets you build AI methods with your coding agent and run them anywhere: as an MCP for chatbots, as a webapp for people, or via API for your software. This repository is the Pipelex MCP: it connects your chatbot to your Pipelex account and the methods saved there.
 
-**Chatbots** — ChatGPT, Claude. Add the Pipelex MCP in your chatbot's settings by the address below — in Claude, that is **Add custom connector** — then sign in with your Pipelex account when asked. Nothing to install and no key: the Pipelex MCP runs on your signed-in session.
+**Chatbots** — ChatGPT, Claude. Sign up at [app.pipelex.com](https://app.pipelex.com). Add the Pipelex MCP in your chatbot's settings by the address below — in Claude, that is **Add custom connector** — then sign in with your Pipelex account when asked. Nothing to install and no key: the Pipelex MCP runs on your signed-in session.
 
 ```
 https://mcp.pipelex.com/mcp
 ```
 
-**Coding agents** — Claude Code, Codex. Install the [Pipelex plugin](https://github.com/Pipelex/pipelex-plugins) instead: it brings the same tools, and the skills that build methods beside them. Claude Code also loads what you have added to your Claude account, so if the Pipelex MCP is there, turn it off in Claude Code with `/mcp`: an agent with the plugin never takes both, since they register the same tool names.
+**Coding agents** — Claude Code, Codex. Install the [Pipelex plugin](https://github.com/Pipelex/pipelex-plugins) instead: it brings the skills that build methods, and its own Pipelex tools, which run your methods and also work with the method files in your project. Claude Code also loads what you have added to your Claude account, so if you added the Pipelex MCP to Claude, Claude Code has it too. An agent with the plugin does not need the Pipelex MCP, and there is nothing to turn off: when both are present, the Pipelex MCP defers to the plugin's tools.
 
 **Then ask your chatbot:**
 
 > What methods do I have?
 >
-> Run the invoice method on https://example.com/invoice.pdf
+> Run github.com/Pipelex/methods/invoice_extraction@v0.1.1 on https://raw.githubusercontent.com/Pipelex/pipelex-cookbook/main/assets/extract_proof_of_purchase/restaurant_invoice.pdf
 
 You get a run id straight away, and you can ask for its status, its results or the files it produced at any time.
+
+Your new account comes with one method to try. A published method, such as those in the [Pipelex methods repository](https://github.com/Pipelex/methods), runs from its address with nothing to save. Your own methods come from the Pipelex plugin: build one in a coding agent and save it to your account, and your chatbot lists it and runs it by name.
 
 Give the file as a URL the Pipelex MCP can reach. In ChatGPT you can attach it to the conversation instead and ask for a run on it; Claude has no way yet to hand the Pipelex MCP a file you attached.
 
@@ -50,9 +52,9 @@ A host that spawns MCP servers but takes no plugin, such as Cursor, can run the 
 Pipelex MCP connects MCP hosts to Pipelex methods, wrapping the Pipelex API through the `@pipelex/sdk` `PipelexApiClient`. It ships as **two servers with two tool sets, over one capability core**:
 
 - **The console**, the Pipelex connector (server name `pipelex`): a [Skybridge](https://docs.skybridge.tech) HTTP server, deployed on Alpic, for chat hosts. Its tools are `pipelex_*`, and it names a method by reference only, a saved method's catalog id or a published method's address: it finds a method, shows it, takes a file attached in the chat, and runs it. It registers the Skybridge views.
-- **The workshop**, the Pipelex plugin's server (server name `pipelex-plugin`): an npm-distributed stdio server (`@pipelex/mcp`, bin `pipelex-mcp`) that coding-agent hosts spawn via `npx`. Its tools are `mthds_*`, and they also validate a method, template its inputs, generate typed code for it, prepare its files, and save it to the catalog and pull it back. Its headline feature is the `{ path }` file arm: it reads `.mthds` files from disk instead of having the model hand-copy their contents.
+- **The workshop**, the Pipelex plugin's server (server name `pipelex-plugin`): an npm-distributed stdio server (`@pipelex/mcp`, bin `pipelex-mcp`) that coding-agent hosts spawn via `npx`. Its tools are `mthds_*`, and they also validate a method, template its inputs, generate typed code for it, prepare its files, look up the model references it can name, and save it to the catalog and pull it back. Its headline feature is the `{ path }` file arm: it reads `.mthds` files from disk instead of having the model hand-copy their contents.
 
-The console is the Pipelex MCP of the get-started above, at `mcp.pipelex.com`, and the workshop is the MCP server the Pipelex plugin runs. The rest of this page calls them by the names the code uses.
+The console is the Pipelex MCP of the get-started above, at `mcp.pipelex.com`, and the workshop is the MCP server the Pipelex plugin runs. The rest of this page calls them by the names the code uses. The two are released separately, each with its own version and changelog.
 
 ## Tools
 
@@ -76,7 +78,8 @@ The workshop's tools:
 | Tool | What it does |
 |---|---|
 | [`mthds_list_methods`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_list_methods) | List the methods saved in your organization's catalog by name, description and id, never their source. |
-| [`mthds_validate`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_validate) | Validate a method given as files, a published address or a catalog id, and return its main pipe's typed signature. |
+| [`mthds_models`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_models) | List the model references a pipe can name, or check one before writing it into a method. |
+| [`mthds_validate`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_validate) | Validate a method given as files, a published address or a catalog id, return its main pipe's typed signature, and write its flowchart as an HTML page beside files given by path. |
 | [`mthds_inputs_template`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_inputs_template) | Return a fill-in template of a pipe's declared inputs. |
 | [`mthds_codegen`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_codegen) | Generate typed TypeScript or Python for a method's concepts, stamped and locked, returned or written straight to disk. |
 | [`mthds_prepare_inputs`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_prepare_inputs) | Make filled inputs run-ready, uploading local files to Pipelex storage. |
@@ -120,7 +123,7 @@ The hosted console holds **no server-side API key** and there is nothing to past
 https://mcp.pipelex.com/mcp
 ```
 
-That is the address to register, in every host.
+That is the address to register, in every host. If you have no Pipelex account yet, create one at [app.pipelex.com](https://app.pipelex.com) before you add the console: signing up there also sets up the organization every tool call works in.
 
 Sign-in is OAuth through WorkOS AuthKit, which the console's MCP host drives for you — ChatGPT, claude.ai and Claude Desktop handle the handshake themselves, including picking the organization you want to work in. Your verified session is what authorizes every call the console makes on your behalf, so the catalog you see and the runs you spend are your own. The token never travels through tool arguments, so it never enters the model's context.
 
@@ -156,22 +159,25 @@ A chat host takes the console, and a coding agent takes the workshop through the
 The way to end up with both without choosing it: **the console added in claude.ai syncs into Claude Code automatically.** A user signed into claude.ai with the console enabled gets the connector's tools in coding sessions beside the workshop's. That is harmless, but it doubles the tool list for no added capability, so you can turn the console off for those sessions:
 
 - In Claude Code, `/mcp` is the entry point. A connector you haven't signed into is collapsed behind a **"Show unused connectors"** row (Claude Code v2.1.161+) — expand it to find Pipelex.
-- Config alternatives: per-project `deniedMcpServers` in `.claude/settings.json`, or global `disableClaudeAiConnectors: true` in user settings.
+- For one project, list it under `deniedMcpServers` in `.claude/settings.json`.
+
+Avoid `disableClaudeAiConnectors: true` for this. It turns off the console, but also every other connector on your Claude account, such as Gmail, Google Drive and Calendar, and those are what an agent uses to fetch a method's inputs from your mail or files and to deliver its results.
 
 ## Documentation
 
 - [Tools reference](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md): every tool's input, structured result and behavior, and which server registers it.
 - [Registering the workshop in a host](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/hosts.md): the configuration for Claude Code, Codex, Cursor, Claude Desktop and Mistral Vibe, the environment variables the workshop reads, and the working directory it is bound to.
 - [Developing pipelex-mcp](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/development.md): running the console locally, the build, the test suites and versioning.
+- [Architecture](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/architecture.md) and [Testing](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/testing.md): how the two servers and their shared core are built, module by module, and how they are tested, the live drift detectors included.
 - [Client identification](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/client-identification.md): the `User-Agent` every request to the Pipelex API carries, naming this server, its shell and the host behind it.
 - [The specification](https://github.com/Pipelex/pipelex-mcp/blob/main/SPEC.md): the source of truth for the full tool contracts, verdict discipline and view behavior.
 - [An illustrated overview](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/readme.html) of the two servers, the tool surface, the flow a method takes and the sharp edges, as an HTML page to download and open in a browser.
-- [The changelog](https://github.com/Pipelex/pipelex-mcp/blob/main/CHANGELOG.md): what each release shipped.
+- The changelogs, one per server, since each is released on its own: [the workshop's](https://github.com/Pipelex/pipelex-mcp/blob/main/packages/workshop/CHANGELOG.md), whose versions are the ones on npm and which also records every release made before the two were split, and [the console's](https://github.com/Pipelex/pipelex-mcp/blob/main/packages/console/CHANGELOG.md).
 - [The Pipelex documentation](https://docs.pipelex.com/) and [the MTHDS standard](https://mthds.ai/).
 
 ## Develop
 
-To work on this repository, clone it, then:
+The repository is an npm workspace of three packages: the capability core both servers are built from, the workshop and the console, under `packages/`. To work on it, clone it, then, from the root:
 
 ```bash
 make install   # install the dependencies
@@ -179,7 +185,7 @@ make check     # lint, formatting, both builds, typecheck, and the text and styl
 make test      # the hermetic test suite, which never touches the network
 ```
 
-A coding agent runs `make agent-test` instead of `make test`: the same suite, with its output shown only when a test fails. `make dev-local` runs the workshop from source. [Developing pipelex-mcp](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/development.md) covers running the console locally, the live test suites against the Pipelex API, and versioning, and [the changelog](https://github.com/Pipelex/pipelex-mcp/blob/main/CHANGELOG.md) records what each release shipped.
+A coding agent runs `make agent-test` instead of `make test`: the same suite, with its output shown only when a test fails. `make dev-local` runs the workshop from source. [Developing pipelex-mcp](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/development.md) covers the layout, running the console locally, the live test suites against the Pipelex API, and how each server is versioned and released.
 
 ## License
 

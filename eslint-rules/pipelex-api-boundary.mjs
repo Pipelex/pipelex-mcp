@@ -4,7 +4,7 @@
  * The server names itself to the platform with a `User-Agent`
  * (`docs/client-identification.md`), which `@pipelex/sdk` builds from the
  * `appInfo` its client is constructed with. One factory passes it —
- * `createPipelexApiClient` in `src/capabilities/shared.ts` — and these rules
+ * `createPipelexApiClient` in `packages/core/src/capabilities/shared.ts` — and these rules
  * make that factory the only way to reach the API:
  *
  * - `pipelex/sdk-client-factory`: an SDK client (`PipelexApiClient`,
@@ -42,7 +42,7 @@ const sdkClientFactory = {
     ],
     messages: {
       construct:
-        "`{{name}}` is built only by `createPipelexApiClient` (`src/capabilities/shared.ts`), which passes the shell's `appInfo` so every request carries the pipelex-mcp User-Agent. Pass a subclass as its second argument. See docs/client-identification.md.",
+        "`{{name}}` is built only by `createPipelexApiClient` (`packages/core/src/capabilities/shared.ts`), which passes the shell's `appInfo` so every request carries the pipelex-mcp User-Agent. Pass a subclass as its second argument. See docs/client-identification.md.",
       extend:
         "Subclassing `{{name}}` is allowed only where the lint config says so. Add the subclass there and construct it through `createPipelexApiClient`. See docs/client-identification.md.",
     },

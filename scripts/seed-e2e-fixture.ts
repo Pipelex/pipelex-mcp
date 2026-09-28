@@ -37,7 +37,7 @@ import {
   catalogRowNamed,
   liveApiConfig,
   liveClient,
-} from "../src/capabilities/e2e-support.js";
+} from "@pipelex/mcp-core/capabilities/e2e-support.js";
 
 function write(text: string): void {
   process.stdout.write(`${text}\n`);
@@ -61,7 +61,7 @@ function write(text: string): void {
  * `input_data: null` and erase any form inputs saved against the fixture from
  * the webapp. `mthds_save_method` defends the same way and for the same
  * reason — see the note above its own `updateMethod` call in
- * `src/capabilities/catalog-write.ts`.
+ * `packages/core/src/capabilities/catalog-write.ts`.
  */
 async function seed(name: string, mthds: string): Promise<void> {
   const client = liveClient();

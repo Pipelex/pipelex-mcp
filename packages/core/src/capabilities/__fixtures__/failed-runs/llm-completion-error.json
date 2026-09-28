@@ -1,0 +1,39 @@
+{
+  "status_read": {
+    "pipeline_run_id": "run_aa422fd5-59ef-4801-a585-09e6a961e80f",
+    "status": "FAILED",
+    "created_at": "2026-09-23T15:16:34.018225Z",
+    "finished_at": "2026-09-23T15:16:37.856067+00:00",
+    "degraded": false,
+    "pipe_code": "joke_and_judge",
+    "error": {
+      "provider_metadata": {
+        "status_code": "412",
+        "sdk_exception_type": "APIStatusError",
+        "provider": "openai",
+        "message": "Error code: 412 - {'error': {'message': 'Model global.anthropic.claude-opus-4-8 is not allowed for this integration', 'type': 'model_not_allowed_error', 'param': None, 'code': None}}",
+        "provider_error_code": "model_not_allowed_error"
+      },
+      "error_category": "configuration",
+      "type_uri": "https://docs.pipelex.com/latest/errors/llm-completion-error/",
+      "error_domain": "config",
+      "model": "claude-4.8-opus",
+      "error_type": "LLMCompletionError",
+      "message": "openai inference failed for model 'claude-4.8-opus → SDK\\[gateway_completions]•Backend\\[pipelex_gateway]•Model\\[global.anthropic.claude-opus-4-8]' (HTTP 412): Error code: 412 - {'error': {'message': 'Model global.anthropic.claude-opus-4-8 is not allowed for this integration', 'type': 'model_not_allowed_error', 'param': None, 'code': None}}",
+      "retryable": false,
+      "provider": "pipelex_gateway",
+      "title": "LLM completion",
+      "user_action": {
+        "kind": "change_input",
+        "detail": "The provider rejected the request — review the prompt, parameters, and inputs."
+      }
+    }
+  },
+  "results_arm": {
+    "state": "failed",
+    "pipeline_run_id": "run_aa422fd5-59ef-4801-a585-09e6a961e80f",
+    "status": "FAILED",
+    "message": "Run finished with status FAILED; no result available",
+    "error": null
+  }
+}

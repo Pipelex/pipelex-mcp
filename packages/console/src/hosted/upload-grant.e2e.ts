@@ -1,0 +1,98 @@
+/**
+ * Live e2e — `pipelex_request_upload` against a real Pipelex API.
+ *
+ * Write-free: a grant is a signed promise to accept one object, and nothing is
+ * stored until someone sends the file with it, which this suite never does. The
+ * send itself is `@pipelex/sdk`'s and is proven live in that repo, in Node and in
+ * a browser; what can only be proven here is that the route still answers the
+ * way this capability projects it, and that the host a grant names is one the
+ * `run-graph` view's CSP lets a page connect to. That last check is the one a
+ * unit test cannot make: the platform picked the global S3 host rather than the
+ * regional one the runtime uses, and nothing but a live grant says so.
+ *
+ * The grant's reference also serves the check the views' images rest on: the
+ * results paint from fresh links the bulk resolve route mints, and the host it
+ * signs on must be one `RUN_OUTPUT_SOURCES` names. The route presigns without
+ * reading the object, so an unsent grant's reference is enough, and this stays
+ * write-free. It is the check whose absence let the views ship pointing at a
+ * host no image was ever served from.
+ */
+
+import { describe, expect, it } from "vitest";
+
+import { RUN_OUTPUT_SOURCES, UPLOAD_CONNECT_DOMAINS } from "./app-buckets.js";
+import { liveApiConfig } from "@pipelex/mcp-core/capabilities/e2e-support.js";
+import { createPipelexApiClient } from "@pipelex/mcp-core/capabilities/shared.js";
+import { requestPipelexUpload } from "@pipelex/mcp-core/capabilities/upload-grant.js";
+
+const context = liveApiConfig();
+
+describe("pipelex_request_upload (live)", () => {
+  it("mints a grant for a small file, on a host the run form may connect to", async () => {
+    const result = await requestPipelexUpload(
+      { filename: "pipelex-mcp-e2e.pdf", content_type: "application/pdf", size: 125 },
+      context,
+    );
+
+    expect(result.structuredContent.errors, result.summary).toBeUndefined();
+    expect(result.structuredContent.status).toBe("ok");
+    const grant = result.grant;
+    expect(grant).toBeDefined();
+    expect(result.structuredContent.uri).toBe(grant?.uri);
+    expect(grant?.uri.startsWith("pipelex-storage://")).toBe(true);
+    expect(grant?.max_bytes).toBeGreaterThan(125);
+    expect(Date.parse(grant?.expires_at ?? "")).toBeGreaterThan(Date.now());
+    // Create-only: the grant can write its object once and never overwrite one.
+    expect(grant?.headers["If-None-Match"]).toBe("*");
+    // A local stack's object store is plain http and named by no CSP here; the
+    // allowlist is for the hosted buckets.
+    const origin = new URL(grant?.url ?? "").origin;
+    if (!origin.startsWith("http://")) {
+      expect(UPLOAD_CONNECT_DOMAINS).toContain(origin);
+    }
+  });
+
+  it("resolves a stored reference to a fresh link on a host both run views may load", async () => {
+    const minted = await requestPipelexUpload(
+      { filename: "pipelex-mcp-e2e.png", content_type: "image/png", size: 68 },
+      context,
+    );
+    const reference = minted.grant?.uri;
+    expect(reference, minted.summary).toBeDefined();
+
+    // The route itself, not `freshStorageLinks`: that is best effort and
+    // swallows a refusal, where this must fail naming a 403, a 404 or wire
+    // drift, and it keeps only https links, where a local stack's plain-http
+    // one must reach the guard below.
+    const answer = await createPipelexApiClient(context).resolveStorageUrls({
+      uris: [reference ?? ""],
+    });
+
+    const [item] = answer.items;
+    expect(item?.error ?? null, JSON.stringify(item?.error)).toBeNull();
+    expect(item?.uri).toBe(reference);
+    const origin = new URL(item?.url ?? "").origin;
+    if (!origin.startsWith("http://")) {
+      expect(RUN_OUTPUT_SOURCES).toContain(origin);
+    }
+  });
+
+  it("refuses a declared size over the cap before any byte moves", async () => {
+    const first = await requestPipelexUpload({ filename: "small.pdf", size: 1 }, context);
+    const cap = first.structuredContent.max_bytes;
+    expect(cap, first.summary).toBeGreaterThan(0);
+
+    const result = await requestPipelexUpload(
+      { filename: "too-large.pdf", size: (cap ?? 0) + 1 },
+      context,
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "size",
+      retryable: false,
+    });
+    expect(result.grant).toBeUndefined();
+  });
+});
