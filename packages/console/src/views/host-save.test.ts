@@ -13,7 +13,7 @@ import {
 import type { HostDownload } from "./host-save.js";
 
 const IMAGE: SaveFile = {
-  name: "report-output-figures-0.png",
+  name: "report-figures-0.png",
   mimeType: "image/png",
   kind: "image",
   path: "output.figures.0",
@@ -36,7 +36,7 @@ describe("downloadContentOf", () => {
     expect(downloadContentOf(IMAGE, "iVBORw0KGgo=")).toEqual({
       type: "resource",
       resource: {
-        uri: "file:///report-output-figures-0.png",
+        uri: "file:///report-figures-0.png",
         mimeType: "image/png",
         blob: "iVBORw0KGgo=",
       },
@@ -47,7 +47,7 @@ describe("downloadContentOf", () => {
     expect(downloadContentOf(IMAGE)).toEqual({
       type: "resource_link",
       uri: IMAGE.url,
-      name: "report-output-figures-0.png",
+      name: "report-figures-0.png",
       mimeType: "image/png",
     });
   });
@@ -87,8 +87,8 @@ describe("saveThroughHostDownload", () => {
 
   it("embeds stored files only up to the request's budget, in plan order, and links the rest", async () => {
     const download = vi.fn<HostDownload>().mockResolvedValue({});
-    const second = { ...IMAGE, name: "report-output-figures-1.png", url: `${IMAGE.url}&b` };
-    const third = { ...IMAGE, name: "report-output-figures-2.png", url: `${IMAGE.url}&c` };
+    const second = { ...IMAGE, name: "report-figures-1.png", url: `${IMAGE.url}&b` };
+    const third = { ...IMAGE, name: "report-figures-2.png", url: `${IMAGE.url}&c` };
     const readStoredFile = vi.fn((_url: string, maxBytes: number) =>
       Promise.resolve({ blob: "QUFB", byteLength: maxBytes }),
     );
@@ -138,7 +138,7 @@ describe("saveThroughOpenLink", () => {
   it("fails a link the host refused to open and still opens the next", async () => {
     const other = {
       ...IMAGE,
-      name: "report-output-figures-1.png",
+      name: "report-figures-1.png",
       url: "https://bucket.example/b.png",
     };
     const openLink = vi.fn().mockImplementationOnce(() => {

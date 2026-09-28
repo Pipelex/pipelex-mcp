@@ -31,6 +31,7 @@ import {
   hasExecutedGraph,
   outputFieldFor,
   outputToRender,
+  saveBaseNameOf,
 } from "../run-results.js";
 import type { RunResultsView } from "../run-results.js";
 import { saveWholeOutput } from "../host-save.js";
@@ -277,6 +278,8 @@ function RunOutput({
     () => outputFieldFor(results.contracts, results.outputForm, pipeRef),
     [results.contracts, results.outputForm, pipeRef],
   );
+  // Saved files are named after the pipe that ran, not the field's `output`.
+  const saveBaseName = saveBaseNameOf(pipeRef) ?? undefined;
   // The full output rides `_meta`; the bounded copy stands in past the render
   // budget, and for a response that somehow carried none.
   const { value, oversizedLength } = useMemo(
@@ -336,7 +339,7 @@ function RunOutput({
                   fallback={<JsonView value={value} />}
                   mutedColor={mutedColor}
                 >
-                  <StuffViewer field={field} value={value} />
+                  <StuffViewer field={field} value={value} downloadBaseName={saveBaseName} />
                 </RenderBoundary>
               ) : (
                 <JsonView value={value} />
@@ -364,6 +367,7 @@ function RunOutput({
           {field && hostSave.downloads.result && (
             <WholeOutputDownload
               field={field}
+              baseName={saveBaseName ?? field.name}
               value={results.mainStuff}
               resolveUrl={results.resolveUrl}
               saveFiles={hostSave.saveFiles}
@@ -408,6 +412,7 @@ type WholeOutputSave =
  */
 function WholeOutputDownload({
   field,
+  baseName,
   value,
   resolveUrl,
   saveFiles,
@@ -415,6 +420,7 @@ function WholeOutputDownload({
   errorColor,
 }: {
   field: RunField;
+  baseName: string;
   value: unknown;
   resolveUrl: ResolveUrl | undefined;
   saveFiles: SaveFiles;
@@ -426,7 +432,7 @@ function WholeOutputDownload({
     setSave({ state: "saving" });
     // The planner walks a payload nothing validated, so a throw is a failure
     // to report, never a crash of the panel.
-    saveWholeOutput(field, value, { baseName: field.name, resolveUrl, saveFiles })
+    saveWholeOutput(field, value, { baseName, resolveUrl, saveFiles })
       .then((names) => setSave(names.length > 0 ? { state: "missed", names } : { state: "idle" }))
       .catch(() => setSave({ state: "failed" }));
   };
