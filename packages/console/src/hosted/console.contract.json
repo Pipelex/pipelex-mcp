@@ -1701,7 +1701,13 @@
             ],
             "connectDomains": [
               "http://<skybridge dev host>",
-              "ws://<skybridge dev host>"
+              "ws://<skybridge dev host>",
+              "https://pipelex-app-dev.s3.amazonaws.com",
+              "https://pipelex-app-staging.s3.amazonaws.com",
+              "https://pipelex-app-prod.s3.amazonaws.com",
+              "https://pipelex-app-dev.s3.us-west-2.amazonaws.com",
+              "https://pipelex-app-staging.s3.us-west-2.amazonaws.com",
+              "https://pipelex-app-prod.s3.us-west-2.amazonaws.com"
             ],
             "baseUriDomains": [
               "http://<skybridge dev host>"

@@ -67,6 +67,12 @@ export default [
     files: ["packages/core/src/capabilities/attachment-fetch.ts"],
     rules: { "pipelex/no-raw-fetch": "off" },
   },
+  // The views read a stored file from its presigned app-bucket link, to hand
+  // its bytes to the host, never the Pipelex API.
+  {
+    files: ["packages/console/src/views/stored-file-bytes.ts"],
+    rules: { "pipelex/no-raw-fetch": "off" },
+  },
   // The bundle boot check fetches the console it has just started on loopback,
   // never the Pipelex API.
   {

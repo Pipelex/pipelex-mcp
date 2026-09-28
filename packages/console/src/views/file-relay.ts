@@ -17,7 +17,7 @@ import { RUN_OUTPUT_SOURCES } from "../hosted/app-buckets.js";
 export const FILE_RELAY_PAGE = "open-file.html";
 
 /** Whether `href` points to an app bucket, where every stored file's fresh link points. */
-function isStoredFileLink(href: string): boolean {
+export function isStoredFileLink(href: string): boolean {
   // `new URL` rather than `URL.parse`, which Safari before 18 lacks.
   try {
     return RUN_OUTPUT_SOURCES.includes(new URL(href).origin);

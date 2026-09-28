@@ -7,6 +7,7 @@ import { McpAppBridge, useDownload, useOpenExternal } from "skybridge/web";
 import { fileRelayLink, storedFileLinkOf } from "./file-relay.js";
 import { downloadDisplayFor, saveThroughHostDownload, saveThroughOpenLink } from "./host-save.js";
 import type { HostSaveSupport } from "./host-save.js";
+import { storedFileReader } from "./stored-file-bytes.js";
 
 /**
  * Whether the host takes a `ui/download-file` request, read from the
@@ -61,7 +62,9 @@ export function useHostSave(): {
       openExternal(fileRelayLink(window.skybridge.serverUrl, href), { redirectUrl: false });
     return {
       saveFiles:
-        support === "download" ? saveThroughHostDownload(download) : saveThroughOpenLink(openLink),
+        support === "download"
+          ? saveThroughHostDownload(download, storedFileReader())
+          : saveThroughOpenLink(openLink),
       downloads: downloadDisplayFor(support),
       routeFileLinks: (event: MouseEvent) => {
         if (event.button !== 0) return;
