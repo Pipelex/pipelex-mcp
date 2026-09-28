@@ -386,6 +386,18 @@ describe("the console's instructions", () => {
     }
   });
 
+  it("say what a method leaves to whatever calls it, in both variants", async () => {
+    for (const instructions of [await instructionsFor(), await instructionsFor(VIEWS_HOST)]) {
+      // A chat host's user has their mail and drive connectors beside this
+      // one: the model fetches the inputs and delivers the results with
+      // those, and the method only works on what it is handed.
+      expect(instructions).toContain("only turns the inputs it is given into results");
+      for (const reach of ["mail, drives or business systems", "on a schedule", "writing back"]) {
+        expect(instructions).toContain(reach);
+      }
+    }
+  });
+
   it("say that showing a picture is permanent", async () => {
     const instructions = await instructionsFor();
 

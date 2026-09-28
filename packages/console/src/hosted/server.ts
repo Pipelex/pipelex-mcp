@@ -44,15 +44,16 @@ export const HOSTED_SERVER_INFO = {
  * first and the per-host sentence last.
  */
 const HOSTED_INSTRUCTIONS_BODY = [
-  "The Pipelex connector runs executable AI methods on the hosted Pipelex API: methods saved in your Pipelex organization, or published by address.",
+  "The Pipelex connector runs executable AI methods, saved in your Pipelex organization or published by address, on the hosted Pipelex API.",
   `The usual flow: \`${NAMES.listMethods}\` to find a saved method, \`${NAMES.showMethod}\` for its signature and inputs template,`,
   `\`${NAMES.uploadAttachments}\` if the user attached files, \`${NAMES.run}\`, then \`${NAMES.runStatus}\` and`,
   `\`${NAMES.runResults}\` with the run id, and \`${NAMES.showImages}\` to see a picture the run produced.`,
-  "When the Pipelex plugin's `mthds_*` tools are also present, use them for all method work instead of these, and never mix the two servers: each can be signed in to a different organization.",
-  `\`${NAMES.showMethod}\` and \`${NAMES.run}\` take a saved method's catalog id (mt_…) as method_id or a published method's address as method_ref, resolved server-side.`,
+  "A method only turns the inputs it is given into results; fetching from mail, drives or business systems, running on a schedule and writing back are up to whatever calls it.",
+  "When the Pipelex plugin's `mthds_*` tools are also present, use them for all method work and never mix the two servers: each can be signed in to a different organization.",
+  `\`${NAMES.showMethod}\` and \`${NAMES.run}\` take a catalog id (mt_…) as method_id or a published address as method_ref, resolved server-side.`,
   `Call \`${NAMES.listMethods}\` when the user asks what saved methods exist, names one without its`,
   "mt_ id, or a saved method may fit the task; choose by name and description, then pass the id on.",
-  `A file input takes an http(s) URL or a pipelex-storage:// reference; a file attached to the conversation goes through \`${NAMES.uploadAttachments}\` first.`,
+  `A file input takes an http(s) URL or a pipelex-storage:// reference, which \`${NAMES.uploadAttachments}\` makes from an attached file.`,
   `\`${NAMES.run}\` spends inference credit.`,
   `A picture from \`${NAMES.showImages}\` stays in the conversation for every turn that follows,`,
   "so show one when it is asked for, not by reflex.",
@@ -64,8 +65,8 @@ const HOSTED_INSTRUCTIONS_BODY = [
  * choice, and must not start the run the form is about to start.
  */
 const VIEWS_SENTENCE = [
-  `This host shows views: \`${NAMES.showMethod}\` shows the user the method's graph and an input form with a Run button, and a run shows a live status card.`,
-  "After a show, unless the user already gave you the input values, let them choose between the form and the chat,",
+  `This host shows views: \`${NAMES.showMethod}\` shows the method's graph and an input form with a Run button, and a run shows a live status card.`,
+  "After a show, unless the user already gave the input values, let them use the form or the chat,",
   `and never call \`${NAMES.run}\` while they may be using the form: the method would run twice.`,
 ].join(" ");
 
