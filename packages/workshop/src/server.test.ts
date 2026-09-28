@@ -199,6 +199,24 @@ describe("the workshop's instructions", () => {
     }
   });
 
+  it("say what a method leaves to whatever calls it", async () => {
+    const { client, close } = await connectClient(createLocalServer());
+
+    try {
+      // An agent that goes straight to the tools reads no skill, so this is
+      // where it learns that "read my mail every morning and post the digest"
+      // is a method plus the mail read, the schedule and the post around it.
+      const instructions = client.getInstructions() ?? "";
+
+      expect(instructions).toContain("only turns the inputs it is given into results");
+      for (const reach of ["mail, drives or business systems", "on a schedule", "writing back"]) {
+        expect(instructions).toContain(reach);
+      }
+    } finally {
+      await close();
+    }
+  });
+
   it("name the tools only the workshop has, and not the console's", async () => {
     const { client, close } = await connectClient(createLocalServer());
 
@@ -424,8 +442,8 @@ describe("the workshop's contexts and dispatch", () => {
 
     const { client, close } = await connectClient(createLocalServer({ contexts }));
     try {
-      expect(client.getInstructions()).toContain("Prefer the `{ path: string }` file form");
-      expect(client.getInstructions()).toContain("Inline `{ content: string, uri?: string }`");
+      expect(client.getInstructions()).toContain("Prefer `{ path: string }` files");
+      expect(client.getInstructions()).toContain("files to inline content");
       expect(client.getInstructions()).toContain("has no views");
     } finally {
       await close();
@@ -502,7 +520,7 @@ describe("the workshop's contexts and dispatch", () => {
       expect(listed.tools.map((tool) => tool.name)).toEqual(
         localToolDefinitions.map((definition) => definition.name),
       );
-      expect(client.getInstructions()).toContain("Prefer the `{ path: string }` file form");
+      expect(client.getInstructions()).toContain("Prefer `{ path: string }` files");
     } finally {
       await client.close();
     }
