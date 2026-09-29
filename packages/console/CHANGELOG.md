@@ -2,6 +2,12 @@
 
 This is the changelog of the hosted console: the Pipelex MCP that chat hosts reach at `https://mcp.pipelex.com/mcp`, deployed to Alpic. Up to and including 0.20.0 the console was released together with the workshop, `@pipelex/mcp`, under one version, and those releases are recorded in [the workshop's changelog](../workshop/CHANGELOG.md). After 0.20.0 the console has its own version, this changelog, and `console-vX.Y.Z` tags.
 
+## [Unreleased]
+
+### Fixed
+
+- **A click on an image or a file's name saves the file on claude.ai**: On a host that takes download requests, a click on an output image, or on a file's name, now saves that file just as its download button does, under the same name, so the host asks to confirm a named file. Before, it opened the file, and claude.ai's confirmation showed a long link full of encoded signature instead of a name. A file in the executed graph's data panel is named after its stored file. On ChatGPT, which takes no download request, the click still opens the file in a new tab.
+
 ## [0.20.1] - 2026-09-28
 
 ### Highlights

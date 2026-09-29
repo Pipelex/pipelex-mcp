@@ -6,9 +6,12 @@ import {
   INLINE_SAVE_BUDGET_BYTES,
   downloadContentOf,
   downloadDisplayFor,
+  linkedSaveFile,
+  plannedFilesOf,
   saveThroughHostDownload,
   saveThroughOpenLink,
   saveWholeOutput,
+  storedFileOpener,
 } from "./host-save.js";
 import type { HostDownload } from "./host-save.js";
 
@@ -172,6 +175,98 @@ describe("saveWholeOutput", () => {
     expect(await saveWholeOutput(field, full, { baseName: "report", saveFiles })).toEqual([
       "report.json",
     ]);
+  });
+});
+
+describe("plannedFilesOf", () => {
+  // An image's payload schema has several members, so the kernel reads the
+  // object itself as the file rather than unwrapping one of them.
+  const field = buildResultField(
+    { field: { name: "output", kind: "image", concept_ref: "native.Image", required: true } },
+    {
+      type: "object",
+      properties: {
+        url: { type: "string" },
+        public_url: { type: ["string", "null"] },
+        filename: { type: ["string", "null"] },
+      },
+      required: ["url"],
+    },
+  );
+  const reference = "pipelex-storage://runs/run_1/generated/c2b8836d8e5bc2b1.png";
+  const fresh =
+    "https://bucket.example/runs/run_1/generated/c2b8836d8e5bc2b1.png?X-Amz-Signature=abc";
+
+  it("plans each file as its own button does, from its fresh link and under the output's base name", () => {
+    const planned = plannedFilesOf(
+      field,
+      { url: reference },
+      {
+        baseName: "generate_portrait",
+        resolveUrl: (url) => (url === reference ? fresh : undefined),
+      },
+    );
+    expect(planned).toEqual([
+      expect.objectContaining({ name: "generate_portrait.png", mimeType: "image/png", url: fresh }),
+    ]);
+  });
+
+  it("plans nothing when the planner throws on the payload", () => {
+    const hostile = {
+      get url(): string {
+        throw new Error("a payload nothing validated");
+      },
+    };
+    expect(plannedFilesOf(field, hostile, { baseName: "generate_portrait" })).toEqual([]);
+  });
+});
+
+describe("linkedSaveFile", () => {
+  it("saves a link to a planned file as that file, however the browser writes the link", () => {
+    const planned = { ...IMAGE, url: "https://Bucket.example/figure.png?X-Amz-Signature=abc" };
+    expect(
+      linkedSaveFile("https://bucket.example/figure.png?X-Amz-Signature=abc", [JSON_COPY, planned]),
+    ).toBe(planned);
+  });
+
+  it("names a link no plan holds after the last segment of its path, typed from its extension", () => {
+    const href =
+      "https://bucket.example/runs/run_1/generated/c2b8836d8e5bc2b1.png?X-Amz-Signature=abc";
+    expect(linkedSaveFile(href, [IMAGE])).toMatchObject({
+      name: "c2b8836d8e5bc2b1.png",
+      mimeType: "image/png",
+      kind: "image",
+      url: href,
+    });
+    expect(linkedSaveFile("https://bucket.example/docs/Q3%20report.pdf", [])).toMatchObject({
+      name: "Q3 report.pdf",
+      mimeType: "application/pdf",
+      kind: "document",
+    });
+  });
+
+  it("saves nothing for a link the kernel's gate refuses", () => {
+    expect(linkedSaveFile("javascript:alert(1)", [])).toBeUndefined();
+  });
+});
+
+describe("storedFileOpener", () => {
+  it("saves the clicked file through the host on a host that downloads, and opens nothing", () => {
+    const saveFiles = vi.fn<SaveFiles>().mockResolvedValue({ failed: [] });
+    const openLink = vi.fn();
+    storedFileOpener("download", saveFiles, openLink)(IMAGE.url, [IMAGE]);
+    expect(saveFiles).toHaveBeenCalledExactlyOnceWith([IMAGE]);
+    expect(openLink).not.toHaveBeenCalled();
+  });
+
+  it("opens the link on a host that only opens links, and before the host is known", () => {
+    for (const support of ["open-link", "unknown"] as const) {
+      const saveFiles = vi.fn<SaveFiles>();
+      const openLink = vi.fn();
+      storedFileOpener(support, saveFiles, openLink)(IMAGE.url, [IMAGE]);
+      expect(openLink).toHaveBeenCalledExactlyOnceWith(IMAGE.url);
+      expect(saveFiles).not.toHaveBeenCalled();
+    }
   });
 });
 
