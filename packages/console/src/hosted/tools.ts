@@ -6,7 +6,7 @@
  *
  * The console is the Pipelex MCP: it runs methods saved in the caller's
  * organization or published by address, by reference only, and its tools are
- * `pipelex_*` (`wip/mcp-server-split/design.md`, D2). It shares no tool name
+ * `pipelex_*` (L-260923-d3c264, D2). It shares no tool name
  * with the workshop, whose tools stay `mthds_*`, so neither server's name can
  * mean the other's contract. It has no validate, inputs-template, codegen or
  * prepare tool and no `files` argument anywhere: `pipelex_show_method` shows a

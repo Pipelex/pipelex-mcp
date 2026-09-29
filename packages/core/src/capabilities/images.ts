@@ -49,8 +49,8 @@ import type {
  *
  * It is a tool of its own rather than a flag on `mthds_run_results`, and that
  * is the whole design. An image block is cheap to send — the host probe
- * (`wip/mcp-image-results/host-probe.md`) measured a host billing one at the
- * model's native vision price, with its base64 size free — but it is
+ * (L-260920-fc66db) measured a host billing one at the model's native vision
+ * price, with its base64 size free — but it is
  * **permanent**: once a picture is in the conversation it is in every prompt
  * that follows, and nothing takes it back. A results tool that inlined by
  * default would have an agentic loop quietly buying twenty images of context
