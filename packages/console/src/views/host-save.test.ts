@@ -285,6 +285,25 @@ describe("storedFileOpener", () => {
     }
   });
 
+  it("ignores a click on a file whose last click is still in flight, and takes the next one once it settles", async () => {
+    let answer: (value: { isError?: boolean }) => void = () => {};
+    const download = vi.fn<HostDownload>(() => new Promise((resolve) => (answer = resolve)));
+    const readStoredFile = vi.fn().mockResolvedValue(bytes);
+    const open = storedFileOpener("download", download, readStoredFile, vi.fn());
+    // A double-click is two clicks, the second before the first is answered.
+    const first = open(IMAGE.url, [IMAGE]);
+    await open(IMAGE.url, [IMAGE]);
+    await vi.waitFor(() => expect(download).toHaveBeenCalledTimes(1));
+    expect(readStoredFile).toHaveBeenCalledTimes(1);
+    answer({});
+    await first;
+    const again = open(IMAGE.url, [IMAGE]);
+    await vi.waitFor(() => expect(download).toHaveBeenCalledTimes(2));
+    answer({});
+    await again;
+    expect(readStoredFile).toHaveBeenCalledTimes(2);
+  });
+
   it("opens nothing when the host declines the request, and never rejects when it does not answer", async () => {
     const readStoredFile = vi.fn().mockResolvedValue(bytes);
     const openLink = vi.fn();

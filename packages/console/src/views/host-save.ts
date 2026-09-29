@@ -231,8 +231,11 @@ function lastSegmentOf(href: string): string {
  * claude.ai fails at once (`stored-file-bytes.ts`); such a file opens through
  * `openLink`, as it does on a host that only opens links and in a view that
  * does not know its host yet. A request the host declines or leaves unanswered
- * shows nothing, since cancelling its confirmation is a decline too. Never
- * rejects: a click has nowhere to report.
+ * shows nothing, since cancelling its confirmation is a decline too. A click on
+ * a link whose last click is still being read or answered is ignored, as the
+ * kernel's own button disables itself while it saves: a double-click is two
+ * clicks, and each would read the file again and send the host a second
+ * request. Never rejects: a click has nowhere to report.
  */
 export function storedFileOpener(
   support: HostSaveSupport,
@@ -240,7 +243,10 @@ export function storedFileOpener(
   readStoredFile: ReadStoredFile,
   openLink: HostOpenLink,
 ): (href: string, planned: readonly SaveFile[]) => Promise<void> {
+  const inFlight = new Set<string>();
   return async (href, planned) => {
+    if (inFlight.has(href)) return;
+    inFlight.add(href);
     try {
       const file = support === "download" ? linkedSaveFile(href, planned) : undefined;
       const read =
@@ -254,6 +260,8 @@ export function storedFileOpener(
       await download({ contents: [downloadContentOf(file, read.blob)] });
     } catch {
       // A lost bridge or a host that refused to open the link: nothing to say.
+    } finally {
+      inFlight.delete(href);
     }
   };
 }
