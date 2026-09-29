@@ -38,6 +38,7 @@ import {
 } from "./run-graph-upload.js";
 import type { GrantRequest, GrantToolResponse, UploadErrors } from "./run-graph-upload.js";
 import { hasExecutedGraph, runDurationSeconds } from "./run-results.js";
+import { useFrameHeight } from "./use-frame-height.js";
 import { useHostSave } from "./use-host-save.js";
 import { useRunPolling } from "./use-run-polling.js";
 import { useRunResults } from "./use-run-results.js";
@@ -123,6 +124,7 @@ function RunGraph() {
   const { callToolAsync: requestUploadAsync } = useCallTool("pipelex_request_upload");
   const { theme, maxHeight, safeArea } = useLayout();
   const [displayMode, setDisplayMode] = useDisplayMode();
+  const frameHeight = useFrameHeight(displayMode === "fullscreen");
   const [viewState, setViewState] = useViewState<RunGraphViewState>({});
 
   const responseMetadata = toolInfo.isSuccess ? toolInfo.responseMetadata : undefined;
@@ -284,13 +286,13 @@ function RunGraph() {
 
   const isFullscreen = displayMode === "fullscreen";
   const { top, right, bottom, left } = safeArea.insets;
-  // ReactFlow needs an explicit pixel height. Fill the host when fullscreen;
+  // ReactFlow needs an explicit pixel height. Fill the frame when fullscreen;
   // keep a compact preview inline (no inline overflow scroll — fullscreen is
-  // the sanctioned mode for exploring the graph). Floor it so a small host
-  // height or large insets can't collapse the canvas to nothing. With a form
-  // below, the fullscreen graph takes roughly half the host and the whole view
+  // the sanctioned mode for exploring the graph). Floor it so a small frame
+  // or large insets can't collapse the canvas to nothing. With a form below,
+  // the fullscreen graph takes roughly half the frame and the whole view
   // scrolls.
-  const available = (maxHeight ?? 600) - top - bottom;
+  const available = frameHeight - top - bottom;
   const graphHeight = hasForm
     ? Math.max(isFullscreen ? Math.floor(available * 0.55) : 320, 240)
     : Math.max(isFullscreen ? available : Math.min(available, 420), 240);
@@ -431,16 +433,21 @@ function RunGraph() {
         paddingRight: right,
         paddingBottom: bottom,
         paddingLeft: left,
-        maxHeight: isFullscreen ? available : undefined,
+        // The insets are padding inside this height (border-box), not taken
+        // off it a second time.
+        maxHeight: isFullscreen ? frameHeight : undefined,
       }}
     >
-      <ToolbarButton
-        dark={dark}
-        onClick={() => void setDisplayMode(isFullscreen ? "inline" : "fullscreen")}
-        className="absolute right-2 top-2 z-10"
-      >
-        {isFullscreen ? "Collapse" : "Fullscreen"}
-      </ToolbarButton>
+      {/* An offset is measured from the padding box, so the insets are added
+          to it, or the toggle sits in the area they keep clear. */}
+      <div className="absolute z-10" style={{ top: top + 8, right: right + 8 }}>
+        <ToolbarButton
+          dark={dark}
+          onClick={() => void setDisplayMode(isFullscreen ? "inline" : "fullscreen")}
+        >
+          {isFullscreen ? "Collapse" : "Fullscreen"}
+        </ToolbarButton>
+      </div>
       {executedGraph ? (
         <div
           className="relative w-full overflow-hidden"

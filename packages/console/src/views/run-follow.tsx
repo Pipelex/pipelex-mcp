@@ -13,6 +13,7 @@ import { RenderBoundary } from "./components/render-boundary.js";
 import { RunResultsPanel } from "./components/run-results-panel.js";
 import { terminalFollowUpPrompt } from "./run-notify.js";
 import { runDurationSeconds } from "./run-results.js";
+import { useFrameHeight } from "./use-frame-height.js";
 import { useElapsedSeconds, useRunPolling } from "./use-run-polling.js";
 import { useRunResults } from "./use-run-results.js";
 
@@ -82,6 +83,7 @@ function RunFollow() {
   const { callToolAsync: resultsAsync } = useCallTool("pipelex_run_results");
   const { theme, maxHeight, safeArea } = useLayout();
   const [displayMode, setDisplayMode] = useDisplayMode();
+  const frameHeight = useFrameHeight(displayMode === "fullscreen");
   const [viewState, setViewState] = useViewState<RunFollowViewState>({});
   const sendFollowUpMessage = useSendFollowUpMessage();
 
@@ -217,7 +219,7 @@ function RunFollow() {
     const { top, right, bottom, left } = safeArea.insets;
     // ReactFlow needs an explicit pixel height; the graph shows in fullscreen
     // only, under the output, and the whole card scrolls there.
-    const available = (maxHeight ?? 600) - top - bottom;
+    const available = frameHeight - top - bottom;
     return (
       <div
         className="relative w-full overflow-y-auto"
@@ -226,7 +228,9 @@ function RunFollow() {
           paddingRight: right,
           paddingBottom: bottom,
           paddingLeft: left,
-          maxHeight: isFullscreen ? available : undefined,
+          // The insets are padding inside this height (border-box), not taken
+          // off it a second time.
+          maxHeight: isFullscreen ? frameHeight : undefined,
         }}
       >
         <RunResultsPanel

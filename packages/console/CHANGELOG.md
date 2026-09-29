@@ -2,6 +2,12 @@
 
 This is the changelog of the hosted console: the Pipelex MCP that chat hosts reach at `https://mcp.pipelex.com/mcp`, deployed to Alpic. Up to and including 0.20.0 the console was released together with the workshop, `@pipelex/mcp`, under one version, and those releases are recorded in [the workshop's changelog](../workshop/CHANGELOG.md). After 0.20.0 the console has its own version, this changelog, and `console-vX.Y.Z` tags.
 
+## [Unreleased]
+
+### Fixed
+
+- **Both views fill the fullscreen frame on claude.ai**: In fullscreen, `run-graph` and `run-follow` laid themselves out in 600 pixels and cut off there, with the rest of the frame empty, because the frame's height claude.ai states never reached them. They now take the frame's own height in fullscreen, keep the host's safe-area insets once rather than twice, and `run-graph`'s Collapse button sits inside those insets rather than at the frame's edge. This changes the views' code, so ChatGPT shows it only once the connector is removed and added again.
+
 ## [0.20.1] - 2026-09-28
 
 ### Highlights
