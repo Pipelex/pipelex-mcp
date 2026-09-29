@@ -216,7 +216,7 @@ Compiling and running locally still leaves the platform build untested, and on a
 make deploy-dev
 ```
 
-That ships the **working tree** (not a branch) to the Dev environment and restores the tracked `.alpic/project.json` afterwards. Offer it; treat it as strongly recommended on a major and optional on a patch. When it is done, exercise the deployed console the way Step 7 exercised the local one.
+That ships the **working tree** (not a branch) to the Dev environment, where it stays until the next push to `dev` redeploys that branch, and restores the tracked `.alpic/project.json` afterwards. Offer it; treat it as strongly recommended on a major and optional on a patch. When it is done, exercise the deployed console the way Step 7 exercised the local one.
 
 ## Step 9 — Sync the prose that names Skybridge behavior
 

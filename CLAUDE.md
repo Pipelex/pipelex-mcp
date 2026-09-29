@@ -39,7 +39,7 @@ Every target runs from the root.
 - `make smoke`, `make test-e2e` — the live drift detectors. `make test-e2e` writes to storage and to a seeded fixture.
 - `make test-e2e-run`, `make test-all` — the live suite with the run family: **spend inference credit**, run only when asked.
 - `make seed-e2e-fixture` — writes the durable fixture methods, once per organization.
-- `make deploy-dev`, `make deploy-staging` — ship the working tree to those consoles. `make deploy` / `make publish` are release-guarded escape hatches for a CI outage.
+- `make deploy-dev`, `make deploy-staging` — ship the working tree to those consoles until the next push to `dev` or `staging`: Alpic deploys each console from its branch, so Staging is promoted by a PR from `dev` into `staging`. `make deploy` / `make publish` are release-guarded escape hatches for a CI outage.
 - `make use-local-sdk`, `make use-local-ui`, `make use-npm` — switch `@pipelex/sdk` or `@pipelex/mthds-ui` between the sibling checkout and npm.
 
 A single test: `npx vitest run <file>` or `npx vitest run -t "<name>"`; add `--config vitest.e2e.config.ts` for a live one.

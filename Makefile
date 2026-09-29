@@ -39,8 +39,8 @@ make dev-tunnel     - Start Skybridge dev server with tunnel (same port and .env
 make start          - Start the built console from its server bundle, as Alpic does
 make deploy         - Deploy the hosted console to Alpic Production (from a clean main; break-glass)
 make deploy-prod    - Same as deploy
-make deploy-staging - Deploy the working tree to the Alpic Staging console
-make deploy-dev     - Deploy the working tree to the Alpic Dev console
+make deploy-staging - Deploy the working tree to the Alpic Staging console, until the next push to staging
+make deploy-dev     - Deploy the working tree to the Alpic Dev console, until the next push to dev
 make deploy-envs    - List this project's Alpic environments and their URLs
 make publish        - Publish the workshop, @pipelex/mcp, to npm (from a clean main; break-glass)
 
@@ -469,9 +469,12 @@ publish: check-no-local-deps check-release-ready check-workshop-released
 # `check-no-local-deps` still applies — a @pipelex `file:` link does not resolve
 # on Alpic's build machine, so it would fail the build there instead of here.
 #
-# There is no Alpic git integration on this project. A deploy uploads the
-# WORKING TREE, not the branch the environment is named after, so the banner
-# says which branch (and whether it is dirty) is actually being shipped.
+# Alpic's git integration also deploys each environment from its branch on
+# every push (dev -> Dev, staging -> Staging, main -> Production). These targets
+# upload the WORKING TREE instead, and that deploy lasts only until the next push
+# to the environment's branch redeploys it, so the banner says which branch (and
+# whether it is dirty) is actually being shipped. Staging is promoted by a PR
+# from dev into staging, never by `make deploy-staging`.
 #
 # Run `make deploy-envs` for the current ids; these are pinned so a deploy
 # needs no lookup, and a renamed or recreated environment fails loudly.
