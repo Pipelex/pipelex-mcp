@@ -11,27 +11,29 @@ describe("frameHeightFor", () => {
     );
   });
 
-  it("keeps a stated maxHeight as the bound in fullscreen", () => {
+  it("takes a stated maxHeight as the room in fullscreen, whatever the viewport measures", () => {
+    // A stated maxHeight is a frame that grows with the content, so the
+    // viewport is the view's current height: sizing from it would hold the
+    // view at its inline height for good.
+    expect(frameHeightFor({ maxHeight: 900, viewportHeight: 470, isFullscreen: true })).toBe(900);
     expect(frameHeightFor({ maxHeight: 900, viewportHeight: 1100, isFullscreen: true })).toBe(900);
   });
 
-  it("never lays the fullscreen view out taller than its frame", () => {
-    expect(frameHeightFor({ maxHeight: 1400, viewportHeight: 1100, isFullscreen: true })).toBe(
-      1100,
+  it("never gives a fullscreen view with no stated bound less room than the fallback", () => {
+    // A host stating nothing whose frame follows the content measures the
+    // view's inline height; the fallback is what such a host got before.
+    expect(frameHeightFor({ maxHeight: undefined, viewportHeight: 470, isFullscreen: true })).toBe(
+      FALLBACK_FRAME_HEIGHT_PX,
+    );
+    expect(frameHeightFor({ maxHeight: undefined, viewportHeight: 0, isFullscreen: true })).toBe(
+      FALLBACK_FRAME_HEIGHT_PX,
     );
   });
 
   it("ignores the viewport inline, where the frame follows the content", () => {
     expect(frameHeightFor({ maxHeight: 500, viewportHeight: 180, isFullscreen: false })).toBe(500);
-    expect(frameHeightFor({ maxHeight: undefined, viewportHeight: 180, isFullscreen: false })).toBe(
-      FALLBACK_FRAME_HEIGHT_PX,
-    );
-  });
-
-  it("falls back where there is no viewport to measure", () => {
-    expect(frameHeightFor({ maxHeight: undefined, viewportHeight: 0, isFullscreen: true })).toBe(
-      FALLBACK_FRAME_HEIGHT_PX,
-    );
-    expect(frameHeightFor({ maxHeight: 700, viewportHeight: 0, isFullscreen: true })).toBe(700);
+    expect(
+      frameHeightFor({ maxHeight: undefined, viewportHeight: 1100, isFullscreen: false }),
+    ).toBe(FALLBACK_FRAME_HEIGHT_PX);
   });
 });

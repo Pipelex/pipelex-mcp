@@ -1,7 +1,6 @@
 /**
- * The height a view lays itself out in when the host has said nothing it can
- * read and the frame's own height says nothing either: an inline frame, which
- * follows the content.
+ * The height a view lays itself out in when the host states no `maxHeight`
+ * Skybridge reads, and the floor of the viewport's reading in fullscreen.
  */
 export const FALLBACK_FRAME_HEIGHT_PX = 600;
 
@@ -10,16 +9,20 @@ export const FALLBACK_FRAME_HEIGHT_PX = 600;
  * may fill in fullscreen, and what the graph's explicit pixel height is carved
  * from.
  *
- * In fullscreen the frame is the view's own viewport, whatever the host said
- * about it. Skybridge's `maxHeight` carries only the `maxHeight` arm of the
- * MCP Apps `containerDimensions`, never the fixed `height` arm, and on
- * claude.ai's fullscreen frame it is `undefined`, so the views laid themselves
- * out in the fallback, cut off above an empty frame. A fixed height is one the
- * MCP Apps spec tells an app to fill (`100vh`), which is the viewport's height,
- * and a `maxHeight` the host does state still bounds it.
- * Inline the frame follows the content, so the viewport measures the view
- * rather than the room it has, and the host's `maxHeight`, else the fallback,
- * is the bound.
+ * A `maxHeight` the host states is the room, inline and in fullscreen alike:
+ * it is a frame that grows with the content up to that bound, so the viewport
+ * measures only how tall the view is now, and a view sized from it would never
+ * grow.
+ *
+ * With none stated, the fullscreen frame is the view's own viewport. Skybridge's
+ * `maxHeight` carries only the `maxHeight` arm of the MCP Apps
+ * `containerDimensions`, never the fixed `height` arm, and on claude.ai's
+ * fullscreen frame it is `undefined`, so the views laid themselves out in the
+ * fallback, cut off above an empty frame. A fixed height is one the MCP Apps
+ * spec tells an app to fill (`100vh`), which is the viewport's height. The
+ * fallback stays the floor, so a host that states nothing and grows its frame
+ * with the content still gives the view the room it had before, rather than
+ * holding it at the height it was inline.
  */
 export function frameHeightFor({
   maxHeight,
@@ -32,8 +35,10 @@ export function frameHeightFor({
   viewportHeight: number;
   isFullscreen: boolean;
 }): number {
-  if (isFullscreen && viewportHeight > 0) {
-    return maxHeight === undefined ? viewportHeight : Math.min(maxHeight, viewportHeight);
+  if (maxHeight !== undefined) {
+    return maxHeight;
   }
-  return maxHeight ?? FALLBACK_FRAME_HEIGHT_PX;
+  return isFullscreen
+    ? Math.max(viewportHeight, FALLBACK_FRAME_HEIGHT_PX)
+    : FALLBACK_FRAME_HEIGHT_PX;
 }
