@@ -114,7 +114,7 @@ The workshop's method graph page pins the same package a second way: `GRAPH_VIEW
 
 ### 4d — Everything mechanical
 
-Some bullets are a plain rename — an option, an export, an env var written as `` `oldName` `` → `` `newName` ``. For those, grep the **whole repo**, not just `packages/`: env var names in particular leak into `README.md`, `docs/`, `SPEC.md`, `.claude/rules/`, `.env.example`, and `wip/` notes. Apply the rename everywhere and show the diff — this workspace keeps no backward-compatibility shims, so there is nothing to preserve. The one place to leave untouched is the changelogs' **already-dated release headings**: those record what was true at that release. Step 9 is where the changelogs get their new entries.
+Some bullets are a plain rename — an option, an export, an env var written as `` `oldName` `` → `` `newName` ``. For those, grep the **whole repo**, not just `packages/`: env var names in particular leak into `README.md`, `docs/`, `SPEC.md`, `.claude/rules/` and `.env.example`. Apply the rename everywhere and show the diff — this workspace keeps no backward-compatibility shims, so there is nothing to preserve. The one place to leave untouched is the changelogs' **already-dated release headings**: those record what was true at that release. Step 9 is where the changelogs get their new entries.
 
 Run `make format` after any edit, not just renames. Prettier re-flows on line length, so reworking a function body or a Markdown table will fail `format:check` on whitespace alone — a confusing way to fail Step 6 if you have forgotten that your own edit caused it.
 
