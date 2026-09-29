@@ -7,6 +7,7 @@ This is the changelog of the hosted console: the Pipelex MCP that chat hosts rea
 ### Fixed
 
 - **A click on an image or a file's name saves the file on claude.ai**: On a host that takes download requests, a click on an output image, or on a file's name, now saves that file just as its download button does, under the same name, so the host asks to confirm a named file. Before, it opened the file, and claude.ai's confirmation showed a long link full of encoded signature instead of a name. A file in the executed graph's data panel is named after its stored file, and a file too large to save that way still opens in a new tab. On ChatGPT, which takes no download request, the click still opens the file in a new tab.
+- **A stalled file read no longer holds a download for good**: The view reads a stored file's bytes before handing them to the host, and that read had no time limit, so a read that stalled without failing left the file's download button spinning and disabled until the view reloaded. The view now gives a read up after two minutes, which is enough for the largest file one download request carries on a slow connection. The button then settles on a failure that can be retried, and a click on the file's name or image opens it in a new tab instead.
 
 ## [0.20.1] - 2026-09-28
 

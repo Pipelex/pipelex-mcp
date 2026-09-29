@@ -18,7 +18,20 @@ describe("storedFileReader", () => {
       blob: "iVBORw0KGgo=",
       byteLength: 8,
     });
-    expect(fetchImpl).toHaveBeenCalledExactlyOnceWith(STORED, { cache: "no-store" });
+    expect(fetchImpl).toHaveBeenCalledExactlyOnceWith(STORED, {
+      cache: "no-store",
+      signal: expect.any(AbortSignal),
+    });
+  });
+
+  it("gives up a read that stalls, so its caller is never held for good", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(
+      (_url, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+        }),
+    );
+    expect(await storedFileReader(fetchImpl, 10)(STORED, MAX)).toBeUndefined();
   });
 
   it("reads nothing from a link to anywhere but an app bucket", async () => {
