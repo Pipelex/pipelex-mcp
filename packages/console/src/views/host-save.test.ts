@@ -251,22 +251,50 @@ describe("linkedSaveFile", () => {
 });
 
 describe("storedFileOpener", () => {
-  it("saves the clicked file through the host on a host that downloads, and opens nothing", () => {
-    const saveFiles = vi.fn<SaveFiles>().mockResolvedValue({ failed: [] });
+  const bytes = { blob: "iVBORw0KGgo=", byteLength: 8 };
+
+  it("sends the clicked file's bytes in one download request on a host that downloads, and opens nothing", async () => {
+    const download = vi.fn<HostDownload>().mockResolvedValue({});
+    const readStoredFile = vi.fn().mockResolvedValue(bytes);
     const openLink = vi.fn();
-    storedFileOpener("download", saveFiles, openLink)(IMAGE.url, [IMAGE]);
-    expect(saveFiles).toHaveBeenCalledExactlyOnceWith([IMAGE]);
+    await storedFileOpener("download", download, readStoredFile, openLink)(IMAGE.url, [IMAGE]);
+    expect(readStoredFile).toHaveBeenCalledExactlyOnceWith(IMAGE.url, INLINE_SAVE_BUDGET_BYTES);
+    expect(download).toHaveBeenCalledExactlyOnceWith({
+      contents: [downloadContentOf(IMAGE, bytes.blob)],
+    });
     expect(openLink).not.toHaveBeenCalled();
   });
 
-  it("opens the link on a host that only opens links, and before the host is known", () => {
+  it("opens a file the view cannot read, since the host would fail it as a link", async () => {
+    const download = vi.fn<HostDownload>();
+    const openLink = vi.fn();
+    await storedFileOpener("download", download, readNothing, openLink)(IMAGE.url, [IMAGE]);
+    expect(openLink).toHaveBeenCalledExactlyOnceWith(IMAGE.url);
+    expect(download).not.toHaveBeenCalled();
+  });
+
+  it("opens the link on a host that only opens links, and before the host is known", async () => {
     for (const support of ["open-link", "unknown"] as const) {
-      const saveFiles = vi.fn<SaveFiles>();
+      const download = vi.fn<HostDownload>();
+      const readStoredFile = vi.fn();
       const openLink = vi.fn();
-      storedFileOpener(support, saveFiles, openLink)(IMAGE.url, [IMAGE]);
+      await storedFileOpener(support, download, readStoredFile, openLink)(IMAGE.url, [IMAGE]);
       expect(openLink).toHaveBeenCalledExactlyOnceWith(IMAGE.url);
-      expect(saveFiles).not.toHaveBeenCalled();
+      expect(readStoredFile).not.toHaveBeenCalled();
+      expect(download).not.toHaveBeenCalled();
     }
+  });
+
+  it("opens nothing when the host declines the request, and never rejects when it does not answer", async () => {
+    const readStoredFile = vi.fn().mockResolvedValue(bytes);
+    const openLink = vi.fn();
+    const declined = vi.fn<HostDownload>().mockResolvedValue({ isError: true });
+    await storedFileOpener("download", declined, readStoredFile, openLink)(IMAGE.url, [IMAGE]);
+    const lost = vi.fn<HostDownload>().mockRejectedValue(new Error("Request timed out"));
+    await expect(
+      storedFileOpener("download", lost, readStoredFile, openLink)(IMAGE.url, [IMAGE]),
+    ).resolves.toBeUndefined();
+    expect(openLink).not.toHaveBeenCalled();
   });
 });
 

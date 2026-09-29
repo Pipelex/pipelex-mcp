@@ -6,7 +6,7 @@ This is the changelog of the hosted console: the Pipelex MCP that chat hosts rea
 
 ### Fixed
 
-- **A click on an image or a file's name saves the file on claude.ai**: On a host that takes download requests, a click on an output image, or on a file's name, now saves that file just as its download button does, under the same name, so the host asks to confirm a named file. Before, it opened the file, and claude.ai's confirmation showed a long link full of encoded signature instead of a name. A file in the executed graph's data panel is named after its stored file. On ChatGPT, which takes no download request, the click still opens the file in a new tab.
+- **A click on an image or a file's name saves the file on claude.ai**: On a host that takes download requests, a click on an output image, or on a file's name, now saves that file just as its download button does, under the same name, so the host asks to confirm a named file. Before, it opened the file, and claude.ai's confirmation showed a long link full of encoded signature instead of a name. A file in the executed graph's data panel is named after its stored file, and a file too large to save that way still opens in a new tab. On ChatGPT, which takes no download request, the click still opens the file in a new tab.
 
 ## [0.20.1] - 2026-09-28
 

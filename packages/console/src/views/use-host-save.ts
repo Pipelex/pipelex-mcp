@@ -48,7 +48,8 @@ function useHostSaveSupport(): HostSaveSupport {
  * kernel's plain links to stored files. It takes a click on one over rather
  * than letting the host open the bare presigned link: a host that downloads
  * saves the file, named as its Download button names it when the subtree's
- * `plannedFiles` hold it, and any other host opens it through the relay.
+ * `plannedFiles` hold it, unless the view cannot read the file's bytes, and
+ * otherwise the file opens through the relay.
  * `plannedFiles` is asked for only when such a click lands, which keeps
  * planning off the render path.
  */
@@ -69,11 +70,12 @@ export function useHostSave(): {
     // ignores it.
     const openLink = (href: string) =>
       openExternal(fileRelayLink(window.skybridge.serverUrl, href), { redirectUrl: false });
+    const readStoredFile = storedFileReader();
     const saveFiles =
       support === "download"
-        ? saveThroughHostDownload(download, storedFileReader())
+        ? saveThroughHostDownload(download, readStoredFile)
         : saveThroughOpenLink(openLink);
-    const openStoredFile = storedFileOpener(support, saveFiles, openLink);
+    const openStoredFile = storedFileOpener(support, download, readStoredFile, openLink);
     return {
       saveFiles,
       downloads: downloadDisplayFor(support),
@@ -86,7 +88,7 @@ export function useHostSave(): {
         // `defaultPrevented`, from opening the bare link beside the relay.
         event.preventDefault();
         event.stopPropagation();
-        openStoredFile(href, plannedFiles?.() ?? []);
+        void openStoredFile(href, plannedFiles?.() ?? []);
       },
     };
   }, [support, download, openExternal]);

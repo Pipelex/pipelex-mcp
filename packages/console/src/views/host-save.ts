@@ -221,23 +221,40 @@ function lastSegmentOf(href: string): string {
 
 /**
  * What a click on a stored file's link does on this host, given the planned
- * files of the output it landed in. A host that downloads saves the file
- * through `saveFiles`, as its Download button would (`linkedSaveFile`), so the
- * host asks the reader to confirm a named file: opening the link there had
- * claude.ai ask them to confirm the relay page's long link instead (seen on the
- * Dev console on 2026-09-29). A host that only opens links, or a view that does
- * not know its host yet, opens the link through `openLink`. A click whose save
- * fails shows nothing, where the file's own button would say so.
+ * files of the output it landed in. A host that downloads is sent the file's
+ * bytes in one download request, named as its Download button names it
+ * (`linkedSaveFile`), so the host asks the reader to confirm a named file:
+ * opening the link there had claude.ai ask them to confirm the relay page's
+ * long link instead (seen on the Dev console on 2026-09-29). The bytes are read
+ * before anything is sent, because a file the view cannot read, past
+ * {@link INLINE_SAVE_BUDGET_BYTES} or refused, would go as a link, which
+ * claude.ai fails at once (`stored-file-bytes.ts`); such a file opens through
+ * `openLink`, as it does on a host that only opens links and in a view that
+ * does not know its host yet. A request the host declines or leaves unanswered
+ * shows nothing, since cancelling its confirmation is a decline too. Never
+ * rejects: a click has nowhere to report.
  */
 export function storedFileOpener(
   support: HostSaveSupport,
-  saveFiles: SaveFiles,
+  download: HostDownload,
+  readStoredFile: ReadStoredFile,
   openLink: HostOpenLink,
-): (href: string, planned: readonly SaveFile[]) => void {
-  return (href, planned) => {
-    const file = support === "download" ? linkedSaveFile(href, planned) : undefined;
-    if (file === undefined) openLink(href);
-    else void saveFiles([file]);
+): (href: string, planned: readonly SaveFile[]) => Promise<void> {
+  return async (href, planned) => {
+    try {
+      const file = support === "download" ? linkedSaveFile(href, planned) : undefined;
+      const read =
+        file?.url === undefined
+          ? undefined
+          : await readStoredFile(file.url, INLINE_SAVE_BUDGET_BYTES);
+      if (file === undefined || read === undefined) {
+        openLink(href);
+        return;
+      }
+      await download({ contents: [downloadContentOf(file, read.blob)] });
+    } catch {
+      // A lost bridge or a host that refused to open the link: nothing to say.
+    }
   };
 }
 
