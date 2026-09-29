@@ -39,7 +39,7 @@ import type { MainPipeSignature, ViewSpec } from "./validate.js";
 
 /**
  * `pipelex_show_method` — the console's one way to look at a method before
- * running it, with two audiences in one result (`wip/mcp-server-split/design.md`,
+ * running it, with two audiences in one result (L-260923-d3c264,
  * "The toolsets after the split"). The user gets the `run-graph` view: the
  * method's graph and an input form they can run from. The model gets the pipe's
  * signature and the fill-in inputs template, so it can fill the inputs in

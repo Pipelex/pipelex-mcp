@@ -256,8 +256,8 @@ export type ContentText = { type: "text"; text: string };
  * **No `annotations`, ever.** The MCP standard's `annotations` hint (audience,
  * priority) is optional and looks harmless, but the host probe found that Codex
  * refuses an annotated image block outright with `Unexpected response type`,
- * against a control proving the identical block without them is accepted. See
- * `wip/mcp-image-results/host-probe.md`.
+ * against a control proving the identical block without them is accepted
+ * (L-260920-fc66db).
  */
 export type ContentImage = {
   type: "image";
@@ -1614,7 +1614,7 @@ export function itemToolError(
 
 /**
  * The per-image byte cap. NOT a cost control: the host probe
- * (`wip/mcp-image-results/host-probe.md`) established that a host bills an
+ * (L-260920-fc66db) established that a host bills an
  * image block at the model's native vision price, derived from its pixel
  * dimensions, and that its base64 size costs nothing. This is a transport
  * guard and a point of diminishing returns — Claude Code's stdio transport

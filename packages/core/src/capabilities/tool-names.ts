@@ -2,7 +2,7 @@
  * The names each shell gives its tools, as the capability core writes them into
  * model-facing text: result summaries, error hints and schema descriptions.
  *
- * The two servers do not share a tool name (`wip/mcp-server-split/design.md`,
+ * The two servers do not share a tool name (L-260923-d3c264,
  * D1 and D2): the workshop keeps `mthds_*`, the console calls its tools
  * `pipelex_*`, and the console has no validate, inputs-template, prepare,
  * codegen or download tool at all. So a sentence that names a tool is a

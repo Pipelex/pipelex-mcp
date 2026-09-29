@@ -8,7 +8,7 @@ import { TEST_OAUTH } from "../packages/console/src/hosted/test-oauth.js";
 import { createLocalServer } from "../packages/workshop/src/server.js";
 
 /**
- * One tool name means one contract (`wip/mcp-server-split/design.md`, D1): when
+ * One tool name means one contract (L-260923-d3c264, D1): when
  * the two servers' contracts for a tool diverge, the names diverge too. Each
  * shell owns its tool table, so nothing else stops a name they share from
  * quietly meaning two things — which is how a model, a skill or an instruction

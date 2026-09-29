@@ -259,7 +259,7 @@ describe("showMthdsRunImages", () => {
    * The one property a host failure would otherwise teach us about in
    * production: Codex refuses an image block carrying `annotations` outright,
    * with an opaque `Unexpected response type`, and accepts the identical block
-   * without them (`wip/mcp-image-results/host-probe.md`).
+   * without them (L-260920-fc66db).
    */
   it("emits no annotations on any block", async () => {
     const { client } = fakeClient({

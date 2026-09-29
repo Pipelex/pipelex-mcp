@@ -33,8 +33,7 @@ import { UPLOAD_GRANT_META_KEY, narrowUploadGrant } from "./upload-grant-shape.j
  * identity, and the view sends the file straight to the app bucket with
  * `@pipelex/sdk/upload`'s `uploadWithGrant`. The bytes never pass through the
  * model, the host's relay, this server or the API gateway, which is also what
- * lifts the gateway's 7.5 MiB ceiling from this path. See
- * `wip/run-form-direct-upload/design.md` in the workspace.
+ * lifts the gateway's 7.5 MiB ceiling from this path. See L-260923-854545.
  *
  * **The grant is a bearer capability, so it rides `_meta` and nowhere else**
  * (under `UPLOAD_GRANT_META_KEY`, named like the repo's other view-only
