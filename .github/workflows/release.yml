@@ -5,9 +5,12 @@
 #   console   the hosted console on Alpic (packages/console)  tag console-vX.Y.Z
 #
 # A track's version is its own member's `package.json` version, read through
-# `.github/scripts/track-version.sh`, and a release of one track never ships
-# the other: a workshop release publishes to npm and tags `vX.Y.Z`, a console
-# release deploys to Alpic and tags `console-vX.Y.Z`.
+# `.github/scripts/track-version.sh`, and this workflow never ships one track
+# on a release of the other: a workshop release publishes to npm and tags
+# `vX.Y.Z`, a console release deploys to Alpic and tags `console-vX.Y.Z`.
+# Alpic's git integration, outside this workflow and its guards, still rebuilds
+# the Production console from every push to `main`, a workshop release included
+# (docs/development.md, "Which branch each console follows").
 #
 # It fires on the push to `main` — the merge of a `release/vX.Y.Z` (workshop)
 # or `release/console-vX.Y.Z` (console) pull request — so a release ships from
