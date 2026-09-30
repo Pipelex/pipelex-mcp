@@ -268,7 +268,12 @@ function RunGraph() {
   // spec degrades to its own empty state rather than throwing.
   const graphSpec = (toolInfo.responseMetadata.graph_spec ?? null) as GraphSpec | null;
 
-  if (output.status !== "ok" || !output.is_valid) {
+  const hasGraph = Boolean(graphSpec && graphSpec.nodes?.length);
+  // A graph drawn from the method's text (`meta.mode: "static"`) needs no dry
+  // run, so it rides an invalid verdict too: the user sees what the method was
+  // meant to do beside why it cannot run. A dry-run graph never does.
+  const isStaticGraph = graphSpec?.meta?.mode === "static";
+  if (output.status !== "ok" || (!output.is_valid && !hasGraph)) {
     return (
       <EmptyState
         message="The method does not validate — no graph to display."
@@ -276,7 +281,6 @@ function RunGraph() {
       />
     );
   }
-  const hasGraph = Boolean(graphSpec && graphSpec.nodes?.length);
   // The form needs both artifacts: the descriptor drives the derivation, the
   // contract is co-walked beside it (and is what the run gate validates on).
   const hasForm = Boolean(contract && descriptor && selectedPipe);
@@ -390,8 +394,9 @@ function RunGraph() {
   // they are not the same pipe, which only that older deployment produces.
   // The executed graph gets no caption: it is of the pipe that ran, which is
   // the one the results below it are for.
-  const graphCaption =
-    hasGraph && executedGraph === null
+  const graphCaption = !output.is_valid
+    ? "This method does not validate, so it cannot run. The graph is drawn from its source."
+    : hasGraph && executedGraph === null
       ? graphCaptionFor(
           graphPipeRefOf(graphSpec),
           mainPipeRef,
@@ -414,7 +419,7 @@ function RunGraph() {
     executedGraph
       ? `Showing the executed graph of run ${runId}`
       : hasGraph
-        ? `Showing the dry-run graph of the method: ${graphSpec?.nodes.length} nodes`
+        ? `Showing the ${isStaticGraph ? "" : "dry-run "}graph of the method: ${graphSpec?.nodes.length} nodes`
         : null,
     graphCaption,
     `runnable=${output.is_runnable}`,

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
 import type {
   InputForm,
+  MthdsFileItem,
   OutputForm,
   PipeIOContracts,
   PipelexInvalidReport,
@@ -150,18 +151,55 @@ interface ValidateCall {
   views?: string[];
 }
 
-function contextAnswering(answer: () => Promise<PipelexValidationResult>): {
+// The method's text, as the catalog serves it: an entry sequence of two pipes.
+const DEMO_MTHDS = `domain = "demo"
+main_pipe = "main"
+
+[pipe.main]
+type = "PipeSequence"
+description = "The entry pipe"
+inputs = { topic = "Text" }
+output = "Text"
+steps = [{ pipe = "other", result = "note" }, { pipe = "finish", result = "done" }]
+
+[pipe.other]
+type = "PipeLLM"
+description = "Draft a note"
+inputs = { topic = "Text" }
+output = "Text"
+prompt = "Write about $topic"
+
+[pipe.finish]
+type = "PipeLLM"
+description = "Polish the note"
+inputs = { note = "Text" }
+output = "Text"
+prompt = "Polish $note"
+`;
+
+function contextAnswering(
+  answer: () => Promise<PipelexValidationResult>,
+  closure: () => Promise<MthdsFileItem[]> = async () => {
+    throw new Error("no closure in this test");
+  },
+): {
   context: ShowContext;
   calls: ValidateCall[];
+  closureCalls: string[];
 } {
   const calls: ValidateCall[] = [];
+  const closureCalls: string[] = [];
   const client: ShowClient = {
     async validate(source, allowSignatures, _mthdsSources, render, views) {
       calls.push({ source, allowSignatures, render, views });
       return answer();
     },
+    async getMethodClosure(methodId) {
+      closureCalls.push(methodId);
+      return closure();
+    },
   };
-  return { context: { baseUrl: DEFAULT_API_URL, client }, calls };
+  return { context: { baseUrl: DEFAULT_API_URL, client }, calls, closureCalls };
 }
 
 function apiError(status: number, message: string): ApiResponseError {
@@ -199,6 +237,48 @@ describe("showPipelexMethod", () => {
         views: ["input_form", "output_form"],
       },
     ]);
+  });
+
+  it("draws a saved method's graph from its text, not from the dry run", async () => {
+    const { context, closureCalls } = contextAnswering(
+      async () => validReport,
+      async () => [{ content: DEMO_MTHDS, source: "mt_demo" }],
+    );
+
+    const result = await showPipelexMethod({ method_id: "mt_demo" }, context);
+
+    expect(closureCalls).toEqual(["mt_demo"]);
+    const spec = result.graphSpec as {
+      meta?: { mode?: string };
+      nodes: { pipe_code?: string }[];
+    };
+    expect(spec.meta?.mode).toBe("static");
+    expect(spec.nodes.map((node) => node.pipe_code).sort()).toEqual(["finish", "main", "other"]);
+  });
+
+  it("still draws the graph of a saved method that does not validate", async () => {
+    const { context } = contextAnswering(
+      async () => invalidReport,
+      async () => [{ content: DEMO_MTHDS, source: "mt_demo" }],
+    );
+
+    const result = await showPipelexMethod({ method_id: "mt_demo" }, context);
+
+    expect(result.structuredContent.is_valid).toBe(false);
+    expect((result.graphSpec as { meta?: { mode?: string } }).meta?.mode).toBe("static");
+    // The model is not told a graph view exists: the advert is the dry run's.
+    expect(result.structuredContent.available_view_specs).toEqual([]);
+  });
+
+  it("keeps the dry-run graph when the closure cannot be fetched, and for an address", async () => {
+    const { context, closureCalls } = contextAnswering(async () => validReport);
+
+    const byId = await showPipelexMethod({ method_id: "mt_demo" }, context);
+    const byRef = await showPipelexMethod({ method_ref: PUBLISHED_REF }, context);
+
+    expect(byId.graphSpec).toEqual(GRAPH);
+    expect(byRef.graphSpec).toEqual(GRAPH);
+    expect(closureCalls).toEqual(["mt_demo"]);
   });
 
   it("hands the model a runnable method's signature and template, and the view its artifacts", async () => {

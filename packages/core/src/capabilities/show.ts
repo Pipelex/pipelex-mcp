@@ -1,4 +1,6 @@
+import { buildStaticGraphSpecFromToml, orderMthdsSources } from "@pipelex/mthds-ui/static-graph";
 import type {
+  MthdsFileItem,
   PipelexValidationReport,
   PipelexValidationResult,
   ValidateMethodSelector,
@@ -168,6 +170,7 @@ export interface ShowClient {
     render?: string[],
     views?: string[],
   ): Promise<PipelexValidationResult>;
+  getMethodClosure(methodId: string): Promise<MthdsFileItem[]>;
 }
 
 export interface ShowContext extends ApiConfig {
@@ -230,17 +233,21 @@ export async function showPipelexMethod(
 
   let report: PipelexValidationResult;
   let selector: ShowSelector;
+  let closure: Promise<MthdsFileItem[] | undefined> = Promise.resolve(undefined);
   try {
     selector = selectorOf(input);
+    const client = context.client ?? createPipelexApiClient(context);
+    // The graph is drawn from the method's own text, not from the dry run, so
+    // a saved method's closure is fetched beside the verdict. Its failure is
+    // never the tool's: the dry-run graph stands in for it. An address has no
+    // text to fetch here — `/v1/resolve` answers with the resolved crate, not
+    // the files — so it keeps the dry-run graph.
+    if ("method_id" in selector) {
+      closure = client.getMethodClosure(selector.method_id).catch(() => undefined);
+    }
     // No `render`: this tool composes its own summary, so the validation
     // report's Markdown would only cost the wire.
-    report = await (context.client ?? createPipelexApiClient(context)).validate(
-      selector,
-      true,
-      undefined,
-      undefined,
-      [...VALIDATE_VIEW_TOKENS],
-    );
+    report = await client.validate(selector, true, undefined, undefined, [...VALIDATE_VIEW_TOKENS]);
   } catch (err) {
     const error = classifyError(err, { ...classifyOptions, auth: context.authError });
     return errorResult(summaryForToolError(error, ERROR_SUMMARIES), [error]);
@@ -254,8 +261,9 @@ export async function showPipelexMethod(
     }
   }
 
+  const files = await closure;
   try {
-    return showResult(report, selector, requestedPipe);
+    return showResult(report, selector, requestedPipe, files);
   } catch (err) {
     return errorResult(
       "The method could not be shown: the Pipelex API returned a malformed report.",
@@ -345,6 +353,7 @@ export function showResult(
   report: PipelexValidationResult,
   selector: ShowSelector,
   requestedPipe?: string,
+  files?: MthdsFileItem[],
 ): ShowResult {
   const projection = projectValidationReport(report, true, true, requestedPipe);
   const verdict = projection.structuredContent;
@@ -390,13 +399,37 @@ export function showResult(
       template?.format === "json" ? template.text : undefined,
       report,
     ),
-    graphSpec: projection.graphSpec,
+    graphSpec: staticGraphOf(files, entryPipeRef) ?? projection.graphSpec,
     pipeIoContracts: projection.pipeIoContracts,
     inputForm: projection.inputForm,
     outputForm: projection.outputForm,
     ...(entryPipeRef === undefined ? {} : { mainPipeRef: entryPipeRef }),
     ...(projection.mainPipeRef === undefined ? {} : { formPipeRef: projection.mainPipeRef }),
   };
+}
+
+/**
+ * The method's graph drawn from its text by mthds-ui's static builder, the one
+ * the VS Code extension and the workshop's graph page use: a spec with
+ * `meta.mode: "static"`, one node per pipe call, no run chrome. It needs no dry
+ * run, so a method that does not validate still draws what can be read from
+ * it. The builder is lenient and documented never to throw; a throw anyway, or
+ * a method with no text, leaves the dry-run graph in place.
+ */
+function staticGraphOf(files: MthdsFileItem[] | undefined, entryPipe: string | undefined): unknown {
+  if (files === undefined || files.length === 0) return undefined;
+  try {
+    const ordered = orderMthdsSources(
+      files.map((file, index) => ({ name: `${index}.mthds`, content: file.content })),
+    );
+    const { spec } = buildStaticGraphSpecFromToml(
+      ordered.map((file) => file.content),
+      entryPipe === undefined ? {} : { entryPipe },
+    );
+    return spec.nodes.length > 0 ? spec : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // ── the prose ───────────────────────────────────────────────────────
