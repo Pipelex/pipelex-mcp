@@ -14,8 +14,9 @@ import type {
   MethodProvenance,
   OutputForm,
   PipeIOContracts,
-  PipelexValidationReport,
-  PipelexValidationResult,
+  PipeIORequest,
+  PipeIOResponse,
+  PipeIOValidReport,
   RunRead,
   RunResults,
   RunResultStart,
@@ -24,7 +25,6 @@ import type {
   PipelexStartOptions,
   TokensUsageRecord,
   UsageSummary,
-  ValidateMethodSelector,
 } from "@pipelex/sdk";
 
 import {
@@ -1478,7 +1478,7 @@ describe("startMthdsRun", () => {
       toolNames: CONSOLE_TOOL_NAMES,
       client: {
         ...NEVER_CLIENT,
-        validate: () => Promise.reject(new Error("validate must not be called")),
+        pipeIo: () => Promise.reject(new Error("pipeIo must not be called")),
         start: () => Promise.reject(serverError(500)),
       },
     };
@@ -2517,37 +2517,34 @@ describe("startPipelexRun", () => {
     },
   };
 
-  const WALK_REPORT: PipelexValidationReport = {
+  const WALK_REPORT: PipeIOValidReport = {
     is_valid: true,
-    bundle_blueprint: { domain: "demo", main_pipe: "main" },
+    pipe_ref: "demo.main",
     pipe_io_contracts: {},
     input_form: WALK_FORM,
-    graph_spec: {},
-    validated_pipes: [],
+    output_form: {},
+    default_pipe_ref: "demo.main",
     pending_signatures: [],
-    liftable_pipes: [],
-    warnings: [],
     is_runnable: true,
-    message: "ok",
   };
 
   interface Recorded {
-    validated: Array<string[] | ValidateMethodSelector>;
+    read: PipeIORequest[];
     started: PipelexStartOptions[];
   }
 
   /** A console run context whose client serves the walk's read and the start, recording both. */
   function consoleContext(
-    options: { report?: PipelexValidationResult; start?: () => Promise<RunResultStart> } = {},
+    options: { report?: PipeIOResponse; start?: () => Promise<RunResultStart> } = {},
   ): { context: PipelexRunContext; recorded: Recorded } {
-    const recorded: Recorded = { validated: [], started: [] };
+    const recorded: Recorded = { read: [], started: [] };
     const context: PipelexRunContext = {
       baseUrl: DEFAULT_API_URL,
       toolNames: CONSOLE_TOOL_NAMES,
       client: {
         ...NEVER_CLIENT,
-        async validate(source: string[] | ValidateMethodSelector) {
-          recorded.validated.push(source);
+        async pipeIo(request: PipeIORequest) {
+          recorded.read.push(request);
           return options.report ?? WALK_REPORT;
         },
         start(startOptions: PipelexStartOptions) {
@@ -2572,7 +2569,7 @@ describe("startPipelexRun", () => {
     );
 
     // The walk reads the signature of the same method the run starts.
-    expect(recorded.validated).toEqual([{ method_id: "mt_demo" }]);
+    expect(recorded.read).toEqual([{ method_id: "mt_demo", pipe_ref: "demo.main" }]);
     // The console's `pipe_ref` rides the run route's `pipe_code`, and the file
     // input arrives in the shape the run needs.
     expect(recorded.started).toEqual([
@@ -2612,7 +2609,7 @@ describe("startPipelexRun", () => {
     await startPipelexRun({ method_ref: "github.com/acme/methods@v1" }, context);
     await startPipelexRun({ method_id: "mt_demo", inputs: {} }, context);
 
-    expect(recorded.validated).toEqual([]);
+    expect(recorded.read).toEqual([]);
     expect(recorded.started).toEqual([
       { method_ref: "github.com/acme/methods@v1" },
       { method_id: "mt_demo", inputs: {} },
@@ -2623,7 +2620,7 @@ describe("startPipelexRun", () => {
     // A method that does not validate is refused at the selector during the
     // walk; its headline must not send the model to fix inputs that were fine.
     const broken = consoleContext({
-      report: { is_valid: false, validation_errors: [] } as unknown as PipelexValidationResult,
+      report: { is_valid: false, validation_errors: [], message: "invalid" },
     });
     const refusedMethod = await startPipelexRun(
       { method_id: "mt_demo", inputs: { question: "why?" } },
@@ -2655,7 +2652,7 @@ describe("startPipelexRun", () => {
     expect(neither.structuredContent.errors?.[0]?.location).toBe("method_id");
     expect(both.structuredContent.errors?.[0]?.class).toBe("input_domain");
     expect(blankPipe.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
-    expect(recorded.validated).toEqual([]);
+    expect(recorded.read).toEqual([]);
     expect(recorded.started).toEqual([]);
   });
 
@@ -2673,7 +2670,7 @@ describe("startPipelexRun", () => {
       expect(error?.location).toBe("pipe_ref");
       expect(error?.message).toContain('the bare "main"');
     }
-    expect(recorded.validated).toEqual([]);
+    expect(recorded.read).toEqual([]);
     expect(recorded.started).toEqual([]);
   });
 

@@ -1545,7 +1545,7 @@ export async function startMthdsRun(
  * preparing its inputs with the console's own walk.
  *
  * The walk runs only when there are inputs to walk: with none, there is no
- * file position to rewrite or refuse, and the one `POST /v1/validate` it costs
+ * file position to rewrite or refuse, and the one `POST /v1/pipe-io` it costs
  * would buy nothing. Its refusals stop the run before anything starts, so an
  * input that would need an upload never costs inference credit. Only the pipe
  * the caller named rides the start: the walk picks the same default the run

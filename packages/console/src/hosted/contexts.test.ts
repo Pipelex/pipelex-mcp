@@ -156,8 +156,7 @@ describe("console auth failures through a capability", () => {
       {
         ...contexts.show,
         client: {
-          validate: () => Promise.reject(new ClientAuthenticationError("Unauthorized")),
-          getMethodClosure: () => Promise.reject(new ClientAuthenticationError("Unauthorized")),
+          pipeIo: () => Promise.reject(new ClientAuthenticationError("Unauthorized")),
         },
       },
     );

@@ -2,14 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
 import type {
+  CrateInvalidReport,
   InputForm,
-  MthdsFileItem,
   OutputForm,
   PipeIOContracts,
-  PipelexInvalidReport,
-  PipelexValidationReport,
-  PipelexValidationResult,
-  ValidateMethodSelector,
+  PipeIORequest,
+  PipeIOResponse,
+  PipeIOValidReport,
 } from "@pipelex/sdk";
 import { projectInputsTemplate, renderInputsTemplate } from "mthds/protocol";
 
@@ -109,49 +108,8 @@ const outputForm: OutputForm = {
   },
 };
 
-const GRAPH = { nodes: [{ id: "demo.main" }] };
-
-const validReport: PipelexValidationReport = {
-  is_valid: true,
-  bundle_blueprint: { domain: "demo", main_pipe: "main" },
-  pipe_io_contracts: contracts,
-  input_form: inputForm,
-  output_form: outputForm,
-  graph_spec: GRAPH,
-  validated_pipes: [],
-  pending_signatures: [],
-  liftable_pipes: [],
-  warnings: [],
-  is_runnable: true,
-  message: "ok",
-};
-
-const pendingReport: PipelexValidationReport = {
-  ...validReport,
-  pending_signatures: ["demo.todo"],
-  is_runnable: false,
-};
-
-const invalidReport: PipelexInvalidReport = {
-  is_valid: false,
-  is_runnable: false,
-  pending_signatures: [],
-  message: "invalid",
-  validation_errors: [
-    { category: "blueprint_validation", message: "Unknown pipe type", source: "bundle.mthds" },
-  ],
-};
-
-const PUBLISHED_REF = "github.com/Pipelex/methods/documents@v0.1.0";
-
-interface ValidateCall {
-  source: string[] | ValidateMethodSelector;
-  allowSignatures?: boolean;
-  render?: string[];
-  views?: string[];
-}
-
-// The method's text, as the catalog serves it: an entry sequence of two pipes.
+// The method's text, as the route echoes it under `include_files`: an entry
+// sequence calling two pipes.
 const DEMO_MTHDS = `domain = "demo"
 main_pipe = "main"
 
@@ -177,35 +135,62 @@ output = "Text"
 prompt = "Polish $note"
 `;
 
-function contextAnswering(
-  answer: () => Promise<PipelexValidationResult>,
-  closure: () => Promise<MthdsFileItem[]> = async () => {
-    throw new Error("no closure in this test");
-  },
-): {
+const DEMO_FILES = [{ content: DEMO_MTHDS, source: "main.mthds" }];
+
+/** The whole-method answer: every pipe's artifacts, the entry pipe, the files. */
+const validReport: PipeIOValidReport = {
+  is_valid: true,
+  pipe_ref: "demo.main",
+  pipe_io_contracts: contracts,
+  input_form: inputForm,
+  output_form: outputForm,
+  default_pipe_ref: "demo.main",
+  pending_signatures: [],
+  is_runnable: true,
+  files: DEMO_FILES,
+};
+
+const pendingReport: PipeIOValidReport = {
+  ...validReport,
+  pending_signatures: ["demo.todo"],
+  is_runnable: false,
+};
+
+// The crate verdict: no artifacts, no runnability facts, and no files.
+const invalidReport: CrateInvalidReport = {
+  is_valid: false,
+  message: "invalid",
+  validation_errors: [
+    { category: "blueprint_validation", message: "Unknown pipe type", source: "bundle.mthds" },
+  ],
+};
+
+const PUBLISHED_REF = "github.com/Pipelex/methods/documents@v0.1.0";
+
+/** The static graph's pipe codes, sorted: what the builder draws from `DEMO_MTHDS` at its entry. */
+function graphPipeCodes(spec: unknown): string[] {
+  const nodes = (spec as { nodes?: Array<{ pipe_code?: string }> } | undefined)?.nodes ?? [];
+  return nodes.map((node) => node.pipe_code ?? "").sort();
+}
+
+function contextAnswering(answer: () => Promise<PipeIOResponse>): {
   context: ShowContext;
-  calls: ValidateCall[];
-  closureCalls: string[];
+  calls: PipeIORequest[];
 } {
-  const calls: ValidateCall[] = [];
-  const closureCalls: string[] = [];
+  const calls: PipeIORequest[] = [];
   const client: ShowClient = {
-    async validate(source, allowSignatures, _mthdsSources, render, views) {
-      calls.push({ source, allowSignatures, render, views });
+    async pipeIo(request) {
+      calls.push(request);
       return answer();
     },
-    async getMethodClosure(methodId) {
-      closureCalls.push(methodId);
-      return closure();
-    },
   };
-  return { context: { baseUrl: DEFAULT_API_URL, client }, calls, closureCalls };
+  return { context: { baseUrl: DEFAULT_API_URL, client }, calls };
 }
 
 function apiError(status: number, message: string): ApiResponseError {
   return new ApiResponseError(
     `HTTP ${status}`,
-    `${DEFAULT_API_URL}/v1/validate`,
+    `${DEFAULT_API_URL}/v1/pipe-io`,
     status,
     "Error",
     "{}",
@@ -217,68 +202,98 @@ function apiError(status: number, message: string): ApiResponseError {
 }
 
 describe("showPipelexMethod", () => {
-  it("asks /v1/validate for the graph and both forms, by the selector it was given", async () => {
+  it("makes one whole-method pipe I/O call with the files, by the selector it was given", async () => {
     const { context, calls } = contextAnswering(async () => validReport);
 
     await showPipelexMethod({ method_id: "mt_demo" }, context);
     await showPipelexMethod({ method_ref: PUBLISHED_REF }, context);
+    // A named pipe is checked against the whole-method answer, never forwarded.
+    await showPipelexMethod({ method_id: "mt_demo", pipe_ref: "demo.other" }, context);
 
     expect(calls).toEqual([
-      {
-        source: { method_id: "mt_demo" },
-        allowSignatures: true,
-        render: undefined,
-        views: ["input_form", "output_form"],
-      },
-      {
-        source: { method_ref: PUBLISHED_REF },
-        allowSignatures: true,
-        render: undefined,
-        views: ["input_form", "output_form"],
-      },
+      { method_id: "mt_demo", all_pipes: true, include_files: true },
+      { method_ref: PUBLISHED_REF, all_pipes: true, include_files: true },
+      { method_id: "mt_demo", all_pipes: true, include_files: true },
     ]);
   });
 
-  it("draws a saved method's graph from its text, not from the dry run", async () => {
-    const { context, closureCalls } = contextAnswering(
-      async () => validReport,
-      async () => [{ content: DEMO_MTHDS, source: "mt_demo" }],
-    );
-
-    const result = await showPipelexMethod({ method_id: "mt_demo" }, context);
-
-    expect(closureCalls).toEqual(["mt_demo"]);
-    const spec = result.graphSpec as {
-      meta?: { mode?: string };
-      nodes: { pipe_code?: string }[];
-    };
-    expect(spec.meta?.mode).toBe("static");
-    expect(spec.nodes.map((node) => node.pipe_code).sort()).toEqual(["finish", "main", "other"]);
-  });
-
-  it("still draws the graph of a saved method that does not validate", async () => {
-    const { context } = contextAnswering(
-      async () => invalidReport,
-      async () => [{ content: DEMO_MTHDS, source: "mt_demo" }],
-    );
-
-    const result = await showPipelexMethod({ method_id: "mt_demo" }, context);
-
-    expect(result.structuredContent.is_valid).toBe(false);
-    expect((result.graphSpec as { meta?: { mode?: string } }).meta?.mode).toBe("static");
-    // The model is not told a graph view exists: the advert is the dry run's.
-    expect(result.structuredContent.available_view_specs).toEqual([]);
-  });
-
-  it("keeps the dry-run graph when the closure cannot be fetched, and for an address", async () => {
-    const { context, closureCalls } = contextAnswering(async () => validReport);
+  it("draws the graph from the echoed files, for a catalog id and an address alike", async () => {
+    const { context } = contextAnswering(async () => validReport);
 
     const byId = await showPipelexMethod({ method_id: "mt_demo" }, context);
     const byRef = await showPipelexMethod({ method_ref: PUBLISHED_REF }, context);
 
-    expect(byId.graphSpec).toEqual(GRAPH);
-    expect(byRef.graphSpec).toEqual(GRAPH);
-    expect(closureCalls).toEqual(["mt_demo"]);
+    for (const result of [byId, byRef]) {
+      const spec = result.graphSpec as {
+        meta?: { mode?: string };
+        pipeline_ref?: { domain?: string; main_pipe?: string };
+      };
+      expect(spec.meta?.mode).toBe("static");
+      // Drawn from the entry pipe the route stated, so the whole method shows.
+      expect(spec.pipeline_ref).toEqual({ domain: "demo", main_pipe: "main" });
+      expect(graphPipeCodes(spec)).toEqual(["finish", "main", "other"]);
+      expect(result.structuredContent.available_view_specs).toContain("dry_run_graph");
+    }
+  });
+
+  it("keeps the whole method's graph when the caller names another pipe", async () => {
+    const { context } = contextAnswering(async () => validReport);
+
+    const result = await showPipelexMethod(
+      { method_id: "mt_demo", pipe_ref: "demo.other" },
+      context,
+    );
+
+    // The form is for the named pipe; the graph is still drawn from the entry.
+    expect(graphPipeCodes(result.graphSpec)).toEqual(["finish", "main", "other"]);
+  });
+
+  it("draws a graph from the files of a method that settles no entry pipe", async () => {
+    // The builder falls back on its own; a pipe the user clicks there is the
+    // one way a form appears, so the graph is what makes the method usable.
+    const { context } = contextAnswering(async () => ({
+      ...validReport,
+      pipe_ref: null,
+      default_pipe_ref: null,
+    }));
+
+    const result = await showPipelexMethod({ method_id: "mt_demo" }, context);
+
+    expect(graphPipeCodes(result.graphSpec)).toEqual(["finish", "main", "other"]);
+    expect(result.mainPipeRef).toBeUndefined();
+    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
+  });
+
+  it("ships no graph when the answer carries no files, or files the builder draws nothing from", async () => {
+    const { files: _files, ...withoutFiles } = validReport;
+    for (const report of [
+      withoutFiles as PipeIOValidReport,
+      { ...validReport, files: [] },
+      { ...validReport, files: [{ content: "not [ toml", source: "broken.mthds" }] },
+    ]) {
+      const { context } = contextAnswering(async () => report);
+
+      const result = await showPipelexMethod({ method_id: "mt_demo" }, context);
+
+      expect(result.graphSpec).toBeUndefined();
+      expect(result.structuredContent.available_view_specs).toEqual(["input_form"]);
+    }
+  });
+
+  it("never lets the method's source reach the model, the view or the summary", async () => {
+    const { context } = contextAnswering(async () => validReport);
+
+    const result = showToolResult(await showPipelexMethod({ method_id: "mt_demo" }, context));
+
+    // The catalog projection invariant: only the graph built from the files
+    // ships. Its pipe registry carries each pipe's parsed blueprint, as the
+    // dry-run graph's did, but never the text of a file or its name.
+    const everything = JSON.stringify(result);
+    expect(everything).not.toContain(JSON.stringify(DEMO_MTHDS).slice(1, -1));
+    expect(everything).not.toContain('main_pipe = \\"main\\"');
+    expect(everything).not.toContain("main.mthds");
+    expect(result._meta).not.toHaveProperty("files");
+    expect(result.structuredContent).not.toHaveProperty("files");
   });
 
   it("hands the model a runnable method's signature and template, and the view its artifacts", async () => {
@@ -307,7 +322,7 @@ describe("showPipelexMethod", () => {
 
     // The view reads exactly the keys `mthds_validate` fed it on.
     expect(result._meta).toEqual({
-      graph_spec: GRAPH,
+      graph_spec: expect.objectContaining({ meta: expect.objectContaining({ mode: "static" }) }),
       pipe_io_contracts: contracts,
       input_form: inputForm,
       output_form: outputForm,
@@ -385,14 +400,14 @@ describe("showPipelexMethod", () => {
     }
   });
 
-  it("refuses a bare pipe_ref even when the report carries no contracts", async () => {
-    // An older runner sends no pipe_io_contracts, so membership cannot be
-    // checked; a bare ref is still refused, since pipelex_run always refuses one.
-    const { pipe_io_contracts: _dropped, ...legacyReport } = validReport as unknown as Record<
+  it("refuses a bare pipe_ref even when a malformed answer carries no contracts", async () => {
+    // Membership cannot be checked without the contracts; a bare ref is still
+    // refused, since pipelex_run always refuses one.
+    const { pipe_io_contracts: _dropped, ...malformed } = validReport as unknown as Record<
       string,
       unknown
     >;
-    const { context } = contextAnswering(async () => legacyReport as PipelexValidationReport);
+    const { context } = contextAnswering(async () => malformed as unknown as PipeIOValidReport);
 
     const bare = await showPipelexMethod({ method_id: "mt_demo", pipe_ref: "main" }, context);
     const qualified = await showPipelexMethod(
@@ -415,7 +430,8 @@ describe("showPipelexMethod", () => {
     expect(content.is_runnable).toBe(false);
     expect(content.pending_signatures).toEqual(["demo.todo"]);
     expect(content).not.toHaveProperty("inputs");
-    // The graph still shows; the form does not.
+    // The graph still shows; the form does not. The route states pending
+    // signatures without a dry run, so this verdict needs no validation.
     expect(content.available_view_specs).toEqual(["dry_run_graph"]);
     expect(result._meta.input_form).toBeUndefined();
     expect(result._meta.pipe_io_contracts).toBeUndefined();
@@ -442,12 +458,28 @@ describe("showPipelexMethod", () => {
     expect(content.available_view_specs).toEqual([]);
     expect(result.summary).toContain("does not validate");
     expect(result.summary).toContain("Unknown pipe type");
+    // The invalid arm carries no files, so an invalid method ships no graph.
     expect(result.graphSpec).toBeUndefined();
+    expect(result.mainPipeRef).toBeUndefined();
+    expect(result.formPipeRef).toBeUndefined();
+  });
+
+  it("does not check a named pipe against a method that does not validate", async () => {
+    const { context } = contextAnswering(async () => invalidReport);
+
+    const result = await showPipelexMethod(
+      { method_id: "mt_demo", pipe_ref: "demo.nope" },
+      context,
+    );
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.is_valid).toBe(false);
   });
 
   it("asks for a pipe_ref when the method settles no entry pipe", async () => {
     const { context } = contextAnswering(async () => ({
       ...validReport,
+      pipe_ref: null,
       default_pipe_ref: null,
     }));
 
@@ -537,7 +569,7 @@ describe("validateShowRequest", () => {
 
 describe("showResult", () => {
   it("withholds the template when the descriptor for the pipe is missing", () => {
-    const report: PipelexValidationReport = { ...validReport, input_form: {} };
+    const report: PipeIOValidReport = { ...validReport, input_form: {} };
 
     const result = showResult(report, { method_id: "mt_demo" });
 

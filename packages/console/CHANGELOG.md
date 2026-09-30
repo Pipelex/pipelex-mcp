@@ -4,6 +4,10 @@ This is the changelog of the hosted console: the Pipelex MCP that chat hosts rea
 
 ## [Unreleased]
 
+### Changed
+
+- **`pipelex_show_method` and `pipelex_run`'s input check read `POST /v1/pipe-io`, with no dry run**: A show and a run's input preparation each read the method's signature and forms from one call that loads the method without validating it, so neither waits for the dry run of every pipe any more, and the console calls `/v1/validate` nowhere. The method's graph is now drawn on the server from the method's own files by `@pipelex/mthds-ui`'s static builder, one node per pipe call, for a saved method and a published address alike; only the graph reaches the view, never the source. A method with pending signatures is still reported as not runnable, but a method whose dry run would fail is now reported runnable and fails when it runs, and a published package that ships Python now shows, its run being refused at the start as before. A named `pipe_ref` the method does not declare, or a method with no single entry pipe, is refused at `pipe_ref` with the route's own reason during a run's input check. The deployment must serve `/v1/pipe-io` (pipelex-api 0.33.1 or later). The tool list is unchanged, so no connector needs re-adding.
+
 ### Fixed
 
 - **Both views fill the fullscreen frame on claude.ai**: In fullscreen, `run-graph` and `run-follow` laid themselves out in 600 pixels and cut off there, with the rest of the frame empty, because the frame's height claude.ai states never reached them. They now take the frame's own height in fullscreen, keep the host's safe-area insets once rather than twice, and `run-graph`'s Collapse button sits inside those insets rather than at the frame's edge. This changes the views' code, so ChatGPT shows it only once the connector is removed and added again.

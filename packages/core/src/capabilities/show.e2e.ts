@@ -1,13 +1,14 @@
 /**
  * Live e2e — `pipelex_show_method` against a real Pipelex API.
  *
- * The tool reads `POST /v1/validate` with the graph and both form descriptors
- * requested, then projects the inputs template client-side from the input-form
- * descriptor. The unit suite fakes that report, so only a live call proves the
- * route still serves each artifact the view and the template are built from,
- * for a saved method and a published one alike.
+ * The tool reads one `POST /v1/pipe-io` for the whole method with its files,
+ * projects the inputs template client-side from the input-form descriptor, and
+ * draws the static graph from the echoed files. The unit suite fakes that
+ * answer, so only a live call proves the route still serves each artifact the
+ * view and the template are built from, and the files the graph is drawn
+ * from, for a saved method and a published one alike.
  *
- * Free: validation dry-runs the graph and executes nothing.
+ * Free: the route loads the method, runs no dry run and executes nothing.
  */
 
 import { describe, expect, it } from "vitest";
@@ -15,6 +16,8 @@ import { describe, expect, it } from "vitest";
 import {
   FIXTURE_INPUT_NAME,
   FIXTURE_PIPE_REF,
+  PUBLISHED_METHOD_PIPE_REF,
+  PUBLISHED_METHOD_REF,
   PYTHON_FREE_METHOD_REF,
   apiAdvertisesExtension,
   fixtureMethodId,
@@ -37,11 +40,27 @@ function expectFormArtifacts(meta: Record<string, unknown>) {
   expect(meta.main_pipe_ref).toBeTypeOf("string");
 }
 
-/** The form's keys, and the dry-run graph beside them. */
+/** The form's keys, and the static graph beside them, drawn from the entry pipe. */
 function expectViewArtifacts(meta: Record<string, unknown>) {
   expectFormArtifacts(meta);
-  expect(meta.graph_spec, "_meta.graph_spec").toBeTypeOf("object");
-  expect(meta.graph_spec, "_meta.graph_spec").not.toBeNull();
+  const graph = meta.graph_spec as
+    | { meta?: { mode?: string }; nodes?: unknown[]; pipeline_ref?: Record<string, unknown> }
+    | null
+    | undefined;
+  expect(graph, "_meta.graph_spec").toBeTypeOf("object");
+  expect(graph, "_meta.graph_spec").not.toBeNull();
+  expect(graph?.meta?.mode, "_meta.graph_spec.meta.mode").toBe("static");
+  expect(graph?.nodes?.length ?? 0, "_meta.graph_spec.nodes").toBeGreaterThan(0);
+  expect(`${graph?.pipeline_ref?.domain}.${graph?.pipeline_ref?.main_pipe}`).toBe(
+    meta.main_pipe_ref,
+  );
+}
+
+/** The method's source never rides any channel: the catalog projection invariant. */
+function expectNoSource(result: unknown) {
+  const everything = JSON.stringify(result);
+  expect(everything).not.toContain('"files"');
+  expect(everything).not.toMatch(/main_pipe\s*=\s*\\"/);
 }
 
 describe.skipIf(!SERVES_SELECTORS)("pipelex_show_method (live)", () => {
@@ -61,11 +80,13 @@ describe.skipIf(!SERVES_SELECTORS)("pipelex_show_method (live)", () => {
     expect(content.inputs?.[FIXTURE_INPUT_NAME]).toHaveProperty("concept");
     expect(content.available_view_specs).toEqual(["dry_run_graph", "input_form"]);
     expectViewArtifacts(result._meta as Record<string, unknown>);
+    expectNoSource(result);
   });
 
   it("shows a published method by address, with its template and every view artifact", async () => {
-    // `/v1/validate` resolves an address through the execution-locus gate, so
-    // this is the Python-free package (see `PYTHON_FREE_METHOD_REF`).
+    // The package whose entry pipe only its manifest names, which is what
+    // this leg is about; it is also Python-free, so its run would pass the
+    // execution-locus gate at the start.
     const result = showToolResult(
       await showPipelexMethod({ method_ref: PYTHON_FREE_METHOD_REF }, context),
     );
@@ -79,10 +100,46 @@ describe.skipIf(!SERVES_SELECTORS)("pipelex_show_method (live)", () => {
     // why naming it is the point), and the template is for that pipe.
     expect(content.pipe_ref).toBe("documents.extract_document_markdown");
     expect(Object.keys(content.inputs ?? {}).length).toBeGreaterThan(0);
-    // This package declares its entry pipe only in its manifest, and the route
-    // dry-runs that pipe when the bundle names no `main_pipe`, so the graph
-    // comes as it does for a saved method.
+    // This package declares its entry pipe only in its manifest; the route
+    // states it as `default_pipe_ref`, and the graph is drawn from the
+    // package's echoed files at that pipe, as it is for a saved method.
     expect(content.available_view_specs).toEqual(["dry_run_graph", "input_form"]);
     expectViewArtifacts(result._meta as Record<string, unknown>);
+    expectNoSource(result);
+  });
+
+  it("shows a published package that ships Python: only its run's start is gated", async () => {
+    // `/v1/pipe-io` fetches a package's `.mthds` files alone, so no execution
+    // locus is decided and the gate cannot fire; `/v1/validate`, which the
+    // show read before, refused this package off a sandbox-hosted deployment.
+    const result = showToolResult(
+      await showPipelexMethod({ method_ref: PUBLISHED_METHOD_REF }, context),
+    );
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.pipe_ref).toBe(PUBLISHED_METHOD_PIPE_REF);
+    expectViewArtifacts(result._meta as Record<string, unknown>);
+    expectNoSource(result);
+  });
+
+  it("shows another pipe of a published method, and refuses one it does not declare", async () => {
+    const named = await showPipelexMethod(
+      { method_ref: PYTHON_FREE_METHOD_REF, pipe_ref: "documents.extract_document_text" },
+      context,
+    );
+    expect(named.structuredContent.status).toBe("ok");
+    expect(named.structuredContent.pipe_ref).toBe("documents.extract_document_text");
+    expect(named.formPipeRef).toBe("documents.extract_document_text");
+    // The entry pipe stays the method's own, and the graph is still drawn from it.
+    expect(named.mainPipeRef).toBe("documents.extract_document_markdown");
+
+    const unknown = await showPipelexMethod(
+      { method_ref: PYTHON_FREE_METHOD_REF, pipe_ref: "documents.nope" },
+      context,
+    );
+    const error = unknown.structuredContent.errors?.[0];
+    expect(error?.location).toBe("pipe_ref");
+    // Named from the whole-method answer: the route's own refusal names none.
+    expect(error?.message).toContain("documents.extract_document_markdown");
   });
 });

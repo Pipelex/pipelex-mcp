@@ -833,6 +833,17 @@ function viewsNote(specs: ViewSpec[]): string {
 }
 
 /**
+ * The three I/O artifacts a signature is read from, as any answer carrying
+ * them spells them: `/v1/validate`'s valid arm and `/v1/pipe-io`'s alike. Typed
+ * `unknown` because both are relayed wire data that nothing validates.
+ */
+export interface PipeIOArtifacts {
+  pipe_io_contracts?: unknown;
+  input_form?: unknown;
+  output_form?: unknown;
+}
+
+/**
  * The main pipe's signature, or `undefined` when the report carries no usable
  * one. Defensive on purpose (`narrowMethodProvenance` in `run.ts` is the
  * model): the SDK's declared type is not proof of what arrived, and this is
@@ -842,7 +853,7 @@ function viewsNote(specs: ViewSpec[]): string {
  * verdict itself is never affected.
  */
 export function mainPipeSignatureOf(
-  report: PipelexValidationReport,
+  report: PipeIOArtifacts,
   mainPipeRef: string | undefined,
 ): MainPipeSignature | undefined {
   if (mainPipeRef === undefined) {
@@ -1182,7 +1193,7 @@ function isPresenceMarker(value: unknown): value is PresenceMarker {
  * click would still reach it — the safe direction, since withholding an advert
  * costs a hint while a false one costs the model a view that cannot render.
  */
-function hasEntryFor(artifact: unknown, pipeRef: string): boolean {
+export function hasEntryFor(artifact: unknown, pipeRef: string): boolean {
   const map = asRecord(artifact);
   return map !== undefined && asRecord(map[pipeRef]) !== undefined;
 }
