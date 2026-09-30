@@ -28,9 +28,9 @@ export function parsePipeRef(ref: string): SelectedPipe {
  * absent. The view used to reach for whichever pipe came first in the contract
  * map there, which put a fill-in form and a Run button in front of the user for
  * a pipe nobody chose. No form is the honest rendering until somebody chooses:
- * the show draws no graph on such a verdict either, since it enters the graph
- * only at a chosen pipe, so a show that names a `pipe_ref` is the way a form
- * appears — and this function is what keeps the view from choosing one itself.
+ * the capability still ships the artifact pair on such a verdict (it only
+ * withholds the *advert*), so a pipe the user picks in the graph is the one
+ * way a form appears — and this function is what keeps it the only one.
  */
 export function selectedPipeFor(
   pickedPipe: SelectedPipe | null,
@@ -47,7 +47,7 @@ export function selectedPipeFor(
  * `pipeline_ref.domain` and `pipeline_ref.main_pipe` with the pipe they start
  * from. On `pipelex_show_method` that is the pipe the form opens on
  * (`_meta.form_pipe_ref`): the one the caller named, else the entry pipe,
- * manifest included.
+ * manifest included; with neither, the first `main_pipe` the files declare.
  *
  * Both halves must be non-empty strings, the same test pipelex applies when it
  * reads the ref back; anything less is `null`, and the view then says nothing
@@ -72,7 +72,9 @@ export function graphPipeRefOf(graphSpec: unknown): string | null {
  * `pipelex_show_method` draws the graph from the pipe the caller named, else
  * from the entry pipe, so the two differ exactly when the caller named another
  * pipe, and the caption then says the graph is not the whole method, with
- * both refs spelled out.
+ * both refs spelled out. A verdict with no entry pipe has no
+ * `_meta.main_pipe_ref`, so its graph, drawn from the files' `main_pipe`, is
+ * never captioned against an entry pipe the method does not have.
  *
  * The second sentence follows the form actually on screen, so the caption stays
  * true after a click: it says the form runs the entry pipe only while it does

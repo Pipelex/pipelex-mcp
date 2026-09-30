@@ -316,21 +316,44 @@ describe("showPipelexMethod", () => {
     expect(result.formPipeRef).toBe("demo.main");
   });
 
-  it("draws no graph when no pipe is named and the method settles no entry pipe", async () => {
-    // Nothing chose a pipe, so the graph is not entered wherever the builder's
-    // own fallback would land.
-    const { context } = contextAnswering(async () => ({
+  it("draws the files' declared main pipe when no pipe is named and none is settled", async () => {
+    // A pipe the user clicks in the graph is then the only way to a form, so
+    // the graph is entered at the first `main_pipe` the files declare. Nothing
+    // is called the entry pipe, so the view's caption claims none.
+    const noEntry = (files: PipeIOValidReport["files"]): PipeIOValidReport => ({
       ...validReport,
       pipe_ref: null,
       default_pipe_ref: null,
-    }));
+      files,
+    });
 
-    const result = await showPipelexMethod({ method_id: "mt_demo" }, context);
+    const declared = await showPipelexMethod(
+      { method_id: "mt_demo" },
+      contextAnswering(async () => noEntry(DEMO_FILES)).context,
+    );
 
-    expect(result.graphSpec).toBeUndefined();
-    expect(result.mainPipeRef).toBeUndefined();
-    expect(result.formPipeRef).toBeUndefined();
-    expect(result.structuredContent.available_view_specs).toEqual([]);
+    const spec = declared.graphSpec as { pipeline_ref?: { domain?: string; main_pipe?: string } };
+    expect(spec.pipeline_ref).toEqual({ domain: "demo", main_pipe: "main" });
+    expect(graphPipeCodes(spec)).toEqual(["finish", "main", "other"]);
+    expect(declared.mainPipeRef).toBeUndefined();
+    expect(declared.formPipeRef).toBeUndefined();
+    // The view captions a graph only against `main_pipe_ref`, which is absent.
+    expect(showToolResult(declared)._meta.main_pipe_ref).toBeUndefined();
+    expect(declared.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
+
+    // Files that declare no `main_pipe` get no graph: the builder's root
+    // heuristic would pick a pipe nobody declared.
+    const undeclared = await showPipelexMethod(
+      { method_id: "mt_demo" },
+      contextAnswering(async () =>
+        noEntry([
+          { content: DEMO_MTHDS.replace('main_pipe = "main"\n', ""), source: "main.mthds" },
+        ]),
+      ).context,
+    );
+
+    expect(undeclared.graphSpec).toBeUndefined();
+    expect(undeclared.structuredContent.available_view_specs).toEqual([]);
   });
 
   it("draws no graph for a named pipe the files do not declare", async () => {

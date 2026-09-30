@@ -359,7 +359,8 @@ function unknownPipeError(requested: string, report: PipeIOValidReport): ToolErr
  * Project the route's answer: the verdict, the signature and the template for
  * the model, the graph and the form's artifacts for the view. The signature,
  * the form and the graph all follow one pipe: the one the caller named, else
- * the method's entry pipe.
+ * the method's entry pipe. With neither, there is no signature and no form,
+ * and the graph is entered at the first `main_pipe` the files declare.
  */
 export function showResult(
   report: PipeIOResponse,
@@ -409,9 +410,11 @@ export function showResult(
 
   // The graph is entered at the same pipe as the form: the one the caller
   // named, which `unknownPipeError` has checked against the whole method, else
-  // the entry pipe. With neither there is no graph, rather than one entered
-  // wherever the builder's own fallback lands, which no selection chose.
-  const graphSpec = pipeRef === undefined ? undefined : staticGraphOf(report.files, pipeRef);
+  // the entry pipe. With neither it is entered at the first `main_pipe` the
+  // files declare, since a pipe clicked in the graph is then the only way to
+  // a form; `mainPipeRef` stays unset, so the view's caption claims no entry
+  // pipe the method does not have.
+  const graphSpec = staticGraphOf(report.files, pipeRef);
 
   const template =
     report.is_runnable && pipeRef !== undefined
@@ -488,10 +491,14 @@ export const MAX_STATIC_GRAPH_NODES = 2_000;
  * its expansion is counted without building anything, and a method whose
  * count passes {@link MAX_STATIC_GRAPH_NODES} gets no graph.
  *
- * The builder is lenient and documented never to throw; a throw anyway, an
- * entry pipe it cannot resolve, or an answer with no files leaves no graph.
+ * The graph is entered at `entryPipe`, else at the first `main_pipe` the files
+ * declare, and never at the builder's root heuristic, which would pick a pipe
+ * nobody declared. The builder is lenient and documented never to throw; a
+ * throw anyway, an entry pipe it cannot resolve, files that declare no
+ * `main_pipe` when no pipe was selected, or an answer with no files leaves no
+ * graph.
  */
-function staticGraphOf(files: MthdsFileItem[] | undefined, entryPipe: string): unknown {
+function staticGraphOf(files: MthdsFileItem[] | undefined, entryPipe: string | undefined): unknown {
   if (!Array.isArray(files) || files.length === 0) return undefined;
   try {
     const ordered = orderMthdsSources(
@@ -504,7 +511,12 @@ function staticGraphOf(files: MthdsFileItem[] | undefined, entryPipe: string): u
     if (staticGraphSizeBound(merged, MAX_STATIC_GRAPH_NODES) > MAX_STATIC_GRAPH_NODES) {
       return undefined;
     }
-    const { spec } = buildStaticGraphSpec(merged, { entryPipe });
+    // With no pipe selected, the builder's own fallback minus its root
+    // heuristic: the first declared `main_pipe`, passed explicitly so that one
+    // it cannot resolve draws nothing rather than a pipe nobody declared.
+    const entry = entryPipe ?? merged.mainPipe ?? undefined;
+    if (entry === undefined) return undefined;
+    const { spec } = buildStaticGraphSpec(merged, { entryPipe: entry });
     return spec.nodes.length > 0 ? spec : undefined;
   } catch {
     return undefined;

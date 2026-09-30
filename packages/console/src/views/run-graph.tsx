@@ -81,8 +81,8 @@ type RunGraphViewState = {
  * beside it. The form is for the pipe the show named, else the effective entry
  * pipe (`responseMetadata.form_pipe_ref`, then `main_pipe_ref`); clicking a
  * pipe node in the graph switches it. With no entry pipe settled no form opens on its own —
- * `selectedPipeFor` never substitutes a pipe of the view's own choosing — and
- * the show draws no graph either, so a show naming a `pipe_ref` is the way in.
+ * `selectedPipeFor` never substitutes a pipe of the view's own choosing — but
+ * the artifacts still ride, so clicking a pipe node still produces its form.
  * The graph is drawn from the pipe the form opens on, so the two agree; when
  * that pipe is not the entry pipe `main_pipe_ref` names, because the caller
  * named another one, a caption under the graph names both
