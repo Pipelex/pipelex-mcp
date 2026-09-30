@@ -183,7 +183,9 @@ const PREPARE_ERROR_OPTIONS: ClassifyErrorOptions = {
  * route fetches a package's `.mthds` files alone, so the execution-locus gate
  * does not apply and a package shipping Python prepares on any deployment, as
  * it answers on `mthds_inputs_template` and `mthds_codegen`; its run is still
- * refused at the start off a sandbox-hosted deployment.
+ * refused at the start off a sandbox-hosted deployment. The 404 texture is
+ * `typedOnly`, here and on the id shape: a runner too old to serve
+ * `/v1/pipe-io` answers a bare 404, which is the deployment, not the address.
  */
 const PREPARE_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/pipe-io",
@@ -196,6 +198,7 @@ const PREPARE_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
   notFound: {
     location: "method_ref",
     hint: "The repository was fetched but holds no package matching this address by manifest identity. Check the package selector against the repository's METHODS.toml manifests.",
+    typedOnly: true,
   },
   notImplemented: {
     location: "method_ref",
@@ -223,6 +226,7 @@ const PREPARE_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
   notFound: {
     location: "method_id",
     hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.",
+    typedOnly: true,
   },
   asset: PREPARE_ASSET_TEXTURE,
 };

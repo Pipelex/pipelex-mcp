@@ -758,6 +758,38 @@ describe("prepareConsoleInputs — selector-shaped classification", () => {
     expect(result.error?.hint).toContain("pipelex_list_methods");
   });
 
+  // A runner too old to serve `/v1/pipe-io` answers a bare 404, with neither an
+  // error type nor a code: that is the deployment, never the method named.
+  for (const selector of [
+    { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
+    { method_id: "mt_123" },
+  ]) {
+    it(`reports a bare 404 as config at PIPELEX_BASE_URL (${Object.keys(selector)[0]})`, async () => {
+      const result = await walk(
+        { ...selector, inputs: {} },
+        {
+          client: failingWith(
+            new ApiResponseError(
+              "HTTP 404",
+              `${DEFAULT_API_URL}/v1/pipe-io`,
+              404,
+              "Not Found",
+              '{"detail":"Not Found"}',
+              undefined, // errorType
+              "Not Found",
+              undefined, // validationErrors
+              undefined, // code
+            ),
+          ),
+        },
+      );
+
+      expect(result.error?.class).toBe("config");
+      expect(result.error?.location).toBe("PIPELEX_BASE_URL");
+      expect(result.error?.hint).toContain("/v1/pipe-io");
+    });
+  }
+
   it("locates the sandbox refusal (403) at method_ref, never at the credential", async () => {
     const result = await walk(
       { method_ref: PUBLISHED_REF, inputs: {} },

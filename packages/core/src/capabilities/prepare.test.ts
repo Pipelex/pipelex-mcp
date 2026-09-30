@@ -386,6 +386,40 @@ describe("prepareMthdsInputs — selector-shaped classification", () => {
     expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
   });
 
+  // A runner too old to serve `/v1/pipe-io` answers a bare 404, with neither an
+  // error type nor a code: that is the deployment, never the method named.
+  for (const selector of [
+    { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
+    { method_id: "mt_123" },
+  ]) {
+    it(`reports a bare 404 as config at PIPELEX_BASE_URL (${Object.keys(selector)[0]})`, async () => {
+      const result = await prepareMthdsInputs(
+        { ...selector, inputs: {} },
+        {
+          baseUrl: DEFAULT_API_URL,
+          client: uploadWith(async () => {
+            throw new ApiResponseError(
+              "HTTP 404",
+              `${DEFAULT_API_URL}/v1/pipe-io`,
+              404,
+              "Not Found",
+              '{"detail":"Not Found"}',
+              undefined, // errorType
+              "Not Found",
+              undefined, // validationErrors
+              undefined, // code
+            );
+          }),
+        },
+      );
+
+      const error = result.structuredContent.errors?.[0];
+      expect(error?.class).toBe("config");
+      expect(error?.location).toBe("PIPELEX_BASE_URL");
+      expect(error?.hint).toContain("/v1/pipe-io");
+    });
+  }
+
   it("locates a source-less stored method at method_id (the route's 422)", async () => {
     // The fail-fast EmptyMethodSourceError went out with the client-side
     // expansion; a source-less method now surfaces from the route itself.
