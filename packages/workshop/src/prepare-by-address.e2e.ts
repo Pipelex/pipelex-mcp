@@ -9,8 +9,8 @@
  * It is the workshop arm by construction: the console refuses a local path.
  *
  * The file position is discovered through `POST /v1/validate` — the route
- * {@link PYTHON_FREE_METHOD_REF} is reserved for, and the one
- * `mthds_prepare_inputs` reads its own signature from. The BUILD route is
+ * {@link PYTHON_FREE_METHOD_REF} is reserved for — while `mthds_prepare_inputs`
+ * reads its own signature from `POST /v1/pipe-io`. The BUILD route is
  * deliberately not used here even though a template would also name the slot:
  * `documents@v0.1.0` declares its entry pipe in `METHODS.toml` alone, and a
  * deployment whose pin predates the manifest-aware build routes refuses it a

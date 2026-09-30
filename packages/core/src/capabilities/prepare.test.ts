@@ -330,7 +330,7 @@ describe("prepareMthdsInputs — selector-shaped classification", () => {
   function apiError(status: number, code: string, errorDomain: string): ApiResponseError {
     return new ApiResponseError(
       `HTTP ${status}`,
-      `${DEFAULT_API_URL}/v1/validate`,
+      `${DEFAULT_API_URL}/v1/pipe-io`,
       status,
       "Error",
       "{}",
@@ -422,41 +422,26 @@ describe("prepareMthdsInputs — selector-shaped classification", () => {
     expect(result.structuredContent.errors?.[0]?.hint).toContain("domain.pipe_code");
   });
 
-  it("locates a client-side signature failure at pipe_ref even on a by-id request", async () => {
+  it("locates a pipe selection the route refuses at pipe_ref, even on a by-id request", async () => {
+    // The SDK turns the route's typed 422 into an InputPreparationError
+    // carrying the server's reason.
     const result = await prepareMthdsInputs(
-      { method_id: "mt_123", inputs: {} },
+      { method_id: "mt_123", pipe_ref: "demo.nope", inputs: {} },
       {
         baseUrl: DEFAULT_API_URL,
         client: uploadWith(async () => {
-          throw new InputPreparationError("the method declares no single default pipe");
+          throw new InputPreparationError(
+            "Cannot prepare inputs: Pipe 'demo.nope' not found in the submitted closure",
+          );
         }),
       },
     );
 
-    expect(result.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
-  });
-
-  it("locates the sandbox refusal (403) at method_ref, never at the credential", async () => {
-    const result = await prepareMthdsInputs(
-      { method_ref: PUBLISHED_REF, inputs: {} },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: uploadWith(async () => {
-          throw apiError(403, "CustomCodeRequiresSandbox", "forbidden");
-        }),
-      },
-    );
-
-    // A by-address prepare reads its signature from /v1/validate and therefore
-    // travels the execution-locus gate, which the two tooling routes do not.
-    // The generic 401/403 arm used to tell the caller their key was rejected
-    // and send them to mint a new one, for a package that is perfectly fine on
-    // a sandbox-hosted deployment.
-    expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
-    expect(result.structuredContent.errors?.[0]?.hint).toMatch(/sandbox-hosted/);
-    expect(result.structuredContent.errors?.[0]?.hint).not.toMatch(/PIPELEX_API_KEY/);
+    const error = result.structuredContent.errors?.[0];
+    expect(error?.class).toBe("input_domain");
+    expect(error?.location).toBe("pipe_ref");
+    expect(error?.message).toContain("demo.nope");
+    expect(error?.hint).toContain("qualified domain.pipe_code the method declares");
   });
 
   it("headlines a paywall (402) as a plan limit, not as connectivity", async () => {
