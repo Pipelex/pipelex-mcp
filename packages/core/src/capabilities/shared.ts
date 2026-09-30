@@ -707,6 +707,16 @@ export interface ClassifyErrorOptions {
   notFound?: {
     location?: string;
     hint: string;
+    /**
+     * Take the texture only for a 404 that names what was not found — one
+     * carrying an `error_type` (the runner's `MethodPackageNotFoundError`) or
+     * a problem `code` (the platform's `not_found` for an unknown method id).
+     * A bare 404, which is how a runner answers a route it does not serve,
+     * then keeps the missing-route `config` arm. Set on a route recent enough
+     * that a deployment may not serve it at all (`/v1/pipe-io`), where the
+     * SDK throws the same `ApiResponseError` for both.
+     */
+    typedOnly?: boolean;
   };
   /**
    * The request field that named the method on this route — `files`,
@@ -1267,7 +1277,8 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
   }
 
   if (err.status === 404) {
-    if (options.notFound) {
+    const named = err.errorType !== undefined || err.code !== undefined;
+    if (options.notFound && (options.notFound.typedOnly !== true || named)) {
       return {
         class: "input_domain",
         ...(options.notFound.location === undefined ? {} : { location: options.notFound.location }),

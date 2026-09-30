@@ -524,6 +524,39 @@ describe("classifyError", () => {
     );
   });
 
+  it("takes a typedOnly not-found texture only for a 404 that names what was not found", () => {
+    const notFound = (errorType: string | undefined, code: string | undefined) =>
+      new ApiResponseError(
+        "HTTP 404",
+        `${DEFAULT_API_URL}/v1/pipe-io`,
+        404,
+        "Not Found",
+        "{}",
+        errorType,
+        "Not Found",
+        undefined, // validationErrors
+        code,
+      );
+    const texture = { location: "method_ref", hint: "No such package." };
+    const gated = { route: "/v1/pipe-io", notFound: { ...texture, typedOnly: true } };
+
+    // A runner's typed refusal and the platform's coded one both name the miss.
+    expect(classifyError(notFound("MethodPackageNotFoundError", undefined), gated).location).toBe(
+      "method_ref",
+    );
+    expect(classifyError(notFound(undefined, "not_found"), gated).location).toBe("method_ref");
+
+    // A bare 404 is the deployment not serving the route.
+    const bare = classifyError(notFound(undefined, undefined), gated);
+    expect(bare.class).toBe("config");
+    expect(bare.location).toBe("PIPELEX_BASE_URL");
+    expect(bare.hint).toContain("/v1/pipe-io");
+
+    // Without the flag every 404 takes the texture, as the run routes need.
+    const ungated = { route: "/v1/pipe-io", notFound: texture };
+    expect(classifyError(notFound(undefined, undefined), ungated).location).toBe("method_ref");
+  });
+
   it("locates a stray EmptyMethodSourceError at method_id", () => {
     const error = classifyError(new EmptyMethodSourceError("mt_123"));
 

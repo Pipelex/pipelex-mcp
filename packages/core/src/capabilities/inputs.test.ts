@@ -100,7 +100,17 @@ function contextNeverCalled(): InputsContext {
   };
 }
 
-function apiError(status: number, errorType: string, serverMessage: string): ApiResponseError {
+/**
+ * A non-2xx answer as the SDK throws it. A runner's problem carries an
+ * `errorType`, the platform's a `code`, and a runner's answer for a route it
+ * does not serve carries neither.
+ */
+function apiError(
+  status: number,
+  errorType: string | undefined,
+  serverMessage: string,
+  code?: string,
+): ApiResponseError {
   return new ApiResponseError(
     `HTTP ${status}`,
     `${DEFAULT_API_URL}/v1/pipe-io`,
@@ -110,9 +120,12 @@ function apiError(status: number, errorType: string, serverMessage: string): Api
     errorType,
     serverMessage,
     undefined, // validationErrors
-    undefined, // code
+    code,
   );
 }
+
+/** A runner's answer for a route it does not serve: Starlette's bare `{"detail":"Not Found"}`. */
+const routeMissing = () => apiError(404, undefined, "Not Found");
 
 describe("inputsResult", () => {
   it("projects the explicit json template from the resolved pipe's descriptor", () => {
@@ -367,7 +380,7 @@ describe("buildMthdsInputs by files", () => {
   it("names pipe-io in the hint of a missing-route 404", async () => {
     const result = await buildMthdsInputs(
       { files: [{ content: 'domain = "demo"' }] },
-      contextWith(apiError(404, "not_found", "Not Found")),
+      contextWith(routeMissing()),
     );
 
     expect(result.structuredContent.errors?.[0]?.class).toBe("config");
@@ -498,7 +511,7 @@ describe("buildMthdsInputs by method_id (server pass-through)", () => {
   it("locates an unknown method id (404) at method_id", async () => {
     const result = await buildMthdsInputs(
       { method_id: "mt_missing" },
-      contextWith(apiError(404, "not_found", "Method not found")),
+      contextWith(apiError(404, undefined, "The requested resource does not exist.", "not_found")),
     );
 
     expect(result.structuredContent.status).toBe("error");
@@ -604,6 +617,27 @@ describe("buildMthdsInputs by method_ref (server pass-through)", () => {
       expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
     }
   });
+});
+
+describe("buildMthdsInputs on a deployment without the route", () => {
+  // The by-address and by-id textures take a 404 only when it names what was
+  // not found; a runner too old to serve `/v1/pipe-io` answers a bare 404,
+  // which is the deployment and never the caller's selector.
+  for (const selector of [
+    { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
+    { method_id: "mt_123" },
+  ]) {
+    it(`reports a bare 404 as config at PIPELEX_BASE_URL (${Object.keys(selector)[0]})`, async () => {
+      const result = await buildMthdsInputs(selector, contextWith(routeMissing()));
+
+      expect(result.structuredContent.status).toBe("error");
+      const error = result.structuredContent.errors?.[0];
+      expect(error?.class).toBe("config");
+      expect(error?.location).toBe("PIPELEX_BASE_URL");
+      expect(error?.hint).toContain("/v1/pipe-io");
+      expect(result.summary).toMatch(/unreachable|misconfigured/i);
+    });
+  }
 });
 
 describe("buildMthdsInputs request shape", () => {

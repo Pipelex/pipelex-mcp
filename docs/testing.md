@@ -26,7 +26,7 @@ Run a single test with Vitest directly: `npx vitest run packages/core/src/capabi
 
 ## Detecting API drift
 
-The unit suite cannot see the failure mode that actually breaks this server. Every capability reaches `@pipelex/sdk` through a hand-written narrow interface (`CatalogClient`, `MethodFetchClient`, `RunClient`, …) and every test injects a fake satisfying that interface, so `tsc` catches a **type** change on the SDK side and nothing at all catches a **wire-shape** change. That is not hypothetical: `mthds_list_methods` failed every real call with `wire.map is not a function` — the platform had reshaped `GET /v1/methods` into a page object while the pinned SDK still called `.map()` on it — and the whole suite stayed green. There is no OpenAPI schema to diff against (`/v1/openapi.json` is 403), so a live call is the only available detector.
+The unit suite cannot see the failure mode that actually breaks this server. Every capability reaches `@pipelex/sdk` through a hand-written narrow interface (`CatalogClient`, `RunClient`, `ShowClient`, …) and every test injects a fake satisfying that interface, so `tsc` catches a **type** change on the SDK side and nothing at all catches a **wire-shape** change. That is not hypothetical: `mthds_list_methods` failed every real call with `wire.map is not a function` — the platform had reshaped `GET /v1/methods` into a page object while the pinned SDK still called `.map()` on it — and the whole suite stayed green. There is no OpenAPI schema to diff against (`/v1/openapi.json` is 403), so a live call is the only available detector.
 
 There are two live detectors, at two different altitudes, and they are complementary rather than redundant.
 
