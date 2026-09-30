@@ -859,7 +859,30 @@ const DEFAULT_BAD_REQUEST: NonNullable<ClassifyErrorOptions["badRequest"]> = {
 export const DEFAULT_AUTH_HINT = "Check PIPELEX_API_KEY for the configured API.";
 
 /**
- * The deployment served a validation report with no usable `input_form`
+ * The `error_type`s of the `422`s `POST /v1/pipe-io` refuses a pipe selection
+ * with, in the input domain: a `pipe_ref` that names no pipe, or no entry pipe
+ * (`EntryPipeNotFoundError`), and a code matching several pipes, or several
+ * entry pipes (`EntryPipeAmbiguousError`). Each is a question about the pipe,
+ * where every other `422` of the route is about the request or the method.
+ * `@pipelex/sdk`'s own input walk branches on the same pair.
+ */
+const PIPE_SELECTION_ERROR_TYPES: ReadonlySet<string> = new Set([
+  "EntryPipeNotFoundError",
+  "EntryPipeAmbiguousError",
+]);
+
+/** Whether `err` is the pipe I/O route refusing a pipe selection (see {@link PIPE_SELECTION_ERROR_TYPES}). */
+export function isPipeSelectionRefusal(err: unknown): err is ApiResponseError {
+  return (
+    err instanceof ApiResponseError &&
+    err.status === 422 &&
+    err.errorType !== undefined &&
+    PIPE_SELECTION_ERROR_TYPES.has(err.errorType)
+  );
+}
+
+/**
+ * The deployment served an answer with no usable `input_form`
  * descriptor. Derives from the SDK's `InputPreparationError` so a caller
  * catching the family still catches it, but {@link classifyError} pulls it out
  * ahead of the base arm: it is a deployment fault, not a request the caller can

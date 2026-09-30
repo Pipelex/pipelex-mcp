@@ -1545,12 +1545,15 @@ export async function startMthdsRun(
  * preparing its inputs with the console's own walk.
  *
  * The walk runs only when there are inputs to walk: with none, there is no
- * file position to rewrite or refuse, and the one `POST /v1/validate` it costs
+ * file position to rewrite or refuse, and the one `POST /v1/pipe-io` it costs
  * would buy nothing. Its refusals stop the run before anything starts, so an
  * input that would need an upload never costs inference credit. Only the pipe
- * the caller named rides the start: the walk picks the same default the run
- * route does, and naming it here would let a disagreement between the two run a
- * pipe nobody chose.
+ * the caller named rides the start: the walk's default is the route's entry
+ * pipe, which is the run route's default except for a method whose domains
+ * declare several `main_pipe`s, where the run route takes the first and the
+ * walk is refused, asking for a `pipe_ref`. Naming the walk's pipe here would
+ * let any disagreement between the two run a pipe nobody chose, and the
+ * refusal fails closed.
  */
 export async function startPipelexRun(
   input: PipelexRunInput,

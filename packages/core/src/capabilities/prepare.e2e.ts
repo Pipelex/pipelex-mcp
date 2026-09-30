@@ -24,6 +24,7 @@ import {
   apiAdvertisesExtension,
   fixtureMethodId,
   liveApiConfig,
+  PUBLISHED_METHOD_REF,
   PYTHON_FREE_METHOD_REF,
 } from "./e2e-support.js";
 import { prepareMthdsInputs } from "./prepare.js";
@@ -76,7 +77,7 @@ describe("mthds_prepare_inputs (live)", () => {
 
 /**
  * GATED on the live API, not on a date: the `method_ref` and `method_id` legs
- * are server pass-throughs on `POST /v1/validate` (the route the signature
+ * are server pass-throughs on `POST /v1/pipe-io` (the route the signature
  * comes from), so a deployment that resolves neither has nothing to exercise.
  *
  * These legs deliberately submit **no inputs**. The point they prove is the one
@@ -96,6 +97,19 @@ describe.skipIf(!SERVES_SELECTORS)("mthds_prepare_inputs — by selector (live)"
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);
     expect(result.structuredContent.uploads).toEqual([]);
+  });
+
+  it("resolves a published package that ships Python: the route applies no execution-locus gate", async () => {
+    // `/v1/pipe-io` fetches the package's `.mthds` files alone, so no execution
+    // locus is decided; `/v1/validate`, which preparation read before, refused
+    // this package off a sandbox-hosted deployment.
+    const result = await prepareMthdsInputs(
+      { method_ref: PUBLISHED_METHOD_REF, inputs: {} },
+      workshopContext,
+    );
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.is_valid).toBe(true);
   });
 
   it("prepares a stored method by id, with no client-side closure expansion", async () => {

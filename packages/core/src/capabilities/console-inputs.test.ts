@@ -2,11 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
 import type {
+  CrateInvalidReport,
   InputForm,
   MthdsFileItem,
-  PipelexValidationReport,
-  PipelexValidationResult,
-  ValidateMethodSelector,
+  PipeIORequest,
+  PipeIOResponse,
+  PipeIOValidReport,
 } from "@pipelex/sdk";
 
 import { prepareConsoleInputs } from "./console-inputs.js";
@@ -104,51 +105,44 @@ const urlNamedTextInputForm: InputForm = {
   },
 };
 
+/**
+ * A single-pipe pipe I/O answer: the route selected `demo.main` (or whatever
+ * `overrides.pipe_ref` says) and keyed the maps by it. `undefined` for the
+ * descriptor drops the key, which a well-formed answer never does.
+ */
 function reportWith(
   inputForm: InputForm | undefined,
-  overrides: Partial<PipelexValidationReport> = {},
-): PipelexValidationReport {
+  overrides: Partial<PipeIOValidReport> = {},
+): PipeIOValidReport {
   return {
     is_valid: true,
-    bundle_blueprint: { domain: "demo", main_pipe: "main" },
+    pipe_ref: "demo.main",
     pipe_io_contracts: {},
     ...(inputForm === undefined ? {} : { input_form: inputForm }),
-    graph_spec: {},
-    validated_pipes: [],
+    output_form: {},
+    default_pipe_ref: "demo.main",
     pending_signatures: [],
-    liftable_pipes: [],
-    warnings: [],
     is_runnable: true,
-    message: "ok",
-    rendered_markdown: "# Valid",
     ...overrides,
-  };
+  } as PipeIOValidReport;
 }
 
-const invalidReport: PipelexValidationResult = {
+const invalidReport: CrateInvalidReport = {
   is_valid: false,
   message: "The closure did not validate.",
   validation_errors: [
     { category: "blueprint_validation", message: "Unknown pipe type", source: "bundle.mthds" },
   ],
-  pending_signatures: [],
-  is_runnable: false,
 };
 
-/** The walk's fake: `validate` answers a report and records what it was asked. */
-function validateWith(
-  report: PipelexValidationResult,
-  capture?: (source: string[] | ValidateMethodSelector, views?: string[]) => void,
+/** The walk's fake: `pipeIo` answers a report and records what it was asked. */
+function pipeIoWith(
+  report: PipeIOResponse,
+  capture?: (request: PipeIORequest) => void,
 ): ConsoleInputsClient {
   return {
-    async validate(
-      source: string[] | ValidateMethodSelector,
-      _allowSignatures?: boolean,
-      _mthdsSources?: string[],
-      _render?: string[],
-      views?: string[],
-    ): Promise<PipelexValidationResult> {
-      capture?.(source, views);
+    async pipeIo(request: PipeIORequest): Promise<PipeIOResponse> {
+      capture?.(request);
       return report;
     },
   };
@@ -198,25 +192,21 @@ async function walk(
 }
 
 describe("prepareConsoleInputs — the pass-through walk", () => {
-  it("reads the signature from validate with the input_form view and uploads nothing", async () => {
-    let capturedSource: string[] | ValidateMethodSelector | undefined;
-    let capturedViews: string[] | undefined;
+  it("reads the signature from one pipe I/O call and uploads nothing", async () => {
+    const requests: PipeIORequest[] = [];
 
     const result = await walk(
       { files, inputs: { photo: "https://cdn.example.com/a.png", question: "hi" } },
       {
         baseUrl: DEFAULT_API_URL,
-        client: validateWith(reportWith(demoInputForm), (source, views) => {
-          capturedSource = source;
-          capturedViews = views;
-        }),
+        client: pipeIoWith(reportWith(demoInputForm), (request) => requests.push(request)),
       },
     );
 
     // The console resolves the signature itself, from the descriptor — never
-    // from the rendered inputs template, and never by uploading.
-    expect(capturedSource).toEqual(['domain = "demo"']);
-    expect(capturedViews).toEqual(["input_form"]);
+    // from the rendered inputs template, and never by uploading. With no
+    // pipe named, the route picks the entry pipe, so none is sent.
+    expect(requests).toEqual([{ files: [{ content: 'domain = "demo"' }] }]);
     expect(result.status).toBe("ok");
     expect(result.inputs).toEqual({
       photo: { url: "https://cdn.example.com/a.png" },
@@ -224,8 +214,8 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
     });
   });
 
-  it("forwards a method_ref address to validate as the selector", async () => {
-    let capturedSource: string[] | ValidateMethodSelector | undefined;
+  it("forwards a method_ref address as the selector", async () => {
+    const requests: PipeIORequest[] = [];
 
     const result = await walk(
       {
@@ -234,37 +224,36 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
       },
       {
         baseUrl: DEFAULT_API_URL,
-        client: validateWith(reportWith(demoInputForm), (source) => {
-          capturedSource = source;
-        }),
+        client: pipeIoWith(reportWith(demoInputForm), (request) => requests.push(request)),
       },
     );
 
-    expect(capturedSource).toEqual({
-      method_ref: "github.com/Pipelex/methods/documents@v0.1.0",
-    });
+    expect(requests).toEqual([{ method_ref: "github.com/Pipelex/methods/documents@v0.1.0" }]);
     expect(result.status).toBe("ok");
   });
 
-  it("forwards a method_id to validate as the selector", async () => {
-    let capturedSource: string[] | ValidateMethodSelector | undefined;
+  it("forwards a method_id as the selector, and a named pipe beside it", async () => {
+    const requests: PipeIORequest[] = [];
 
     const result = await walk(
-      { method_id: "mt_123", inputs: { photo: "https://cdn.example.com/a.png" } },
+      {
+        method_id: "mt_123",
+        pipe_ref: " demo.main ",
+        inputs: { photo: "https://cdn.example.com/a.png" },
+      },
       {
         baseUrl: DEFAULT_API_URL,
-        client: validateWith(reportWith(demoInputForm), (source) => {
-          capturedSource = source;
-        }),
+        client: pipeIoWith(reportWith(demoInputForm), (request) => requests.push(request)),
       },
     );
 
-    expect(capturedSource).toEqual({ method_id: "mt_123" });
+    // Trimmed, and never with `all_pipes`: the walk needs one pipe's signature.
+    expect(requests).toEqual([{ method_id: "mt_123", pipe_ref: "demo.main" }]);
     expect(result.status).toBe("ok");
   });
 
-  it("labels every content once any submitted file names a source", async () => {
-    let capturedSources: string[] | undefined;
+  it("forwards inline files as given, their names included", async () => {
+    const requests: PipeIORequest[] = [];
 
     await walk(
       {
@@ -273,22 +262,15 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
       },
       {
         baseUrl: DEFAULT_API_URL,
-        client: {
-          async validate(
-            _source: string[] | ValidateMethodSelector,
-            _allowSignatures?: boolean,
-            mthdsSources?: string[],
-          ): Promise<PipelexValidationResult> {
-            capturedSources = mthdsSources;
-            return reportWith(demoInputForm);
-          },
-        },
+        client: pipeIoWith(reportWith(demoInputForm), (request) => requests.push(request)),
       },
     );
 
-    // A length-mismatched mthds_sources array is a server 422, so the unnamed
-    // file gets a deterministic inline label rather than being left out.
-    expect(capturedSources).toEqual(["a.mthds", "inline://file-2.mthds"]);
+    // The route takes the `files[]` envelope itself, so there is no parallel
+    // `mthds_sources` array to keep the same length.
+    expect(requests).toEqual([
+      { files: [{ content: 'domain = "demo"', source: "a.mthds" }, { content: "# more" }] },
+    ]);
   });
 
   it("accepts the filled explicit {concept, content} envelope and re-wraps it", async () => {
@@ -300,7 +282,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
           question: { concept: "native.Text", content: "hi" },
         },
       },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(reportWith(demoInputForm)) },
     );
 
     // The envelope survives: `concept` rides through, only the inner content is rewritten.
@@ -314,7 +296,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
   it("still refuses an upload-needing value nested inside an envelope", async () => {
     const result = await walk(
       { files, inputs: { photo: { concept: "native.Image", content: "./local/a.png" } } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(reportWith(demoInputForm)) },
     );
 
     expect(result.status).toBe("error");
@@ -328,7 +310,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
     // Exactly-two-keys is the envelope rule; a third key means it is ordinary structured content.
     const result = await walk(
       { files, inputs: { question: { concept: "x", content: "y", extra: 1 } } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(reportWith(demoInputForm)) },
     );
 
     expect(result.status).toBe("ok");
@@ -344,7 +326,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
     // this arm, a plain sentence in it was refused as "a local file path".
     const result = await walk(
       { files, inputs: { url: "not a link, just prose" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(urlNamedTextInputForm)) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(reportWith(urlNamedTextInputForm)) },
     );
 
     expect(result.status).toBe("ok");
@@ -360,7 +342,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
         files,
         inputs: { dossier: { title: "Case 7", scan: "https://cdn.example.com/scan.pdf" } },
       },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(nestedOptionalInputForm)) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(reportWith(nestedOptionalInputForm)) },
     );
 
     expect(result.status).toBe("ok");
@@ -372,7 +354,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
   it("refuses an upload-needing value at an optional nested file field", async () => {
     const result = await walk(
       { files, inputs: { dossier: { title: "Case 7", scan: "./local/scan.pdf" } } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(nestedOptionalInputForm)) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(reportWith(nestedOptionalInputForm)) },
     );
 
     expect(result.status).toBe("error");
@@ -390,7 +372,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
           },
         },
       },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(multipleInputForm)) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(reportWith(multipleInputForm)) },
     );
 
     // Every element is rewritten to canonical {url} content; the envelope survives.
@@ -406,7 +388,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
   it("walks every element of a declared-multiple file input filled compactly", async () => {
     const result = await walk(
       { files, inputs: { exhibits: ["https://cdn.example.com/a.pdf"] } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(multipleInputForm)) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(reportWith(multipleInputForm)) },
     );
 
     expect(result.status).toBe("ok");
@@ -426,7 +408,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
           },
         },
       },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(multipleInputForm)) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(reportWith(multipleInputForm)) },
     );
 
     expect(result.status).toBe("error");
@@ -439,7 +421,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
   it("passes an existing pipelex-storage:// reference through", async () => {
     const result = await walk(
       { files, inputs: { photo: "pipelex-storage://existing" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(reportWith(demoInputForm)) },
     );
 
     expect(result.status).toBe("ok");
@@ -451,7 +433,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
   it("refuses a data: URL up front with an instructive input_domain at inputs", async () => {
     const result = await walk(
       { files, inputs: { photo: "data:image/png;base64,AAAA" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(reportWith(demoInputForm)) },
     );
 
     expect(result.status).toBe("error");
@@ -463,7 +445,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
   it("refuses a bare local path up front", async () => {
     const result = await walk(
       { files, inputs: { photo: "/tmp/a.png" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(reportWith(demoInputForm)) },
     );
 
     expect(result.status).toBe("error");
@@ -474,7 +456,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
   it("surfaces an invalid closure as a no-verdict input_domain at the SELECTOR (no produced-invalid arm)", async () => {
     const result = await walk(
       { files, inputs: {} },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(invalidReport) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(invalidReport) },
     );
 
     expect(result.status).toBe("error");
@@ -488,7 +470,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
   it("locates an invalid closure at method_ref when an address named the method", async () => {
     const result = await walk(
       { files: [], method_ref: PUBLISHED_REF, inputs: {} },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(invalidReport) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(invalidReport) },
     );
 
     expect(result.error?.location).toBe("method_ref");
@@ -502,7 +484,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
     // whole boundary exists to prevent.
     const result = await walk(
       { files, inputs: { photo: "/tmp/a.png" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(undefined)) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(reportWith(undefined)) },
     );
 
     expect(result.status).toBe("error");
@@ -523,10 +505,10 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
       { files, inputs: { photo: "/tmp/a.png" } },
       {
         baseUrl: DEFAULT_API_URL,
-        client: validateWith(
+        client: pipeIoWith(
           reportWith(undefined, {
             input_form: null,
-          } as unknown as Partial<PipelexValidationReport>),
+          } as unknown as Partial<PipeIOValidReport>),
         ),
       },
     );
@@ -540,9 +522,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
       { files, inputs: { photo: "/tmp/a.png" } },
       {
         baseUrl: DEFAULT_API_URL,
-        client: validateWith(
-          reportWith({ "demo.main": { fields: "nope" } } as unknown as InputForm),
-        ),
+        client: pipeIoWith(reportWith({ "demo.main": { fields: "nope" } } as unknown as InputForm)),
       },
     );
 
@@ -569,7 +549,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
         files,
         inputs: { gallery: ["https://cdn.example.com/a.png"], meta: { title: "t" } },
       },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(malformed)) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(reportWith(malformed)) },
     );
 
     expect(result.status).toBe("ok");
@@ -582,7 +562,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
   it("names an unusable value for what it is instead of calling it inline bytes", async () => {
     const result = await walk(
       { files, inputs: { photo: 42 } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(reportWith(demoInputForm)) },
     );
 
     expect(result.error?.location).toBe("inputs");
@@ -593,7 +573,7 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
   it("still calls real inline bytes inline bytes", async () => {
     const result = await walk(
       { files, inputs: { photo: new Uint8Array([1, 2, 3]) } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(reportWith(demoInputForm)) },
     );
 
     expect(result.error?.message).toContain("inline bytes");
@@ -601,88 +581,101 @@ describe("prepareConsoleInputs — the pass-through walk", () => {
 });
 
 describe("prepareConsoleInputs — pipe selection (SDK parity)", () => {
-  const twoPipes: InputForm = {
-    "demo.main": demoInputForm["demo.main"],
-    "demo.other": { fields: [] },
-  };
+  /** The route's typed refusal of a selection, as the SDK surfaces it. */
+  function selectionRefusal(errorType: string, detail: string): ApiResponseError {
+    return new ApiResponseError(
+      "HTTP 422",
+      `${DEFAULT_API_URL}/v1/pipe-io`,
+      422,
+      "Unprocessable Entity",
+      "{}",
+      errorType,
+      detail,
+      undefined,
+      undefined,
+    );
+  }
 
-  it("refuses a bare pipe_ref, naming the declared pipes", async () => {
+  function refusingWith(error: unknown): ConsoleInputsClient {
+    return {
+      async pipeIo(): Promise<PipeIOResponse> {
+        throw error;
+      },
+    };
+  }
+
+  it("refuses a bare pipe_ref before any call", async () => {
+    const requests: PipeIORequest[] = [];
     const result = await walk(
       { files, pipe_ref: "main", inputs: {} },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: pipeIoWith(reportWith(demoInputForm), (request) => requests.push(request)),
+      },
     );
 
     expect(result.error?.location).toBe("pipe_ref");
     expect(result.error?.message).toContain("qualified");
+    expect(requests).toEqual([]);
   });
 
-  it("refuses a pipe_ref the method does not declare", async () => {
+  it("refuses a dependency package's pipe before any call", async () => {
+    const requests: PipeIORequest[] = [];
+    const result = await walk(
+      { files, pipe_ref: "lib->demo.main", inputs: {} },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: pipeIoWith(reportWith(demoInputForm), (request) => requests.push(request)),
+      },
+    );
+
+    expect(result.error?.location).toBe("pipe_ref");
+    expect(result.error?.message).toContain("dependency package");
+    expect(requests).toEqual([]);
+  });
+
+  it("locates the route's refusal of an unknown pipe_ref at pipe_ref, with its detail", async () => {
     const result = await walk(
       { files, pipe_ref: "demo.nope", inputs: {} },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(demoInputForm)) },
+      {
+        client: refusingWith(
+          selectionRefusal("EntryPipeNotFoundError", "Pipe 'demo.nope' not found in the closure."),
+        ),
+      },
     );
 
+    expect(result.error?.class).toBe("input_domain");
     expect(result.error?.location).toBe("pipe_ref");
-    expect(result.error?.message).toContain("demo.main");
+    expect(result.error?.message).toContain("Pipe 'demo.nope' not found");
+    expect(result.error?.retryable).toBe(false);
+    // The route's detail names no candidates, so the hint says where they are.
+    expect(result.error?.hint).toContain("pipelex_show_method");
   });
 
-  it("prefers the runner's stated default_pipe_ref over the blueprint", async () => {
+  it("locates the route's refusal of a method with several entry pipes at pipe_ref", async () => {
+    const result = await walk(
+      { method_id: "mt_1", inputs: {} },
+      {
+        client: refusingWith(
+          selectionRefusal("EntryPipeAmbiguousError", "Several domains declare a main_pipe."),
+        ),
+      },
+    );
+
+    // A question about the pipe, not about the method the id names.
+    expect(result.error?.location).toBe("pipe_ref");
+    expect(result.error?.message).toContain("Several domains");
+  });
+
+  it("walks the pipe the route selected", async () => {
     const report = reportWith(
-      { "demo.other": demoInputForm["demo.main"], "demo.main": { fields: [] } },
-      { default_pipe_ref: "demo.other" },
+      { "demo.other": demoInputForm["demo.main"] },
+      { pipe_ref: "demo.other", default_pipe_ref: "demo.other" },
     );
 
     const result = await walk(
       { files, inputs: { photo: "https://cdn.example.com/a.png" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(report) },
-    );
-
-    // Walked against `demo.other`'s descriptor — the blueprint names `demo.main`,
-    // whose descriptor declares no fields and would have left the value alone.
-    expect(result.inputs).toEqual({
-      photo: { url: "https://cdn.example.com/a.png" },
-    });
-  });
-
-  it("refuses a stated default_pipe_ref: null rather than falling through to the blueprint", async () => {
-    // The blueprint names `demo.main`, whose descriptor WOULD have guided a walk —
-    // this is the exact case the pre-0.19.0 ladder fell through on. A stated null is
-    // the server saying it determined no entry pipe, so the run route would refuse
-    // such a run, and preparing one would prepare a pipe the run will not execute.
-    const report = reportWith(demoInputForm, { default_pipe_ref: null });
-
-    const result = await walk(
-      { files, inputs: { photo: "https://cdn.example.com/a.png" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(report) },
-    );
-
-    expect(result.status).toBe("error");
-    expect(result.error?.location).toBe("pipe_ref");
-    expect(result.error?.message).toContain("no entry pipe");
-    // Named, so the caller can pass one.
-    expect(result.error?.message).toContain("demo.main");
-  });
-
-  it("refuses a stated default_pipe_ref the input_form descriptor does not describe", async () => {
-    // One report, one pipe set, keyed both ways — a miss is the report contradicting
-    // itself, and falling through would silently prepare a different pipe.
-    const report = reportWith(demoInputForm, { default_pipe_ref: "demo.absent" });
-
-    const result = await walk(
-      { files, inputs: {} },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(report) },
-    );
-
-    expect(result.status).toBe("error");
-    expect(result.error?.location).toBe("pipe_ref");
-    expect(result.error?.message).toContain("demo.absent");
-    expect(result.error?.message).toContain("does not describe it");
-  });
-
-  it("falls back to the blueprint's main_pipe when no default is stated", async () => {
-    const result = await walk(
-      { files, inputs: { photo: "https://cdn.example.com/a.png" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(reportWith(twoPipes)) },
+      { baseUrl: DEFAULT_API_URL, client: pipeIoWith(report) },
     );
 
     expect(result.inputs).toEqual({
@@ -690,29 +683,24 @@ describe("prepareConsoleInputs — pipe selection (SDK parity)", () => {
     });
   });
 
-  it("requires pipe_ref when the closure settles no single default pipe", async () => {
-    const report = reportWith(twoPipes, { bundle_blueprint: { domain: "demo" } });
+  it("refuses an answer whose descriptor does not describe the pipe it selected", async () => {
+    // One answer, one pipe, keyed both ways — a miss is the answer
+    // contradicting itself, and walking another pipe would prepare a signature
+    // the run does not take.
+    for (const report of [
+      reportWith(demoInputForm, { pipe_ref: "demo.absent" }),
+      reportWith(demoInputForm, { pipe_ref: null }),
+    ]) {
+      const result = await walk(
+        { files, inputs: {} },
+        { baseUrl: DEFAULT_API_URL, client: pipeIoWith(report) },
+      );
 
-    const result = await walk(
-      { files, inputs: {} },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(report) },
-    );
-
-    expect(result.error?.location).toBe("pipe_ref");
-    expect(result.error?.message).toContain("no single default pipe");
-  });
-
-  it("takes the one declared pipe when nothing names a default", async () => {
-    const report = reportWith(demoInputForm, { bundle_blueprint: {} });
-
-    const result = await walk(
-      { files, inputs: { photo: "https://cdn.example.com/a.png" } },
-      { baseUrl: DEFAULT_API_URL, client: validateWith(report) },
-    );
-
-    expect(result.inputs).toEqual({
-      photo: { url: "https://cdn.example.com/a.png" },
-    });
+      expect(result.status).toBe("error");
+      expect(result.error?.location).toBe("pipe_ref");
+      expect(result.error?.message).toContain("does not describe it");
+      expect(result.error?.message).toContain("demo.main");
+    }
   });
 });
 
@@ -720,7 +708,7 @@ describe("prepareConsoleInputs — selector-shaped classification", () => {
   function apiError(status: number, code: string, errorDomain: string): ApiResponseError {
     return new ApiResponseError(
       `HTTP ${status}`,
-      `${DEFAULT_API_URL}/v1/validate`,
+      `${DEFAULT_API_URL}/v1/pipe-io`,
       status,
       "Error",
       "{}",
@@ -733,7 +721,7 @@ describe("prepareConsoleInputs — selector-shaped classification", () => {
 
   function failingWith(error: unknown): ConsoleInputsClient {
     return {
-      async validate(): Promise<PipelexValidationResult> {
+      async pipeIo(): Promise<PipeIOResponse> {
         throw error;
       },
     };
@@ -776,8 +764,9 @@ describe("prepareConsoleInputs — selector-shaped classification", () => {
       { client: failingWith(apiError(403, "CustomCodeRequiresSandbox", "forbidden")) },
     );
 
-    // A by-address walk reads its signature from /v1/validate and therefore
-    // travels the execution-locus gate. The generic 401/403 arm used to tell
+    // `/v1/pipe-io` fetches `.mthds` files alone and decides no execution
+    // locus, so it should never answer this; the classification stays for a
+    // deployment that does, located where it was on `/v1/validate`. The generic 401/403 arm used to tell
     // the caller their credential was rejected, for a package that is
     // perfectly fine on a sandbox-hosted deployment.
     expect(result.status).toBe("error");
@@ -803,12 +792,9 @@ describe("prepareConsoleInputs — selector-shaped classification", () => {
     // The walk is the console's alone, so every hint it writes must name tools
     // the console registers.
     const refusals = await Promise.all([
-      walk(
-        { inputs: { photo: "/tmp/a.png" } },
-        { client: validateWith(reportWith(demoInputForm)) },
-      ),
-      walk({ method_ref: PUBLISHED_REF, inputs: {} }, { client: validateWith(invalidReport) }),
-      walk({ method_id: "mt_1", inputs: {} }, { client: validateWith(invalidReport) }),
+      walk({ inputs: { photo: "/tmp/a.png" } }, { client: pipeIoWith(reportWith(demoInputForm)) }),
+      walk({ method_ref: PUBLISHED_REF, inputs: {} }, { client: pipeIoWith(invalidReport) }),
+      walk({ method_id: "mt_1", inputs: {} }, { client: pipeIoWith(invalidReport) }),
       walk(
         { method_id: "mt_1", inputs: {} },
         { client: failingWith(apiError(404, "not_found", "not_found")) },

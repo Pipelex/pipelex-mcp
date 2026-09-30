@@ -2,6 +2,12 @@
 
 This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the Pipelex plugin runs. Up to and including 0.20.0 every release also deployed the hosted console at the same version, so those entries describe both servers. After 0.20.0 the console is released on a track of its own, recorded in [its changelog](../console/CHANGELOG.md) and tagged `console-vX.Y.Z`, while this file and the `vX.Y.Z` tags cover the workshop alone.
 
+## [Unreleased]
+
+### Changed
+
+- **`mthds_prepare_inputs` reads `POST /v1/pipe-io`, with no dry run (Breaking)**: `@pipelex/sdk` moves from 0.26.0 to 0.27.0, whose `prepareInputs` reads the pipe's signature from `POST /v1/pipe-io` instead of `POST /v1/validate`, so preparing inputs no longer waits for a dry run of the method. The route picks the pipe: omitting `pipe_ref` prepares the method's entry pipe, and a method whose domains declare several `main_pipe`s now needs `pipe_ref` where the first declaration used to be taken. An unknown `pipe_ref`, or a method with no single entry pipe, is refused at `pipe_ref` with the route's own reason. A published package that ships Python now prepares on a deployment that is not sandbox-hosted, since the route fetches only its `.mthds` files; its run is still refused at the start there. The deployment must serve `/v1/pipe-io` (pipelex-api 0.33.1 or later); one that does not answers the tool with a `404` or a `403`.
+
 ## [0.21.0] - 2026-09-28
 
 ### Highlights

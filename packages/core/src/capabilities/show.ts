@@ -1,8 +1,11 @@
-import type {
-  PipelexValidationReport,
-  PipelexValidationResult,
-  ValidateMethodSelector,
-} from "@pipelex/sdk";
+import {
+  buildStaticGraphSpec,
+  mergeBundles,
+  orderMthdsSources,
+  parseMthdsBundle,
+} from "@pipelex/mthds-ui/static-graph";
+import type { MergedMethodSet } from "@pipelex/mthds-ui/static-graph";
+import type { MthdsFileItem, PipeIORequest, PipeIOResponse, PipeIOValidReport } from "@pipelex/sdk";
 import { z } from "zod";
 
 import { inputsTemplateFor } from "./inputs-template.js";
@@ -13,6 +16,7 @@ import {
   buildApiConfig,
   classifyError,
   createPipelexApiClient,
+  hasArtifactEntries,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
@@ -28,10 +32,9 @@ import type {
 import { CONSOLE_TOOL_NAMES } from "./tool-names.js";
 import {
   VALIDATE_BY_REF_ERROR_OPTIONS,
-  VALIDATE_VIEW_TOKENS,
-  defaultPipeRefOf,
+  hasEntryFor,
+  mainPipeSignatureOf,
   mainPipeSignatureSchema,
-  projectValidationReport,
   signatureLine,
   viewSpecSchema,
 } from "./validate.js";
@@ -45,13 +48,19 @@ import type { MainPipeSignature, ViewSpec } from "./validate.js";
  * signature and the fill-in inputs template, so it can fill the inputs in
  * conversation without a second call.
  *
- * It reads `POST /v1/validate` with the graph and both form descriptors (ruled
- * 2026-09-25): that route already serves everything the tool needs for an id
- * and an address alike, and it reports a method whose dry run fails, or whose
- * signatures are pending, as not runnable instead of handing out a form whose
- * Run can only fail. The move onto `/v1/input-form` (L-260924-f3aa28) changes
- * the route, never this contract. The console has no validate tool: this is not
- * one, and its verdict is only ever "can it run".
+ * It reads one `POST /v1/pipe-io` (L-260924-f3aa28, on the route's shape Louis
+ * ruled on 2026-09-30): the three I/O artifacts for every pipe, the method's
+ * entry pipe, the runnability facts and the closure's files, for an id and an
+ * address alike, with no dry run. It moved there from `/v1/validate` without
+ * changing this contract. A method with pending signatures is still reported
+ * as not runnable; a method whose dry run would fail is not, since only
+ * validate runs one, and its failure surfaces when the run fails. The console
+ * has no validate tool: this is not one, and its verdict is only ever "can it
+ * run".
+ *
+ * The graph is drawn here, from the echoed files, by `@pipelex/mthds-ui`'s
+ * static builder, because the method's source must never leave this process:
+ * only the built graph ships (see `staticGraphOf`).
  *
  * Console-only, so its texts name the console's tools directly.
  */
@@ -148,26 +157,20 @@ export interface ShowStructuredContent {
 export interface ShowResult {
   structuredContent: ShowStructuredContent;
   summary: string;
-  /** The view-only artifacts, keyed on `_meta` exactly as `mthds_validate` keyed them for the view. */
+  /** The view-only artifacts, keyed on `_meta` under the names the `run-graph` view reads. */
   graphSpec?: unknown;
   pipeIoContracts?: unknown;
   inputForm?: unknown;
   outputForm?: unknown;
   /** The method's own entry pipe, which the view's caption calls the entry pipe. */
   mainPipeRef?: string;
-  /** The pipe the form opens on: the one the caller named, else the entry pipe. */
+  /** The pipe the form opens on and the graph is entered at: the one the caller named, else the entry pipe. */
   formPipeRef?: string;
 }
 
 /** The slice of `PipelexApiClient` this capability calls (test seam). */
 export interface ShowClient {
-  validate(
-    source: ValidateMethodSelector,
-    allowSignatures?: boolean,
-    mthdsSources?: string[],
-    render?: string[],
-    views?: string[],
-  ): Promise<PipelexValidationResult>;
+  pipeIo(request: PipeIORequest): Promise<PipeIOResponse>;
 }
 
 export interface ShowContext extends ApiConfig {
@@ -180,13 +183,16 @@ export function buildShowContext(env = process.env): ShowContext {
   return buildApiConfig(env);
 }
 
+/** The route this tool reads, named by the classification of a 404 that has no texture of its own. */
+const SHOW_ROUTE = "/v1/pipe-io";
+
 /**
  * The by-id texture. `mthds_validate`'s is for a workshop user who can also
  * submit files; this tool takes none, so its hints name only what a console
  * caller can change.
  */
 const SHOW_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/validate",
+  route: SHOW_ROUTE,
   methodLocation: "method_id",
   badRequest: {
     location: "method_id",
@@ -196,6 +202,16 @@ const SHOW_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
     location: "method_id",
     hint: `No saved method with this id is visible to your organization. Check the id as ${CONSOLE_TOOL_NAMES.listMethods} returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.`,
   },
+};
+
+/**
+ * The by-address texture is `mthds_validate`'s — the address grammar, the tag
+ * rule, no matching package, the registry form — since `/v1/pipe-io` resolves
+ * an address through the same fetch path; only the route it names differs.
+ */
+const SHOW_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
+  ...VALIDATE_BY_REF_ERROR_OPTIONS,
+  route: SHOW_ROUTE,
 };
 
 const ERROR_SUMMARIES: ErrorSummaries = {
@@ -226,21 +242,29 @@ export async function showPipelexMethod(
   }
 
   const classifyOptions =
-    input.method_ref !== undefined ? VALIDATE_BY_REF_ERROR_OPTIONS : SHOW_BY_ID_ERROR_OPTIONS;
+    input.method_ref !== undefined ? SHOW_BY_REF_ERROR_OPTIONS : SHOW_BY_ID_ERROR_OPTIONS;
 
-  let report: PipelexValidationResult;
+  let report: PipeIOResponse;
   let selector: ShowSelector;
   try {
     selector = selectorOf(input);
-    // No `render`: this tool composes its own summary, so the validation
-    // report's Markdown would only cost the wire.
-    report = await (context.client ?? createPipelexApiClient(context)).validate(
-      selector,
-      true,
-      undefined,
-      undefined,
-      [...VALIDATE_VIEW_TOKENS],
-    );
+    // One call gives the show everything it reads. `all_pipes` keys the three
+    // maps by every pipe, so the view can look up a pipe the user clicks and a
+    // refusal can name the declared pipes, and it never refuses a method for
+    // want of an entry pipe: it answers `default_pipe_ref: null` and the
+    // summary asks for one. `include_files` echoes the closure the graph is
+    // drawn from.
+    //
+    // The caller's `pipe_ref` is deliberately not forwarded. The whole-method
+    // answer already describes every pipe, so the named pipe is checked against
+    // it here, and the refusal can list what the method declares, which the
+    // route's own refusal of an unknown ref does not; a bare ref, which the
+    // route would still resolve across domains, is refused here too.
+    report = await (context.client ?? createPipelexApiClient(context)).pipeIo({
+      ...selector,
+      all_pipes: true,
+      include_files: true,
+    });
   } catch (err) {
     const error = classifyError(err, { ...classifyOptions, auth: context.authError });
     return errorResult(summaryForToolError(error, ERROR_SUMMARIES), [error]);
@@ -265,8 +289,8 @@ export async function showPipelexMethod(
           message:
             err instanceof Error
               ? err.message
-              : "The Pipelex API returned a malformed validation report.",
-          hint: "The API responded but its report was missing required fields; inspect the method on the platform.",
+              : "The Pipelex API returned a malformed pipe I/O answer.",
+          hint: "The API responded but its answer was missing required fields; inspect the method on the platform.",
           retryable: false,
         },
       ],
@@ -291,17 +315,13 @@ export function validateShowRequest(input: PipelexShowMethodInput): ToolError[] 
 
 /**
  * A named pipe the method does not declare is refused before anything is
- * projected, naming the pipes it does declare — the same two refusals
- * `pipelex_run`'s input walk makes, so a pipe this tool accepts is one the run
- * accepts too. Read off the IO contracts, keyed by the same namespaced refs; a
- * report without them (an older runner) cannot be checked for membership, so
- * only a bare ref is refused there.
+ * projected, naming the pipes it does declare, so a pipe this tool accepts is
+ * one `pipelex_run` accepts too. Read off the IO contracts, which the
+ * whole-method answer keys by every pipe's namespaced ref; an answer without
+ * them is malformed, and it is then only a bare ref that can be refused.
  */
-function unknownPipeError(
-  requested: string,
-  report: PipelexValidationResult,
-): ToolError | undefined {
-  const contracts = asRecord((report as { pipe_io_contracts?: unknown }).pipe_io_contracts);
+function unknownPipeError(requested: string, report: PipeIOValidReport): ToolError | undefined {
+  const contracts = asRecord(report.pipe_io_contracts);
   const declared = contracts === undefined ? [] : Object.keys(contracts);
   const candidates = declared.length > 0 ? declared.join(", ") : "(none)";
   // Checked whether or not the contracts arrived: `pipelex_run` refuses a bare
@@ -336,50 +356,88 @@ function unknownPipeError(
 }
 
 /**
- * Project the report. Everything the verdict, the signature and the view
- * artifacts are is `mthds_validate`'s projection, run for the pipe the caller
- * named when they named one; what this adds is the selector echo, the template
- * and the prose.
+ * Project the route's answer: the verdict, the signature and the template for
+ * the model, the graph and the form's artifacts for the view. The signature,
+ * the form and the graph all follow one pipe: the one the caller named, else
+ * the method's entry pipe. With neither, there is no signature and no form,
+ * and the graph is entered at the first `main_pipe` the files declare.
  */
 export function showResult(
-  report: PipelexValidationResult,
+  report: PipeIOResponse,
   selector: ShowSelector,
   requestedPipe?: string,
 ): ShowResult {
-  const projection = projectValidationReport(report, true, true, requestedPipe);
-  const verdict = projection.structuredContent;
-  const pipeRef = report.is_valid ? projection.mainPipeRef : undefined;
-  // The projection answers for the pipe the caller named; the view also needs
-  // the method's own entry pipe, so that it never calls a named pipe that.
-  const entryPipeRef = report.is_valid
-    ? defaultPipeRefOf(report as PipelexValidationReport)
-    : undefined;
+  if (!report.is_valid) {
+    // The invalid arm is the crate verdict: no artifacts, no runnability facts
+    // and no files, so there is no pipe, no form and no graph to show.
+    const structuredContent: ShowStructuredContent = {
+      status: "ok",
+      ...selector,
+      is_valid: false,
+      is_runnable: false,
+      pending_signatures: [],
+      validation_errors: report.validation_errors,
+      available_view_specs: [],
+    };
+    return {
+      structuredContent,
+      summary: showSummary(structuredContent, selector, undefined, report),
+    };
+  }
 
-  // The template is for a method that can run: a pending-signature method
-  // gets neither a template nor (from the projection) a form, since both
-  // would only lead to a Run that fails.
+  // The route states the entry pipe on every valid answer; a stated `null`
+  // means it found none, or several, and nothing stands in for it.
+  const entryPipeRef = nonBlank(report.default_pipe_ref ?? undefined);
+  const pipeRef = requestedPipe ?? entryPipeRef;
+  const mainPipe = mainPipeSignatureOf(report, pipeRef);
+
+  // Two gates, as they were on validate. The form's artifacts ride a runnable
+  // answer whose two maps carry something, whichever pipe was settled: they
+  // are view-only data, and the maps the view looks a clicked pipe up in. The
+  // ADVERT is narrower: `input_form` joins `available_view_specs` only when a
+  // pipe was settled and both maps describe it, so the model is never told a
+  // form exists for a pipe nothing chose. A method with pending signatures
+  // gets neither, since its Run could only fail.
+  const formRides =
+    report.is_runnable &&
+    hasArtifactEntries(report.pipe_io_contracts) &&
+    hasArtifactEntries(report.input_form);
+  const formAdvertised =
+    formRides &&
+    pipeRef !== undefined &&
+    hasEntryFor(report.pipe_io_contracts, pipeRef) &&
+    hasEntryFor(report.input_form, pipeRef);
+
+  // The graph is entered at the same pipe as the form: the one the caller
+  // named, which `unknownPipeError` has checked against the whole method, else
+  // the entry pipe. With neither it is entered at the first `main_pipe` the
+  // files declare, since a pipe clicked in the graph is then the only way to
+  // a form; `mainPipeRef` stays unset, so the view's caption claims no entry
+  // pipe the method does not have.
+  const graphSpec = staticGraphOf(report.files, pipeRef);
+
   const template =
-    report.is_valid && report.is_runnable && pipeRef !== undefined
-      ? inputsTemplateFor((report as { input_form?: unknown }).input_form, pipeRef, {
-          explicit: true,
-          format: "json",
-        })
+    report.is_runnable && pipeRef !== undefined
+      ? inputsTemplateFor(report.input_form, pipeRef, { explicit: true, format: "json" })
       : undefined;
   const inputs = template?.format === "json" ? template.inputs : undefined;
+
+  const availableViewSpecs: ViewSpec[] = [];
+  // The token still says "dry_run_graph" although the graph is static now:
+  // renaming it changes the console's pinned contract (L-260930-e9cd94).
+  if (graphSpec !== undefined) availableViewSpecs.push("dry_run_graph");
+  if (formAdvertised) availableViewSpecs.push("input_form");
 
   const structuredContent: ShowStructuredContent = {
     status: "ok",
     ...selector,
-    is_valid: verdict.is_valid,
-    is_runnable: verdict.is_runnable,
+    is_valid: true,
+    is_runnable: report.is_runnable,
     ...(pipeRef === undefined ? {} : { pipe_ref: pipeRef }),
-    ...(verdict.main_pipe === undefined ? {} : { main_pipe: verdict.main_pipe }),
+    ...(mainPipe === undefined ? {} : { main_pipe: mainPipe }),
     ...(inputs === undefined ? {} : { inputs }),
-    pending_signatures: verdict.pending_signatures,
-    ...(verdict.validation_errors === undefined
-      ? {}
-      : { validation_errors: verdict.validation_errors }),
-    available_view_specs: verdict.available_view_specs,
+    pending_signatures: report.pending_signatures,
+    available_view_specs: availableViewSpecs,
   };
 
   return {
@@ -390,13 +448,198 @@ export function showResult(
       template?.format === "json" ? template.text : undefined,
       report,
     ),
-    graphSpec: projection.graphSpec,
-    pipeIoContracts: projection.pipeIoContracts,
-    inputForm: projection.inputForm,
-    outputForm: projection.outputForm,
+    graphSpec,
+    ...(formRides
+      ? {
+          pipeIoContracts: report.pipe_io_contracts,
+          inputForm: report.input_form,
+          outputForm: report.output_form,
+        }
+      : {}),
     ...(entryPipeRef === undefined ? {} : { mainPipeRef: entryPipeRef }),
-    ...(projection.mainPipeRef === undefined ? {} : { formPipeRef: projection.mainPipeRef }),
+    ...(pipeRef === undefined ? {} : { formPipeRef: pipeRef }),
   };
+}
+
+/**
+ * The most nodes a method's static graph may have before the console draws
+ * none. A drawing past a few hundred nodes is unreadable anyway; the ceiling
+ * exists because the builder has no budget of its own (see
+ * {@link staticGraphSizeBound}), and it is generous enough that no real method
+ * comes near it.
+ */
+export const MAX_STATIC_GRAPH_NODES = 2_000;
+
+/**
+ * The method's graph, drawn from its files by mthds-ui's static builder, the
+ * one the VS Code extension and the workshop's graph page use: a spec with
+ * `meta.mode: "static"`, one node per pipe call, no run chrome. The files are
+ * ordered first so that the file declaring `main_pipe` leads the merge, as it
+ * does in every other host of the builder.
+ *
+ * **The source never leaves this function.** The files are the method's own
+ * text, which the catalog projection invariant keeps out of
+ * `structuredContent`, `content`, `_meta` and every log; only the graph built
+ * from them ships. That is why the graph is built here, on the server, rather
+ * than in the view.
+ *
+ * **The build is bounded before it starts.** The builder emits a node for
+ * every pipe call, so a method a few kilobytes long whose sequences call
+ * nested sequences several times over expands to millions of nodes, and the
+ * build is synchronous: it would block this shared server's event loop, or
+ * exhaust its heap, for every caller. So the method is parsed and merged once,
+ * the graph's expansion from its entry pipe is counted without building
+ * anything ({@link staticGraphSizeBound}), and a graph whose count passes
+ * {@link MAX_STATIC_GRAPH_NODES} is not drawn.
+ *
+ * The graph is entered at `entryPipe`, else at the first `main_pipe` the files
+ * declare, and never at the builder's root heuristic, which would pick a pipe
+ * nobody declared. The builder is lenient and documented never to throw; a
+ * throw anyway, an entry pipe it cannot resolve, files that declare no
+ * `main_pipe` when no pipe was selected, or an answer with no files leaves no
+ * graph.
+ */
+function staticGraphOf(files: MthdsFileItem[] | undefined, entryPipe: string | undefined): unknown {
+  if (!Array.isArray(files) || files.length === 0) return undefined;
+  try {
+    const ordered = orderMthdsSources(
+      files.map((file, index) => ({
+        name: nonBlank(file.source) ?? `file-${index + 1}.mthds`,
+        content: file.content,
+      })),
+    );
+    const merged = mergeBundles(ordered.map((file) => parseMthdsBundle(file.content).bundle));
+    // With no pipe selected, the builder's own fallback minus its root
+    // heuristic: the first declared `main_pipe`, passed explicitly so that one
+    // it cannot resolve draws nothing rather than a pipe nobody declared.
+    const entry = entryPipe ?? merged.mainPipe ?? undefined;
+    if (entry === undefined) return undefined;
+    if (staticGraphSizeBound(merged, MAX_STATIC_GRAPH_NODES, entry) > MAX_STATIC_GRAPH_NODES) {
+      return undefined;
+    }
+    const { spec } = buildStaticGraphSpec(merged, { entryPipe: entry });
+    return spec.nodes.length > 0 ? spec : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** One pipe call a controller makes: the ref as written, and whether it is an inline batch. */
+interface PipeCall {
+  ref: string;
+  batched: boolean;
+}
+
+/** The routes a `PipeCondition` takes that name no pipe, which the builder skips. */
+const NON_PIPE_OUTCOMES = new Set(["", "fail", "continue"]);
+
+/**
+ * The number of nodes the static builder would emit for a graph entered at
+ * `entryPipe`, counted without building anything, and capped at `budget + 1`.
+ *
+ * It walks exactly as the builder does (`walkPipe` in
+ * `@pipelex/mthds-ui/static-graph`): the entry resolves the way
+ * `pickEntryPipe` resolves an explicit one, one node per pipe call, plus the
+ * batch node a sequence step with `batch_over` / `batch_as` adds; a ref
+ * carrying `->` is one opaque leaf, a bare ref resolves in the calling pipe's
+ * domain, and a call to a pipe already on the current path is drawn as a leaf.
+ *
+ * **Nothing is memoised, on purpose.** A pipe's expansion depends on which
+ * pipes are on the path above it, since a recursive call is cut there, so a
+ * count remembered from one path undercounts on another: a memoised count let
+ * a few kilobytes of recursive method pass as under two thousand nodes and
+ * then build a million. The walk is cheap without it because every call it
+ * makes adds to the count and it stops at the cap, so it never visits more
+ * than `budget + 1` calls. That is also why an unresolvable ref, which the
+ * builder skips without a node, counts one here: the bound stays an upper
+ * bound on the nodes, and the walk's own work stays bounded by the budget.
+ *
+ * `show.test.ts` holds the count equal to the builder's node count over a
+ * method using every controller type, recursion included, so a builder that
+ * walks differently fails a test rather than weakening this guard.
+ */
+export function staticGraphSizeBound(
+  set: MergedMethodSet,
+  budget: number,
+  entryPipe: string,
+): number {
+  const cap = budget + 1;
+  const fallbackDomain = set.mainDomain ?? Object.keys(set.domains)[0];
+  // The builder draws nothing from an entry it cannot resolve to a pipe.
+  if (fallbackDomain === undefined || entryPipe.includes("->")) return 0;
+
+  const callsByPipe = new Map<string, PipeCall[]>();
+  const path: string[] = [];
+  let count = 0;
+
+  const walk = (ref: string, callerDomain: string): void => {
+    count += 1;
+    if (ref.includes("->")) return;
+    const dot = ref.lastIndexOf(".");
+    const domain = dot === -1 ? callerDomain : ref.slice(0, dot);
+    const code = dot === -1 ? ref : ref.slice(dot + 1);
+    const blueprint = asRecord(set.domains[domain]?.pipes[code]);
+    if (blueprint === undefined) return;
+    const key = `${domain}.${code}`;
+    if (path.includes(key)) return;
+    let calls = callsByPipe.get(key);
+    if (calls === undefined) {
+      calls = pipeCallsOf(blueprint);
+      callsByPipe.set(key, calls);
+    }
+    path.push(key);
+    try {
+      for (const call of calls) {
+        if (count >= cap) return;
+        if (call.batched) count += 1;
+        walk(call.ref, domain);
+      }
+    } finally {
+      path.pop();
+    }
+  };
+
+  const dot = entryPipe.lastIndexOf(".");
+  const entryDomain = dot === -1 ? fallbackDomain : entryPipe.slice(0, dot);
+  const entryCode = dot === -1 ? entryPipe : entryPipe.slice(dot + 1);
+  if (asRecord(set.domains[entryDomain]?.pipes[entryCode]) === undefined) return 0;
+  walk(entryPipe, fallbackDomain);
+  return Math.min(count, cap);
+}
+
+/** The pipe calls a blueprint makes, read defensively: it is parsed from text nobody validated here. */
+function pipeCallsOf(blueprint: Record<string, unknown>): PipeCall[] {
+  const subPipeCalls = (list: unknown): PipeCall[] =>
+    Array.isArray(list)
+      ? list.flatMap((item) => {
+          const record = asRecord(item);
+          return record !== undefined && typeof record.pipe_code === "string"
+            ? [{ ref: record.pipe_code, batched: asRecord(record.batch_params) !== undefined }]
+            : [];
+        })
+      : [];
+  switch (blueprint.type) {
+    case "PipeSequence":
+      return subPipeCalls(blueprint.sequential_sub_pipes);
+    case "PipeParallel":
+      return subPipeCalls(blueprint.parallel_sub_pipes);
+    case "PipeCondition": {
+      const outcomes = asRecord(blueprint.outcome_map);
+      const targets = new Set(
+        [...Object.values(outcomes ?? {}), blueprint.default_outcome].filter(
+          (target): target is string =>
+            typeof target === "string" && !NON_PIPE_OUTCOMES.has(target),
+        ),
+      );
+      return [...targets].map((ref) => ({ ref, batched: false }));
+    }
+    case "PipeBatch":
+      return typeof blueprint.branch_pipe_code === "string"
+        ? [{ ref: blueprint.branch_pipe_code, batched: false }]
+        : [];
+    default:
+      return [];
+  }
 }
 
 // ── the prose ───────────────────────────────────────────────────────
@@ -419,7 +662,7 @@ function showSummary(
   content: ShowStructuredContent,
   selector: ShowSelector,
   templateJson: string | undefined,
-  report: PipelexValidationResult,
+  report: PipeIOResponse,
 ): string {
   const label = methodLabel(selector);
   const parts: string[] = [`# ${label}`];
@@ -483,8 +726,8 @@ function methodLabel(selector: ShowSelector): string {
     : `Method \`${selector.method_ref}\``;
 }
 
-function declaredPipes(report: PipelexValidationResult): string[] {
-  const contracts = asRecord((report as { pipe_io_contracts?: unknown }).pipe_io_contracts);
+function declaredPipes(report: PipeIOResponse): string[] {
+  const contracts = report.is_valid ? asRecord(report.pipe_io_contracts) : undefined;
   return contracts === undefined ? [] : Object.keys(contracts);
 }
 
@@ -537,7 +780,7 @@ export function showToolResult(result: ShowResult) {
     content: toolResultContent(result.summary, result.structuredContent.errors),
     isError: result.structuredContent.status === "error",
     // View-only, never `structuredContent`: exactly the keys the `run-graph`
-    // view reads, so the view `mthds_validate` fed is fed the same way here.
+    // view reads, and never the method's files.
     _meta: {
       graph_spec: result.graphSpec,
       pipe_io_contracts: result.pipeIoContracts,

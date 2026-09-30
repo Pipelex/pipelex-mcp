@@ -43,12 +43,11 @@ export function selectedPipeFor(
 
 /**
  * The pipe the graph was built for, as a namespaced `pipe_ref`, read off the
- * graph itself: the dry run stamps `pipeline_ref.domain` and
- * `pipeline_ref.main_pipe` with the pipe it traced. On `pipelex_show_method` that is
- * the entry pipe `_meta.main_pipe_ref` names, manifest included, on a current
- * deployment; one older than pipelex-api 0.27.5 traces the bundle blueprint's
- * declared `main_pipe` instead, so there, for a `method_ref` package whose
- * `METHODS.toml` names a different entry pipe, the two differ.
+ * graph itself: both mthds-ui's static builder and a dry run stamp
+ * `pipeline_ref.domain` and `pipeline_ref.main_pipe` with the pipe they start
+ * from. On `pipelex_show_method` that is the pipe the form opens on
+ * (`_meta.form_pipe_ref`): the one the caller named, else the entry pipe,
+ * manifest included; with neither, the first `main_pipe` the files declare.
  *
  * Both halves must be non-empty strings, the same test pipelex applies when it
  * reads the ref back; anything less is `null`, and the view then says nothing
@@ -68,13 +67,14 @@ export function graphPipeRefOf(graphSpec: unknown): string | null {
  * The caption under the graph when it shows a different pipe from the entry
  * pipe, or `null` when there is nothing to say.
  *
- * The graph is the pipe the dry run traced, which a deployment older than
- * pipelex-api 0.27.5 takes from the bundle's declared main pipe; the entry pipe
- * (`_meta.main_pipe_ref`) is what a selector-less run executes and what the
- * form opens on. When the two agree — always on a current deployment, and on an
- * older one for every bundle without a manifest that overrides its entry —
- * nothing is rendered. When they differ the graph is kept and labelled rather
- * than withheld, and both refs are spelled out.
+ * The graph is of the pipe it was drawn from and the pipes that pipe calls;
+ * the entry pipe (`_meta.main_pipe_ref`) is what a selector-less run executes.
+ * `pipelex_show_method` draws the graph from the pipe the caller named, else
+ * from the entry pipe, so the two differ exactly when the caller named another
+ * pipe, and the caption then says the graph is not the whole method, with
+ * both refs spelled out. A verdict with no entry pipe has no
+ * `_meta.main_pipe_ref`, so its graph, drawn from the files' `main_pipe`, is
+ * never captioned against an entry pipe the method does not have.
  *
  * The second sentence follows the form actually on screen, so the caption stays
  * true after a click: it says the form runs the entry pipe only while it does
@@ -87,7 +87,7 @@ export function graphCaptionFor(
   formPipeRef: string | null,
 ): string | null {
   if (!graphPipeRef || !mainPipeRef || graphPipeRef === mainPipeRef) return null;
-  const graphSentence = `The graph above shows ${graphPipeRef}, the bundle's declared main pipe.`;
+  const graphSentence = `The graph above shows ${graphPipeRef} and the pipes it calls.`;
   return formPipeRef === mainPipeRef
     ? `${graphSentence} The form below runs ${mainPipeRef}, the method's entry pipe.`
     : `${graphSentence} The method's entry pipe is ${mainPipeRef}.`;
