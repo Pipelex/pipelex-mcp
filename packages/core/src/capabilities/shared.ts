@@ -19,7 +19,7 @@ import {
   UploadTransportError,
   collectArtifacts,
 } from "@pipelex/sdk";
-import type { MthdsFileItem, PipelexApiClientOptions } from "@pipelex/sdk";
+import type { PipelexApiClientOptions } from "@pipelex/sdk";
 import { z } from "zod";
 
 import { BARE_APP_INFO } from "./client-identification.js";
@@ -720,11 +720,12 @@ export interface ClassifyErrorOptions {
    * `/v1/start`, which applies the gate to a submitted bundle and to a stored
    * method's injected source as well as to a fetched package.
    *
-   * Left unset on the two routes the gate cannot reach at all:
-   * `/v1/build/inputs` and `/v1/codegen` resolve an address through
+   * `/v1/codegen` leaves it unset: it resolves an address through
    * `fetch_method_mthds_files`, which takes only the `.mthds` files and loads
    * no Python, so no execution locus is ever decided there. An arm that fires
-   * with this unset reports no location rather than a wrong one.
+   * with this unset reports no location rather than a wrong one. `/v1/pipe-io`
+   * fetches the same way, and its callers set it all the same, since a locator
+   * costs nothing to keep right.
    *
    * It IS set on every shape of a gated route, including `/v1/validate`'s
    * files shape, where the gate happens to be unreachable today because inline
@@ -804,6 +805,21 @@ export interface ClassifyErrorOptions {
    * problem.
    */
   preparation?: {
+    location?: string;
+    hint: string;
+  };
+  /**
+   * Per-route texture for `POST /v1/pipe-io` refusing a pipe selection — the
+   * typed `422`s {@link isPipeSelectionRefusal} recognizes: a `pipe_ref` that
+   * names no pipe, a method with no entry pipe, or several. Each is a question
+   * about the pipe whatever named the method, so it takes its own locator
+   * rather than {@link badRequest}'s, which follows the selector. Set by a
+   * capability that forwards the caller's pipe selection to the route and
+   * lets the route refuse it (`mthds_inputs_template`); the SDK's input walk
+   * turns the same refusals into an `InputPreparationError` before they get
+   * here. Unset, the refusal keeps the generic 400/422 arm.
+   */
+  selection?: {
     location?: string;
     hint: string;
   };
@@ -958,13 +974,13 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
 
   // ── Input-preparation family (mthds_prepare_inputs) ──
   // Every one of these derives from PipelineRequestError, so they MUST be
-  // classified here, ahead of the generic PipelineRequestError arm below
-  // (mirroring how EmptyMethodSourceError is caught in fetchMethodFiles).
+  // classified here, ahead of the generic PipelineRequestError arm below.
   // Ordered most-specific first: subclasses before the InputPreparationError
   // base.
 
-  // Normally caught in fetchMethodFiles before reaching classifyError; mapped
-  // defensively so a stray one still locates at method_id, not pipe_ref.
+  // Normally caught by its caller (`mthds_get_method` composes its own
+  // refusal); mapped defensively so a stray one still locates at method_id,
+  // not pipe_ref.
   if (err instanceof EmptyMethodSourceError) {
     return {
       class: "input_domain",
@@ -1152,108 +1168,23 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
   };
 }
 
-/** The slice of `PipelexApiClient` the by-id fetch leg calls (test seam). */
-export interface MethodFetchClient {
-  getMethodClosure(methodId: string): Promise<MthdsFileItem[]>;
-}
-
-/**
- * Classify options for the by-id expansion leg (`getMethodClosure`, itself a
- * `getMethod` + parse under the hood), used by the one capability whose
- * surface the platform's tooling `method_id` selector deliberately excludes:
- * `mthds_inputs_template`, over `/v1/build/inputs`. Every other method-taking
- * tool forwards `method_id` server-side — `mthds_prepare_inputs` since
- * `@pipelex/sdk` 0.17.0 gave `prepareInputs` all three selectors. Unlike
- * `/v1/start`, the SDK does not intercept a missing-route 404 on
- * `/v1/methods/{id}` (no `RunLifecycleUnavailableError` equivalent), so a
- * bare-runner base URL and a genuinely unknown method read the same here —
- * the `notFound` hint covers both causes.
- */
-export const METHOD_FETCH_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/methods/{id}",
-  badRequest: {
-    location: "method_id",
-    hint: "Check the method_id as the catalog returned it. If the error mentions organization context, the API key's org binding is the issue — mint a key in the right organization.",
-  },
-  notFound: {
-    location: "method_id",
-    hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss. If PIPELEX_BASE_URL points at a bare pipelex-api runner, the catalog routes do not exist there — use the hosted Pipelex API.",
-  },
-};
-
-/**
- * `reason` lets callers pick their own headline text for the two failure
- * shapes without this shared leg hardcoding either one: `"fetch"` is a
- * classified SDK/HTTP failure (pair with each capability's own
- * `summaryForError`); `"no_source"` is the stored method having no MTHDS
- * content yet (a caller-composed headline, since only the caller's verb
- * — "validated", "projected" — makes it read naturally).
- */
-export type MethodFetchResult =
-  | { ok: true; files: SubmittedFile[] }
-  | { ok: false; reason: "fetch" | "no_source"; error: ToolError };
-
-/**
- * Resolve a stored method's current closure and forward it as submitted files,
- * each labeled with the method id as provenance (`uri`) — the SDK-canonical
- * by-id expansion (`buildInputs({ files: await getMethodClosure(methodId) })`
- * is the SDK's own documented pattern) behind the id-only path of the one tool
- * whose surface the hosted `method_id` selector deliberately excludes:
- * `mthds_inputs_template` (the build routes take no `method_id`). Every other
- * method-taking tool forwards its selectors server-side and does not use this.
- * `getMethodClosure` (the SDK's canonical fetch-and-parse over `getMethod` +
- * `methodSourceToContents`) already labels each file's `source` with the
- * method id; the MCP surface spells provenance `uri`, so we relabel.
- * `getClient` is a factory, not a pre-built client, so a malformed-base-URL
- * throw from the SDK constructor happens inside this function's own try block
- * and classifies as a `config` `ToolError` instead of escaping uncaught
- * (mirrors `run.ts`'s `runClient` call-inline pattern). The no-source hint is
- * the only thing that differs per caller (what the caller was trying to do
- * with the method).
- */
-export async function fetchMethodFiles(
-  getClient: () => MethodFetchClient,
-  methodId: string,
-  options: { authError?: AuthErrorTexture; noSourceHint: string },
-): Promise<MethodFetchResult> {
-  let closure: MthdsFileItem[];
-  try {
-    closure = await getClient().getMethodClosure(methodId);
-  } catch (err) {
-    // A real, in-org method whose stored source parses to nothing throws
-    // EmptyMethodSourceError (the empty-closure check the MCP used to run by
-    // hand, now folded into getMethodClosure). Map it to the same
-    // input_domain@method_id no-verdict, tagged `no_source` so the caller can
-    // compose its own headline. It derives from PipelineRequestError, so it
-    // MUST be caught ahead of classifyError, which would otherwise call it a
-    // config fault.
-    if (err instanceof EmptyMethodSourceError) {
-      return {
-        ok: false,
-        reason: "no_source",
-        error: {
-          class: "input_domain",
-          location: "method_id",
-          message: "The stored method has no MTHDS source yet.",
-          hint: options.noSourceHint,
-          retryable: false,
-        },
-      };
-    }
-    return {
-      ok: false,
-      reason: "fetch",
-      error: classifyError(err, { ...METHOD_FETCH_ERROR_OPTIONS, auth: options.authError }),
-    };
-  }
-
-  return { ok: true, files: closure.map((item) => ({ content: item.content, uri: methodId })) };
-}
-
 function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorOptions): ToolError {
   const message = err.serverMessage ?? err.message;
   const badRequest = options.badRequest ?? DEFAULT_BAD_REQUEST;
   const route = options.route ?? "the Pipelex API";
+
+  // Ahead of the generic 400/422 arm, whose locator follows the selector: a
+  // refused pipe selection is about the pipe, and the route's `detail` names
+  // the candidates where there are some.
+  if (options.selection !== undefined && isPipeSelectionRefusal(err)) {
+    return {
+      class: "input_domain",
+      ...(options.selection.location === undefined ? {} : { location: options.selection.location }),
+      message,
+      hint: options.selection.hint,
+      retryable: false,
+    };
+  }
 
   if (err.status === 400 || err.status === 422) {
     return {

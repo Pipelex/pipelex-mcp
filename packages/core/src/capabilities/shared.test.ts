@@ -12,7 +12,6 @@ import {
   RunLifecycleUnavailableError,
   ScopeUnavailableError,
 } from "@pipelex/sdk";
-import type { MthdsFileItem } from "@pipelex/sdk";
 
 import {
   ALLOW_HTTP_ENV,
@@ -22,7 +21,6 @@ import {
   buildArtifactFetchConfig,
   classifyError,
   DEFAULT_API_URL,
-  fetchMethodFiles,
   filesInputSchema,
   imageCandidatesOf,
   itemToolError,
@@ -35,7 +33,7 @@ import {
   validateMethodSelectorRequest,
   validateRunIdRequest,
 } from "./shared.js";
-import type { ErrorSummaries, FileResolver, MethodFetchClient, ToolError } from "./shared.js";
+import type { ErrorSummaries, FileResolver, ToolError } from "./shared.js";
 
 describe("buildApiConfig", () => {
   it("defaults to the hosted API with no key", () => {
@@ -484,6 +482,54 @@ describe("classifyError", () => {
     expect(error.class).toBe("input_domain");
     expect(error.location).toBe("pipe_ref");
     expect(error.hint).toBe("Pass a qualified domain.pipe_code.");
+  });
+
+  it("locates a refused pipe selection at the selection texture, ahead of the selector's", () => {
+    const refusal = (errorType: string) =>
+      new ApiResponseError(
+        "HTTP 422",
+        `${DEFAULT_API_URL}/v1/pipe-io`,
+        422,
+        "Unprocessable Entity",
+        "{}",
+        errorType,
+        "Several domains declare a main_pipe: a.main, b.main.",
+        undefined, // validationErrors
+        undefined, // code
+      );
+    const withoutSelection = {
+      route: "/v1/pipe-io",
+      badRequest: { location: "method_ref", hint: "Check the address." },
+    };
+    const options = {
+      ...withoutSelection,
+      selection: { location: "pipe_ref", hint: "Name the pipe." },
+    };
+
+    for (const errorType of ["EntryPipeNotFoundError", "EntryPipeAmbiguousError"]) {
+      expect(classifyError(refusal(errorType), options)).toEqual({
+        class: "input_domain",
+        location: "pipe_ref",
+        message: "Several domains declare a main_pipe: a.main, b.main.",
+        hint: "Name the pipe.",
+        retryable: false,
+      });
+    }
+
+    // Any other 422 keeps the selector's texture, and a route that declared no
+    // selection texture keeps the generic arm for the typed refusal too.
+    expect(classifyError(refusal("ValidationError"), options).location).toBe("method_ref");
+    expect(classifyError(refusal("EntryPipeNotFoundError"), withoutSelection).location).toBe(
+      "method_ref",
+    );
+  });
+
+  it("locates a stray EmptyMethodSourceError at method_id", () => {
+    const error = classifyError(new EmptyMethodSourceError("mt_123"));
+
+    expect(error.class).toBe("input_domain");
+    expect(error.location).toBe("method_id");
+    expect(error.retryable).toBe(false);
   });
 
   it("classifies a 413 at the declared size only on a route that declared the texture", () => {
@@ -979,110 +1025,6 @@ describe("summaryForToolError", () => {
         summaries,
       ),
     ).toBe("billing headline");
-  });
-});
-
-describe("fetchMethodFiles", () => {
-  const noSourceHint = "Add MTHDS content to the method, or submit files instead.";
-
-  it("forwards a resolved single-file closure, relabeling source as the id uri", async () => {
-    const client: MethodFetchClient = {
-      async getMethodClosure() {
-        return [{ content: 'domain = "demo"\nmain_pipe = "main"', source: "mt_123" }];
-      },
-    };
-
-    const result = await fetchMethodFiles(() => client, "mt_123", { noSourceHint });
-
-    expect(result).toEqual({
-      ok: true,
-      files: [{ content: 'domain = "demo"\nmain_pipe = "main"', uri: "mt_123" }],
-    });
-  });
-
-  it("forwards each file of a multi-file closure", async () => {
-    const client: MethodFetchClient = {
-      async getMethodClosure() {
-        return [
-          { content: 'domain = "demo"', source: "mt_123" },
-          { content: 'main_pipe = "main"', source: "mt_123" },
-        ];
-      },
-    };
-
-    const result = await fetchMethodFiles(() => client, "mt_123", { noSourceHint });
-
-    expect(result).toEqual({
-      ok: true,
-      files: [
-        { content: 'domain = "demo"', uri: "mt_123" },
-        { content: 'main_pipe = "main"', uri: "mt_123" },
-      ],
-    });
-  });
-
-  it("maps EmptyMethodSourceError to a no_source verdict at method_id with the caller's hint", async () => {
-    const client: MethodFetchClient = {
-      async getMethodClosure(): Promise<MthdsFileItem[]> {
-        throw new EmptyMethodSourceError("mt_123");
-      },
-    };
-
-    const result = await fetchMethodFiles(() => client, "mt_123", { noSourceHint });
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.reason).toBe("no_source");
-      expect(result.error.class).toBe("input_domain");
-      expect(result.error.location).toBe("method_id");
-      expect(result.error.hint).toBe(noSourceHint);
-      expect(result.error.retryable).toBe(false);
-    }
-  });
-
-  it("classifies a fetch failure as input_domain at method_id, tagged fetch", async () => {
-    const client: MethodFetchClient = {
-      async getMethodClosure(): Promise<MthdsFileItem[]> {
-        throw new ApiResponseError(
-          "HTTP 404",
-          `${DEFAULT_API_URL}/v1/methods/mt_missing`,
-          404,
-          "Not Found",
-          "{}",
-          "not_found",
-          "Method not found",
-          undefined, // validationErrors
-          "not_found", // code
-        );
-      },
-    };
-
-    const result = await fetchMethodFiles(() => client, "mt_missing", { noSourceHint });
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.reason).toBe("fetch");
-      expect(result.error.class).toBe("input_domain");
-      expect(result.error.location).toBe("method_id");
-      expect(result.error.retryable).toBe(false);
-    }
-  });
-
-  it("constructs the client lazily, so a synchronous throw classifies instead of escaping", async () => {
-    const result = await fetchMethodFiles(
-      () => {
-        throw new PipelineRequestError("bad base URL");
-      },
-      "mt_123",
-      { noSourceHint },
-    );
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.reason).toBe("fetch");
-      expect(result.error.class).toBe("config");
-      expect(result.error.location).toBe("PIPELEX_BASE_URL");
-    }
   });
 });
 

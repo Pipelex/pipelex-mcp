@@ -9,12 +9,12 @@ import { asRecord } from "./shared.js";
  * (`mthds/protocol`'s `projectInputsTemplate`), never fetched from a build
  * route.
  *
- * One helper for every tool that hands a model a template.
- * `pipelex_show_method` is its first caller; the workshop's
- * `mthds_inputs_template` still reads `POST /v1/build/inputs` and moves here
- * when that route is retired (L-260829-820e74), which is why the helper takes
- * the two options that tool exposes — the shape and the serialization — rather
- * than only the one the console uses.
+ * One helper for every tool that hands a model a template, so no two of them
+ * can hand one different templates for the same pipe: `pipelex_show_method` on
+ * the console and `mthds_inputs_template` on the workshop, both reading the
+ * descriptor from `POST /v1/pipe-io`. It takes the two options the workshop
+ * tool exposes — the shape and the serialization — although the console uses
+ * only the explicit JSON one.
  *
  * The descriptor is wire data, so the helper reads it the way every other
  * consumer of a report artifact in this repo does: it checks what arrived
