@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { ApiResponseError, ApiUnreachableError, EmptyMethodSourceError } from "@pipelex/sdk";
-import type { BuildInputsRequest, BuildInputsResponse, MthdsFileItem } from "@pipelex/sdk";
+import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
+import type {
+  CrateInvalidReport,
+  InputForm,
+  PipeIORequest,
+  PipeIOResponse,
+  PipeIOValidReport,
+} from "@pipelex/sdk";
 
 import {
   buildMthdsInputs,
@@ -9,42 +15,49 @@ import {
   inputsToolResult,
   validateInputsRequest,
 } from "./inputs.js";
+import type { InputsContext } from "./inputs.js";
 import { DEFAULT_API_URL } from "./shared.js";
 
-const validJsonReport: BuildInputsResponse = {
-  is_valid: true,
-  pipe_ref: "demo.main",
-  message: "Inputs template built.",
-  format: "json",
-  explicit: false,
-  inputs: { question: "Your question here" },
-};
-
-const validTomlReport: BuildInputsResponse = {
-  is_valid: true,
-  pipe_ref: "demo.main",
-  requested_pipe_ref: "demo.main",
-  message: "Inputs template built.",
-  format: "toml",
-  explicit: true,
-  inputs_toml: '# question (Text)\nquestion = "Your question here"\n',
-};
-
-/** Fake getMethodClosure arm for tests whose request must never fetch a method. */
-const getMethodClosureNotCalled = {
-  async getMethodClosure(): Promise<MthdsFileItem[]> {
-    throw new Error("getMethodClosure must not be called in this test");
+/** One declared input, a `Text` named `question`, on the pipe the route selected. */
+const demoInputForm: InputForm = {
+  "demo.main": {
+    fields: [
+      {
+        name: "question",
+        kind: "prose",
+        concept_ref: "native.Text",
+        required: true,
+        presence: "plain",
+        gating: true,
+      },
+    ],
   },
 };
 
-/** Fake buildInputs arm for tests whose request must never reach the build route. */
-const buildInputsNotCalled = {
-  async buildInputs(): Promise<BuildInputsResponse> {
-    throw new Error("buildInputs must not be called in this test");
-  },
-};
+/**
+ * A single-pipe pipe I/O answer: the route selected `demo.main` (or whatever
+ * `overrides.pipe_ref` says) and keyed the maps by it.
+ */
+function reportWith(
+  inputForm: InputForm | undefined,
+  overrides: Partial<PipeIOValidReport> = {},
+): PipeIOValidReport {
+  return {
+    is_valid: true,
+    pipe_ref: "demo.main",
+    pipe_io_contracts: {},
+    ...(inputForm === undefined ? {} : { input_form: inputForm }),
+    output_form: {},
+    default_pipe_ref: "demo.main",
+    pending_signatures: [],
+    is_runnable: true,
+    ...overrides,
+  } as PipeIOValidReport;
+}
 
-const invalidReport: BuildInputsResponse = {
+const validReport = reportWith(demoInputForm);
+
+const invalidReport: CrateInvalidReport = {
   is_valid: false,
   message: "The closure did not validate.",
   validation_errors: [
@@ -56,24 +69,82 @@ const invalidReport: BuildInputsResponse = {
   ],
 };
 
+const EXPLICIT_JSON = { explicit: true, format: "json" } as const;
+
+/** A context whose `pipeIo` answers `report` (or throws it) and records every request. */
+function contextWith(
+  answer: PipeIOResponse | Error,
+  requests: PipeIORequest[] = [],
+): InputsContext {
+  return {
+    baseUrl: DEFAULT_API_URL,
+    client: {
+      async pipeIo(request: PipeIORequest): Promise<PipeIOResponse> {
+        requests.push(request);
+        if (answer instanceof Error) throw answer;
+        return answer;
+      },
+    },
+  };
+}
+
+/** A context whose client must never be called: the request is refused before it. */
+function contextNeverCalled(): InputsContext {
+  return {
+    baseUrl: DEFAULT_API_URL,
+    client: {
+      async pipeIo(): Promise<PipeIOResponse> {
+        throw new Error("pipeIo must not be called in this test");
+      },
+    },
+  };
+}
+
+/**
+ * A non-2xx answer as the SDK throws it. A runner's problem carries an
+ * `errorType`, the platform's a `code`, and a runner's answer for a route it
+ * does not serve carries neither.
+ */
+function apiError(
+  status: number,
+  errorType: string | undefined,
+  serverMessage: string,
+  code?: string,
+): ApiResponseError {
+  return new ApiResponseError(
+    `HTTP ${status}`,
+    `${DEFAULT_API_URL}/v1/pipe-io`,
+    status,
+    "",
+    "{}",
+    errorType,
+    serverMessage,
+    undefined, // validationErrors
+    code,
+  );
+}
+
+/** A runner's answer for a route it does not serve: Starlette's bare `{"detail":"Not Found"}`. */
+const routeMissing = () => apiError(404, undefined, "Not Found");
+
 describe("inputsResult", () => {
-  it("projects a json template with the resolved pipe", () => {
-    const result = inputsResult(validJsonReport);
+  it("projects the explicit json template from the resolved pipe's descriptor", () => {
+    const result = inputsResult(validReport, EXPLICIT_JSON);
 
     expect(result.structuredContent).toEqual({
       status: "ok",
       is_valid: true,
       pipe_ref: "demo.main",
       format: "json",
-      explicit: false,
-      inputs: { question: "Your question here" },
+      explicit: true,
+      inputs: { question: { concept: "native.Text", content: { text: "text_value" } } },
     });
     expect(result.structuredContent).not.toHaveProperty("inputs_toml");
     // The summary deliberately duplicates the template: it is the payload the
     // model must read, unlike validation's large view-only graph.
     expect(result.summary).toContain("Resolved pipe: `demo.main`");
     expect(result.summary).toContain("```json");
-    expect(result.summary).toContain('"question": "Your question here"');
+    expect(result.summary).toContain('"concept": "native.Text"');
     // The next step rides the result, where the model has the template in
     // hand, and after the template so the payload stays first.
     expect(result.summary).toContain("`mthds_prepare_inputs`");
@@ -82,17 +153,24 @@ describe("inputsResult", () => {
     );
   });
 
+  it("projects the light shape when explicit is false", () => {
+    const result = inputsResult(validReport, { explicit: false, format: "json" });
+
+    expect(result.structuredContent.explicit).toBe(false);
+    expect(result.structuredContent.inputs).toEqual({ question: "text_value" });
+  });
+
   it("projects a toml template as raw text", () => {
-    const result = inputsResult(validTomlReport);
+    const result = inputsResult(validReport, { explicit: false, format: "toml" });
 
     expect(result.structuredContent.format).toBe("toml");
-    expect(result.structuredContent.explicit).toBe(true);
+    expect(result.structuredContent.explicit).toBe(false);
     expect(result.structuredContent.inputs_toml).toBe(
-      '# question (Text)\nquestion = "Your question here"\n',
+      '# concept: native.Text\nquestion = "text_value"\n',
     );
     expect(result.structuredContent).not.toHaveProperty("inputs");
     expect(result.summary).toContain("```toml");
-    expect(result.summary).toContain('question = "Your question here"');
+    expect(result.summary).toContain('question = "text_value"');
     // Both next tools take `inputs` as a JSON object, so the TOML arm's next
     // step says to convert it — the text itself would be refused.
     expect(result.summary).toContain("convert it to a JSON object for `inputs`");
@@ -101,34 +179,56 @@ describe("inputsResult", () => {
     );
   });
 
+  it("projects the pipe the route resolved, not the method's entry pipe", () => {
+    const report = reportWith(
+      { "demo.other": demoInputForm["demo.main"] },
+      { pipe_ref: "demo.other", default_pipe_ref: "demo.main" },
+    );
+
+    const result = inputsResult(report, EXPLICIT_JSON);
+
+    expect(result.structuredContent.pipe_ref).toBe("demo.other");
+    expect(Object.keys(result.structuredContent.inputs ?? {})).toEqual(["question"]);
+  });
+
   it("projects invalid produced verdicts as ok with validation errors", () => {
-    const result = inputsResult(invalidReport);
+    const result = inputsResult(invalidReport, EXPLICIT_JSON);
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(false);
-    expect(result.structuredContent.validation_errors).toEqual(
-      (invalidReport as { validation_errors: unknown[] }).validation_errors,
-    );
+    expect(result.structuredContent.validation_errors).toEqual(invalidReport.validation_errors);
     expect(result.structuredContent).not.toHaveProperty("pipe_ref");
     expect(result.structuredContent).not.toHaveProperty("inputs");
     expect(result.summary).toContain("Inputs template not produced");
+    expect(result.summary).toContain("The closure did not validate.");
     expect(result.summary).toContain("Unknown pipe type");
     expect(result.summary).toContain("bundle.mthds");
   });
 
-  it("throws when the valid arm is missing its template field", () => {
-    const malformed = { ...validJsonReport, inputs: undefined } as unknown as BuildInputsResponse;
+  it("throws when the valid arm resolved no pipe", () => {
+    expect(() =>
+      inputsResult(reportWith(demoInputForm, { pipe_ref: null }), EXPLICIT_JSON),
+    ).toThrow(/resolved no pipe_ref/);
+  });
 
-    expect(() => inputsResult(malformed)).toThrow(/did not include the json template/);
+  it("throws when the valid arm carries no descriptor for the resolved pipe", () => {
+    expect(() => inputsResult(reportWith({}), EXPLICIT_JSON)).toThrow(
+      /no input-form descriptor .* for "demo\.main"/,
+    );
+    expect(() => inputsResult(reportWith(undefined), EXPLICIT_JSON)).toThrow(
+      /no input-form descriptor/,
+    );
   });
 });
 
 describe("inputsToolResult", () => {
   it("carries the summary as content with no _meta channel", () => {
-    const result = inputsToolResult(inputsResult(validJsonReport));
+    const result = inputsToolResult(inputsResult(validReport, EXPLICIT_JSON));
 
     expect(result.structuredContent.is_valid).toBe(true);
-    expect(result.content).toEqual([{ type: "text", text: inputsResult(validJsonReport).summary }]);
+    expect(result.content).toEqual([
+      { type: "text", text: inputsResult(validReport, EXPLICIT_JSON).summary },
+    ]);
     expect(result.isError).toBe(false);
     expect(result).not.toHaveProperty("_meta");
   });
@@ -183,9 +283,9 @@ describe("validateInputsRequest", () => {
   });
 });
 
-describe("buildMthdsInputs", () => {
-  it("maps MCP input to the build envelope with defaults pinned", async () => {
-    let capturedRequest: BuildInputsRequest | undefined;
+describe("buildMthdsInputs by files", () => {
+  it("posts the files to pipe-io, adapting uri to source, and projects the template", async () => {
+    const requests: PipeIORequest[] = [];
 
     const result = await buildMthdsInputs(
       {
@@ -194,128 +294,82 @@ describe("buildMthdsInputs", () => {
           { content: 'main_pipe = "main"', uri: null },
         ],
       },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: {
-          ...getMethodClosureNotCalled,
-          async buildInputs(request) {
-            capturedRequest = request;
-            return validJsonReport;
-          },
-        },
-      },
+      contextWith(validReport, requests),
     );
 
-    // The MCP surface spells provenance `uri`; the build envelope spells it
-    // `source`. Defaults are sent explicitly: format json, explicit envelope.
-    expect(capturedRequest).toEqual({
-      files: [
-        { content: 'domain = "demo"', source: "bundle.mthds" },
-        { content: 'main_pipe = "main"' },
-      ],
-      format: "json",
-      explicit: true,
-    });
-    expect(capturedRequest).not.toHaveProperty("pipe_ref");
+    // One call. The MCP surface spells provenance `uri`; the crate envelope
+    // spells it `source`. No pipe_ref, so the route's selection chain decides,
+    // and nothing template-shaped travels: the projection is client-side.
+    expect(requests).toEqual([
+      {
+        files: [
+          { content: 'domain = "demo"', source: "bundle.mthds" },
+          { content: 'main_pipe = "main"' },
+        ],
+      },
+    ]);
     expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.inputs).toEqual({ question: "Your question here" });
+    expect(result.structuredContent.format).toBe("json");
+    expect(result.structuredContent.explicit).toBe(true);
+    expect(result.structuredContent.inputs).toEqual({
+      question: { concept: "native.Text", content: { text: "text_value" } },
+    });
   });
 
-  it("forwards pipe_ref, format, and explicit when supplied", async () => {
-    let capturedRequest: BuildInputsRequest | undefined;
+  it("forwards pipe_ref and honours format and explicit client-side", async () => {
+    const requests: PipeIORequest[] = [];
 
-    await buildMthdsInputs(
+    const result = await buildMthdsInputs(
       {
         files: [{ content: 'domain = "demo"' }],
         pipe_ref: "demo.main",
         format: "toml",
-        explicit: true,
+        explicit: false,
       },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: {
-          ...getMethodClosureNotCalled,
-          async buildInputs(request) {
-            capturedRequest = request;
-            return validTomlReport;
-          },
-        },
-      },
+      contextWith(validReport, requests),
     );
 
-    expect(capturedRequest).toEqual({
-      files: [{ content: 'domain = "demo"' }],
-      pipe_ref: "demo.main",
-      format: "toml",
-      explicit: true,
-    });
+    expect(requests).toEqual([{ files: [{ content: 'domain = "demo"' }], pipe_ref: "demo.main" }]);
+    expect(result.structuredContent.format).toBe("toml");
+    expect(result.structuredContent.explicit).toBe(false);
+    expect(result.structuredContent.inputs_toml).toContain('question = "text_value"');
+  });
+
+  it("passes an invalid closure's verdict through as a produced verdict", async () => {
+    const result = await buildMthdsInputs(
+      { files: [{ content: 'domain = "demo"' }] },
+      contextWith(invalidReport),
+    );
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.is_valid).toBe(false);
+    expect(result.structuredContent.validation_errors).toEqual(invalidReport.validation_errors);
   });
 
   it("does not call the client when request validation fails", async () => {
-    let called = false;
+    const result = await buildMthdsInputs({ files: [] }, contextNeverCalled());
 
-    const result = await buildMthdsInputs(
-      { files: [] },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: {
-          ...getMethodClosureNotCalled,
-          async buildInputs() {
-            called = true;
-            return validJsonReport;
-          },
-        },
-      },
-    );
-
-    expect(called).toBe(false);
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.location).toBe("files");
     expect(result.summary).toBe("Inputs template was not run: request input is invalid.");
   });
 
-  it("surfaces an unknown pipe_ref rejection as a pipe_ref-located input_domain error", async () => {
+  it("locates a request-shape 422 at files", async () => {
     const result = await buildMthdsInputs(
-      { files: [{ content: 'domain = "demo"' }], pipe_ref: "demo.missing" },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: {
-          ...getMethodClosureNotCalled,
-          async buildInputs() {
-            throw new ApiResponseError(
-              "HTTP 422",
-              `${DEFAULT_API_URL}/v1/build/inputs`,
-              422,
-              "Unprocessable Entity",
-              "{}",
-              "validation_error",
-              "Unknown pipe: demo.missing",
-              undefined, // validationErrors
-              undefined, // code
-            );
-          },
-        },
-      },
+      { files: [{ content: 'domain = "demo"' }] },
+      contextWith(apiError(422, "ValidationError", "Too many files.")),
     );
 
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("files");
     expect(result.summary).toMatch(/rejected/i);
   });
 
   it("surfaces an unreachable API as config", async () => {
     const result = await buildMthdsInputs(
       { files: [{ content: 'domain = "demo"' }] },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: {
-          ...getMethodClosureNotCalled,
-          async buildInputs() {
-            throw new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED");
-          },
-        },
-      },
+      contextWith(new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED")),
     );
 
     expect(result.structuredContent.status).toBe("error");
@@ -323,10 +377,21 @@ describe("buildMthdsInputs", () => {
     expect(result.summary).toMatch(/unreachable|misconfigured/i);
   });
 
+  it("names pipe-io in the hint of a missing-route 404", async () => {
+    const result = await buildMthdsInputs(
+      { files: [{ content: 'domain = "demo"' }] },
+      contextWith(routeMissing()),
+    );
+
+    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
+    expect(result.structuredContent.errors?.[0]?.hint).toContain("/v1/pipe-io");
+  });
+
   it("classifies a malformed base URL as config instead of rejecting the handler", async () => {
     // No injected client: the real SDK constructor must run — it throws
     // PipelineRequestError on a path-carrying base URL, and that throw has to
-    // land in the caught path (regression guard for the by-id client hoist).
+    // land in the caught path.
     const result = await buildMthdsInputs(
       { files: [{ content: 'domain = "demo"' }] },
       { baseUrl: `${DEFAULT_API_URL}/v1` },
@@ -337,78 +402,90 @@ describe("buildMthdsInputs", () => {
     expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
   });
 
-  it("treats a reachable but malformed report as runtime, not unreachable", async () => {
-    const malformed = { ...validJsonReport, inputs: undefined } as unknown as BuildInputsResponse;
-
+  it("treats a reachable but malformed answer as runtime, not unreachable", async () => {
     const result = await buildMthdsInputs(
       { files: [{ content: 'domain = "demo"' }] },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: {
-          ...getMethodClosureNotCalled,
-          async buildInputs() {
-            return malformed;
-          },
-        },
-      },
+      contextWith(reportWith({ "demo.main": { fields: "nope" } } as unknown as InputForm)),
     );
 
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
+    expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
     expect(result.summary).toMatch(/malformed/i);
     expect(result.summary).not.toMatch(/unreachable/i);
   });
 });
 
+describe("buildMthdsInputs refused pipe selections", () => {
+  const selectors = [
+    { files: [{ content: 'domain = "demo"' }] },
+    { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
+    { method_id: "mt_123" },
+  ];
+
+  for (const selector of selectors) {
+    const shape = Object.keys(selector)[0];
+
+    it(`locates an unknown pipe_ref at pipe_ref with the route's reason (${shape})`, async () => {
+      const result = await buildMthdsInputs(
+        { ...selector, pipe_ref: "demo.missing" },
+        contextWith(
+          apiError(422, "EntryPipeNotFoundError", "No pipe 'demo.missing' in the closure."),
+        ),
+      );
+
+      expect(result.structuredContent.status).toBe("error");
+      const error = result.structuredContent.errors?.[0];
+      expect(error?.class).toBe("input_domain");
+      expect(error?.location).toBe("pipe_ref");
+      expect(error?.message).toBe("No pipe 'demo.missing' in the closure.");
+      expect(error?.retryable).toBe(false);
+    });
+
+    it(`locates several entry pipes at pipe_ref (${shape})`, async () => {
+      const result = await buildMthdsInputs(
+        selector,
+        contextWith(
+          apiError(422, "EntryPipeAmbiguousError", "Several domains declare a main_pipe: a, b."),
+        ),
+      );
+
+      expect(result.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
+      expect(result.structuredContent.errors?.[0]?.message).toContain("Several domains");
+    });
+  }
+});
+
 describe("buildMthdsInputs path submissions", () => {
   it("resolves { path } items through the context resolver, with the path as source", async () => {
-    let capturedRequest: BuildInputsRequest | undefined;
+    const requests: PipeIORequest[] = [];
 
     const result = await buildMthdsInputs(
       { files: [{ path: "methods/bundle.mthds" }] },
       {
-        baseUrl: DEFAULT_API_URL,
+        ...contextWith(validReport, requests),
         resolver: {
           async resolve(path) {
             return { ok: true, content: 'domain = "demo"' + `\n# ${path}` };
           },
         },
-        client: {
-          ...getMethodClosureNotCalled,
-          async buildInputs(request) {
-            capturedRequest = request;
-            return validJsonReport;
-          },
-        },
       },
     );
 
-    // The resolved uri (= the submitted path) crosses into the build
+    // The resolved uri (= the submitted path) crosses into the crate
     // envelope's `source` label, so diagnostics locate to the real file.
-    expect(capturedRequest?.files).toEqual([
+    expect(requests[0]?.files).toEqual([
       { content: 'domain = "demo"\n# methods/bundle.mthds', source: "methods/bundle.mthds" },
     ]);
     expect(result.structuredContent.status).toBe("ok");
   });
 
   it("rejects { path } items instructively without a resolver (hosted)", async () => {
-    let called = false;
-
     const result = await buildMthdsInputs(
       { files: [{ path: "methods/bundle.mthds" }] },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: {
-          ...getMethodClosureNotCalled,
-          async buildInputs() {
-            called = true;
-            return validJsonReport;
-          },
-        },
-      },
+      contextNeverCalled(),
     );
 
-    expect(called).toBe(false);
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
     expect(result.structuredContent.errors?.[0]?.location).toBe("files[0].path");
@@ -416,92 +493,25 @@ describe("buildMthdsInputs path submissions", () => {
   });
 });
 
-describe("buildMthdsInputs by method_id", () => {
-  it("forwards a resolved single-file closure as the build envelope's files labeled with the id", async () => {
-    let capturedRequest: BuildInputsRequest | undefined;
-    let fetchedId: string | undefined;
-
-    const result = await buildMthdsInputs(
-      { method_id: "mt_123" },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: {
-          async getMethodClosure(methodId) {
-            fetchedId = methodId;
-            return [{ content: 'domain = "demo"\nmain_pipe = "main"', source: "mt_123" }];
-          },
-          async buildInputs(request) {
-            capturedRequest = request;
-            return validJsonReport;
-          },
-        },
-      },
-    );
-
-    expect(fetchedId).toBe("mt_123");
-    // The resolved closure is forwarded as the build envelope's files, each
-    // labeled with the method id as provenance.
-    expect(capturedRequest).toEqual({
-      files: [{ content: 'domain = "demo"\nmain_pipe = "main"', source: "mt_123" }],
-      format: "json",
-      explicit: true,
-    });
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.inputs).toEqual({ question: "Your question here" });
-  });
-
-  it("forwards each file of a multi-file closure", async () => {
-    let capturedRequest: BuildInputsRequest | undefined;
+describe("buildMthdsInputs by method_id (server pass-through)", () => {
+  it("forwards method_id to pipe-io without fetching the method", async () => {
+    const requests: PipeIORequest[] = [];
 
     const result = await buildMthdsInputs(
       { method_id: "mt_123", pipe_ref: "demo.main" },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: {
-          async getMethodClosure() {
-            return [
-              { content: 'domain = "demo"', source: "mt_123" },
-              { content: 'main_pipe = "main"', source: "mt_123" },
-            ];
-          },
-          async buildInputs(request) {
-            capturedRequest = request;
-            return validJsonReport;
-          },
-        },
-      },
+      contextWith(validReport, requests),
     );
 
-    expect(capturedRequest?.files).toEqual([
-      { content: 'domain = "demo"', source: "mt_123" },
-      { content: 'main_pipe = "main"', source: "mt_123" },
-    ]);
-    expect(capturedRequest?.pipe_ref).toBe("demo.main");
+    // Nothing is expanded client-side: the hosted platform resolves the id.
+    expect(requests).toEqual([{ method_id: "mt_123", pipe_ref: "demo.main" }]);
     expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.pipe_ref).toBe("demo.main");
   });
 
-  it("surfaces an unknown method id (404) at method_id without calling the build route", async () => {
+  it("locates an unknown method id (404) at method_id", async () => {
     const result = await buildMthdsInputs(
       { method_id: "mt_missing" },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: {
-          ...buildInputsNotCalled,
-          async getMethodClosure(): Promise<MthdsFileItem[]> {
-            throw new ApiResponseError(
-              "HTTP 404",
-              `${DEFAULT_API_URL}/v1/methods/mt_missing`,
-              404,
-              "Not Found",
-              "{}",
-              "not_found",
-              "Method not found",
-              undefined, // validationErrors
-              "not_found", // code
-            );
-          },
-        },
-      },
+      contextWith(apiError(404, undefined, "The requested resource does not exist.", "not_found")),
     );
 
     expect(result.structuredContent.status).toBe("error");
@@ -510,33 +520,21 @@ describe("buildMthdsInputs by method_id", () => {
     expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
   });
 
-  it("reports a no-source method (EmptyMethodSourceError) at method_id without calling the build route", async () => {
+  it("locates a stored method with no source (422) at method_id", async () => {
     const result = await buildMthdsInputs(
       { method_id: "mt_123" },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: {
-          ...buildInputsNotCalled,
-          async getMethodClosure(): Promise<MthdsFileItem[]> {
-            throw new EmptyMethodSourceError("mt_123");
-          },
-        },
-      },
+      contextWith(apiError(422, "ValidationError", "The stored method has no MTHDS source.")),
     );
 
-    expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
     expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
-    expect(result.summary).toContain("no MTHDS source");
+    expect(result.structuredContent.errors?.[0]?.hint).toMatch(/no MTHDS source/);
   });
 
-  it("rejects files beside method_id without calling any client leg", async () => {
+  it("rejects files beside method_id without calling the client", async () => {
     const result = await buildMthdsInputs(
       { files: [{ content: 'domain = "demo"' }], method_id: "mt_123" },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: { ...getMethodClosureNotCalled, ...buildInputsNotCalled },
-      },
+      contextNeverCalled(),
     );
 
     expect(result.structuredContent.status).toBe("error");
@@ -544,77 +542,44 @@ describe("buildMthdsInputs by method_id", () => {
     expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
   });
 
-  it("classifies a paywall (402) on the fetch leg as config", async () => {
+  it("classifies a paywall (402) as config with the plan headline", async () => {
     const result = await buildMthdsInputs(
       { method_id: "mt_123" },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: {
-          ...buildInputsNotCalled,
-          async getMethodClosure(): Promise<MthdsFileItem[]> {
-            throw new ApiResponseError(
-              "HTTP 402",
-              `${DEFAULT_API_URL}/v1/methods/mt_123`,
-              402,
-              "Payment Required",
-              "{}",
-              "forbidden",
-              "Subscription required",
-              undefined, // validationErrors
-              "forbidden", // code
-            );
-          },
-        },
-      },
+      contextWith(apiError(402, "SubscriptionRequiredError", "Subscription required")),
     );
 
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.class).toBe("config");
     expect(result.structuredContent.errors?.[0]?.kind).toBe("paywall");
     expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
-    expect(result.structuredContent.errors?.[0]?.hint).toMatch(/plan|billing/i);
     // A headline-only host shows just this line, so it must name the plan
     // rather than the connectivity headline every other `config` error gets.
     expect(result.summary).toBe(
       "Inputs template could not start: the organization's Pipelex plan does not cover this call.",
     );
-    expect(result.summary).not.toMatch(/unreachable/);
   });
 });
 
 describe("buildMthdsInputs by method_ref (server pass-through)", () => {
-  it("forwards method_ref on the build envelope without fetching anything", async () => {
-    let capturedRequest: BuildInputsRequest | undefined;
+  it("forwards method_ref to pipe-io without fetching anything", async () => {
+    const requests: PipeIORequest[] = [];
 
     const result = await buildMthdsInputs(
       { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: {
-          ...getMethodClosureNotCalled,
-          async buildInputs(request) {
-            capturedRequest = request;
-            return validJsonReport;
-          },
-        },
-      },
+      contextWith(validReport, requests),
     );
 
-    expect(capturedRequest?.method_ref).toBe("github.com/Pipelex/methods/documents@v0.1.0");
-    expect(capturedRequest?.files).toBeUndefined();
+    expect(requests).toEqual([{ method_ref: "github.com/Pipelex/methods/documents@v0.1.0" }]);
     expect(result.structuredContent.status).toBe("ok");
   });
 
-  it("rejects files beside method_ref without calling any client leg", async () => {
+  it("rejects files beside method_ref without calling the client", async () => {
     const result = await buildMthdsInputs(
       {
         files: [{ content: 'domain = "demo"' }],
         method_ref: "github.com/Pipelex/methods/documents@v0.1.0",
       },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: { ...getMethodClosureNotCalled, ...buildInputsNotCalled },
-      },
+      contextNeverCalled(),
     );
 
     expect(result.structuredContent.status).toBe("error");
@@ -622,16 +587,13 @@ describe("buildMthdsInputs by method_ref (server pass-through)", () => {
     expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
   });
 
-  it("rejects method_ref beside method_id without calling any client leg", async () => {
+  it("rejects method_ref beside method_id without calling the client", async () => {
     const result = await buildMthdsInputs(
       {
         method_ref: "github.com/Pipelex/methods/documents@v0.1.0",
         method_id: "mt_123",
       },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: { ...getMethodClosureNotCalled, ...buildInputsNotCalled },
-      },
+      contextNeverCalled(),
     );
 
     expect(result.structuredContent.status).toBe("error");
@@ -639,56 +601,48 @@ describe("buildMthdsInputs by method_ref (server pass-through)", () => {
     expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
   });
 
-  it("classifies a 404 on a by-ref build call at method_ref", async () => {
-    const result = await buildMthdsInputs(
-      { method_ref: "github.com/Pipelex/methods/missing@v0.1.0" },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: {
-          ...getMethodClosureNotCalled,
-          async buildInputs(): Promise<BuildInputsResponse> {
-            throw new ApiResponseError(
-              "HTTP 404",
-              `${DEFAULT_API_URL}/v1/build/inputs`,
-              404,
-              "Not Found",
-              "{}",
-              "not_found",
-              "No MTHDS package found",
-              undefined,
-              undefined,
-            );
-          },
-        },
-      },
-    );
+  it("locates a no-matching-package 404, a bad ref 422 and the registry form 501 at method_ref", async () => {
+    for (const error of [
+      apiError(404, "MethodPackageNotFoundError", "No MTHDS package found"),
+      apiError(422, "MethodRefFetchError", "Could not fetch the repository"),
+      apiError(501, "MethodRefNotSupported", "Registry references are reserved"),
+    ]) {
+      const result = await buildMthdsInputs(
+        { method_ref: "github.com/Pipelex/methods/missing@v0.1.0" },
+        contextWith(error),
+      );
 
-    expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+      expect(result.structuredContent.status).toBe("error");
+      expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+      expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+    }
   });
 });
 
-describe("buildMthdsInputs request shape and transport", () => {
-  it("classifies a malformed base URL on the fetch leg as config", async () => {
-    const result = await buildMthdsInputs(
-      { method_id: "mt_123" },
-      { baseUrl: `${DEFAULT_API_URL}/v1` },
-    );
+describe("buildMthdsInputs on a deployment without the route", () => {
+  // The by-address and by-id textures take a 404 only when it names what was
+  // not found; a runner too old to serve `/v1/pipe-io` answers a bare 404,
+  // which is the deployment and never the caller's selector.
+  for (const selector of [
+    { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
+    { method_id: "mt_123" },
+  ]) {
+    it(`reports a bare 404 as config at PIPELEX_BASE_URL (${Object.keys(selector)[0]})`, async () => {
+      const result = await buildMthdsInputs(selector, contextWith(routeMissing()));
 
-    expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
-  });
+      expect(result.structuredContent.status).toBe("error");
+      const error = result.structuredContent.errors?.[0];
+      expect(error?.class).toBe("config");
+      expect(error?.location).toBe("PIPELEX_BASE_URL");
+      expect(error?.hint).toContain("/v1/pipe-io");
+      expect(result.summary).toMatch(/unreachable|misconfigured/i);
+    });
+  }
+});
 
-  it("rejects a request with neither files nor method_id", async () => {
-    const result = await buildMthdsInputs(
-      {},
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: { ...buildInputsNotCalled, ...getMethodClosureNotCalled },
-      },
-    );
+describe("buildMthdsInputs request shape", () => {
+  it("rejects a request with no selector", async () => {
+    const result = await buildMthdsInputs({}, contextNeverCalled());
 
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.location).toBe("files");

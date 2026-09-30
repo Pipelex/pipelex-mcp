@@ -132,6 +132,9 @@ const BY_FILES_ERROR_OPTIONS: ClassifyErrorOptions = {
   missingDescriptor: MISSING_DESCRIPTOR_TEXTURE,
 };
 
+// The by-address and by-id 404 textures are `typedOnly`: a runner too old to
+// serve `/v1/pipe-io` answers a bare 404, which is the deployment and not the
+// method the caller named.
 const BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: SIGNATURE_ROUTE,
   methodLocation: "method_ref",
@@ -145,6 +148,7 @@ const BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
   notFound: {
     location: "method_ref",
     hint: "The repository was fetched but holds no package matching this address by manifest identity. Check the package selector against the repository's METHODS.toml manifests.",
+    typedOnly: true,
   },
   notImplemented: {
     location: "method_ref",
@@ -165,6 +169,7 @@ const BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
   notFound: {
     location: "method_id",
     hint: `No saved method with this id is visible to your organization. Check the id as ${CONSOLE_TOOL_NAMES.listMethods} returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.`,
+    typedOnly: true,
   },
 };
 

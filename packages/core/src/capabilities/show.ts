@@ -201,17 +201,24 @@ const SHOW_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
   notFound: {
     location: "method_id",
     hint: `No saved method with this id is visible to your organization. Check the id as ${CONSOLE_TOOL_NAMES.listMethods} returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.`,
+    typedOnly: true,
   },
 };
 
 /**
  * The by-address texture is `mthds_validate`'s — the address grammar, the tag
  * rule, no matching package, the registry form — since `/v1/pipe-io` resolves
- * an address through the same fetch path; only the route it names differs.
+ * an address through the same fetch path. Two things differ: the route it
+ * names, and the no-matching-package texture, which takes only a 404 naming
+ * the miss, since a runner too old to serve `/v1/pipe-io` answers a bare one.
  */
 const SHOW_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
   ...VALIDATE_BY_REF_ERROR_OPTIONS,
   route: SHOW_ROUTE,
+  notFound: VALIDATE_BY_REF_ERROR_OPTIONS.notFound && {
+    ...VALIDATE_BY_REF_ERROR_OPTIONS.notFound,
+    typedOnly: true,
+  },
 };
 
 const ERROR_SUMMARIES: ErrorSummaries = {

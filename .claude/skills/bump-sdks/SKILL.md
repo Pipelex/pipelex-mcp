@@ -18,7 +18,7 @@ Work through the steps below, showing the user each file change and each install
 
 ## Why this repo needs more than `make all`
 
-Every capability here talks to the SDK through a **hand-written narrow interface** (`CatalogClient`, `RunClient`, `MethodFetchClient`, …) that restates the SDK method signatures this repo uses. Tests inject fakes that satisfy those local interfaces. That design is good for testing and it creates one specific blind spot you must plan around:
+Every capability here talks to the SDK through a **hand-written narrow interface** (`CatalogClient`, `RunClient`, `ShowClient`, …) that restates the SDK method signatures this repo uses. Tests inject fakes that satisfy those local interfaces. That design is good for testing and it creates one specific blind spot you must plan around:
 
 - A **type** change in the SDK is caught — each capability falls back to `new PipelexApiClient(...)` where the local interface is expected, so `tsc` structurally compares the two and fails.
 - A **behavior or wire-shape** change is *not* caught. The local interface still compiles, the fakes still return the shape they were written for, and `make all` goes green while the real client is broken against the live API.
@@ -163,7 +163,7 @@ make test-e2e   # the thorough option: every capability, through the real client
 make smoke      # the quick one: the read-only tools, through the workshop shell
 ```
 
-`make test-e2e` runs one `*.e2e.ts` per capability with **no client seam injected**, so the real client reaches the real API at exactly the layer an SDK bump moves. It covers the catalog, validation, the inputs template, the by-id `getMethodClosure` leg, both arms of input preparation, and the run lifecycle's free reads. It needs the durable fixture method in the key's organization — if a suite fails saying so, run `make seed-e2e-fixture` once and re-run. It stays free: the paid run family only fires under `make test-e2e-run`, which you should not offer as part of a bump unless the changelog span actually touched the run lifecycle.
+`make test-e2e` runs one `*.e2e.ts` per capability with **no client seam injected**, so the real client reaches the real API at exactly the layer an SDK bump moves. It covers the catalog, validation, the inputs template by every selector, both arms of input preparation, and the run lifecycle's free reads. It needs the durable fixture method in the key's organization — if a suite fails saying so, run `make seed-e2e-fixture` once and re-run. It stays free: the paid run family only fires under `make test-e2e-run`, which you should not offer as part of a bump unless the changelog span actually touched the run lifecycle.
 
 `make smoke` is the faster, shallower check: it spawns the workshop stdio server the way a host does, completes the MCP handshake, then calls `mthds_list_methods`, `mthds_validate` and `mthds_inputs_template` and asserts on their `structuredContent` (`scripts/smoke.ts` holds the assertions). It is the right call when you want a verdict in seconds, or when the failure you are chasing is about the shell rather than a capability.
 
