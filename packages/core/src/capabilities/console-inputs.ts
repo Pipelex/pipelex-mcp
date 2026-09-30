@@ -107,7 +107,9 @@ export class UploadNotAllowedError extends Error {
  */
 const SIGNATURE_TEXTURE: NonNullable<ClassifyErrorOptions["preparation"]> = {
   location: "pipe_ref",
-  hint: "Pass pipe_ref as a qualified domain.pipe_code; omitting it requires the method to settle exactly one entry pipe.",
+  // The route's refusal of an unknown pipe names no candidates, so the hint
+  // says where the declared pipes are listed.
+  hint: `Pass pipe_ref as a qualified domain.pipe_code the method declares; ${CONSOLE_TOOL_NAMES.showMethod} lists them. Omitting it requires the method to settle exactly one entry pipe.`,
 };
 
 /** The deployment, not the request, serves the descriptor; on the console that knob is the operator's. */

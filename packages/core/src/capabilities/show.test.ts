@@ -10,10 +10,18 @@ import type {
   PipeIOResponse,
   PipeIOValidReport,
 } from "@pipelex/sdk";
+import { mergeBundles, parseMthdsBundle } from "@pipelex/mthds-ui/static-graph";
 import { projectInputsTemplate, renderInputsTemplate } from "mthds/protocol";
 
 import { DEFAULT_API_URL } from "./shared.js";
-import { showPipelexMethod, showResult, showToolResult, validateShowRequest } from "./show.js";
+import {
+  MAX_STATIC_GRAPH_NODES,
+  showPipelexMethod,
+  showResult,
+  showToolResult,
+  staticGraphSizeBound,
+  validateShowRequest,
+} from "./show.js";
 import type { ShowClient, ShowContext } from "./show.js";
 
 // Two pipes, so a named pipe_ref has somewhere to go: the entry pipe takes a
@@ -167,6 +175,44 @@ const invalidReport: CrateInvalidReport = {
 
 const PUBLISHED_REF = "github.com/Pipelex/methods/documents@v0.1.0";
 
+/**
+ * A method whose every level is a sequence calling the next level's pipe
+ * `calls` times, `depth` levels deep: a few kilobytes of text whose static
+ * graph has `calls^0 + … + calls^depth` nodes.
+ */
+function nestedSequences(depth: number, calls: number): string {
+  const lines = ['domain = "deep"', 'main_pipe = "level_0"', ""];
+  for (let level = 0; level < depth; level += 1) {
+    const steps = Array.from(
+      { length: calls },
+      (_, index) => `{ pipe = "level_${level + 1}", result = "out_${index}" }`,
+    ).join(", ");
+    lines.push(
+      `[pipe.level_${level}]`,
+      'type = "PipeSequence"',
+      `description = "Level ${level}"`,
+      'inputs = { topic = "Text" }',
+      'output = "Text"',
+      `steps = [${steps}]`,
+      "",
+    );
+  }
+  lines.push(
+    `[pipe.level_${depth}]`,
+    'type = "PipeLLM"',
+    'description = "The leaf"',
+    'inputs = { topic = "Text" }',
+    'output = "Text"',
+    'prompt = "Write about $topic"',
+    "",
+  );
+  return lines.join("\n");
+}
+
+function mergedFrom(...texts: string[]) {
+  return mergeBundles(texts.map((text) => parseMthdsBundle(text).bundle));
+}
+
 /** The static graph's pipe codes, sorted: what the builder draws from `DEMO_MTHDS` at its entry. */
 function graphPipeCodes(spec: unknown): string[] {
   const nodes = (spec as { nodes?: Array<{ pipe_code?: string }> } | undefined)?.nodes ?? [];
@@ -278,6 +324,26 @@ describe("showPipelexMethod", () => {
       expect(result.graphSpec).toBeUndefined();
       expect(result.structuredContent.available_view_specs).toEqual(["input_form"]);
     }
+  });
+
+  it("draws no graph for a method whose expansion passes the node budget, and stays fast", async () => {
+    // Four calls per level, seven levels: 21,845 nodes from about 2 KB of text.
+    // The builder has no budget of its own and builds synchronously.
+    const deep = nestedSequences(7, 4);
+    const { context } = contextAnswering(async () => ({
+      ...validReport,
+      files: [{ content: deep, source: "deep.mthds" }],
+    }));
+
+    const started = Date.now();
+    const result = await showPipelexMethod({ method_id: "mt_deep" }, context);
+
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(result.graphSpec).toBeUndefined();
+    // Everything else the show gives still comes.
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.available_view_specs).toEqual(["input_form"]);
+    expect(result.structuredContent.inputs).toBeDefined();
   });
 
   it("never lets the method's source reach the model, the view or the summary", async () => {
@@ -542,6 +608,63 @@ describe("showPipelexMethod", () => {
     expect(neither.structuredContent.errors?.[0]?.location).toBe("method_id");
     expect(both.structuredContent.errors?.[0]?.class).toBe("input_domain");
     expect(calls).toEqual([]);
+  });
+});
+
+describe("staticGraphSizeBound", () => {
+  it("counts the nodes the builder draws, one per pipe call", () => {
+    expect(staticGraphSizeBound(mergedFrom(DEMO_MTHDS), MAX_STATIC_GRAPH_NODES)).toBe(3);
+    // 1 + 3 + 9 + 27: the calls, not the distinct pipes.
+    expect(staticGraphSizeBound(mergedFrom(nestedSequences(3, 3)), MAX_STATIC_GRAPH_NODES)).toBe(
+      40,
+    );
+  });
+
+  it("caps the count just past the budget, without walking the whole expansion", () => {
+    const started = Date.now();
+    // 4^0 + … + 4^30 nodes if it were built.
+    expect(staticGraphSizeBound(mergedFrom(nestedSequences(30, 4)), 100)).toBe(101);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("counts an inline batch's own node, a condition's distinct pipes, and a recursive call as a leaf", () => {
+    const method = `domain = "mix"
+main_pipe = "route"
+
+[pipe.route]
+type = "PipeCondition"
+description = "Route"
+inputs = { topic = "Text" }
+output = "Text"
+expression = "topic"
+outcomes = { a = "each", b = "each", c = "fail" }
+default_outcome = "loop"
+
+[pipe.each]
+type = "PipeSequence"
+description = "Each"
+inputs = { topics = "Text[]" }
+output = "Text[]"
+steps = [{ pipe = "leaf", batch_over = "topics", batch_as = "topic", result = "out" }]
+
+[pipe.loop]
+type = "PipeSequence"
+description = "Calls the router again"
+inputs = { topic = "Text" }
+output = "Text"
+steps = [{ pipe = "route", result = "again" }, { pipe = "lib->other.pipe", result = "ext" }]
+
+[pipe.leaf]
+type = "PipeLLM"
+description = "Leaf"
+inputs = { topic = "Text" }
+output = "Text"
+prompt = "$topic"
+`;
+
+    // route (1) + each (1 + batch node 1 + leaf 1) + loop (1 + route as a leaf 1
+    // + the opaque dependency leaf 1); "fail" and the duplicate "each" count nothing.
+    expect(staticGraphSizeBound(mergedFrom(method), MAX_STATIC_GRAPH_NODES)).toBe(7);
   });
 });
 

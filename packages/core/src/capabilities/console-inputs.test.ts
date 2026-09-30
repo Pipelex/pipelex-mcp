@@ -648,6 +648,8 @@ describe("prepareConsoleInputs — pipe selection (SDK parity)", () => {
     expect(result.error?.location).toBe("pipe_ref");
     expect(result.error?.message).toContain("Pipe 'demo.nope' not found");
     expect(result.error?.retryable).toBe(false);
+    // The route's detail names no candidates, so the hint says where they are.
+    expect(result.error?.hint).toContain("pipelex_show_method");
   });
 
   it("locates the route's refusal of a method with several entry pipes at pipe_ref", async () => {

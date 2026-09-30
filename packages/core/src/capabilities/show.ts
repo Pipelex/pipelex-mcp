@@ -1,4 +1,10 @@
-import { buildStaticGraphSpecFromToml, orderMthdsSources } from "@pipelex/mthds-ui/static-graph";
+import {
+  buildStaticGraphSpec,
+  mergeBundles,
+  orderMthdsSources,
+  parseMthdsBundle,
+} from "@pipelex/mthds-ui/static-graph";
+import type { MergedMethodSet } from "@pipelex/mthds-ui/static-graph";
 import type { MthdsFileItem, PipeIORequest, PipeIOResponse, PipeIOValidReport } from "@pipelex/sdk";
 import { z } from "zod";
 
@@ -151,7 +157,7 @@ export interface ShowStructuredContent {
 export interface ShowResult {
   structuredContent: ShowStructuredContent;
   summary: string;
-  /** The view-only artifacts, keyed on `_meta` exactly as `mthds_validate` keyed them for the view. */
+  /** The view-only artifacts, keyed on `_meta` under the names the `run-graph` view reads. */
   graphSpec?: unknown;
   pipeIoContracts?: unknown;
   inputForm?: unknown;
@@ -453,6 +459,15 @@ export function showResult(
 }
 
 /**
+ * The most nodes a method's static graph may have before the console draws
+ * none. A drawing past a few hundred nodes is unreadable anyway; the ceiling
+ * exists because the builder has no budget of its own (see
+ * {@link staticGraphSizeBound}), and it is generous enough that no real method
+ * comes near it.
+ */
+export const MAX_STATIC_GRAPH_NODES = 2_000;
+
+/**
  * The method's graph, drawn from its files by mthds-ui's static builder, the
  * one the VS Code extension and the workshop's graph page use: a spec with
  * `meta.mode: "static"`, one node per pipe call, no run chrome. The files are
@@ -464,6 +479,14 @@ export function showResult(
  * `structuredContent`, `content`, `_meta` and every log; only the graph built
  * from them ships. That is why the graph is built here, on the server, rather
  * than in the view.
+ *
+ * **The build is bounded before it starts.** The builder emits a node for
+ * every pipe call, so a method a few kilobytes long whose sequences call
+ * nested sequences several times over expands to millions of nodes, and the
+ * build is synchronous: it would block this shared server's event loop, or
+ * exhaust its heap, for every caller. So the method is parsed and merged once,
+ * its expansion is counted without building anything, and a method whose
+ * count passes {@link MAX_STATIC_GRAPH_NODES} gets no graph.
  *
  * The builder is lenient and documented never to throw; a throw anyway, an
  * entry pipe it cannot resolve, or an answer with no files leaves no graph.
@@ -477,13 +500,114 @@ function staticGraphOf(files: MthdsFileItem[] | undefined, entryPipe: string | u
         content: file.content,
       })),
     );
-    const { spec } = buildStaticGraphSpecFromToml(
-      ordered.map((file) => file.content),
-      entryPipe === undefined ? {} : { entryPipe },
-    );
+    const merged = mergeBundles(ordered.map((file) => parseMthdsBundle(file.content).bundle));
+    if (staticGraphSizeBound(merged, MAX_STATIC_GRAPH_NODES) > MAX_STATIC_GRAPH_NODES) {
+      return undefined;
+    }
+    const { spec } = buildStaticGraphSpec(merged, entryPipe === undefined ? {} : { entryPipe });
     return spec.nodes.length > 0 ? spec : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/** One pipe call a controller makes: the ref as written, and whether it is an inline batch. */
+interface PipeCall {
+  ref: string;
+  batched: boolean;
+}
+
+/** The routes a `PipeCondition` takes that name no pipe, which the builder skips. */
+const NON_PIPE_OUTCOMES = new Set(["", "fail", "continue"]);
+
+/**
+ * The number of nodes the static builder would emit for the largest pipe of a
+ * merged method set, counted without building anything, and capped at
+ * `budget + 1` so the count itself stays cheap.
+ *
+ * It follows the builder's own walk (`walkPipe` in
+ * `@pipelex/mthds-ui/static-graph`): one node per pipe call, plus the batch
+ * node a sequence step with `batch_over` / `batch_as` adds; a ref carrying
+ * `->` is one opaque leaf, an unresolvable ref is skipped, a bare ref resolves
+ * in the calling pipe's domain, and a recursive call is drawn as a leaf. Each
+ * pipe's count is memoised, which is what makes counting linear where
+ * building is exponential. Taking the largest pipe rather than the entry pipe
+ * makes the count independent of how the builder picks its entry.
+ */
+export function staticGraphSizeBound(set: MergedMethodSet, budget: number): number {
+  const cap = budget + 1;
+  const memo = new Map<string, number>();
+  const onStack = new Set<string>();
+
+  const sizeOfRef = (ref: string, callerDomain: string): number => {
+    if (ref.includes("->")) return 1;
+    const dot = ref.lastIndexOf(".");
+    return dot === -1 ? sizeOf(callerDomain, ref) : sizeOf(ref.slice(0, dot), ref.slice(dot + 1));
+  };
+
+  const sizeOf = (domain: string, code: string): number => {
+    const key = `${domain}.${code}`;
+    const known = memo.get(key);
+    if (known !== undefined) return known;
+    if (onStack.has(key)) return 1;
+    const blueprint = asRecord(set.domains[domain]?.pipes[code]);
+    if (blueprint === undefined) return 0;
+    onStack.add(key);
+    let size = 1;
+    for (const call of pipeCallsOf(blueprint)) {
+      size += (call.batched ? 1 : 0) + sizeOfRef(call.ref, domain);
+      if (size >= cap) {
+        size = cap;
+        break;
+      }
+    }
+    onStack.delete(key);
+    memo.set(key, size);
+    return size;
+  };
+
+  let largest = 0;
+  for (const [domain, namespace] of Object.entries(set.domains)) {
+    for (const code of Object.keys(namespace.pipes)) {
+      largest = Math.max(largest, sizeOf(domain, code));
+      if (largest >= cap) return cap;
+    }
+  }
+  return largest;
+}
+
+/** The pipe calls a blueprint makes, read defensively: it is parsed from text nobody validated here. */
+function pipeCallsOf(blueprint: Record<string, unknown>): PipeCall[] {
+  const subPipeCalls = (list: unknown): PipeCall[] =>
+    Array.isArray(list)
+      ? list.flatMap((item) => {
+          const record = asRecord(item);
+          return record !== undefined && typeof record.pipe_code === "string"
+            ? [{ ref: record.pipe_code, batched: asRecord(record.batch_params) !== undefined }]
+            : [];
+        })
+      : [];
+  switch (blueprint.type) {
+    case "PipeSequence":
+      return subPipeCalls(blueprint.sequential_sub_pipes);
+    case "PipeParallel":
+      return subPipeCalls(blueprint.parallel_sub_pipes);
+    case "PipeCondition": {
+      const outcomes = asRecord(blueprint.outcome_map);
+      const targets = new Set(
+        [...Object.values(outcomes ?? {}), blueprint.default_outcome].filter(
+          (target): target is string =>
+            typeof target === "string" && !NON_PIPE_OUTCOMES.has(target),
+        ),
+      );
+      return [...targets].map((ref) => ({ ref, batched: false }));
+    }
+    case "PipeBatch":
+      return typeof blueprint.branch_pipe_code === "string"
+        ? [{ ref: blueprint.branch_pipe_code, batched: false }]
+        : [];
+    default:
+      return [];
   }
 }
 
@@ -625,7 +749,7 @@ export function showToolResult(result: ShowResult) {
     content: toolResultContent(result.summary, result.structuredContent.errors),
     isError: result.structuredContent.status === "error",
     // View-only, never `structuredContent`: exactly the keys the `run-graph`
-    // view reads, so the view `mthds_validate` fed is fed the same way here.
+    // view reads, and never the method's files.
     _meta: {
       graph_spec: result.graphSpec,
       pipe_io_contracts: result.pipeIoContracts,
