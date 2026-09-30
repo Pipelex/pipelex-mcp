@@ -10,7 +10,11 @@ import type {
   PipeIOResponse,
   PipeIOValidReport,
 } from "@pipelex/sdk";
-import { mergeBundles, parseMthdsBundle } from "@pipelex/mthds-ui/static-graph";
+import {
+  buildStaticGraphSpec,
+  mergeBundles,
+  parseMthdsBundle,
+} from "@pipelex/mthds-ui/static-graph";
 import { projectInputsTemplate, renderInputsTemplate } from "mthds/protocol";
 
 import { DEFAULT_API_URL } from "./shared.js";
@@ -692,22 +696,95 @@ describe("showPipelexMethod", () => {
 });
 
 describe("staticGraphSizeBound", () => {
+  /** What the builder itself draws: the number the bound must never fall below. */
+  function builtNodes(text: string, entryPipe: string): number {
+    return buildStaticGraphSpec(mergedFrom(text), { entryPipe }).spec.nodes.length;
+  }
+
+  /** The bound and the builder, side by side, for a method small enough to build. */
+  function boundAndBuilt(text: string, entryPipe: string, budget = 100_000): [number, number] {
+    return [staticGraphSizeBound(mergedFrom(text), budget, entryPipe), builtNodes(text, entryPipe)];
+  }
+
+  /** A sequence calling `refs` in order, one step each. */
+  function sequence(code: string, refs: string[]): string {
+    const steps = refs.map((ref, index) => `{ pipe = "${ref}", result = "r_${index}" }`).join(", ");
+    return [
+      `[pipe.${code}]`,
+      'type = "PipeSequence"',
+      `description = "${code}"`,
+      'inputs = { topic = "Text" }',
+      'output = "Text"',
+      `steps = [${steps}]`,
+      "",
+    ].join("\n");
+  }
+
+  const LEAF = [
+    "[pipe.leaf]",
+    'type = "PipeLLM"',
+    'description = "Leaf"',
+    'inputs = { topic = "Text" }',
+    'output = "Text"',
+    'prompt = "$topic"',
+    "",
+  ].join("\n");
+
+  const times = (ref: string, count: number): string[] => Array.from({ length: count }, () => ref);
+
   it("counts the nodes the builder draws, one per pipe call", () => {
-    expect(staticGraphSizeBound(mergedFrom(DEMO_MTHDS), MAX_STATIC_GRAPH_NODES)).toBe(3);
+    expect(boundAndBuilt(DEMO_MTHDS, "demo.main")).toEqual([3, 3]);
     // 1 + 3 + 9 + 27: the calls, not the distinct pipes.
-    expect(staticGraphSizeBound(mergedFrom(nestedSequences(3, 3)), MAX_STATIC_GRAPH_NODES)).toBe(
-      40,
-    );
+    expect(boundAndBuilt(nestedSequences(3, 3), "deep.level_0")).toEqual([40, 40]);
+    // Entered lower down, only that pipe and what it calls.
+    expect(boundAndBuilt(nestedSequences(3, 3), "deep.level_2")).toEqual([4, 4]);
   });
 
   it("caps the count just past the budget, without walking the whole expansion", () => {
     const started = Date.now();
     // 4^0 + … + 4^30 nodes if it were built.
-    expect(staticGraphSizeBound(mergedFrom(nestedSequences(30, 4)), 100)).toBe(101);
+    expect(staticGraphSizeBound(mergedFrom(nestedSequences(30, 4)), 100, "deep.level_0")).toBe(101);
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 
-  it("counts an inline batch's own node, a condition's distinct pipes, and a recursive call as a leaf", () => {
+  it("counts a recursive method along the path the builder walks, so no memo can undercount it", () => {
+    // Declared in this order, `a` is counted first with `c` below it; a count
+    // remembered for `c` from there (where its call to `a` is cut) would be
+    // reused under `b`, where the builder expands `c` in full.
+    const counterexample = (calls: number): string =>
+      [
+        'domain = "rec"',
+        'main_pipe = "b"',
+        "",
+        sequence("a", times("c", calls)),
+        sequence("b", times("c", calls)),
+        sequence("c", ["a"]),
+      ].join("\n");
+    // b + n × (c + a + n × (c, cut as a leaf)) = 1 + n × (2 + n).
+    expect(boundAndBuilt(counterexample(20), "rec.b")).toEqual([441, 441]);
+    // At 999 calls the builder would draw a million nodes from about 70 KB.
+    const started = Date.now();
+    expect(
+      staticGraphSizeBound(mergedFrom(counterexample(999)), MAX_STATIC_GRAPH_NODES, "rec.b"),
+    ).toBe(MAX_STATIC_GRAPH_NODES + 1);
+    expect(Date.now() - started).toBeLessThan(1_000);
+
+    // A cycle entered from outside, several levels up.
+    const nested = [
+      'domain = "rec"',
+      'main_pipe = "d"',
+      "",
+      sequence("a", ["b", "x"]),
+      sequence("b", ["a"]),
+      sequence("x", times("leaf", 30)),
+      sequence("c", times("b", 5)),
+      sequence("d", times("c", 5)),
+      LEAF,
+    ].join("\n");
+    expect(boundAndBuilt(nested, "rec.d")).toEqual([856, 856]);
+  });
+
+  it("matches the builder over every controller type, so a builder that walks differently fails here", () => {
     const method = `domain = "mix"
 main_pipe = "route"
 
@@ -717,7 +794,7 @@ description = "Route"
 inputs = { topic = "Text" }
 output = "Text"
 expression = "topic"
-outcomes = { a = "each", b = "each", c = "fail" }
+outcomes = { a = "each", b = "each", c = "fail", d = "fan" }
 default_outcome = "loop"
 
 [pipe.each]
@@ -727,6 +804,22 @@ inputs = { topics = "Text[]" }
 output = "Text[]"
 steps = [{ pipe = "leaf", batch_over = "topics", batch_as = "topic", result = "out" }]
 
+[pipe.fan]
+type = "PipeParallel"
+description = "Fan out"
+inputs = { topics = "Text[]" }
+output = "Text"
+branches = [{ pipe = "leaf", result = "one" }, { pipe = "batch", result = "many" }]
+
+[pipe.batch]
+type = "PipeBatch"
+description = "Batch"
+inputs = { topics = "Text[]" }
+output = "Text[]"
+branch_pipe_code = "leaf"
+input_list_name = "topics"
+input_item_name = "topic"
+
 [pipe.loop]
 type = "PipeSequence"
 description = "Calls the router again"
@@ -734,17 +827,32 @@ inputs = { topic = "Text" }
 output = "Text"
 steps = [{ pipe = "route", result = "again" }, { pipe = "lib->other.pipe", result = "ext" }]
 
-[pipe.leaf]
-type = "PipeLLM"
-description = "Leaf"
-inputs = { topic = "Text" }
-output = "Text"
-prompt = "$topic"
-`;
+${LEAF}`;
 
-    // route (1) + each (1 + batch node 1 + leaf 1) + loop (1 + route as a leaf 1
-    // + the opaque dependency leaf 1); "fail" and the duplicate "each" count nothing.
-    expect(staticGraphSizeBound(mergedFrom(method), MAX_STATIC_GRAPH_NODES)).toBe(7);
+    // route (1) + each (1 + batch node 1 + leaf 1) + fan (1 + leaf 1 + batch
+    // 1 + leaf 1) + loop (1 + route as a leaf 1 + the opaque dependency leaf
+    // 1); "fail" and the duplicate "each" count nothing.
+    expect(boundAndBuilt(method, "mix.route")).toEqual([11, 11]);
+  });
+
+  it("counts an unresolvable ref, which the builder skips, so the walk's work stays bounded", () => {
+    const method = [
+      'domain = "gap"',
+      'main_pipe = "main"',
+      "",
+      sequence("main", ["leaf", "nope"]),
+      LEAF,
+    ].join("\n");
+    expect(boundAndBuilt(method, "gap.main")).toEqual([3, 2]);
+  });
+
+  it("counts nothing for an entry the builder cannot resolve", () => {
+    expect(staticGraphSizeBound(mergedFrom(DEMO_MTHDS), MAX_STATIC_GRAPH_NODES, "demo.nope")).toBe(
+      0,
+    );
+    expect(
+      staticGraphSizeBound(mergedFrom(DEMO_MTHDS), MAX_STATIC_GRAPH_NODES, "lib->demo.main"),
+    ).toBe(0);
   });
 });
 

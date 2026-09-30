@@ -488,8 +488,9 @@ export const MAX_STATIC_GRAPH_NODES = 2_000;
  * nested sequences several times over expands to millions of nodes, and the
  * build is synchronous: it would block this shared server's event loop, or
  * exhaust its heap, for every caller. So the method is parsed and merged once,
- * its expansion is counted without building anything, and a method whose
- * count passes {@link MAX_STATIC_GRAPH_NODES} gets no graph.
+ * the graph's expansion from its entry pipe is counted without building
+ * anything ({@link staticGraphSizeBound}), and a graph whose count passes
+ * {@link MAX_STATIC_GRAPH_NODES} is not drawn.
  *
  * The graph is entered at `entryPipe`, else at the first `main_pipe` the files
  * declare, and never at the builder's root heuristic, which would pick a pipe
@@ -508,14 +509,14 @@ function staticGraphOf(files: MthdsFileItem[] | undefined, entryPipe: string | u
       })),
     );
     const merged = mergeBundles(ordered.map((file) => parseMthdsBundle(file.content).bundle));
-    if (staticGraphSizeBound(merged, MAX_STATIC_GRAPH_NODES) > MAX_STATIC_GRAPH_NODES) {
-      return undefined;
-    }
     // With no pipe selected, the builder's own fallback minus its root
     // heuristic: the first declared `main_pipe`, passed explicitly so that one
     // it cannot resolve draws nothing rather than a pipe nobody declared.
     const entry = entryPipe ?? merged.mainPipe ?? undefined;
     if (entry === undefined) return undefined;
+    if (staticGraphSizeBound(merged, MAX_STATIC_GRAPH_NODES, entry) > MAX_STATIC_GRAPH_NODES) {
+      return undefined;
+    }
     const { spec } = buildStaticGraphSpec(merged, { entryPipe: entry });
     return spec.nodes.length > 0 ? spec : undefined;
   } catch {
@@ -533,61 +534,77 @@ interface PipeCall {
 const NON_PIPE_OUTCOMES = new Set(["", "fail", "continue"]);
 
 /**
- * The number of nodes the static builder would emit for the largest pipe of a
- * merged method set, counted without building anything, and capped at
- * `budget + 1` so the count itself stays cheap.
+ * The number of nodes the static builder would emit for a graph entered at
+ * `entryPipe`, counted without building anything, and capped at `budget + 1`.
  *
- * It follows the builder's own walk (`walkPipe` in
- * `@pipelex/mthds-ui/static-graph`): one node per pipe call, plus the batch
- * node a sequence step with `batch_over` / `batch_as` adds; a ref carrying
- * `->` is one opaque leaf, an unresolvable ref is skipped, a bare ref resolves
- * in the calling pipe's domain, and a recursive call is drawn as a leaf. Each
- * pipe's count is memoised, which is what makes counting linear where
- * building is exponential. Taking the largest pipe rather than the pipe the
- * graph is entered at keeps the count from depending on how the builder
- * resolves that pipe, at the cost of refusing a small pipe's graph in a
- * method whose largest pipe is past the budget.
+ * It walks exactly as the builder does (`walkPipe` in
+ * `@pipelex/mthds-ui/static-graph`): the entry resolves the way
+ * `pickEntryPipe` resolves an explicit one, one node per pipe call, plus the
+ * batch node a sequence step with `batch_over` / `batch_as` adds; a ref
+ * carrying `->` is one opaque leaf, a bare ref resolves in the calling pipe's
+ * domain, and a call to a pipe already on the current path is drawn as a leaf.
+ *
+ * **Nothing is memoised, on purpose.** A pipe's expansion depends on which
+ * pipes are on the path above it, since a recursive call is cut there, so a
+ * count remembered from one path undercounts on another: a memoised count let
+ * a few kilobytes of recursive method pass as under two thousand nodes and
+ * then build a million. The walk is cheap without it because every call it
+ * makes adds to the count and it stops at the cap, so it never visits more
+ * than `budget + 1` calls. That is also why an unresolvable ref, which the
+ * builder skips without a node, counts one here: the bound stays an upper
+ * bound on the nodes, and the walk's own work stays bounded by the budget.
+ *
+ * `show.test.ts` holds the count equal to the builder's node count over a
+ * method using every controller type, recursion included, so a builder that
+ * walks differently fails a test rather than weakening this guard.
  */
-export function staticGraphSizeBound(set: MergedMethodSet, budget: number): number {
+export function staticGraphSizeBound(
+  set: MergedMethodSet,
+  budget: number,
+  entryPipe: string,
+): number {
   const cap = budget + 1;
-  const memo = new Map<string, number>();
-  const onStack = new Set<string>();
+  const fallbackDomain = set.mainDomain ?? Object.keys(set.domains)[0];
+  // The builder draws nothing from an entry it cannot resolve to a pipe.
+  if (fallbackDomain === undefined || entryPipe.includes("->")) return 0;
 
-  const sizeOfRef = (ref: string, callerDomain: string): number => {
-    if (ref.includes("->")) return 1;
+  const callsByPipe = new Map<string, PipeCall[]>();
+  const path: string[] = [];
+  let count = 0;
+
+  const walk = (ref: string, callerDomain: string): void => {
+    count += 1;
+    if (ref.includes("->")) return;
     const dot = ref.lastIndexOf(".");
-    return dot === -1 ? sizeOf(callerDomain, ref) : sizeOf(ref.slice(0, dot), ref.slice(dot + 1));
-  };
-
-  const sizeOf = (domain: string, code: string): number => {
-    const key = `${domain}.${code}`;
-    const known = memo.get(key);
-    if (known !== undefined) return known;
-    if (onStack.has(key)) return 1;
+    const domain = dot === -1 ? callerDomain : ref.slice(0, dot);
+    const code = dot === -1 ? ref : ref.slice(dot + 1);
     const blueprint = asRecord(set.domains[domain]?.pipes[code]);
-    if (blueprint === undefined) return 0;
-    onStack.add(key);
-    let size = 1;
-    for (const call of pipeCallsOf(blueprint)) {
-      size += (call.batched ? 1 : 0) + sizeOfRef(call.ref, domain);
-      if (size >= cap) {
-        size = cap;
-        break;
-      }
+    if (blueprint === undefined) return;
+    const key = `${domain}.${code}`;
+    if (path.includes(key)) return;
+    let calls = callsByPipe.get(key);
+    if (calls === undefined) {
+      calls = pipeCallsOf(blueprint);
+      callsByPipe.set(key, calls);
     }
-    onStack.delete(key);
-    memo.set(key, size);
-    return size;
+    path.push(key);
+    try {
+      for (const call of calls) {
+        if (count >= cap) return;
+        if (call.batched) count += 1;
+        walk(call.ref, domain);
+      }
+    } finally {
+      path.pop();
+    }
   };
 
-  let largest = 0;
-  for (const [domain, namespace] of Object.entries(set.domains)) {
-    for (const code of Object.keys(namespace.pipes)) {
-      largest = Math.max(largest, sizeOf(domain, code));
-      if (largest >= cap) return cap;
-    }
-  }
-  return largest;
+  const dot = entryPipe.lastIndexOf(".");
+  const entryDomain = dot === -1 ? fallbackDomain : entryPipe.slice(0, dot);
+  const entryCode = dot === -1 ? entryPipe : entryPipe.slice(dot + 1);
+  if (asRecord(set.domains[entryDomain]?.pipes[entryCode]) === undefined) return 0;
+  walk(entryPipe, fallbackDomain);
+  return Math.min(count, cap);
 }
 
 /** The pipe calls a blueprint makes, read defensively: it is parsed from text nobody validated here. */
