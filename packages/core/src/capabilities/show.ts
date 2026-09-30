@@ -164,7 +164,7 @@ export interface ShowResult {
   outputForm?: unknown;
   /** The method's own entry pipe, which the view's caption calls the entry pipe. */
   mainPipeRef?: string;
-  /** The pipe the form opens on: the one the caller named, else the entry pipe. */
+  /** The pipe the form opens on and the graph is entered at: the one the caller named, else the entry pipe. */
   formPipeRef?: string;
 }
 
@@ -357,9 +357,9 @@ function unknownPipeError(requested: string, report: PipeIOValidReport): ToolErr
 
 /**
  * Project the route's answer: the verdict, the signature and the template for
- * the model, the graph and the form's artifacts for the view. The signature
- * and the form follow the pipe the caller named, else the method's entry pipe;
- * the graph is always the whole method, drawn from its entry pipe.
+ * the model, the graph and the form's artifacts for the view. The signature,
+ * the form and the graph all follow one pipe: the one the caller named, else
+ * the method's entry pipe.
  */
 export function showResult(
   report: PipeIOResponse,
@@ -407,11 +407,11 @@ export function showResult(
     hasEntryFor(report.pipe_io_contracts, pipeRef) &&
     hasEntryFor(report.input_form, pipeRef);
 
-  // The graph starts at the method's entry pipe, whichever pipe the form is
-  // for, so a named pipe shows as one node of the whole method, as the dry-run
-  // graph did. With no entry pipe it starts at the named pipe, else wherever
-  // the builder's own fallback finds one.
-  const graphSpec = staticGraphOf(report.files, entryPipeRef ?? pipeRef);
+  // The graph is entered at the same pipe as the form: the one the caller
+  // named, which `unknownPipeError` has checked against the whole method, else
+  // the entry pipe. With neither there is no graph, rather than one entered
+  // wherever the builder's own fallback lands, which no selection chose.
+  const graphSpec = pipeRef === undefined ? undefined : staticGraphOf(report.files, pipeRef);
 
   const template =
     report.is_runnable && pipeRef !== undefined
@@ -491,7 +491,7 @@ export const MAX_STATIC_GRAPH_NODES = 2_000;
  * The builder is lenient and documented never to throw; a throw anyway, an
  * entry pipe it cannot resolve, or an answer with no files leaves no graph.
  */
-function staticGraphOf(files: MthdsFileItem[] | undefined, entryPipe: string | undefined): unknown {
+function staticGraphOf(files: MthdsFileItem[] | undefined, entryPipe: string): unknown {
   if (!Array.isArray(files) || files.length === 0) return undefined;
   try {
     const ordered = orderMthdsSources(
@@ -504,7 +504,7 @@ function staticGraphOf(files: MthdsFileItem[] | undefined, entryPipe: string | u
     if (staticGraphSizeBound(merged, MAX_STATIC_GRAPH_NODES) > MAX_STATIC_GRAPH_NODES) {
       return undefined;
     }
-    const { spec } = buildStaticGraphSpec(merged, entryPipe === undefined ? {} : { entryPipe });
+    const { spec } = buildStaticGraphSpec(merged, { entryPipe });
     return spec.nodes.length > 0 ? spec : undefined;
   } catch {
     return undefined;
@@ -531,8 +531,10 @@ const NON_PIPE_OUTCOMES = new Set(["", "fail", "continue"]);
  * `->` is one opaque leaf, an unresolvable ref is skipped, a bare ref resolves
  * in the calling pipe's domain, and a recursive call is drawn as a leaf. Each
  * pipe's count is memoised, which is what makes counting linear where
- * building is exponential. Taking the largest pipe rather than the entry pipe
- * makes the count independent of how the builder picks its entry.
+ * building is exponential. Taking the largest pipe rather than the pipe the
+ * graph is entered at keeps the count from depending on how the builder
+ * resolves that pipe, at the cost of refusing a small pipe's graph in a
+ * method whose largest pipe is past the budget.
  */
 export function staticGraphSizeBound(set: MergedMethodSet, budget: number): number {
   const cap = budget + 1;

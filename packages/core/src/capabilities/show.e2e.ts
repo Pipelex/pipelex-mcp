@@ -40,7 +40,7 @@ function expectFormArtifacts(meta: Record<string, unknown>) {
   expect(meta.main_pipe_ref).toBeTypeOf("string");
 }
 
-/** The form's keys, and the static graph beside them, drawn from the entry pipe. */
+/** The form's keys, and the static graph beside them, drawn from the pipe the form opens on. */
 function expectViewArtifacts(meta: Record<string, unknown>) {
   expectFormArtifacts(meta);
   const graph = meta.graph_spec as
@@ -52,7 +52,7 @@ function expectViewArtifacts(meta: Record<string, unknown>) {
   expect(graph?.meta?.mode, "_meta.graph_spec.meta.mode").toBe("static");
   expect(graph?.nodes?.length ?? 0, "_meta.graph_spec.nodes").toBeGreaterThan(0);
   expect(`${graph?.pipeline_ref?.domain}.${graph?.pipeline_ref?.main_pipe}`).toBe(
-    meta.main_pipe_ref,
+    meta.form_pipe_ref,
   );
 }
 
@@ -130,8 +130,16 @@ describe.skipIf(!SERVES_SELECTORS)("pipelex_show_method (live)", () => {
     expect(named.structuredContent.status).toBe("ok");
     expect(named.structuredContent.pipe_ref).toBe("documents.extract_document_text");
     expect(named.formPipeRef).toBe("documents.extract_document_text");
-    // The entry pipe stays the method's own, and the graph is still drawn from it.
+    // The entry pipe stays the method's own; the graph is entered at the named pipe.
     expect(named.mainPipeRef).toBe("documents.extract_document_markdown");
+    const graph = named.graphSpec as
+      | { nodes?: unknown[]; pipeline_ref?: { domain?: string; main_pipe?: string } }
+      | undefined;
+    expect(graph?.pipeline_ref).toEqual({
+      domain: "documents",
+      main_pipe: "extract_document_text",
+    });
+    expect(graph?.nodes?.length ?? 0).toBeGreaterThan(0);
 
     const unknown = await showPipelexMethod(
       { method_ref: PYTHON_FREE_METHOD_REF, pipe_ref: "documents.nope" },

@@ -81,12 +81,13 @@ type RunGraphViewState = {
  * beside it. The form is for the pipe the show named, else the effective entry
  * pipe (`responseMetadata.form_pipe_ref`, then `main_pipe_ref`); clicking a
  * pipe node in the graph switches it. With no entry pipe settled no form opens on its own —
- * `selectedPipeFor` never substitutes a pipe of the view's own choosing — but
- * the artifacts still ride, so clicking a pipe node still produces its form.
- * The graph is drawn from the entry pipe `main_pipe_ref` names, so the two
- * agree; should they ever differ, the graph stays and a caption under it names
- * both (`graphCaptionFor`), so the diagram is never silently of a different
- * pipe from the form below it.
+ * `selectedPipeFor` never substitutes a pipe of the view's own choosing — and
+ * the show draws no graph either, so a show naming a `pipe_ref` is the way in.
+ * The graph is drawn from the pipe the form opens on, so the two agree; when
+ * that pipe is not the entry pipe `main_pipe_ref` names, because the caller
+ * named another one, a caption under the graph names both
+ * (`graphCaptionFor`), so the diagram is never silently less than the whole
+ * method.
  * A file-bearing input takes a file the user picks: the form asks the console
  * for an upload grant (`pipelex_request_upload`) and sends the file straight
  * to Pipelex storage, so the bytes never cross the conversation or the server
@@ -384,9 +385,9 @@ function RunGraph() {
     })();
   };
 
-  // The method's graph is drawn from the entry pipe, which is also the pipe
-  // the form defaults to, so the caption is a guard: it speaks only when the
-  // graph names a different pipe from the entry pipe.
+  // The method's graph is drawn from the pipe the form opens on, the one the
+  // caller named or else the entry pipe, so the caption speaks only when the
+  // caller named a pipe other than the entry pipe.
   // The executed graph gets no caption: it is of the pipe that ran, which is
   // the one the results below it are for.
   const graphCaption =

@@ -282,7 +282,7 @@ describe("showPipelexMethod", () => {
     }
   });
 
-  it("keeps the whole method's graph when the caller names another pipe", async () => {
+  it("enters the graph at the pipe the caller named, as the form is", async () => {
     const { context } = contextAnswering(async () => validReport);
 
     const result = await showPipelexMethod(
@@ -290,13 +290,35 @@ describe("showPipelexMethod", () => {
       context,
     );
 
-    // The form is for the named pipe; the graph is still drawn from the entry.
-    expect(graphPipeCodes(result.graphSpec)).toEqual(["finish", "main", "other"]);
+    const spec = result.graphSpec as { pipeline_ref?: { domain?: string; main_pipe?: string } };
+    expect(spec.pipeline_ref).toEqual({ domain: "demo", main_pipe: "other" });
+    expect(graphPipeCodes(spec)).toEqual(["other"]);
+    // The entry pipe stays the method's own, which the view's caption names.
+    expect(result.formPipeRef).toBe("demo.other");
+    expect(result.mainPipeRef).toBe("demo.main");
+    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph", "input_form"]);
   });
 
-  it("draws a graph from the files of a method that settles no entry pipe", async () => {
-    // The builder falls back on its own; a pipe the user clicks there is the
-    // one way a form appears, so the graph is what makes the method usable.
+  it("enters the graph at the named pipe of a method that settles no entry pipe", async () => {
+    const { context } = contextAnswering(async () => ({
+      ...validReport,
+      pipe_ref: null,
+      default_pipe_ref: null,
+    }));
+
+    const result = await showPipelexMethod(
+      { method_id: "mt_demo", pipe_ref: "demo.main" },
+      context,
+    );
+
+    expect(graphPipeCodes(result.graphSpec)).toEqual(["finish", "main", "other"]);
+    expect(result.mainPipeRef).toBeUndefined();
+    expect(result.formPipeRef).toBe("demo.main");
+  });
+
+  it("draws no graph when no pipe is named and the method settles no entry pipe", async () => {
+    // Nothing chose a pipe, so the graph is not entered wherever the builder's
+    // own fallback would land.
     const { context } = contextAnswering(async () => ({
       ...validReport,
       pipe_ref: null,
@@ -305,9 +327,32 @@ describe("showPipelexMethod", () => {
 
     const result = await showPipelexMethod({ method_id: "mt_demo" }, context);
 
-    expect(graphPipeCodes(result.graphSpec)).toEqual(["finish", "main", "other"]);
+    expect(result.graphSpec).toBeUndefined();
     expect(result.mainPipeRef).toBeUndefined();
-    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
+    expect(result.formPipeRef).toBeUndefined();
+    expect(result.structuredContent.available_view_specs).toEqual([]);
+  });
+
+  it("draws no graph for a named pipe the files do not declare", async () => {
+    // The contracts list the pipe, so the local check passes, but the builder
+    // cannot resolve it in the files: no graph rather than another pipe's.
+    const { context } = contextAnswering(async () => ({
+      ...validReport,
+      files: [
+        {
+          content: DEMO_MTHDS.replace(/\[pipe\.other\][\s\S]*?(?=\[pipe\.finish\])/, ""),
+          source: "main.mthds",
+        },
+      ],
+    }));
+
+    const result = await showPipelexMethod(
+      { method_id: "mt_demo", pipe_ref: "demo.other" },
+      context,
+    );
+
+    expect(result.graphSpec).toBeUndefined();
+    expect(result.structuredContent.pipe_ref).toBe("demo.other");
   });
 
   it("ships no graph when the answer carries no files, or files the builder draws nothing from", async () => {
@@ -329,11 +374,23 @@ describe("showPipelexMethod", () => {
   it("draws no graph for a method whose expansion passes the node budget, and stays fast", async () => {
     // Four calls per level, seven levels: 21,845 nodes from about 2 KB of text.
     // The builder has no budget of its own and builds synchronously.
-    const deep = nestedSequences(7, 4);
-    const { context } = contextAnswering(async () => ({
+    const deepReport = (content: string): PipeIOValidReport => ({
       ...validReport,
-      files: [{ content: deep, source: "deep.mthds" }],
-    }));
+      pipe_ref: "deep.level_0",
+      default_pipe_ref: "deep.level_0",
+      pipe_io_contracts: { "deep.level_0": contracts["demo.main"]! },
+      input_form: { "deep.level_0": inputForm["demo.main"]! },
+      output_form: { "deep.level_0": outputForm["demo.main"]! },
+      files: [{ content, source: "deep.mthds" }],
+    });
+    // Within the budget, the same shape draws, so the refusal below is the budget's.
+    const shallow = await showPipelexMethod(
+      { method_id: "mt_deep" },
+      contextAnswering(async () => deepReport(nestedSequences(3, 3))).context,
+    );
+    expect(graphPipeCodes(shallow.graphSpec)).toHaveLength(40);
+
+    const { context } = contextAnswering(async () => deepReport(nestedSequences(7, 4)));
 
     const started = Date.now();
     const result = await showPipelexMethod({ method_id: "mt_deep" }, context);
