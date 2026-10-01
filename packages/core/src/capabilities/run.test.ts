@@ -10,6 +10,7 @@ import {
 import type {
   BulkResolvedStorageUrls,
   BulkResolveStorageUrlsInput,
+  GetRunResultOptions,
   InputForm,
   MethodProvenance,
   OutputForm,
@@ -18,6 +19,7 @@ import type {
   PipeIOResponse,
   PipeIOValidReport,
   RunRead,
+  RunResultArtifact,
   RunResults,
   RunResultStart,
   RunResultState,
@@ -46,6 +48,7 @@ import {
   RUN_RESULTS_ERROR_OPTIONS,
   RUN_START_ERROR_OPTIONS,
   RUN_STATUS_ERROR_OPTIONS,
+  runResultsArtifacts,
   runResultsToolResult,
   startMthdsRun,
   startPipelexRun,
@@ -1325,7 +1328,7 @@ describe("boundMainStuff", () => {
 interface FakeRunClient {
   start(options: PipelexStartOptions): Promise<RunResultStart>;
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
-  getRunResult(runId: string): Promise<RunResultState>;
+  getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
   resolveStorageUrls(
     input: BulkResolveStorageUrlsInput,
     options?: { signal?: AbortSignal },
@@ -2367,6 +2370,100 @@ describe("freshStorageLinks", () => {
     // A refused item is the route's answer, not a failure: asking again gets
     // the same, so it does not make the links partial.
     expect(links).toEqual({ links: undefined, partial: false });
+  });
+});
+
+describe("getMthdsRunResults artifact selection", () => {
+  const TOKENS_USAGES: TokensUsageRecord[] = [
+    { pipe_code: "extract", cost: 0.01, nb_tokens_by_category: { input: 100, output: 50 } },
+  ];
+  const FULL: RunResults = {
+    pipeline_run_id: RUN_ID,
+    main_stuff: { answer: 42 },
+    working_memory: { root: {}, aliases: {} },
+    graph_spec: { nodes: [] },
+    pipe_io_contracts: CONTRACTS,
+    output_form: OUTPUT_FORM,
+    input_form: INPUT_FORM,
+    tokens_usages: TOKENS_USAGES,
+    usage_assembly_error: null,
+  };
+
+  /**
+   * A results read the way the SDK answers a narrowed one: every artifact the
+   * selection left out is absent, and `tokens_usages` brings
+   * `usage_assembly_error` with it. A projection reading an artifact it did
+   * not ask for then finds nothing, which the assertions below would see.
+   */
+  function narrowedRead(selections: (readonly RunResultArtifact[] | undefined)[]) {
+    return (_runId: string, options?: GetRunResultOptions): Promise<RunResultState> => {
+      selections.push(options?.artifacts);
+      const selected = new Set<string>(options?.artifacts ?? []);
+      if (selected.has("tokens_usages")) selected.add("usage_assembly_error");
+      const result = Object.fromEntries(
+        Object.entries(FULL).filter(
+          ([key]) =>
+            key === "pipeline_run_id" || options?.artifacts === undefined || selected.has(key),
+        ),
+      ) as unknown as RunResults;
+      return Promise.resolve({ state: "completed", pipeline_run_id: RUN_ID, result });
+    };
+  }
+
+  it("asks for the output, the usage, the graph and its data artifacts on a shell with views", async () => {
+    const selections: (readonly RunResultArtifact[] | undefined)[] = [];
+    const context = {
+      ...contextWith({ getRunResult: narrowedRead(selections), resolveStorageUrls: mintedLinks }),
+      viewsAvailable: true,
+    };
+
+    const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
+
+    expect(selections).toHaveLength(1);
+    expect([...(selections[0] ?? [])].sort()).toEqual(
+      [
+        "graph_spec",
+        "input_form",
+        "main_stuff",
+        "output_form",
+        "pipe_io_contracts",
+        "tokens_usages",
+      ].sort(),
+    );
+    expect(selections[0]).not.toContain("working_memory");
+    // Everything the projection delivers came out of the narrowed read.
+    expect(toolResult.structuredContent.main_stuff).toEqual({ answer: 42 });
+    expect(toolResult.structuredContent.usage?.calls).toBe(1);
+    expect(toolResult.structuredContent.available_view_specs).toEqual(["run_graph"]);
+    expect(toolResult._meta.graph_spec).toEqual({ nodes: [] });
+    expect(toolResult._meta.pipe_io_contracts).toEqual(CONTRACTS);
+    expect(toolResult._meta.output_form).toEqual(OUTPUT_FORM);
+    expect(toolResult._meta.input_form).toEqual(INPUT_FORM);
+    expect(toolResult._meta.tokens_usages).toEqual(TOKENS_USAGES);
+  });
+
+  it("asks for the output and the usage alone on a shell without views", async () => {
+    const selections: (readonly RunResultArtifact[] | undefined)[] = [];
+    const context = {
+      ...contextWith({ getRunResult: narrowedRead(selections) }),
+      viewsAvailable: false,
+    };
+
+    const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
+
+    expect(selections).toEqual([["main_stuff", "tokens_usages"]]);
+    expect(toolResult.structuredContent.main_stuff).toEqual({ answer: 42 });
+    expect(toolResult.structuredContent.usage?.calls).toBe(1);
+    expect(toolResult._meta.tokens_usages).toEqual(TOKENS_USAGES);
+  });
+
+  it("names only artifacts the SDK knows, and never the working memory", () => {
+    for (const viewsAvailable of [true, false]) {
+      const artifacts = runResultsArtifacts(viewsAvailable);
+      expect(artifacts.length).toBeGreaterThan(0);
+      expect(artifacts).toContain("main_stuff");
+      expect(artifacts).not.toContain("working_memory");
+    }
   });
 });
 

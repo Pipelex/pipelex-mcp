@@ -40,7 +40,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@pipelex/sdk": "^0.27.0",
+    "@pipelex/sdk": "^0.28.0",
     "mthds": "^0.28.0",
     "zod": "^4.3.6"
   },

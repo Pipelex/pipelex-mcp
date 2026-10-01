@@ -1,5 +1,12 @@
 import { ArtifactFetchError } from "@pipelex/sdk";
-import type { FetchArtifactOptions, RunRead, RunResultState, RunStatus } from "@pipelex/sdk";
+import type {
+  FetchArtifactOptions,
+  GetRunResultOptions,
+  RunRead,
+  RunResultArtifact,
+  RunResultState,
+  RunStatus,
+} from "@pipelex/sdk";
 import { z } from "zod";
 
 import type { RunFailure } from "./run-failure.js";
@@ -246,13 +253,20 @@ export interface ShowImagesResult {
 }
 
 /**
+ * The result artifacts this tool's results read asks for: the main output
+ * alone, the only artifact its picture walk reads. The graph, the I/O
+ * artifacts, the working memory and the usage records are never fetched.
+ */
+export const SHOW_IMAGES_RESULT_ARTIFACTS: readonly RunResultArtifact[] = ["main_stuff"];
+
+/**
  * The slice of `PipelexApiClient` this capability calls (test seam). The
  * fetch is the client's own bounded method rather than a separately injected
  * function: it is the same seam shape `ArtifactClient` uses, and
  * `PipelexApiClient` satisfies it structurally.
  */
 export interface ImagesClient {
-  getRunResult(runId: string): Promise<RunResultState>;
+  getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
   /** Read once after a failed results arm, for when the run ended and its report (`readFailedRun`). */
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   fetchArtifact(uri: string, options?: FetchArtifactOptions): Promise<Response>;
@@ -340,7 +354,7 @@ export async function showMthdsRunImages(
   let state: RunResultState;
   try {
     client = imagesClient(context);
-    state = await client.getRunResult(input.run_id);
+    state = await client.getRunResult(input.run_id, { artifacts: SHOW_IMAGES_RESULT_ARTIFACTS });
   } catch (err) {
     const error = classifyError(err, { ...runResultsErrorOptions(names), auth: context.authError });
     return errorResult(summaryForToolError(error, ERROR_SUMMARIES), [error]);
