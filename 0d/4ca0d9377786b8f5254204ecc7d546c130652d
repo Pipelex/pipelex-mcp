@@ -1,0 +1,63 @@
+packages/core/src/capabilities/run.ts
+  s_19015810651d9c::t_906bcfe1f998ee 1722-1735
+  s_19015810651d9c::t_f68085cd7e5b99 18
+  s_19015810651d9c::t_0a9737518f7d60 12
+  s_19015810651d9c::t_8e75716845fbca 599
+  s_19015810651d9c::t_9cabf8c5b6292c 1736-1742,1754,1757-1759
+packages/core/src/capabilities/images.ts
+  s_19015810651d9c::t_c27de7132bb077 256-261
+  s_19015810651d9c::t_bdc2b776a4648c 255
+  s_7e0fd9f10880f8::t_0315b0d1da9d97 2-9,269,357
+SPEC.md
+  s_19015810651d9c::t_e3a23bf3f42fa2 1455,1463,1471
+docs/architecture.md
+  s_19015810651d9c::t_87118d398c21bb 91,123,131
+docs/tools.md
+  s_19015810651d9c::t_ccacfc6c6539fe 413
+package-lock.json
+  s_19015810651d9c::t_3ffe577819913c 498,515,532,549,566,583,600,617,634,651,668,685,702,719,736,753,770,787,804,821,838,855,872,889,906,923,1824-1826,12898,12926,12941
+packages/console/CHANGELOG.md
+  s_19015810651d9c::t_29fbd7bc6462c6 11
+packages/console/package.json
+  s_19015810651d9c::t_dd586946322259 20
+packages/core/package.json
+  s_19015810651d9c::t_dc9c6f20b8779c 12
+packages/core/src/capabilities/artifacts.e2e.ts
+  s_19015810651d9c::t_5ffc99cb573b1c 109
+packages/core/src/capabilities/artifacts.test.ts
+  s_19015810651d9c::t_e478dbbaeefb9d 17,131,133,135,144,344,352-356
+packages/core/src/capabilities/artifacts.ts
+  s_19015810651d9c::t_a14e5ad72dd4d2 11,13,74-84,267,390
+packages/core/src/capabilities/images.test.ts
+  s_19015810651d9c::t_ae8f902524e2c0 2-7,263-280
+packages/core/src/capabilities/run.test.ts
+  s_19015810651d9c::t_3fb2610c39d641 13,22,51,1331,2376-2469
+packages/workshop/CHANGELOG.md
+  s_19015810651d9c::t_89e2ab041745b6 11
+packages/workshop/package.json
+  s_19015810651d9c::t_0970c738e29cf8 43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0d4ca0d9377786b8f5254204ecc7d546c130652d",
+  "prompts": {},
+  "sessions": {
+    "s_19015810651d9c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7c8fe5d-9da1-4ed6-80d4-812084259a9f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thomashebrard <thomas@pipelex.com>"
+    },
+    "s_7e0fd9f10880f8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-a8b974c89d5c91bd0",
+        "model": "unknown"
+      },
+      "human_author": "thomashebrard <thomas@pipelex.com>"
+    }
+  }
+}
