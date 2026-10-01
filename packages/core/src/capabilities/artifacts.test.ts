@@ -14,6 +14,7 @@ import type {
   DownloadArtifactsResult,
   DownloadedArtifact,
   RunRead,
+  RunResultArtifact,
   RunResults,
   RunResultState,
 } from "@pipelex/sdk";
@@ -127,9 +128,11 @@ function fakeClient(
 ) {
   const requests: DownloadArtifactsRequest[] = [];
   const reads: string[] = [];
+  const selections: (readonly RunResultArtifact[] | undefined)[] = [];
   const client: ArtifactClient = {
-    getRunResult(runId) {
+    getRunResult(runId, options) {
       reads.push(runId);
+      selections.push(options?.artifacts);
       return Promise.resolve(state);
     },
     getRunStatus: statusRead === undefined ? noStatusRead : () => Promise.resolve(statusRead),
@@ -138,7 +141,7 @@ function fakeClient(
       return download(request);
     },
   };
-  return { client, requests, reads };
+  return { client, requests, reads, selections };
 }
 
 function apiError(route: string, status: number, message: string): ApiResponseError {
@@ -338,13 +341,18 @@ describe("downloadMthdsArtifacts", () => {
         nested: [{ url: PICTURE_URI }, { document: { url: REPORT_URI } }],
       },
     };
-    const { client, requests } = fakeClient({
+    const { client, requests, selections } = fakeClient({
       state: "completed",
       pipeline_run_id: RUN_ID,
       result: results,
     });
 
     const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
+
+    // The one results read asks for the main output alone: it is both the file
+    // written first and the scope the download walks, so the graph, the I/O
+    // artifacts, the working memory and the usage records are never fetched.
+    expect(selections).toEqual([["main_stuff"]]);
 
     // The run is read once, here, and handed over: no second read by id, the
     // default scope named, plain http refused against an https API, and the

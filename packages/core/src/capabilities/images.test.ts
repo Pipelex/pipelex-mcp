@@ -1,5 +1,10 @@
 import { ApiResponseError, ApiUnreachableError, ArtifactFetchError } from "@pipelex/sdk";
-import type { FetchArtifactOptions, RunRead, RunResultState } from "@pipelex/sdk";
+import type {
+  FetchArtifactOptions,
+  RunRead,
+  RunResultArtifact,
+  RunResultState,
+} from "@pipelex/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -253,6 +258,24 @@ describe("showMthdsRunImages", () => {
     ]);
     expect(result.imageBlocks[0].data).toBe(TINY_PNG.toString("base64"));
     expect(result.imageBlocks[0]._meta).toEqual({ uri: COVER });
+  });
+
+  it("asks the results read for the main output alone, the only artifact its walk reads", async () => {
+    const selections: (readonly RunResultArtifact[] | undefined)[] = [];
+    const client: ImagesClient = {
+      getRunStatus: noStatusRead,
+      getRunResult: (_runId, options) => {
+        selections.push(options?.artifacts);
+        return Promise.resolve(completedRun());
+      },
+      fetchArtifact: () => Promise.resolve(imageResponse(TINY_PNG)),
+    };
+
+    const result = await showMthdsRunImages({ run_id: RUN_ID, images: [COVER] }, context(client));
+
+    expect(selections).toEqual([["main_stuff"]]);
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.imageBlocks).toHaveLength(1);
   });
 
   /**
