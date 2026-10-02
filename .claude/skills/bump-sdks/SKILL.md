@@ -9,10 +9,12 @@ This repo depends on two published `@pipelex` packages, and both are pre-1.0:
 
 | Package | What it gives this repo | Source repo |
 |---|---|---|
-| `@pipelex/sdk` | `PipelexApiClient` — every API call the capabilities make | `Pipelex/pipelex-sdk-js` |
+| `@pipelex/sdk` | `PipelexApiClient` — every API call the capabilities make | `Pipelex/pipelex-sdk`, its `js/` directory |
 | `@pipelex/mthds-ui` | `GraphViewer` / `GraphSpec` — the run-graph and run-follow views | `Pipelex/mthds-ui` |
 
 Because they are `0.x`, npm treats the leading zero as the major: a `^0.9.0` range auto-resolves patches only, so every minor bump (`0.9.0 → 0.10.0`) needs a deliberate edit. **Bump both by default.** Only narrow to one package, or to a specific version, if the user asked for that.
+
+**npm is the only authority on which versions exist.** `Pipelex/pipelex-sdk` is a monorepo that releases both SDKs, the starters and the method apps under one version and one tag, `vX.Y.Z`, and a release ships only the packages that changed since they last shipped. So `@pipelex/sdk`'s own sequence of versions has gaps, a release can hold it back, and a tag or even a heading in `js/CHANGELOG.md` can name a version npm never received: 0.29.0 is a tag and a changelog heading, but its npm publish failed, and 0.29.1, which carries the same code, is the first `@pipelex/sdk` published from that repository. The versions ending in `-sprint.g<sha>` sit on the `sprint` dist-tag for sprints that pin an unreleased commit, and are never a bump target.
 
 Work through the steps below, showing the user each file change and each install before moving on. The judgment in this skill is concentrated in Step 4 — reading the changelogs and deciding what this repo actually has to migrate — so spend your effort explaining there, not narrating the mechanical steps.
 
@@ -50,9 +52,11 @@ A dirty working tree is not a blocker — this repo's checks don't need a clean 
 
 ## Step 2 — Decide the targets
 
-Default to latest for both. If a package is already at latest, say so and drop it from this run rather than reinstalling it.
+Default to latest for both. `npm view @pipelex/<p> version` reads the `latest` dist-tag, which never names a sprint prerelease, and `make use-npm-sdk` without `VERSION` installs the same. If a package is already at latest, say so and drop it from this run rather than reinstalling it.
 
-If the user named a version or a single package, honour that exactly. Otherwise, when there is a real choice to make (a large jump, or one package moving several minors), use `AskUserQuestion` to confirm — offering latest as the recommended default and letting them type a specific version.
+If the user named a version or a single package, honour that exactly, once npm confirms the version exists: `npm view @pipelex/sdk@X.Y.Z version` fails with `E404` for a version npm never received, 0.29.0 included, and `npm view @pipelex/sdk versions --json` lists every one, sprint prereleases included, which you skip. Otherwise, when there is a real choice to make (a large jump, or one package moving several minors), use `AskUserQuestion` to confirm — offering latest as the recommended default and letting them type a specific version.
+
+**This skill only moves to published versions.** If what the user wants is not released yet, say so and stop: the fix is a release of `../pipelex-sdk` with that repository's root `/release` skill, which ships `@pipelex/sdk` when `js/` has changed since it last shipped. Never point a manifest at a local path, a git ref or a sprint prerelease to route around it.
 
 Record targets without a `v` prefix (`0.12.0`). Flag any downgrade and confirm it is intended.
 
@@ -60,18 +64,30 @@ Record targets without a `v` prefix (`0.12.0`). Flag any downgrade and confirm i
 
 You need each package's `CHANGELOG.md` entries strictly after its current version through its target. Their headings carry a `v` (`## [v0.12.0] - YYYY-MM-DD`) — **this repo's two changelogs do not** (see Step 9), so don't let the two formats bleed into each other.
 
-Prefer a sibling checkout, but **verify it is current before trusting it** — that is the trap here, not a formality. A workspace checkout sitting on `dev` a few commits behind `origin` simply will not contain the newest release entry, and you will silently review an incomplete set of breaking changes:
+| Package | Changelog | Sibling checkout |
+|---|---|---|
+| `@pipelex/sdk` | `js/CHANGELOG.md` in `Pipelex/pipelex-sdk`, the package's own history, which goes back past its move into that repository | `../pipelex-sdk` |
+| `@pipelex/mthds-ui` | `CHANGELOG.md` in `Pipelex/mthds-ui` | `../mthds-ui` |
+
+Read each one from `origin/main`, the branch releases merge into, after a fetch, never from the checkout's working tree — that is the trap here, not a formality. A workspace checkout sits on `dev`, often a few commits behind `origin`, and simply will not contain the newest release entry, so you would silently review an incomplete set of breaking changes:
 
 ```bash
-grep -n "^## \[v${TARGET}\]" ../pipelex-sdk-js/CHANGELOG.md   # ../mthds-ui for the UI
+git -C ../pipelex-sdk fetch origin --quiet
+git -C ../pipelex-sdk show origin/main:js/CHANGELOG.md | sed -n "/^## \[v${TARGET}\]/,/^## \[v${CURRENT}\]/p"
+git -C ../mthds-ui fetch origin --quiet
+git -C ../mthds-ui show origin/main:CHANGELOG.md | sed -n "/^## \[v${TARGET}\]/,/^## \[v${CURRENT}\]/p"
 ```
 
-- **Heading found** → the checkout covers the target; read it from there.
-- **Heading missing** → the checkout is stale. Either `git fetch && git show origin/main:CHANGELOG.md` in that repo, or fall back to GitHub raw:
-  - `https://raw.githubusercontent.com/Pipelex/pipelex-sdk-js/main/CHANGELOG.md`
-  - `https://raw.githubusercontent.com/Pipelex/mthds-ui/main/CHANGELOG.md`
+Each changelog is newest-first, so the target's heading comes before the current one. If a range comes back empty, the target's heading is not on `main`: stop and say so rather than reading a partial range. Without a sibling checkout, read the same files from GitHub:
 
-Neither published npm tarball ships a `CHANGELOG.md`, so there is nothing to read in `node_modules` — GitHub raw is the only network-only source. Never assume the sibling checkouts exist at all.
+- `https://raw.githubusercontent.com/Pipelex/pipelex-sdk/main/js/CHANGELOG.md`, or `gh api repos/Pipelex/pipelex-sdk/contents/js/CHANGELOG.md --jq .content | base64 -d`
+- `https://raw.githubusercontent.com/Pipelex/mthds-ui/main/CHANGELOG.md`
+
+Neither published npm tarball ships a `CHANGELOG.md`, so there is nothing to read in `node_modules`. Never assume the sibling checkouts exist at all.
+
+**Read every heading in the range, including a version npm never received.** Its entry still describes code the next published version carries: 0.29.1's entry says only that it published 0.29.0's code, and what changed is under 0.29.0.
+
+For `@pipelex/sdk`, the release is a second view, not a substitute. A version released from `pipelex-sdk` was built from that repository's tag `vX.Y.Z`, so `git -C ../pipelex-sdk show vX.Y.Z:js/<path>` reads the source it was built from, and `gh release view vX.Y.Z --repo Pipelex/pipelex-sdk` shows its `@pipelex/sdk` entry beside those of the other packages that release shipped. A release that held `@pipelex/sdk` back has no section for it, a tag has no GitHub Release when its run stopped before creating one (`v0.29.0` is one), and the versions released before the SDK moved there have no tag in it at all; their entries are in the changelog all the same.
 
 Present the entries to the user grouped by package, then by version, newest first. **Call out every bullet marked "Breaking"** — those are the ones that can reach this repo. Mention the rest briefly; internal refactors, CI changes and additive APIs are FYI.
 
@@ -91,7 +107,7 @@ grep -rn "PipelexApiClient" packages/ --include="*.ts" --exclude-dir=node_module
 They live in `packages/core/src/capabilities/` — the catalog client, the shared method-fetch client, and the validation, inputs, prepare, attachment-upload and run clients, plus the `SizeGuardedPipelexApiClient` subclass in `upload-ceiling.ts` that overrides the `upload` wire call. For each seam whose methods appear in a breaking bullet:
 
 1. Read the local interface's declared signature.
-2. Read the new SDK's actual signature (`node_modules/@pipelex/sdk/dist/**/*.d.ts` after Step 5, or the sibling checkout's source before it).
+2. Read the new SDK's actual signature (`node_modules/@pipelex/sdk/dist/**/*.d.ts` after Step 5, or, before it, the source a version released from `pipelex-sdk` was built from: `git -C ../pipelex-sdk show "v${TARGET}:js/src/<file>"`).
 3. Update the local interface to match, then follow the call site through — a return-shape change usually means the projection function downstream needs reworking too, not just the type. A method that now returns a page object rather than an array is the canonical example: the interface, the call site, *and* the projection all move.
 
 `SizeGuardedPipelexApiClient` deserves its own look on any SDK bump: it overrides `upload` specifically because that is the one seam both upload paths funnel through. If the SDK reorganises where the wire call happens, that override can go silently dead — it would still compile.
@@ -172,7 +188,7 @@ Neither spends inference credit, but only `make smoke` is read-only: `make test-
 Read the result as a whole rather than the exit code alone:
 
 - **`SMOKE PASSED`, or a green `make test-e2e`** — the shipped client and the live API agree on every checked shape. Note what a green e2e run reports as *skipped*: the paid run family is expected to skip, and that is the design, not a gap.
-- **A failed check or a failed test** — the real client disagreeing with the real API, which is precisely what Step 6 cannot see. Both surfaces name the tool, the field, and what they got. If the API moved, the fix belongs in `../pipelex-sdk-js` (plus its own e2e), then a bump here — never a local patch that papers over it. If a live result contradicts a unit-test fake in this repo, fix the fake in the same change: a fake that has drifted from the wire is how the mocked suite goes green over a broken client.
+- **A failed check or a failed test** — the real client disagreeing with the real API, which is precisely what Step 6 cannot see. Both surfaces name the tool, the field, and what they got. If the API moved, the fix belongs in `../pipelex-sdk/js` (plus its own e2e), then a bump here — never a local patch that papers over it. If a live result contradicts a unit-test fake in this repo, fix the fake in the same change: a fake that has drifted from the wire is how the mocked suite goes green over a broken client.
 - **`catalog is EMPTY`** on a pass — a note, not a failure, and worth repeating to the user: the org holds no methods, so row projection was not exercised by that run. A pass under an empty catalog is a weaker result than it looks.
 
 Worth running **before** the bump too when the user reports a live failure: a check that fails on the old version and passes on the new one turns "we upgraded" into "we fixed it", and gives Step 9 something concrete to write.
@@ -228,7 +244,8 @@ Then *offer* — do not run — pushing and opening a PR. PRs target **`dev`**, 
 - Never `git add .` or `git add -A` — stage only what this bump touched.
 - Never push or open a PR without explicit approval.
 - Never guess a fix for a behavior change — flag it and let the user decide.
-- Never trust a sibling checkout without confirming it contains the target version's heading.
+- Never read a changelog from a sibling checkout's working tree: read it from `origin/main` after a fetch, and confirm the range contains the target version's heading.
+- Only move to a version npm serves: never to a `-sprint.g<sha>` prerelease, and never to a version that exists only as a tag or a changelog heading.
 - Never treat a green `make all` as proof the bump works — the suite runs on fakes.
-- Don't assume `../pipelex-sdk-js` or `../mthds-ui` exist; keep the GitHub-raw path ready.
+- Don't assume `../pipelex-sdk` or `../mthds-ui` exist; keep the GitHub path ready.
 - If any step fails or the user aborts, stop immediately.

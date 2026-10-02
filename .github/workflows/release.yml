@@ -75,7 +75,7 @@
 # One-time external setup:
 #   - npm: register `@pipelex/mcp` as a trusted publisher on npmjs.com
 #     (package settings) for `Pipelex/pipelex-mcp` with workflow filename
-#     `release.yml` — the same OIDC pattern `pipelex-sdk-js` and `mthds-js`
+#     `release.yml` — the same OIDC pattern `pipelex-sdk` and `mthds-js`
 #     use, so no long-lived npm secret exists anywhere. **The registration is
 #     bound to this filename**: renaming or moving this workflow breaks
 #     publishing until the trusted publisher is re-registered. Publishing from

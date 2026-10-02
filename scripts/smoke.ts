@@ -56,7 +56,7 @@ const FORBIDDEN_CATALOG_KEYS = new Set([
   "created_by_user_id",
 ]);
 
-/** The canonical bundle from `pipelex-sdk-js`'s e2e fixtures: lints clean, validates, runs. */
+/** The canonical bundle from `@pipelex/sdk`'s e2e fixtures: lints clean, validates, runs. */
 const VALID_BUNDLE = `domain      = "quick_start"
 description = "Discovering Pipelex"
 main_pipe   = "hello_world"
@@ -743,7 +743,7 @@ function finish(): void {
   write("");
   write(
     "A failure here is the real client disagreeing with the real API — the class of break " +
-      "`make all` cannot see. If the API moved, the fix belongs in ../pipelex-sdk-js, then a bump here.",
+      "`make all` cannot see. If the API moved, the fix belongs in ../pipelex-sdk/js, then a bump here.",
   );
   process.exitCode = 1;
 }
