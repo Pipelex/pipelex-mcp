@@ -39,7 +39,7 @@ const context: ValidationContext = liveApiConfig();
 const SERVES_SELECTORS = await apiAdvertisesExtension("method_ref");
 
 describe("mthds_validate (live)", () => {
-  it("returns a runnable verdict, a Markdown summary, and a graph on the view-only channel", async () => {
+  it("returns a runnable verdict and a Markdown summary", async () => {
     const result = await validateMthds(
       { files: [{ content: FIXTURE_BUNDLE, uri: FIXTURE_BUNDLE_URI }] },
       context,
@@ -57,17 +57,6 @@ describe("mthds_validate (live)", () => {
     // contract moved.
     expect(result.summary.trim()).not.toBe("");
 
-    // The graph and the IO contracts ride `_meta` and never `structuredContent`
-    // — the model must not pay their tokens. `available_view_specs` is the
-    // model's structured signal that they exist.
-    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph", "input_form"]);
-    expect(result.graphSpec).toBeDefined();
-    expect(typeof result.graphSpec).toBe("object");
-    expect(typeof result.pipeIoContracts).toBe("object");
-    // The descriptor is the `views: ["input_form"]` opt-in round-tripping for
-    // real — the spec keeps it off the report unless asked, so its arrival is
-    // the live proof the token still works.
-    expect(typeof result.inputForm).toBe("object");
     expect(typeof result.mainPipeRef).toBe("string");
 
     // The main pipe's signature — the wire shape the projection narrows, and
@@ -171,12 +160,11 @@ describe("mthds_validate (live)", () => {
   it("carries no view artifacts on the workshop, which renders no views", async () => {
     const result = await validateMthds(
       { files: [{ content: FIXTURE_BUNDLE, uri: FIXTURE_BUNDLE_URI }] },
-      { ...context, viewsAvailable: false },
+      context,
     );
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);
-    expect(result.graphSpec).toBeUndefined();
     // The signature does not depend on views.
     expect(result.structuredContent.available_view_specs).toEqual([]);
     expect(result.structuredContent.main_pipe?.output.concept_ref).toBe("native.Text");
@@ -255,22 +243,5 @@ describe.skipIf(!SERVES_SELECTORS)("mthds_validate by selector (live)", () => {
     expect(result.structuredContent.main_pipe?.pipe_ref).toBe(
       "documents.extract_document_markdown",
     );
-    // This leg does NOT discriminate the artifact gate from the advert gate, and
-    // must not be read as doing so. Because the entry pipe is settled AND keyed
-    // in both artifacts, putting the pair back on the entry-pipe gate leaves
-    // every assertion here green — established by mutation, not by argument.
-    // That discrimination is hermetic, in `validate.test.ts` ("withholds the
-    // form's advert, but not its artifacts, when the server states no default"):
-    // it needs a STATED `default_pipe_ref: null`, which no method reachable from
-    // here produces.
-    //
-    // What the keys below do prove is the address resolution: they are the
-    // report's own per-pipe map, so their namespace identifies the package.
-    const contractRefs = Object.keys(result.pipeIoContracts ?? {});
-    expect(contractRefs.length).toBeGreaterThan(0);
-    expect(contractRefs).toContain("documents.extract_document_markdown");
-    for (const ref of contractRefs) {
-      expect(ref.startsWith("documents.")).toBe(true);
-    }
   });
 });

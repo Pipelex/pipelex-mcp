@@ -51,18 +51,14 @@ import {
 } from "./workspace-boundary.js";
 
 /**
- * The catalog's write half — `mthds_save_method` and `mthds_get_method`, both
- * registered on the local workshop only.
+ * The catalog's write half — `mthds_save_method` and `mthds_get_method`.
  *
  * They complete the loop `mthds_list_methods` opened: the listing says which
  * methods exist, and these two say what a method *is* and let a workshop
- * session change it. The per-shell split is not the `output_dir` precedent
- * widened — `mthds_codegen` advertises its write argument on both shells
- * because writing is optional there, whereas here the filesystem is not
- * optional on either side. A console save would submit files the console
- * rejects and would leave no link file, so the next save would duplicate the
- * method: a materially different act under the same name, which is the one
- * invariant the per-shell split exists to protect.
+ * session change it. Unlike `mthds_codegen`, whose `output_dir` is optional,
+ * both need the filesystem: a save without its files' directory would leave
+ * no link file, so the next save would duplicate the method — a materially
+ * different act under the same name.
  */
 
 // ── the inline budget ───────────────────────────────────────────────

@@ -16,10 +16,8 @@ import type { LocalToolContexts, LocalToolDefinition } from "./tools.js";
 // Version is sourced from the workshop's own package.json so the MCP handshake
 // always reports the shipped release — the /release skill bumps package.json
 // alone, and a hardcoded copy here would silently drift (it did: 0.1.0 vs a
-// 0.4.0 package). The console is released on its own track, with its own
-// version, so this is the workshop's release and never the console's.
-// The workshop is the Pipelex plugin's server, so it is named `pipelex-plugin`;
-// the hosted console, the Pipelex connector, is `pipelex`.
+// 0.4.0 package). The workshop is the Pipelex plugin's server, so it is named
+// `pipelex-plugin`; the Pipelex connector, a separate product, is `pipelex`.
 export const LOCAL_SERVER_INFO = {
   name: "pipelex-plugin",
   version: pkg.version,
@@ -75,7 +73,7 @@ export function createLocalServer(options: LocalServerOptions = {}): McpServer {
   // `clientInfo` of the MCP `initialize` handshake, which is only known once
   // the host has connected — after these contexts exist — so it is read when
   // each client is constructed, never captured here. Applied to supplied
-  // contexts too: the identity is the shell's, not the caller's.
+  // contexts too: the identity is the server's, not the caller's.
   const contexts = patchLocalApiContexts(
     options.contexts ?? buildLocalToolContexts(options.env, options.rootDir ?? process.cwd()),
     { appInfo: workshopAppInfoSource(() => server.server.getClientVersion()) },
@@ -88,7 +86,7 @@ export function createLocalServer(options: LocalServerOptions = {}): McpServer {
   return server;
 }
 
-/** The workshop as its `User-Agent` names it: the shell and the version it shipped as. */
+/** The workshop as its `User-Agent` names it: its mode and the version it shipped as. */
 const WORKSHOP_SHELL: McpShell = { mode: "workshop", version: LOCAL_SERVER_INFO.version };
 
 /**

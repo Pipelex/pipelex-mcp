@@ -1,12 +1,10 @@
 /**
  * The words for a start whose outcome is unknown: a start that failed in a way
  * that may still have created the run, which {@link classifyStartError} in
- * `run.ts` marks not retryable. They live apart from `run.ts` because the
- * console's views read them too, and `run.ts` imports the SDK and zod, which a
- * view cannot bundle; this module imports nothing.
+ * `run.ts` marks not retryable. This module imports nothing.
  *
  * The hint is the marker: `classifyStartError` is the only place that sets it,
- * so the tool's headline and both views recognise a may-have-run start by it.
+ * so the tool's headline recognises a may-have-run start by it.
  */
 
 /** The hint on a start that may have run, worded for a lost answer, a gateway's answer and the runner's own 500. */

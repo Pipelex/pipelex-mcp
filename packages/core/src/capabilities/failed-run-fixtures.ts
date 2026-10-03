@@ -7,7 +7,7 @@ import type { FailedRunState } from "./run.js";
 
 /**
  * Failed runs recorded from the dev plane, for the hermetic tests of every
- * failed arm in the run family and of the console's failure display.
+ * failed arm in the run family.
  *
  * Each recording holds two reads of one real run, as the SDK returned them on
  * 2026-09-26: its status read (`getRunStatus`), which carries the error report
@@ -15,8 +15,8 @@ import type { FailedRunState } from "./run.js";
  * carried no report yet because the platform did not relay it on the results
  * route's `409`. The identifiers of the organization, the user and the workflow
  * were left out; everything else is verbatim, the provider's raw text in
- * `message` and `provider_metadata` included, since that text is exactly what
- * the tests prove stays out of a person's view.
+ * `message` and `provider_metadata` included, since the tests check which of
+ * it reaches the model and which is left out.
  *
  * - `llmCompletion` — a model the inference gateway refused (HTTP 412), not
  *   retryable, with a `change_input` user action.

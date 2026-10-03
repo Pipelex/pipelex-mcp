@@ -25,15 +25,13 @@ import { z } from "zod";
 import { BARE_APP_INFO } from "./client-identification.js";
 import type { AppInfoSource } from "./client-identification.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
-import type { ToolNames } from "./tool-names.js";
 
 export const DEFAULT_API_URL = "https://api.pipelex.com";
 
 /**
  * The submitted-files shape every capability shares on its MCP input. Each
  * item is one of two arms: inline contents (`{ content, uri? }`) or a file
- * path (`{ path }`, resolved from disk by the local workshop deployment only —
- * the hosted console rejects it instructively at request validation). The
+ * path (`{ path }`, resolved from disk through the context's resolver). The
  * arms are deliberately non-strict with first-match semantics: a pathological
  * item carrying both keys parses as the content arm and `path` is ignored.
  *
@@ -87,9 +85,10 @@ export type FileResolution =
   | { ok: false; message: string; hint: string };
 
 /**
- * The seam the shells fill: the local workshop provides a filesystem-backed
- * resolver; the hosted console provides none, which turns every `{ path }`
- * item into an instructive rejection.
+ * The seam the workshop fills with a filesystem-backed resolver
+ * (`localFileResolver` in its `src/files.ts`). A context built without one —
+ * the core's own `build…Context`, as the live suite uses — turns every
+ * `{ path }` item into an instructive rejection.
  */
 export interface FileResolver {
   resolve(path: string): Promise<FileResolution>;
@@ -106,9 +105,9 @@ export interface ResolvedFiles {
  * `{ path }` items go through the resolver
  * when one is provided; a resolved item carries `uri` = the submitted path,
  * so diagnostics locate to files the agent can open. Without a resolver a
- * `{ path }` item is rejected instructively — the hosted deployment cannot
- * read files, and the rejection names the local workshop that can. `files` is
- * only meaningful when `errors` is empty.
+ * `{ path }` item is rejected instructively, the rejection naming the local
+ * workshop that resolves paths. `files` is only meaningful when `errors` is
+ * empty.
  */
 export async function resolveSubmittedFiles(
   files: SubmittedFileInput[],
@@ -272,7 +271,7 @@ export type ContentImage = {
  * headline.
  *
  * Without this, the instructive detail every capability writes into
- * `errors[]` (e.g. the hosted `{ path }` rejection naming the local workshop)
+ * `errors[]` (e.g. an unreadable `{ path }` naming the file it could not open)
  * would live *only* in `structuredContent.errors` — the machine contract — and
  * never reach the agent, which reads `content`. The summary alone is a terse
  * headline ("… request input is invalid."), leaving the agent to guess the
@@ -313,19 +312,18 @@ export interface ApiConfig {
   apiKey?: string;
   /**
    * Who is calling, for the `User-Agent` (`./client-identification.ts`). Set by
-   * the shell — `patchLocalApiContexts` in the workshop's `src/tools.ts`,
-   * `patchHostedApiContexts` in the console's `src/hosted/tools.ts` — never by the env: the
-   * workshop reads its host from the MCP handshake and the console from each
-   * request, so it is a function called when a client is constructed. Absent, a
-   * client still names itself `pipelex-mcp` (`BARE_APP_INFO`).
+   * the workshop through `patchLocalApiContexts` in its `src/tools.ts`, never
+   * by the env: the workshop reads its host from the MCP handshake, so it is a
+   * function called when a client is constructed. Absent, a client still names
+   * itself `pipelex-mcp` (`BARE_APP_INFO`).
    */
   appInfo?: AppInfoSource;
 }
 
 /**
- * What a shell may override on every capability context that talks to the API.
- * Each shell's tool table applies it to its own context set, since that table
- * is where the list of contexts lives.
+ * What the workshop may override on every capability context that talks to
+ * the API. Its tool table applies it to the whole context set, since that
+ * table is where the list of contexts lives.
  */
 export interface ApiContextPatch {
   apiKey?: string;
@@ -345,7 +343,7 @@ export interface ApiContextPatch {
  * `clientClass` lets a capability pick a subclass (`SizeGuardedPipelexApiClient`)
  * without constructing it itself. The client is built per tool call, which is
  * what makes the lazy `appInfo` possible: by then the workshop has completed its
- * handshake and the console holds the request.
+ * handshake.
  */
 export function createPipelexApiClient<T extends PipelexApiClient = PipelexApiClient>(
   config: ApiConfig,
@@ -375,9 +373,8 @@ export function buildApiConfig(env: ApiEnv = process.env): ApiConfig {
 
 /**
  * The bundle blueprint's declared `main_pipe`, qualified by the blueprint's
- * `domain` when it is authored bare — the fallback pipe both the validate
- * capability and the console's input walk (`console-inputs.ts`) consult behind
- * the runner's own `default_pipe_ref`.
+ * `domain` when it is authored bare — the fallback pipe the validate
+ * capability consults behind the runner's own `default_pipe_ref`.
  *
  * Every read is defensive: `bundle_blueprint` is opaque transport (its schema
  * is the runtime's, not this server's), so a blueprint that is not an object,
@@ -393,11 +390,9 @@ export function buildApiConfig(env: ApiEnv = process.env): ApiConfig {
  * serve no `default_pipe_ref`, which is why it went unseen.
  *
  * **Both members are trimmed before use**, which is not cosmetic: the SDK reads
- * them through its own `nonEmptyString`, and `mthds_prepare_inputs` mirrors the
- * SDK's pipe selection on the console while delegating to it on the workshop.
- * Without the trim a padded `main_pipe` keyed nothing here and `domain.main`
- * there, so one method prepared on one shell and was refused on the other —
- * the one outcome `selectPipeRef` says this tool cannot have. Nothing upstream
+ * them through its own `nonEmptyString`, so without the trim a padded
+ * `main_pipe` keyed nothing here and `domain.main` there, and the signature
+ * named a different pipe from the one the SDK selects. Nothing upstream
  * strips it: `pipelex`'s `DomainBlueprint.main_pipe` is a bare `str` with no
  * validator, so a padded TOML value reaches the wire intact.
  */
@@ -429,18 +424,6 @@ export function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
-}
-
-/**
- * A non-empty record — the test for whether a per-pipe artifact map is worth
- * shipping to a view at all. The view looks pipes up in it, so an empty map can
- * drive nothing, and a runner that ignored the `views` token returns nothing
- * rather than an empty map. Shared by `mthds_validate`, which gates the input
- * form's artifacts on it, and by `mthds_run_results`, which gates the run's.
- */
-export function hasArtifactEntries(artifact: unknown): boolean {
-  const map = asRecord(artifact);
-  return map !== undefined && Object.keys(map).length > 0;
 }
 
 /** The shared `<address>[@<tag>]` grammar sentence, reused by schema descriptions and hints. */
@@ -533,52 +516,6 @@ export function validateMethodSelectorRequest(
 }
 
 /**
- * Request-shape checks for a tool that names its method by reference only —
- * the console's `pipelex_show_method` and `pipelex_run`, which take no files:
- * exactly one of `method_id` / `method_ref`, neither blank. It is the
- * `one_selector` rule of {@link validateMethodSelectorRequest} with the files
- * arm gone, and its teaching text names only the two forms such a tool takes,
- * since telling a caller to "submit files" to a tool with no `files` argument
- * sends it after a parameter that does not exist.
- */
-export function validateMethodReferenceRequest(selectors: MethodSelectors): ToolError[] {
-  const errors: ToolError[] = [];
-
-  if (selectors.method_ref !== undefined && selectors.method_ref.trim() === "") {
-    errors.push({
-      class: "input_domain",
-      location: "method_ref",
-      message: "method_ref must not be empty when supplied.",
-      hint: `Pass a published method's address — ${METHOD_REF_GRAMMAR} — or a saved method's catalog id (mt_…) as method_id instead.`,
-      retryable: false,
-    });
-  }
-
-  if (selectors.method_id !== undefined && selectors.method_id.trim() === "") {
-    errors.push({
-      class: "input_domain",
-      location: "method_id",
-      message: "method_id must not be empty when supplied.",
-      hint: "Pass the catalog id (mt_…) of a saved method, or a published method's address as method_ref instead.",
-      retryable: false,
-    });
-  }
-
-  if (selectors.method_ref === undefined && selectors.method_id === undefined) {
-    errors.push({
-      class: "input_domain",
-      location: "method_id",
-      message: "Provide a method_id or a method_ref.",
-      hint: `Pass the catalog id (mt_…) of a saved method as method_id, or a published method's address (${METHOD_REF_GRAMMAR}) as method_ref.`,
-      retryable: false,
-    });
-  }
-
-  errors.push(...validateSelectorExclusivity([], selectors, "one_selector"));
-  return errors;
-}
-
-/**
  * The illegal pairings per {@link SelectorRule}. Evaluated only on validly
  * supplied selectors (a blank one already earned its own error above), and
  * emitting one error per illegal pair so a three-selector request teaches both
@@ -661,17 +598,14 @@ function validateFileItems(files: SubmittedFile[]): ToolError[] {
 }
 
 /** Request-shape check on a run id (format stays server-owned). */
-export function validateRunIdRequest(
-  runId: string,
-  names: ToolNames = WORKSHOP_TOOL_NAMES,
-): ToolError[] {
+export function validateRunIdRequest(runId: string): ToolError[] {
   if (runId.trim() === "") {
     return [
       {
         class: "input_domain",
         location: "run_id",
         message: "run_id must not be empty.",
-        hint: `Pass the durable run id returned by ${names.run}.`,
+        hint: `Pass the durable run id returned by ${WORKSHOP_TOOL_NAMES.run}.`,
         retryable: false,
       },
     ];
@@ -779,11 +713,10 @@ export interface ClassifyErrorOptions {
   /**
    * Per-deployment texture for auth failures (`ClientAuthenticationError`,
    * HTTP 401/403). The default wording points at the `PIPELEX_API_KEY` env
-   * var — right for the workshop, where the caller owns the process env. The
-   * hosted console overrides it per request (its `src/hosted/contexts.ts`): its
-   * callers cannot touch the server env and authenticate by signing in, so
-   * they must be pointed at reconnecting the connector instead. Capabilities
-   * thread it from their context's `authError` field.
+   * var — right for the workshop, where the caller owns the process env. A
+   * deployment whose callers authenticate some other way overrides it, and
+   * capabilities thread it from their context's `authError` field; the
+   * workshop never sets it.
    */
   auth?: {
     location?: string;
@@ -833,35 +766,10 @@ export interface ClassifyErrorOptions {
     hint: string;
   };
   /**
-   * Per-route texture for {@link MissingInputFormError} — the deployment served
-   * a report with no usable `input_form` descriptor. Classified `config`, not
-   * `input_domain`: no request the caller can write works around it, so
-   * reporting it against one of their fields sent them editing a request that
-   * was never the problem. Defaults to `PIPELEX_BASE_URL`, the knob that
-   * actually selects the deployment.
-   */
-  missingDescriptor?: {
-    location?: string;
-    hint: string;
-  };
-  /**
-   * Per-route texture for {@link UnresolvableClosureError} — the method's own
-   * bundle did not validate, so no signature could be read from it. It locates
-   * at whatever NAMED the method (the files, the address, the id) and never at
-   * `pipe_ref`, which is why it is separate from {@link preparation}: that
-   * texture answers "which pipe?", and this one answers "which method?".
-   * Defaults to {@link badRequest}, whose locator already follows the selector.
-   */
-  closure?: {
-    location?: string;
-    hint: string;
-  };
-  /**
    * Per-route texture for a refused or unreadable asset on the upload leg.
    * `location` covers both arms (`RejectedAssetError` /
    * `InvalidLocalSourceError`) and defaults to `inputs` — right for
-   * `mthds_prepare_inputs`, whose assets are values inside the filled inputs;
-   * wrong for `mthds_upload_attachments`, whose assets are located per item.
+   * `mthds_prepare_inputs`, whose assets are values inside the filled inputs.
    * `hint` covers the size-refusal arm only, so a route can name the real
    * upload ceiling; an unreadable local path keeps its own path-readability
    * hint either way.
@@ -897,40 +805,13 @@ const PIPE_SELECTION_ERROR_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /** Whether `err` is the pipe I/O route refusing a pipe selection (see {@link PIPE_SELECTION_ERROR_TYPES}). */
-export function isPipeSelectionRefusal(err: unknown): err is ApiResponseError {
+function isPipeSelectionRefusal(err: unknown): err is ApiResponseError {
   return (
     err instanceof ApiResponseError &&
     err.status === 422 &&
     err.errorType !== undefined &&
     PIPE_SELECTION_ERROR_TYPES.has(err.errorType)
   );
-}
-
-/**
- * The deployment served an answer with no usable `input_form`
- * descriptor. Derives from the SDK's `InputPreparationError` so a caller
- * catching the family still catches it, but {@link classifyError} pulls it out
- * ahead of the base arm: it is a deployment fault, not a request the caller can
- * repair.
- */
-export class MissingInputFormError extends InputPreparationError {
-  constructor(message: string) {
-    super(message);
-    this.name = "MissingInputFormError";
-  }
-}
-
-/**
- * The method's own closure did not validate, so no signature could be read.
- * Separated from the preparation family for the locator alone: left in it, a
- * caller who named a broken published package by `method_ref` was told to fix
- * their `pipe_ref` — a field they had left empty, on a bundle they do not own.
- */
-export class UnresolvableClosureError extends InputPreparationError {
-  constructor(message: string) {
-    super(message);
-    this.name = "UnresolvableClosureError";
-  }
 }
 
 export function classifyError(err: unknown, options: ClassifyErrorOptions = {}): ToolError {
@@ -1057,45 +938,11 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
     };
   }
 
-  // Two subclasses first, because both derive from InputPreparationError and
-  // the base arm below would otherwise swallow them — which is exactly what it
-  // used to do, reporting each against the caller's `pipe_ref`.
-
-  // The deployment served no usable descriptor. A `config` condition: the
-  // message and the hint used to contradict each other, one naming the
-  // deployment and the other telling the caller to qualify a pipe.
-  if (err instanceof MissingInputFormError) {
-    const texture = options.missingDescriptor;
-    return {
-      class: "config",
-      location: texture?.location ?? "PIPELEX_BASE_URL",
-      message: err.message,
-      hint:
-        texture?.hint ??
-        "Point the API at a deployment that serves the input-form descriptor (pipelex-api >= 0.18.0).",
-      retryable: false,
-    };
-  }
-
-  // The closure itself is broken — a question about whatever named the method,
-  // so it takes the selector's own locator rather than the pipe's.
-  if (err instanceof UnresolvableClosureError) {
-    const texture = options.closure ?? options.badRequest ?? DEFAULT_BAD_REQUEST;
-    return {
-      class: "input_domain",
-      ...(texture.location === undefined ? {} : { location: texture.location }),
-      message: err.message,
-      hint: texture.hint,
-      retryable: false,
-    };
-  }
-
   // The base class: an unqualified or unknown pipe_ref, no single default pipe,
   // or a caller value at a file position that was malformed/unsupported. All are
   // request-domain problems, and all are raised CLIENT-SIDE — so they locate at
-  // `preparation`,
-  // which a route separates from `badRequest` when its 400/422 is about a
-  // different field. `badRequest` remains the fallback for a route that has no
+  // `preparation`, which a route separates from `badRequest` when its 400/422
+  // is about a different field. `badRequest` remains the fallback for a route that has no
   // such distinction to draw.
   if (err instanceof InputPreparationError) {
     const texture = options.preparation ?? options.badRequest ?? DEFAULT_BAD_REQUEST;
@@ -1231,7 +1078,7 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
   // a sandbox-hosted deployment, which is where PipeFunc Python belongs. The
   // class is still `input_domain`, by this repo's own test for it: a request
   // the caller can write does work around it (a Python-free method), which is
-  // exactly what `missingDescriptor` is `config` for failing. The runner reads
+  // what separates `input_domain` from `config`. The runner reads
   // it the same way — `raise_forbidden` tags this refusal `error_domain:
   // input` (`pipelex-api/api/errors.py`) — though the SDK surfaces no
   // `error_domain`, which is why the branch is on `errorType`. What must not
@@ -1359,8 +1206,8 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
 
 /**
  * The explicit override of the plain-http rule, read by every capability that
- * fetches a stored artifact — `mthds_download_artifacts` on the workshop and
- * `mthds_show_images` on both shells. Unset, a plain `http:` link is accepted
+ * fetches a stored artifact — `mthds_download_artifacts` and
+ * `mthds_show_images`. Unset, a plain `http:` link is accepted
  * exactly when `PIPELEX_BASE_URL` is itself `http:` (the local compose stack,
  * whose object store mints plain-http links); `true` / `1` accepts one from any
  * deployment, `false` / `0` refuses one from every deployment. Any other value
@@ -1454,9 +1301,7 @@ interface ItemErrorTexture {
  * call mints fresh links.
  *
  * It lives here rather than in `artifacts.ts` because both fetching
- * capabilities need it, and the image-display capability — which both shells
- * register, as `mthds_show_images` and `pipelex_show_images` — must not import
- * the workshop-only download tool to get it.
+ * capabilities need it, and neither imports the other.
  */
 const ITEM_ERROR_TEXTURES: Record<string, ItemErrorTexture> = {
   invalid_storage_uri: {

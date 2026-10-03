@@ -120,10 +120,8 @@ interface PrepareClient {
 }
 
 /**
- * `mthds_prepare_inputs` is the workshop's alone, and it always uploads: the
- * workshop is co-located with the user's files. The console never had a use
- * for an upload walk it had to refuse at every leaf, so its pass-through copy
- * of the walk lives in `console-inputs.ts`, where `pipelex_run` calls it.
+ * `mthds_prepare_inputs` always uploads: the workshop is co-located with the
+ * user's files.
  */
 export interface PrepareContext extends ApiConfig {
   client?: PrepareClient;

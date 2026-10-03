@@ -2,17 +2,15 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 
 /**
- * One MCP tool as a shell registers it: the contract a host is shown (name,
- * description, schemas, annotations) and the handler that answers a call over
- * that shell's own capability contexts.
+ * One MCP tool as the workshop registers it: the contract a host is shown
+ * (name, description, schemas, annotations) and the handler that answers a
+ * call over the workshop's capability contexts.
  *
- * This is the shape both tool tables are written in, not a table: each shell
- * owns its table (`src/tools.ts` in the workshop's package, `src/hosted/tools.ts`
- * in the console's), and what the two share is the capability core in `capabilities/`,
- * never a definition. A tool that should behave differently on one shell is an
- * edit to that shell's table, not a flag on a shared one.
+ * This is the shape the workshop's tool table is written in, not the table:
+ * the table is `src/tools.ts` in the workshop's package, and what it is built
+ * from is the capability core in `capabilities/`.
  *
- * Kept free of any Skybridge import: the workshop's bundle reaches this module.
+ * Type imports only: the workshop's bundle reaches this module.
  */
 export interface ToolDefinition<
   TContexts,
@@ -32,8 +30,8 @@ export interface ToolDefinition<
 
 /**
  * Identity at runtime; it exists so a definition keeps its literal `name` and
- * its handler's precise input type, which the console's typed registration
- * chain needs.
+ * its handler's precise input type in the workshop's table, which erases them
+ * only at the one registration loop in its `src/server.ts`.
  */
 export function defineTool<
   TContexts,

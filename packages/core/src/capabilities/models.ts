@@ -26,9 +26,6 @@
  * the same reference would suggest. But the runner matches a handle against
  * every model of the pipe's type, which the deck does not list, and it checks
  * within one type, where a check here with no category pools every category.
- *
- * The console has no such tool: a chatbot runs methods rather than authoring
- * them, so it never writes a `model` field.
  */
 
 import { ApiResponseError } from "@pipelex/sdk";
@@ -240,7 +237,7 @@ export interface ModelsResult {
   summary: string;
 }
 
-/** The narrow SDK seam the tests and a shell can supply. */
+/** The narrow SDK seam the tests supply. */
 export interface ModelsClient {
   models(category?: ModelCategory): Promise<ModelDeck>;
 }

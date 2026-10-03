@@ -38,9 +38,7 @@ import type {
  *
  * It reads one `POST /v1/pipe-io` for the one pipe, with no dry run, and
  * projects the template client-side from the pipe's `input_form` descriptor
- * through `inputs-template.ts`'s `inputsTemplateFor`, the helper
- * `pipelex_show_method` projects its template with, so the two tools cannot
- * hand a model different templates for the same pipe. All three selectors are
+ * through `inputs-template.ts`'s `inputsTemplateFor`. All three selectors are
  * server pass-throughs: the runner resolves an address, and the hosted platform
  * resolves a catalog id. The route picks the pipe too, so the template is for
  * the pipe `mthds_prepare_inputs` would prepare and a run naming none would
@@ -156,9 +154,9 @@ interface InputsClient {
 
 export interface InputsContext extends ApiConfig {
   client?: InputsClient;
-  /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
+  /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
-  /** Deployment-specific auth-failure texture (the hosted console overrides it per request); default env-var wording when absent. */
+  /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
 

@@ -274,10 +274,9 @@ export interface ArtifactsContext extends ApiConfig {
   client?: ArtifactClient;
   /**
    * The directory saves land under — the workshop's working directory,
-   * absolute. Absent on a deployment that cannot write files; the tool then
-   * refuses (fail-closed) rather than picking a directory of its own. Only the
-   * workshop registers the tool, so that branch is a guard, not a served
-   * posture.
+   * absolute. Absent, as on a context the core builds alone, the tool refuses
+   * (fail-closed) rather than picking a directory of its own. The workshop
+   * always sets it, so that branch is a guard, not a served posture.
    */
   saveRoot?: string;
   /**

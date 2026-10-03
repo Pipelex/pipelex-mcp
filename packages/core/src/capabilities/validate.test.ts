@@ -118,18 +118,8 @@ const pendingReport: PipelexValidationReport = {
 };
 
 // Appended to the API's rendered markdown on every valid verdict that carries a
-// signature, ahead of the Views note. Kept in sync with `signatureLine`.
+// signature. Kept in sync with `signatureLine`.
 const MAIN_PIPE_NOTE = "\n\n## Main pipe\n\n`demo.main(topic: native.Text) -> native.Text`";
-
-// Appended to the API's rendered markdown whenever a view is available. Kept
-// in sync with `viewsNote` in validate.ts: a runnable verdict advertises the
-// graph and the input form, a pending-signature one the graph alone.
-const VIEWS_NOTE =
-  "\n\n## Views\n\nThe validation result includes a graph view of the method (dry run) and an input form the user can fill in to run it.";
-const VIEWS_NOTE_GRAPH_ONLY =
-  "\n\n## Views\n\nThe validation result includes a graph view of the method (dry run).";
-const VIEWS_NOTE_FORM_ONLY =
-  "\n\n## Views\n\nThe validation result includes an input form the user can fill in to run the method.";
 
 const invalidReport: PipelexInvalidReport = {
   is_valid: false,
@@ -147,39 +137,16 @@ const invalidReport: PipelexInvalidReport = {
 };
 
 describe("validationResult", () => {
-  it("projects runnable valid reports and carries the graph off structuredContent", () => {
-    const result = validationResult(validReport, true);
+  it("projects runnable valid reports and keeps the graph off structuredContent", () => {
+    const result = validationResult(validReport);
 
     expect(result.structuredContent.status).toBe("ok");
-    // The summary is the API markdown plus the appended signature line and
-    // Views note, in that order.
-    expect(result.summary).toBe("# Valid" + MAIN_PIPE_NOTE + VIEWS_NOTE);
-    // The graph rides the view-only `graphSpec` field (delivered on `_meta`),
-    // never `structuredContent` — the model reads the lean verdict only.
-    expect(result.graphSpec).toEqual(validReport.graph_spec);
-    // ...but the model still learns the views are available via this list.
-    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph", "input_form"]);
-    // The IO contracts and their descriptor ride beside the graph, same
-    // channel, same discipline.
-    expect(result.pipeIoContracts).toEqual(validReport.pipe_io_contracts);
-    expect(result.inputForm).toEqual(validReport.input_form);
+    // The summary is the API markdown plus the appended signature line.
+    expect(result.summary).toBe("# Valid" + MAIN_PIPE_NOTE);
     expect(result.mainPipeRef).toBe("demo.main");
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
     expect(result.structuredContent).not.toHaveProperty("pipe_io_contracts");
     expect(result.structuredContent).not.toHaveProperty("rendered_markdown");
-  });
-
-  it("omits graph when requested", () => {
-    const result = validationResult(validReport, false);
-
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.graphSpec).toBeUndefined();
-    // No graph produced → no graph view advertised; the form does not depend on it.
-    expect(result.structuredContent.available_view_specs).toEqual(["input_form"]);
-    expect(result.pipeIoContracts).toEqual(validReport.pipe_io_contracts);
-    // The signature does not ride the graph either.
-    expect(result.summary).toBe("# Valid" + MAIN_PIPE_NOTE + VIEWS_NOTE_FORM_ONLY);
-    expect(result.structuredContent).not.toHaveProperty("graph_spec");
   });
 
   it("settles no entry pipe when the blueprint states a bare main pipe and no domain", () => {
@@ -187,22 +154,14 @@ describe("validationResult", () => {
       ...validReport,
       bundle_blueprint: { main_pipe: "main" },
     };
-    const result = validationResult(report, true);
+    const result = validationResult(report);
 
     // A bare code cannot key either artifact — both are keyed by the qualified
     // ref — so there is nothing to qualify it with and nothing to find.
     expect(result.mainPipeRef).toBeUndefined();
-    // A missing entry omits the signature rather than guessing at a key, and
-    // withholds the form's ADVERT the same way.
+    // A missing entry omits the signature rather than guessing at a key.
     expect(result.structuredContent.main_pipe).toBeUndefined();
-    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
-    expect(result.summary).toBe("# Valid" + VIEWS_NOTE_GRAPH_ONLY);
-    // The artifacts themselves still ride: the advert speaks for the entry
-    // pipe, the maps are just what the view looks a pipe up in. The kernel's
-    // selectors also try the bare code, so this very map is reachable by a
-    // click — withholding it would make that click dead for every pipe.
-    expect(result.pipeIoContracts).toEqual(validReport.pipe_io_contracts);
-    expect(result.inputForm).toEqual(validReport.input_form);
+    expect(result.summary).toBe("# Valid");
   });
 
   it("leaves an already-qualified blueprint main_pipe alone instead of prefixing the domain", () => {
@@ -214,74 +173,58 @@ describe("validationResult", () => {
       bundle_blueprint: { domain: "demo", main_pipe: "other.shout" },
     };
 
-    expect(validationResult(report, true).mainPipeRef).toBe("other.shout");
+    expect(validationResult(report).mainPipeRef).toBe("other.shout");
   });
 
-  it("does not advertise a form when the report carries no contracts", () => {
+  it("carries no signature when the report carries no contracts", () => {
     const report: PipelexValidationReport = { ...validReport, pipe_io_contracts: {} };
-    const result = validationResult(report, true);
+    const result = validationResult(report);
 
-    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
-    expect(result.pipeIoContracts).toBeUndefined();
-    expect(result.inputForm).toBeUndefined();
     // The ref is still derived (it is the blueprint's, not the contracts'), but
     // an empty contract map leaves the signature nothing to project.
     expect(result.mainPipeRef).toBe("demo.main");
     expect(result.structuredContent.main_pipe).toBeUndefined();
-    expect(result.summary).toBe("# Valid" + VIEWS_NOTE_GRAPH_ONLY);
+    expect(result.summary).toBe("# Valid");
   });
 
-  it("does not advertise a form when the report carries no descriptor", () => {
+  it("keeps the signature when the report carries no descriptor", () => {
     // A runner that ignores the `views` token (or predates it) returns no
-    // `input_form`. The kernel derives the fields from the descriptor, so
-    // without it the panel would render an empty form — advertise nothing,
-    // and keep the contracts off `_meta` too (their only consumer is the form).
+    // `input_form`.
     const report: PipelexValidationReport = { ...validReport, input_form: undefined };
-    const result = validationResult(report, true);
+    const result = validationResult(report);
 
-    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
-    expect(result.pipeIoContracts).toBeUndefined();
-    expect(result.inputForm).toBeUndefined();
     expect(result.mainPipeRef).toBe("demo.main");
     // The signature reads the contracts, which are still there — it never
     // depended on the descriptor beyond input order.
-    expect(result.summary).toBe("# Valid" + MAIN_PIPE_NOTE + VIEWS_NOTE_GRAPH_ONLY);
+    expect(result.summary).toBe("# Valid" + MAIN_PIPE_NOTE);
   });
 
-  it("does not advertise or emit a graph when the invoking shell has no views", () => {
-    const result = validationResult(validReport, true, false);
+  it("does not advertise or emit a graph", () => {
+    const result = validationResult(validReport);
 
     expect(result.structuredContent.available_view_specs).toEqual([]);
-    expect(result.graphSpec).toBeUndefined();
-    expect(result.pipeIoContracts).toBeUndefined();
-    // The workshop is precisely the shell the signature exists for, so it is
-    // NOT on the views branch.
+    // The signature is not on a views branch.
     expect(result.summary).toBe("# Valid" + MAIN_PIPE_NOTE);
   });
 
   it("projects pending signatures as valid but not runnable", () => {
-    const result = validationResult(pendingReport, true);
+    const result = validationResult(pendingReport);
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(true);
     expect(result.structuredContent.is_runnable).toBe(false);
     expect(result.structuredContent.pending_signatures).toEqual(["demo.todo"]);
-    // A pending-signature bundle is still valid and carries a graph, but it
-    // cannot run, so no input form is advertised for it.
-    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
-    expect(result.pipeIoContracts).toBeUndefined();
-    expect(result.summary).toBe("# Valid" + MAIN_PIPE_NOTE + VIEWS_NOTE_GRAPH_ONLY);
+    expect(result.summary).toBe("# Valid" + MAIN_PIPE_NOTE);
   });
 
   it("projects invalid produced verdicts as ok with validation errors", () => {
-    const result = validationResult(invalidReport, true);
+    const result = validationResult(invalidReport);
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(false);
     expect(result.structuredContent.is_runnable).toBe(false);
     expect(result.structuredContent.validation_errors).toEqual(invalidReport.validation_errors);
     expect(result.structuredContent.available_view_specs).toEqual([]);
-    expect(result.graphSpec).toBeUndefined();
     expect(result.structuredContent).not.toHaveProperty("rendered_markdown");
     expect(result.summary).toBe("# Invalid");
   });
@@ -292,7 +235,7 @@ describe("validationResult", () => {
       rendered_markdown: null,
     } as unknown as PipelexValidationReport;
 
-    expect(() => validationResult(report, true)).toThrow(/did not include rendered markdown/);
+    expect(() => validationResult(report)).toThrow(/did not include rendered markdown/);
   });
 });
 
@@ -400,7 +343,7 @@ function reportWithContract(contract: unknown): PipelexValidationReport {
 
 describe("main pipe signature", () => {
   it("projects the main pipe's signature in the authored order the descriptor states", () => {
-    const result = validationResult(orderedReport, true);
+    const result = validationResult(orderedReport);
 
     // toEqual pins the field set as well as the values: an extra member would
     // be a token the model pays for and a schema the host may reject.
@@ -422,7 +365,7 @@ describe("main pipe signature", () => {
   });
 
   it("falls back to the contract map's own order when no descriptor arrived", () => {
-    const result = validationResult({ ...orderedReport, input_form: undefined }, true);
+    const result = validationResult({ ...orderedReport, input_form: undefined });
 
     expect(result.structuredContent.main_pipe?.inputs.map((input) => input.name)).toEqual([
       "notes",
@@ -456,7 +399,7 @@ describe("main pipe signature", () => {
         ],
       },
     };
-    const result = validationResult({ ...orderedReport, input_form: inputForm }, true);
+    const result = validationResult({ ...orderedReport, input_form: inputForm });
 
     expect(result.structuredContent.main_pipe?.inputs.map((input) => input.name)).toEqual([
       "tags",
@@ -473,7 +416,7 @@ describe("main pipe signature", () => {
     const inputForm: InputForm = {
       "demo.main": { fields: [document, notes, document, tags] },
     };
-    const result = validationResult({ ...orderedReport, input_form: inputForm }, true);
+    const result = validationResult({ ...orderedReport, input_form: inputForm });
 
     expect(result.structuredContent.main_pipe?.inputs).toEqual(ORDERED_INPUTS);
   });
@@ -482,28 +425,22 @@ describe("main pipe signature", () => {
     // Not runnable, so no form is advertised — but the shape is fully
     // determined before the signatures resolve, and knowing it is what lets an
     // agent write the call site it is about to fill in.
-    const result = validationResult(
-      { ...orderedReport, pending_signatures: ["demo.todo"], is_runnable: false },
-      true,
-    );
+    const result = validationResult({
+      ...orderedReport,
+      pending_signatures: ["demo.todo"],
+      is_runnable: false,
+    });
 
     expect(result.structuredContent.is_runnable).toBe(false);
     expect(result.structuredContent.main_pipe?.pipe_ref).toBe("demo.main");
   });
 
   it("projects the signature on a shell with no views — the workshop case", () => {
-    const result = validationResult(orderedReport, true, false);
+    const result = validationResult(orderedReport);
 
     expect(result.structuredContent.available_view_specs).toEqual([]);
     expect(result.structuredContent.main_pipe?.inputs).toEqual(ORDERED_INPUTS);
     expect(result.summary).toContain("## Main pipe");
-  });
-
-  it("projects the signature when the graph was not requested", () => {
-    const result = validationResult(orderedReport, false);
-
-    expect(result.graphSpec).toBeUndefined();
-    expect(result.structuredContent.main_pipe?.inputs).toEqual(ORDERED_INPUTS);
   });
 
   it("marks an optional output with a trailing ? in the rendered line", () => {
@@ -517,7 +454,6 @@ describe("main pipe signature", () => {
           optional: true,
         },
       }),
-      true,
     );
 
     expect(result.structuredContent.main_pipe?.output.optional).toBe(true);
@@ -525,10 +461,7 @@ describe("main pipe signature", () => {
   });
 
   it("omits the signature when the blueprint declares no main pipe", () => {
-    const result = validationResult(
-      { ...orderedReport, bundle_blueprint: { domain: "demo" } },
-      true,
-    );
+    const result = validationResult({ ...orderedReport, bundle_blueprint: { domain: "demo" } });
 
     expect(result.structuredContent.main_pipe).toBeUndefined();
     expect(result.summary).not.toContain("## Main pipe");
@@ -656,7 +589,7 @@ describe("main pipe signature", () => {
     ];
 
     for (const [label, contract] of malformed) {
-      const result = validationResult(reportWithContract(contract), true);
+      const result = validationResult(reportWithContract(contract));
 
       expect(result.structuredContent.main_pipe, label).toBeUndefined();
       expect(result.summary, label).not.toContain("## Main pipe");
@@ -666,14 +599,9 @@ describe("main pipe signature", () => {
     }
   });
 
-  it("still advertises the form when a plain-object contract fails to narrow", () => {
-    // The advert and `main_pipe` answer two different questions, and this is
-    // where they diverge: the form derives its fields from the DESCRIPTOR, so
-    // it renders whatever the contract's `optional` flag says, while the
-    // signature refuses to emit a half-narrowed call site. A non-boolean
-    // `optional` therefore advertises a form that genuinely works and no
-    // signature — so the schema description must not promise the form's pipe
-    // is "the same pipe `main_pipe` names".
+  it("omits the signature when a plain-object contract fails to narrow", () => {
+    // The signature refuses to emit a half-narrowed call site, so a
+    // non-boolean `optional` yields no signature.
     const result = validationResult(
       reportWithContract({
         inputs: {},
@@ -684,28 +612,18 @@ describe("main pipe signature", () => {
           optional: "no",
         },
       }),
-      true,
     );
 
     expect(result.structuredContent.main_pipe).toBeUndefined();
-    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph", "input_form"]);
   });
 
-  it("withholds the form's advert when the contract entry is not an object", () => {
-    // The twin of the test above, and the boundary between them. A plain object
-    // that fails to narrow still derives a working form from the descriptor, so
-    // it is advertised; an entry that is no object at all is no entry, and the
-    // advert does not speak for it. What the VIEW then does with such an entry
-    // is a separate question, and not a settled one — see L-260912-445e9b.
-    // Without this case the "plain object" half of `hasEntryFor` is unpinned:
-    // relax it to a bare `!== undefined` and the whole suite stays green.
-    const result = validationResult(reportWithContract("demo.main"), true);
+  it("omits the signature when the contract entry is not an object", () => {
+    // An entry that is no object at all is no entry.
+    const result = validationResult(reportWithContract("demo.main"));
 
-    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
     expect(result.structuredContent.main_pipe).toBeUndefined();
-    // The verdict and the artifacts are untouched: only the advert is withheld.
+    // The verdict is untouched.
     expect(result.structuredContent.is_valid).toBe(true);
-    expect(result.pipeIoContracts).toBeDefined();
   });
 });
 
@@ -854,7 +772,7 @@ describe("the produces-images signal", () => {
 
   describe("projection onto main_pipe.output", () => {
     it("reports the empty array when the descriptor arrived and holds no image", () => {
-      const result = validationResult({ ...validReport, output_form: demoOutputForm }, true);
+      const result = validationResult({ ...validReport, output_form: demoOutputForm });
 
       expect(result.structuredContent.main_pipe?.output.images).toEqual([]);
       // Nothing is said in prose when nothing is produced.
@@ -862,18 +780,15 @@ describe("the produces-images signal", () => {
     });
 
     it("reports the path and says so in prose when the output is an image", () => {
-      const result = validationResult(
-        {
-          ...validReport,
-          output_form: outputFormOf({
-            name: "output",
-            kind: "image",
-            concept_ref: "native.Image",
-            required: true,
-          }),
-        },
-        true,
-      );
+      const result = validationResult({
+        ...validReport,
+        output_form: outputFormOf({
+          name: "output",
+          kind: "image",
+          concept_ref: "native.Image",
+          required: true,
+        }),
+      });
 
       expect(result.structuredContent.main_pipe?.output.images).toEqual(["$"]);
       expect(result.summary).toContain("-> native.Text (produces images)");
@@ -896,7 +811,7 @@ describe("the produces-images signal", () => {
           fields: [{ name: "inner", kind: "unknown", required: true }],
         },
       ]) {
-        const result = validationResult({ ...validReport, output_form: outputFormOf(field) }, true);
+        const result = validationResult({ ...validReport, output_form: outputFormOf(field) });
 
         expect(result.structuredContent.main_pipe?.output).not.toHaveProperty("images");
         expect(result.summary).not.toContain("produces images");
@@ -906,38 +821,35 @@ describe("the produces-images signal", () => {
     it("still reports an image the walk DID find, though the rest was opaque", () => {
       // Downgrading a known yes to "unknown" would lose the very signal the
       // member exists for, so a non-empty list rides even when incomplete.
-      const result = validationResult(
-        {
-          ...validReport,
-          output_form: outputFormOf({
-            name: "output",
-            kind: "object",
-            required: true,
-            fields: [
-              { name: "picture", kind: "image", required: true },
-              { name: "extra", kind: "unknown", required: false },
-            ],
-          }),
-        },
-        true,
-      );
+      const result = validationResult({
+        ...validReport,
+        output_form: outputFormOf({
+          name: "output",
+          kind: "object",
+          required: true,
+          fields: [
+            { name: "picture", kind: "image", required: true },
+            { name: "extra", kind: "unknown", required: false },
+          ],
+        }),
+      });
 
       expect(result.structuredContent.main_pipe?.output.images).toEqual(["$.picture"]);
       expect(result.summary).toContain("(produces images)");
     });
 
     it("leaves the member ABSENT when no descriptor arrived, which is unknown and not none", () => {
-      const result = validationResult(validReport, true);
+      const result = validationResult(validReport);
 
       expect(result.structuredContent.main_pipe?.output).not.toHaveProperty("images");
       expect(result.summary).not.toContain("produces images");
     });
 
     it("leaves the member absent when the descriptor carries no entry for the entry pipe", () => {
-      const result = validationResult(
-        { ...validReport, output_form: { "demo.other": demoOutputForm["demo.main"] } },
-        true,
-      );
+      const result = validationResult({
+        ...validReport,
+        output_form: { "demo.other": demoOutputForm["demo.main"] },
+      });
 
       expect(result.structuredContent.main_pipe?.output).not.toHaveProperty("images");
     });
@@ -946,13 +858,10 @@ describe("the produces-images signal", () => {
       // The contract is the signature's source of truth; the descriptor is
       // presentation riding beside it, so a bad one costs the images member and
       // never the signature.
-      const result = validationResult(
-        {
-          ...validReport,
-          output_form: { "demo.main": { field: "not a node" } } as unknown as OutputForm,
-        },
-        true,
-      );
+      const result = validationResult({
+        ...validReport,
+        output_form: { "demo.main": { field: "not a node" } } as unknown as OutputForm,
+      });
 
       expect(result.structuredContent.main_pipe).toEqual({
         pipe_ref: "demo.main",
@@ -973,48 +882,31 @@ describe("the produces-images signal", () => {
     });
 
     it("rides a valid verdict whose signatures are still pending", () => {
-      // Independent of `is_runnable` and of `includeGraph`, like the rest of
-      // the signature: the output's shape is settled before the signatures are.
-      const result = validationResult(
-        {
-          ...pendingReport,
-          output_form: outputFormOf({ name: "output", kind: "image", required: true }),
-        },
-        false,
-      );
+      // Independent of `is_runnable`, like the rest of the signature: the
+      // output's shape is settled before the signatures are.
+      const result = validationResult({
+        ...pendingReport,
+        output_form: outputFormOf({ name: "output", kind: "image", required: true }),
+      });
 
       expect(result.structuredContent.main_pipe?.output.images).toEqual(["$"]);
     });
   });
 
-  describe("the descriptor on the view-only channel", () => {
-    it("rides _meta beside its twin, and reaches structuredContent never", () => {
-      const result = toolResult(
-        validationResult({ ...validReport, output_form: demoOutputForm }, true),
-      );
+  describe("the output descriptor", () => {
+    it("never reaches structuredContent", () => {
+      const result = toolResult(validationResult({ ...validReport, output_form: demoOutputForm }));
 
-      expect(result._meta.output_form).toEqual(demoOutputForm);
       expect(result.structuredContent).not.toHaveProperty("output_form");
-      // No new view kind is minted until a view consumes it.
-      expect(result.structuredContent.available_view_specs).toEqual([
-        "dry_run_graph",
-        "input_form",
-      ]);
     });
 
-    it("stays off _meta on a shell with no views, while the images member still rides", () => {
-      const result = validationResult(
-        {
-          ...validReport,
-          output_form: outputFormOf({ name: "output", kind: "image", required: true }),
-        },
-        true,
-        false,
-      );
+    it("still carries the images member", () => {
+      const result = validationResult({
+        ...validReport,
+        output_form: outputFormOf({ name: "output", kind: "image", required: true }),
+      });
 
-      expect(result.outputForm).toBeUndefined();
-      // The workshop is the shell an integrating agent uses, so the
-      // model-facing half is deliberately not on the views branch.
+      // The model-facing half is not on a views branch.
       expect(result.structuredContent.main_pipe?.output.images).toEqual(["$"]);
     });
   });
@@ -1061,7 +953,7 @@ describe("effective entry pipe", () => {
   it("prefers the server's stated default over the blueprint's main pipe", () => {
     // The blueprint still says `demo.main`; the manifest the MCP cannot see
     // says `other.shout`, and that is the pipe `mthds_run` defaults to.
-    const result = validationResult({ ...divergingReport, default_pipe_ref: "other.shout" }, true);
+    const result = validationResult({ ...divergingReport, default_pipe_ref: "other.shout" });
 
     expect(result.mainPipeRef).toBe("other.shout");
     expect(result.structuredContent.main_pipe).toEqual({
@@ -1079,7 +971,7 @@ describe("effective entry pipe", () => {
     // naming a pipe the closure declares in several domains, say. A
     // selector-less run would fail to resolve one too, so the blueprint must
     // not be consulted behind it.
-    const result = validationResult({ ...divergingReport, default_pipe_ref: null }, true);
+    const result = validationResult({ ...divergingReport, default_pipe_ref: null });
 
     expect(result.mainPipeRef).toBeUndefined();
     expect(result.structuredContent.main_pipe).toBeUndefined();
@@ -1092,7 +984,7 @@ describe("effective entry pipe", () => {
     // No `default_pipe_ref` own property at all: the runner predates the
     // field, and the blueprint derivation is the only signal there is.
     expect(divergingReport).not.toHaveProperty("default_pipe_ref");
-    const result = validationResult(divergingReport, true);
+    const result = validationResult(divergingReport);
 
     expect(result.mainPipeRef).toBe("demo.main");
     expect(result.structuredContent.main_pipe?.inputs).toEqual(ORDERED_INPUTS);
@@ -1106,73 +998,27 @@ describe("effective entry pipe", () => {
       // Cast because the drift is the point: a newer SDK types this field, and
       // a fixture that could not express a value it forbids would stop testing
       // what arrives on the wire.
-      const result = validationResult(
-        { ...divergingReport, default_pipe_ref: stated } as unknown as PipelexValidationReport,
-        true,
-      );
+      const result = validationResult({
+        ...divergingReport,
+        default_pipe_ref: stated,
+      } as unknown as PipelexValidationReport);
 
       expect(result.mainPipeRef, JSON.stringify(stated)).toBeUndefined();
       expect(result.structuredContent.main_pipe, JSON.stringify(stated)).toBeUndefined();
     }
   });
 
-  it("carries the stated default on _meta, where the view reads the pipe in play", () => {
+  it("carries the stated default on _meta", () => {
     const result = toolResult(
-      validationResult({ ...divergingReport, default_pipe_ref: "other.shout" }, true),
+      validationResult({ ...divergingReport, default_pipe_ref: "other.shout" }),
     );
 
     expect(result._meta.main_pipe_ref).toBe("other.shout");
   });
 
-  it("withholds the form's advert, but not its artifacts, when the server states no default", () => {
-    // Runnable, views on, both artifacts populated — but no entry pipe was
-    // settled. The view used to fall through to the first pipe in the contract
-    // map and offer a Run button for it. Now the model is told no form exists
-    // and the view opens none, so the verdict reads the same on every stream:
-    // the graph, no `main_pipe`, no advertised form.
-    const result = validationResult({ ...divergingReport, default_pipe_ref: null }, true);
-
-    expect(result.structuredContent.is_runnable).toBe(true);
-    expect(result.structuredContent.main_pipe).toBeUndefined();
-    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
-    expect(result.summary).toBe("# Valid" + VIEWS_NOTE_GRAPH_ONLY);
-
-    const wire = toolResult(result);
-    expect(wire._meta.main_pipe_ref).toBeUndefined();
-    // The graph still rides: withholding the form is not withholding the view.
-    expect(wire._meta.graph_spec).toEqual(validReport.graph_spec);
-    // ...and so do the form's artifacts, which is the whole point of the
-    // split. `_meta` never reaches the model, so shipping them tells it
-    // nothing; withholding them made a click on a graph node dead, because
-    // the view's selectors would then miss for EVERY pipe. This verdict is
-    // exactly the one where a click is the only route to a form.
-    expect(wire._meta.pipe_io_contracts).toEqual(divergingContracts);
-    expect(wire._meta.input_form).toEqual(orderedInputForm);
-  });
-
-  it("withholds the form's advert when the descriptor has no entry for the entry pipe", () => {
-    // The contracts know `other.shout`; the descriptor (still `demo.main`
-    // only) does not. The kernel derives the fields from the descriptor, so
-    // the view could not render a form for the entry pipe — a non-empty map
-    // is not the advert's test, the entry pipe's own entry is.
-    const result = validationResult({ ...divergingReport, default_pipe_ref: "other.shout" }, true);
-
-    expect(result.structuredContent.main_pipe?.pipe_ref).toBe("other.shout");
-    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
-    // The pair still rides, so `demo.main` — which DOES carry both entries —
-    // is still reachable by a click even though the entry pipe is not.
-    expect(result.pipeIoContracts).toEqual(divergingContracts);
-    expect(result.inputForm).toEqual(orderedInputForm);
-  });
-
-  it("withholds the form's advert when the contract has no entry for the entry pipe", () => {
-    // The mirror of the test above, and the reason the advert names BOTH
-    // artifacts rather than either: here the DESCRIPTOR knows `other.shout`
-    // while the contracts (still `demo.main` only) do not. `RunPanel` co-walks
-    // the pair and the view mounts only once both resolve, so an advert riding
-    // the descriptor alone would be exactly the false advert this gate exists
-    // to prevent. Without this case the contracts conjunct is unpinned: delete
-    // it from the gate and the whole suite stays green.
+  it("omits the signature when the contract has no entry for the entry pipe", () => {
+    // The DESCRIPTOR knows `other.shout` while the contracts (still
+    // `demo.main` only) do not.
     const inputForm: InputForm = {
       ...orderedInputForm,
       "other.shout": {
@@ -1188,72 +1034,27 @@ describe("effective entry pipe", () => {
         ],
       },
     };
-    const result = validationResult(
-      { ...orderedReport, input_form: inputForm, default_pipe_ref: "other.shout" },
-      true,
-    );
+    const result = validationResult({
+      ...orderedReport,
+      input_form: inputForm,
+      default_pipe_ref: "other.shout",
+    });
 
-    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph"]);
-    // No signature either, and for the same missing entry: the contract is what
-    // the signature narrows from.
+    // No signature: the contract is what the signature narrows from.
     expect(result.structuredContent.main_pipe).toBeUndefined();
-    // The pair still rides, so `demo.main` stays reachable by a click.
-    expect(result.pipeIoContracts).toEqual(orderedContracts);
-    expect(result.inputForm).toEqual(inputForm);
-    expect(result.mainPipeRef).toBe("other.shout");
-  });
-
-  it("advertises the form for the stated default once both artifacts carry it", () => {
-    const inputForm: InputForm = {
-      ...orderedInputForm,
-      "other.shout": {
-        fields: [
-          {
-            name: "message",
-            kind: "prose",
-            concept_ref: "native.Text",
-            required: true,
-            presence: "plain",
-            gating: true,
-          },
-        ],
-      },
-    };
-    const result = validationResult(
-      { ...divergingReport, input_form: inputForm, default_pipe_ref: "other.shout" },
-      true,
-    );
-
-    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph", "input_form"]);
-    expect(result.pipeIoContracts).toEqual(divergingContracts);
-    expect(result.inputForm).toEqual(inputForm);
     expect(result.mainPipeRef).toBe("other.shout");
   });
 });
 
 describe("toolResult", () => {
-  it("delivers the graph on _meta, never on structuredContent", () => {
-    const result = toolResult(validationResult(validReport, true));
+  it("delivers the main pipe ref on _meta, and keeps the graph off structuredContent", () => {
+    const result = toolResult(validationResult(validReport));
 
-    expect(result._meta.graph_spec).toEqual(validReport.graph_spec);
-    expect(result._meta.pipe_io_contracts).toEqual(validReport.pipe_io_contracts);
-    expect(result._meta.input_form).toEqual(validReport.input_form);
     expect(result._meta.main_pipe_ref).toBe("demo.main");
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
     expect(result.structuredContent).not.toHaveProperty("pipe_io_contracts");
     expect(result.isError).toBe(false);
-    expect(result.content).toEqual([
-      { type: "text", text: "# Valid" + MAIN_PIPE_NOTE + VIEWS_NOTE },
-    ]);
-  });
-
-  it("carries an undefined graph on _meta for verdicts without one", () => {
-    const result = toolResult(validationResult(invalidReport, true));
-
-    expect(result._meta.graph_spec).toBeUndefined();
-    expect(result._meta.pipe_io_contracts).toBeUndefined();
-    expect(result._meta.input_form).toBeUndefined();
-    expect(result.isError).toBe(false);
+    expect(result.content).toEqual([{ type: "text", text: "# Valid" + MAIN_PIPE_NOTE }]);
   });
 });
 
@@ -1271,8 +1072,6 @@ describe("validateMthds", () => {
       },
       {
         baseUrl: DEFAULT_API_URL,
-        // The workshop's context: it renders no views.
-        viewsAvailable: false,
         client: {
           ...selectorValidateNotCalled,
           async validateFiles(files, options) {
@@ -1296,10 +1095,9 @@ describe("validateMthds", () => {
       views: ["input_form", "output_form"],
     });
     expect(result.structuredContent.status).toBe("ok");
-    // A shell that renders no views gets neither the graph nor the form.
+    // No views are advertised.
     expect(result.structuredContent.available_view_specs).toEqual([]);
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
-    expect(result.graphSpec).toBeUndefined();
   });
 
   it("does not call the client when request validation fails", async () => {
@@ -1550,9 +1348,6 @@ describe("validateMthds by selector (server pass-through)", () => {
     // markdown itself.
     expect(capturedArgs).toEqual([true, undefined, undefined, ["input_form", "output_form"]]);
     expect(result.structuredContent.status).toBe("ok");
-    // The views work the same whichever selector supplied the content.
-    expect(result.structuredContent.available_view_specs).toEqual(["dry_run_graph", "input_form"]);
-    expect(result.graphSpec).toEqual(validReport.graph_spec);
   });
 
   it("forwards method_ref to the validate route as a selector", async () => {
@@ -1846,7 +1641,6 @@ describe("the method graph page", () => {
         baseUrl: DEFAULT_API_URL,
         client,
         resolver,
-        viewsAvailable: false,
         saveRoot: root,
       },
     };

@@ -301,17 +301,17 @@ export interface CodegenClient {
 
 export interface CodegenContext extends ApiConfig {
   client?: CodegenClient;
-  /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
+  /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
   /**
    * The directory `output_dir` is resolved against — the workshop's working
    * directory, absolute. The same name and meaning as `ArtifactsContext.saveRoot`:
-   * the workshop's context builder sets both to its working directory. Absent on the
-   * hosted console, which then refuses `output_dir` instructively rather than
-   * picking a directory of its own.
+   * the workshop's context builder sets both to its working directory. Absent,
+   * as on a context the core builds alone, `output_dir` is refused
+   * instructively rather than resolved against a directory of its own.
    */
   saveRoot?: string;
-  /** Deployment-specific auth-failure texture (the hosted console overrides it per request); default env-var wording when absent. */
+  /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
 
@@ -391,8 +391,8 @@ const CODEGEN_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
  * The 403 texture. The hosted authorizer gates `/v1/codegen` on a feature flag
  * as well as on the plan, so a caller whose credential is perfectly valid can
  * still be refused — and the generic "check your key" would send them to debug
- * the wrong thing. Composed per call so the deployment's own auth wording
- * (the console's "reconnect and sign in again") stays in front.
+ * the wrong thing. Composed per call so the deployment's own auth wording,
+ * when its context carries one, stays in front.
  */
 function forbiddenTexture(auth: AuthErrorTexture | undefined): { hint: string } {
   return {
@@ -415,9 +415,9 @@ const WRITE_ARM_FALLBACK =
 /**
  * The `output_dir` request-shape checks, kept beside the selector checks
  * rather than inside `resolveSubmittedFiles` (which only ever sees files).
- * The "no write root" refusal is the `{ path }` console texture: an
- * affordance the tool's one contract advertises on both shells and this
- * deployment cannot serve, refused instructively with the shell that can.
+ * The "no write root" refusal mirrors the `{ path }` one for a context without
+ * a resolver: an affordance the contract advertises and this context cannot
+ * serve, refused instructively with the server that can.
  */
 export function validateCodegenWriteRequest(
   outputDir: string | undefined,
@@ -501,7 +501,7 @@ export async function generateMthdsCode(
     return errorResult(summaryForError(error), [error]);
   }
 
-  // A produced-invalid verdict never touches disk, on either shell: it carries
+  // A produced-invalid verdict never touches disk: it carries
   // no artifacts at all, so there is nothing to preflight and nothing to write.
   if (!report.is_valid) {
     return codegenResult(report);
@@ -512,9 +512,9 @@ export async function generateMthdsCode(
   // artifact path the check cannot verify, a lock filename that is not bare,
   // or a set that fails the SDK's own offline check — is a reachable contract
   // violation, surfaced as a runtime no-verdict error. The preflight runs on
-  // BOTH shells, not only the write path: the console relays these bytes to a
-  // model that will write them, so a report the workshop would refuse is one
-  // the console must not hand over either.
+  // BOTH arms, not only the write path: the inline arm hands these bytes to a
+  // model that will write them, so a report the write arm would refuse is one
+  // the inline arm must not hand over either.
   try {
     assertValidReportShape(report);
     assertReportAnswersRequest(report, request);
@@ -524,7 +524,7 @@ export async function generateMthdsCode(
   }
 
   // The write arm. `output_dir` without a `saveRoot` was already refused as a
-  // request-shape error, so reaching here with one means this shell can write.
+  // request-shape error, so reaching here with one means this context can write.
   let written: CodegenWriteSuccess | undefined;
   if (request.output_dir !== undefined && context.saveRoot !== undefined) {
     const result = await writeCodegenTree({
@@ -561,9 +561,9 @@ export async function generateMthdsCode(
  * internally current and passes. It matters most on the write arm, where a
  * mismatched or partially upgraded API would otherwise have this tool overwrite
  * the caller's `output_dir` with another language's files and report a current
- * tree — but it is checked on both shells, like every other rule about what
- * arrives, because the console hands the same bytes to a model that will write
- * them.
+ * tree — but it is checked on the inline arm too, like every other rule about
+ * what arrives, because that arm hands the same bytes to a model that will
+ * write them.
  */
 function assertReportAnswersRequest(
   report: CodegenValidReport,
@@ -636,7 +636,7 @@ function summaryForError(error: ToolError): string {
   return summaryForToolError(error, ERROR_SUMMARIES);
 }
 
-/** No `_meta`: this tool has no view on either shell, so the bounded copies below are the whole response. */
+/** No `_meta`: the bounded copies below are the whole response. */
 export function codegenToolResult(result: CodegenResult) {
   return {
     structuredContent: result.structuredContent,
@@ -754,15 +754,15 @@ function assertValidReportShape(report: CodegenValidReport): void {
   // The lock filename is pinned to the ONE name the contract fixes. Three
   // things follow from the exact match that a bare-filename rule left open:
   // `../../…` cannot reach a write uncontained (the writer joins this under the
-  // generated directory, and the console hands it to a model that will do the
-  // same); the lock lands where the offline check looks for it, so `pipelex
+  // generated directory, and the inline arm hands it to a model that will do
+  // the same); the lock lands where the offline check looks for it, so `pipelex
   // codegen check` finds the tree this tool says passes; and it cannot ALIAS an
   // artifact path — an artifact must carry a stampable suffix to reach here, so
   // it can never be `codegen.lock`, which closes the one case where the writer
   // would overwrite an artifact it had just written with lock text and then
   // report that as drift. Containment in the writer still stands on its own —
   // canonical is not the same as contained — but the rule belongs here, where
-  // it holds for both shells.
+  // it holds for both arms.
   if (report.lock_filename !== CODEGEN_LOCK_FILENAME) {
     throw new Error(
       `Codegen report returned a lock filename other than ${CODEGEN_LOCK_FILENAME}: ${report.lock_filename}.`,

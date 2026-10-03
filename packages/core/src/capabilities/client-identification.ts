@@ -1,12 +1,12 @@
 /**
  * Client identification: the `User-Agent` this server sends to the Pipelex API.
  *
- * Every call either shell makes to the API names itself `pipelex-mcp/<version>`,
- * followed by a comment saying which shell made it and which AI host drove it,
- * so the platform attributes the call to the `mcp` surface and records the host:
+ * Every call the workshop makes to the API names itself `pipelex-mcp/<version>`,
+ * followed by a comment saying that the workshop made it and which AI host
+ * drove it, so the platform attributes the call to the `mcp` surface and
+ * records the host:
  *
  *   pipelex-mcp/<v> (workshop; host=claude-code/2.1.4) pipelex-sdk-js/<v> node/<v> (darwin; arm64)
- *   pipelex-mcp/<v> (console; host=openai) pipelex-sdk-js/<v> node/<v> (linux; x64)
  *
  * `@pipelex/sdk` builds the header itself from the `appInfo` this module
  * produces; `createPipelexApiClient` in `./shared.ts` is the one place a client
@@ -14,8 +14,7 @@
  *
  * The host is read lazily, which is why an `AppInfoSource` is a function and not
  * a value: the workshop only learns its host from the MCP `initialize`
- * handshake, after every context has been built, and the console learns it
- * from each incoming HTTP request.
+ * handshake, after every context has been built.
  *
  * The header is self-declared and unauthenticated — analytics and diagnostics
  * only. It must never carry a secret, a user identifier, an email or a hostname.
@@ -29,14 +28,14 @@ export const MCP_TOKEN_NAME = "pipelex-mcp";
 /** The ceiling the spec puts on the whole header value. */
 export const MAX_USER_AGENT_LENGTH = 512;
 
-/** Which shell made the call: the hosted Skybridge console or the local stdio workshop. */
-export type McpMode = "console" | "workshop";
+/** The mode the `User-Agent` comment names. */
+export type McpMode = "workshop";
 
 /**
- * The server a call came from: its shell, and the version that shell shipped
- * as. Each server is released on its own track, so the version is the shell's
- * own `package.json` version, which the shell reads and hands in; the core is
- * never released and has no version of its own to report.
+ * The server a call came from: its mode, and the version it shipped as. The
+ * version is the workshop's own `package.json` version, which it reads and
+ * hands in; the core is never released and has no version of its own to
+ * report.
  */
 export interface McpShell {
   mode: McpMode;
@@ -47,11 +46,11 @@ export interface McpShell {
 export type AppInfoSource = () => AppInfo;
 
 /**
- * The identity used when no shell has named itself: the e2e suites and the
- * scripts, which call capabilities directly. It still says `pipelex-mcp`, so
+ * The identity used when the workshop has not named itself: the e2e suites and
+ * the scripts, which call capabilities directly. It still says `pipelex-mcp`, so
  * the platform attributes the call to the right surface. It carries no version,
  * because no released server is making the call, and no comment, because there
- * is no shell and no host to report.
+ * is no server and no host to report.
  */
 export const BARE_APP_INFO: AppInfo = { name: MCP_TOKEN_NAME };
 
@@ -95,31 +94,6 @@ export function workshopHost(clientInfo: McpClientInfo | undefined): string | un
   return version === undefined ? name : `${name}/${version}`;
 }
 
-/**
- * The console's `host=` value, from the incoming request's own `User-Agent`.
- * The console is stateless HTTP, so no session links a `tools/call` to the
- * `initialize` that preceded it; the connector's request header is all it has,
- * and it is reduced to a coarse, closed set rather than forwarded: `openai`
- * (ChatGPT's connector), `claude` (claude.ai, Claude Desktop, Cowork), or
- * nothing at all when the header names neither.
- */
-export function consoleHost(userAgent: string | undefined): string | undefined {
-  if (typeof userAgent !== "string") return undefined;
-  const lowered = userAgent.toLowerCase();
-  if (lowered.includes("openai") || lowered.includes("chatgpt")) return "openai";
-  if (lowered.includes("claude") || lowered.includes("anthropic")) return "claude";
-  return undefined;
-}
-
-/** The request header shape both MCP transports expose (`RequestInfo.headers`). */
-export type RequestHeaders = Record<string, string | string[] | undefined>;
-
-/** The request's `User-Agent`, joined when a proxy repeated it. */
-export function userAgentOf(headers: RequestHeaders | undefined): string | undefined {
-  const value = headers?.["user-agent"];
-  return Array.isArray(value) ? value.join(" ") : value;
-}
-
 /** The slice of Node's `process` the runtime token is read from. */
 export interface RuntimeProcess {
   versions?: Record<string, string | undefined>;
@@ -156,8 +130,8 @@ export function userAgentFor(
 }
 
 /**
- * The `appInfo` for one shell and host: `pipelex-mcp/<version> (<mode>; host=<host>)`,
- * the version being the shell's own. The `host=` parameter is omitted when there
+ * The `appInfo` for the workshop and its host: `pipelex-mcp/<version> (<mode>; host=<host>)`,
+ * the version being the workshop's own. The `host=` parameter is omitted when there
  * is no host, and also when it would push the header past its ceiling — the SDK
  * refuses an over-long `appInfo` at construction, and a host name must never be
  * able to fail a tool call.

@@ -10,9 +10,9 @@
  * the same template shape as the by-files path, and a drift in either shows up
  * as a disagreement rather than as two independently-stale copies.
  *
- * The module is deliberately import-free of anything Skybridge or MCP: these
- * suites call the capability functions directly, because the shells are already
- * pinned by unit tests and the drift lives at the SDK/wire boundary.
+ * The module is deliberately import-free of anything MCP: these suites call the
+ * capability functions directly, because the server is already pinned by unit
+ * tests and the drift lives at the SDK/wire boundary.
  */
 
 import type { PipelexApiClient } from "@pipelex/sdk";
@@ -25,7 +25,7 @@ import type { ApiConfig } from "./shared.js";
 /**
  * The live suite's own API coordinates. They are deliberately not
  * `PIPELEX_BASE_URL` / `PIPELEX_API_KEY`: those names are shared with every
- * other tool and with the console's dev loop, so a shell exporting the
+ * other tool, so a shell exporting the
  * production pair for other tools aimed the suite at an organization holding no
  * seeded fixture, and every by-id leg failed with a miss that read like drift.
  * The Makefile resolves these two names for the live targets; the comment above
@@ -399,9 +399,6 @@ export const IMAGE_BUNDLE_URI = "e2e/mcp_e2e_image.mthds";
 /** The Image input's name — the key the prepare walk must rewrite. */
 export const IMAGE_INPUT_NAME = "picture";
 
-/** The image fixture's pipe, qualified. */
-export const IMAGE_PIPE_REF = "mcp_e2e_image.describe_picture";
-
 /**
  * A bundle whose main pipe PRODUCES an image — the free half of the
  * produces-images signal. Validation dry-runs the graph and executes nothing,
@@ -455,14 +452,11 @@ export const IMAGE_OUTPUT_LIST_BUNDLE_URI = "e2e/mcp_e2e_imggen_many.mthds";
 
 /**
  * A 1x1 transparent PNG. Real bytes rather than a placeholder string, because
- * the workshop arm uploads it for real — and tiny, because the point is to
+ * the prepare legs upload it for real — and tiny, because the point is to
  * exercise the upload walk, not to move data.
  */
 export const TINY_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
-
-/** An http(s) reference the console's input walk must pass through untouched. */
-export const PASS_THROUGH_URL = "https://example.com/pipelex-mcp-e2e.png";
 
 const MISSING_FIXTURE_HINT =
   `No registered method named "${FIXTURE_METHOD_NAME}" is visible to this API key. The by-id legs need ` +

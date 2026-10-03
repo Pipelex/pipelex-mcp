@@ -15,8 +15,8 @@ import {
   failureMessageOf,
   failureOfFailedArm,
   readFailedRun,
+  RUN_RESULTS_ERROR_OPTIONS,
   runFailureSchema,
-  runResultsErrorOptions,
   runStatusSchema,
 } from "./run.js";
 import type { FailedRunState } from "./run.js";
@@ -39,7 +39,6 @@ import {
   validateRunIdRequest,
 } from "./shared.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
-import type { ToolNames } from "./tool-names.js";
 import type {
   ApiConfig,
   AuthErrorTexture,
@@ -63,12 +62,10 @@ import type {
  * default would have an agentic loop quietly buying twenty images of context
  * nobody chose. So `mthds_run_results` reports the free inventory
  * (`image_candidates`) and fetches nothing, and seeing a picture is an act
- * with a name — one a person can say out loud, and the one a console button
- * will later call.
+ * with a name — one a person can say out loud.
  *
- * Registered on BOTH shells, unlike `mthds_download_artifacts`: a call nobody
- * can make by accident is safe everywhere, and nothing here touches a
- * filesystem.
+ * Unlike `mthds_download_artifacts`, nothing here touches a filesystem: the
+ * pictures go into the conversation and nowhere else.
  *
  * The fetch is the SDK's (`client.fetchArtifact` — fresh link, redirects
  * refused, no credentials forwarded, the cap checked from `Content-Length` and
@@ -112,28 +109,26 @@ export const INLINE_IMAGE_TIMEOUT_MS = 30_000;
  */
 export const INLINE_IMAGES_DEADLINE_MS = 60_000;
 
-/** The input schema, its descriptions naming the tools of the shell that registers it. */
-export function showImagesInputSchemaFor(names: ToolNames) {
-  return {
-    run_id: z
-      .string()
-      .describe(`The durable run id returned by ${names.run} — the run whose images to show.`),
-    images: z
-      .array(z.string())
-      .optional()
-      .describe(
-        `Which pictures to show, as pipelex-storage:// references taken from ${names.runResults}' image_candidates. Omit to show every candidate (up to the per-call cap). Mutually exclusive with indices.`,
-      ),
-    indices: z
-      .array(z.number().int())
-      .optional()
-      .describe(
-        `Which pictures to show, as zero-based positions in ${names.runResults}' image_candidates. Omit to show every candidate (up to the per-call cap). Mutually exclusive with images.`,
-      ),
-  };
-}
-
-export const mthdsShowImagesInputSchema = showImagesInputSchemaFor(WORKSHOP_TOOL_NAMES);
+/** The input schema of `mthds_show_images`. */
+export const mthdsShowImagesInputSchema = {
+  run_id: z
+    .string()
+    .describe(
+      `The durable run id returned by ${WORKSHOP_TOOL_NAMES.run} — the run whose images to show.`,
+    ),
+  images: z
+    .array(z.string())
+    .optional()
+    .describe(
+      `Which pictures to show, as pipelex-storage:// references taken from ${WORKSHOP_TOOL_NAMES.runResults}' image_candidates. Omit to show every candidate (up to the per-call cap). Mutually exclusive with indices.`,
+    ),
+  indices: z
+    .array(z.number().int())
+    .optional()
+    .describe(
+      `Which pictures to show, as zero-based positions in ${WORKSHOP_TOOL_NAMES.runResults}' image_candidates. Omit to show every candidate (up to the per-call cap). Mutually exclusive with images.`,
+    ),
+};
 
 const withheldReasonSchema = z.enum(["size", "budget", "count", "type", "deadline", "empty"]);
 
@@ -157,57 +152,53 @@ const shownImageSchema = z.object({
   error: toolErrorSchema.optional().describe("Present when this picture could not be read at all."),
 });
 
-/** The output schema, its descriptions naming the tools of the shell that registers it. */
-export function showImagesOutputSchemaFor(names: ToolNames) {
-  return z.object({
-    status: z.enum(["ok", "error"]),
-    run_id: z.string().optional(),
-    state: z
-      .enum(["running", "completed", "failed"])
-      .optional()
-      .describe(
-        `The run lookup outcome, as ${names.runResults} reports it: "running" (nothing to show yet), "completed" (the walk below ran), "failed" (a failed run produces no images).`,
-      ),
-    retry_after_seconds: z
-      .number()
-      .nullable()
-      .optional()
-      .describe('State "running" only — check again after this many seconds.'),
-    run_status: runStatusSchema
-      .optional()
-      .describe('State "failed" only — the terminal lifecycle status.'),
-    failure_message: z
-      .string()
-      .optional()
-      .describe('State "failed" only — the platform\'s one-sentence account of the ending.'),
-    failure: runFailureSchema
-      .optional()
-      .describe(
-        `State "failed" only, when the run stored an error report — the same object ${names.runResults} carries: why it failed, what to do next, whether running it again can help, and what to give support.`,
-      ),
-    images: z
-      .array(shownImageSchema)
-      .optional()
-      .describe(
-        'State "completed" only — one entry per candidate considered, in the order they were considered: the order you named them when images or indices was given, else discovery order. Bounded — see omitted. Branch on inlined, never on the presence of an image block.',
-      ),
-    omitted: z
-      .number()
-      .optional()
-      .describe(
-        "State \"completed\" only, and only when something was left out — how many of the candidates THIS CALL considered are past the listed ones and so not enumerated here, so a call cannot flood the response. It counts this listing's truncation, not the run's surplus: a narrowed call that named more than the listing holds reports its own excess here. Reach one by its position with indices, which are positions in the run's full candidate list and not in this listing.",
-      ),
-    all_inlined: z
-      .boolean()
-      .optional()
-      .describe(
-        'State "completed" only — true when every candidate THIS RUN produced became an image block: nothing withheld, nothing failed, nothing omitted from the listing, and nothing left unconsidered by a narrowed images/indices selection (vacuously true when the run produced no candidate). So a narrowed call reports false whenever the run holds a picture it did not ask for, and this member keeps answering "is everything this run produced now in front of me" rather than "did what I asked for arrive".',
-      ),
-    errors: z.array(toolErrorSchema).optional(),
-  });
-}
-
-export const mthdsShowImagesOutputSchema = showImagesOutputSchemaFor(WORKSHOP_TOOL_NAMES);
+/** The output schema of `mthds_show_images`. */
+export const mthdsShowImagesOutputSchema = z.object({
+  status: z.enum(["ok", "error"]),
+  run_id: z.string().optional(),
+  state: z
+    .enum(["running", "completed", "failed"])
+    .optional()
+    .describe(
+      `The run lookup outcome, as ${WORKSHOP_TOOL_NAMES.runResults} reports it: "running" (nothing to show yet), "completed" (the walk below ran), "failed" (a failed run produces no images).`,
+    ),
+  retry_after_seconds: z
+    .number()
+    .nullable()
+    .optional()
+    .describe('State "running" only — check again after this many seconds.'),
+  run_status: runStatusSchema
+    .optional()
+    .describe('State "failed" only — the terminal lifecycle status.'),
+  failure_message: z
+    .string()
+    .optional()
+    .describe('State "failed" only — the platform\'s one-sentence account of the ending.'),
+  failure: runFailureSchema
+    .optional()
+    .describe(
+      `State "failed" only, when the run stored an error report — the same object ${WORKSHOP_TOOL_NAMES.runResults} carries: why it failed, what to do next, whether running it again can help, and what to give support.`,
+    ),
+  images: z
+    .array(shownImageSchema)
+    .optional()
+    .describe(
+      'State "completed" only — one entry per candidate considered, in the order they were considered: the order you named them when images or indices was given, else discovery order. Bounded — see omitted. Branch on inlined, never on the presence of an image block.',
+    ),
+  omitted: z
+    .number()
+    .optional()
+    .describe(
+      "State \"completed\" only, and only when something was left out — how many of the candidates THIS CALL considered are past the listed ones and so not enumerated here, so a call cannot flood the response. It counts this listing's truncation, not the run's surplus: a narrowed call that named more than the listing holds reports its own excess here. Reach one by its position with indices, which are positions in the run's full candidate list and not in this listing.",
+    ),
+  all_inlined: z
+    .boolean()
+    .optional()
+    .describe(
+      'State "completed" only — true when every candidate THIS RUN produced became an image block: nothing withheld, nothing failed, nothing omitted from the listing, and nothing left unconsidered by a narrowed images/indices selection (vacuously true when the run produced no candidate). So a narrowed call reports false whenever the run holds a picture it did not ask for, and this member keeps answering "is everything this run produced now in front of me" rather than "did what I asked for arrive".',
+    ),
+  errors: z.array(toolErrorSchema).optional(),
+});
 
 export interface MthdsShowImagesInput {
   run_id: string;
@@ -280,14 +271,6 @@ export interface ImagesContext extends ApiConfig {
    * same fetch boundary.
    */
   allowHttp?: boolean;
-  /**
-   * Whether this shell registers `mthds_download_artifacts`. When true, the
-   * summary reminds the caller that the full files can be saved to disk —
-   * prose only; the structured contract is identical on both shells.
-   */
-  artifactDownloadAvailable?: boolean;
-  /** The tool names this shell's texts use; the workshop's when absent. */
-  toolNames?: ToolNames;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
@@ -303,18 +286,15 @@ function imagesClient(context: ImagesContext): ImagesClient {
   return context.client ?? createPipelexApiClient(context);
 }
 
-export function validateShowImagesRequest(
-  input: MthdsShowImagesInput,
-  names: ToolNames = WORKSHOP_TOOL_NAMES,
-): ToolError[] {
-  const errors = validateRunIdRequest(input.run_id, names);
+export function validateShowImagesRequest(input: MthdsShowImagesInput): ToolError[] {
+  const errors = validateRunIdRequest(input.run_id);
 
   if (input.images !== undefined && input.indices !== undefined) {
     errors.push({
       class: "input_domain",
       location: "images",
       message: "Pass either images or indices, never both.",
-      hint: `Both name the same candidates two ways. Pass the pipelex-storage:// references as images, or their positions in ${names.runResults}' image_candidates as indices, or neither to show them all.`,
+      hint: `Both name the same candidates two ways. Pass the pipelex-storage:// references as images, or their positions in ${WORKSHOP_TOOL_NAMES.runResults}' image_candidates as indices, or neither to show them all.`,
       retryable: false,
     });
   }
@@ -342,8 +322,7 @@ export async function showMthdsRunImages(
   input: MthdsShowImagesInput,
   context: ImagesContext = buildImagesContext(),
 ): Promise<ShowImagesResult> {
-  const names = context.toolNames ?? WORKSHOP_TOOL_NAMES;
-  const requestErrors = validateShowImagesRequest(input, names);
+  const requestErrors = validateShowImagesRequest(input);
   if (requestErrors.length > 0) {
     return errorResult("No images were shown: request input is invalid.", requestErrors);
   }
@@ -356,13 +335,13 @@ export async function showMthdsRunImages(
     client = imagesClient(context);
     state = await client.getRunResult(input.run_id, { artifacts: SHOW_IMAGES_RESULT_ARTIFACTS });
   } catch (err) {
-    const error = classifyError(err, { ...runResultsErrorOptions(names), auth: context.authError });
+    const error = classifyError(err, { ...RUN_RESULTS_ERROR_OPTIONS, auth: context.authError });
     return errorResult(summaryForToolError(error, ERROR_SUMMARIES), [error]);
   }
 
   switch (state.state) {
     case "running":
-      return runningResult(state.pipeline_run_id, state.retry_after_seconds, names);
+      return runningResult(state.pipeline_run_id, state.retry_after_seconds);
     case "failed":
       return failedResult(state, await readFailedRun(client, state.pipeline_run_id));
     case "completed":
@@ -385,12 +364,12 @@ export async function showMthdsRunImages(
 
   const runId = state.pipeline_run_id;
   const candidates = imageCandidatesOf(state.result.main_stuff);
-  const selection = selectCandidates(candidates, input, names);
+  const selection = selectCandidates(candidates, input);
   if (!selection.ok) {
     return errorResult("No images were shown: request input is invalid.", [selection.error]);
   }
   if (selection.selected.length === 0) {
-    return emptyWalkResult(runId, context.artifactDownloadAvailable === true);
+    return emptyWalkResult(runId);
   }
 
   const walk = await walkCandidates(client, context, selection.selected, candidates.length);
@@ -410,7 +389,7 @@ export async function showMthdsRunImages(
     ]);
   }
 
-  return completedResult(runId, walk, context.artifactDownloadAvailable === true);
+  return completedResult(runId, walk);
 }
 
 // ── the selection ───────────────────────────────────────────────────
@@ -434,7 +413,6 @@ type Selection = { ok: true; selected: ImageCandidate[] } | { ok: false; error: 
 export function selectCandidates(
   candidates: ImageCandidate[],
   input: Pick<MthdsShowImagesInput, "images" | "indices">,
-  names: ToolNames = WORKSHOP_TOOL_NAMES,
 ): Selection {
   if (input.images !== undefined) {
     const known = new Map(candidates.map((candidate) => [candidate.uri, candidate]));
@@ -449,7 +427,7 @@ export function selectCandidates(
             class: "input_domain",
             location: "images",
             message: `This run produced no image candidate with the reference ${uri}.`,
-            hint: `Take the references from ${names.runResults}' image_candidates for this run id — only a stored reference whose key looks like an image can be shown.`,
+            hint: `Take the references from ${WORKSHOP_TOOL_NAMES.runResults}' image_candidates for this run id — only a stored reference whose key looks like an image can be shown.`,
             retryable: false,
           },
         };
@@ -473,7 +451,7 @@ export function selectCandidates(
             class: "input_domain",
             location: "indices",
             message: `Index ${index} is outside this run's image candidates (${candidates.length} candidate(s)).`,
-            hint: `Indices are zero-based positions in ${names.runResults}' image_candidates for this run id. Pass the references themselves as images when the positions are not to hand.`,
+            hint: `Indices are zero-based positions in ${WORKSHOP_TOOL_NAMES.runResults}' image_candidates for this run id. Pass the references themselves as images when the positions are not to hand.`,
             retryable: false,
           },
         };
@@ -795,11 +773,7 @@ async function cancelBody(response: Response): Promise<void> {
 /** Mirrors the SDK's base poll interval, like mthds_run_results. */
 const DEFAULT_RETRY_SECONDS = 2;
 
-function runningResult(
-  runId: string,
-  retryAfterSeconds: number | null,
-  names: ToolNames,
-): ShowImagesResult {
+function runningResult(runId: string, retryAfterSeconds: number | null): ShowImagesResult {
   const seconds = retryAfterSeconds ?? DEFAULT_RETRY_SECONDS;
   return {
     structuredContent: {
@@ -808,7 +782,7 @@ function runningResult(
       state: "running",
       retry_after_seconds: retryAfterSeconds,
     },
-    summary: `Run \`${runId}\` has no result yet — it is still running, so there is nothing to show. Check again in ~${seconds}s with \`${names.runStatus}\`, then call this tool once it is COMPLETED.`,
+    summary: `Run \`${runId}\` has no result yet — it is still running, so there is nothing to show. Check again in ~${seconds}s with \`${WORKSHOP_TOOL_NAMES.runStatus}\`, then call this tool once it is COMPLETED.`,
     imageBlocks: [],
   };
 }
@@ -835,16 +809,12 @@ function failedResult(state: FailedRunState, failedRead: RunRead | undefined): S
 }
 
 /** A completed run whose output holds no image candidate at all — a verdict, not an error. */
-function emptyWalkResult(runId: string, artifactDownloadAvailable: boolean): ShowImagesResult {
+function emptyWalkResult(runId: string): ShowImagesResult {
   const parts = [
     "# No images",
     `Run \`${runId}\` completed, but its main output references no stored file whose key looks like an image, so there is nothing to show.`,
+    "Whatever files it did produce can be saved with `mthds_download_artifacts` using this run id.",
   ];
-  if (artifactDownloadAvailable) {
-    parts.push(
-      "Whatever files it did produce can be saved with `mthds_download_artifacts` using this run id.",
-    );
-  }
   return {
     structuredContent: {
       status: "ok",
@@ -863,11 +833,7 @@ function emptyWalkResult(runId: string, artifactDownloadAvailable: boolean): Sho
  * the result is PRODUCED (`status: "ok"`, `state: "completed"`), discriminated
  * on `all_inlined`. Partial success is a produced verdict, not an error.
  */
-export function completedResult(
-  runId: string,
-  walk: Walk,
-  artifactDownloadAvailable: boolean,
-): ShowImagesResult {
+function completedResult(runId: string, walk: Walk): ShowImagesResult {
   return {
     structuredContent: {
       status: "ok",
@@ -885,7 +851,7 @@ export function completedResult(
       all_inlined:
         walk.omitted === 0 && walk.unselected === 0 && walk.entries.every((entry) => entry.inlined),
     },
-    summary: completedSummary(runId, walk, artifactDownloadAvailable),
+    summary: completedSummary(runId, walk),
     imageBlocks: walk.blocks,
   };
 }
@@ -902,7 +868,7 @@ const WITHHELD_REASONS: Record<WithheldReason, string> = {
   deadline: `this call used up its ${Math.round(INLINE_IMAGES_DEADLINE_MS / 1000)}s total time budget before reaching it`,
 };
 
-function completedSummary(runId: string, walk: Walk, artifactDownloadAvailable: boolean): string {
+function completedSummary(runId: string, walk: Walk): string {
   const inlined = walk.blocks.length;
   const withheld = walk.entries.filter((entry) => !entry.inlined);
 
@@ -946,9 +912,7 @@ function completedSummary(runId: string, walk: Walk, artifactDownloadAvailable: 
     parts.push("## Withheld");
     parts.push(lines.join("\n"));
     parts.push(
-      artifactDownloadAvailable
-        ? "Call this tool again naming a withheld reference in `images` to retry one on its own, or save the full file with `mthds_download_artifacts` and this run id."
-        : "Call this tool again naming a withheld reference in `images` to retry one on its own.",
+      "Call this tool again naming a withheld reference in `images` to retry one on its own, or save the full file with `mthds_download_artifacts` and this run id.",
     );
   }
 
