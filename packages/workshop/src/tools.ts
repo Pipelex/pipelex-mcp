@@ -1,16 +1,7 @@
 /**
  * The workshop's tool table: every tool the local stdio server registers, in
- * registration order, over the workshop's own capability contexts.
- *
- * The console has its own table (`src/hosted/tools.ts` in `packages/console`);
- * nothing here is registered by both shells. Where a tool exists on both, its
- * definition is written once per table: a change that should reach one shell is
- * an edit here or there, not a flag on a shared definition. Both tables are
- * built from the same capability functions in the core
- * (`@pipelex/mcp-core/capabilities/`), which is where sharing pays.
- *
- * Nothing here may import Skybridge: tsup bundles this module into the npm
- * package, and `skybridge` is the console's dependency alone.
+ * registration order, over the workshop's own capability contexts, each built
+ * from a capability function in the core (`@pipelex/mcp-core/capabilities/`).
  */
 
 import {

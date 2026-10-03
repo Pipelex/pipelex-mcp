@@ -2,7 +2,7 @@
   "name": "@pipelex/mcp-core",
   "version": "0.0.0",
   "private": true,
-  "description": "The capability core both Pipelex MCP servers are built on. Never published: each server's build inlines it.",
+  "description": "The capability core the workshop is built on. Never published: the workshop's build inlines it.",
   "license": "Elastic-2.0",
   "type": "module",
   "exports": {

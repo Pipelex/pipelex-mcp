@@ -4,7 +4,7 @@
  *
  * They read their own pair, `PIPELEX_E2E_BASE_URL` and `PIPELEX_E2E_API_KEY`,
  * never the `PIPELEX_BASE_URL` / `PIPELEX_API_KEY` that other tools and the
- * console share: a shell exporting the production pair for other tools used to
+ * server itself read: a shell exporting the production pair for other tools used to
  * aim `make test-e2e` at production, where no fixture is seeded. The Makefile
  * resolves the pair and `e2e-support.ts` reads it, so both halves are pinned
  * here. The Makefile half runs `make -f` from a temp directory holding its own
@@ -27,7 +27,7 @@ import {
 
 const MAKEFILE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "Makefile");
 
-// A minimal environment on purpose, as in `make-dev-recipe.test.ts`: a parent
+// A minimal environment on purpose: a parent
 // `make test` would hand its MAKEFLAGS to the child, and the developer's shell
 // could leak the very variables under test.
 const BASE_ENV: NodeJS.ProcessEnv = {

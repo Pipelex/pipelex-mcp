@@ -1,9 +1,7 @@
 /**
  * What the shell tests share: an in-memory MCP client and the reading of what
  * a shell emits to a host. Never shipped code — no entrypoint imports it, so
- * neither server's build reaches it. The console's OAuth stand-in lives beside
- * the console (`hosted/test-oauth.ts` there), because it is a Skybridge type
- * and Skybridge belongs to the console alone.
+ * the workshop's build never reaches it.
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";

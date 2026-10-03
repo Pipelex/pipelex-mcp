@@ -68,7 +68,6 @@ function member(name: string): Manifest {
 
 const core = member("@pipelex/mcp-core");
 const workshop = member("@pipelex/mcp");
-const consoleManifest = member("@pipelex/mcp-console");
 
 function declared(manifest: Manifest): [string, string][] {
   return [
@@ -110,18 +109,13 @@ function specsByPackage(): Map<string, Set<string>> {
 }
 
 describe("the workspace's manifests", () => {
-  it("name the three packages the repository ships from", () => {
-    expect([...WORKSPACE_NAMES].sort()).toEqual([
-      "@pipelex/mcp",
-      "@pipelex/mcp-console",
-      "@pipelex/mcp-core",
-    ]);
+  it("name the two packages the repository ships from", () => {
+    expect([...WORKSPACE_NAMES].sort()).toEqual(["@pipelex/mcp", "@pipelex/mcp-core"]);
   });
 
   it("publish the workshop alone", () => {
     expect(root.private).toBe(true);
     expect(core.private).toBe(true);
-    expect(consoleManifest.private).toBe(true);
     expect(workshop.private).toBeUndefined();
   });
 
@@ -142,13 +136,6 @@ describe("the workspace's manifests", () => {
       ]),
     );
     expect(workshop.dependencies).toMatchObject(expected);
-  });
-
-  it("keep skybridge to the console", () => {
-    const holders = [root, ...members.map(({ manifest }) => manifest)]
-      .filter((manifest) => declared(manifest).some(([name]) => name === "skybridge"))
-      .map((manifest) => manifest.name);
-    expect(holders).toEqual(["@pipelex/mcp-console"]);
   });
 
   it("carry one range for a package that several of them name", () => {

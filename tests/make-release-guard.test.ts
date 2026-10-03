@@ -1,16 +1,15 @@
 /**
- * A hermetic test of the break-glass targets' release-commit guard.
+ * A hermetic test of the break-glass publish's release-commit guard.
  *
- * `make publish` ships the workshop and `make deploy` the console, and each may
- * run only from the commit that released its own track. With two tracks, main
- * moves past a workshop release when the console releases, and its tip still
- * carries the workshop's released version with code that version never shipped;
- * a recovery from there would publish the wrong bytes under the right number.
- * The guard reads each track's version at HEAD and at its first parent through
- * `.github/scripts/track-version.sh`, so each case below builds a small history
- * in a temp repository holding that script and runs the guard target in it.
- * `check-release-ready` also holds HEAD to origin/main's tip, which a bare
- * repository beside the temp one stands in for.
+ * `make publish` ships the workshop, and only from the commit that released it:
+ * a tip that did not raise the version still carries the released number with
+ * code that version never shipped, and a recovery from there would publish the
+ * wrong bytes under the right number. The guard reads the workshop's version at
+ * HEAD and at its first parent through `.github/scripts/track-version.sh`, so
+ * each case below builds a small history in a temp repository holding that
+ * script and runs the guard target in it. `check-release-ready` also holds HEAD
+ * to origin/main's tip, which a bare repository beside the temp one stands in
+ * for.
  */
 import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
@@ -51,11 +50,10 @@ async function writeManifest(relative: string, version: string): Promise<void> {
   await fs.writeFile(file, `${JSON.stringify({ name: "x", version })}\n`);
 }
 
-async function commitVersions(versions: { workshop: string; console: string }): Promise<void> {
-  await writeManifest("packages/workshop/package.json", versions.workshop);
-  await writeManifest("packages/console/package.json", versions.console);
+async function commitVersion(version: string): Promise<void> {
+  await writeManifest("packages/workshop/package.json", version);
   git("add", "-A");
-  git("commit", "-q", "-m", `workshop ${versions.workshop}, console ${versions.console}`);
+  git("commit", "-q", "--allow-empty", "-m", `workshop ${version}`);
 }
 
 function run(target: string): { status: number | null; output: string } {
@@ -67,8 +65,8 @@ function run(target: string): { status: number | null; output: string } {
   return { status: result.status, output: `${result.stdout}${result.stderr}` };
 }
 
-function guard(track: "workshop" | "console"): { status: number | null; output: string } {
-  return run(`check-${track}-released`);
+function guard(): { status: number | null; output: string } {
+  return run("check-workshop-released");
 }
 
 beforeEach(async () => {
@@ -83,50 +81,45 @@ afterEach(async () => {
 });
 
 describe("the break-glass release guard", () => {
-  it("lets a track ship from the commit that raised its version, and refuses the other track", async () => {
-    await commitVersions({ workshop: "0.20.0", console: "0.20.0" });
-    await commitVersions({ workshop: "0.21.0", console: "0.20.0" });
+  it("lets the workshop ship from the commit that raised its version", async () => {
+    await commitVersion("0.20.0");
+    await commitVersion("0.21.0");
 
-    expect(guard("workshop").status).toBe(0);
-    const refused = guard("console");
-    expect(refused.status).not.toBe(0);
-    expect(refused.output).toContain("HEAD did not raise the console version");
+    expect(guard().status).toBe(0);
   });
 
-  it("refuses a track once the other track's release has moved main past its release commit", async () => {
-    await commitVersions({ workshop: "0.20.0", console: "0.20.0" });
-    await commitVersions({ workshop: "0.21.0", console: "0.20.0" });
-    await commitVersions({ workshop: "0.21.0", console: "0.21.0" });
+  it("refuses a commit that keeps the version its first parent carried", async () => {
+    await commitVersion("0.20.0");
+    await commitVersion("0.21.0");
+    await commitVersion("0.21.0");
 
-    const refused = guard("workshop");
+    const refused = guard();
     expect(refused.status).not.toBe(0);
-    expect(refused.output).toContain("it carries workshop 0.21.0 over its first parent's 0.21.0");
-    expect(guard("console").status).toBe(0);
+    expect(refused.output).toContain("it carries 0.21.0 over its first parent's 0.21.0");
   });
 
   it("reads a parent from before the split through its root manifest", async () => {
     await writeManifest("package.json", "0.19.0");
     git("add", "-A");
-    git("commit", "-q", "-m", "0.19.0, both servers");
+    git("commit", "-q", "-m", "0.19.0, from the root");
     await fs.rm(path.join(repo, "package.json"));
-    await commitVersions({ workshop: "0.19.0", console: "0.20.0" });
+    await commitVersion("0.20.0");
 
-    expect(guard("console").status).toBe(0);
-    expect(guard("workshop").status).not.toBe(0);
+    expect(guard().status).toBe(0);
   });
 
-  it("refuses a commit that lowers a track's version", async () => {
-    await commitVersions({ workshop: "0.21.0", console: "0.21.0" });
-    await commitVersions({ workshop: "0.21.0", console: "0.20.0" });
+  it("refuses a commit that lowers the version", async () => {
+    await commitVersion("0.21.0");
+    await commitVersion("0.20.0");
 
-    const refused = guard("console");
+    const refused = guard();
     expect(refused.status).not.toBe(0);
-    expect(refused.output).toContain("it carries console 0.20.0 over its first parent's 0.21.0");
+    expect(refused.output).toContain("it carries 0.20.0 over its first parent's 0.21.0");
   });
 
   it("holds a clean main to origin/main's tip", async () => {
-    await commitVersions({ workshop: "0.20.0", console: "0.20.0" });
-    await commitVersions({ workshop: "0.20.0", console: "0.21.0" });
+    await commitVersion("0.20.0");
+    await commitVersion("0.21.0");
     const origin = `${repo}-origin.git`;
     spawnSync("git", ["init", "-q", "--bare", origin], { env: BASE_ENV });
     try {
@@ -135,7 +128,7 @@ describe("the break-glass release guard", () => {
       expect(run("check-release-ready").status).toBe(0);
 
       // origin/main moves on while this checkout stays on the older release.
-      await commitVersions({ workshop: "0.21.0", console: "0.21.0" });
+      await commitVersion("0.22.0");
       git("push", "-q", "origin", "main");
       git("reset", "-q", "--hard", "HEAD^");
       const refused = run("check-release-ready");
@@ -147,7 +140,7 @@ describe("the break-glass release guard", () => {
   });
 
   it("refuses when origin/main cannot be fetched", async () => {
-    await commitVersions({ workshop: "0.20.0", console: "0.20.0" });
+    await commitVersion("0.20.0");
 
     const refused = run("check-release-ready");
     expect(refused.status).not.toBe(0);
@@ -155,9 +148,9 @@ describe("the break-glass release guard", () => {
   });
 
   it("refuses when a version cannot be read at all", async () => {
-    await commitVersions({ workshop: "0.20.0", console: "0.20.0" });
+    await commitVersion("0.20.0");
 
     // The only commit has no first parent, so its parent's version is unreadable.
-    expect(guard("workshop").status).not.toBe(0);
+    expect(guard().status).not.toBe(0);
   });
 });

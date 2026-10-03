@@ -53,9 +53,8 @@ export function base64DecodedLength(data: string): number {
  * `classifyError` unwraps it.
  *
  * `upload` is the only seam available here: the SDK's `prepareInputs` walk
- * calls it through `this`, so subclassing catches both the workshop's
- * delegated walk (`mthds_prepare_inputs`) and our own `uploadFile` calls
- * (`mthds_upload_attachments`) with one override.
+ * calls it through `this`, so subclassing catches the workshop's delegated
+ * walk (`mthds_prepare_inputs`) with one override.
  *
  * What this does NOT do: skip reading and base64-encoding the asset first. For
  * a local path the SDK owns that step (`readLocalPath` inside `uploadFile`),

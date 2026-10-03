@@ -57,7 +57,7 @@ describe("the Pipelex API boundary lint rules", () => {
     ).toEqual([]);
   });
 
-  it("refuse a bare fetch outside the third-party fetch boundary", async () => {
+  it("refuse a bare fetch outside the files exempted from it", async () => {
     const code = [
       'export const a = fetch("https://api.pipelex.com/v1/version");',
       'export const b = globalThis.fetch("https://api.pipelex.com/health");',
@@ -71,9 +71,6 @@ describe("the Pipelex API boundary lint rules", () => {
       "pipelex/no-raw-fetch",
       "pipelex/no-raw-fetch",
     ]);
-    expect(
-      await boundaryViolations(code, "packages/core/src/capabilities/attachment-fetch.ts"),
-    ).toEqual([]);
     // The graph page's live check fetches its pinned CDN files; the shipped
     // module it checks is not exempt.
     expect(
