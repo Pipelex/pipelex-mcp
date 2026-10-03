@@ -31,6 +31,9 @@ describe("unpublishableReason", () => {
       "bitbucket:Pipelex/pipelex-sdk",
       `Pipelex/pipelex-sdk#${SHA}`,
       "Pipelex/pipelex-sdk",
+      "Pipelex/pipelex-sdk#semver:^0.28",
+      "git@github.com:Pipelex/pipelex-sdk.git",
+      `git@github.com:Pipelex/pipelex-sdk.git#${SHA}`,
     ]) {
       expect(unpublishableReason(spec), spec).toBe("a git source");
     }
@@ -48,9 +51,23 @@ describe("unpublishableReason", () => {
       "portal:../mthds-ui",
       "workspace:*",
       "../pipelex-sdk/js",
+      "/Users/someone/repos/Pipelex/pipelex-sdk/js",
+      "~/repos/Pipelex/pipelex-sdk/js",
+      "sdk-0.28.0.tgz",
+      "sdk-0.28.0.tar.gz",
     ]) {
       expect(unpublishableReason(spec), spec).toBe("a local source");
     }
+  });
+
+  it("refuses an alias to anything but the registry", () => {
+    expect(unpublishableReason(`npm:@pipelex/sdk@github:Pipelex/pipelex-sdk#${SHA}`)).toBe(
+      "a spec npm cannot read",
+    );
+  });
+
+  it("refuses a spec npm cannot read at all", () => {
+    expect(unpublishableReason("not a spec")).toBe("a spec npm cannot read");
   });
 });
 

@@ -12,17 +12,26 @@
  * on every machine that installs it; a sprint prerelease ships code its
  * upstream never released.
  *
- * So publishing refuses, naming the package, a spec in any of these forms:
+ * So publishing refuses, naming the package, every spec npm would not resolve
+ * from the registry. The spec is classified by `npm-package-arg`, the parser
+ * npm itself reads a manifest with, and only a version, a range or a tag
+ * passes, or an `npm:` alias to one. Everything else is refused, whether or
+ * not this module foresaw its spelling:
  *
  * - a **sprint prerelease**, `X.Y.Z-sprint.g<sha>`, the form `wt pin` writes
  *   for a package built in a member directory of its upstream, such as
- *   `@pipelex/sdk` in `pipelex-sdk/js`;
+ *   `@pipelex/sdk` in `pipelex-sdk/js`, is a version npm would resolve, so it
+ *   is refused by name, ranged or aliased;
  * - a **git source**, `github:<org>/<repo>#<sha>` (the form `wt pin` writes for
- *   a package at its repository's root), `git+https://…`, `git+ssh://…`, the
- *   other hosted shorthands, or the bare `<org>/<repo>` GitHub shorthand;
+ *   a package at its repository's root), and every other spelling npm reads as
+ *   git: `git+https://…`, `git+ssh://…`, the scp form `git@github.com:…`, the
+ *   bare `<org>/<repo>` shorthand, a `#semver:` committish;
  * - a **URL**, a tarball or a repository served over HTTP;
- * - a **local source**, `file:`, `link:`, `portal:`, `workspace:` or a path,
- *   which `make use-local-sdk` and `make use-local-ui` write for development.
+ * - a **local source**: a `file:` spec, the form `make use-local-sdk` and
+ *   `make use-local-ui` write for development, a path, a bare `*.tgz` name, or
+ *   the `link:`, `portal:` and `workspace:` protocols other package managers
+ *   write;
+ * - anything else npm cannot read at all.
  *
  * Every dependency block is read, `devDependencies` included: tsup inlines what
  * a devDependency provides, such as the graph page's embed serializer from
@@ -35,9 +44,13 @@
  * stay green with a pin deliberately in place on a sprint branch, so the
  * guard is the manifest's `prepublishOnly` script, which `npm publish` runs
  * before it packs, whether `release.yml`, `make publish` or a person started
- * it. `scripts/check-publishable.ts` reads the manifest and reports; the
- * classification lives here so the hermetic suite covers it.
+ * it. An npm configured with `ignore-scripts` runs no lifecycle script, so
+ * `make publish` also runs the guard as a prerequisite and passes
+ * `--ignore-scripts=false`. `scripts/check-publishable.ts` reads the manifest
+ * and reports; the classification lives here so the hermetic suite covers it.
  */
+
+import npa from "npm-package-arg";
 
 /** The dependency blocks of a manifest, each read by the guard. */
 const DEPENDENCY_BLOCKS = [
@@ -62,22 +75,43 @@ export interface UnpublishableDependency {
 }
 
 const SPRINT_PRERELEASE = /-sprint\./;
-const LOCAL_SOURCE = /^(file:|link:|portal:|workspace:|\.{1,2}\/|\/|~\/)/;
-const URL_SOURCE = /^https?:\/\//;
-const GIT_SOURCE = /^(git\+|git:|github:|gitlab:|bitbucket:|gist:|ssh:)/;
-// npm reads a spec holding a slash, and no scheme, as `<org>/<repo>` on GitHub.
-// A registry range never holds one; an `npm:` alias does, in its scoped name.
-const GITHUB_SHORTHAND = /^[^:]+\/[^:]+$/;
+// Protocols other package managers write, which npm refuses to parse at all.
+const FOREIGN_LOCAL_PROTOCOL = /^(link:|portal:|workspace:)/;
+// The package name only shapes npm's error messages; a spec parses the same under any.
+const PROBE_NAME = "probe";
 
 /** Why a spec may not be published, or undefined when it is a registry range or tag. */
 export function unpublishableReason(spec: string): string | undefined {
   const trimmed = spec.trim();
-  if (SPRINT_PRERELEASE.test(trimmed)) return "a sprint prerelease";
-  if (LOCAL_SOURCE.test(trimmed)) return "a local source";
-  if (URL_SOURCE.test(trimmed)) return "a URL";
-  if (GIT_SOURCE.test(trimmed)) return "a git source";
-  if (!trimmed.startsWith("npm:") && GITHUB_SHORTHAND.test(trimmed)) return "a git source";
-  return undefined;
+  if (FOREIGN_LOCAL_PROTOCOL.test(trimmed)) return "a local source";
+  let parsed: npa.Result;
+  try {
+    parsed = npa.resolve(PROBE_NAME, trimmed);
+  } catch {
+    return "a spec npm cannot read";
+  }
+  return reasonOf(parsed);
+}
+
+function reasonOf(parsed: npa.Result): string | undefined {
+  switch (parsed.type) {
+    case "version":
+    case "range":
+    case "tag":
+      return SPRINT_PRERELEASE.test(parsed.rawSpec) ? "a sprint prerelease" : undefined;
+    case "alias":
+      return reasonOf((parsed as npa.AliasResult).subSpec);
+    case "git":
+      return "a git source";
+    case "file":
+    case "directory":
+      return "a local source";
+    case "remote":
+      return "a URL";
+    // A type a later npm adds is refused until this module has read it.
+    default:
+      return "not a registry range or tag";
+  }
 }
 
 /** Every dependency of the manifest that may not be published, block by block. */
