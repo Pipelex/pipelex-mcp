@@ -19,6 +19,17 @@ import type { ModelDeckListing, ModelReferenceCheck, ModelsContext } from "./mod
 // No `client` seam: this is the real PipelexApiClient talking to the real API.
 const context: ModelsContext = liveApiConfig();
 
+/**
+ * The categories the hosted runner may still refuse as a filter, because it
+ * implements a protocol older than the one that defined them: a runner before
+ * protocol 0.7.0 answers `?type=judgment` with a 422. The leg accepts that
+ * refusal, held to its classification, rather than skipping: the hosted
+ * `/v1/version` does not yet report the runner's protocol, so nothing live can
+ * say which answer to expect. Empty this set once the hosted runner serves the
+ * category (L-261003-584d78), so the leg holds `judgment` to the deck again.
+ */
+const NEWER_THAN_THE_HOSTED_RUNNER: ReadonlySet<string> = new Set(["judgment"]);
+
 async function liveListing(category?: ModelDeckListing["category"]): Promise<ModelDeckListing> {
   const result = await readMthdsModels(category === undefined ? {} : { category }, context);
   expect(result.structuredContent.status, result.summary).toBe("ok");
@@ -47,6 +58,18 @@ describe("mthds_models against the live API", () => {
     const whole = await liveListing();
 
     for (const category of MODEL_CATEGORIES) {
+      if (NEWER_THAN_THE_HOSTED_RUNNER.has(category)) {
+        const result = await readMthdsModels({ category }, context);
+        if (result.structuredContent.status === "error") {
+          // The one refusal the tool documents for a runner that predates the
+          // category, and nothing else.
+          expect(result.structuredContent.errors[0], result.summary).toMatchObject({
+            class: "input_domain",
+            location: "category",
+          });
+          continue;
+        }
+      }
       const listing = await liveListing(category);
       // The tool scopes a listing to its category itself, so the shape alone
       // proves nothing: the entry is held to the unfiltered deck's, which
