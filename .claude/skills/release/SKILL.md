@@ -21,7 +21,9 @@ The procedure is the workspace release play, [`docs/workspace/releasing.md`](../
 
 ## What a release is here
 
-**This repository ships one server, the workshop: `@pipelex/mcp` on npm, the stdio server the Pipelex plugin runs.** Its member is `packages/workshop`, its version lives in `packages/workshop/package.json` and its changelog in `packages/workshop/CHANGELOG.md`; the release branch is `release/vX.Y.Z`, the tag `vX.Y.Z`, the release item's title `pipelex-mcp vX.Y.Z`, and what the merge ships is an npm publish. The hosted console, the Pipelex connector for chat hosts, is a separate product released from its own repository, and nothing here releases it.
+**This repository ships one server, the workshop: `@pipelex/mcp` on npm, the stdio server the Pipelex plugin runs.** Its member is `packages/workshop`, its version lives in `packages/workshop/package.json` and its changelog in `packages/workshop/CHANGELOG.md`; the release branch is `release/vX.Y.Z`, the tag `vX.Y.Z`, and what the merge ships is an npm publish. The hosted console, the Pipelex connector for chat hosts, is a separate product released from its own repository, and nothing here releases it: work waiting on a console release names that repository, `pipelex-mcp-console@X.Y.Z`, and the `console-vX.Y.Z` tags in this history are the console's past releases from here, which no condition reads.
+
+**A release files nothing in the ledger.** Work another repo must do once this version is on npm, such as a consumer's move of its `@pipelex/mcp` floor, is filed with `ledger new --after-release pipelex-mcp@X.Y.Z`, or put on an item already open with `ledger link <id> --after-release pipelex-mcp@X.Y.Z`, and becomes ready by itself once this repository's checkout carries the `vX.Y.Z` tag or a later release's.
 
 The release worktree is `_pipelex-mcp--release`, made with `wt add pipelex-mcp release --branch release/vX.Y.Z`. `wt` resolves the base from `origin/dev`, copies the main checkout's `.env` by the default rule, and provisions with the Makefile's `install` target (`npm install` at the root, which installs every workspace member) — which is what puts `node_modules` in the worktree for the gates below.
 
@@ -35,7 +37,7 @@ The release worktree is `_pipelex-mcp--release`, made with `wt add pipelex-mcp r
 
 The member's `files` list publishes `dist`, `README.md` and `LICENSE`; its `prepack` rebuilds `dist/main.js` with tsup and copies the repository's README and licence into the member, and its `postpack` removes the copies, so the tarball is built from the commit being shipped. It goes out as `npm publish --workspace @pipelex/mcp --access public --provenance` under npm trusted publishing, so no npm token exists anywhere; **the registration is bound to the filename `release.yml`**, and renaming or moving that workflow breaks publishing until the trusted publisher is re-registered. The `tag` job then creates `vX.Y.Z`.
 
-The tag is created by `git tag`, so it is **lightweight**, and the tag job leaves an existing tag alone. The landing verifies the `release.yml` run on the merge SHA, which is the play's default reading, and the tag the release branch spells after `release/`, so keep the release item open until that run is green.
+The tag is created by `git tag`, so it is **lightweight**, and the tag job leaves an existing tag alone. The landing verifies the `release.yml` run on the merge SHA, which is the play's default reading, and the tag the release branch spells after `release/`, so the release is verified only once that run is green and the tag is there; the landing then closes nothing, since a release files nothing in the ledger.
 
 ```bash
 gh run list --workflow=release.yml --limit 3 --json conclusion,event,headSha,url,createdAt   # the run whose headSha is the merge: success
