@@ -35,7 +35,7 @@ import {
 import { LIVE_API_KEY_ENV, liveApiTarget } from "../src/capabilities/e2e-support.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const SERVER_ENTRYPOINT = path.join(REPO_ROOT, "packages", "workshop", "src", "main.ts");
+const SERVER_ENTRYPOINT = path.join(REPO_ROOT, "src", "main.ts");
 const TSX_BIN = path.join(REPO_ROOT, "node_modules", ".bin", "tsx");
 
 /** Generous: a cold hosted API can take seconds, and a hang must still end in a verdict. */
