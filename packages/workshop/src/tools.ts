@@ -134,9 +134,9 @@ export interface LocalToolContexts {
 }
 
 /**
- * The workshop's contexts, every per-shell setting stated here rather than
- * passed in as an option: the workshop reads `{ path }` files from `rootDir`,
- * uploads file-bearing inputs, writes under `rootDir`, and has no views.
+ * The workshop's contexts, every setting stated here rather than passed in as
+ * an option: the workshop reads `{ path }` files from `rootDir`, uploads
+ * file-bearing inputs and writes under `rootDir`.
  */
 export function buildLocalToolContexts(
   env: NodeJS.ProcessEnv = process.env,
@@ -156,7 +156,6 @@ export function buildLocalToolContexts(
   const validation: ValidationContext = {
     ...buildValidationContext(env),
     resolver,
-    viewsAvailable: false,
   };
 
   return {
@@ -175,29 +174,21 @@ export function buildLocalToolContexts(
     // `output_dir` against it, as the download tool resolves `dir`.
     codegen: { ...buildCodegenContext(env), resolver, saveRoot: rootDir },
     // The workshop is co-located with the user's files, so its prepare tool
-    // uploads file-bearing inputs (local paths, data: URLs, bytes); the
-    // console has no prepare tool at all.
+    // uploads file-bearing inputs (local paths, data: URLs, bytes).
     prepare: { ...buildPrepareContext(env), resolver },
-    // The results summary names mthds_download_artifacts, which exists here.
-    run: {
-      ...buildRunContext(env),
-      resolver,
-      viewsAvailable: false,
-      artifactDownloadAvailable: true,
-    },
-    // The same prose-only nudge as the run context's.
-    images: { ...buildImagesContext(env), artifactDownloadAvailable: true },
+    run: { ...buildRunContext(env), resolver },
+    images: buildImagesContext(env),
     artifacts: { ...buildArtifactsContext(env), saveRoot: rootDir },
   };
 }
 
 /**
  * Apply one patch to every workshop context, the nested validation context of
- * `catalogWrite` included. This is the single list of contexts a shell-level
- * override has to reach on the workshop: `createLocalServer` lifts its
- * handshake's `appInfo` through it. A context left out here would be one whose
- * calls go out without the shell's identity, which is why the list lives
- * beside `LocalToolContexts` and covers every member of it.
+ * `catalogWrite` included. This is the single list of contexts a server-level
+ * override has to reach: `createLocalServer` lifts its handshake's `appInfo`
+ * through it. A context left out here would be one whose calls go out without
+ * the workshop's identity, which is why the list lives beside
+ * `LocalToolContexts` and covers every member of it.
  *
  * Only the keys present in `patch` are written, and each is written
  * unconditionally — an `apiKey` of `""` is a value, not an absence.
@@ -251,9 +242,6 @@ export const mthdsListMethodsTool = defineTool({
 });
 
 /**
- * Workshop-only: a chatbot runs methods and never writes a pipe's `model`
- * field, so the console has no use for the deck.
- *
  * The description carries the account caveat on purpose. The deck is what the
  * runner can route to, and a gateway can still refuse a listed model for this
  * account when a run starts; a model that read the list as the account's would
@@ -493,10 +481,8 @@ export const mthdsShowImagesTool = defineTool({
 });
 
 /**
- * Workshop-only: it writes a completed run — its main output and the files the
- * output references — under the server's working directory. The console has no
- * working directory and never writes a file (its users download run outputs
- * from the app's UI), so there it would have nowhere to save.
+ * It writes a completed run — its main output and the files the output
+ * references — under the server's working directory.
  *
  * The description leads with the output because that is what a model asked to
  * "save the results" is looking for, and the tool's name says "artifacts": a
@@ -527,11 +513,9 @@ export const mthdsDownloadArtifactsTool = defineTool({
 });
 
 /**
- * Workshop-only, like the pull below: the save submits the bundle in the
- * `{ path }` form and finishes by writing the link file that makes the next
- * save an update rather than a duplicate, so it needs the working directory the
- * console does not have. The console's users reach both gestures in the
- * webapp's editor.
+ * Like the pull below, the save needs the working directory: it submits the
+ * bundle in the `{ path }` form and finishes by writing the link file that
+ * makes the next save an update rather than a duplicate.
  *
  * The order rule is the load-bearing part of this description, and it is stated
  * rather than inferred: the platform derives a method's LISTED description from

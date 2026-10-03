@@ -289,13 +289,11 @@ describe("the workshop's contexts and dispatch", () => {
     expect(contexts.catalogWrite.validation.saveRoot).toBeUndefined();
 
     // One working directory, every consumer — the download tool's save root,
-    // codegen's `output_dir` root, the catalog pull's write root, the graph
-    // page's root (above), and the results summary's nudge.
+    // codegen's `output_dir` root, the catalog pull's write root and the graph
+    // page's root (above).
     expect(contexts.artifacts.saveRoot).toBe(rootDir);
     expect(contexts.codegen.saveRoot).toBe(rootDir);
     expect(contexts.catalogWrite.saveRoot).toBe(rootDir);
-    expect(contexts.run.artifactDownloadAvailable).toBe(true);
-    expect(contexts.images.artifactDownloadAvailable).toBe(true);
   });
 
   it("registers mthds_list_methods first with its read-only schema and dispatches it", async () => {
@@ -433,8 +431,6 @@ describe("the workshop's contexts and dispatch", () => {
 
     expect(contexts.validation.resolver).toBe(contexts.inputs.resolver);
     expect(contexts.validation.resolver).toBe(contexts.run.resolver);
-    expect(contexts.validation.viewsAvailable).toBe(false);
-    expect(contexts.run.viewsAvailable).toBe(false);
     await expect(contexts.validation.resolver?.resolve("bundle.mthds")).resolves.toEqual({
       ok: true,
       content: 'domain = "demo"',

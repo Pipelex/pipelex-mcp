@@ -1,28 +1,24 @@
 /**
  * Why a hosted run failed, carried from the report the runner stored and worded
- * for each reader.
+ * for the model.
  *
  * When a run fails, the runner writes an error report and the platform stores it
  * on the run whole: the status read serves it as `RunRead.error`, and the results
  * read's `409` carries it too once the platform relays it there. This module
  * narrows that report into the `failure` object every failed arm of the run
- * family carries, and words it twice: for the model, in the result summary, and
- * for the person, in the console's views.
+ * family carries, and words it in the result summary.
  *
- * The two wordings differ on purpose. The platform serves the runner's VERBOSE
- * report, so its `message` can hold a provider's raw text. The model reads that
- * message, through `failure.message` and the summary, because it is what lets an
- * assistant diagnose the fault. The person never sees it: the views say why from
- * the report's `title`, what to do from its `user_action`, and give a short
- * support line with the run id, the error type and the time the run ended.
+ * The platform serves the runner's VERBOSE report, so its `message` can hold a
+ * provider's raw text. The model reads that message, through `failure.message`
+ * and the summary, because it is what lets an assistant diagnose the fault; the
+ * summary adds what to do from the report's `user_action`, and a short support
+ * line with the run id, the error type and the time the run ended.
  *
  * Nothing here is inferred. Whether running it again can help comes from the
  * report's `retryable` alone, and a report without one gets no retry sentence
  * either way. The runner owns the report's shape, so every field is narrowed as
  * it arrives, the way `narrowMethodProvenance` treats provenance: a field of the
  * wrong type reads as absent, and a report with nothing to say reads as no report.
- *
- * The views bundle this module for the browser, so it imports types only.
  */
 
 import type { RunStatus } from "@pipelex/sdk";
@@ -238,41 +234,6 @@ export function failureSummaryLines(
   }
   lines.push(`For support: ${supportLineOf(runId, failure, finishedAt)}`);
   return lines;
-}
-
-/** The failure as a person reads it in the console's views: never the report's message, never provider text. */
-export interface RunFailureDisplay {
-  /** Why the run failed, in plain words: the report's title. */
-  reason: string;
-  /** What the person can do next. */
-  nextStep: string;
-  /** Whether trying again can help, when the report says. */
-  retry?: string;
-  /** The short line to copy for support. */
-  support: string;
-}
-
-/**
- * The failure as the views show it. The reason is the report's `title`, the
- * stable label of the error class, and never its `message`, which can carry a
- * provider's raw text; the next step is the report's advice, or support when it
- * gives none.
- */
-export function failureDisplayOf(
-  runId: string,
-  failure: RunFailure | undefined,
-  finishedAt?: string | null,
-): RunFailureDisplay {
-  const retry = retryAdviceOf(failure);
-  return {
-    reason:
-      failure === undefined
-        ? "No reason was recorded for this run."
-        : (failure.title ?? "The run failed without naming a cause."),
-    nextStep: nextStepOf(failure) ?? "If you need help, contact support with the line below.",
-    ...(retry === undefined ? {} : { retry }),
-    support: supportLineOf(runId, failure, finishedAt),
-  };
 }
 
 /**

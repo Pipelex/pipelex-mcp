@@ -1,14 +1,11 @@
 import {
   ApiResponseError,
   ApiUnreachableError,
-  BULK_RESOLVE_MAX_URIS,
   collectArtifacts,
   isTerminalRunStatus,
   summarizeUsage,
 } from "@pipelex/sdk";
 import type {
-  BulkResolvedStorageUrls,
-  BulkResolveStorageUrlsInput,
   GetRunResultOptions,
   MethodProvenance,
   PipelexRunResultStart,
@@ -27,20 +24,17 @@ import type {
 import { z } from "zod";
 
 import {
-  BULK_RESOLVE_ERROR_OPTIONS,
   MAX_IMAGE_CANDIDATE_ENTRIES,
   METHOD_REF_GRAMMAR,
   buildApiConfig,
   classifyError,
   createPipelexApiClient,
   filesInputSchema,
-  hasArtifactEntries,
   imageCandidatesOf,
   resolveSubmittedFiles,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
-  validateMethodReferenceRequest,
   validateMethodSelectorRequest,
   validateRunIdRequest,
 } from "./shared.js";
@@ -54,7 +48,6 @@ import type {
   SubmittedFileInput,
   ToolError,
 } from "./shared.js";
-import { prepareConsoleInputs } from "./console-inputs.js";
 import {
   START_MAY_HAVE_RUN_HINT,
   START_MAY_HAVE_RUN_SUMMARY,
@@ -67,9 +60,7 @@ import {
   runFailureOf,
 } from "./run-failure.js";
 import type { RunFailure } from "./run-failure.js";
-import type { ConsoleInputsClient, ConsoleInputsSelector } from "./console-inputs.js";
-import { CONSOLE_TOOL_NAMES, WORKSHOP_TOOL_NAMES } from "./tool-names.js";
-import type { ToolNames } from "./tool-names.js";
+import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 
 /**
  * The hosted run lifecycle statuses. The `Record<RunStatus, true>` shape ties
@@ -88,10 +79,6 @@ const RUN_STATUS_SET: Record<RunStatus, true> = {
 };
 
 export const runStatusSchema = z.enum(Object.keys(RUN_STATUS_SET) as [RunStatus, ...RunStatus[]]);
-
-function runIdInputField(names: ToolNames) {
-  return z.string().describe(`The durable run id returned by ${names.run}.`);
-}
 
 export const mthdsRunInputSchema = {
   files: filesInputSchema.optional(),
@@ -121,30 +108,28 @@ export const mthdsRunInputSchema = {
     ),
 };
 
-/**
- * The input schema of the status and results tools alike, its description
- * naming the run tool of the shell that registers it.
- */
-export function runIdInputSchemaFor(names: ToolNames) {
-  return { run_id: runIdInputField(names) };
+/** The input schema of the status and results tools alike, built afresh for each. */
+function runIdInputSchema() {
+  return {
+    run_id: z.string().describe(`The durable run id returned by ${WORKSHOP_TOOL_NAMES.run}.`),
+  };
 }
 
-export const mthdsRunStatusInputSchema = runIdInputSchemaFor(WORKSHOP_TOOL_NAMES);
+export const mthdsRunStatusInputSchema = runIdInputSchema();
 
-export const mthdsRunResultsInputSchema = runIdInputSchemaFor(WORKSHOP_TOOL_NAMES);
+export const mthdsRunResultsInputSchema = runIdInputSchema();
 
 /**
- * Identifiers of the renderable views a start result can drive (same
- * convention as validate's view-spec list: the model never sees `_meta`, so
- * this is how it learns a view is available to surface). The only kind is
- * `"live_run_status"` — the self-polling run-follow card.
+ * Identifiers of the renderable views a start result can name (same convention
+ * as validate's view-spec list). The workshop renders no views, so a start
+ * result always lists none; the enum stays because it is part of the output
+ * schema `workshop.contract.json` pins.
  */
 const runViewSpecSchema = z.enum(["live_run_status"]);
 
 /**
- * Identifiers of the renderable views a results result can drive. The only
- * kind is `"run_graph"` — the executed method graph, whose spec rides the tool
- * result's `_meta.graph_spec`.
+ * Identifiers of the renderable views a results result can name. Always none
+ * on the workshop, kept for the pinned output schema like `runViewSpecSchema`.
  */
 const resultsViewSpecSchema = z.enum(["run_graph"]);
 
@@ -161,33 +146,28 @@ const methodProvenanceSchema = z.object({
     ),
 });
 
-/** The start result's schema, naming the follow-up tools of the shell that registers it. */
-export function runStartOutputSchemaFor(names: ToolNames) {
-  return z.object({
-    status: z.enum(["ok", "error"]),
-    run_id: z
-      .string()
-      .optional()
-      .describe(`The durable run id — the handle for ${names.runStatus} and ${names.runResults}.`),
-    run_status: runStatusSchema
-      .optional()
-      .describe("Initial lifecycle state from the start ack, when the server includes one."),
-    created_at: z.string().optional(),
-    method_provenance: methodProvenanceSchema
-      .optional()
-      .describe(
-        "method_ref runs only — the address, tag, and resolved commit SHA that was fetched.",
-      ),
-    available_view_specs: z
-      .array(runViewSpecSchema)
-      .describe(
-        'Renderable views available for this result. Contains "live_run_status" when a live-following status card is available; empty otherwise.',
-      ),
-    errors: z.array(toolErrorSchema).optional(),
-  });
-}
-
-export const mthdsRunOutputSchema = runStartOutputSchemaFor(WORKSHOP_TOOL_NAMES);
+export const mthdsRunOutputSchema = z.object({
+  status: z.enum(["ok", "error"]),
+  run_id: z
+    .string()
+    .optional()
+    .describe(
+      `The durable run id — the handle for ${WORKSHOP_TOOL_NAMES.runStatus} and ${WORKSHOP_TOOL_NAMES.runResults}.`,
+    ),
+  run_status: runStatusSchema
+    .optional()
+    .describe("Initial lifecycle state from the start ack, when the server includes one."),
+  created_at: z.string().optional(),
+  method_provenance: methodProvenanceSchema
+    .optional()
+    .describe("method_ref runs only — the address, tag, and resolved commit SHA that was fetched."),
+  available_view_specs: z
+    .array(runViewSpecSchema)
+    .describe(
+      'Renderable views available for this result. Contains "live_run_status" when a live-following status card is available; empty otherwise.',
+    ),
+  errors: z.array(toolErrorSchema).optional(),
+});
 
 /**
  * Why a run failed, from the error report the runner stored on it: the
@@ -311,111 +291,64 @@ const runUsageSchema = z.object({
     ),
 });
 
-/** The results tool's schema, naming the image tool of the shell that registers it. */
-export function runResultsOutputSchemaFor(names: ToolNames) {
-  return z.object({
-    status: z.enum(["ok", "error"]),
-    run_id: z.string().optional(),
-    state: z
-      .enum(["running", "completed", "failed"])
-      .optional()
-      .describe(
-        'The result lookup outcome: "running" (no result yet), "completed" (main output below), "failed" (terminal non-COMPLETED).',
-      ),
-    retry_after_seconds: z
-      .number()
-      .nullable()
-      .optional()
-      .describe('State "running" only — check again after this many seconds.'),
-    run_status: runStatusSchema
-      .optional()
-      .describe('State "failed" only — the terminal lifecycle status.'),
-    failure_message: z
-      .string()
-      .optional()
-      .describe('State "failed" only — the platform\'s one-sentence account of the ending.'),
-    failure: runFailureSchema
-      .optional()
-      .describe(`State "failed" only. ${FAILURE_FIELD_DESCRIPTION}`),
-    main_stuff: z
-      .unknown()
-      .optional()
-      .describe(
-        'State "completed" only — the resolved main output, bounded to a serialized cap (see truncated).',
-      ),
-    truncated: z
-      .boolean()
-      .optional()
-      .describe(
-        "True when main_stuff was bounded down; the full output rides the view-only _meta.",
-      ),
-    image_candidates: z
-      .array(z.string())
-      .optional()
-      .describe(
-        `State "completed" only, and only when the output references stored files — the pipelex-storage:// references whose storage key looks like an image, as they appear in the output. A free in-memory prefilter over the FULL output, so a reference pruned out of main_stuff still appears here; nothing was fetched and nothing was read, so this is a shortlist, not a verdict. Bounded — see image_candidates_omitted. Pass one of these (or its index in this list) to ${names.showImages} to see the picture.`,
-      ),
-    image_candidates_omitted: z
-      .number()
-      .optional()
-      .describe(
-        `State "completed" only, and only when something was left out — how many image candidates past the listed ones this result does not enumerate. They are still on the run: ${names.showImages} walks the full set.`,
-      ),
-    usage: runUsageSchema
-      .optional()
-      .describe(
-        'State "completed" only — token and USD-cost aggregates for the run, always present: read its state first. The full per-call record list rides the view-only _meta.tokens_usages.',
-      ),
-    available_view_specs: z
-      .array(resultsViewSpecSchema)
-      .describe(
-        'Renderable views available for this result. Contains "run_graph" when the executed method graph is available to display; empty otherwise.',
-      ),
-    errors: z.array(toolErrorSchema).optional(),
-  });
-}
-
-export const mthdsRunResultsOutputSchema = runResultsOutputSchemaFor(WORKSHOP_TOOL_NAMES);
-
-/**
- * `pipelex_run`'s input — the console's run, by reference only: no `files`, no
- * `{ path }` arm, and the pipe selector spelled `pipe_ref` like on every other
- * console tool (the run routes' own `pipe_code` is a wire detail the console
- * keeps to itself).
- */
-export const pipelexRunInputSchema = {
-  method_id: z
+export const mthdsRunResultsOutputSchema = z.object({
+  status: z.enum(["ok", "error"]),
+  run_id: z.string().optional(),
+  state: z
+    .enum(["running", "completed", "failed"])
+    .optional()
+    .describe(
+      'The result lookup outcome: "running" (no result yet), "completed" (main output below), "failed" (terminal non-COMPLETED).',
+    ),
+  retry_after_seconds: z
+    .number()
+    .nullable()
+    .optional()
+    .describe('State "running" only — check again after this many seconds.'),
+  run_status: runStatusSchema
+    .optional()
+    .describe('State "failed" only — the terminal lifecycle status.'),
+  failure_message: z
     .string()
     .optional()
-    .describe(
-      `Catalog id (mt_…) of a saved method in your organization, as ${CONSOLE_TOOL_NAMES.listMethods} returns it. Runs the method's CURRENT stored content. Supply exactly ONE of method_id / method_ref.`,
-    ),
-  method_ref: z
-    .string()
+    .describe('State "failed" only — the platform\'s one-sentence account of the ending.'),
+  failure: runFailureSchema
+    .optional()
+    .describe(`State "failed" only. ${FAILURE_FIELD_DESCRIPTION}`),
+  main_stuff: z
+    .unknown()
     .optional()
     .describe(
-      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side: the repository is fetched at the tag and the resolved commit SHA comes back as provenance. Supply exactly ONE of method_id / method_ref.`,
+      'State "completed" only — the resolved main output, bounded to a serialized cap (see truncated).',
     ),
-  pipe_ref: z
-    .string()
+  truncated: z
+    .boolean()
+    .optional()
+    .describe("True when main_stuff was bounded down; the full output rides the view-only _meta."),
+  image_candidates: z
+    .array(z.string())
     .optional()
     .describe(
-      `The pipe to run, as a qualified domain.pipe_code, as ${CONSOLE_TOOL_NAMES.showMethod} reports it. Omit to run the method's entry pipe.`,
+      `State "completed" only, and only when the output references stored files — the pipelex-storage:// references whose storage key looks like an image, as they appear in the output. A free in-memory prefilter over the FULL output, so a reference pruned out of main_stuff still appears here; nothing was fetched and nothing was read, so this is a shortlist, not a verdict. Bounded — see image_candidates_omitted. Pass one of these (or its index in this list) to ${WORKSHOP_TOOL_NAMES.showImages} to see the picture.`,
     ),
-  inputs: z
-    .record(z.string(), z.unknown())
+  image_candidates_omitted: z
+    .number()
     .optional()
     .describe(
-      `The method's inputs — ${CONSOLE_TOOL_NAMES.showMethod}'s template, filled. A file input takes an http(s) URL or a pipelex-storage:// reference; a file the user attached in the chat goes through ${CONSOLE_TOOL_NAMES.uploadAttachments} first.`,
+      `State "completed" only, and only when something was left out — how many image candidates past the listed ones this result does not enumerate. They are still on the run: ${WORKSHOP_TOOL_NAMES.showImages} walks the full set.`,
     ),
-};
-
-export interface PipelexRunInput {
-  method_id?: string;
-  method_ref?: string;
-  pipe_ref?: string;
-  inputs?: Record<string, unknown>;
-}
+  usage: runUsageSchema
+    .optional()
+    .describe(
+      'State "completed" only — token and USD-cost aggregates for the run, always present: read its state first. The full per-call record list rides the view-only _meta.tokens_usages.',
+    ),
+  available_view_specs: z
+    .array(resultsViewSpecSchema)
+    .describe(
+      'Renderable views available for this result. Contains "run_graph" when the executed method graph is available to display; empty otherwise.',
+    ),
+  errors: z.array(toolErrorSchema).optional(),
+});
 
 export interface MthdsRunInput {
   files?: SubmittedFileInput[];
@@ -516,51 +449,18 @@ export interface RunResultsResult {
   structuredContent: RunResultsStructuredContent;
   summary: string;
   /**
-   * The executed method graph, for the Skybridge views only. It rides the tool
-   * result's `_meta.graph_spec` (never `structuredContent`), so the model never
-   * pays its tokens. Populated only on a completed result that carries one
-   * and the invoking shell has views.
-   */
-  graphSpec?: unknown;
-  /**
-   * The run's `pipe_io_contracts` — the per-pipe IO contracts for the library
-   * the run executed against, keyed by namespaced `pipe_ref`. It rides
-   * `_meta.pipe_io_contracts` beside the graph, never `structuredContent`.
-   *
-   * It travels as a PAIR with `outputForm` because that is the renderer's own
-   * rule: `GraphViewer` shows a data node's VALUE only when it holds both, and
-   * falls back to the concept's structure table otherwise. Shipping one alone
-   * would buy nothing and cost the wire.
-   */
-  pipeIoContracts?: unknown;
-  /**
-   * The run's `output_form` — the other half of the pair above. The contract
-   * names the payload's shape; the descriptor says what the result IS.
-   */
-  outputForm?: unknown;
-  /**
-   * The run's `input_form`. It is what lets the method's own INPUTS show their
-   * value, since no pipe produced them and so no output descriptor describes
-   * them, and its absence changes nothing but those nodes. Optional to the
-   * renderer — but optional *given* the pair rather than independent of it, so
-   * it rides only when the pair does. `completedResult` is where that holds,
-   * and says why.
-   */
-  inputForm?: unknown;
-  /**
    * The full, unbounded main output on raw MCP response metadata (rides
    * `_meta.main_stuff`). `structuredContent.main_stuff` is the bounded copy.
-   * It remains on the raw MCP result even when the invoking shell has no views,
-   * so a programmatic consumer never loses the full result.
+   * The model never reads `_meta`, so a programmatic consumer keeps the full
+   * result without the model paying for it.
    */
   mainStuff?: unknown;
   /**
    * The full per-call token-usage record list on raw MCP response metadata
    * (rides `_meta.tokens_usages`). `structuredContent.usage` is the compact
-   * run-level projection. Like `mainStuff`, it is carried ungated by
-   * `viewsAvailable` so a programmatic consumer keeps the full detail; the model
-   * never sees it (it is not in `structuredContent`). Absent when the run
-   * reported no usage list.
+   * run-level projection. Like `mainStuff`, it is carried so a programmatic
+   * consumer keeps the full detail; the model never sees it (it is not in
+   * `structuredContent`). Absent when the run reported no usage list.
    */
   tokensUsages?: TokensUsageRecord[];
   /**
@@ -568,28 +468,10 @@ export interface RunResultsResult {
    * `_meta.usage_by_pipe`), projected from the SDK summary's `by_pipe` in its
    * order. Deliberately kept off the model-facing
    * `structuredContent.usage` (which is run-level only) so a future
-   * detailed-cost tool/view can display per-pipe attribution without spending
-   * model tokens on it now. Ungated by views, like `tokensUsages`. Absent when
-   * the run reported no usage list.
+   * detailed-cost surface can display per-pipe attribution without spending
+   * model tokens on it now. Absent when the run reported no usage list.
    */
   usageByPipe?: PipeUsage[];
-  /**
-   * A fresh link for each stored file a completed output references, keyed by
-   * its `pipelex-storage://` reference, for the views only (rides
-   * `_meta.resolved_urls`). The views paint files from these rather than from
-   * the payload's baked `public_url`, which expires an hour after the run. See
-   * `freshStorageLinks`.
-   */
-  resolvedUrls?: Record<string, string>;
-  /**
-   * Set, and only ever `true`, when a request for those links failed in a way
-   * that may pass, or ran out of time, so some reference went without one
-   * that a later read may mint (rides `_meta.resolved_urls_partial`). The
-   * views read the results again for it. A refusal that asking again would
-   * repeat does not set it: the route refusing the credential or missing from
-   * the deployment, or refusing one reference on its own item.
-   */
-  resolvedUrlsPartial?: true;
 }
 
 /** The slice of `PipelexApiClient` the run capabilities call (test seam). */
@@ -597,52 +479,17 @@ interface RunClient {
   start(options: PipelexStartOptions): Promise<PipelexRunResultStart>;
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
-  /** The bulk resolve route, `POST /v1/resolve-storage-url/bulk`: fresh links for a completed output's files. */
-  resolveStorageUrls(
-    input: BulkResolveStorageUrlsInput,
-    options?: { signal?: AbortSignal },
-  ): Promise<BulkResolvedStorageUrls>;
 }
-
-/** The console's run also reads the signature its input walk needs (test seam). */
-export type PipelexRunClient = RunClient & ConsoleInputsClient;
 
 export interface RunContext extends ApiConfig {
   client?: RunClient;
-  /** Fills `{ path }` items from disk (local workshop); absent on the hosted console. */
+  /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
-  /** Whether this shell can render run-follow and its view-only result payloads. */
-  viewsAvailable?: boolean;
-  /**
-   * Whether this shell registers `mthds_download_artifacts` (the workshop
-   * does; the console has a UI for it). When true, every completed result's
-   * summary names the tool as the way to keep the run on disk — the output
-   * verbatim, and the files it references, whose presigned links die within
-   * the hour — and a truncated result names it as the way to read the rest.
-   * The summary is the channel that reaches the agent at the moment it
-   * matters, and a model that does not know the tool retypes the output.
-   */
-  artifactDownloadAvailable?: boolean;
-  /** The tool names this shell's texts use; the workshop's when absent. */
-  toolNames?: ToolNames;
-  /** Deployment-specific auth-failure texture (the hosted console overrides it per request); default env-var wording when absent. */
+  /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
 
 export function buildRunContext(env = process.env): RunContext {
-  return buildApiConfig(env);
-}
-
-/**
- * The console's run context: the shared one, with a client that can also serve
- * the input walk `pipelex_run` performs before it starts. The status and
- * results tools read the same context as a plain {@link RunContext}.
- */
-export interface PipelexRunContext extends RunContext {
-  client?: PipelexRunClient;
-}
-
-export function buildPipelexRunContext(env = process.env): PipelexRunContext {
   return buildApiConfig(env);
 }
 
@@ -730,76 +577,24 @@ export const RUN_START_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
 };
 
 /**
- * `pipelex_run`'s start textures. The console names a method by reference only
- * and has no validate or inputs-template tool, so its hints send the caller to
- * the one tool that shows a method and its template.
- */
-const CONSOLE_START_SERVER_ERROR = {
-  hint: `The hosted API reports start-time rejections (e.g. an invalid method or bad inputs) as a generic server error. Check the method with ${CONSOLE_TOOL_NAMES.showMethod} and the inputs against its template; if both pass, the platform itself may be having trouble.`,
-};
-
-export const PIPELEX_RUN_START_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
-  ...RUN_START_BY_REF_ERROR_OPTIONS,
-  badRequest: {
-    location: "method_ref",
-    hint: `Check the address and tag — ${METHOD_REF_GRAMMAR}. The tag must be a git tag on the repository (branches do not pin). If the address resolved, check pipe_ref and the inputs against ${CONSOLE_TOOL_NAMES.showMethod}'s template.`,
-  },
-  serverError: CONSOLE_START_SERVER_ERROR,
-};
-
-export const PIPELEX_RUN_START_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/start",
-  methodLocation: "method_id",
-  badRequest: {
-    location: "method_id",
-    hint: `The saved method may have no MTHDS source yet. Check pipe_ref and the inputs against ${CONSOLE_TOOL_NAMES.showMethod}'s template.`,
-  },
-  notFound: {
-    location: "method_id",
-    hint: `No saved method with this id is visible to your organization. Check the id as ${CONSOLE_TOOL_NAMES.listMethods} returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.`,
-  },
-  serverError: CONSOLE_START_SERVER_ERROR,
-};
-
-/**
  * What an unknown run id means to the caller. The workshop's operator is its
- * user, so the deployment the key points at is theirs to check; the console's
- * deployment is not the caller's to change, and what they can check is which
- * organization they are signed in to.
+ * user, so the deployment the key points at is theirs to check.
  */
-function unknownRunHint(names: ToolNames): string {
-  return names.shell === "workshop"
-    ? `No run with this id is known to the configured API. Check the run_id returned by ${names.run}, and that PIPELEX_BASE_URL points at the deployment that started it.`
-    : `No run with this id is visible to your organization. Check the run_id returned by ${names.run}: a run started in another organization is not visible from this one.`;
-}
+const UNKNOWN_RUN_HINT = `No run with this id is known to the configured API. Check the run_id returned by ${WORKSHOP_TOOL_NAMES.run}, and that PIPELEX_BASE_URL points at the deployment that started it.`;
 
-function malformedRunIdHint(names: ToolNames): string {
-  return `Pass the run_id exactly as returned by ${names.run}.`;
-}
+const MALFORMED_RUN_ID_HINT = `Pass the run_id exactly as returned by ${WORKSHOP_TOOL_NAMES.run}.`;
 
-/** The status route's classify options, in the vocabulary of the shell that reads them. */
-export function runStatusErrorOptions(names: ToolNames): ClassifyErrorOptions {
-  return {
-    route: "/v1/runs/{id}/status",
-    badRequest: { location: "run_id", hint: malformedRunIdHint(names) },
-    notFound: { location: "run_id", hint: unknownRunHint(names) },
-  };
-}
+export const RUN_STATUS_ERROR_OPTIONS: ClassifyErrorOptions = {
+  route: "/v1/runs/{id}/status",
+  badRequest: { location: "run_id", hint: MALFORMED_RUN_ID_HINT },
+  notFound: { location: "run_id", hint: UNKNOWN_RUN_HINT },
+};
 
-/** The results route's classify options, in the vocabulary of the shell that reads them. */
-export function runResultsErrorOptions(names: ToolNames): ClassifyErrorOptions {
-  return {
-    route: "/v1/runs/{id}/results",
-    badRequest: { location: "run_id", hint: malformedRunIdHint(names) },
-    notFound: { location: "run_id", hint: unknownRunHint(names) },
-  };
-}
-
-export const RUN_STATUS_ERROR_OPTIONS: ClassifyErrorOptions =
-  runStatusErrorOptions(WORKSHOP_TOOL_NAMES);
-
-export const RUN_RESULTS_ERROR_OPTIONS: ClassifyErrorOptions =
-  runResultsErrorOptions(WORKSHOP_TOOL_NAMES);
+export const RUN_RESULTS_ERROR_OPTIONS: ClassifyErrorOptions = {
+  route: "/v1/runs/{id}/results",
+  badRequest: { location: "run_id", hint: MALFORMED_RUN_ID_HINT },
+  notFound: { location: "run_id", hint: UNKNOWN_RUN_HINT },
+};
 
 /** Request-shape checks on the mthds_run input, after `{ path }` resolution. */
 export function validateRunRequest(input: ResolvedRunRequest): ToolError[] {
@@ -1027,14 +822,9 @@ function narrowMethodProvenance(value: unknown): MethodProvenance | undefined {
  * defensively rather than trusted — as is `method_provenance`, the Pipelex-API
  * extension a `method_ref` run carries (the resolved commit SHA is what keeps
  * the run explainable when a tag moves, so it is surfaced to the model and
- * echoed in the summary). A produced ack advertises the `live_run_status` view
- * only when the invoking shell registered run-follow.
+ * echoed in the summary). The workshop renders no views, so it advertises none.
  */
-export function startResult(
-  ack: PipelexRunResultStart,
-  viewsAvailable = true,
-  names: ToolNames = WORKSHOP_TOOL_NAMES,
-): RunStartResult {
+export function startResult(ack: PipelexRunResultStart): RunStartResult {
   const runStatus = narrowRunStatus(ack.state);
   const createdAt = narrowString(ack.created_at);
   const provenance = narrowMethodProvenance(ack.method_provenance);
@@ -1045,7 +835,7 @@ export function startResult(
     ...(runStatus === undefined ? {} : { run_status: runStatus }),
     ...(createdAt === undefined ? {} : { created_at: createdAt }),
     ...(provenance === undefined ? {} : { method_provenance: provenance }),
-    available_view_specs: viewsAvailable ? ["live_run_status"] : [],
+    available_view_specs: [],
   };
 
   const summaryParts = [
@@ -1058,14 +848,8 @@ export function startResult(
     );
   }
   summaryParts.push(
-    `Check on it with \`${names.runStatus}\` (one cheap read — honor its retry hint instead of polling in a tight loop), and fetch the outcome with \`${names.runResults}\` once it is terminal.`,
+    `Check on it with \`${WORKSHOP_TOOL_NAMES.runStatus}\` (one cheap read — honor its retry hint instead of polling in a tight loop), and fetch the outcome with \`${WORKSHOP_TOOL_NAMES.runResults}\` once it is terminal.`,
   );
-  if (viewsAvailable) {
-    summaryParts.push(
-      "## Views",
-      `If this host shows views (the server instructions say whether it does), a live status card follows this run on its own (polling, then the results) and the user is already watching it, so there is no need to poll on their behalf. If it shows none, give the user the run id and check on the run with \`${names.runStatus}\` when they ask.`,
-    );
-  }
 
   return { structuredContent, summary: summaryParts.join("\n\n") };
 }
@@ -1077,10 +861,7 @@ export function startResult(
  * `failure` object and the summary's sentences come from it. A read whose report
  * is `null` or malformed carries the status alone, and the summary says so.
  */
-export function statusResult(
-  read: RunRead,
-  names: ToolNames = WORKSHOP_TOOL_NAMES,
-): RunStatusResult {
+export function statusResult(read: RunRead): RunStatusResult {
   const isTerminal = isTerminalRunStatus(read.status);
   const ended = isTerminal && read.status !== "COMPLETED";
   const failure = ended
@@ -1101,21 +882,20 @@ export function statusResult(
     ...(failure === undefined ? {} : { failure }),
   };
 
-  return { structuredContent, summary: statusSummary(read, isTerminal, failure, names) };
+  return { structuredContent, summary: statusSummary(read, isTerminal, failure) };
 }
 
 function statusSummary(
   read: RunRead,
   isTerminal: boolean,
   failure: RunFailure | undefined,
-  names: ToolNames,
 ): string {
   const lines: string[] = [];
 
   if (isTerminal) {
     lines.push(
       read.status === "COMPLETED"
-        ? `Run \`${read.pipeline_run_id}\` is COMPLETED. Fetch the output with \`${names.runResults}\`.`
+        ? `Run \`${read.pipeline_run_id}\` is COMPLETED. Fetch the output with \`${WORKSHOP_TOOL_NAMES.runResults}\`.`
         : failureSummaryLines(read.pipeline_run_id, read.status, failure, read.finished_at).join(
             "\n",
           ),
@@ -1142,24 +922,12 @@ function statusSummary(
  * A failed arm is projected with `failedRead`, the status read that follows it
  * (see {@link readFailedRun}), when the caller made one.
  */
-export function resultsResult(
-  state: RunResultState,
-  viewsAvailable = true,
-  artifactDownloadAvailable = false,
-  names: ToolNames = WORKSHOP_TOOL_NAMES,
-  failedRead?: RunRead,
-): RunResultsResult {
+export function resultsResult(state: RunResultState, failedRead?: RunRead): RunResultsResult {
   switch (state.state) {
     case "running":
       return runningResult(state.pipeline_run_id, state.retry_after_seconds);
     case "completed":
-      return completedResult(
-        state.pipeline_run_id,
-        state.result,
-        viewsAvailable,
-        artifactDownloadAvailable,
-        names,
-      );
+      return completedResult(state.pipeline_run_id, state.result);
     case "failed":
       return failedResult(state, failedRead);
   }
@@ -1179,13 +947,7 @@ function runningResult(runId: string, retryAfterSeconds: number | null): RunResu
   };
 }
 
-function completedResult(
-  runId: string,
-  result: RunResults,
-  viewsAvailable: boolean,
-  artifactDownloadAvailable: boolean,
-  names: ToolNames,
-): RunResultsResult {
+function completedResult(runId: string, result: RunResults): RunResultsResult {
   // The SDK guarantees a non-null main_stuff on a completed run (it throws
   // MissingMainStuffError otherwise); reaching here without one is a contract
   // violation the caller surfaces as a runtime no-verdict. A falsy-but-present
@@ -1195,37 +957,12 @@ function completedResult(
   }
 
   const { value: bounded, truncated } = boundMainStuff(result.main_stuff);
-  const graphSpec = viewsAvailable ? (result.graph_spec ?? undefined) : undefined;
-  // The graph's data artifacts, on the same terms as the graph itself: views
-  // only, `_meta` only. They travel as a PAIR, which is the renderer's rule and
-  // not a convenience — `GraphViewer` reads a data node's value only when it
-  // holds `contracts` and `outputForm` together, and shows the concept's
-  // structure table otherwise, so half the pair renders exactly like neither.
-  // `hasArtifactEntries` is what makes that a real test: the hosted results
-  // relay these keys as `null` for any run whose runner predates them, and an
-  // empty map is a map the view can look nothing up in.
-  const artifactsRide =
-    viewsAvailable &&
-    hasArtifactEntries(result.pipe_io_contracts) &&
-    hasArtifactEntries(result.output_form);
-  const pipeIoContracts = artifactsRide ? result.pipe_io_contracts : undefined;
-  const outputForm = artifactsRide ? result.output_form : undefined;
-  // Third, and optional GIVEN the pair rather than independent of it: the input
-  // form answers for the method's own inputs alone — nodes no pipe produced,
-  // which no output descriptor describes — and its absence costs those nodes
-  // their value and nothing else. It rides when it has entries and the pair
-  // does, because the renderer consults it only inside the gate the pair opens:
-  // shipping it without them renders identically and costs the wire. Should a
-  // later mthds-ui open that gate on the contracts alone, this conjunction
-  // starts costing real input-node values and has to be loosened with it.
-  const inputForm =
-    artifactsRide && hasArtifactEntries(result.input_form) ? result.input_form : undefined;
   const usage = summarizeUsage(result);
 
   // Both walks read the FULL output, not the bounded copy: a reference pruned
   // out of the model-facing copy is still a file the workshop can save and a
   // picture mthds_show_images can fetch. Both are in-memory, so a completed
-  // result pays no network call for either, on either shell.
+  // result pays no network call for either.
   const stored = collectArtifacts(result.main_stuff);
   const candidates = imageCandidatesOf(result.main_stuff);
   const listedCandidates = candidates.slice(0, MAX_IMAGE_CANDIDATE_ENTRIES);
@@ -1256,32 +993,19 @@ function completedResult(
             : { image_candidates_omitted: candidates.length - listedCandidates.length }),
         }),
     usage: projectRunUsage(usage),
-    available_view_specs: graphSpec === undefined ? [] : ["run_graph"],
+    available_view_specs: [],
   };
 
   return {
     structuredContent,
     // Usage is deliberately kept OUT of the prose summary — the run-level totals
     // ride structuredContent.usage; the per-pipe rollup rides _meta only.
-    summary: completedSummary(
-      runId,
-      bounded,
-      truncated,
-      viewsAvailable,
-      stored.length,
-      candidates.length,
-      artifactDownloadAvailable,
-      names,
-    ),
-    graphSpec,
-    pipeIoContracts,
-    outputForm,
-    inputForm,
+    summary: completedSummary(runId, bounded, truncated, stored.length, candidates.length),
     mainStuff: result.main_stuff,
-    // Both ride `_meta` ungated by views (like mainStuff): the full per-call
-    // list, and the per-pipe rollup for a future detailed-cost surface. Kept off
-    // the model-facing channels so they cost no model tokens now. Absent when
-    // the run reported no usage list (state "unavailable").
+    // Both ride `_meta` like mainStuff: the full per-call list, and the
+    // per-pipe rollup for a future detailed-cost surface. Kept off the
+    // model-facing channels so they cost no model tokens now. Absent when the
+    // run reported no usage list (state "unavailable").
     ...(result.tokens_usages == null
       ? {}
       : {
@@ -1299,11 +1023,8 @@ function completedSummary(
   runId: string,
   bounded: unknown,
   truncated: boolean,
-  viewsAvailable: boolean,
   storedFiles: number,
   imageCandidates: number,
-  artifactDownloadAvailable: boolean,
-  names: ToolNames,
 ): string {
   const fence =
     typeof bounded === "string"
@@ -1312,45 +1033,33 @@ function completedSummary(
 
   const parts = ["# Run results", `Run \`${runId}\` completed. Main output:`, fence];
   if (truncated) {
-    parts.push(truncationNote(viewsAvailable, artifactDownloadAvailable));
+    parts.push(TRUNCATION_NOTE);
   }
   const stored = [
-    storedFilesNote(storedFiles, imageCandidates, names),
-    artifactDownloadAvailable ? saveNote(storedFiles, truncated) : undefined,
+    storedFilesNote(storedFiles, imageCandidates),
+    saveNote(storedFiles, truncated),
   ].filter((sentence): sentence is string => sentence !== undefined);
   if (stored.length > 0) parts.push(stored.join(" "));
   return parts.join("\n\n");
 }
 
 /**
- * What the model is told when the output was bounded. On the workshop the rest
- * is one call away — the download tool writes the whole output to disk, where
- * the agent reads it with its own file tools — so the sentence says so rather
- * than leave a cut output looking like the last word. The console has no disk:
- * its views hold the full output, and its model does not.
+ * What the model is told when the output was bounded. The rest is one call
+ * away — the download tool writes the whole output to disk, where the agent
+ * reads it with its own file tools — so the sentence says so rather than leave
+ * a cut output looking like the last word.
  */
-function truncationNote(viewsAvailable: boolean, artifactDownloadAvailable: boolean): string {
-  if (artifactDownloadAvailable) {
-    return "The output shown above was truncated to fit the response. `mthds_download_artifacts` with this run id saves all of it to disk as `main_stuff.json`, verbatim; read it there in full.";
-  }
-  return viewsAvailable
-    ? "The output shown above was truncated to fit the response; the full output is available to views."
-    : "The output shown above was truncated to fit the response.";
-}
+const TRUNCATION_NOTE =
+  "The output shown above was truncated to fit the response. `mthds_download_artifacts` with this run id saves all of it to disk as `main_stuff.json`, verbatim; read it there in full.";
 
 /**
  * The run's stored files: how many there are, how many look like images, and
  * how to see one. This tool itself never fetches a byte and never puts a
  * picture in the conversation, which is the whole point of naming
- * `mthds_show_images` here instead. Said on both shells, since
- * `mthds_show_images` is registered on both; nothing is said when the output
- * references no stored file.
+ * `mthds_show_images` here instead. Nothing is said when the output references
+ * no stored file.
  */
-function storedFilesNote(
-  storedFiles: number,
-  imageCandidates: number,
-  names: ToolNames,
-): string | undefined {
+function storedFilesNote(storedFiles: number, imageCandidates: number): string | undefined {
   if (storedFiles === 0) return undefined;
 
   const parts = [
@@ -1360,20 +1069,21 @@ function storedFilesNote(
   ];
   if (imageCandidates > 0) {
     parts.push(
-      `To see one, call \`${names.showImages}\` with this run id — it returns the picture itself, which then stays in this conversation for every turn that follows, so ask for it when someone wants to look at it rather than by reflex.`,
+      `To see one, call \`${WORKSHOP_TOOL_NAMES.showImages}\` with this run id — it returns the picture itself, which then stays in this conversation for every turn that follows, so ask for it when someone wants to look at it rather than by reflex.`,
     );
   }
   return parts.join(" ");
 }
 
 /**
- * How to keep the run, on the shell that registers the download tool. The
- * results land here and nowhere else, so this is the moment to say that the
- * output can reach the disk without the model retyping it — which costs output
- * tokens in proportion to the result and can alter it silently — and, when the
- * output references stored files, that their presigned links expire within the
- * hour. A truncated result's own sentence already names the tool, so without
- * files there is nothing left to add.
+ * How to keep the run. The results land here and nowhere else, so this is the
+ * moment to say that the output can reach the disk without the model retyping
+ * it — which costs output tokens in proportion to the result and can alter it
+ * silently — and, when the output references stored files, that their
+ * presigned links expire within the hour. The summary is the channel that
+ * reaches the agent at the moment it matters, and a model that does not know
+ * the download tool retypes the output. A truncated result's own sentence
+ * already names the tool, so without files there is nothing left to add.
  */
 function saveNote(storedFiles: number, truncated: boolean): string | undefined {
   if (storedFiles > 0) {
@@ -1535,85 +1245,9 @@ export async function startMthdsRun(
 
   try {
     const ack = await runClient(context).start(toStartOptions(request));
-    return startResult(ack, context.viewsAvailable !== false, context.toolNames);
+    return startResult(ack);
   } catch (err) {
     const error = classifyStartError(err, { ...classifyOptions, auth: context.authError });
-    return startErrorResult(startSummaryForError(error), [error]);
-  }
-}
-
-/**
- * `pipelex_run` — start a durable run of a method named by reference, after
- * preparing its inputs with the console's own walk.
- *
- * The walk runs only when there are inputs to walk: with none, there is no
- * file position to rewrite or refuse, and the one `POST /v1/pipe-io` it costs
- * would buy nothing. Its refusals stop the run before anything starts, so an
- * input that would need an upload never costs inference credit. Only the pipe
- * the caller named rides the start: the walk's default is the route's entry
- * pipe, which is the run route's default except for a method whose domains
- * declare several `main_pipe`s, where the run route takes the first and the
- * walk is refused, asking for a `pipe_ref`. Naming the walk's pipe here would
- * let any disagreement between the two run a pipe nobody chose, and the
- * refusal fails closed.
- */
-export async function startPipelexRun(
-  input: PipelexRunInput,
-  context: PipelexRunContext = buildPipelexRunContext(),
-): Promise<RunStartResult> {
-  const names = context.toolNames ?? CONSOLE_TOOL_NAMES;
-  const inputErrors = validatePipelexRunRequest(input);
-  if (inputErrors.length > 0) {
-    return startErrorResult("Run was not started: request input is invalid.", inputErrors);
-  }
-
-  const selector: ConsoleInputsSelector & ({ method_ref: string } | { method_id: string }) =
-    input.method_ref !== undefined
-      ? { method_ref: input.method_ref }
-      : { method_id: input.method_id ?? "" };
-  const startOptions =
-    "method_ref" in selector
-      ? PIPELEX_RUN_START_BY_REF_ERROR_OPTIONS
-      : PIPELEX_RUN_START_BY_ID_ERROR_OPTIONS;
-
-  let client: PipelexRunClient;
-  try {
-    client = context.client ?? createPipelexApiClient(context);
-  } catch (err) {
-    const error = classifyError(err, { ...startOptions, auth: context.authError });
-    return startErrorResult(startSummaryForError(error), [error]);
-  }
-
-  // Trimmed once, so the walk checks and the start runs the same pipe.
-  const pipeRef = input.pipe_ref?.trim();
-  let inputs = input.inputs;
-  if (inputs !== undefined && Object.keys(inputs).length > 0) {
-    const prepared = await prepareConsoleInputs(
-      client,
-      {
-        selector,
-        ...(pipeRef === undefined ? {} : { pipe_ref: pipeRef }),
-        inputs,
-      },
-      context.authError,
-    );
-    if (!prepared.ok) {
-      return startErrorResult(summaryForToolError(prepared.error, walkHeadlines(prepared.error)), [
-        prepared.error,
-      ]);
-    }
-    inputs = prepared.inputs;
-  }
-
-  try {
-    const ack = await client.start({
-      ...selector,
-      ...(pipeRef === undefined ? {} : { pipe_code: pipeRef }),
-      ...(inputs === undefined ? {} : { inputs }),
-    });
-    return startResult(ack, context.viewsAvailable !== false, names);
-  } catch (err) {
-    const error = classifyStartError(err, { ...startOptions, auth: context.authError });
     return startErrorResult(startSummaryForError(error), [error]);
   }
 }
@@ -1669,52 +1303,21 @@ function startMayHaveRun(err: unknown): boolean {
   return false;
 }
 
-/**
- * Request-shape checks on `pipelex_run`: exactly one method reference, and a
- * pipe_ref that is neither blank nor bare. The qualified rule is checked here
- * rather than left to the input walk, because the walk runs only when there are
- * inputs: a run with none would otherwise send a bare code to `/v1/start`, whose
- * runner resolves one across domains.
- */
-export function validatePipelexRunRequest(input: PipelexRunInput): ToolError[] {
-  const errors = validateMethodReferenceRequest(input);
-  const pipeRef = input.pipe_ref?.trim();
-  if (pipeRef === "") {
-    errors.push({
-      class: "input_domain",
-      location: "pipe_ref",
-      message: "pipe_ref must not be empty when supplied.",
-      hint: "Pass a qualified domain.pipe_code, or omit pipe_ref to run the method's entry pipe.",
-      retryable: false,
-    });
-  } else if (pipeRef !== undefined && !pipeRef.includes(".")) {
-    errors.push({
-      class: "input_domain",
-      location: "pipe_ref",
-      message: `pipe_ref must be qualified (domain.pipe_code), got the bare "${pipeRef}".`,
-      hint: `Pass the pipe as ${CONSOLE_TOOL_NAMES.showMethod} names it, or omit pipe_ref to run the method's entry pipe.`,
-      retryable: false,
-    });
-  }
-  return errors;
-}
-
 /** One cheap self-healing status read — `GET /v1/runs/{id}/status`. */
 export async function getMthdsRunStatus(
   input: RunIdInput,
   context: RunContext = buildRunContext(),
 ): Promise<RunStatusResult> {
-  const names = context.toolNames ?? WORKSHOP_TOOL_NAMES;
-  const inputErrors = validateRunIdRequest(input.run_id, names);
+  const inputErrors = validateRunIdRequest(input.run_id);
   if (inputErrors.length > 0) {
     return statusErrorResult("Run status was not read: request input is invalid.", inputErrors);
   }
 
   try {
     const read = await runClient(context).getRunStatus(input.run_id);
-    return statusResult(read, names);
+    return statusResult(read);
   } catch (err) {
-    const error = classifyError(err, { ...runStatusErrorOptions(names), auth: context.authError });
+    const error = classifyError(err, { ...RUN_STATUS_ERROR_OPTIONS, auth: context.authError });
     return statusErrorResult(statusSummaryForError(error), [error]);
   }
 }
@@ -1722,43 +1325,29 @@ export async function getMthdsRunStatus(
 /**
  * The result artifacts a `run_results` read asks for — exactly what
  * `completedResult` projects, so the platform reads and re-signs nothing the
- * tool drops. The main output and the usage records (which bring
- * `usage_assembly_error`) are read on every shell. The graph and its three
- * data artifacts only ever ride the views' `_meta`, so they are asked for only
- * when this shell renders views. The working memory is never read.
+ * tool drops: the main output and the usage records (which bring
+ * `usage_assembly_error`). The graph, its data artifacts and the working
+ * memory are never read.
  */
-export function runResultsArtifacts(viewsAvailable: boolean): readonly RunResultArtifact[] {
-  return viewsAvailable
-    ? [
-        "main_stuff",
-        "tokens_usages",
-        "graph_spec",
-        "pipe_io_contracts",
-        "output_form",
-        "input_form",
-      ]
-    : ["main_stuff", "tokens_usages"];
-}
+export const RUN_RESULTS_ARTIFACTS: readonly RunResultArtifact[] = ["main_stuff", "tokens_usages"];
 
 /** One-shot result lookup — `GET /v1/runs/{id}/results`. */
 export async function getMthdsRunResults(
   input: RunIdInput,
   context: RunContext = buildRunContext(),
 ): Promise<RunResultsResult> {
-  const names = context.toolNames ?? WORKSHOP_TOOL_NAMES;
-  const inputErrors = validateRunIdRequest(input.run_id, names);
+  const inputErrors = validateRunIdRequest(input.run_id);
   if (inputErrors.length > 0) {
     return resultsErrorResult("Run results were not read: request input is invalid.", inputErrors);
   }
 
-  const viewsAvailable = context.viewsAvailable !== false;
   let state: RunResultState;
   try {
     state = await runClient(context).getRunResult(input.run_id, {
-      artifacts: runResultsArtifacts(viewsAvailable),
+      artifacts: RUN_RESULTS_ARTIFACTS,
     });
   } catch (err) {
-    const error = classifyError(err, { ...runResultsErrorOptions(names), auth: context.authError });
+    const error = classifyError(err, { ...RUN_RESULTS_ERROR_OPTIONS, auth: context.authError });
     return resultsErrorResult(resultsSummaryForError(error), [error]);
   }
   const failedRead =
@@ -1769,15 +1358,8 @@ export async function getMthdsRunResults(
   // The API responded; projecting it must not be reported as an unreachable
   // API. A malformed report (a completed result missing main_stuff) is a
   // reachable contract violation, surfaced as a runtime no-verdict error.
-  let projected: RunResultsResult;
   try {
-    projected = resultsResult(
-      state,
-      viewsAvailable,
-      context.artifactDownloadAvailable === true,
-      names,
-      failedRead,
-    );
+    return resultsResult(state, failedRead);
   } catch (err) {
     return resultsErrorResult(
       "Run results produced no verdict: the Pipelex API returned a malformed report.",
@@ -1791,111 +1373,6 @@ export async function getMthdsRunResults(
         },
       ],
     );
-  }
-
-  if (viewsAvailable && state.state === "completed") {
-    const fresh = await freshStorageLinks(runClient(context), [
-      state.result.main_stuff,
-      state.result.graph_spec,
-    ]);
-    if (fresh.links !== undefined) projected.resolvedUrls = fresh.links;
-    if (fresh.partial) projected.resolvedUrlsPartial = true;
-  }
-  return projected;
-}
-
-/**
- * How long the results wait on the bulk resolve route, across every request
- * one read makes, before the views go without the links still missing.
- */
-export const VIEW_LINKS_TIMEOUT_MS = 5_000;
-
-/** What {@link freshStorageLinks} minted, and whether a failed request left references without a link. */
-export interface FreshStorageLinks {
-  /** The link minted for each reference that got one; `undefined` when none did. */
-  links: Record<string, string> | undefined;
-  /**
-   * Whether a request failed in a way that may pass, or the deadline cut the
-   * walk short, so a later read may link what this one could not. A refusal
-   * that asking again would repeat does not count, whether of the whole
-   * request (a 401, a 403, a 404 from a deployment without the route) or of
-   * one reference on its own item.
-   */
-  partial: boolean;
-}
-
-/**
- * Fresh links for the stored files a completed run references, for the views
- * to paint from: the output's references first, then the executed graph's,
- * deduplicated, asked for `BULK_RESOLVE_MAX_URIS` at a time, one request
- * after another, all under one {@link VIEW_LINKS_TIMEOUT_MS} deadline.
- *
- * The baked `public_url` cannot serve for long. The runtime signs it on the
- * bucket's regional host, which the views' CSP allows (from `pipelex` 0.66.0;
- * before, it signed path-style on the shared regional endpoint, which no CSP
- * can scope to a bucket), but it expires an hour after the run, so a reopened
- * conversation painted nothing. The platform signs these on each bucket's own
- * host (`<bucket>.s3.amazonaws.com`, measured against api-dev on 2026-09-25),
- * which the CSP names as a plain origin, and a view that remounts reads the
- * results again and gets new ones. A reference left without a fresh one falls
- * back to the baked link and paints nothing once that has expired, which is
- * why every reference is asked for rather than the first request's worth.
- *
- * Best effort by design: the links are a view's convenience and never part of
- * the verdict, so a failed or slow request never fails the results. It stops
- * the walk, keeps what the earlier requests minted, and says so through
- * `partial`, which the views read the results again for — but only when the
- * failure may pass, which is `classifyError`'s `retryable` verdict on it: the
- * deadline, an unreachable API, a 5xx, a 408 or a 429. Only a link the route
- * actually minted is kept; an item it refused is left out.
- */
-export async function freshStorageLinks(
-  client: Pick<RunClient, "resolveStorageUrls">,
-  sources: readonly unknown[],
-): Promise<FreshStorageLinks> {
-  const uris = [...new Set(sources.flatMap((source) => collectArtifacts(source)))];
-  if (uris.length === 0) return { links: undefined, partial: false };
-  const links: Record<string, string> = {};
-  let partial = false;
-  const deadline = AbortSignal.timeout(VIEW_LINKS_TIMEOUT_MS);
-  for (let start = 0; start < uris.length; start += BULK_RESOLVE_MAX_URIS) {
-    const chunk = uris.slice(start, start + BULK_RESOLVE_MAX_URIS);
-    let answer: BulkResolvedStorageUrls;
-    try {
-      answer = await client.resolveStorageUrls({ uris: chunk }, { signal: deadline });
-    } catch (err) {
-      // A refusal that would repeat ends the walk too, since every later
-      // request would get it, but asks the views for no further read.
-      partial = classifyError(err, BULK_RESOLVE_ERROR_OPTIONS).retryable;
-      break;
-    }
-    keepMintedLinks(answer, new Set(chunk), links);
-  }
-  return { links: Object.keys(links).length === 0 ? undefined : links, partial };
-}
-
-/**
- * Copy into `links` each link the route minted for a reference it was asked
- * for. Narrowed rather than trusted: the answer is written into a page's
- * `<img src>`, so only an `https:` string survives.
- */
-function keepMintedLinks(
-  answer: BulkResolvedStorageUrls,
-  requested: ReadonlySet<string>,
-  links: Record<string, string>,
-): void {
-  for (const item of Array.isArray(answer?.items) ? (answer.items as unknown[]) : []) {
-    if (typeof item !== "object" || item === null) continue;
-    const { uri, url, error } = item as Record<string, unknown>;
-    if (error != null) continue;
-    if (
-      typeof uri === "string" &&
-      requested.has(uri) &&
-      typeof url === "string" &&
-      url.startsWith("https://")
-    ) {
-      links[uri] = url;
-    }
   }
 }
 
@@ -1924,29 +1401,6 @@ function toStartOptions(input: ResolvedRunRequest): PipelexStartOptions {
     ...(input.method_id === undefined ? {} : { method_id: input.method_id }),
   };
 }
-
-/**
- * The walk reads the method before the start does, so it also meets the
- * start's own failures: an unknown id, an address that does not resolve, a
- * refused sign-in. Those keep the start's headlines, and only a fault in the
- * inputs or the pipe is headlined as one, since a host that shows only the
- * first line would otherwise send the model to fix inputs that were fine.
- */
-function walkHeadlines(error: ToolError): ErrorSummaries {
-  const location = error.location ?? "";
-  return location === "pipe_ref" || location === "inputs" || location.startsWith("inputs.")
-    ? INPUTS_ERROR_SUMMARIES
-    : START_ERROR_SUMMARIES;
-}
-
-/** Headlines for a run refused while its inputs were being prepared, before anything started. */
-const INPUTS_ERROR_SUMMARIES: ErrorSummaries = {
-  config:
-    "Run could not start: its inputs could not be checked — the Pipelex API is unreachable or misconfigured.",
-  input_domain: "Run was not started: its inputs could not be prepared as submitted.",
-  runtime: "Run could not start: checking its inputs failed on the Pipelex API.",
-  paywall: "Run could not start: the organization's Pipelex plan does not cover this call.",
-};
 
 const START_ERROR_SUMMARIES: ErrorSummaries = {
   config: "Run could not start: the Pipelex API is unreachable or misconfigured.",
@@ -2031,29 +1485,16 @@ export function runResultsToolResult(result: RunResultsResult) {
     structuredContent: result.structuredContent,
     content: toolResultContent(result.summary, result.structuredContent.errors),
     isError: result.structuredContent.status === "error",
-    // Response-metadata channel (the mthds_validate convention): the executed
-    // graph, the FULL unbounded main output, the FULL per-call token-usage list,
-    // and the per-pipe usage rollup ride `_meta`, never structuredContent, so the
-    // model never pays their tokens. Views consume it on the hosted shell; raw
-    // MCP consumers can still retain it on the tools-only local shell. Keys
-    // mirror the API field names (usage_by_pipe is the SDK's per-pipe rollup,
-    // projected onto this tool's row shape).
+    // Response-metadata channel (the mthds_validate convention): the FULL
+    // unbounded main output, the FULL per-call token-usage list, and the
+    // per-pipe usage rollup ride `_meta`, never structuredContent, so the model
+    // never pays their tokens while a raw MCP consumer can still retain them.
+    // Keys mirror the API field names (usage_by_pipe is the SDK's per-pipe
+    // rollup, projected onto this tool's row shape).
     _meta: {
-      graph_spec: result.graphSpec,
-      // Keyed as the API names them, like every other key here. These three are
-      // what turn the graph's data nodes from structure tables into the run's
-      // actual values; see `completedResult` for why the first two are a pair.
-      pipe_io_contracts: result.pipeIoContracts,
-      output_form: result.outputForm,
-      input_form: result.inputForm,
       main_stuff: result.mainStuff,
       tokens_usages: result.tokensUsages,
       usage_by_pipe: result.usageByPipe,
-      // Not API fields: the fresh link for each stored reference, which the
-      // views paint from, and whether a failed request left some without one
-      // (see `freshStorageLinks`).
-      resolved_urls: result.resolvedUrls,
-      resolved_urls_partial: result.resolvedUrlsPartial,
     },
   };
 }

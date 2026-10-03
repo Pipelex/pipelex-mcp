@@ -2,9 +2,7 @@
  * Live e2e — the workshop's `mthds_prepare_inputs` against a real Pipelex API.
  *
  * The workshop delegates the upload walk to the SDK, and only a live call
- * proves it really uploads, rewriting the value to `pipelex-storage://`. The
- * console has no prepare tool: `pipelex_run` walks its inputs itself, pass
- * through only, and that walk's live legs are `console-inputs.e2e.ts`.
+ * proves it really uploads, rewriting the value to `pipelex-storage://`.
  *
  * It costs storage, not inference: it uploads one 1x1 PNG.
  */

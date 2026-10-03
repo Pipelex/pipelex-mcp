@@ -18,7 +18,6 @@ import type {
   ToolError,
 } from "./shared.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
-import type { ToolNames } from "./tool-names.js";
 
 export const CATALOG_DEFAULT_LIMIT = 20;
 export const CATALOG_MAX_LIMIT = 50;
@@ -104,16 +103,14 @@ export interface CatalogResult {
   summary: string;
 }
 
-/** The narrow SDK seam catalog tests and alternate shells can supply. */
+/** The narrow SDK seam the catalog tests supply. */
 export interface CatalogClient {
   listMethods(query?: ListMethodsQuery): Promise<MethodPage>;
 }
 
 export interface CatalogContext extends ApiConfig {
   client?: CatalogClient;
-  /** The tool names this shell's texts use; the workshop's when absent. */
-  toolNames?: ToolNames;
-  /** Deployment-specific auth-failure texture (the hosted console overrides it per request); env-var wording by default. */
+  /** Deployment-specific auth-failure texture; env-var wording by default. */
   authError?: AuthErrorTexture;
 }
 
@@ -160,7 +157,7 @@ export async function listMthdsMethods(
   }
 
   try {
-    return projectCatalog(page, normalized.input, context.toolNames);
+    return projectCatalog(page, normalized.input);
   } catch (err) {
     const message =
       err instanceof Error ? err.message : "The Pipelex API returned a malformed methods catalog.";
@@ -211,11 +208,7 @@ function normalizeInput(
  * reorder a page against the cursor that produced it, and re-filtering would
  * search only the rows that survived the server's own filter.
  */
-export function projectCatalog(
-  value: unknown,
-  input: NormalizedCatalogInput,
-  names: ToolNames = WORKSHOP_TOOL_NAMES,
-): CatalogResult {
+export function projectCatalog(value: unknown, input: NormalizedCatalogInput): CatalogResult {
   if (typeof value !== "object" || value === null) {
     throw new Error("Methods catalog response must be a page object.");
   }
@@ -244,7 +237,7 @@ export function projectCatalog(
     methods,
   };
 
-  return { structuredContent, summary: catalogSummary(structuredContent, input.query, names) };
+  return { structuredContent, summary: catalogSummary(structuredContent, input.query) };
 }
 
 interface ValidatedRow {
@@ -337,7 +330,7 @@ function boundCodePoints(value: string, limit: number): { value: string; truncat
  * job is carried by the directive and the `mthds_list_methods` tool
  * description instead of by punctuation.
  */
-function catalogSummary(result: CatalogSuccess, query: string, names: ToolNames): string {
+function catalogSummary(result: CatalogSuccess, query: string): string {
   const scope =
     query === "" ? "Organization method catalog" : `Methods matching ${JSON.stringify(query)}`;
   const lines = [`${scope}: ${result.returned_count} returned, newest first.`];
@@ -362,7 +355,7 @@ function catalogSummary(result: CatalogSuccess, query: string, names: ToolNames)
     const queryHint = query === "" ? "no query" : `query ${JSON.stringify(query)}`;
     lines.push(
       "",
-      `More methods are available: call ${names.listMethods} with ${queryHint} and cursor ${JSON.stringify(result.next_cursor)}.`,
+      `More methods are available: call ${WORKSHOP_TOOL_NAMES.listMethods} with ${queryHint} and cursor ${JSON.stringify(result.next_cursor)}.`,
     );
   }
 
@@ -397,7 +390,7 @@ function catalogErrorOptions(
             // No `class` override: a rejected cursor is the caller's input, so it
             // takes the default `input_domain`.
             location: "cursor",
-            hint: `The cursor was rejected — it may be stale, truncated, or from a different catalog. Drop it and call ${(context.toolNames ?? WORKSHOP_TOOL_NAMES).listMethods} again from the start.`,
+            hint: `The cursor was rejected — it may be stale, truncated, or from a different catalog. Drop it and call ${WORKSHOP_TOOL_NAMES.listMethods} again from the start.`,
           },
     auth: context.authError,
   };

@@ -1,23 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { z } from "zod";
 
-import {
-  ApiResponseError,
-  ApiUnreachableError,
-  BULK_RESOLVE_MAX_URIS,
-  MissingMainStuffError,
-} from "@pipelex/sdk";
+import { ApiResponseError, ApiUnreachableError, MissingMainStuffError } from "@pipelex/sdk";
 import type {
-  BulkResolvedStorageUrls,
-  BulkResolveStorageUrlsInput,
   GetRunResultOptions,
   InputForm,
   MethodProvenance,
   OutputForm,
   PipeIOContracts,
-  PipeIORequest,
-  PipeIOResponse,
-  PipeIOValidReport,
   RunRead,
   RunResultArtifact,
   RunResults,
@@ -34,7 +23,6 @@ import {
   classifyStartError,
   ELLIPSIS_MARKER,
   FAILED_RUN_READ_TIMEOUT_MS,
-  freshStorageLinks,
   getMthdsRunResults,
   getMthdsRunStatus,
   MAIN_STUFF_CAP,
@@ -42,24 +30,19 @@ import {
   projectUsageByPipe,
   readFailedRun,
   resultsResult,
-  runIdInputSchemaFor,
-  runResultsOutputSchemaFor,
-  runStartOutputSchemaFor,
+  RUN_RESULTS_ARTIFACTS,
   RUN_RESULTS_ERROR_OPTIONS,
   RUN_START_ERROR_OPTIONS,
   RUN_STATUS_ERROR_OPTIONS,
-  runResultsArtifacts,
   runResultsToolResult,
   startMthdsRun,
-  startPipelexRun,
   startResult,
   statusResult,
   validateRunRequest,
 } from "./run.js";
-import type { PipelexRunContext, RunContext } from "./run.js";
+import type { RunContext } from "./run.js";
 import { RECORDED_FAILED_RUNS } from "./failed-run-fixtures.js";
 import { classifyError, DEFAULT_API_URL, MAX_IMAGE_CANDIDATE_ENTRIES } from "./shared.js";
-import { CONSOLE_TOOL_NAMES, WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 
 const RUN_ID = "01JRUN0000000000000000TEST";
 
@@ -267,16 +250,11 @@ describe("startResult", () => {
       run_id: RUN_ID,
       run_status: "STARTED",
       created_at: "2026-07-15T10:00:00Z",
-      available_view_specs: ["live_run_status"],
+      available_view_specs: [],
     });
     expect(result.summary).toContain(RUN_ID);
     expect(result.summary).toContain("mthds_run_status");
     expect(result.summary).toContain("mthds_run_results");
-    expect(result.summary).toContain("## Views");
-    // A shell that registers views cannot tell whether this host renders them,
-    // so the status card is promised only on the host that shows one.
-    expect(result.summary).toContain("If this host shows views");
-    expect(result.summary).toContain("If it shows none, give the user the run id");
   });
 
   it("projects method_provenance and narrates the resolved snapshot", () => {
@@ -334,8 +312,8 @@ describe("startResult", () => {
     expect(result.structuredContent).not.toHaveProperty("created_at");
   });
 
-  it("does not advertise or narrate a live card when the invoking shell has no views", () => {
-    const result = startResult({ pipeline_run_id: RUN_ID }, false);
+  it("does not advertise or narrate a live card", () => {
+    const result = startResult({ pipeline_run_id: RUN_ID });
 
     expect(result.structuredContent.available_view_specs).toEqual([]);
     expect(result.summary).not.toContain("## Views");
@@ -507,11 +485,10 @@ describe("resultsResult", () => {
       available_view_specs: [],
     });
     expect(result.summary).toContain("~3s");
-    expect(result.graphSpec).toBeUndefined();
     expect(result.mainStuff).toBeUndefined();
   });
 
-  it("names mthds_download_artifacts on every completed workshop result, and never on the console", () => {
+  it("names mthds_download_artifacts on every completed result", () => {
     const withFiles = {
       state: "completed" as const,
       pipeline_run_id: RUN_ID,
@@ -529,7 +506,7 @@ describe("resultsResult", () => {
     };
 
     // The workshop: files produced → the nudge, output and files, with the expiry stated.
-    const workshop = resultsResult(withFiles, false, true);
+    const workshop = resultsResult(withFiles);
     expect(workshop.summary).toContain("mthds_download_artifacts");
     expect(workshop.summary).toContain("main_stuff.json");
     expect(workshop.summary).toContain("1 stored file(s)");
@@ -539,17 +516,14 @@ describe("resultsResult", () => {
 
     // The workshop, nothing produced → still the way to keep the output, since
     // a model that does not know the tool retypes the output into a file.
-    const outputOnly = resultsResult(withoutFiles, false, true).summary;
+    const outputOnly = resultsResult(withoutFiles).summary;
     expect(outputOnly).toContain("mthds_download_artifacts");
     expect(outputOnly).toContain("main_stuff.json");
     expect(outputOnly).toContain("Never retype it");
     expect(outputOnly).not.toContain("stored file(s)");
-    // The console has no such tool → silent even with files.
-    expect(resultsResult(withFiles, true, false).summary).not.toContain("mthds_download_artifacts");
-    expect(resultsResult(withFiles).summary).not.toContain("mthds_download_artifacts");
   });
 
-  it("lists the image candidates on both shells, for free, from the FULL output", () => {
+  it("lists the image candidates, for free, from the FULL output", () => {
     const picture = "pipelex-storage://runs/x/illustration.png";
     const report = "pipelex-storage://runs/x/report.pdf";
     const state: RunResultState = {
@@ -561,20 +535,16 @@ describe("resultsResult", () => {
       },
     };
 
-    // The console (no download tool) gets the same structured list as the workshop.
-    for (const result of [resultsResult(state, true, false), resultsResult(state, false, true)]) {
-      // Bare references: the key beside them was a fixed-prefix strip of the
-      // reference itself, so it doubled the list's cost and said nothing new.
-      expect(result.structuredContent.image_candidates).toEqual([picture]);
-      expect(result.structuredContent).not.toHaveProperty("image_candidates_omitted");
-    }
+    const result = resultsResult(state);
+    // Bare references: the key beside them was a fixed-prefix strip of the
+    // reference itself, so it doubled the list's cost and said nothing new.
+    expect(result.structuredContent.image_candidates).toEqual([picture]);
+    expect(result.structuredContent).not.toHaveProperty("image_candidates_omitted");
 
-    const summary = resultsResult(state, true, false).summary;
+    const summary = result.summary;
     expect(summary).toContain("2 stored file(s)");
     expect(summary).toContain("1 of which look like images");
     expect(summary).toContain("mthds_show_images");
-    // Nothing was fetched to say it, and nothing is inlined here.
-    expect(summary).not.toContain("mthds_download_artifacts");
   });
 
   it("survives a main output bounded away from its references", () => {
@@ -590,7 +560,7 @@ describe("resultsResult", () => {
       },
     };
 
-    const result = resultsResult(state, false, true);
+    const result = resultsResult(state);
 
     expect(result.structuredContent.truncated).toBe(true);
     expect(result.structuredContent.image_candidates).toEqual([picture]);
@@ -613,7 +583,7 @@ describe("resultsResult", () => {
       },
     };
 
-    const result = resultsResult(state, false, true);
+    const result = resultsResult(state);
 
     expect(result.structuredContent.image_candidates).toHaveLength(MAX_IMAGE_CANDIDATE_ENTRIES);
     // A prefix, so an index into this list means the same thing it means to
@@ -631,32 +601,26 @@ describe("resultsResult", () => {
       result: { pipeline_run_id: RUN_ID, main_stuff: { answer: 42 } },
     };
 
-    const result = resultsResult(state, true, false);
+    const result = resultsResult(state);
 
     expect(result.structuredContent).not.toHaveProperty("image_candidates");
     expect(result.summary).not.toContain("mthds_show_images");
     expect(result.summary).not.toContain("stored file(s)");
   });
 
-  it("names the download tool as the way to read a truncated output, on the workshop only", () => {
+  it("names the download tool as the way to read a truncated output", () => {
     const state: RunResultState = {
       state: "completed",
       pipeline_run_id: RUN_ID,
       result: { pipeline_run_id: RUN_ID, main_stuff: { memo: "x".repeat(MAIN_STUFF_CAP * 2) } },
     };
 
-    const workshop = resultsResult(state, false, true);
+    const workshop = resultsResult(state);
     expect(workshop.structuredContent.truncated).toBe(true);
     expect(workshop.summary).toContain("truncated to fit the response");
     expect(workshop.summary).toContain("saves all of it to disk");
     // One mention, not two: without files, the truncation sentence is the save note.
     expect(workshop.summary.split("mthds_download_artifacts")).toHaveLength(2);
-
-    // The console keeps its own sentences: the views hold the full output, the model does not.
-    const hosted = resultsResult(state, true, false);
-    expect(hosted.summary).toContain("the full output is available to views");
-    expect(hosted.summary).not.toContain("mthds_download_artifacts");
-    expect(resultsResult(state, false, false).summary).not.toContain("mthds_download_artifacts");
   });
 
   it("reports stored files that look like nothing without naming the image tool", () => {
@@ -669,7 +633,7 @@ describe("resultsResult", () => {
       },
     };
 
-    const result = resultsResult(state, false, true);
+    const result = resultsResult(state);
 
     expect(result.structuredContent.image_candidates).toEqual([]);
     expect(result.summary).toContain("none of them looks like an image");
@@ -677,7 +641,7 @@ describe("resultsResult", () => {
     expect(result.summary).toContain("mthds_download_artifacts");
   });
 
-  it("projects a completed run and carries graph + full output off structuredContent", () => {
+  it("projects a completed run and carries the full output off structuredContent", () => {
     const mainStuff = { answer: 42, items: ["a", "b"] };
     const graphSpec = { nodes: [{ id: "demo.main" }] };
     const result = resultsResult({
@@ -690,9 +654,7 @@ describe("resultsResult", () => {
     expect(result.structuredContent.state).toBe("completed");
     expect(result.structuredContent.main_stuff).toEqual(mainStuff);
     expect(result.structuredContent.truncated).toBe(false);
-    expect(result.structuredContent.available_view_specs).toEqual(["run_graph"]);
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
-    expect(result.graphSpec).toEqual(graphSpec);
     expect(result.mainStuff).toBe(mainStuff);
     expect(result.summary).toContain("```json");
     expect(result.summary).toContain('"answer": 42');
@@ -708,7 +670,7 @@ describe("resultsResult", () => {
     expect(result.summary).not.toContain("## Usage");
   });
 
-  it("carries the graph's data artifacts off structuredContent when both halves have entries", () => {
+  it("keeps the graph's data artifacts off structuredContent", () => {
     const contracts = CONTRACTS;
     const outputForm = OUTPUT_FORM;
     const inputForm = INPUT_FORM;
@@ -725,117 +687,26 @@ describe("resultsResult", () => {
       },
     });
 
-    expect(result.pipeIoContracts).toEqual(contracts);
-    expect(result.outputForm).toEqual(outputForm);
-    expect(result.inputForm).toEqual(inputForm);
-    // Never the model-facing channel — these are view-only, like the graph.
+    // Never the model-facing channel.
     expect(result.structuredContent).not.toHaveProperty("pipe_io_contracts");
     expect(result.structuredContent).not.toHaveProperty("output_form");
     expect(result.structuredContent).not.toHaveProperty("input_form");
   });
 
-  it("withholds both halves of the pair when only one arrived", () => {
-    const result = resultsResult({
-      state: "completed",
-      pipeline_run_id: RUN_ID,
-      result: {
-        pipeline_run_id: RUN_ID,
-        main_stuff: "done",
-        graph_spec: { nodes: [{ id: "demo.main" }] },
-        pipe_io_contracts: CONTRACTS,
-        output_form: null,
-      },
-    });
-
-    // The renderer reads them together or not at all, so half the pair renders
-    // exactly like neither — shipping the contracts alone would only cost wire.
-    expect(result.pipeIoContracts).toBeUndefined();
-    expect(result.outputForm).toBeUndefined();
-    // The graph itself is unaffected: it still rides and is still advertised.
-    expect(result.graphSpec).toEqual({ nodes: [{ id: "demo.main" }] });
-    expect(result.structuredContent.available_view_specs).toEqual(["run_graph"]);
-  });
-
-  it("treats an empty artifact map as no artifact", () => {
-    const result = resultsResult({
-      state: "completed",
-      pipeline_run_id: RUN_ID,
-      result: {
-        pipeline_run_id: RUN_ID,
-        main_stuff: "done",
-        graph_spec: { nodes: [{ id: "demo.main" }] },
-        pipe_io_contracts: {},
-        output_form: {},
-      },
-    });
-
-    // A map the view can look nothing up in drives nothing.
-    expect(result.pipeIoContracts).toBeUndefined();
-    expect(result.outputForm).toBeUndefined();
-  });
-
-  it("rides the pair without an input form, which is independently optional", () => {
-    const contracts = CONTRACTS;
-    const outputForm = OUTPUT_FORM;
-    const result = resultsResult({
-      state: "completed",
-      pipeline_run_id: RUN_ID,
-      result: {
-        pipeline_run_id: RUN_ID,
-        main_stuff: "done",
-        graph_spec: { nodes: [{ id: "demo.main" }] },
-        pipe_io_contracts: contracts,
-        output_form: outputForm,
-      },
-    });
-
-    expect(result.pipeIoContracts).toEqual(contracts);
-    expect(result.outputForm).toEqual(outputForm);
-    // Only the method's own input nodes lose their value; the rest still render.
-    expect(result.inputForm).toBeUndefined();
-  });
-
-  it("withholds the data artifacts from a shell with no views", () => {
-    const result = resultsResult(
-      {
-        state: "completed",
-        pipeline_run_id: RUN_ID,
-        result: {
-          pipeline_run_id: RUN_ID,
-          main_stuff: "done",
-          graph_spec: { nodes: [{ id: "demo.main" }] },
-          pipe_io_contracts: CONTRACTS,
-          output_form: OUTPUT_FORM,
-          input_form: INPUT_FORM,
-        },
-      },
-      false,
-    );
-
-    // They exist to feed a renderer this shell does not have.
-    expect(result.pipeIoContracts).toBeUndefined();
-    expect(result.outputForm).toBeUndefined();
-    expect(result.inputForm).toBeUndefined();
-  });
-
-  it("does not advertise a view but preserves full result metadata when the shell has no views", () => {
+  it("does not advertise a view but preserves full result metadata", () => {
     const mainStuff = { answer: "x".repeat(MAIN_STUFF_CAP * 2) };
-    const result = resultsResult(
-      {
-        state: "completed",
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
         pipeline_run_id: RUN_ID,
-        result: {
-          pipeline_run_id: RUN_ID,
-          main_stuff: mainStuff,
-          graph_spec: { nodes: [{ id: "demo.main" }] },
-        },
+        main_stuff: mainStuff,
+        graph_spec: { nodes: [{ id: "demo.main" }] },
       },
-      false,
-    );
+    });
 
     expect(result.structuredContent.available_view_specs).toEqual([]);
     expect(result.structuredContent.truncated).toBe(true);
-    expect(result.graphSpec).toBeUndefined();
     expect(result.mainStuff).toBe(mainStuff);
   });
 
@@ -858,10 +729,9 @@ describe("resultsResult", () => {
     });
 
     expect(result.structuredContent.available_view_specs).toEqual([]);
-    expect(result.graphSpec).toBeUndefined();
   });
 
-  it("bounds a huge completed output and keeps the full copy for the view", () => {
+  it("bounds a huge completed output and keeps the full copy", () => {
     const mainStuff = {
       report: Array.from({ length: 3000 }, (_, index) => ({
         index,
@@ -952,13 +822,7 @@ describe("resultsResult", () => {
       message: "Run finished with status FAILED; no result available",
       error: null,
     };
-    const result = resultsResult(
-      failedArm,
-      true,
-      false,
-      WORKSHOP_TOOL_NAMES,
-      runRead({ status: "FAILED", error: null }),
-    );
+    const result = resultsResult(failedArm, runRead({ status: "FAILED", error: null }));
 
     expect(result.structuredContent).toEqual({
       status: "ok",
@@ -1003,10 +867,7 @@ describe("resultsResult", () => {
 
   it("carries the report the failed arm relays, with when the run ended from the status read", () => {
     const { relayedArm, statusRead } = RECORDED_FAILED_RUNS.llmCompletion;
-    const result = resultsResult(relayedArm, true, false, WORKSHOP_TOOL_NAMES, {
-      ...statusRead,
-      error: null,
-    });
+    const result = resultsResult(relayedArm, { ...statusRead, error: null });
 
     expect(result.structuredContent.failure_message).toBe(relayedArm.message);
     expect(result.structuredContent.failure).toMatchObject({
@@ -1030,7 +891,7 @@ describe("resultsResult", () => {
 
   it("takes the report from the status read when the failed arm carries none", () => {
     const { resultsArm, statusRead } = RECORDED_FAILED_RUNS.sandboxProvisioning;
-    const result = resultsResult(resultsArm, true, false, WORKSHOP_TOOL_NAMES, statusRead);
+    const result = resultsResult(resultsArm, statusRead);
 
     expect(result.structuredContent.failure).toEqual({
       run_id: statusRead.pipeline_run_id,
@@ -1329,31 +1190,13 @@ interface FakeRunClient {
   start(options: PipelexStartOptions): Promise<RunResultStart>;
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
-  resolveStorageUrls(
-    input: BulkResolveStorageUrlsInput,
-    options?: { signal?: AbortSignal },
-  ): Promise<BulkResolvedStorageUrls>;
 }
 
 const NEVER_CLIENT: FakeRunClient = {
   start: () => Promise.reject(new Error("start must not be called")),
   getRunStatus: () => Promise.reject(new Error("getRunStatus must not be called")),
   getRunResult: () => Promise.reject(new Error("getRunResult must not be called")),
-  resolveStorageUrls: () => Promise.reject(new Error("resolveStorageUrls must not be called")),
 };
-
-/** The bulk resolve route's answer for each reference, minted on each bucket's own host. */
-function mintedLinks(input: BulkResolveStorageUrlsInput): Promise<BulkResolvedStorageUrls> {
-  return Promise.resolve({
-    items: input.uris.map((uri) => ({
-      uri,
-      url: `https://pipelex-app-dev.s3.amazonaws.com/${uri.slice("pipelex-storage://".length)}?X-Amz-Expires=900`,
-      expires_at: "2026-09-25T12:00:00Z",
-      content_type: "image/png",
-      error: null,
-    })),
-  });
-}
 
 function contextWith(overrides: Partial<FakeRunClient>): RunContext {
   return {
@@ -1474,23 +1317,7 @@ describe("startMthdsRun", () => {
     }
   });
 
-  it("refuses a retry of a 500 on either shell's start, and nowhere else", async () => {
-    // With no inputs pipelex_run skips its walk, so the start is the only call.
-    const consoleContext: PipelexRunContext = {
-      baseUrl: DEFAULT_API_URL,
-      toolNames: CONSOLE_TOOL_NAMES,
-      client: {
-        ...NEVER_CLIENT,
-        pipeIo: () => Promise.reject(new Error("pipeIo must not be called")),
-        start: () => Promise.reject(serverError(500)),
-      },
-    };
-    const pipelexStart = await startPipelexRun({ method_id: "mt_demo" }, consoleContext);
-    const startError = pipelexStart.structuredContent.errors?.[0];
-    expect(startError?.retryable).toBe(false);
-    expect(startError?.hint).toContain("the run may have started");
-    expect(pipelexStart.summary).toMatch(/^Run may have started/);
-
+  it("refuses a retry of a 500 on the start, and nowhere else", async () => {
     // A 500 from the status route reads nothing into being and stays retryable.
     const status = await getMthdsRunStatus(
       { run_id: RUN_ID },
@@ -2072,79 +1899,6 @@ describe("getMthdsRunResults", () => {
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.state).toBe("completed");
-    expect(result.graphSpec).toEqual({ nodes: [] });
-  });
-
-  it("puts a fresh link for each stored file on _meta when the shell has views", async () => {
-    const picture = "pipelex-storage://runs/x/illustration.png";
-    const state: RunResultState = {
-      state: "completed",
-      pipeline_run_id: RUN_ID,
-      result: { pipeline_run_id: RUN_ID, main_stuff: { image: { url: picture } } },
-    };
-    const context = contextWith({
-      getRunResult: () => Promise.resolve(state),
-      resolveStorageUrls: mintedLinks,
-    });
-
-    const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
-
-    expect(toolResult._meta.resolved_urls).toEqual({
-      [picture]:
-        "https://pipelex-app-dev.s3.amazonaws.com/runs/x/illustration.png?X-Amz-Expires=900",
-    });
-    expect(toolResult._meta.resolved_urls_partial).toBeUndefined();
-    expect(JSON.stringify(toolResult.structuredContent)).not.toContain("s3.amazonaws.com");
-  });
-
-  it("resolves nothing on a shell without views", async () => {
-    const state: RunResultState = {
-      state: "completed",
-      pipeline_run_id: RUN_ID,
-      result: {
-        pipeline_run_id: RUN_ID,
-        main_stuff: { image: { url: "pipelex-storage://runs/x/illustration.png" } },
-      },
-    };
-    let requests = 0;
-    const context = {
-      ...contextWith({
-        getRunResult: () => Promise.resolve(state),
-        resolveStorageUrls: (input) => {
-          requests += 1;
-          return mintedLinks(input);
-        },
-      }),
-      viewsAvailable: false,
-    };
-
-    const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
-
-    expect(result.structuredContent.state).toBe("completed");
-    expect(requests).toBe(0);
-    expect(result.resolvedUrls).toBeUndefined();
-  });
-
-  it("flags the links as partial on _meta when the route fails, and still answers", async () => {
-    const state: RunResultState = {
-      state: "completed",
-      pipeline_run_id: RUN_ID,
-      result: {
-        pipeline_run_id: RUN_ID,
-        main_stuff: { image: { url: "pipelex-storage://runs/x/illustration.png" } },
-      },
-    };
-    const context = contextWith({
-      getRunResult: () => Promise.resolve(state),
-      resolveStorageUrls: () =>
-        Promise.reject(new ApiUnreachableError("down", DEFAULT_API_URL, "ECONNREFUSED")),
-    });
-
-    const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
-
-    expect(toolResult.structuredContent.state).toBe("completed");
-    expect(toolResult._meta.resolved_urls).toBeUndefined();
-    expect(toolResult._meta.resolved_urls_partial).toBe(true);
   });
 
   it("does not call the client on a blank run_id", async () => {
@@ -2194,185 +1948,6 @@ describe("getMthdsRunResults", () => {
   });
 });
 
-describe("freshStorageLinks", () => {
-  const picture = "pipelex-storage://runs/x/illustration.png";
-  const step = "pipelex-storage://runs/x/step.png";
-
-  it("resolves the output's references, then the graph's, once each, in one request", async () => {
-    const asked: string[][] = [];
-    let signal: AbortSignal | undefined;
-    const links = await freshStorageLinks(
-      {
-        resolveStorageUrls: (input, options) => {
-          asked.push(input.uris);
-          signal = options?.signal;
-          return mintedLinks(input);
-        },
-      },
-      [{ image: { url: picture }, again: picture }, { nodes: [{ value: { url: step } }, picture] }],
-    );
-
-    expect(asked).toEqual([[picture, step]]);
-    expect(signal).toBeInstanceOf(AbortSignal);
-    expect(links).toEqual({
-      links: {
-        [picture]:
-          "https://pipelex-app-dev.s3.amazonaws.com/runs/x/illustration.png?X-Amz-Expires=900",
-        [step]: "https://pipelex-app-dev.s3.amazonaws.com/runs/x/step.png?X-Amz-Expires=900",
-      },
-      partial: false,
-    });
-  });
-
-  const frames = (count: number) =>
-    Array.from(
-      { length: count },
-      (_unused, index) => `pipelex-storage://runs/x/frame-${index}.png`,
-    );
-
-  it("links every reference, a bulk request's worth at a time, under one deadline", async () => {
-    const many = frames(BULK_RESOLVE_MAX_URIS * 2 + 5);
-    const asked: string[][] = [];
-    const signals: (AbortSignal | undefined)[] = [];
-    const fresh = await freshStorageLinks(
-      {
-        resolveStorageUrls: (input, options) => {
-          asked.push(input.uris);
-          signals.push(options?.signal);
-          return mintedLinks(input);
-        },
-      },
-      [many, { url: step }],
-    );
-
-    expect(asked).toEqual([
-      many.slice(0, BULK_RESOLVE_MAX_URIS),
-      many.slice(BULK_RESOLVE_MAX_URIS, BULK_RESOLVE_MAX_URIS * 2),
-      [...many.slice(BULK_RESOLVE_MAX_URIS * 2), step],
-    ]);
-    expect(new Set(signals).size).toBe(1);
-    expect(Object.keys(fresh.links ?? {})).toEqual([...many, step]);
-    expect(fresh.partial).toBe(false);
-  });
-
-  it("keeps what the earlier requests minted when a later one fails, and says it is partial", async () => {
-    const many = frames(BULK_RESOLVE_MAX_URIS * 3);
-    let requests = 0;
-    const fresh = await freshStorageLinks(
-      {
-        resolveStorageUrls: (input) => {
-          requests += 1;
-          return requests === 2
-            ? Promise.reject(new ApiUnreachableError("down", DEFAULT_API_URL, "ECONNREFUSED"))
-            : mintedLinks(input);
-        },
-      },
-      [many],
-    );
-
-    expect(requests).toBe(2);
-    expect(Object.keys(fresh.links ?? {})).toEqual(many.slice(0, BULK_RESOLVE_MAX_URIS));
-    expect(fresh.partial).toBe(true);
-  });
-
-  it("makes no request when nothing is stored", async () => {
-    let requests = 0;
-    const fresh = await freshStorageLinks(
-      {
-        resolveStorageUrls: (input) => {
-          requests += 1;
-          return mintedLinks(input);
-        },
-      },
-      [{ answer: 42 }, undefined],
-    );
-
-    expect(requests).toBe(0);
-    expect(fresh).toEqual({ links: undefined, partial: false });
-  });
-
-  it("goes without links when the route fails, rather than failing the results", async () => {
-    const fresh = await freshStorageLinks(
-      {
-        resolveStorageUrls: () =>
-          Promise.reject(new ApiUnreachableError("down", DEFAULT_API_URL, "ECONNREFUSED")),
-      },
-      [{ url: picture }],
-    );
-
-    expect(fresh).toEqual({ links: undefined, partial: true });
-  });
-
-  it("asks for no further read when the route refuses in a way that would repeat", async () => {
-    const refused = (status: number) =>
-      new ApiResponseError(
-        `HTTP ${status}`,
-        `${DEFAULT_API_URL}/v1/resolve-storage-url/bulk`,
-        status,
-        "Refused",
-        "{}",
-        undefined,
-        undefined,
-        undefined, // validationErrors
-        undefined, // code
-      );
-    // A credential refused, or a deployment without the route: every later
-    // read would get the same answer, so none is asked for.
-    for (const status of [401, 403, 404]) {
-      const fresh = await freshStorageLinks(
-        { resolveStorageUrls: () => Promise.reject(refused(status)) },
-        [{ url: picture }],
-      );
-      expect(fresh).toEqual({ links: undefined, partial: false });
-    }
-    // A throttle may pass, so it is one.
-    const throttled = await freshStorageLinks(
-      { resolveStorageUrls: () => Promise.reject(refused(429)) },
-      [{ url: picture }],
-    );
-    expect(throttled).toEqual({ links: undefined, partial: true });
-  });
-
-  it("keeps only an https link the route minted for a reference it was asked for", async () => {
-    const other = "pipelex-storage://runs/x/other.png";
-    const links = await freshStorageLinks(
-      {
-        resolveStorageUrls: () =>
-          Promise.resolve({
-            items: [
-              {
-                uri: picture,
-                url: null,
-                expires_at: null,
-                content_type: null,
-                error: { code: "not_found", message: "gone" },
-              },
-              {
-                uri: step,
-                url: "javascript:alert(1)",
-                expires_at: "2026-09-25T12:00:00Z",
-                content_type: null,
-                error: null,
-              },
-              {
-                uri: other,
-                url: "https://pipelex-app-dev.s3.amazonaws.com/runs/x/other.png",
-                expires_at: "2026-09-25T12:00:00Z",
-                content_type: null,
-                error: null,
-              },
-            ],
-          } as unknown as BulkResolvedStorageUrls),
-      },
-      [{ a: { url: picture }, b: { url: step } }],
-    );
-
-    // A refused item is the route's answer, not a failure: asking again gets
-    // the same, so it does not make the links partial.
-    expect(links).toEqual({ links: undefined, partial: false });
-  });
-});
-
 describe("getMthdsRunResults artifact selection", () => {
   const TOKENS_USAGES: TokensUsageRecord[] = [
     { pipe_code: "extract", cost: 0.01, nb_tokens_by_category: { input: 100, output: 50 } },
@@ -2410,44 +1985,9 @@ describe("getMthdsRunResults artifact selection", () => {
     };
   }
 
-  it("asks for the output, the usage, the graph and its data artifacts on a shell with views", async () => {
+  it("asks for the output and the usage alone", async () => {
     const selections: (readonly RunResultArtifact[] | undefined)[] = [];
-    const context = {
-      ...contextWith({ getRunResult: narrowedRead(selections), resolveStorageUrls: mintedLinks }),
-      viewsAvailable: true,
-    };
-
-    const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
-
-    expect(selections).toHaveLength(1);
-    expect([...(selections[0] ?? [])].sort()).toEqual(
-      [
-        "graph_spec",
-        "input_form",
-        "main_stuff",
-        "output_form",
-        "pipe_io_contracts",
-        "tokens_usages",
-      ].sort(),
-    );
-    expect(selections[0]).not.toContain("working_memory");
-    // Everything the projection delivers came out of the narrowed read.
-    expect(toolResult.structuredContent.main_stuff).toEqual({ answer: 42 });
-    expect(toolResult.structuredContent.usage?.calls).toBe(1);
-    expect(toolResult.structuredContent.available_view_specs).toEqual(["run_graph"]);
-    expect(toolResult._meta.graph_spec).toEqual({ nodes: [] });
-    expect(toolResult._meta.pipe_io_contracts).toEqual(CONTRACTS);
-    expect(toolResult._meta.output_form).toEqual(OUTPUT_FORM);
-    expect(toolResult._meta.input_form).toEqual(INPUT_FORM);
-    expect(toolResult._meta.tokens_usages).toEqual(TOKENS_USAGES);
-  });
-
-  it("asks for the output and the usage alone on a shell without views", async () => {
-    const selections: (readonly RunResultArtifact[] | undefined)[] = [];
-    const context = {
-      ...contextWith({ getRunResult: narrowedRead(selections) }),
-      viewsAvailable: false,
-    };
+    const context = contextWith({ getRunResult: narrowedRead(selections) });
 
     const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
 
@@ -2458,17 +1998,15 @@ describe("getMthdsRunResults artifact selection", () => {
   });
 
   it("names only artifacts the SDK knows, and never the working memory", () => {
-    for (const viewsAvailable of [true, false]) {
-      const artifacts = runResultsArtifacts(viewsAvailable);
-      expect(artifacts.length).toBeGreaterThan(0);
-      expect(artifacts).toContain("main_stuff");
-      expect(artifacts).not.toContain("working_memory");
-    }
+    const artifacts = RUN_RESULTS_ARTIFACTS;
+    expect(artifacts.length).toBeGreaterThan(0);
+    expect(artifacts).toContain("main_stuff");
+    expect(artifacts).not.toContain("working_memory");
   });
 });
 
 describe("runResultsToolResult", () => {
-  it("delivers the graph and the full output on _meta, never on structuredContent", async () => {
+  it("delivers the full output on _meta, never on structuredContent", async () => {
     const huge = { text: "x".repeat(MAIN_STUFF_CAP * 2) };
     const tokensUsages: TokensUsageRecord[] = [
       { pipe_code: "extract", cost: 0.01, nb_tokens_by_category: { input: 100, output: 50 } },
@@ -2489,7 +2027,6 @@ describe("runResultsToolResult", () => {
     const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
 
     expect(toolResult.isError).toBe(false);
-    expect(toolResult._meta.graph_spec).toEqual({ nodes: [] });
     // _meta carries the FULL output, the raw per-call list, and the per-pipe rollup;
     // structuredContent carries only the bounded output and the run-level usage.
     expect(toolResult._meta.main_stuff).toBe(huge);
@@ -2507,41 +2044,12 @@ describe("runResultsToolResult", () => {
     );
   });
 
-  it("delivers the graph's data artifacts on _meta under the API's own key names", async () => {
-    const contracts = CONTRACTS;
-    const outputForm = OUTPUT_FORM;
-    const inputForm = INPUT_FORM;
-    const state: RunResultState = {
-      state: "completed",
-      pipeline_run_id: RUN_ID,
-      result: {
-        pipeline_run_id: RUN_ID,
-        main_stuff: "done",
-        graph_spec: { nodes: [] },
-        pipe_io_contracts: contracts,
-        output_form: outputForm,
-        input_form: inputForm,
-      },
-    };
-    const context = contextWith({ getRunResult: () => Promise.resolve(state) });
-
-    const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
-
-    expect(toolResult._meta.pipe_io_contracts).toEqual(contracts);
-    expect(toolResult._meta.output_form).toEqual(outputForm);
-    expect(toolResult._meta.input_form).toEqual(inputForm);
-  });
-
   it("flags error results as isError with empty _meta", async () => {
     const toolResult = runResultsToolResult(
       await getMthdsRunResults({ run_id: "" }, contextWith({})),
     );
 
     expect(toolResult.isError).toBe(true);
-    expect(toolResult._meta.graph_spec).toBeUndefined();
-    expect(toolResult._meta.pipe_io_contracts).toBeUndefined();
-    expect(toolResult._meta.output_form).toBeUndefined();
-    expect(toolResult._meta.input_form).toBeUndefined();
     expect(toolResult._meta.main_stuff).toBeUndefined();
     expect(toolResult._meta.tokens_usages).toBeUndefined();
     expect(toolResult._meta.usage_by_pipe).toBeUndefined();
@@ -2584,265 +2092,5 @@ describe("startMthdsRun path submissions", () => {
     expect(result.structuredContent.errors?.[0]?.location).toBe("files[0].path");
     expect(result.structuredContent.errors?.[0]?.hint).toContain("npx @pipelex/mcp");
     expect(result.summary).toBe("Run was not started: request input is invalid.");
-  });
-});
-
-// ── the console's run: `pipelex_run` ────────────────────────────────
-
-describe("startPipelexRun", () => {
-  /** A signature with one image input and one text input, for the walk to read. */
-  const WALK_FORM: InputForm = {
-    "demo.main": {
-      fields: [
-        {
-          name: "photo",
-          kind: "image",
-          concept_ref: "native.Image",
-          required: true,
-          presence: "plain",
-          gating: true,
-        },
-        {
-          name: "question",
-          kind: "prose",
-          concept_ref: "native.Text",
-          required: true,
-          presence: "plain",
-          gating: true,
-        },
-      ],
-    },
-  };
-
-  const WALK_REPORT: PipeIOValidReport = {
-    is_valid: true,
-    pipe_ref: "demo.main",
-    pipe_io_contracts: {},
-    input_form: WALK_FORM,
-    output_form: {},
-    default_pipe_ref: "demo.main",
-    pending_signatures: [],
-    is_runnable: true,
-  };
-
-  interface Recorded {
-    read: PipeIORequest[];
-    started: PipelexStartOptions[];
-  }
-
-  /** A console run context whose client serves the walk's read and the start, recording both. */
-  function consoleContext(
-    options: { report?: PipeIOResponse; start?: () => Promise<RunResultStart> } = {},
-  ): { context: PipelexRunContext; recorded: Recorded } {
-    const recorded: Recorded = { read: [], started: [] };
-    const context: PipelexRunContext = {
-      baseUrl: DEFAULT_API_URL,
-      toolNames: CONSOLE_TOOL_NAMES,
-      client: {
-        ...NEVER_CLIENT,
-        async pipeIo(request: PipeIORequest) {
-          recorded.read.push(request);
-          return options.report ?? WALK_REPORT;
-        },
-        start(startOptions: PipelexStartOptions) {
-          recorded.started.push(startOptions);
-          return options.start?.() ?? Promise.resolve({ pipeline_run_id: RUN_ID });
-        },
-      },
-    };
-    return { context, recorded };
-  }
-
-  it("walks the inputs against the method's signature, then starts it by reference", async () => {
-    const { context, recorded } = consoleContext();
-
-    const result = await startPipelexRun(
-      {
-        method_id: "mt_demo",
-        pipe_ref: "demo.main",
-        inputs: { photo: "https://example.com/cat.png", question: "why?" },
-      },
-      context,
-    );
-
-    // The walk reads the signature of the same method the run starts.
-    expect(recorded.read).toEqual([{ method_id: "mt_demo", pipe_ref: "demo.main" }]);
-    // The console's `pipe_ref` rides the run route's `pipe_code`, and the file
-    // input arrives in the shape the run needs.
-    expect(recorded.started).toEqual([
-      {
-        method_id: "mt_demo",
-        pipe_code: "demo.main",
-        inputs: {
-          photo: { url: "https://example.com/cat.png" },
-          question: "why?",
-        },
-      },
-    ]);
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.run_id).toBe(RUN_ID);
-  });
-
-  it("refuses an upload-needing value before anything starts, naming the attachment tool", async () => {
-    const { context, recorded } = consoleContext();
-
-    const result = await startPipelexRun(
-      { method_ref: "github.com/acme/methods@v1", inputs: { photo: "/etc/passwd", question: "x" } },
-      context,
-    );
-
-    expect(recorded.started).toEqual([]);
-    expect(result.structuredContent.status).toBe("error");
-    const error = result.structuredContent.errors?.[0];
-    expect(error?.class).toBe("input_domain");
-    expect(error?.location).toBe("inputs");
-    expect(error?.hint).toContain("pipelex_upload_attachments");
-    expect(JSON.stringify(result)).not.toContain("mthds_");
-  });
-
-  it("reads no signature when there are no inputs to walk", async () => {
-    const { context, recorded } = consoleContext();
-
-    await startPipelexRun({ method_ref: "github.com/acme/methods@v1" }, context);
-    await startPipelexRun({ method_id: "mt_demo", inputs: {} }, context);
-
-    expect(recorded.read).toEqual([]);
-    expect(recorded.started).toEqual([
-      { method_ref: "github.com/acme/methods@v1" },
-      { method_id: "mt_demo", inputs: {} },
-    ]);
-  });
-
-  it("headlines a walk failure by where it lies, not as an inputs fault by default", async () => {
-    // A method that does not validate is refused at the selector during the
-    // walk; its headline must not send the model to fix inputs that were fine.
-    const broken = consoleContext({
-      report: { is_valid: false, validation_errors: [], message: "invalid" },
-    });
-    const refusedMethod = await startPipelexRun(
-      { method_id: "mt_demo", inputs: { question: "why?" } },
-      broken.context,
-    );
-    expect(refusedMethod.structuredContent.errors?.[0]?.location).toBe("method_id");
-    expect(refusedMethod.summary).not.toContain("its inputs");
-
-    // An input that would need an upload is an inputs fault, and says so.
-    const { context } = consoleContext();
-    const refusedInput = await startPipelexRun(
-      { method_id: "mt_demo", inputs: { photo: "./cat.png" } },
-      context,
-    );
-    expect(refusedInput.structuredContent.errors?.[0]?.location).toMatch(/^inputs/);
-    expect(refusedInput.summary).toContain("its inputs could not be prepared");
-  });
-
-  it("requires exactly one method reference, before any call", async () => {
-    const { context, recorded } = consoleContext();
-
-    const neither = await startPipelexRun({ inputs: {} }, context);
-    const both = await startPipelexRun(
-      { method_id: "mt_demo", method_ref: "github.com/acme/methods@v1" },
-      context,
-    );
-    const blankPipe = await startPipelexRun({ method_id: "mt_demo", pipe_ref: " " }, context);
-
-    expect(neither.structuredContent.errors?.[0]?.location).toBe("method_id");
-    expect(both.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(blankPipe.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
-    expect(recorded.read).toEqual([]);
-    expect(recorded.started).toEqual([]);
-  });
-
-  it("refuses a bare pipe_ref whether or not there are inputs to walk", async () => {
-    const { context, recorded } = consoleContext();
-
-    // With no inputs the walk never runs, so the request check is what keeps a
-    // bare code from reaching the run route, which resolves one across domains.
-    for (const inputs of [undefined, {}, { question: "why?" }]) {
-      const result = await startPipelexRun(
-        { method_id: "mt_demo", pipe_ref: "main", ...(inputs === undefined ? {} : { inputs }) },
-        context,
-      );
-      const error = result.structuredContent.errors?.[0];
-      expect(error?.location).toBe("pipe_ref");
-      expect(error?.message).toContain('the bare "main"');
-    }
-    expect(recorded.read).toEqual([]);
-    expect(recorded.started).toEqual([]);
-  });
-
-  it("walks and starts the same trimmed pipe_ref", async () => {
-    const { context, recorded } = consoleContext();
-
-    await startPipelexRun({ method_id: "mt_demo", pipe_ref: "  demo.main  " }, context);
-    await startPipelexRun(
-      { method_id: "mt_demo", pipe_ref: " demo.main ", inputs: { question: "why?" } },
-      context,
-    );
-
-    expect(recorded.started.map((options) => options.pipe_code)).toEqual([
-      "demo.main",
-      "demo.main",
-    ]);
-  });
-
-  it("points a refused start at the console's own tools", async () => {
-    const { context } = consoleContext({
-      start: () =>
-        Promise.reject(
-          new ApiResponseError(
-            "HTTP 422",
-            `${DEFAULT_API_URL}/v1/start`,
-            422,
-            "Unprocessable Entity",
-            "{}",
-            "error",
-            "bad inputs",
-            undefined,
-            undefined,
-          ),
-        ),
-    });
-
-    const result = await startPipelexRun({ method_id: "mt_demo" }, context);
-
-    expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("pipelex_show_method");
-    expect(JSON.stringify(result)).not.toContain("mthds_");
-  });
-
-  it("follows its run with the console's status tool", async () => {
-    const { context } = consoleContext();
-
-    const result = await startPipelexRun({ method_id: "mt_demo" }, context);
-
-    expect(result.summary).toContain("pipelex_run_status");
-    expect(result.summary).not.toContain("mthds_");
-  });
-});
-
-describe("the run family in the console's names", () => {
-  it("names no workshop tool in a status, a result or a schema", () => {
-    const status = statusResult(runRead({ status: "RUNNING" }), CONSOLE_TOOL_NAMES);
-    const results = resultsResult(
-      {
-        state: "completed",
-        pipeline_run_id: RUN_ID,
-        result: { pipeline_run_id: RUN_ID, main_stuff: { answer: 42 } },
-      } as RunResultState,
-      false,
-      false,
-      CONSOLE_TOOL_NAMES,
-    );
-    const schemas = JSON.stringify([
-      z.toJSONSchema(z.object(runIdInputSchemaFor(CONSOLE_TOOL_NAMES))),
-      z.toJSONSchema(runStartOutputSchemaFor(CONSOLE_TOOL_NAMES)),
-      z.toJSONSchema(runResultsOutputSchemaFor(CONSOLE_TOOL_NAMES)),
-    ]);
-
-    for (const text of [JSON.stringify(status), JSON.stringify(results), schemas]) {
-      expect(text).not.toContain("mthds_");
-    }
   });
 });

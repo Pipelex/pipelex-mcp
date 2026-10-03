@@ -14,7 +14,6 @@ import {
 } from "./catalog.js";
 import type { CatalogClient, CatalogContext, CatalogSuccess } from "./catalog.js";
 import { DEFAULT_API_URL } from "./shared.js";
-import { CONSOLE_TOOL_NAMES } from "./tool-names.js";
 
 type WireRow = Record<string, unknown>;
 
@@ -215,23 +214,10 @@ describe("listMthdsMethods projection", () => {
     expect(last.summary).not.toContain("More methods are available");
   });
 
-  it("names the shell's own listing tool when it tells the model how to continue", async () => {
+  it("names its own listing tool when it tells the model how to continue", async () => {
     const workshop = await success([method()], {}, "c2");
-    const console = await listMthdsMethods(
-      {},
-      {
-        ...context({
-          async listMethods() {
-            return page([method()], "c2");
-          },
-        }),
-        toolNames: CONSOLE_TOOL_NAMES,
-      },
-    );
 
     expect(workshop.summary).toContain("mthds_list_methods");
-    expect(console.summary).toContain("pipelex_list_methods");
-    expect(console.summary).not.toContain("mthds_");
   });
 
   it("bounds names and descriptions by Unicode code point without splitting surrogate pairs", async () => {

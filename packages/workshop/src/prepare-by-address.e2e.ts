@@ -6,8 +6,6 @@
  * `inputs: {}`. Their intersection — an address whose pipe declares a file
  * input, filled from a path on disk — is the leg that had no coverage.
  *
- * It is the workshop arm by construction: the console refuses a local path.
- *
  * The file position is discovered through `POST /v1/validate` — the route
  * {@link PYTHON_FREE_METHOD_REF} is reserved for — while `mthds_prepare_inputs`
  * reads its own signature from `POST /v1/pipe-io`. The BUILD route is

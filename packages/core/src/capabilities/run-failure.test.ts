@@ -4,7 +4,6 @@ import { RECORDED_FAILED_RUNS } from "./failed-run-fixtures.js";
 import {
   FAILURE_FIELD_MAX_CODE_POINTS,
   FAILURE_MESSAGE_MAX_CODE_POINTS,
-  failureDisplayOf,
   failureSummaryLines,
   nextStepOf,
   retryAdviceOf,
@@ -20,12 +19,6 @@ function failureOf(recorded: typeof llmCompletion): RunFailure {
   const failure = runFailureOf(read.pipeline_run_id, read.error, read.finished_at);
   if (failure === undefined) throw new Error("the recorded report did not narrow");
   return failure;
-}
-
-/** Every piece of text the view shows a person, joined. */
-function shown(recorded: typeof llmCompletion): string {
-  const display = failureDisplayOf(recorded.statusRead.pipeline_run_id, failureOf(recorded));
-  return [display.reason, display.nextStep, display.retry, display.support].join("\n");
 }
 
 describe("runFailureOf", () => {
@@ -267,64 +260,5 @@ describe("failureSummaryLines", () => {
       "Why: unknown for now, since the run's error report could not be read; reading the run's status again returns it.",
     );
     expect(lines.join("\n")).not.toContain("stored no error report");
-  });
-});
-
-describe("failureDisplayOf", () => {
-  it("shows a person why, what to do and the support line, from the LLMCompletionError report", () => {
-    const display = failureDisplayOf(
-      llmCompletion.statusRead.pipeline_run_id,
-      failureOf(llmCompletion),
-    );
-
-    expect(display).toEqual({
-      reason: "LLM completion",
-      nextStep: "The provider rejected the request — review the prompt, parameters, and inputs.",
-      retry: "The report does not expect running it again unchanged to help.",
-      support:
-        "Run run_aa422fd5-59ef-4801-a585-09e6a961e80f · LLMCompletionError · ended 2026-09-23T15:16:37.856067+00:00",
-    });
-  });
-
-  it("shows a person the SandboxProvisioningError report's reason and a way to get help", () => {
-    const display = failureDisplayOf(
-      sandboxProvisioning.statusRead.pipeline_run_id,
-      failureOf(sandboxProvisioning),
-    );
-
-    expect(display).toEqual({
-      reason: "Sandbox provisioning",
-      nextStep: "If you need help, contact support with the line below.",
-      support:
-        "Run run_a23eccb6-fc93-4c30-8ba5-e6d785e1c96f · SandboxProvisioningError · ended 2026-09-24T10:38:04.285649+00:00",
-    });
-  });
-
-  it("never shows a person the report's message or the provider's text", () => {
-    for (const recorded of [llmCompletion, sandboxProvisioning, extractJobFailure]) {
-      const text = shown(recorded);
-      const report = recorded.statusRead.error;
-      expect(text).not.toContain(report?.message ?? "never");
-      if (report?.provider_metadata?.message) {
-        expect(text).not.toContain(report.provider_metadata.message);
-      }
-      for (const fragment of [
-        "HTTP 412",
-        "not allowed for this integration",
-        "Daytona",
-        "openrouter",
-        "Error code",
-      ]) {
-        expect(text).not.toContain(fragment);
-      }
-    }
-  });
-
-  it("says no reason was recorded for a run with no report", () => {
-    expect(failureDisplayOf("run_x", undefined, "2026-09-24T10:38:04Z")).toEqual({
-      reason: "No reason was recorded for this run.",
-      nextStep: "If you need help, contact support with the line below.",
-      support: "Run run_x · ended 2026-09-24T10:38:04Z",
-    });
   });
 });

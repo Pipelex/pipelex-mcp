@@ -4,11 +4,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BARE_APP_INFO,
   MAX_USER_AGENT_LENGTH,
-  consoleHost,
   mcpAppInfo,
   sanitizeHostPart,
   userAgentFor,
-  userAgentOf,
   workshopHost,
 } from "./client-identification.js";
 import type { McpShell } from "./client-identification.js";
@@ -16,10 +14,8 @@ import { createPipelexApiClient } from "./shared.js";
 
 const NODE = { versions: { node: "24.14.1" }, platform: "darwin", arch: "arm64" };
 
-// Each server hands in its own version; these two differ so a test that read
-// one shell's version for the other's would fail.
+// The workshop hands in its own version.
 const WORKSHOP: McpShell = { mode: "workshop", version: "0.21.0" };
-const CONSOLE: McpShell = { mode: "console", version: "0.20.3" };
 
 /** The `User-Agent` a client built by the factory actually sends. */
 async function sentUserAgent(config: Parameters<typeof createPipelexApiClient>[0]) {
@@ -84,51 +80,12 @@ describe("workshopHost", () => {
   });
 });
 
-describe("consoleHost", () => {
-  it.each([
-    ["openai-mcp/1.0.0 (+https://openai.com/bot)", "openai"],
-    ["ChatGPT-User/1.0", "openai"],
-    ["Claude-User", "claude"],
-    ["claude-ai/0.1.0", "claude"],
-    ["Anthropic/1.0", "claude"],
-  ])("%j -> %j", (userAgent, expected) => {
-    expect(consoleHost(userAgent)).toBe(expected);
-  });
-
-  it("omits a host it does not recognise, and never forwards the raw header", () => {
-    expect(consoleHost("node")).toBeUndefined();
-    expect(consoleHost("Mozilla/5.0 (Macintosh)")).toBeUndefined();
-    expect(consoleHost(undefined)).toBeUndefined();
-  });
-
-  it("reads a repeated header", () => {
-    expect(userAgentOf({ "user-agent": ["proxy/1", "openai-mcp/1.0.0"] })).toBe(
-      "proxy/1 openai-mcp/1.0.0",
-    );
-    expect(userAgentOf({})).toBeUndefined();
-    expect(userAgentOf(undefined)).toBeUndefined();
-  });
-});
-
 describe("mcpAppInfo", () => {
   it("names the shell, its own version and the host", () => {
     expect(mcpAppInfo(WORKSHOP, "claude-code/2.1.4", NODE)).toEqual({
       name: "pipelex-mcp",
       version: "0.21.0",
       details: ["workshop", "host=claude-code/2.1.4"],
-    });
-    expect(mcpAppInfo(CONSOLE, "openai", NODE)).toEqual({
-      name: "pipelex-mcp",
-      version: "0.20.3",
-      details: ["console", "host=openai"],
-    });
-  });
-
-  it("names the shell alone when there is no host", () => {
-    expect(mcpAppInfo(CONSOLE, undefined, NODE)).toEqual({
-      name: "pipelex-mcp",
-      version: "0.20.3",
-      details: ["console"],
     });
   });
 
@@ -170,17 +127,6 @@ describe("the header on the wire", () => {
     expect(sent).toBe(
       `pipelex-mcp/0.21.0 (workshop; host=claude-code/2.1.4) pipelex-sdk-js/${SDK_VERSION} ` +
         `node/${process.versions.node} (${process.platform}; ${process.arch})`,
-    );
-  });
-
-  it("reads, for the console, the coarse host", async () => {
-    const sent = await sentUserAgent({
-      baseUrl: "https://api.test",
-      apiKey: "k",
-      appInfo: () => mcpAppInfo(CONSOLE, consoleHost("openai-mcp/1.0.0")),
-    });
-    expect(sent?.startsWith(`pipelex-mcp/0.20.3 (console; host=openai) pipelex-sdk-js/`)).toBe(
-      true,
     );
   });
 
