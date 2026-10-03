@@ -8,7 +8,9 @@ import type {
   DownloadArtifactsRequest,
   DownloadArtifactsResult,
   DownloadedArtifact,
+  GetRunResultOptions,
   RunRead,
+  RunResultArtifact,
   RunResultState,
   RunStatus,
 } from "@pipelex/sdk";
@@ -68,6 +70,17 @@ import { errorMessage, resolveSaveDir } from "./workspace-boundary.js";
  * default, so the empty-walk check and the download agree on what was walked.
  */
 export const DOWNLOAD_SCOPE: ArtifactScope = "main_stuff";
+
+/**
+ * The result artifacts this tool's results read asks for, and nothing else:
+ * `main_stuff`, which it writes as the output file, and the artifact the
+ * download walks, which is `DOWNLOAD_SCOPE`. Both are `main_stuff` today, so
+ * the read carries the main output alone, never the graph, the I/O artifacts,
+ * the working memory or the usage records.
+ */
+export const DOWNLOAD_RESULT_ARTIFACTS: readonly RunResultArtifact[] = [
+  ...new Set<RunResultArtifact>(["main_stuff", DOWNLOAD_SCOPE]),
+];
 
 /**
  * The file every completed save writes first: the run's main output, verbatim.
@@ -251,7 +264,7 @@ export interface ArtifactsResult {
 
 /** The slice of `PipelexApiClient` this capability calls (test seam). */
 export interface ArtifactClient {
-  getRunResult(runId: string): Promise<RunResultState>;
+  getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
   /** Read once after a failed results arm, for when the run ended and its report (`readFailedRun`). */
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   downloadArtifacts(request: DownloadArtifactsRequest): Promise<DownloadArtifactsResult>;
@@ -374,7 +387,7 @@ export async function downloadMthdsArtifacts(
   let state: RunResultState;
   try {
     client = artifactClient(context);
-    state = await client.getRunResult(input.run_id);
+    state = await client.getRunResult(input.run_id, { artifacts: DOWNLOAD_RESULT_ARTIFACTS });
   } catch (err) {
     const error = classifyError(err, { ...RUN_RESULTS_ERROR_OPTIONS, auth: context.authError });
     return errorResult(summaryForToolError(error, ERROR_SUMMARIES), [error]);

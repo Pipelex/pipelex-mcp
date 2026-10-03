@@ -9,7 +9,7 @@
 // frame refuses. So the views deliver through the host instead: the MCP Apps
 // `ui/download-file` request where the host advertises `downloadFile`, and the
 // host's open-link request for a stored file where it does not.
-import { planStuffSave } from "@pipelex/mthds-ui/form";
+import { collectStuffFiles, planFileSave, planStuffSave } from "@pipelex/mthds-ui/form";
 import type {
   RunField,
   SaveFile,
@@ -159,6 +159,111 @@ export async function saveWholeOutput(
     ...plan.unavailable.map((file) => file.name),
     ...failed.map((failure) => failure.file.name),
   ];
+}
+
+/**
+ * Every stored file an output holds, planned the way each one's own Download
+ * button plans it: the kernel's reader, the file's place in the output and the
+ * output's base name, one file at a time, so a file reached through its link
+ * is named as its button names it. The planner walks a payload nothing
+ * validated, so a throw plans nothing, and a click then falls back to the
+ * link's own name (`linkedSaveFile`).
+ */
+export function plannedFilesOf(
+  field: RunField,
+  value: unknown,
+  options: SavePlanOptions,
+): SaveFile[] {
+  try {
+    return collectStuffFiles(field, value).flatMap((file) => planFileSave(file, options) ?? []);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The file a click on a stored file's link saves: the planned file the link
+ * belongs to, so a click on an image preview or a file's name saves what the
+ * Download button beside it saves, under the same name. A link none of
+ * `planned` holds, such as a file in the executed graph's data panel, saves
+ * under the last segment of its path, which the kernel plans and types as it
+ * would a file of that name. `undefined` for a link the kernel's gate refuses.
+ */
+export function linkedSaveFile(href: string, planned: readonly SaveFile[]): SaveFile | undefined {
+  const key = linkKey(href);
+  const known = planned.find((file) => file.url !== undefined && linkKey(file.url) === key);
+  if (known !== undefined) return known;
+  const own = planFileSave(
+    { kind: "document", path: "", url: href, filename: lastSegmentOf(href) },
+    { baseName: "file" },
+  );
+  if (own === undefined) return undefined;
+  return { ...own, kind: own.mimeType.startsWith("image/") ? "image" : "document" };
+}
+
+/** A link as the browser writes it, so the gate's string and a DOM anchor's `href` compare equal. */
+function linkKey(href: string): string {
+  try {
+    return new URL(href).href;
+  } catch {
+    return href;
+  }
+}
+
+/** The last segment of a link's path, decoded, or `""` when it has none. */
+function lastSegmentOf(href: string): string {
+  try {
+    return decodeURIComponent(new URL(href).pathname.split("/").pop() ?? "");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * What a click on a stored file's link does on this host, given the planned
+ * files of the output it landed in. A host that downloads is sent the file's
+ * bytes in one download request, named as its Download button names it
+ * (`linkedSaveFile`), so the host asks the reader to confirm a named file:
+ * opening the link there had claude.ai ask them to confirm the relay page's
+ * long link instead (seen on the Dev console on 2026-09-29). The bytes are read
+ * before anything is sent, because a file the view cannot read, past
+ * {@link INLINE_SAVE_BUDGET_BYTES} or refused, would go as a link, which
+ * claude.ai fails at once (`stored-file-bytes.ts`); such a file opens through
+ * `openLink`, as it does on a host that only opens links and in a view that
+ * does not know its host yet. A request the host declines or leaves unanswered
+ * shows nothing, since cancelling its confirmation is a decline too. A click on
+ * a link whose last click is still being read or answered is ignored, as the
+ * kernel's own button disables itself while it saves: a double-click is two
+ * clicks, and each would read the file again and send the host a second
+ * request. Never rejects: a click has nowhere to report.
+ */
+export function storedFileOpener(
+  support: HostSaveSupport,
+  download: HostDownload,
+  readStoredFile: ReadStoredFile,
+  openLink: HostOpenLink,
+): (href: string, planned: readonly SaveFile[]) => Promise<void> {
+  const inFlight = new Set<string>();
+  return async (href, planned) => {
+    if (inFlight.has(href)) return;
+    inFlight.add(href);
+    try {
+      const file = support === "download" ? linkedSaveFile(href, planned) : undefined;
+      const read =
+        file?.url === undefined
+          ? undefined
+          : await readStoredFile(file.url, INLINE_SAVE_BUDGET_BYTES);
+      if (file === undefined || read === undefined) {
+        openLink(href);
+        return;
+      }
+      await download({ contents: [downloadContentOf(file, read.blob)] });
+    } catch {
+      // A lost bridge or a host that refused to open the link: nothing to say.
+    } finally {
+      inFlight.delete(href);
+    }
+  };
 }
 
 /**

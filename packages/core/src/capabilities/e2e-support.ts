@@ -225,14 +225,16 @@ async function readAdvertisedExtensions(): Promise<Set<string>> {
  * ships `text_stats_funcs.py`, and that route's address path applies the
  * execution-locus gate, so a fetched package carrying Python is a 403 there on
  * any deployment that is not sandbox-hosted. Those legs take
- * {@link PYTHON_FREE_METHOD_REF} instead.
+ * {@link PYTHON_FREE_METHOD_REF} instead. The legs that resolve through
+ * `/v1/pipe-io`, which applies no gate, may take either.
  */
 export const PUBLISHED_METHOD_REF = "github.com/Pipelex/methods/text_stats@v0.1.1";
 
 /**
  * The published package the by-address legs that resolve through
- * `POST /v1/validate` use — `mthds_validate`'s own leg and
- * `mthds_prepare_inputs`', which reads its signature from that route.
+ * `POST /v1/validate` use — `mthds_validate`'s own — and the legs that need an
+ * entry pipe declared in a package's manifest alone, such as the show's and
+ * the input preparation's on `POST /v1/pipe-io`.
  *
  * Deliberately a different package from {@link PUBLISHED_METHOD_REF}, and do
  * not "harmonize" the two onto one: `/v1/validate` resolves an address through

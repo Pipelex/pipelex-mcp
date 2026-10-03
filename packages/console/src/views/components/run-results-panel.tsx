@@ -34,7 +34,7 @@ import {
   saveBaseNameOf,
 } from "../run-results.js";
 import type { RunResultsView } from "../run-results.js";
-import { saveWholeOutput } from "../host-save.js";
+import { plannedFilesOf, saveWholeOutput } from "../host-save.js";
 import { useHostSave } from "../use-host-save.js";
 import { FailureDetails } from "./failure-details.js";
 import { RenderBoundary } from "./render-boundary.js";
@@ -74,9 +74,11 @@ const FADE_MASK = "linear-gradient(to bottom, black 72%, transparent)";
  * sandboxed view frame refuses. A host that takes `ui/download-file` receives
  * the files as one request; one that does not opens each stored file's link,
  * and the controls that could only save inline content are not drawn there.
- * The fullscreen graph's data panel takes the same seam, and a click on one of
- * the kernel's plain links to a stored file, an image preview or a file's name,
- * is opened through the host the same way (`routeFileLinks`).
+ * The fullscreen graph's data panel takes the same seam. A click on one of the
+ * kernel's plain links to a stored file, an image preview or a file's name, is
+ * taken over too (`routeFileLinks`): a host that downloads saves the file, under
+ * the name its own button gives it when it is in the output, and any other
+ * opens it the way that host opens a file.
  *
  * Everything shown here was fetched by the view and goes to the view alone:
  * none of it enters the model's context. The model gets one line through
@@ -143,11 +145,7 @@ export function RunResultsPanel({
     : `Run ${runId}: ${headline.toLowerCase()}. Its output is shown to the user in this view; ${CONSOLE_TOOL_NAMES.runResults} with the run id returns it when a question needs the values.`;
 
   return (
-    <section
-      data-llm={llm}
-      className="w-full space-y-2 px-2 pb-2 pt-2"
-      onClickCapture={hostSave.routeFileLinks}
-    >
+    <section data-llm={llm} className="w-full space-y-2 px-2 pb-2 pt-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm font-medium" style={{ color: failed ? palette.error : palette.text }}>
           <span aria-hidden="true">{failed ? "✕ " : "✓ "}</span>
@@ -186,7 +184,11 @@ export function RunResultsPanel({
               <p className="pb-1 text-xs font-medium" style={{ color: palette.muted }}>
                 Execution graph
               </p>
-              <div className="relative w-full overflow-hidden" style={{ height: graphHeight }}>
+              <div
+                className="relative w-full overflow-hidden"
+                style={{ height: graphHeight }}
+                onClickCapture={hostSave.routeFileLinks}
+              >
                 <RenderBoundary
                   what="The run's graph"
                   resetKey={results.graphSpec}
@@ -303,8 +305,17 @@ function RunOutput({
   }, []);
 
   const cut = bounded && overflowing;
+  // The output's files, planned as their own buttons plan them, so a click on
+  // an image preview or a file's name saves what its button would.
+  const plannedFiles = () =>
+    field
+      ? plannedFilesOf(field, value, {
+          baseName: saveBaseName ?? field.name,
+          resolveUrl: results.resolveUrl,
+        })
+      : [];
   return (
-    <div>
+    <div onClickCapture={(event) => hostSave.routeFileLinks(event, plannedFiles)}>
       <div
         style={
           bounded

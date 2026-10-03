@@ -10,13 +10,16 @@ import {
 import type {
   BulkResolvedStorageUrls,
   BulkResolveStorageUrlsInput,
+  GetRunResultOptions,
   InputForm,
   MethodProvenance,
   OutputForm,
   PipeIOContracts,
-  PipelexValidationReport,
-  PipelexValidationResult,
+  PipeIORequest,
+  PipeIOResponse,
+  PipeIOValidReport,
   RunRead,
+  RunResultArtifact,
   RunResults,
   RunResultStart,
   RunResultState,
@@ -24,7 +27,6 @@ import type {
   PipelexStartOptions,
   TokensUsageRecord,
   UsageSummary,
-  ValidateMethodSelector,
 } from "@pipelex/sdk";
 
 import {
@@ -46,6 +48,7 @@ import {
   RUN_RESULTS_ERROR_OPTIONS,
   RUN_START_ERROR_OPTIONS,
   RUN_STATUS_ERROR_OPTIONS,
+  runResultsArtifacts,
   runResultsToolResult,
   startMthdsRun,
   startPipelexRun,
@@ -1325,7 +1328,7 @@ describe("boundMainStuff", () => {
 interface FakeRunClient {
   start(options: PipelexStartOptions): Promise<RunResultStart>;
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
-  getRunResult(runId: string): Promise<RunResultState>;
+  getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
   resolveStorageUrls(
     input: BulkResolveStorageUrlsInput,
     options?: { signal?: AbortSignal },
@@ -1478,7 +1481,7 @@ describe("startMthdsRun", () => {
       toolNames: CONSOLE_TOOL_NAMES,
       client: {
         ...NEVER_CLIENT,
-        validate: () => Promise.reject(new Error("validate must not be called")),
+        pipeIo: () => Promise.reject(new Error("pipeIo must not be called")),
         start: () => Promise.reject(serverError(500)),
       },
     };
@@ -2370,6 +2373,100 @@ describe("freshStorageLinks", () => {
   });
 });
 
+describe("getMthdsRunResults artifact selection", () => {
+  const TOKENS_USAGES: TokensUsageRecord[] = [
+    { pipe_code: "extract", cost: 0.01, nb_tokens_by_category: { input: 100, output: 50 } },
+  ];
+  const FULL: RunResults = {
+    pipeline_run_id: RUN_ID,
+    main_stuff: { answer: 42 },
+    working_memory: { root: {}, aliases: {} },
+    graph_spec: { nodes: [] },
+    pipe_io_contracts: CONTRACTS,
+    output_form: OUTPUT_FORM,
+    input_form: INPUT_FORM,
+    tokens_usages: TOKENS_USAGES,
+    usage_assembly_error: null,
+  };
+
+  /**
+   * A results read the way the SDK answers a narrowed one: every artifact the
+   * selection left out is absent, and `tokens_usages` brings
+   * `usage_assembly_error` with it. A projection reading an artifact it did
+   * not ask for then finds nothing, which the assertions below would see.
+   */
+  function narrowedRead(selections: (readonly RunResultArtifact[] | undefined)[]) {
+    return (_runId: string, options?: GetRunResultOptions): Promise<RunResultState> => {
+      selections.push(options?.artifacts);
+      const selected = new Set<string>(options?.artifacts ?? []);
+      if (selected.has("tokens_usages")) selected.add("usage_assembly_error");
+      const result = Object.fromEntries(
+        Object.entries(FULL).filter(
+          ([key]) =>
+            key === "pipeline_run_id" || options?.artifacts === undefined || selected.has(key),
+        ),
+      ) as unknown as RunResults;
+      return Promise.resolve({ state: "completed", pipeline_run_id: RUN_ID, result });
+    };
+  }
+
+  it("asks for the output, the usage, the graph and its data artifacts on a shell with views", async () => {
+    const selections: (readonly RunResultArtifact[] | undefined)[] = [];
+    const context = {
+      ...contextWith({ getRunResult: narrowedRead(selections), resolveStorageUrls: mintedLinks }),
+      viewsAvailable: true,
+    };
+
+    const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
+
+    expect(selections).toHaveLength(1);
+    expect([...(selections[0] ?? [])].sort()).toEqual(
+      [
+        "graph_spec",
+        "input_form",
+        "main_stuff",
+        "output_form",
+        "pipe_io_contracts",
+        "tokens_usages",
+      ].sort(),
+    );
+    expect(selections[0]).not.toContain("working_memory");
+    // Everything the projection delivers came out of the narrowed read.
+    expect(toolResult.structuredContent.main_stuff).toEqual({ answer: 42 });
+    expect(toolResult.structuredContent.usage?.calls).toBe(1);
+    expect(toolResult.structuredContent.available_view_specs).toEqual(["run_graph"]);
+    expect(toolResult._meta.graph_spec).toEqual({ nodes: [] });
+    expect(toolResult._meta.pipe_io_contracts).toEqual(CONTRACTS);
+    expect(toolResult._meta.output_form).toEqual(OUTPUT_FORM);
+    expect(toolResult._meta.input_form).toEqual(INPUT_FORM);
+    expect(toolResult._meta.tokens_usages).toEqual(TOKENS_USAGES);
+  });
+
+  it("asks for the output and the usage alone on a shell without views", async () => {
+    const selections: (readonly RunResultArtifact[] | undefined)[] = [];
+    const context = {
+      ...contextWith({ getRunResult: narrowedRead(selections) }),
+      viewsAvailable: false,
+    };
+
+    const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
+
+    expect(selections).toEqual([["main_stuff", "tokens_usages"]]);
+    expect(toolResult.structuredContent.main_stuff).toEqual({ answer: 42 });
+    expect(toolResult.structuredContent.usage?.calls).toBe(1);
+    expect(toolResult._meta.tokens_usages).toEqual(TOKENS_USAGES);
+  });
+
+  it("names only artifacts the SDK knows, and never the working memory", () => {
+    for (const viewsAvailable of [true, false]) {
+      const artifacts = runResultsArtifacts(viewsAvailable);
+      expect(artifacts.length).toBeGreaterThan(0);
+      expect(artifacts).toContain("main_stuff");
+      expect(artifacts).not.toContain("working_memory");
+    }
+  });
+});
+
 describe("runResultsToolResult", () => {
   it("delivers the graph and the full output on _meta, never on structuredContent", async () => {
     const huge = { text: "x".repeat(MAIN_STUFF_CAP * 2) };
@@ -2517,37 +2614,34 @@ describe("startPipelexRun", () => {
     },
   };
 
-  const WALK_REPORT: PipelexValidationReport = {
+  const WALK_REPORT: PipeIOValidReport = {
     is_valid: true,
-    bundle_blueprint: { domain: "demo", main_pipe: "main" },
+    pipe_ref: "demo.main",
     pipe_io_contracts: {},
     input_form: WALK_FORM,
-    graph_spec: {},
-    validated_pipes: [],
+    output_form: {},
+    default_pipe_ref: "demo.main",
     pending_signatures: [],
-    liftable_pipes: [],
-    warnings: [],
     is_runnable: true,
-    message: "ok",
   };
 
   interface Recorded {
-    validated: Array<string[] | ValidateMethodSelector>;
+    read: PipeIORequest[];
     started: PipelexStartOptions[];
   }
 
   /** A console run context whose client serves the walk's read and the start, recording both. */
   function consoleContext(
-    options: { report?: PipelexValidationResult; start?: () => Promise<RunResultStart> } = {},
+    options: { report?: PipeIOResponse; start?: () => Promise<RunResultStart> } = {},
   ): { context: PipelexRunContext; recorded: Recorded } {
-    const recorded: Recorded = { validated: [], started: [] };
+    const recorded: Recorded = { read: [], started: [] };
     const context: PipelexRunContext = {
       baseUrl: DEFAULT_API_URL,
       toolNames: CONSOLE_TOOL_NAMES,
       client: {
         ...NEVER_CLIENT,
-        async validate(source: string[] | ValidateMethodSelector) {
-          recorded.validated.push(source);
+        async pipeIo(request: PipeIORequest) {
+          recorded.read.push(request);
           return options.report ?? WALK_REPORT;
         },
         start(startOptions: PipelexStartOptions) {
@@ -2572,7 +2666,7 @@ describe("startPipelexRun", () => {
     );
 
     // The walk reads the signature of the same method the run starts.
-    expect(recorded.validated).toEqual([{ method_id: "mt_demo" }]);
+    expect(recorded.read).toEqual([{ method_id: "mt_demo", pipe_ref: "demo.main" }]);
     // The console's `pipe_ref` rides the run route's `pipe_code`, and the file
     // input arrives in the shape the run needs.
     expect(recorded.started).toEqual([
@@ -2612,7 +2706,7 @@ describe("startPipelexRun", () => {
     await startPipelexRun({ method_ref: "github.com/acme/methods@v1" }, context);
     await startPipelexRun({ method_id: "mt_demo", inputs: {} }, context);
 
-    expect(recorded.validated).toEqual([]);
+    expect(recorded.read).toEqual([]);
     expect(recorded.started).toEqual([
       { method_ref: "github.com/acme/methods@v1" },
       { method_id: "mt_demo", inputs: {} },
@@ -2623,7 +2717,7 @@ describe("startPipelexRun", () => {
     // A method that does not validate is refused at the selector during the
     // walk; its headline must not send the model to fix inputs that were fine.
     const broken = consoleContext({
-      report: { is_valid: false, validation_errors: [] } as unknown as PipelexValidationResult,
+      report: { is_valid: false, validation_errors: [], message: "invalid" },
     });
     const refusedMethod = await startPipelexRun(
       { method_id: "mt_demo", inputs: { question: "why?" } },
@@ -2655,7 +2749,7 @@ describe("startPipelexRun", () => {
     expect(neither.structuredContent.errors?.[0]?.location).toBe("method_id");
     expect(both.structuredContent.errors?.[0]?.class).toBe("input_domain");
     expect(blankPipe.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
-    expect(recorded.validated).toEqual([]);
+    expect(recorded.read).toEqual([]);
     expect(recorded.started).toEqual([]);
   });
 
@@ -2673,7 +2767,7 @@ describe("startPipelexRun", () => {
       expect(error?.location).toBe("pipe_ref");
       expect(error?.message).toContain('the bare "main"');
     }
-    expect(recorded.validated).toEqual([]);
+    expect(recorded.read).toEqual([]);
     expect(recorded.started).toEqual([]);
   });
 

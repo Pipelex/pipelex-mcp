@@ -6,10 +6,11 @@
  * itself and walks the inputs pass-through only, because on a public endpoint
  * the SDK's own walk would reach `readLocalPath` for a value at a file
  * position. Only a live call proves the signature it reads really comes back
- * with the input-form descriptor, and that the refusal still fires before any
- * filesystem read.
+ * from `POST /v1/pipe-io` with the input-form descriptor, that the route's
+ * typed selection refusal still lands at `pipe_ref`, and that the upload
+ * refusal still fires before any filesystem read.
  *
- * Free: it calls `POST /v1/validate` and starts nothing, uploads nothing.
+ * Free: it calls `POST /v1/pipe-io` and starts nothing, uploads nothing.
  */
 
 import { describe, expect, it } from "vitest";
@@ -70,17 +71,33 @@ describe("the console's input walk (live)", () => {
     expect(error?.retryable).toBe(false);
     expect(error?.hint).toContain("pipelex_upload_attachments");
   });
+
+  it("locates the route's refusal of an unknown pipe at pipe_ref", async () => {
+    const outcome = await prepareConsoleInputs(client, {
+      selector: imageSelector,
+      pipe_ref: "mcp_e2e_image.nope",
+      inputs: { [IMAGE_INPUT_NAME]: PASS_THROUGH_URL },
+    });
+
+    // The route's `422` typed `EntryPipeNotFoundError`, relayed as the walk's
+    // own question about the pipe rather than as a malformed request.
+    expect(outcome.ok).toBe(false);
+    const error = outcome.ok ? undefined : outcome.error;
+    expect(error?.class).toBe("input_domain");
+    expect(error?.location).toBe("pipe_ref");
+    expect(error?.message).toContain("mcp_e2e_image.nope");
+  });
 });
 
 /**
  * GATED on the live API, not on a date: the selector legs are server
- * pass-throughs on `POST /v1/validate`, so a deployment that resolves neither
+ * pass-throughs on `POST /v1/pipe-io`, so a deployment that resolves neither
  * has nothing to exercise.
  */
 describe.skipIf(!SERVES_SELECTORS)("the console's input walk — by selector (live)", () => {
   it("reads the signature of a published method by address", async () => {
-    // `/v1/validate` resolves an address through the execution-locus gate, so
-    // this is the Python-free package (see `PYTHON_FREE_METHOD_REF`).
+    // The Python-free package, so the run this walk precedes would also pass
+    // the execution-locus gate at the start (see `PYTHON_FREE_METHOD_REF`).
     const outcome = await prepareConsoleInputs(client, {
       selector: { method_ref: PYTHON_FREE_METHOD_REF },
       inputs: {},

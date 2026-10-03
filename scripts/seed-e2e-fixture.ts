@@ -2,11 +2,11 @@
  * `make seed-e2e-fixture` — put the live e2e suite's durable fixture methods
  * into the organization the configured API key belongs to.
  *
- * Why durable fixtures at all: the by-id legs (`fetchMethodFiles`, by-id
- * validate, by-id run) need a registered method, and the platform makes delete
- * admin-only. A suite that created its own method could never clean up, so it
- * would leak one method per run into the org. Methods seeded once, asserted by
- * name instead.
+ * Why durable fixtures at all: the by-id legs (the inputs template, validate,
+ * the show and the run, each by id) need a registered method, and the platform
+ * makes delete admin-only. A suite that created its own method could never
+ * clean up, so it would leak one method per run into the org. Methods seeded
+ * once, asserted by name instead.
  *
  * Why it is a separate, hand-invoked target rather than a step of
  * `make test-e2e`: seeding writes durable METHODS into whichever organization

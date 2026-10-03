@@ -42,7 +42,8 @@ export function fileRelayLink(serverUrl: string, href: string): string {
  * plain link to one: the kernel wraps each image preview, and names each file,
  * with an `<a target="_blank">` to the file's presigned link, which a host
  * opens with the same damage as `openExternal`. The views take such a click
- * over and open the file through the relay (`useHostSave().routeFileLinks`).
+ * over (`useHostSave().routeFileLinks`): a host that downloads saves the file,
+ * and any other opens it through the relay.
  * Duck-typed on `closest`, so Node tests reach it without a DOM.
  */
 export function storedFileLinkOf(target: unknown): string | undefined {

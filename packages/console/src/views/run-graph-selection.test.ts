@@ -61,11 +61,10 @@ describe("graphPipeRefOf", () => {
 
 describe("graphCaptionFor", () => {
   it("labels the graph and names the form's pipe when the entry pipe differs", () => {
-    // A `method_ref` package whose `METHODS.toml` names `other.shout` while the
-    // bundle declares `main_pipe = "main"` in `demo`: the graph is the bundle's
-    // pipe, the form below is for the manifest's. Both are spelled out.
+    // The graph shows `demo.main` while the form is back on the entry pipe
+    // `other.shout`, the user having clicked it: both are spelled out.
     expect(graphCaptionFor("demo.main", "other.shout", "other.shout")).toBe(
-      "The graph above shows demo.main, the bundle's declared main pipe. The form below runs other.shout, the method's entry pipe.",
+      "The graph above shows demo.main and the pipes it calls. The form below runs other.shout, the method's entry pipe.",
     );
   });
 
@@ -75,11 +74,12 @@ describe("graphCaptionFor", () => {
     expect(graphCaptionFor("demo.main", "demo.main", "demo.step")).toBeNull();
   });
 
-  it("stops claiming the form runs the entry pipe once it does not", () => {
-    // The user clicked a node, or no form is shown: the graph is still not the
-    // entry pipe, but "the form below runs" would now be false.
+  it("names the entry pipe alone when the form is not on it", () => {
+    // The caller named `demo.main`, so the graph and the form are both for it,
+    // or no form is shown: the graph is not the whole method, and "the form
+    // below runs" the entry pipe would be false.
     const graphOnly =
-      "The graph above shows demo.main, the bundle's declared main pipe. The method's entry pipe is other.shout.";
+      "The graph above shows demo.main and the pipes it calls. The method's entry pipe is other.shout.";
     expect(graphCaptionFor("demo.main", "other.shout", "demo.main")).toBe(graphOnly);
     expect(graphCaptionFor("demo.main", "other.shout", null)).toBe(graphOnly);
   });

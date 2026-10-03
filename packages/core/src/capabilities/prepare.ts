@@ -112,8 +112,8 @@ export interface PrepareResult {
  * The slice of `PipelexApiClient` the prepare capability calls (test seam): the
  * SDK's `prepareInputs`, handed the selector as given. Nothing here expands a
  * selector or reads a signature client-side, which is why there is no
- * `getMethodClosure` and no `validate` here: the SDK reads the signature from
- * one `POST /v1/validate` itself.
+ * `getMethodClosure` and no `pipeIo` here: the SDK reads the signature from
+ * one `POST /v1/pipe-io` itself.
  */
 interface PrepareClient {
   prepareInputs(request: PrepareInputsRequest): Promise<PreparedInputs>;
@@ -150,49 +150,45 @@ const PREPARE_ASSET_TEXTURE: NonNullable<ClassifyErrorOptions["asset"]> = {
 };
 
 /**
- * The signature texture, and the reason every shape carries it unchanged: an
- * unqualified `pipe_ref`, an unknown one and a closure with no single default
- * pipe are all refused **client-side** by the SDK, as an
- * `InputPreparationError` raised before any request. Each really is a question
- * about the pipe, whatever named the method — which is why it rides
- * `preparation` rather than `badRequest`, whose locator follows the selector
- * the caller actually typed.
+ * The signature texture, and the reason every shape carries it unchanged: the
+ * SDK refuses an unqualified `pipe_ref` before any request, and turns the
+ * route's typed refusals of a selection (an unknown `pipe_ref`, a method that
+ * settles no entry pipe, or several) into an `InputPreparationError` carrying
+ * the server's reason. Each really is a question about the pipe, whatever
+ * named the method — which is why it rides `preparation` rather than
+ * `badRequest`, whose locator follows the selector the caller actually typed.
  */
 const PREPARE_SIGNATURE_TEXTURE: NonNullable<ClassifyErrorOptions["preparation"]> = {
   location: "pipe_ref",
-  hint: "Pass pipe_ref as a qualified domain.pipe_code; omitting it requires the closure to declare exactly one main_pipe.",
+  hint: "Pass pipe_ref as a qualified domain.pipe_code the method declares; omitting it requires the method to settle exactly one entry pipe.",
 };
 
 /** Classify options for a files-shaped request. */
 const PREPARE_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/validate",
+  route: "/v1/pipe-io",
   methodLocation: "files",
   // No `badRequest` override on purpose: a files request names no selector
-  // field, so the default `files` locator is already right, and it is the very
-  // texture `mthds_validate` gets for the very same body on the very same
-  // route. It must NOT be the signature texture, which is what it was while
-  // this tool still sent `pipe_ref` to `/v1/build/inputs`: pipe selection is
-  // client-side now, so `/v1/validate` can never be complaining about it.
+  // field, so the default `files` locator is already right. It must NOT be the
+  // signature texture, which is what it was while this tool still sent
+  // `pipe_ref` to `/v1/build/inputs`: the route's refusals of a selection are
+  // typed, and the SDK turns them into an `InputPreparationError`, which
+  // reaches `preparation`, so a bare 400 or 422 is never about the pipe.
   preparation: PREPARE_SIGNATURE_TEXTURE,
   asset: PREPARE_ASSET_TEXTURE,
 };
 
 /**
  * Classify options for an address-shaped request — the `mthds_validate`
- * textures, because this tool now reaches the very same route with the very
- * same selector. Note the address travels through `/v1/validate` and therefore
- * through the execution-locus gate, so a fetched package shipping any `.py` is
- * a 403 here off a deployment that is not sandbox-hosted, while the same
- * address still answers on `mthds_inputs_template` and `mthds_codegen`, which
- * reach their crate another way. Both of the gate's refusals are classified
- * route-independently in `classifyError`, off the `error_type` the runner
- * declares — the sandbox refusal at `methodLocation`, the structures refusal,
- * which only a fetched package can trigger, at `method_ref` — and never in the
- * generic 401/403 arm, which sent a caller with a perfectly good credential to
- * mint a key.
+ * textures, since the address is resolved by the runner the same way. The
+ * route fetches a package's `.mthds` files alone, so the execution-locus gate
+ * does not apply and a package shipping Python prepares on any deployment, as
+ * it answers on `mthds_inputs_template` and `mthds_codegen`; its run is still
+ * refused at the start off a sandbox-hosted deployment. The 404 texture is
+ * `typedOnly`, here and on the id shape: a runner too old to serve
+ * `/v1/pipe-io` answers a bare 404, which is the deployment, not the address.
  */
 const PREPARE_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/validate",
+  route: "/v1/pipe-io",
   methodLocation: "method_ref",
   badRequest: {
     location: "method_ref",
@@ -202,6 +198,7 @@ const PREPARE_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
   notFound: {
     location: "method_ref",
     hint: "The repository was fetched but holds no package matching this address by manifest identity. Check the package selector against the repository's METHODS.toml manifests.",
+    typedOnly: true,
   },
   notImplemented: {
     location: "method_ref",
@@ -219,16 +216,17 @@ const PREPARE_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
  * `EmptyMethodSourceError` having gone out with the client-side expansion.
  */
 const PREPARE_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/validate",
+  route: "/v1/pipe-io",
   methodLocation: "method_id",
   badRequest: {
     location: "method_id",
-    hint: "The stored method may have no MTHDS source yet, or this deployment may not resolve method_id on /v1/validate — the selector is hosted-only (a bare pipelex-api runner has no catalog).",
+    hint: "The stored method may have no MTHDS source yet, or this deployment may not resolve method_id on /v1/pipe-io — the selector is hosted-only (a bare pipelex-api runner has no catalog).",
   },
   preparation: PREPARE_SIGNATURE_TEXTURE,
   notFound: {
     location: "method_id",
     hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.",
+    typedOnly: true,
   },
   asset: PREPARE_ASSET_TEXTURE,
 };
@@ -326,10 +324,11 @@ interface PrepareEnvelope {
 }
 
 /**
- * Hand the whole request to the SDK's `prepareInputs`, selector included. Since `@pipelex/sdk` 0.17.0 that call takes `files`, `method_ref`
- * or `method_id` and resolves each through one `POST /v1/validate` with
- * `views: ["input_form"]` — which is why this repo no longer expands a stored
- * method into files before calling it.
+ * Hand the whole request to the SDK's `prepareInputs`, selector included. Since
+ * `@pipelex/sdk` 0.17.0 that call takes `files`, `method_ref` or `method_id`,
+ * and since 0.27.0 it resolves each, with the `pipe_ref` if one was named,
+ * through one `POST /v1/pipe-io` for that one pipe, with no dry run — which is
+ * why this repo does not expand a stored method into files before calling it.
  */
 function prepareWithUpload(
   client: PrepareClient,

@@ -1,5 +1,10 @@
 import { ApiResponseError, ApiUnreachableError, ArtifactFetchError } from "@pipelex/sdk";
-import type { FetchArtifactOptions, RunRead, RunResultState } from "@pipelex/sdk";
+import type {
+  FetchArtifactOptions,
+  RunRead,
+  RunResultArtifact,
+  RunResultState,
+} from "@pipelex/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -255,11 +260,29 @@ describe("showMthdsRunImages", () => {
     expect(result.imageBlocks[0]._meta).toEqual({ uri: COVER });
   });
 
+  it("asks the results read for the main output alone, the only artifact its walk reads", async () => {
+    const selections: (readonly RunResultArtifact[] | undefined)[] = [];
+    const client: ImagesClient = {
+      getRunStatus: noStatusRead,
+      getRunResult: (_runId, options) => {
+        selections.push(options?.artifacts);
+        return Promise.resolve(completedRun());
+      },
+      fetchArtifact: () => Promise.resolve(imageResponse(TINY_PNG)),
+    };
+
+    const result = await showMthdsRunImages({ run_id: RUN_ID, images: [COVER] }, context(client));
+
+    expect(selections).toEqual([["main_stuff"]]);
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.imageBlocks).toHaveLength(1);
+  });
+
   /**
    * The one property a host failure would otherwise teach us about in
    * production: Codex refuses an image block carrying `annotations` outright,
    * with an opaque `Unexpected response type`, and accepts the identical block
-   * without them (`wip/mcp-image-results/host-probe.md`).
+   * without them (L-260920-fc66db).
    */
   it("emits no annotations on any block", async () => {
     const { client } = fakeClient({

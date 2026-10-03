@@ -38,6 +38,7 @@ import {
 } from "./run-graph-upload.js";
 import type { GrantRequest, GrantToolResponse, UploadErrors } from "./run-graph-upload.js";
 import { hasExecutedGraph, runDurationSeconds } from "./run-results.js";
+import { useFrameHeight } from "./use-frame-height.js";
 import { useHostSave } from "./use-host-save.js";
 import { useRunPolling } from "./use-run-polling.js";
 import { useRunResults } from "./use-run-results.js";
@@ -66,11 +67,12 @@ type RunGraphViewState = {
  * method's run graph (delivered view-only on `_meta`, read here as
  * `responseMetadata.graph_spec`) with mthds-ui's `GraphViewer`, the same
  * component `pipelex-app` ships. It is the generic renderer for any run graph:
- * today `pipelex_show_method` feeds it the **dry-run graph** (the method
- * structure from the validation dry run); a future run tool can register the
- * same component to surface a **live-run graph** (with execution status).
- * Invalid verdicts and pending-signature verdicts with no graph fall back to a
- * compact, non-crashing empty state.
+ * today `pipelex_show_method` feeds it the method's **static graph**, drawn
+ * from the method's source by mthds-ui's static builder (`meta.mode:
+ * "static"`), and a completed run feeds it the **executed graph**; a future run
+ * tool can register the same component to surface a **live-run graph** (with
+ * execution status). Invalid verdicts, which carry no graph, and verdicts with
+ * neither a graph nor a form fall back to a compact, non-crashing empty state.
  *
  * On a runnable verdict it also renders the method's **input form** below the
  * graph — mthds-ui's `RunPanel` over the wire input-form descriptor riding
@@ -81,11 +83,11 @@ type RunGraphViewState = {
  * pipe node in the graph switches it. With no entry pipe settled no form opens on its own —
  * `selectedPipeFor` never substitutes a pipe of the view's own choosing — but
  * the artifacts still ride, so clicking a pipe node still produces its form.
- * The graph is the entry pipe's dry run on a current deployment, but the
- * bundle's declared main pipe on one older than pipelex-api 0.27.5, where a
- * `method_ref` package's manifest can name a different entry pipe: when the two
- * differ the graph stays and a caption under it names both (`graphCaptionFor`),
- * so the diagram is never silently of a different pipe from the form below it.
+ * The graph is drawn from the pipe the form opens on, so the two agree; when
+ * that pipe is not the entry pipe `main_pipe_ref` names, because the caller
+ * named another one, a caption under the graph names both
+ * (`graphCaptionFor`), so the diagram is never silently less than the whole
+ * method.
  * A file-bearing input takes a file the user picks: the form asks the console
  * for an upload grant (`pipelex_request_upload`) and sends the file straight
  * to Pipelex storage, so the bytes never cross the conversation or the server
@@ -96,7 +98,7 @@ type RunGraphViewState = {
  * follows the run by polling `pipelex_run_status`, fetches `pipelex_run_results`
  * itself once the run is terminal, and shows them in the results panel it
  * shares with `run-follow`: the output rendered by the form kernel takes the
- * form's place, the dry-run graph gives way to the executed one, and the form
+ * form's place, the method's graph gives way to the executed one, and the form
  * folds behind "Edit inputs and run again", which brings it back with the
  * values entered (`./run-graph-stage.ts` holds those transitions). A call the
  * view makes returns to the view alone and mounts no other view, which is why
@@ -123,6 +125,7 @@ function RunGraph() {
   const { callToolAsync: requestUploadAsync } = useCallTool("pipelex_request_upload");
   const { theme, maxHeight, safeArea } = useLayout();
   const [displayMode, setDisplayMode] = useDisplayMode();
+  const frameHeight = useFrameHeight(displayMode === "fullscreen");
   const [viewState, setViewState] = useViewState<RunGraphViewState>({});
 
   const responseMetadata = toolInfo.isSuccess ? toolInfo.responseMetadata : undefined;
@@ -284,13 +287,13 @@ function RunGraph() {
 
   const isFullscreen = displayMode === "fullscreen";
   const { top, right, bottom, left } = safeArea.insets;
-  // ReactFlow needs an explicit pixel height. Fill the host when fullscreen;
+  // ReactFlow needs an explicit pixel height. Fill the frame when fullscreen;
   // keep a compact preview inline (no inline overflow scroll — fullscreen is
-  // the sanctioned mode for exploring the graph). Floor it so a small host
-  // height or large insets can't collapse the canvas to nothing. With a form
-  // below, the fullscreen graph takes roughly half the host and the whole view
+  // the sanctioned mode for exploring the graph). Floor it so a small frame
+  // or large insets can't collapse the canvas to nothing. With a form below,
+  // the fullscreen graph takes roughly half the frame and the whole view
   // scrolls.
-  const available = (maxHeight ?? 600) - top - bottom;
+  const available = frameHeight - top - bottom;
   const graphHeight = hasForm
     ? Math.max(isFullscreen ? Math.floor(available * 0.55) : 320, 240)
     : Math.max(isFullscreen ? available : Math.min(available, 420), 240);
@@ -382,10 +385,9 @@ function RunGraph() {
     })();
   };
 
-  // The dry-run graph is of the pipe the dry run traced: the entry pipe on a
-  // current deployment, the bundle's declared main pipe on one older than
-  // pipelex-api 0.27.5. The form defaults to the entry pipe, so say so when
-  // they are not the same pipe, which only that older deployment produces.
+  // The method's graph is drawn from the pipe the form opens on, the one the
+  // caller named or else the entry pipe, so the caption speaks only when the
+  // caller named a pipe other than the entry pipe.
   // The executed graph gets no caption: it is of the pipe that ran, which is
   // the one the results below it are for.
   const graphCaption =
@@ -412,7 +414,7 @@ function RunGraph() {
     executedGraph
       ? `Showing the executed graph of run ${runId}`
       : hasGraph
-        ? `Showing the dry-run graph of the method: ${graphSpec?.nodes.length} nodes`
+        ? `Showing the ${graphSpec?.meta?.mode === "static" ? "" : "dry-run "}graph of the method: ${graphSpec?.nodes.length} nodes`
         : null,
     graphCaption,
     `runnable=${output.is_runnable}`,
@@ -431,16 +433,21 @@ function RunGraph() {
         paddingRight: right,
         paddingBottom: bottom,
         paddingLeft: left,
-        maxHeight: isFullscreen ? available : undefined,
+        // The insets are padding inside this height (border-box), not taken
+        // off it a second time.
+        maxHeight: isFullscreen ? frameHeight : undefined,
       }}
     >
-      <ToolbarButton
-        dark={dark}
-        onClick={() => void setDisplayMode(isFullscreen ? "inline" : "fullscreen")}
-        className="absolute right-2 top-2 z-10"
-      >
-        {isFullscreen ? "Collapse" : "Fullscreen"}
-      </ToolbarButton>
+      {/* An offset is measured from the padding box, so the insets are added
+          to it, or the toggle sits in the area they keep clear. */}
+      <div className="absolute z-10" style={{ top: top + 8, right: right + 8 }}>
+        <ToolbarButton
+          dark={dark}
+          onClick={() => void setDisplayMode(isFullscreen ? "inline" : "fullscreen")}
+        >
+          {isFullscreen ? "Collapse" : "Fullscreen"}
+        </ToolbarButton>
+      </div>
       {executedGraph ? (
         <div
           className="relative w-full overflow-hidden"

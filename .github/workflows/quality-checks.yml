@@ -3,7 +3,7 @@
 # required by the branch-protection ruleset before anything can merge.
 #
 # Unlike the sibling TS repos, `@pipelex/sdk` is consumed as a published npm
-# package (not a `file:../pipelex-sdk-js` link), so CI needs nothing more than
+# package (not a `file:../pipelex-sdk/js` link), so CI needs nothing more than
 # `npm ci` — there is no sibling repo to check out and build.
 name: Quality Checks
 

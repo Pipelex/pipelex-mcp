@@ -2,9 +2,10 @@
 
 .PHONY: help install lint format format-check typecheck test agent-test test-watch test-coverage smoke live-preflight test-e2e test-e2e-run test-all seed-e2e-fixture te check check-no-local-deps check-release-ready check-workshop-released check-console-released build build-local all clean dev dev-local inspect-local dev-tunnel start deploy deploy-prod deploy-dev deploy-staging deploy-envs alpic-deploy publish c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
 
-# Sibling repos for live development of our npm dependencies (see use-local / use-npm).
+# Sibling checkouts for live development of our npm dependencies (see use-local / use-npm).
+# @pipelex/sdk lives in the js/ directory of the pipelex-sdk monorepo.
 MTHDS_UI_DIR := ../mthds-ui
-PIPELEX_SDK_DIR := ../pipelex-sdk-js
+PIPELEX_SDK_DIR := ../pipelex-sdk/js
 
 # The port the hosted console's dev server listens on. Skybridge defaults to
 # 3000 and, finding it busy, walks up to the next free port. That reflex is
@@ -74,7 +75,7 @@ make use-local      - Switch @pipelex/mthds-ui AND @pipelex/sdk to their sibling
 make use-npm        - Switch both back to npm (latest)
 make use-local-ui   - Switch only @pipelex/mthds-ui to sibling ../mthds-ui
 make use-npm-ui     - Switch only @pipelex/mthds-ui back to npm [VERSION=x.y.z]
-make use-local-sdk  - Switch only @pipelex/sdk to sibling ../pipelex-sdk-js
+make use-local-sdk  - Switch only @pipelex/sdk to sibling ../pipelex-sdk/js
 make use-npm-sdk    - Switch only @pipelex/sdk back to npm [VERSION=x.y.z]
 make ul             - Shorthand -> use-local
 make un             - Shorthand -> use-npm
@@ -166,7 +167,7 @@ agent-test:
 # the shell clear it followed `.env`, which names whatever `make dev` is pointed
 # at. Neither is the deployment the durable fixture is seeded in, so every by-id
 # leg failed with a fixture miss that read like drift. `PIPELEX_E2E_BASE_URL` is
-# also the name pipelex-sdk-js's live suite uses.
+# also the name the live suite of @pipelex/sdk, in pipelex-sdk/js, uses.
 #
 # The pair is resolved ONCE here and exported, so the URL these targets
 # preflight is the URL the suites call (`packages/core/src/capabilities/e2e-support.ts` reads
@@ -548,10 +549,10 @@ use-npm-ui:
 	echo "Switched to npm @pipelex/mthds-ui@$$VERSION. Review the diff, then commit packages/*/package.json + package-lock.json."
 
 use-local-sdk:
-	@if [ ! -d $(PIPELEX_SDK_DIR) ]; then echo "ERROR: $(PIPELEX_SDK_DIR) not found. Clone it next to pipelex-mcp."; exit 1; fi
+	@if [ ! -d $(PIPELEX_SDK_DIR) ]; then echo "ERROR: $(PIPELEX_SDK_DIR) not found. Clone Pipelex/pipelex-sdk next to pipelex-mcp."; exit 1; fi
 	cd $(PIPELEX_SDK_DIR) && npm install && npm run build
 	npm install $(SDK_WORKSPACES) @pipelex/sdk@file:$(abspath $(PIPELEX_SDK_DIR))
-	@echo "Switched to local pipelex-sdk-js (file link). Run 'make use-npm-sdk' to switch back."
+	@echo "Switched to local @pipelex/sdk from $(PIPELEX_SDK_DIR) (file link). Run 'make use-npm-sdk' to switch back."
 
 use-npm-sdk:
 	@VERSION="$${VERSION:-latest}" && \

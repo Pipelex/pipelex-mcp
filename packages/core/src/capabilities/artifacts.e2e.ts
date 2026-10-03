@@ -106,7 +106,7 @@ describe.runIf(RUN_ENABLED)("mthds_download_artifacts (live, EXECUTES A RUN)", (
 
       // The file is the value the platform holds, read here through the SDK
       // with no bounding in between, so a pruned or retyped output cannot pass.
-      const held = await liveClient().getRunResult(runId);
+      const held = await liveClient().getRunResult(runId, { artifacts: ["main_stuff"] });
       expect(held.state).toBe("completed");
       if (held.state !== "completed") return;
       const written = await fs.readFile(path.join(context.saveRoot!, outputPath), "utf8");

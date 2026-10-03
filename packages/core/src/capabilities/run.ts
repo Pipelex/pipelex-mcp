@@ -9,11 +9,13 @@ import {
 import type {
   BulkResolvedStorageUrls,
   BulkResolveStorageUrlsInput,
+  GetRunResultOptions,
   MethodProvenance,
   PipelexRunResultStart,
   PipelexStartOptions,
   PipeUsageSummary,
   RunRead,
+  RunResultArtifact,
   RunResults,
   RunResultState,
   RunStatus,
@@ -594,7 +596,7 @@ export interface RunResultsResult {
 interface RunClient {
   start(options: PipelexStartOptions): Promise<PipelexRunResultStart>;
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
-  getRunResult(runId: string): Promise<RunResultState>;
+  getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
   /** The bulk resolve route, `POST /v1/resolve-storage-url/bulk`: fresh links for a completed output's files. */
   resolveStorageUrls(
     input: BulkResolveStorageUrlsInput,
@@ -1545,12 +1547,15 @@ export async function startMthdsRun(
  * preparing its inputs with the console's own walk.
  *
  * The walk runs only when there are inputs to walk: with none, there is no
- * file position to rewrite or refuse, and the one `POST /v1/validate` it costs
+ * file position to rewrite or refuse, and the one `POST /v1/pipe-io` it costs
  * would buy nothing. Its refusals stop the run before anything starts, so an
  * input that would need an upload never costs inference credit. Only the pipe
- * the caller named rides the start: the walk picks the same default the run
- * route does, and naming it here would let a disagreement between the two run a
- * pipe nobody chose.
+ * the caller named rides the start: the walk's default is the route's entry
+ * pipe, which is the run route's default except for a method whose domains
+ * declare several `main_pipe`s, where the run route takes the first and the
+ * walk is refused, asking for a `pipe_ref`. Naming the walk's pipe here would
+ * let any disagreement between the two run a pipe nobody chose, and the
+ * refusal fails closed.
  */
 export async function startPipelexRun(
   input: PipelexRunInput,
@@ -1714,6 +1719,27 @@ export async function getMthdsRunStatus(
   }
 }
 
+/**
+ * The result artifacts a `run_results` read asks for — exactly what
+ * `completedResult` projects, so the platform reads and re-signs nothing the
+ * tool drops. The main output and the usage records (which bring
+ * `usage_assembly_error`) are read on every shell. The graph and its three
+ * data artifacts only ever ride the views' `_meta`, so they are asked for only
+ * when this shell renders views. The working memory is never read.
+ */
+export function runResultsArtifacts(viewsAvailable: boolean): readonly RunResultArtifact[] {
+  return viewsAvailable
+    ? [
+        "main_stuff",
+        "tokens_usages",
+        "graph_spec",
+        "pipe_io_contracts",
+        "output_form",
+        "input_form",
+      ]
+    : ["main_stuff", "tokens_usages"];
+}
+
 /** One-shot result lookup — `GET /v1/runs/{id}/results`. */
 export async function getMthdsRunResults(
   input: RunIdInput,
@@ -1725,9 +1751,12 @@ export async function getMthdsRunResults(
     return resultsErrorResult("Run results were not read: request input is invalid.", inputErrors);
   }
 
+  const viewsAvailable = context.viewsAvailable !== false;
   let state: RunResultState;
   try {
-    state = await runClient(context).getRunResult(input.run_id);
+    state = await runClient(context).getRunResult(input.run_id, {
+      artifacts: runResultsArtifacts(viewsAvailable),
+    });
   } catch (err) {
     const error = classifyError(err, { ...runResultsErrorOptions(names), auth: context.authError });
     return resultsErrorResult(resultsSummaryForError(error), [error]);
@@ -1740,7 +1769,6 @@ export async function getMthdsRunResults(
   // The API responded; projecting it must not be reported as an unreachable
   // API. A malformed report (a completed result missing main_stuff) is a
   // reachable contract violation, surfaced as a runtime no-verdict error.
-  const viewsAvailable = context.viewsAvailable !== false;
   let projected: RunResultsResult;
   try {
     projected = resultsResult(

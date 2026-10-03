@@ -1,6 +1,6 @@
 {
   "name": "@pipelex/mcp",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "description": "The MCP server inside the Pipelex plugin: validate, prepare and run AI methods on Pipelex from a coding agent.",
   "keywords": [
     "mcp",
@@ -40,7 +40,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@pipelex/sdk": "^0.26.0",
+    "@pipelex/sdk": "^0.28.0",
     "mthds": "^0.28.0",
     "zod": "^4.3.6"
   },
