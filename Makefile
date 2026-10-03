@@ -282,6 +282,12 @@ all: clean check test
 clean:
 	rm -rf coverage *.tsbuildinfo packages/*/dist packages/*/*.tsbuildinfo
 
+dev-local:
+	npm run dev:local
+
+inspect-local:
+	npm run inspect:local
+
 # --- Release-only publish (break-glass) ---
 # A release ships from the merge of its pull request into main, through
 # release.yml, which publishes the workshop to npm (see docs/development.md
