@@ -481,23 +481,23 @@ The public MCP input is:
 
 ```ts
 {
-  category?: "llm" | "extract" | "img_gen" | "search"; // for a PipeLLM, PipeExtract, PipeImgGen, PipeSearch
+  category?: "llm" | "extract" | "img_gen" | "search" | "judgment"; // for a PipeLLM, PipeExtract, PipeImgGen, PipeSearch, PipeJudge
   reference?: string; // $preset, @alias, ~waterfall, a bare handle, or a preset:/alias:/waterfall:/handle: prefix; at most 199 characters
 }
 ```
 
-Without `reference` the tool lists the deck; with it, it checks that reference. The category enum is closed against the protocol's `ModelCategory` in both directions, so a category the protocol gains or drops fails this repository's build rather than reaching a model unexplained.
+Without `reference` the tool lists the deck; with it, it checks that reference. **The `category` filter is closed and what the tool reads is open.** The filter takes the protocol's categories and nothing else, since a runner refuses any other value on `?type=`: its enum is `mthds`'s `MODEL_CATEGORIES`, and the table of the pipe type that names each category is total over it, so a category the protocol gains or drops fails this repository's build until the tool is taught to describe it. The deck it reads is held to the protocol's reader rule, "A client reading a model list MUST NOT fail it because an entry carries a category it does not recognize; it keeps that entry with its raw value or leaves it out.", and the tool keeps it: a category of the deck it does not know, which a runner of a later protocol may report, is listed and checked under the runner's own name.
 
 **What the deck holds.** On the Pipelex runner, the protocol's flat `models` list carries the presets, each stamped with its category, and two extensions keyed by category carry the rest: `aliases` (an alias's name to its model handle) and `waterfalls` (a waterfall's name to the handles it tries in order). The same alias name can exist in several categories pointing at different models, which is why the extensions are keyed by category and why the tool answers per category. **The deck lists no model handle as such**: a handle appears only as an alias's target or a waterfall's step.
 
-**Listing.** A listing asks the route for the category when one is given, and projects one entry per category in scope, in the protocol's order, each present even when it is empty:
+**Listing.** A listing asks the route for the category when one is given, and projects one entry per category in scope: the protocol's, in its order, each present even when it is empty, then, when no category was named, each category the tool does not know that holds a preset, an alias or a waterfall, in the order the deck first names it:
 
 ```ts
 {
   status: "ok";
   category?: ModelCategory;
   deck: Array<{
-    category: ModelCategory;
+    category: string; // a ModelCategory, or a category the tool does not know under the runner's name
     presets: string[];
     aliases: Array<{ reference: string; target: string }>;
     waterfalls: Array<{ reference: string; fallbacks: string[] }>;
@@ -505,7 +505,7 @@ Without `reference` the tool lists the deck; with it, it checks that reference. 
 }
 ```
 
-Every reference is written as it is typed in a method (`$writing-factual`, `@best-gpt`, `~robust-llm`), in the runner's order. The summary repeats the deck by category, names each category's pipe type, says what each kind of reference is for and that presets are the ones to prefer, and ends with how to check a reference.
+Every reference is written as it is typed in a method (`$writing-factual`, `@best-gpt`, `~robust-llm`), in the runner's order. The summary repeats the deck by category, names each category's pipe type or says that the tool does not know the category, says what each kind of reference is for and that presets are the ones to prefer, and ends with how to check a reference.
 
 **Checking.** A check parses the reference as the runner does (`ModelReference.parse`): a sigil, else a spelled-out namespace, else a bare handle. A blank reference, a sigil or namespace with nothing after it, and a reference longer than 199 characters are `input_domain` at `reference`, refused before any call, and the summary names which of the faults it was. The bound refuses nothing a method could name, since no model name comes near it, and it bounds the work of the nearest-name match, which grows with the reference's length. The check then reads the **whole** deck, whatever the category, so that a reference missing from the category asked about can still be placed in the one that holds it, and answers:
 
@@ -516,10 +516,10 @@ Every reference is written as it is typed in a method (`$writing-factual`, `@bes
   reference: string; // the caller's, trimmed
   kind: "preset" | "alias" | "waterfall" | "handle";
   resolution: "resolved" | "not_found" | "unconfirmed";
-  matches: Array<{ category: ModelCategory; target?: string; fallbacks?: string[]; via?: string[] }>;
+  matches: Array<{ category: string; target?: string; fallbacks?: string[]; via?: string[] }>;
   suggestions: string[];
   other_kinds: string[];
-  other_categories: ModelCategory[];
+  other_categories: string[];
 }
 ```
 
@@ -531,7 +531,7 @@ On `not_found` and `unconfirmed`, `suggestions` holds the nearest names, up to f
 
 **The deck is not the account.** The deck is what the runner can route to, not what the caller's account may use: a gateway can refuse a listed model when a run starts, after validation has passed. The tool description and every summary say so. An account-level check belongs to hosted validation, not to this tool.
 
-**Malformed and failed reads.** What arrives is checked rather than trusted. A deck that is not an object, a missing `models` list, an entry without a name, and an extension that is present but shaped wrong are a non-retryable `runtime` no-verdict. An entry whose category is absent, null or unknown is skipped, as is an extension's category the tool does not know, and an absent extension reads as empty, since `aliases` and `waterfalls` are the runner's rather than the protocol's. A 400 or 422 is classified by status, since the two come from two layers: a 422 is the runner refusing the category, `input_domain` at `category`, and a 400 is the platform's missing active organization, `config` at the credential, whether or not a category was sent. The route takes a user credential alone today, so the second is not expected, but a valid category must never take the blame for it. An unreachable API, a refused credential, a paywall, a missing route and a server fault take the shared arms.
+**Malformed and failed reads.** What arrives is checked rather than trusted. A deck that is not an object, a missing `models` list, an entry without a name, a category that is present but is not a non-blank string, and an extension that is present but shaped wrong are a non-retryable `runtime` no-verdict. An entry whose category is absent or null is skipped, since it has no category to be listed under, an unknown category is kept as described above, and an absent extension reads as empty, since `aliases` and `waterfalls` are the runner's rather than the protocol's. A 400 or 422 is classified by status, since the two come from two layers: a 422 is the runner refusing the category, `input_domain` at `category`, which happens when the runner implements an older protocol than the one that defined the category (a runner before protocol 0.7.0 refuses `judgment`), and the hint says so rather than offering the refused value back; a 400 is the platform's missing active organization, `config` at the credential, whether or not a category was sent. The route takes a user credential alone today, so the second is not expected, but a valid category must never take the blame for it. An unreachable API, a refused credential, a paywall, a missing route and a server fault take the shared arms.
 
 ### Validation Scope (`mthds_validate`)
 

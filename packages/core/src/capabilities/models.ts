@@ -32,7 +32,8 @@
  */
 
 import { ApiResponseError } from "@pipelex/sdk";
-import type { ModelCategory, ModelDeck } from "mthds/protocol";
+import { MODEL_CATEGORIES } from "mthds/protocol";
+import type { ModelCategory, ModelDeck, ModelInfo } from "mthds/protocol";
 import { z } from "zod";
 
 import {
@@ -52,25 +53,36 @@ import type {
 } from "./shared.js";
 
 /**
- * The categories, in the order a listing shows them. Closed in both directions
- * against the protocol's `ModelCategory`: `satisfies` fails the build when the
- * protocol drops one, and `PIPE_TYPE_OF` below, a total record, fails it when the
- * protocol gains one this module has not been taught to describe.
+ * The pipe type that names a reference of each category, which is how an author
+ * picks one. The categories themselves are the protocol's `MODEL_CATEGORIES`, in
+ * its order, which is the order a listing shows them and the closed set the tool
+ * takes as a filter. This record is total, so it fails the build when the
+ * protocol gains a category this module has not been taught to describe, and its
+ * excess-key check fails it when the protocol drops one.
  */
-export const MODEL_CATEGORY_VALUES = [
-  "llm",
-  "extract",
-  "img_gen",
-  "search",
-] as const satisfies readonly ModelCategory[];
-
-/** The pipe type that names a reference of each category, which is how an author picks one. */
 export const PIPE_TYPE_OF: Record<ModelCategory, string> = {
   llm: "PipeLLM",
   extract: "PipeExtract",
   img_gen: "PipeImgGen",
   search: "PipeSearch",
+  judgment: "PipeJudge",
 };
+
+/**
+ * A category as a deck names it: one of the protocol's, or one this module does
+ * not know, kept under the runner's own name. The protocol's reader rule: "A
+ * client reading a model list MUST NOT fail it because an entry carries a
+ * category it does not recognize; it keeps that entry with its raw value or
+ * leaves it out." This tool keeps it, so a runner of a later protocol minor
+ * still has its new category listed and checked, labelled as one this tool
+ * cannot place on a pipe type.
+ */
+export type DeckCategoryName = NonNullable<ModelInfo["type"]>;
+
+/** Each category with the pipe type that names it, as the descriptions write them. */
+export const CATEGORY_PIPE_TYPES = MODEL_CATEGORIES.map(
+  (category) => `${category} for a ${PIPE_TYPE_OF[category]}`,
+).join(", ");
 
 export const REFERENCE_KINDS = ["preset", "alias", "waterfall", "handle"] as const;
 export type ReferenceKind = (typeof REFERENCE_KINDS)[number];
@@ -108,14 +120,16 @@ const OTHER_KIND_CUTOFF = 0.7;
  */
 export const MAX_REFERENCE_LENGTH = 199;
 
-const categorySchema = z.enum(MODEL_CATEGORY_VALUES);
+/** The filter: the protocol's closed set, which a runner refuses a value outside of. */
+const categorySchema = z.enum(MODEL_CATEGORIES);
+
+/** A category in a result: any name the deck carried, the protocol's or not. */
+const deckCategoryNameSchema = z.string();
 
 export const mthdsModelsInputSchema = {
   category: categorySchema
     .optional()
-    .describe(
-      "Only this category: llm for a PipeLLM, extract for a PipeExtract, img_gen for a PipeImgGen, search for a PipeSearch. Omit it for every category.",
-    ),
+    .describe(`Only this category: ${CATEGORY_PIPE_TYPES}. Omit it for every category.`),
   reference: z
     .string()
     .max(MAX_REFERENCE_LENGTH)
@@ -128,14 +142,14 @@ export const mthdsModelsInputSchema = {
 export const mthdsModelsInputObjectSchema = z.object(mthdsModelsInputSchema);
 
 const deckCategorySchema = z.object({
-  category: categorySchema,
+  category: deckCategoryNameSchema,
   presets: z.array(z.string()),
   aliases: z.array(z.object({ reference: z.string(), target: z.string() })),
   waterfalls: z.array(z.object({ reference: z.string(), fallbacks: z.array(z.string()) })),
 });
 
 const matchSchema = z.object({
-  category: categorySchema,
+  category: deckCategoryNameSchema,
   target: z.string().optional(),
   fallbacks: z.array(z.string()).optional(),
   via: z.array(z.string()).optional(),
@@ -154,7 +168,7 @@ export const mthdsModelsOutputSchema = z.object({
   matches: z.array(matchSchema).optional(),
   suggestions: z.array(z.string()).optional(),
   other_kinds: z.array(z.string()).optional(),
-  other_categories: z.array(categorySchema).optional(),
+  other_categories: z.array(deckCategoryNameSchema).optional(),
   errors: z.array(toolErrorSchema).optional(),
 });
 
@@ -164,7 +178,7 @@ export interface MthdsModelsInput {
 }
 
 export interface DeckCategory {
-  category: ModelCategory;
+  category: DeckCategoryName;
   /** Each preset as it is written, `$name`, in the runner's order. */
   presets: string[];
   aliases: Array<{ reference: string; target: string }>;
@@ -173,7 +187,7 @@ export interface DeckCategory {
 
 /** One category a checked reference resolves in, with what it resolves to there. */
 export interface ReferenceMatch {
-  category: ModelCategory;
+  category: DeckCategoryName;
   /** An alias's model handle. */
   target?: string;
   /** A waterfall's handles, in the order they are tried. */
@@ -211,7 +225,7 @@ export interface ModelReferenceCheck {
   /** The same name under another kind, written with that kind's sigil (`best-claude` → `@best-claude`); empty when `resolved`. */
   other_kinds: string[];
   /** With a category: the other categories the same reference resolves in; empty otherwise. */
-  other_categories: ModelCategory[];
+  other_categories: DeckCategoryName[];
 }
 
 export interface ModelsFailure {
@@ -265,7 +279,7 @@ export async function readMthdsModels(
         class: "input_domain",
         ...(issue.path.length === 0 ? {} : { location: issue.path.join(".") }),
         message: issue.message,
-        hint: `Use category as one of ${MODEL_CATEGORY_VALUES.join(", ")}, and reference as text of at most ${MAX_REFERENCE_LENGTH} characters.`,
+        hint: `Use category as one of ${MODEL_CATEGORIES.join(", ")}, and reference as text of at most ${MAX_REFERENCE_LENGTH} characters.`,
         retryable: false,
       })),
     );
@@ -301,7 +315,7 @@ export async function readMthdsModels(
     return errorResult(summaryForToolError(error, ERROR_SUMMARIES), [error]);
   }
 
-  let deck: Map<ModelCategory, DeckCategory>;
+  let deck: Map<DeckCategoryName, DeckCategory>;
   try {
     deck = projectDeck(wire);
   } catch (err) {
@@ -319,7 +333,7 @@ export async function readMthdsModels(
     const listing: ModelDeckListing = {
       status: "ok",
       ...(category === undefined ? {} : { category }),
-      deck: scopeOf(category).map((each) => deck.get(each) ?? emptyCategory(each)),
+      deck: scopeOf(deck, category),
     };
     return { structuredContent: listing, summary: listingSummary(listing) };
   }
@@ -380,19 +394,22 @@ const EXAMPLE_NAME_OF: Record<ReferenceKind, string> = {
 };
 
 /**
- * Validate the wire and index it by category.
+ * Validate the wire and index it by category: the protocol's categories first,
+ * in its order and each present even when empty, then any category this module
+ * does not know, in the order the deck first names it, under the runner's name.
  *
  * What arrives is checked rather than trusted, since the SDK hands the body back
- * as parsed JSON: a missing `models` list, an entry without a string name, or an
- * extension that is present but shaped wrong is a contract break and throws.
- * Two things are skipped rather than refused, because neither is a break: an
- * entry whose `type` is absent, null or a category this module does not know
- * (the protocol allows the first two, and a category the protocol gains fails
- * this module's build through `PIPE_TYPE_OF` before it can matter), and an
- * extension absent altogether (`aliases` and `waterfalls` are the Pipelex
- * runner's, not the protocol's).
+ * as parsed JSON: a missing `models` list, an entry without a string name, a
+ * category that is present but not a name, or an extension that is present but
+ * shaped wrong is a contract break and throws. A category this module does not
+ * know is kept, under the protocol's reader rule (see `DeckCategoryName`), and
+ * appears only once it holds a preset, an alias or a waterfall. Two things are
+ * skipped rather than refused, because neither is a break: an entry whose `type`
+ * is absent or null, which the protocol's schema allows and which leaves no
+ * category to list it under, and an extension absent altogether (`aliases` and
+ * `waterfalls` are the Pipelex runner's, not the protocol's).
  */
-export function projectDeck(value: unknown): Map<ModelCategory, DeckCategory> {
+export function projectDeck(value: unknown): Map<DeckCategoryName, DeckCategory> {
   if (!isRecord(value)) {
     throw new Error("The model deck must be an object.");
   }
@@ -400,18 +417,26 @@ export function projectDeck(value: unknown): Map<ModelCategory, DeckCategory> {
     throw new Error("The model deck is missing its models list.");
   }
 
-  const deck = new Map<ModelCategory, DeckCategory>(
-    MODEL_CATEGORY_VALUES.map((category) => [category, emptyCategory(category)]),
+  const deck = new Map<DeckCategoryName, DeckCategory>(
+    MODEL_CATEGORIES.map((category) => [category, emptyCategory(category)]),
   );
+  const categoryOf = (category: DeckCategoryName): DeckCategory => {
+    const existing = deck.get(category);
+    if (existing !== undefined) return existing;
+    const added = emptyCategory(category);
+    deck.set(category, added);
+    return added;
+  };
 
   value.models.forEach((entry, index) => {
     if (!isRecord(entry) || typeof entry.name !== "string" || entry.name === "") {
       throw new Error(`Model deck entry ${index} has no name.`);
     }
-    const category = knownCategory(entry.type);
-    if (category !== undefined) {
-      deck.get(category)?.presets.push(`${SIGIL_OF.preset}${entry.name}`);
+    if (entry.type === undefined || entry.type === null) return;
+    if (typeof entry.type !== "string" || entry.type === "") {
+      throw new Error(`Model deck entry ${index} has a category that is not a name.`);
     }
+    categoryOf(entry.type).presets.push(`${SIGIL_OF.preset}${entry.name}`);
   });
 
   for (const [category, aliases] of categoryEntries(value.aliases, "aliases")) {
@@ -419,7 +444,7 @@ export function projectDeck(value: unknown): Map<ModelCategory, DeckCategory> {
       if (typeof target !== "string" || target === "") {
         throw new Error(`Model deck alias ${category}.${name} has no model handle.`);
       }
-      deck.get(category)?.aliases.push({ reference: `${SIGIL_OF.alias}${name}`, target });
+      categoryOf(category).aliases.push({ reference: `${SIGIL_OF.alias}${name}`, target });
     }
   }
 
@@ -431,7 +456,7 @@ export function projectDeck(value: unknown): Map<ModelCategory, DeckCategory> {
       ) {
         throw new Error(`Model deck waterfall ${category}.${name} is not a list of model handles.`);
       }
-      deck.get(category)?.waterfalls.push({
+      categoryOf(category).waterfalls.push({
         reference: `${SIGIL_OF.waterfall}${name}`,
         fallbacks: fallbacks as string[],
       });
@@ -441,19 +466,20 @@ export function projectDeck(value: unknown): Map<ModelCategory, DeckCategory> {
   return deck;
 }
 
-/** An extension's per-category maps, for the categories this module knows. */
+/** An extension's per-category maps, for every category it names. */
 function categoryEntries(
   value: unknown,
   field: "aliases" | "waterfalls",
-): Array<[ModelCategory, Record<string, unknown>]> {
+): Array<[DeckCategoryName, Record<string, unknown>]> {
   if (value === undefined || value === null) return [];
   if (!isRecord(value)) {
     throw new Error(`The model deck's ${field} must map each category to its names.`);
   }
-  const entries: Array<[ModelCategory, Record<string, unknown>]> = [];
-  for (const [key, names] of Object.entries(value)) {
-    const category = knownCategory(key);
-    if (category === undefined) continue;
+  const entries: Array<[DeckCategoryName, Record<string, unknown>]> = [];
+  for (const [category, names] of Object.entries(value)) {
+    if (category === "") {
+      throw new Error(`The model deck's ${field} name a category with a blank key.`);
+    }
     if (!isRecord(names)) {
       throw new Error(`The model deck's ${field}.${category} must map each name to its models.`);
     }
@@ -462,16 +488,29 @@ function categoryEntries(
   return entries;
 }
 
-function knownCategory(value: unknown): ModelCategory | undefined {
-  return MODEL_CATEGORY_VALUES.find((category) => category === value);
+function isModelCategory(value: unknown): value is ModelCategory {
+  return MODEL_CATEGORIES.some((category) => category === value);
 }
 
-function emptyCategory(category: ModelCategory): DeckCategory {
+function emptyCategory(category: DeckCategoryName): DeckCategory {
   return { category, presets: [], aliases: [], waterfalls: [] };
 }
 
-function scopeOf(category: ModelCategory | undefined): ModelCategory[] {
-  return category === undefined ? [...MODEL_CATEGORY_VALUES] : [category];
+/** The categories a listing or a check covers: the one named, else every one the deck holds. */
+function scopeOf(
+  deck: Map<DeckCategoryName, DeckCategory>,
+  category: ModelCategory | undefined,
+): DeckCategory[] {
+  return category === undefined
+    ? [...deck.values()]
+    : [deck.get(category) ?? emptyCategory(category)];
+}
+
+/** A category as a summary names it: with its pipe type, or as one this tool does not know. */
+function categoryLabel(category: DeckCategoryName): string {
+  return isModelCategory(category)
+    ? `${category} (${PIPE_TYPE_OF[category]})`
+    : `${category} (a category this tool does not know)`;
 }
 
 /** The bare names one category holds for one kind, in the deck's order. */
@@ -526,10 +565,10 @@ function matchIn(deck: DeckCategory, reference: ParsedReference): ReferenceMatch
 
 export function checkReference(
   reference: ParsedReference,
-  deck: Map<ModelCategory, DeckCategory>,
+  deck: Map<DeckCategoryName, DeckCategory>,
   category: ModelCategory | undefined,
 ): ModelReferenceCheck {
-  const scope = scopeOf(category).map((each) => deck.get(each) ?? emptyCategory(each));
+  const scope = scopeOf(deck, category);
   const matches = scope.flatMap((each) => matchIn(each, reference) ?? []);
   const base = {
     status: "ok" as const,
@@ -579,12 +618,9 @@ export function checkReference(
   const otherCategories =
     category === undefined
       ? []
-      : MODEL_CATEGORY_VALUES.filter((each) => {
-          const other = deck.get(each);
-          return (
-            each !== category && other !== undefined && matchIn(other, reference) !== undefined
-          );
-        });
+      : [...deck.values()]
+          .filter((other) => other.category !== category && matchIn(other, reference) !== undefined)
+          .map((other) => other.category);
 
   return {
     ...base,
@@ -687,7 +723,7 @@ function listingSummary(listing: ModelDeckListing): string {
   ];
 
   for (const category of listing.deck) {
-    lines.push("", `## ${category.category} (${PIPE_TYPE_OF[category.category]})`);
+    lines.push("", `## ${categoryLabel(category.category)}`);
     lines.push(`Presets: ${listOrNone(category.presets.map(code))}`);
     lines.push(
       `Aliases: ${listOrNone(category.aliases.map((alias) => `${code(alias.reference)} → ${code(alias.target)}`))}`,
@@ -720,7 +756,7 @@ function checkSummary(check: ModelReferenceCheck): string {
     case "resolved":
       lines.push(`${code(check.reference)} resolves: it is ${article(check.kind)} ${check.kind}.`);
       for (const match of check.matches) {
-        lines.push(`- ${match.category} (${PIPE_TYPE_OF[match.category]})${matchDetail(match)}`);
+        lines.push(`- ${categoryLabel(match.category)}${matchDetail(match)}`);
       }
       break;
     case "not_found":
@@ -744,9 +780,7 @@ function checkSummary(check: ModelReferenceCheck): string {
     );
   }
   if (check.other_categories.length > 0) {
-    const others = check.other_categories
-      .map((category) => `${category} (${PIPE_TYPE_OF[category]})`)
-      .join(", ");
+    const others = check.other_categories.map(categoryLabel).join(", ");
     lines.push(
       `It resolves in ${others}, not in ${where}: a reference names a model of its pipe's own category.`,
     );
@@ -807,8 +841,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * The 400/422 arm is picked by status, as the upload grant's is, because the
  * two refusals come from two layers. A 422 is the runner's, and its only one on
  * this route is a `type` it does not know, which only a listing with a category
- * sends, and which the enum this tool declares keeps out of reach unless the two
- * drift apart. A 400 is the platform's missing active-organization refusal: the
+ * sends. This tool declares the protocol's categories, so a runner refuses one
+ * only when it implements an older protocol than the one that defined it, as a
+ * runner before protocol 0.7.0 refuses `judgment`; the hint says so rather than
+ * offering the refused value back. A 400 is the platform's missing active-organization refusal: the
  * route takes a user credential alone today and never answers it, but the
  * refusal is the platform's on every organization-scoped route, and it would
  * arrive with a category or without one, so the category must not take the
@@ -826,7 +862,7 @@ function modelsErrorOptions(context: ModelsContext, err: unknown): ClassifyError
         }
       : {
           location: "category",
-          hint: `The API refused the category. Use one of ${MODEL_CATEGORY_VALUES.join(", ")}, or omit it to list every category.`,
+          hint: "The runner does not know this category, which happens when it implements an older MTHDS protocol than the one that defined it. Omit category to list every category it serves.",
         },
     auth: context.authError,
   };

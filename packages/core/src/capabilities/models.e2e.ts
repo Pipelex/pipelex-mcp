@@ -9,10 +9,11 @@
  * spends no inference credit.
  */
 
+import { MODEL_CATEGORIES } from "mthds/protocol";
 import { describe, expect, it } from "vitest";
 
 import { liveApiConfig } from "./e2e-support.js";
-import { MODEL_CATEGORY_VALUES, readMthdsModels } from "./models.js";
+import { readMthdsModels } from "./models.js";
 import type { ModelDeckListing, ModelReferenceCheck, ModelsContext } from "./models.js";
 
 // No `client` seam: this is the real PipelexApiClient talking to the real API.
@@ -34,7 +35,7 @@ describe("mthds_models against the live API", () => {
   it("lists every category, with presets the runner stamped with their category", async () => {
     const listing = await liveListing();
 
-    expect(listing.deck.map((each) => each.category)).toEqual([...MODEL_CATEGORY_VALUES]);
+    expect(listing.deck.map((each) => each.category)).toEqual([...MODEL_CATEGORIES]);
     // Every deployment serves LLM presets; an empty list here means the
     // presets stopped arriving with a category this tool can place.
     expect(listing.deck[0]?.presets.length).toBeGreaterThan(0);
@@ -45,7 +46,7 @@ describe("mthds_models against the live API", () => {
   it("asks the route for each category and gets that category's share of the whole deck", async () => {
     const whole = await liveListing();
 
-    for (const category of MODEL_CATEGORY_VALUES) {
+    for (const category of MODEL_CATEGORIES) {
       const listing = await liveListing(category);
       // The tool scopes a listing to its category itself, so the shape alone
       // proves nothing: the entry is held to the unfiltered deck's, which

@@ -72,12 +72,12 @@ Lists the model deck, the references a pipe's `model` field can name, or checks 
 
 ```ts
 {
-  category?: "llm" | "extract" | "img_gen" | "search";
+  category?: "llm" | "extract" | "img_gen" | "search" | "judgment";
   reference?: string; // at most 199 characters
 }
 ```
 
-`category` narrows either use to the references of one pipe type: `llm` for a PipeLLM, `extract` for a PipeExtract, `img_gen` for a PipeImgGen and `search` for a PipeSearch. Without `reference`, the tool lists the deck:
+`category` narrows either use to the references of one pipe type: `llm` for a PipeLLM, `extract` for a PipeExtract, `img_gen` for a PipeImgGen, `search` for a PipeSearch and `judgment` for a PipeJudge. These are the MTHDS protocol's categories, and a runner that implements an older protocol than the one that defined a category refuses it as a filter, as a runner before protocol 0.7.0 refuses `judgment`; omit `category` to list what that runner serves. Without `reference`, the tool lists the deck:
 
 ```ts
 {
@@ -92,7 +92,7 @@ Lists the model deck, the references a pipe's `model` field can name, or checks 
 }
 ```
 
-Every reference is written the way a method writes it, and every category in scope is present, empty or not. Presets pair a model with settings for a kind of task and are the ones to prefer. The deck names no model handle on its own: a handle appears only as an alias's target or a waterfall's step.
+Every reference is written the way a method writes it, and every category in scope is present, empty or not. A category the tool does not know, which a runner of a later protocol may report, is not dropped: a listing of every category shows it after the protocol's under the runner's own name, a check resolves in it, and the summary says the tool does not know which pipe type names it. Presets pair a model with settings for a kind of task and are the ones to prefer. The deck names no model handle on its own: a handle appears only as an alias's target or a waterfall's step.
 
 With `reference`, the tool checks that reference, which may be a preset (`$`), an alias (`@`), a waterfall (`~`), a bare model handle, or any of them with the `preset:`, `alias:`, `waterfall:` or `handle:` prefix the runner also accepts. A check reads the whole deck, so it can tell a reference written into the wrong pipe type from one that does not exist:
 
