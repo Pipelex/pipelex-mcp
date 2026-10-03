@@ -1,6 +1,25 @@
 {
-  // The repository's own scripts and cross-package tests.
-  "extends": "./tsconfig.base.json",
+  // One program over the workshop's sources, the repository's own scripts and
+  // the tests under `tests/`. Nothing here emits; tsup builds.
+  "compilerOptions": {
+    "module": "NodeNext",
+    "esModuleInterop": true,
+    "verbatimModuleSyntax": true,
+    "resolveJsonModule": true,
 
-  "include": ["scripts", "tests"]
+    "noEmit": true,
+
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+
+  "include": ["src", "scripts", "tests"]
 }

@@ -5,12 +5,14 @@
 # Every workflow that asks "which version does the workshop have here?" asks
 # this script, so where that version is read from lives in one place.
 #
-# The workshop's version has lived in two manifests. From the workspace split
-# (pipelex-mcp#89) on, it is `packages/workshop/package.json`; before it, one
-# root `package.json` versioned the package, which was published from the
-# root. A commit that has the first is read from it, and any other commit falls
-# back to the second. That is what lets a release compare its version with a
-# parent from either layout, instead of reading a missing file as "no version".
+# The workshop's version has lived in two manifests across three layouts. The
+# root `package.json` versioned the package, published from the root, until the
+# workspace split (pipelex-mcp#89); from the split to the flatten, the version
+# lived in `packages/workshop/package.json`, beside a root manifest carrying
+# none; since the flatten, the root `package.json` carries it again. A commit
+# that has the member's manifest is read from it, and any other commit falls
+# back to the root's. That is what lets a release compare its version with a
+# parent from any layout, instead of reading a missing file as "no version".
 #
 # Usage: track-version.sh <commit-ish>
 # Prints the version, with no `v`. Exits 1 when neither manifest can be read at

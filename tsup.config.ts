@@ -1,13 +1,13 @@
 import { defineConfig } from "tsup";
 
 // The workshop's executable, `dist/main.js`, the one file the npm tarball ships
-// besides the README and the licence. tsup leaves external exactly what this
-// package's `dependencies` name and inlines everything else it reaches, which
-// is how the private `@pipelex/mcp-core` (a devDependency) ends up inside the
-// bundle while its own runtime dependencies stay installable packages: the core
-// declares them, and this package declares them again, with the same ranges, so
-// every `npx @pipelex/mcp` install resolves them. `tests/workspace-manifests.test.ts`
-// holds the two lists together.
+// besides the README and the licence. tsup leaves external exactly what
+// `package.json`'s `dependencies` name, which every `npx @pipelex/mcp` install
+// resolves, and inlines everything else it reaches: the capabilities under
+// `src/capabilities/` and the graph page's embed serializer from the
+// devDependency `@pipelex/mthds-ui`. A runtime import of a package that is not
+// declared therefore still builds, inlined without a word, which is why
+// `.claude/rules/manifests.md` asks where each new package belongs.
 export default defineConfig({
   entry: ["src/main.ts"],
   format: ["esm"],

@@ -24,19 +24,16 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildLocalToolContexts } from "./tools.js";
-import { prepareMthdsInputs } from "@pipelex/mcp-core/capabilities/prepare.js";
-import type { PrepareContext } from "@pipelex/mcp-core/capabilities/prepare.js";
-import { validateMthds } from "@pipelex/mcp-core/capabilities/validate.js";
-import type {
-  MainPipeInputSignature,
-  ValidationContext,
-} from "@pipelex/mcp-core/capabilities/validate.js";
+import { prepareMthdsInputs } from "./capabilities/prepare.js";
+import type { PrepareContext } from "./capabilities/prepare.js";
+import { validateMthds } from "./capabilities/validate.js";
+import type { MainPipeInputSignature, ValidationContext } from "./capabilities/validate.js";
 import {
   PYTHON_FREE_METHOD_REF,
   TINY_PNG_BASE64,
   apiAdvertisesExtension,
   liveApiConfig,
-} from "@pipelex/mcp-core/capabilities/e2e-support.js";
+} from "./capabilities/e2e-support.js";
 
 /** Does this deployment resolve `method_id` / `method_ref` server-side? */
 const SERVES_SELECTORS = await apiAdvertisesExtension("method_ref");

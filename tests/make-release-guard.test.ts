@@ -7,7 +7,9 @@
  * wrong bytes under the right number. The guard reads the workshop's version at
  * HEAD and at its first parent through `.github/scripts/track-version.sh`, so
  * each case below builds a small history in a temp repository holding that
- * script and runs the guard target in it. `check-release-ready` also holds HEAD
+ * script and runs the guard target in it, across the three layouts the history
+ * holds: the root manifest before the workspace split, the workshop member's
+ * manifest during it, and the root manifest again after the flatten. `check-release-ready` also holds HEAD
  * to origin/main's tip, which a bare repository beside the temp one stands in
  * for.
  */
@@ -50,10 +52,25 @@ async function writeManifest(relative: string, version: string): Promise<void> {
   await fs.writeFile(file, `${JSON.stringify({ name: "x", version })}\n`);
 }
 
+/** A commit of the current layout: one root manifest carrying the version. */
 async function commitVersion(version: string): Promise<void> {
-  await writeManifest("packages/workshop/package.json", version);
+  await writeManifest("package.json", version);
   git("add", "-A");
   git("commit", "-q", "--allow-empty", "-m", `workshop ${version}`);
+}
+
+/**
+ * A commit of the workspace layout (pipelex-mcp#89 to the flatten): the version
+ * in the workshop member's manifest, and a root manifest carrying none.
+ */
+async function commitWorkspaceVersion(version: string): Promise<void> {
+  await fs.writeFile(
+    path.join(repo, "package.json"),
+    `${JSON.stringify({ name: "pipelex-mcp", private: true })}\n`,
+  );
+  await writeManifest("packages/workshop/package.json", version);
+  git("add", "-A");
+  git("commit", "-q", "-m", `workshop ${version}, from the workspace`);
 }
 
 function run(target: string): { status: number | null; output: string } {
@@ -99,13 +116,28 @@ describe("the break-glass release guard", () => {
   });
 
   it("reads a parent from before the split through its root manifest", async () => {
-    await writeManifest("package.json", "0.19.0");
-    git("add", "-A");
-    git("commit", "-q", "-m", "0.19.0, from the root");
-    await fs.rm(path.join(repo, "package.json"));
-    await commitVersion("0.20.0");
+    await commitVersion("0.19.0");
+    await commitWorkspaceVersion("0.20.0");
 
     expect(guard().status).toBe(0);
+  });
+
+  it("reads a parent from the workspace layout through the workshop member", async () => {
+    await commitWorkspaceVersion("0.22.0");
+    await fs.rm(path.join(repo, "packages"), { recursive: true });
+    await commitVersion("0.23.0");
+
+    expect(guard().status).toBe(0);
+  });
+
+  it("refuses a flattening commit that keeps the workspace layout's version", async () => {
+    await commitWorkspaceVersion("0.22.0");
+    await fs.rm(path.join(repo, "packages"), { recursive: true });
+    await commitVersion("0.22.0");
+
+    const refused = guard();
+    expect(refused.status).not.toBe(0);
+    expect(refused.output).toContain("it carries 0.22.0 over its first parent's 0.22.0");
   });
 
   it("refuses a commit that lowers the version", async () => {

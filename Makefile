@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint format format-check typecheck test agent-test test-watch test-coverage smoke live-preflight test-e2e test-e2e-run test-all seed-e2e-fixture te check check-no-local-deps check-release-ready check-workshop-released build-local all clean dev-local inspect-local publish c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
+.PHONY: help install lint format format-check typecheck test agent-test test-watch test-coverage smoke live-preflight test-e2e test-e2e-run test-all seed-e2e-fixture te check check-no-local-deps check-publishable check-release-ready check-workshop-released build-local all clean dev-local inspect-local publish c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
 
 # Sibling checkouts for live development of our npm dependencies (see use-local / use-npm).
 # @pipelex/sdk lives in the js/ directory of the pipelex-sdk monorepo.
@@ -8,8 +8,8 @@ MTHDS_UI_DIR := ../mthds-ui
 PIPELEX_SDK_DIR := ../pipelex-sdk/js
 
 define HELP
-Manage pipelex-mcp located in $(CURDIR): an npm workspace holding the core
-(packages/core) and the workshop published as @pipelex/mcp (packages/workshop).
+Manage pipelex-mcp located in $(CURDIR): the workshop, the local MCP server
+published to npm as @pipelex/mcp from this directory.
 Usage:
 
 make install        - Install dependencies
@@ -36,13 +36,14 @@ make test-e2e-run     - Same, plus the run family (SPENDS INFERENCE CREDIT)
 make seed-e2e-fixture - Create/refresh the durable fixture methods the live suites need
 make test-all         - EVERY test: hermetic + smoke + live incl. run family (SPENDS CREDIT)
 
-make build-local    - Build the workshop, the npm-distributed stdio server
+make build-local    - Build the workshop's executable, dist/main.js
 make check          - Run lint, format check, the text budgets, the build and typecheck
+make check-publishable - Refuse a dependency that may not be published (a sprint pin, a git or local source)
 make all            - Clean, check, and test
 make clean          - Remove generated artifacts
 make c              - Shorthand -> check
 
-make use-local      - Switch @pipelex/mthds-ui AND @pipelex/sdk to their sibling repos (file links), in every member naming them
+make use-local      - Switch @pipelex/mthds-ui AND @pipelex/sdk to their sibling repos (file links)
 make use-npm        - Switch both back to npm (latest)
 make use-local-ui   - Switch only @pipelex/mthds-ui to sibling ../mthds-ui
 make use-npm-ui     - Switch only @pipelex/mthds-ui back to npm [VERSION=x.y.z]
@@ -141,7 +142,7 @@ agent-test:
 # also the name the live suite of @pipelex/sdk, in pipelex-sdk/js, uses.
 #
 # The pair is resolved ONCE here and exported, so the URL these targets
-# preflight is the URL the suites call (`packages/core/src/capabilities/e2e-support.ts` reads
+# preflight is the URL the suites call (`src/capabilities/e2e-support.ts` reads
 # the same two names). Precedence is the make command line, then `.env`, then the
 # shell, then the default, because `.env` is this checkout's own configuration
 # and the shell is ambient. Each value is taken
@@ -264,23 +265,30 @@ test-all: live-preflight
 check: check-no-local-deps
 	npm run check
 
-# Every manifest in the workspace, since `use-local` links a package in each
-# member that declares it.
-MANIFESTS := package.json $(wildcard packages/*/package.json)
-
 check-no-local-deps:
-	@if grep -qE '"@pipelex/(mthds-ui|sdk)":[[:space:]]*"(file:|link:|portal:)' $(MANIFESTS); then \
-		grep -nE '"@pipelex/(mthds-ui|sdk)":[[:space:]]*"(file:|link:|portal:)' $(MANIFESTS); \
+	@if grep -qE '"@pipelex/(mthds-ui|sdk)":[[:space:]]*"(file:|link:|portal:)' package.json; then \
+		grep -nE '"@pipelex/(mthds-ui|sdk)":[[:space:]]*"(file:|link:|portal:)' package.json; \
 		echo "ERROR: a @pipelex dependency above is a local link. Run 'make use-npm' first."; exit 1; \
 	fi
 
+# The publish guard, which `npm publish` also runs as the manifest's
+# `prepublishOnly` script, so every route to the registry passes through it:
+# `release.yml`, `make publish` and a bare `npm publish` alike. It is not part
+# of `make check`, which stays green while a sprint pin is deliberately in
+# place on a sprint branch. `scripts/publish-guard.ts` says what it refuses.
+check-publishable:
+	npm run check:publishable
+
 build-local:
-	npm run build:local
+	npm run build
 
 all: clean check test
 
+# `packages/*/dist` is the workspace layout's build output, which a checkout
+# built before the flatten still holds, untracked: a tool still pointed at
+# `packages/workshop/dist/main.js` would run that old workshop without a word.
 clean:
-	rm -rf coverage *.tsbuildinfo packages/*/dist packages/*/*.tsbuildinfo
+	rm -rf coverage *.tsbuildinfo dist packages/*/dist
 
 dev-local:
 	npm run dev:local
@@ -294,7 +302,8 @@ inspect-local:
 # "CI and releases" and the /release skill). `make publish` is the escape hatch
 # for a CI outage. check-release-ready demands a clean main, and
 # check-no-local-deps refuses a @pipelex file: link, which would ship a broken
-# install.
+# install; `npm publish` itself then runs the publish guard (check-publishable)
+# before anything reaches the registry.
 
 check-release-ready:
 	@current_branch="$$(git rev-parse --abbrev-ref HEAD)"; \
@@ -324,7 +333,7 @@ check-workshop-released:
 	fi
 
 publish: check-no-local-deps check-release-ready check-workshop-released
-	npm publish --workspace @pipelex/mcp
+	npm publish
 
 c: check
 t: test
@@ -334,17 +343,11 @@ te: test-e2e
 # use-local / use-npm act on BOTH @pipelex/mthds-ui and @pipelex/sdk.
 # The per-package targets act on one, and take VERSION=x.y.z to pin an npm version.
 #
-# Each package is installed into exactly the workspace members that declare it,
-# never into the root, and both go into both members, which carry the same
-# range (tests/workspace-manifests.test.ts fails when they drift apart). npm
-# updates an entry in the block it already sits in, so a bump keeps @pipelex/sdk
-# in `dependencies` and @pipelex/mthds-ui in `devDependencies`: the core imports
-# only its `./static-graph` embed serializer, which tsup inlines into the
-# workshop's bundle. What reaches every `npx @pipelex/mcp` install is the
-# workshop's `dependencies` alone, so read the diff of
-# packages/workshop/package.json before committing a bump.
-UI_WORKSPACES := --workspace @pipelex/mcp-core --workspace @pipelex/mcp
-SDK_WORKSPACES := --workspace @pipelex/mcp-core --workspace @pipelex/mcp
+# npm updates an entry in the block it already sits in, so a bump keeps
+# @pipelex/sdk in `dependencies` and @pipelex/mthds-ui in `devDependencies`: the
+# capabilities import only its `./static-graph` embed serializer, which tsup
+# inlines into the bundle. What reaches every `npx @pipelex/mcp` install is
+# `dependencies` alone, so read the diff of package.json before committing a bump.
 
 use-local: use-local-ui use-local-sdk
 
@@ -353,26 +356,26 @@ use-npm: use-npm-ui use-npm-sdk
 use-local-ui:
 	@if [ ! -d $(MTHDS_UI_DIR) ]; then echo "ERROR: $(MTHDS_UI_DIR) not found. Clone it next to pipelex-mcp."; exit 1; fi
 	cd $(MTHDS_UI_DIR) && npm install && npm run build
-	npm install $(UI_WORKSPACES) @pipelex/mthds-ui@file:$(abspath $(MTHDS_UI_DIR))
+	npm install @pipelex/mthds-ui@file:$(abspath $(MTHDS_UI_DIR))
 	@echo "Switched to local mthds-ui (file link). Run 'make use-npm-ui' to switch back."
 
 use-npm-ui:
 	@VERSION="$${VERSION:-latest}" && \
 	echo "Installing @pipelex/mthds-ui@$$VERSION from npm" && \
-	npm install $(UI_WORKSPACES) @pipelex/mthds-ui@$$VERSION && \
-	echo "Switched to npm @pipelex/mthds-ui@$$VERSION. Review the diff, then commit packages/*/package.json + package-lock.json."
+	npm install @pipelex/mthds-ui@$$VERSION && \
+	echo "Switched to npm @pipelex/mthds-ui@$$VERSION. Review the diff, then commit package.json + package-lock.json."
 
 use-local-sdk:
 	@if [ ! -d $(PIPELEX_SDK_DIR) ]; then echo "ERROR: $(PIPELEX_SDK_DIR) not found. Clone Pipelex/pipelex-sdk next to pipelex-mcp."; exit 1; fi
 	cd $(PIPELEX_SDK_DIR) && npm install && npm run build
-	npm install $(SDK_WORKSPACES) @pipelex/sdk@file:$(abspath $(PIPELEX_SDK_DIR))
+	npm install @pipelex/sdk@file:$(abspath $(PIPELEX_SDK_DIR))
 	@echo "Switched to local @pipelex/sdk from $(PIPELEX_SDK_DIR) (file link). Run 'make use-npm-sdk' to switch back."
 
 use-npm-sdk:
 	@VERSION="$${VERSION:-latest}" && \
 	echo "Installing @pipelex/sdk@$$VERSION from npm" && \
-	npm install $(SDK_WORKSPACES) @pipelex/sdk@$$VERSION && \
-	echo "Switched to npm @pipelex/sdk@$$VERSION. Review the diff, then commit packages/*/package.json + package-lock.json."
+	npm install @pipelex/sdk@$$VERSION && \
+	echo "Switched to npm @pipelex/sdk@$$VERSION. Review the diff, then commit package.json + package-lock.json."
 
 ul: use-local
 un: use-npm
