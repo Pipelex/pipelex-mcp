@@ -40,7 +40,7 @@
  */
 
 /** The dependency blocks of a manifest, each read by the guard. */
-export const DEPENDENCY_BLOCKS = [
+const DEPENDENCY_BLOCKS = [
   "dependencies",
   "optionalDependencies",
   "peerDependencies",
