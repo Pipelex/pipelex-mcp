@@ -2,6 +2,13 @@
 
 This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the Pipelex plugin runs. Up to and including 0.20.0 every release also deployed the hosted console at the same version, so those entries describe both servers. After 0.20.0 the console has its own release track and changelog, kept with the Pipelex connector rather than here, and the `console-vX.Y.Z` tags in this repository's history are its releases from that time; this file and the `vX.Y.Z` tags cover the workshop alone.
 
+## [Unreleased]
+
+### Changed
+
+- **`mthds_models` lists and filters judgment models, and keeps a category it does not know (Breaking)**: `category` takes `judgment`, for a PipeJudge, beside `llm`, `extract`, `img_gen` and `search`, and a listing shows the judgment presets, aliases and waterfalls, which it used to drop. A category of the deck the tool does not know, which a runner of a later MTHDS protocol may report, is now listed after the protocol's under the runner's own name and resolves in a check instead of being dropped, so the result's `deck[].category`, `matches[].category` and `other_categories` are any string rather than the category enum, and a summary says the tool does not know which pipe type names it. A runner that implements a protocol older than 0.7.0 refuses `category: "judgment"`, and the error's hint now says the runner predates the category instead of offering the refused value back.
+- **`mthds` 0.28.0 → 0.29.0**: The release that defines the `judgment` category and reads a deck entry's category as any string, which the change above is built on. `@pipelex/sdk` 0.28.0 still requires `mthds` 0.28, so an install carries both copies until the SDK moves.
+
 ## [0.22.0] - 2026-10-03
 
 ### Changed

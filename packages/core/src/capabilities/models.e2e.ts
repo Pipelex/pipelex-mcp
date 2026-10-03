@@ -9,14 +9,26 @@
  * spends no inference credit.
  */
 
+import { MODEL_CATEGORIES } from "mthds/protocol";
 import { describe, expect, it } from "vitest";
 
 import { liveApiConfig } from "./e2e-support.js";
-import { MODEL_CATEGORY_VALUES, readMthdsModels } from "./models.js";
+import { readMthdsModels } from "./models.js";
 import type { ModelDeckListing, ModelReferenceCheck, ModelsContext } from "./models.js";
 
 // No `client` seam: this is the real PipelexApiClient talking to the real API.
 const context: ModelsContext = liveApiConfig();
+
+/**
+ * The categories the hosted runner may still refuse as a filter, because it
+ * implements a protocol older than the one that defined them: a runner before
+ * protocol 0.7.0 answers `?type=judgment` with a 422. The leg accepts that
+ * refusal, held to its classification, rather than skipping: the hosted
+ * `/v1/version` does not yet report the runner's protocol, so nothing live can
+ * say which answer to expect. Empty this set once the hosted runner serves the
+ * category (L-261003-584d78), so the leg holds `judgment` to the deck again.
+ */
+const NEWER_THAN_THE_HOSTED_RUNNER: ReadonlySet<string> = new Set(["judgment"]);
 
 async function liveListing(category?: ModelDeckListing["category"]): Promise<ModelDeckListing> {
   const result = await readMthdsModels(category === undefined ? {} : { category }, context);
@@ -34,7 +46,7 @@ describe("mthds_models against the live API", () => {
   it("lists every category, with presets the runner stamped with their category", async () => {
     const listing = await liveListing();
 
-    expect(listing.deck.map((each) => each.category)).toEqual([...MODEL_CATEGORY_VALUES]);
+    expect(listing.deck.map((each) => each.category)).toEqual([...MODEL_CATEGORIES]);
     // Every deployment serves LLM presets; an empty list here means the
     // presets stopped arriving with a category this tool can place.
     expect(listing.deck[0]?.presets.length).toBeGreaterThan(0);
@@ -45,7 +57,19 @@ describe("mthds_models against the live API", () => {
   it("asks the route for each category and gets that category's share of the whole deck", async () => {
     const whole = await liveListing();
 
-    for (const category of MODEL_CATEGORY_VALUES) {
+    for (const category of MODEL_CATEGORIES) {
+      if (NEWER_THAN_THE_HOSTED_RUNNER.has(category)) {
+        const result = await readMthdsModels({ category }, context);
+        if (result.structuredContent.status === "error") {
+          // The one refusal the tool documents for a runner that predates the
+          // category, and nothing else.
+          expect(result.structuredContent.errors[0], result.summary).toMatchObject({
+            class: "input_domain",
+            location: "category",
+          });
+          continue;
+        }
+      }
       const listing = await liveListing(category);
       // The tool scopes a listing to its category itself, so the shape alone
       // proves nothing: the entry is held to the unfiltered deck's, which

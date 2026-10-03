@@ -6,8 +6,9 @@ import type { ModelCategory, ModelDeck } from "mthds/protocol";
 
 import {
   MAX_REFERENCE_LENGTH,
-  MODEL_CATEGORY_VALUES,
+  PIPE_TYPE_OF,
   closeMatches,
+  mthdsModelsInputSchema,
   modelsToolResult,
   parseModelReference,
   readMthdsModels,
@@ -26,7 +27,9 @@ import { DEFAULT_API_URL } from "./shared.js";
  * A deck shaped as the Pipelex runner answers `GET /v1/models` (measured on the
  * dev API on 2026-09-27): the presets in `models`, each stamped with its
  * category, and the category-keyed `aliases` and `waterfalls` extensions. The
- * dev deck has no waterfall, so this one adds one to exercise that kind.
+ * dev deck has no waterfall, so this one adds one to exercise that kind, and no
+ * judgment preset, since the kit deck ships the judgment alias alone, so this
+ * one adds one to list the protocol's fifth category in full.
  */
 const DECK = {
   models: [
@@ -38,6 +41,7 @@ const DECK = {
     { name: "gen-image", type: "img_gen" },
     { name: "gen-image-fast", type: "img_gen" },
     { name: "standard", type: "search" },
+    { name: "judgment-strict", type: "judgment" },
   ],
   aliases: {
     llm: {
@@ -48,12 +52,14 @@ const DECK = {
     img_gen: { "best-gpt": "gpt-image-2", "default-small": "gpt-image-1-mini" },
     extract: { "default-premium": "azure-document-intelligence" },
     search: { "default-search": "linkup-standard" },
+    judgment: { "default-judgment": "jev-1.13.0" },
   },
   waterfalls: {
     llm: { "robust-llm": ["claude-4.6-sonnet", "gpt-5.6-sol"] },
     img_gen: {},
     extract: {},
     search: {},
+    judgment: {},
   },
 };
 
@@ -96,6 +102,12 @@ async function listing(input: MthdsModelsInput = {}, deck: unknown = DECK) {
   return { result, structured: result.structuredContent as ModelDeckListing, recorded };
 }
 
+async function checkAgainst(input: MthdsModelsInput, deck: unknown) {
+  const recorded = contextAnswering(deck);
+  const result = await readMthdsModels(input, recorded.context);
+  return { result, structured: result.structuredContent as ModelReferenceCheck };
+}
+
 async function check(reference: string, category?: ModelCategory) {
   const recorded = contextAnswering();
   const result = await readMthdsModels(
@@ -126,8 +138,16 @@ function apiError(status: number, message: string): ApiResponseError {
 }
 
 describe("the categories", () => {
-  it("are the protocol's, in the protocol's order", () => {
-    expect([...MODEL_CATEGORY_VALUES]).toEqual([...MODEL_CATEGORIES]);
+  it("are the protocol's, in the protocol's order, each with the pipe type that names it", () => {
+    expect(mthdsModelsInputSchema.category.unwrap().options).toEqual([...MODEL_CATEGORIES]);
+    expect(Object.keys(PIPE_TYPE_OF)).toEqual([...MODEL_CATEGORIES]);
+    expect(PIPE_TYPE_OF.judgment).toBe("PipeJudge");
+  });
+
+  it("names every category and its pipe type in the category's description", () => {
+    expect(mthdsModelsInputSchema.category.description).toBe(
+      "Only this category: llm for a PipeLLM, extract for a PipeExtract, img_gen for a PipeImgGen, search for a PipeSearch, judgment for a PipeJudge. Omit it for every category.",
+    );
   });
 });
 
@@ -143,6 +163,7 @@ describe("listing the deck", () => {
       "extract",
       "img_gen",
       "search",
+      "judgment",
     ]);
     expect(structured.deck[0]).toEqual({
       category: "llm",
@@ -153,6 +174,12 @@ describe("listing the deck", () => {
         { reference: "@default-small", target: "gpt-5.6-luna" },
       ],
       waterfalls: [{ reference: "~robust-llm", fallbacks: ["claude-4.6-sonnet", "gpt-5.6-sol"] }],
+    });
+    expect(structured.deck[4]).toEqual({
+      category: "judgment",
+      presets: ["$judgment-strict"],
+      aliases: [{ reference: "@default-judgment", target: "jev-1.13.0" }],
+      waterfalls: [],
     });
   });
 
@@ -183,6 +210,7 @@ describe("listing the deck", () => {
 
     expect(result.summary).toContain("## llm (PipeLLM)");
     expect(result.summary).toContain("## img_gen (PipeImgGen)");
+    expect(result.summary).toContain("## judgment (PipeJudge)");
     expect(result.summary).toContain("`$writing-factual`");
     expect(result.summary).toContain("`@best-gpt` → `gpt-5.6-sol`");
     expect(result.summary).toContain("`~robust-llm` → `claude-4.6-sonnet`, `gpt-5.6-sol`");
@@ -191,7 +219,7 @@ describe("listing the deck", () => {
     expect(result.summary).toContain("call mthds_models with reference");
   });
 
-  it("skips an entry of no known category and a category it does not know", async () => {
+  it("skips an entry that carries no category", async () => {
     const { structured } = await listing(
       {},
       {
@@ -199,14 +227,49 @@ describe("listing the deck", () => {
           { name: "writing-factual", type: "llm" },
           { name: "untyped" },
           { name: "nulled", type: null },
-          { name: "spoken", type: "tts" },
         ],
-        aliases: { tts: { voice: "some-voice" } },
       },
     );
 
     expect(structured.deck.flatMap((each) => each.presets)).toEqual(["$writing-factual"]);
-    expect(structured.deck.flatMap((each) => each.aliases)).toEqual([]);
+  });
+
+  it("keeps a category it does not know under the runner's name, after the protocol's", async () => {
+    const { structured, result } = await listing(
+      {},
+      {
+        models: [
+          { name: "writing-factual", type: "llm" },
+          { name: "voice-clear", type: "tts" },
+        ],
+        aliases: {
+          llm: { "best-gpt": "gpt-5.6-sol" },
+          tts: { "default-voice": "some-voice" },
+          music: { "default-tune": "some-tune" },
+        },
+        // An unknown category with nothing in it adds nothing to list.
+        waterfalls: { tts: {}, video: {} },
+      },
+    );
+
+    expect(structured.status).toBe("ok");
+    expect(structured.deck.map((each) => each.category)).toEqual([
+      "llm",
+      "extract",
+      "img_gen",
+      "search",
+      "judgment",
+      "tts",
+      "music",
+    ]);
+    expect(structured.deck[5]).toEqual({
+      category: "tts",
+      presets: ["$voice-clear"],
+      aliases: [{ reference: "@default-voice", target: "some-voice" }],
+      waterfalls: [],
+    });
+    expect(result.summary).toContain("## tts (a category this tool does not know)");
+    expect(result.summary).toContain("`@default-voice` → `some-voice`");
   });
 
   it("reads a deck carrying the protocol's base alone, with no extensions", async () => {
@@ -221,6 +284,9 @@ describe("listing the deck", () => {
     ["a non-object deck", "nope"],
     ["a deck without its models list", { aliases: {} }],
     ["an entry without a name", { models: [{ type: "llm" }] }],
+    ["an entry whose category is not a name", { models: [{ name: "vision", type: 3 }] }],
+    ["an entry whose category is blank", { models: [{ name: "vision", type: "" }] }],
+    ["an extension keyed by a blank category", { models: [], aliases: { "": { a: "b" } } }],
     ["an alias without a model handle", { models: [], aliases: { llm: { "best-gpt": 3 } } }],
     ["a category's aliases that are not a map", { models: [], aliases: { llm: ["best-gpt"] } }],
     ["a waterfall that is not a list", { models: [], waterfalls: { llm: { robust: "a" } } }],
@@ -334,6 +400,33 @@ describe("checking a reference", () => {
     expect(structured.resolution).toBe("not_found");
     expect(structured.other_categories).toEqual(["img_gen"]);
     expect(result.summary).toContain("It resolves in img_gen (PipeImgGen), not in llm (PipeLLM)");
+  });
+
+  it("resolves a reference in a category it does not know, and places it there", async () => {
+    const unknown = {
+      models: [
+        { name: "writing-factual", type: "llm" },
+        { name: "voice-clear", type: "tts" },
+      ],
+      aliases: { tts: { "default-voice": "some-voice" } },
+    };
+    const anywhere = await checkAgainst({ reference: "@default-voice" }, unknown);
+    expect(anywhere.structured).toMatchObject({
+      resolution: "resolved",
+      matches: [{ category: "tts", target: "some-voice" }],
+    });
+    expect(anywhere.result.summary).toContain(
+      "- tts (a category this tool does not know) → `some-voice`",
+    );
+
+    const misplaced = await checkAgainst({ reference: "$voice-clear", category: "llm" }, unknown);
+    expect(misplaced.structured).toMatchObject({
+      resolution: "not_found",
+      other_categories: ["tts"],
+    });
+    expect(misplaced.result.summary).toContain(
+      "It resolves in tts (a category this tool does not know), not in llm (PipeLLM)",
+    );
   });
 
   it("reports no other category when none was named", async () => {
@@ -471,6 +564,9 @@ describe("failures", () => {
       class: "input_domain",
       location: "category",
     });
+    // A runner older than the category refuses it: the hint says so, rather
+    // than offering the refused value back among the valid ones.
+    expect(firstError(refusedCategory)?.hint).toContain("older MTHDS protocol");
 
     // A missing organization is the credential's fault, with a valid category
     // on the wire or none: a check sends no category, whatever the caller named.
