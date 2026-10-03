@@ -1,7 +1,6 @@
 import { PipelexApiClient, RejectedAssetError, UploadTransportError } from "@pipelex/sdk";
 import { describe, expect, it, vi } from "vitest";
 
-import { uploadClient } from "./attachments.js";
 import { prepareClient } from "./prepare.js";
 import { classifyError } from "./shared.js";
 import {
@@ -44,22 +43,11 @@ describe("formatMib", () => {
   });
 });
 
-describe("both upload paths are wired to the guard", () => {
-  it("mthds_prepare_inputs (workshop) constructs a size-guarded client", () => {
+describe("the upload path is wired to the guard", () => {
+  it("mthds_prepare_inputs constructs a size-guarded client", () => {
     expect(prepareClient({ baseUrl: "https://api.pipelex.test" })).toBeInstanceOf(
       SizeGuardedPipelexApiClient,
     );
-  });
-
-  it("mthds_upload_attachments constructs a size-guarded client", () => {
-    expect(uploadClient({ baseUrl: "https://api.pipelex.test" })).toBeInstanceOf(
-      SizeGuardedPipelexApiClient,
-    );
-  });
-
-  it("still honours an injected test client", () => {
-    const fake = { uploadFile: () => Promise.reject(new Error("unused")) };
-    expect(uploadClient({ baseUrl: "https://api.pipelex.test", client: fake })).toBe(fake);
   });
 });
 

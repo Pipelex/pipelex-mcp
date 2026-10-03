@@ -4,7 +4,7 @@
  *
  * They read their own pair, `PIPELEX_E2E_BASE_URL` and `PIPELEX_E2E_API_KEY`,
  * never the `PIPELEX_BASE_URL` / `PIPELEX_API_KEY` that other tools and the
- * console share: a shell exporting the production pair for other tools used to
+ * server itself read: a shell exporting the production pair for other tools used to
  * aim `make test-e2e` at production, where no fixture is seeded. The Makefile
  * resolves the pair and `e2e-support.ts` reads it, so both halves are pinned
  * here. The Makefile half runs `make -f` from a temp directory holding its own

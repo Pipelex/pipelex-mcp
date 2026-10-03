@@ -677,8 +677,7 @@ export function toolResult(result: ValidationResult) {
  * Everything a validation report projects to except the prose: the verdict,
  * the signature, the view adverts and the view-only artifacts. `mthds_validate`
  * is its one caller, always with views off, since the workshop renders none;
- * `pipelex_show_method`, which it was split out for, reads `/v1/pipe-io` now
- * and projects that answer by the same rules in `show.ts`.
+ * `pipelex_show_method`, which it was split out for, reads `/v1/pipe-io` now.
  *
  * `pipeRef` names the pipe the signature and the form advert are for when the
  * caller chose one; absent, it is the effective entry pipe

@@ -4,8 +4,6 @@ coverage/
 .env*
 .DS_Store
 *.tsbuildinfo
-.skybridge/
-.vercel/
 .gstack/
 
 # The workshop's tarball carries the repository's README and licence, which
