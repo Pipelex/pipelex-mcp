@@ -1,6 +1,7 @@
-# Publishes the workshop, @pipelex/mcp (packages/workshop), to npm from
-# `main`, and tags the release `vX.Y.Z`. Its version is the workshop's
-# `package.json` version, read through `.github/scripts/track-version.sh`.
+# Publishes the workshop, @pipelex/mcp, to npm from `main`, from the
+# repository root, and tags the release `vX.Y.Z`. Its version is the root
+# `package.json` version, read through `.github/scripts/track-version.sh`,
+# which also reads a parent from the workspace layout the history holds.
 #
 # It fires on the push to `main` — the merge of a `release/vX.Y.Z` pull
 # request — so a release ships from the merge itself, the way every other
@@ -63,14 +64,14 @@
 # `release.yml` — the same OIDC pattern `pipelex-sdk` and `mthds-js` use, so no
 # long-lived npm secret exists anywhere. **The registration is bound to this
 # filename**: renaming or moving this workflow breaks publishing until the
-# trusted publisher is re-registered. Publishing from a workspace member
-# changes nothing there: the registration names the repository and the
-# workflow, not a directory.
+# trusted publisher is re-registered. Where in the repository the package is
+# published from changes nothing there: the registration names the repository
+# and the workflow, not a directory.
 name: Release (publish)
 
 on:
   # The merge of a release pull request. The version is whatever `main`'s
-  # workshop `package.json` says, and the workshop ships when it rose.
+  # `package.json` says, and the workshop ships when it rose.
   push:
     branches:
       - main
@@ -79,7 +80,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to ship — must match the workshop's package.json on main (e.g. 0.12.0, no prefix)"
+        description: "Version to ship — must match package.json on main (e.g. 0.12.0, no prefix)"
         required: true
         type: string
 
@@ -190,8 +191,8 @@ jobs:
       contents: read
     outputs:
       already_published: ${{ steps.published.outputs.already_published }}
-      # Read from the workshop's `package.json` beside the lookup, so the run
-      # summary the release play reads names whatever was actually published.
+      # Read from `package.json` beside the lookup, so the run summary the
+      # release play reads names whatever was actually published.
       package: ${{ steps.published.outputs.package }}
 
     steps:
@@ -220,7 +221,7 @@ jobs:
           VERSION: ${{ needs.detect.outputs.version }}
         run: |
           # The heading carries no prefix — `v` lives on the branch and tag only.
-          CHANGELOG=packages/workshop/CHANGELOG.md
+          CHANGELOG=CHANGELOG.md
           if ! grep -q "^## \[$VERSION\]" "$CHANGELOG"; then
             echo "::error::$CHANGELOG has no '## [$VERSION]' heading. Promote ## [Unreleased] before shipping."
             exit 1
@@ -248,15 +249,14 @@ jobs:
       # code — a rate limit, a 5xx, a DNS failure — when it could not find out;
       # only the first of those is an answer. An inconclusive lookup therefore
       # fails the guard rather than reading as "not published". The package is
-      # read from the workshop's `package.json` rather than typed, so the
-      # lookup cannot come to name something other than what `npm publish`
-      # ships.
+      # read from `package.json` rather than typed, so the lookup cannot come
+      # to name something other than what `npm publish` ships.
       - name: Check whether this version is already on npm
         id: published
         env:
           VERSION: ${{ needs.detect.outputs.version }}
         run: |
-          PACKAGE=$(node -p "require('./packages/workshop/package.json').name")
+          PACKAGE=$(node -p "require('./package.json').name")
           echo "package=$PACKAGE" >> "$GITHUB_OUTPUT"
           if LOOKUP=$(npm view "$PACKAGE@$VERSION" version --json 2>&1); then
             echo "already_published=true" >> "$GITHUB_OUTPUT"
@@ -321,14 +321,18 @@ jobs:
         if: needs.guard.outputs.already_published == 'false'
         run: npm ci
 
-      # The workshop member's `prepack` rebuilds `dist/main.js` and copies the
-      # repository's README and licence in, so the tarball is built from this
-      # commit rather than from whatever a previous step left behind. Auth is
-      # OIDC trusted publishing — no token; `--provenance` is what binds the
-      # published tarball to this workflow, this repo, and this commit.
+      # `npm publish` runs two of the manifest's scripts first. Its
+      # `prepublishOnly` is the publish guard, `scripts/check-publishable.ts`,
+      # which refuses a sprint pin or a git or local source among the
+      # dependencies, naming the package, so a pin the release train failed to
+      # collapse never reaches npm. Its `prepack` rebuilds `dist/main.js`, so
+      # the tarball is built from this commit rather than from whatever a
+      # previous step left behind. Auth is OIDC trusted publishing — no token;
+      # `--provenance` is what binds the published tarball to this workflow,
+      # this repo, and this commit.
       - name: Publish
         if: needs.guard.outputs.already_published == 'false'
-        run: npm publish --workspace @pipelex/mcp --access public --provenance
+        run: npm publish --access public --provenance
 
       - name: Summary
         env:

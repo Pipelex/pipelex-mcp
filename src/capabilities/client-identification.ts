@@ -33,9 +33,8 @@ export type McpMode = "workshop";
 
 /**
  * The server a call came from: its mode, and the version it shipped as. The
- * version is the workshop's own `package.json` version, which it reads and
- * hands in; the core is never released and has no version of its own to
- * report.
+ * version is the `package.json` version, which the server reads and hands in;
+ * the capabilities read no manifest of their own.
  */
 export interface McpShell {
   mode: McpMode;

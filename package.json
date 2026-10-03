@@ -1,49 +1,80 @@
 {
-  "name": "pipelex-mcp",
-  "private": true,
-  "description": "The Pipelex workshop, the local MCP server published to npm as @pipelex/mcp, and the capability core it is built on.",
+  "name": "@pipelex/mcp",
+  "version": "0.22.0",
+  "description": "The MCP server inside the Pipelex plugin: validate, prepare and run AI methods on Pipelex from a coding agent.",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "pipelex",
+    "mthds",
+    "ai-methods",
+    "coding-agent",
+    "claude-code",
+    "codex",
+    "cursor",
+    "mistral-vibe"
+  ],
   "license": "Elastic-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/Pipelex/pipelex-mcp"
   },
   "type": "module",
-  "workspaces": [
-    "packages/core",
-    "packages/workshop"
+  "bin": {
+    "pipelex-mcp": "dist/main.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "dev:local": "tsx packages/workshop/src/main.ts",
-    "inspect:local": "npx @modelcontextprotocol/inspector npx tsx packages/workshop/src/main.ts",
-    "lint": "eslint packages/ scripts/ tests/ eslint-rules/ vitest.config.ts vitest.e2e.config.ts",
-    "format": "prettier --write \"packages/*/src/**/*.ts\" \"packages/*/*.{ts,mjs}\" \"scripts/**/*.{ts,mjs}\" \"tests/**/*.ts\" \"eslint-rules/**/*.mjs\" \"*.{ts,mjs}\"",
-    "format:check": "prettier --check \"packages/*/src/**/*.ts\" \"packages/*/*.{ts,mjs}\" \"scripts/**/*.{ts,mjs}\" \"tests/**/*.ts\" \"eslint-rules/**/*.mjs\" \"*.{ts,mjs}\"",
-    "typecheck": "tsc -p packages/core && tsc -p packages/workshop && tsc -p tsconfig.json",
+    "dev:local": "tsx src/main.ts",
+    "inspect:local": "npx @modelcontextprotocol/inspector npx tsx src/main.ts",
+    "lint": "eslint src/ scripts/ tests/ eslint-rules/ tsup.config.ts vitest.config.ts vitest.e2e.config.ts",
+    "format": "prettier --write \"src/**/*.ts\" \"scripts/**/*.{ts,mjs}\" \"tests/**/*.ts\" \"eslint-rules/**/*.mjs\" \"*.{ts,mjs}\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"scripts/**/*.{ts,mjs}\" \"tests/**/*.ts\" \"eslint-rules/**/*.mjs\" \"*.{ts,mjs}\"",
+    "typecheck": "tsc",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "smoke": "tsx --env-file-if-exists=.env scripts/smoke.ts",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "seed:e2e-fixture": "tsx --env-file-if-exists=.env scripts/seed-e2e-fixture.ts",
-    "check": "npm run lint && npm run format:check && npm run check:instructions && npm run check:tool-texts && npm run build:local && npm run typecheck",
+    "check": "npm run lint && npm run format:check && npm run check:instructions && npm run check:tool-texts && npm run build && npm run typecheck",
     "check:instructions": "tsx scripts/check-instructions.ts",
     "check:tool-texts": "tsx scripts/check-tool-texts.ts",
-    "build:local": "npm run build --workspace @pipelex/mcp"
+    "check:publishable": "tsx scripts/check-publishable.ts",
+    "build": "tsup",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run check:publishable"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@pipelex/sdk": "^0.28.0",
+    "mthds": "^0.29.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@pipelex/mthds-ui": "^0.27.0",
     "@types/node": "^24.12.0",
+    "@types/npm-package-arg": "^6.1.4",
     "@vitest/coverage-v8": "^4.1.9",
     "eslint": "^9.39.4",
     "globals": "^16.5.0",
+    "npm-package-arg": "^13.0.2",
     "prettier": "^3.8.4",
+    "tsup": "^8.5.1",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2",
     "typescript-eslint": "^8.62.0",
     "vitest": "^4.1.9",
-    "yaml": "^2.9.1",
-    "zod": "^4.3.6"
+    "yaml": "^2.9.1"
   },
   "engines": {
     "node": ">=24.14.1"

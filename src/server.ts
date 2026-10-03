@@ -4,12 +4,12 @@ import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/ser
 
 import pkg from "../package.json" with { type: "json" };
 
-import { mcpAppInfo, workshopHost } from "@pipelex/mcp-core/capabilities/client-identification.js";
+import { mcpAppInfo, workshopHost } from "./capabilities/client-identification.js";
 import type {
   AppInfoSource,
   McpClientInfo,
   McpShell,
-} from "@pipelex/mcp-core/capabilities/client-identification.js";
+} from "./capabilities/client-identification.js";
 import { buildLocalToolContexts, localToolDefinitions, patchLocalApiContexts } from "./tools.js";
 import type { LocalToolContexts, LocalToolDefinition } from "./tools.js";
 

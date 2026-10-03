@@ -39,7 +39,7 @@ export default [
   // Every call to the Pipelex API goes through `createPipelexApiClient`, which
   // names this server in the User-Agent (docs/client-identification.md).
   {
-    files: ["packages/*/src/**/*.ts", "scripts/**/*.{ts,mjs}", "tests/**/*.ts"],
+    files: ["src/**/*.ts", "scripts/**/*.{ts,mjs}", "tests/**/*.ts"],
     plugins: { pipelex: pipelexApiBoundary },
     rules: {
       "pipelex/sdk-client-factory": "error",
@@ -48,18 +48,18 @@ export default [
   },
   // The factory itself.
   {
-    files: ["packages/core/src/capabilities/shared.ts"],
+    files: ["src/capabilities/shared.ts"],
     rules: { "pipelex/sdk-client-factory": "off" },
   },
   // The one sanctioned subclass, which the factory constructs.
   {
-    files: ["packages/core/src/capabilities/upload-ceiling.ts"],
+    files: ["src/capabilities/upload-ceiling.ts"],
     rules: { "pipelex/sdk-client-factory": ["error", { allowExtends: true }] },
   },
   // The graph page's live check fetches the public CDN files the page pins,
   // never the Pipelex API.
   {
-    files: ["packages/core/src/capabilities/graph-page.e2e.ts"],
+    files: ["src/capabilities/graph-page.e2e.ts"],
     rules: { "pipelex/no-raw-fetch": "off" },
   },
   // Unit tests build clients directly to test them, and stub the global fetch.

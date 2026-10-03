@@ -1,12 +1,12 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import type { FileResolution, FileResolver } from "@pipelex/mcp-core/capabilities/shared.js";
+import type { FileResolution, FileResolver } from "./capabilities/shared.js";
 import {
   errorMessage,
   isInsideRoot,
   isMissingPathError,
-} from "@pipelex/mcp-core/capabilities/workspace-boundary.js";
+} from "./capabilities/workspace-boundary.js";
 
 const MTHDS_EXTENSION = ".mthds";
 const INLINE_FALLBACK = "or inline the contents as { content, uri? }.";

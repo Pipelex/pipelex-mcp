@@ -40,14 +40,14 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildLocalToolContexts } from "./tools.js";
-import { LINK_FILE_NAME } from "@pipelex/mcp-core/capabilities/catalog-link.js";
-import { getMthdsMethod, saveMthdsMethod } from "@pipelex/mcp-core/capabilities/catalog-write.js";
+import { LINK_FILE_NAME } from "./capabilities/catalog-link.js";
+import { getMthdsMethod, saveMthdsMethod } from "./capabilities/catalog-write.js";
 import type {
   CatalogWriteContext,
   GetMethodSuccess,
   SaveMethodFailure,
   SaveMethodSuccess,
-} from "@pipelex/mcp-core/capabilities/catalog-write.js";
+} from "./capabilities/catalog-write.js";
 import {
   CATALOG_WRITE_BUNDLE,
   CATALOG_WRITE_BUNDLE_FILE,
@@ -56,7 +56,7 @@ import {
   catalogRowNamed,
   catalogWriteFixtureMethodId,
   liveApiConfig,
-} from "@pipelex/mcp-core/capabilities/e2e-support.js";
+} from "./capabilities/e2e-support.js";
 
 /** A name this suite must never bring into existence. */
 const NEVER_CREATED_NAME = `${CATALOG_WRITE_FIXTURE_NAME}_never_created`;
