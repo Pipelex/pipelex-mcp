@@ -3,7 +3,7 @@
 # One manifest declares `@pipelex/sdk`, and it is also the one npm publishes, so a sprint pin is written
 # where it could ship. `@pipelex/sdk` is built in a member directory of `pipelex-sdk`, so `wt pin` writes
 # the sprint prerelease `X.Y.Z-sprint.g<sha>` rather than a git source. What keeps either form off npm is
-# the publish guard, the manifest's `prepublishOnly` script (`scripts/publish-guard.ts`), which refuses to
+# the publish guard, the manifest's `prepublishOnly` script (`scripts/check-publishable.ts`), which refuses to
 # publish while a pin stands, while `make check` stays green with one in place on a sprint branch. The
 # collapse is `make use-npm-sdk`, never a one-site replace, because the SDK's release can move the
 # `mthds` it requires: when it needs a newer one than this manifest declares, `mthds` must move with it,

@@ -273,7 +273,9 @@ check-no-local-deps:
 
 # The publish guard, which `npm publish` also runs as the manifest's
 # `prepublishOnly` script, so every route to the registry passes through it:
-# `release.yml`, `make publish` and a bare `npm publish` alike. It is not part
+# `release.yml`, `make publish` and a bare `npm publish` alike. `make publish`
+# runs it as a prerequisite as well, since an npm configured with
+# `ignore-scripts` skips every lifecycle script. It is not part
 # of `make check`, which stays green while a sprint pin is deliberately in
 # place on a sprint branch. `scripts/publish-guard.ts` says what it refuses.
 check-publishable:
@@ -302,8 +304,10 @@ inspect-local:
 # "CI and releases" and the /release skill). `make publish` is the escape hatch
 # for a CI outage. check-release-ready demands a clean main, and
 # check-no-local-deps refuses a @pipelex file: link, which would ship a broken
-# install; `npm publish` itself then runs the publish guard (check-publishable)
-# before anything reaches the registry.
+# install; check-publishable runs the publish guard, which `npm publish` runs
+# again as `prepublishOnly`. `--ignore-scripts=false` keeps an npm configured
+# with `ignore-scripts` from skipping that and the `prepack` build, which would
+# publish whatever `dist/` already held.
 
 check-release-ready:
 	@current_branch="$$(git rev-parse --abbrev-ref HEAD)"; \
@@ -332,8 +336,8 @@ check-workshop-released:
 		echo "ERROR: HEAD did not raise the workshop version: it carries $$now over its first parent's $$before. A break-glass publish runs only from the commit that raised the version; once main has moved past it, cut a new release instead."; exit 1; \
 	fi
 
-publish: check-no-local-deps check-release-ready check-workshop-released
-	npm publish
+publish: check-no-local-deps check-release-ready check-workshop-released check-publishable
+	npm publish --ignore-scripts=false
 
 c: check
 t: test

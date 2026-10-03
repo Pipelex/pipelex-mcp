@@ -76,7 +76,10 @@ describe("the manifest", () => {
  * real `npm publish --dry-run --offline` in a scratch package that carries the
  * manifest's guard scripts and the scripts they run. The scratch package has
  * its own name and an unroutable registry, so nothing could reach npm even if
- * `--dry-run` were ignored.
+ * `--dry-run` were ignored. Its dependencies are fixed specs rather than the
+ * live manifest's, which a sprint pin or `make use-local-sdk` deliberately
+ * changes, and `--ignore-scripts=false` keeps an npm configured to skip
+ * lifecycle scripts from skipping the guard under test.
  */
 describe("npm publish", () => {
   let dir: string;
@@ -105,14 +108,18 @@ describe("npm publish", () => {
         prepublishOnly: manifest.scripts?.prepublishOnly,
         "check:publishable": manifest.scripts?.["check:publishable"],
       },
-      dependencies: { ...manifest.dependencies, "@pipelex/sdk": sdkSpec },
+      dependencies: { "@pipelex/sdk": sdkSpec, zod: "^4.3.6" },
     };
     await fs.writeFile(path.join(dir, "package.json"), `${JSON.stringify(scratch, null, 2)}\n`);
-    const result = spawnSync("npm", ["publish", "--dry-run", "--offline"], {
-      cwd: dir,
-      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
-      encoding: "utf8",
-    });
+    const result = spawnSync(
+      "npm",
+      ["publish", "--dry-run", "--offline", "--ignore-scripts=false"],
+      {
+        cwd: dir,
+        env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
+        encoding: "utf8",
+      },
+    );
     return { status: result.status, output: `${result.stdout}${result.stderr}` };
   }
 
@@ -133,7 +140,7 @@ describe("npm publish", () => {
   });
 
   it("goes through with registry ranges", async () => {
-    const published = await publishWith(manifest.dependencies?.["@pipelex/sdk"] ?? "");
+    const published = await publishWith("^0.28.0");
     expect(published.output).toContain("is a registry range or tag");
     expect(published.status).toBe(0);
   });
