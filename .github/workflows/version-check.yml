@@ -3,9 +3,9 @@
 # main) and on PRs into a release branch (dev/work → release branch) — the two
 # places the version matters.
 #
-# The workshop's version lives in packages/workshop/package.json and is read
-# through `.github/scripts/track-version.sh`, which also reads a commit from
-# before the workspace split, where the root package.json carried it. Branch
+# The workshop's version lives in the root package.json and is read through
+# `.github/scripts/track-version.sh`, which also reads a commit from the
+# workspace layout, where packages/workshop/package.json carried it. Branch
 # refs are read into env: and never interpolated into the shell, matching
 # guard-branches.yml's injection-safe style. The version string has NO prefix
 # in package.json (`v` lives on the branch name and the git tag only).

@@ -20,10 +20,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import {
-  LIVE_DEFAULT_BASE_URL,
-  liveApiTarget,
-} from "@pipelex/mcp-core/capabilities/e2e-support.js";
+import { LIVE_DEFAULT_BASE_URL, liveApiTarget } from "../src/capabilities/e2e-support.js";
 
 const MAKEFILE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "Makefile");
 

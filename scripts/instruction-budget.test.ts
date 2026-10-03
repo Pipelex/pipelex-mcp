@@ -9,7 +9,7 @@ import {
   isRulePath,
 } from "./instruction-budget.js";
 
-const SCOPED_RULE = ["---", "paths:", '  - "packages/core/src/x.ts"', "---", "", "# A rule"].join(
+const SCOPED_RULE = ["---", "paths:", '  - "src/capabilities/x.ts"', "---", "", "# A rule"].join(
   "\n",
 );
 
@@ -26,10 +26,10 @@ describe("hasPathsFrontmatter", () => {
   });
 
   it("accepts an unindented block list and a flow list", () => {
-    expect(hasPathsFrontmatter('---\npaths:\n- "packages/core/src/x.ts"\n---\n# A rule\n')).toBe(
+    expect(hasPathsFrontmatter('---\npaths:\n- "src/capabilities/x.ts"\n---\n# A rule\n')).toBe(
       true,
     );
-    expect(hasPathsFrontmatter('---\npaths: ["packages/core/src/x.ts"]\n---\n# A rule\n')).toBe(
+    expect(hasPathsFrontmatter('---\npaths: ["src/capabilities/x.ts"]\n---\n# A rule\n')).toBe(
       true,
     );
   });

@@ -1,7 +1,7 @@
 /**
  * The workshop's tool table: every tool the local stdio server registers, in
  * registration order, over the workshop's own capability contexts, each built
- * from a capability function in the core (`@pipelex/mcp-core/capabilities/`).
+ * from a capability function under `capabilities/`.
  */
 
 import {
@@ -10,22 +10,16 @@ import {
   downloadMthdsArtifacts,
   mthdsDownloadArtifactsInputSchema,
   mthdsDownloadArtifactsOutputSchema,
-} from "@pipelex/mcp-core/capabilities/artifacts.js";
-import type {
-  ArtifactsContext,
-  MthdsDownloadArtifactsInput,
-} from "@pipelex/mcp-core/capabilities/artifacts.js";
+} from "./capabilities/artifacts.js";
+import type { ArtifactsContext, MthdsDownloadArtifactsInput } from "./capabilities/artifacts.js";
 import {
   buildCatalogContext,
   catalogToolResult,
   listMthdsMethods,
   mthdsListMethodsInputSchema,
   mthdsListMethodsOutputSchema,
-} from "@pipelex/mcp-core/capabilities/catalog.js";
-import type {
-  CatalogContext,
-  MthdsListMethodsInput,
-} from "@pipelex/mcp-core/capabilities/catalog.js";
+} from "./capabilities/catalog.js";
+import type { CatalogContext, MthdsListMethodsInput } from "./capabilities/catalog.js";
 import {
   buildCatalogWriteContext,
   getMethodToolResult,
@@ -36,12 +30,12 @@ import {
   mthdsSaveMethodOutputSchema,
   saveMethodToolResult,
   saveMthdsMethod,
-} from "@pipelex/mcp-core/capabilities/catalog-write.js";
+} from "./capabilities/catalog-write.js";
 import type {
   CatalogWriteContext,
   MthdsGetMethodInput,
   MthdsSaveMethodInput,
-} from "@pipelex/mcp-core/capabilities/catalog-write.js";
+} from "./capabilities/catalog-write.js";
 import {
   CODEGEN_TARGET_RULE,
   buildCodegenContext,
@@ -49,25 +43,25 @@ import {
   generateMthdsCode,
   mthdsCodegenInputSchema,
   mthdsCodegenOutputSchema,
-} from "@pipelex/mcp-core/capabilities/codegen.js";
-import type { CodegenContext, MthdsCodegenInput } from "@pipelex/mcp-core/capabilities/codegen.js";
-import { GRAPH_PAGE_FILENAME } from "@pipelex/mcp-core/capabilities/graph-page.js";
+} from "./capabilities/codegen.js";
+import type { CodegenContext, MthdsCodegenInput } from "./capabilities/codegen.js";
+import { GRAPH_PAGE_FILENAME } from "./capabilities/graph-page.js";
 import {
   buildImagesContext,
   mthdsShowImagesInputSchema,
   mthdsShowImagesOutputSchema,
   showImagesToolResult,
   showMthdsRunImages,
-} from "@pipelex/mcp-core/capabilities/images.js";
-import type { ImagesContext, MthdsShowImagesInput } from "@pipelex/mcp-core/capabilities/images.js";
+} from "./capabilities/images.js";
+import type { ImagesContext, MthdsShowImagesInput } from "./capabilities/images.js";
 import {
   buildInputsContext,
   buildMthdsInputs,
   inputsToolResult,
   mthdsInputsInputSchema,
   mthdsInputsOutputSchema,
-} from "@pipelex/mcp-core/capabilities/inputs.js";
-import type { InputsContext, MthdsInputsInput } from "@pipelex/mcp-core/capabilities/inputs.js";
+} from "./capabilities/inputs.js";
+import type { InputsContext, MthdsInputsInput } from "./capabilities/inputs.js";
 import {
   CATEGORY_PIPE_TYPES,
   buildModelsContext,
@@ -75,19 +69,16 @@ import {
   mthdsModelsInputSchema,
   mthdsModelsOutputSchema,
   readMthdsModels,
-} from "@pipelex/mcp-core/capabilities/models.js";
-import type { ModelsContext, MthdsModelsInput } from "@pipelex/mcp-core/capabilities/models.js";
+} from "./capabilities/models.js";
+import type { ModelsContext, MthdsModelsInput } from "./capabilities/models.js";
 import {
   buildPrepareContext,
   mthdsPrepareInputsInputSchema,
   mthdsPrepareInputsOutputSchema,
   prepareInputsToolResult,
   prepareMthdsInputs,
-} from "@pipelex/mcp-core/capabilities/prepare.js";
-import type {
-  MthdsPrepareInputsInput,
-  PrepareContext,
-} from "@pipelex/mcp-core/capabilities/prepare.js";
+} from "./capabilities/prepare.js";
+import type { MthdsPrepareInputsInput, PrepareContext } from "./capabilities/prepare.js";
 import {
   buildRunContext,
   getMthdsRunResults,
@@ -102,21 +93,18 @@ import {
   runStatusToolResult,
   runToolResult,
   startMthdsRun,
-} from "@pipelex/mcp-core/capabilities/run.js";
-import type { MthdsRunInput, RunContext, RunIdInput } from "@pipelex/mcp-core/capabilities/run.js";
-import type { ApiContextPatch } from "@pipelex/mcp-core/capabilities/shared.js";
+} from "./capabilities/run.js";
+import type { MthdsRunInput, RunContext, RunIdInput } from "./capabilities/run.js";
+import type { ApiContextPatch } from "./capabilities/shared.js";
 import {
   buildValidationContext,
   mthdsValidateInputSchema,
   mthdsValidateOutputSchema,
   toolResult,
   validateMthds,
-} from "@pipelex/mcp-core/capabilities/validate.js";
-import type {
-  MthdsValidateInput,
-  ValidationContext,
-} from "@pipelex/mcp-core/capabilities/validate.js";
-import { defineTool } from "@pipelex/mcp-core/tool-definition.js";
+} from "./capabilities/validate.js";
+import type { MthdsValidateInput, ValidationContext } from "./capabilities/validate.js";
+import { defineTool } from "./tool-definition.js";
 import { localFileResolver } from "./files.js";
 
 /** The capability contexts the workshop's tools run over — one per capability it registers. */

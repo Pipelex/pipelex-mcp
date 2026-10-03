@@ -123,15 +123,15 @@ Avoid `disableClaudeAiConnectors: true` for this. It turns off the Pipelex conne
 - [Tools reference](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md): every tool's input, structured result and behavior.
 - [Registering the workshop in a host](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/hosts.md): the configuration for Claude Code, Codex, Cursor, Claude Desktop and Mistral Vibe, the environment variables the workshop reads, and the working directory it is bound to.
 - [Developing pipelex-mcp](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/development.md): the layout, the build, the test suites and versioning.
-- [Architecture](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/architecture.md) and [Testing](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/testing.md): how the workshop and the core it is built on are built, module by module, and how they are tested, the live drift detectors included.
+- [Architecture](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/architecture.md) and [Testing](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/testing.md): how the workshop and its capability core are built, module by module, and how they are tested, the live drift detectors included.
 - [Client identification](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/client-identification.md): the `User-Agent` every request to the Pipelex API carries, naming this server and the host behind it.
 - [The specification](https://github.com/Pipelex/pipelex-mcp/blob/main/SPEC.md): the source of truth for the full tool contracts and the verdict discipline.
-- [The changelog](https://github.com/Pipelex/pipelex-mcp/blob/main/packages/workshop/CHANGELOG.md), whose versions are the ones on npm, and which also records every release made before the console and the workshop were split.
+- [The changelog](https://github.com/Pipelex/pipelex-mcp/blob/main/CHANGELOG.md), whose versions are the ones on npm, and which also records every release made before the console and the workshop were split.
 - [The Pipelex documentation](https://docs.pipelex.com/) and [the MTHDS standard](https://mthds.ai/).
 
 ## Develop
 
-The repository is an npm workspace of two packages under `packages/`: the capability core and the workshop, which inlines it. To work on it, clone it, then, from the root:
+The repository is one package at its root, `@pipelex/mcp`, whose sources are under `src/`: the server and, under `src/capabilities/`, the capability core it is built on. To work on it, clone it, then, from the root:
 
 ```bash
 make install   # install the dependencies

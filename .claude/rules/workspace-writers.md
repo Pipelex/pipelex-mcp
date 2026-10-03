@@ -1,13 +1,13 @@
 ---
 paths:
-  - "packages/core/src/capabilities/workspace-boundary.ts"
-  - "packages/core/src/capabilities/artifacts.ts"
-  - "packages/core/src/capabilities/codegen.ts"
-  - "packages/core/src/capabilities/codegen-writer.ts"
-  - "packages/core/src/capabilities/graph-page.ts"
-  - "packages/core/src/capabilities/catalog-write.ts"
-  - "packages/core/src/capabilities/catalog-link.ts"
-  - "packages/workshop/src/files.ts"
+  - "src/capabilities/workspace-boundary.ts"
+  - "src/capabilities/artifacts.ts"
+  - "src/capabilities/codegen.ts"
+  - "src/capabilities/codegen-writer.ts"
+  - "src/capabilities/graph-page.ts"
+  - "src/capabilities/catalog-write.ts"
+  - "src/capabilities/catalog-link.ts"
+  - "src/files.ts"
 ---
 
 # The workshop's filesystem boundaries
@@ -38,6 +38,6 @@ Above that the rules are **inverted, deliberately**, so never write one shared "
 
 ## The read side
 
-`packages/workshop/src/files.ts` rejects any path whose extension the argument is not contracted to **before touching the filesystem**, so a prompt-injected `.env`, `.git/config` or key path is never opened; it enforces real-path containment, and it reports every failure as a `FileResolution` value, never a throw. Keep all three gates on the submitted items, ahead of any read.
+`src/files.ts` rejects any path whose extension the argument is not contracted to **before touching the filesystem**, so a prompt-injected `.env`, `.git/config` or key path is never opened; it enforces real-path containment, and it reports every failure as a `FileResolution` value, never a throw. Keep all three gates on the submitted items, ahead of any read.
 
 The writers have no injected write seam on purpose: a real `mkdtemp` directory is the better test double, so their tests run against real temp trees.

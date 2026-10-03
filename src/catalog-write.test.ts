@@ -7,23 +7,16 @@ import type { MethodData, MethodWriteInput, PipelexValidationResult } from "@pip
 import { parseMethodFiles } from "mthds/protocol";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import {
-  LINK_FILE_NAME,
-  apiHostOf,
-  readMethodLink,
-} from "@pipelex/mcp-core/capabilities/catalog-link.js";
+import { LINK_FILE_NAME, apiHostOf, readMethodLink } from "./capabilities/catalog-link.js";
 import {
   buildCatalogWriteContext,
   getMthdsMethod,
   saveMthdsMethod,
   storedSourceFiles,
-} from "@pipelex/mcp-core/capabilities/catalog-write.js";
-import type {
-  CatalogWriteClient,
-  CatalogWriteContext,
-} from "@pipelex/mcp-core/capabilities/catalog-write.js";
-import { DEFAULT_API_URL } from "@pipelex/mcp-core/capabilities/shared.js";
-import type { ToolError } from "@pipelex/mcp-core/capabilities/shared.js";
+} from "./capabilities/catalog-write.js";
+import type { CatalogWriteClient, CatalogWriteContext } from "./capabilities/catalog-write.js";
+import { DEFAULT_API_URL } from "./capabilities/shared.js";
+import type { ToolError } from "./capabilities/shared.js";
 import { localFileResolver } from "./files.js";
 
 // ── fixtures ────────────────────────────────────────────────────────

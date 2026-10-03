@@ -30,7 +30,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 
-import { createLocalServer } from "../packages/workshop/src/server.js";
+import { createLocalServer } from "../src/server.js";
 import {
   HOST_TEXT_CAP,
   TOOL_TEXT_CEILING,

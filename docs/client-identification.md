@@ -11,7 +11,7 @@ pipelex-mcp/<version> (workshop; host=claude-code/2.1.4) pipelex-sdk-js/<sdk ver
 pipelex-mcp/<version> (workshop) pipelex-sdk-js/<sdk version> node/<version> (linux; x64)
 ```
 
-`<version>` is the workshop's version, read from `packages/workshop/package.json` so it cannot drift from the release. The capability core that builds the header is never released and has no version of its own; the workshop hands its mode and its version to the core as one `McpShell` value. The first word of the comment is the shell, `workshop`, the local stdio server that coding-agent hosts spawn with `npx @pipelex/mcp`. The product token is `pipelex-mcp`, although the server reports `pipelex-plugin` as its name in the MCP handshake: the token names this repository's product, and the comment says which server sent the request. The `host=` parameter names the AI host driving the call and is left out when the server cannot tell.
+`<version>` is the workshop's version, read from `package.json` so it cannot drift from the release. The capability core that builds the header reads no manifest of its own; the server hands its mode and its version to the core as one `McpShell` value. The first word of the comment is the shell, `workshop`, the local stdio server that coding-agent hosts spawn with `npx @pipelex/mcp`. The product token is `pipelex-mcp`, although the server reports `pipelex-plugin` as its name in the MCP handshake: the token names this repository's product, and the comment says which server sent the request. The `host=` parameter names the AI host driving the call and is left out when the server cannot tell.
 
 The server does not build the header itself. It passes an `appInfo` of `{ name: "pipelex-mcp", version, details: [<shell>, "host=<host>"] }` to `PipelexApiClient`, and the SDK renders it in front of its own tokens (see the SDK's own `docs/client-identification.md`).
 
@@ -25,14 +25,14 @@ MCP does not restrict `clientInfo` to header-safe characters, and a host may wel
 
 ## One factory, and the guard that keeps it the only one
 
-Every Pipelex API client the server builds comes from `createPipelexApiClient` in `packages/core/src/capabilities/shared.ts`, which passes the context's `appInfo`, or a bare `pipelex-mcp` with no version and no comment when the server has set none (the live test suites and the scripts, which call capabilities directly without starting the server). A capability that needs a subclass, such as the upload size guard, passes the class to the factory rather than constructing it.
+Every Pipelex API client the server builds comes from `createPipelexApiClient` in `src/capabilities/shared.ts`, which passes the context's `appInfo`, or a bare `pipelex-mcp` with no version and no comment when the server has set none (the live test suites and the scripts, which call capabilities directly without starting the server). A capability that needs a subclass, such as the upload size guard, passes the class to the factory rather than constructing it.
 
-The workshop sets the identity on every capability context of its table through `patchLocalApiContexts` in `packages/workshop/src/tools.ts`, the one list of contexts a server-level override has to reach. It applies it once, in `packages/workshop/src/server.ts`, with a function that reads the handshake late.
+The workshop sets the identity on every capability context of its table through `patchLocalApiContexts` in `src/tools.ts`, the one list of contexts a server-level override has to reach. It applies it once, in `src/server.ts`, with a function that reads the handshake late.
 
 Two lint rules in `eslint-rules/pipelex-api-boundary.mjs` make the factory the only way to reach the API, and `tests/api-boundary-lint.test.ts` pins them under the repo's real ESLint config:
 
-- `pipelex/sdk-client-factory` refuses `new PipelexApiClient(…)`, `new MthdsApiClient(…)`, or `new` of any class whose name ends in `ApiClient`, anywhere but the factory, whether the class was imported by name, under an alias or through a namespace. It also refuses subclassing an SDK client outside `packages/core/src/capabilities/upload-ceiling.ts`.
-- `pipelex/no-raw-fetch` refuses a bare `fetch(…)` or `globalThis.fetch(…)`, because a raw request to the API would carry the runtime's default `User-Agent` and be counted as anonymous traffic. The one exempt file is the method graph page's live check, `packages/core/src/capabilities/graph-page.e2e.ts`, which fetches the public CDN files the page pins and never the Pipelex API.
+- `pipelex/sdk-client-factory` refuses `new PipelexApiClient(…)`, `new MthdsApiClient(…)`, or `new` of any class whose name ends in `ApiClient`, anywhere but the factory, whether the class was imported by name, under an alias or through a namespace. It also refuses subclassing an SDK client outside `src/capabilities/upload-ceiling.ts`.
+- `pipelex/no-raw-fetch` refuses a bare `fetch(…)` or `globalThis.fetch(…)`, because a raw request to the API would carry the runtime's default `User-Agent` and be counted as anonymous traffic. The one exempt file is the method graph page's live check, `src/capabilities/graph-page.e2e.ts`, which fetches the public CDN files the page pins and never the Pipelex API.
 
 Unit tests are exempt from both, since they construct clients to test them and stub the global `fetch`.
 

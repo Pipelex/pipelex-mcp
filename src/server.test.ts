@@ -15,16 +15,16 @@ import type {
 } from "@pipelex/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { recordedTsZodReport } from "@pipelex/mcp-core/capabilities/codegen-fixture.js";
-import { CODEGEN_TARGETS } from "@pipelex/mcp-core/capabilities/codegen.js";
-import { GRAPH_PAGE_FILENAME } from "@pipelex/mcp-core/capabilities/graph-page.js";
+import { recordedTsZodReport } from "./capabilities/codegen-fixture.js";
+import { CODEGEN_TARGETS } from "./capabilities/codegen.js";
+import { GRAPH_PAGE_FILENAME } from "./capabilities/graph-page.js";
 import {
   FLOW_HEAD_LENGTH,
   connectClient,
   emittedContract,
   listTools,
   sentencesAbout,
-} from "@pipelex/mcp-core/shell-test-support.js";
+} from "./shell-test-support.js";
 import pkg from "../package.json" with { type: "json" };
 import { LOCAL_SERVER_INFO, createLocalServer } from "./server.js";
 import * as localTools from "./tools.js";
