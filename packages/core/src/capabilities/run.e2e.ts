@@ -6,7 +6,7 @@
  *
  *  - The FREE half always runs. Reading the status and results of a run id that
  *    does not exist still proves the two lifecycle routes are reachable and
- *    still classify the way the run-follow view's poll loops expect, and one
+ *    still classify the way a caller polling them expects, and one
  *    unknown-`method_id` start proves `/v1/start` still accepts the run source
  *    the way this client sends it — all of it spending nothing. A missing
  *    lifecycle route and a mis-sent run source are the failures this catches.

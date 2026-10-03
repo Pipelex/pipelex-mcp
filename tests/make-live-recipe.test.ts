@@ -27,7 +27,7 @@ import {
 
 const MAKEFILE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "Makefile");
 
-// A minimal environment on purpose, as in `make-dev-recipe.test.ts`: a parent
+// A minimal environment on purpose: a parent
 // `make test` would hand its MAKEFLAGS to the child, and the developer's shell
 // could leak the very variables under test.
 const BASE_ENV: NodeJS.ProcessEnv = {
