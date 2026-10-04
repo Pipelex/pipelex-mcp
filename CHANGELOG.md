@@ -9,6 +9,10 @@ This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the
 - **`mthds_models` lists and filters judgment models, and keeps a category it does not know (Breaking)**: `category` takes `judgment`, for a PipeJudge, beside `llm`, `extract`, `img_gen` and `search`, and a listing shows the judgment presets, aliases and waterfalls, which it used to drop. A category of the deck the tool does not know, which a runner of a later MTHDS protocol may report, is now listed after the protocol's under the runner's own name and resolves in a check instead of being dropped, so the result's `deck[].category`, `matches[].category` and `other_categories` are any string rather than the category enum, and a summary says the tool does not know which pipe type names it. A runner that implements a protocol older than 0.7.0 refuses `category: "judgment"`, and the error's hint now says the runner predates the category instead of offering the refused value back.
 - **`mthds` 0.28.0 → 0.29.0**: The release that defines the `judgment` category and reads a deck entry's category as any string, which the change above is built on. `@pipelex/sdk` 0.28.0 still requires `mthds` 0.28, so an install carries both copies until the SDK moves.
 
+### Security
+
+- **`fast-uri`, `hono`, `ip-address` and `qs` re-resolved in the lockfile**: `fast-uri` moves to 3.1.8, clearing its high-severity host-confusion and server-side request forgery advisories, and `hono` 4.13.13, `ip-address` 10.7.3 and `qs` 6.16.0 clear the moderate ones, so `npm audit --omit=dev` reports nothing. Each arrives through `@modelcontextprotocol/sdk`, whose declared ranges the fixed releases already satisfy, so only the lockfile was holding the vulnerable ones. A published `npx @pipelex/mcp` install resolves those ranges fresh, since the tarball carries no lockfile, so what this fixes is every install that reads the lockfile: CI and a development checkout.
+
 ## [0.22.0] - 2026-10-03
 
 ### Changed
