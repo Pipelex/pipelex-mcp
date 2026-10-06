@@ -95,6 +95,7 @@ import {
   startMthdsRun,
 } from "./capabilities/run.js";
 import type { MthdsRunInput, RunContext, RunIdInput } from "./capabilities/run.js";
+import { MAX_INPUTS_FILE_BYTES } from "./capabilities/shared.js";
 import type { ApiContextPatch } from "./capabilities/shared.js";
 import {
   buildValidationContext,
@@ -135,6 +136,14 @@ export function buildLocalToolContexts(
   // boundary, so one resolver serving both would let each read the other's files.
   const resolver = localFileResolver(rootDir);
   const pythonResolver = localFileResolver(rootDir, ".py");
+  // A third, for mthds_run and mthds_prepare_inputs's `inputs_path`: `.json`
+  // only, capped, and worded to fall back on inline `inputs`. The bundle
+  // directory gate does not apply — inputs are not part of the bundle — but the
+  // working-directory containment does, as it does for every read.
+  const inputsResolver = localFileResolver(rootDir, ".json", {
+    fallback: "or pass the inputs inline as inputs.",
+    maxBytes: MAX_INPUTS_FILE_BYTES,
+  });
 
   // One base, shared by mthds_save_method's validation leg and mthds_validate
   // — not a second context built from the same parts, since two hand-synced
@@ -163,8 +172,8 @@ export function buildLocalToolContexts(
     codegen: { ...buildCodegenContext(env), resolver, saveRoot: rootDir },
     // The workshop is co-located with the user's files, so its prepare tool
     // uploads file-bearing inputs (local paths, data: URLs, bytes).
-    prepare: { ...buildPrepareContext(env), resolver },
-    run: { ...buildRunContext(env), resolver },
+    prepare: { ...buildPrepareContext(env), resolver, inputsResolver },
+    run: { ...buildRunContext(env), resolver, inputsResolver },
     images: buildImagesContext(env),
     artifacts: { ...buildArtifactsContext(env), saveRoot: rootDir },
   };
@@ -356,6 +365,7 @@ export const mthdsPrepareInputsTool = defineTool({
     "Prepare a pipe's FILLED inputs for a run — upload file-bearing values (local paths, data: URLs, bytes) to Pipelex storage and rewrite them to pipelex-storage:// so they are run-ready. " +
     "http(s) URLs and existing pipelex-storage:// references pass through unchanged; an inputs set that is already all pass-through can skip this and go straight to mthds_run. " +
     "Name the method as files, as a published method's address via method_ref, or as a registered method's catalog id via method_id — exactly ONE of the three, never several — plus the filled inputs from mthds_inputs_template. " +
+    "Pass the inputs inline as inputs, or, for a large or machine-produced set, as inputs_path, the path of a .json file in the workspace — exactly one of the two. " +
     "Uploads are made with your API key.",
   inputSchema: mthdsPrepareInputsInputSchema,
   outputSchema: mthdsPrepareInputsOutputSchema,
@@ -381,6 +391,7 @@ export const mthdsRunTool = defineTool({
     "Executes the method on the hosted Pipelex API and spends inference credit. " +
     "When running from files, validate the bundle with mthds_validate and fill the inputs template from mthds_inputs_template first — " +
     "validation gives a structured, repairable verdict, where a start-time rejection only reports the failure. " +
+    "For a large or machine-produced inputs set, pass inputs_path, the path of a .json file in the workspace, instead of inputs — never both. " +
     "Returns the durable run id immediately (never blocks); follow up with mthds_run_status and mthds_run_results.",
   inputSchema: mthdsRunInputSchema,
   outputSchema: mthdsRunOutputSchema,

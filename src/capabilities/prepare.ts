@@ -8,6 +8,8 @@ import {
   classifyError,
   createPipelexApiClient,
   filesInputSchema,
+  inputsPathSchema,
+  resolveInputsSource,
   resolveSubmittedFiles,
   summaryForToolError,
   toolErrorSchema,
@@ -48,9 +50,11 @@ export const mthdsPrepareInputsInputSchema = {
     ),
   inputs: z
     .record(z.string(), z.unknown())
+    .optional()
     .describe(
-      "The caller's FILLED inputs (the mthds_inputs_template output, populated). File-bearing values are uploaded to Pipelex storage and rewritten to pipelex-storage://; http(s) URLs and existing pipelex-storage:// URIs pass through. An empty object uploads nothing.",
+      "The caller's FILLED inputs (the mthds_inputs_template output, populated). File-bearing values are uploaded to Pipelex storage and rewritten to pipelex-storage://; http(s) URLs and existing pipelex-storage:// URIs pass through. An empty object uploads nothing. Supply exactly ONE of inputs / inputs_path.",
     ),
+  inputs_path: inputsPathSchema,
 };
 
 const prepareStructuredContentSchema = z.object({
@@ -82,10 +86,11 @@ export interface MthdsPrepareInputsInput {
   method_ref?: string;
   method_id?: string;
   pipe_ref?: string;
-  inputs: Record<string, unknown>;
+  inputs?: Record<string, unknown>;
+  inputs_path?: string;
 }
 
-/** The prepare request after `{ path }` resolution — what the checks and the prepare step consume. */
+/** The prepare request after `{ path }` and `inputs_path` resolution — what the checks and the prepare step consume. */
 interface ResolvedPrepareRequest {
   files: SubmittedFile[];
   method_ref?: string;
@@ -127,6 +132,8 @@ export interface PrepareContext extends ApiConfig {
   client?: PrepareClient;
   /** Fills `{ path }` closure items from disk (local workshop). */
   resolver?: FileResolver;
+  /** Reads `inputs_path` from disk (local workshop, `.json` only); without one `inputs_path` is refused. */
+  inputsResolver?: FileResolver;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
@@ -247,11 +254,22 @@ export async function prepareMthdsInputs(
   context: PrepareContext = buildPrepareContext(),
 ): Promise<PrepareResult> {
   const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
-  if (resolution.errors.length > 0) {
-    return errorResult("Inputs were not prepared: request input is invalid.", resolution.errors);
+  const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
+    required: true,
+  });
+  const resolutionErrors = [...resolution.errors, ...inputsResolution.errors];
+  if (resolutionErrors.length > 0) {
+    return errorResult("Inputs were not prepared: request input is invalid.", resolutionErrors);
   }
 
-  const request: ResolvedPrepareRequest = { ...input, files: resolution.files };
+  // `inputs_path` is settled into `inputs` here and goes no further: the rest
+  // of the flow cannot tell a loaded file from an inline object.
+  const { inputs_path: _inputsPath, ...selection } = input;
+  const request: ResolvedPrepareRequest = {
+    ...selection,
+    files: resolution.files,
+    inputs: inputsResolution.inputs ?? {},
+  };
   const inputErrors = validatePrepareInputsRequest(request);
   if (inputErrors.length > 0) {
     return errorResult("Inputs were not prepared: request input is invalid.", inputErrors);
