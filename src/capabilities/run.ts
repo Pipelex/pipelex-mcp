@@ -1279,6 +1279,12 @@ const START_MAY_HAVE_RUN_STATUSES: ReadonlySet<number> = new Set([500, 502, 504,
  * answered for a request it may have accepted; and for a 500, which the platform
  * relays from the runner when its start call failed, and which can arrive after
  * Temporal has already recorded the start.
+ *
+ * This overrides the SDK's `retryable` on purpose, as `notRetryableCreate`
+ * (`catalog-write.ts`) does for a method create: the SDK's verdict says whether
+ * asking again can succeed, never whether it is safe, and it does not depend on
+ * the route. A retry that succeeds here is the second paid run, so it stays
+ * refused until the client can send an idempotency key.
  */
 export function classifyStartError(err: unknown, options: ClassifyErrorOptions): ToolError {
   const error = classifyError(err, options);

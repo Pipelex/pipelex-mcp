@@ -671,8 +671,10 @@ export async function saveMthdsMethod(
  * honours an `Idempotency-Key` and `@pipelex/sdk` exposes no way to send one, so
  * the retry mints a SECOND method under the same name. A create-side transport
  * fault is therefore reported as not retryable, with the cure that does work.
- * An update has no such hazard — `PUT` is idempotent by construction — so its
- * faults keep whatever `classifyError` decided.
+ * This overrides the SDK's `retryable` on purpose, as `classifyStartError`
+ * (`run.ts`) does for a start: the SDK's verdict says whether asking again can
+ * succeed, never whether it is safe. An update has no such hazard — `PUT` is
+ * idempotent by construction — so its faults keep the SDK's verdict.
  *
  * When the SDK gains the key, this function goes.
  */

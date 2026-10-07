@@ -299,7 +299,8 @@ describe("prepareMthdsInputs — the SDK upload walk", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: uploadWith(async () => {
-          throw new UploadTransportError("upstream died");
+          // Storage's 503, as the SDK's grant upload reports it.
+          throw new UploadTransportError("upstream died", { code: "server_error", status: 503 });
         }),
       },
     );

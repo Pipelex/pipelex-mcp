@@ -637,7 +637,7 @@ describe("getMthdsMethod", () => {
               undefined,
               "Method not found",
               undefined,
-              undefined,
+              "not_found", // the platform names an unknown method by its code
             );
           },
         },

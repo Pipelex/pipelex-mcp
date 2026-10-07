@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { RECORDED_FAILED_RUNS } from "./failed-run-fixtures.js";
 import {
@@ -11,6 +11,7 @@ import {
   supportLineOf,
 } from "./run-failure.js";
 import type { RunFailure } from "./run-failure.js";
+import { DEFAULT_API_URL, createPipelexApiClient } from "./shared.js";
 
 const { llmCompletion, sandboxProvisioning, extractJobFailure } = RECORDED_FAILED_RUNS;
 
@@ -54,23 +55,47 @@ describe("runFailureOf", () => {
     expect(JSON.stringify(failureOf(llmCompletion))).not.toContain("APIStatusError");
   });
 
-  it("reads no report, a report that is not an object, and one that says nothing, as none", () => {
-    for (const report of [null, undefined, "LLMCompletionError", 42, [], {}, { retryable: true }]) {
+  it("reads no report, and one that says nothing, as none", () => {
+    const silent = [null, undefined, {}, { retryable: true }, { error_type: "  ", title: "" }];
+    for (const report of silent) {
       expect(runFailureOf("run_x", report, "2026-09-23T15:16:37Z")).toBeUndefined();
     }
   });
 
-  it("drops a field of the wrong type rather than guessing it", () => {
-    const failure = runFailureOf("run_x", {
-      title: "LLM completion",
-      error_type: 12,
-      retryable: "no",
-      user_action: { kind: "change_model" },
-      error_domain: "  ",
-    });
+  it("drops a field of the wrong type, which the SDK reads as absent before it gets here", async () => {
+    // The status read the SDK actually hands back, from a stored report whose
+    // fields an older runner or a hand-written row got wrong: `@pipelex/sdk`
+    // checks it field by field, and this module adds only its own reading of a
+    // blank field.
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(
+        Response.json({
+          pipeline_run_id: "run_x",
+          status: "FAILED",
+          created_at: "2026-09-23T15:16:00Z",
+          finished_at: "2026-09-23T15:16:37Z",
+          error: {
+            title: "LLM completion",
+            error_type: 12,
+            retryable: "no",
+            user_action: { kind: "change_model" },
+            error_domain: "  ",
+          },
+        }),
+      ),
+    );
+    const read = await createPipelexApiClient({ baseUrl: DEFAULT_API_URL }).getRunStatus("run_x");
 
-    expect(failure).toEqual({ run_id: "run_x", title: "LLM completion" });
+    expect(runFailureOf(read.pipeline_run_id, read.error, read.finished_at)).toEqual({
+      run_id: "run_x",
+      title: "LLM completion",
+      finished_at: "2026-09-23T15:16:37Z",
+    });
   });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe("runFailureOf's bounds", () => {

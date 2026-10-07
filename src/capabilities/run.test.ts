@@ -1397,6 +1397,8 @@ describe("startMthdsRun by method_ref", () => {
             "The method declares in-process Python structures",
             undefined,
             undefined,
+            // The runner tags the gate's refusals `error_domain: input`.
+            { problem: { errorDomain: "input" } },
           ),
         ),
     });
@@ -1422,6 +1424,8 @@ describe("startMthdsRun by method_ref", () => {
           "This bundle ships custom Python (.py); running it requires a sandbox-hosted deployment.",
           undefined,
           undefined,
+          // The runner tags the gate's refusals `error_domain: input`.
+          { problem: { errorDomain: "input" } },
         ),
       );
 

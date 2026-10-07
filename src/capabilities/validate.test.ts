@@ -1308,6 +1308,7 @@ describe("validateMthds by selector (server pass-through)", () => {
     statusText: string,
     errorType?: string,
     serverMessage?: string,
+    errorDomain?: string,
   ): ApiResponseError {
     return new ApiResponseError(
       `HTTP ${status}`,
@@ -1319,6 +1320,7 @@ describe("validateMthds by selector (server pass-through)", () => {
       serverMessage,
       undefined, // validationErrors
       undefined, // code
+      errorDomain === undefined ? undefined : { problem: { errorDomain } },
     );
   }
 
@@ -1502,6 +1504,7 @@ describe("validateMthds by selector (server pass-through)", () => {
               "Forbidden",
               "MethodStructuresRefusedError",
               "hosted execution accepts MTHDS concepts and sandboxed PipeFuncs, not in-process Python",
+              "input", // the runner tags the gate's refusals `error_domain: input`
             );
           },
         },
@@ -1529,6 +1532,7 @@ describe("validateMthds by selector (server pass-through)", () => {
               "Forbidden",
               "CustomCodeRequiresSandbox",
               "This bundle ships custom Python (.py); running it requires a sandbox-hosted deployment.",
+              "input", // the runner tags the gate's refusals `error_domain: input`
             );
           },
         },

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ApiResponseError, ApiUnreachableError, ClientAuthenticationError } from "@pipelex/sdk";
+import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
 import type { ListMethodsQuery, MethodPage } from "@pipelex/sdk";
 
 import {
@@ -345,12 +345,8 @@ describe("listMthdsMethods failures", () => {
     });
   });
 
-  it("maps SDK and HTTP auth failures through deployment auth texture", async () => {
-    for (const error of [
-      new ClientAuthenticationError("Unauthorized"),
-      apiError(401, "Unauthorized"),
-      apiError(403, "Forbidden"),
-    ]) {
+  it("maps HTTP auth failures through deployment auth texture", async () => {
+    for (const error of [apiError(401, "Unauthorized"), apiError(403, "Forbidden")]) {
       const result = await failure(error, {
         authError: { location: "api_key", hint: "Bring your own key." },
       });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ApiResponseError, ApiUnreachableError, ClientAuthenticationError } from "@pipelex/sdk";
+import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
 import { MODEL_CATEGORIES } from "mthds/protocol";
 import type { ModelCategory, ModelDeck } from "mthds/protocol";
 
@@ -542,7 +542,7 @@ describe("failures", () => {
   });
 
   it("maps an auth failure through the deployment's texture", async () => {
-    for (const error of [new ClientAuthenticationError("Unauthorized"), apiError(403, "no")]) {
+    for (const error of [apiError(401, "Unauthorized"), apiError(403, "no")]) {
       const result = await readMthdsModels(
         {},
         contextFailing(error, { authError: { location: "api_key", hint: "Use your key." } }),
