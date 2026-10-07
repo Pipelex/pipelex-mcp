@@ -1317,6 +1317,33 @@ describe("startMthdsRun", () => {
     }
   });
 
+  it("warns that the run may exist even when the server says a retry cannot help", async () => {
+    // The runner's catch-all 500 states `retryable: false` whatever it
+    // interrupted, so the SDK's verdict says nothing about whether the start
+    // was recorded: the warning is decided by the failure, never by that flag.
+    const catchAll = new ApiResponseError(
+      "HTTP 500",
+      `${DEFAULT_API_URL}/v1/start`,
+      500,
+      "Internal Server Error",
+      "{}",
+      "UnexpectedError",
+      "An unexpected error occurred",
+      undefined,
+      undefined,
+      { problem: { errorDomain: "runtime", retryable: false } },
+    );
+    expect(catchAll.retryable).toBe(false);
+
+    const result = await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }] },
+      contextWith({ start: () => Promise.reject(catchAll) }),
+    );
+
+    expect(result.structuredContent.errors?.[0]?.hint).toContain("the run may have started");
+    expect(result.summary).toMatch(/^Run may have started/);
+  });
+
   it("refuses a retry of a 500 on the start, and nowhere else", async () => {
     // A 500 from the status route reads nothing into being and stays retryable.
     const status = await getMthdsRunStatus(
@@ -1397,8 +1424,8 @@ describe("startMthdsRun by method_ref", () => {
             "The method declares in-process Python structures",
             undefined,
             undefined,
-            // The runner tags the gate's refusals `error_domain: input`.
-            { problem: { errorDomain: "input" } },
+            // The runner sends this refusal with no `error_domain`
+            // (L-261007-31dea6), which the SDK reads as `config`.
           ),
         ),
     });
@@ -1424,7 +1451,7 @@ describe("startMthdsRun by method_ref", () => {
           "This bundle ships custom Python (.py); running it requires a sandbox-hosted deployment.",
           undefined,
           undefined,
-          // The runner tags the gate's refusals `error_domain: input`.
+          // The runner tags this refusal `error_domain: input` (raise_forbidden).
           { problem: { errorDomain: "input" } },
         ),
       );

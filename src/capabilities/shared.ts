@@ -862,12 +862,12 @@ function toolError(verdict: ToolVerdict, texture: ToolTexture): ToolError {
  * onto this server's class and takes `retryable` as it comes. What it adds is
  * this server's own: the wording, the locator a tool's caller can act on, the
  * hint and the `kind`. A few arms override the SDK's class on purpose — a
- * rejected credential, a route's 400 that no argument fixes, the reserved
- * registry form of `method_ref`, a 404 on a route that names no resource — and
- * each says why where it does. Two callers override `retryable` the same way,
- * for a write that may already have happened: `classifyStartError` (`run.ts`)
- * for a run's start and `notRetryableCreate` (`catalog-write.ts`) for a
- * method's create.
+ * rejected credential, the execution-locus gate's refusals, a route's 400 that
+ * no argument fixes, the reserved registry form of `method_ref`, a 404 on a
+ * route that names no resource — and each says why where it does. Callers
+ * override `retryable` the same way for a write that may already have
+ * happened: `classifyStartError` (`run.ts`) for a run's start and
+ * `notRetryableCreate` (`catalog-write.ts`) for a method's create.
  *
  * A failure that is not the SDK's keeps this server's reading: a bare
  * `PipelineRequestError` from `mthds` is `config`, and a fault nothing names is
@@ -890,14 +890,8 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
   }
 
   if (err instanceof PipelineRequestError) {
-    return toolError(
-      { class: "config", retryable: false },
-      {
-        location: "PIPELEX_BASE_URL",
-        message: err.message,
-        hint: "Check PIPELEX_BASE_URL and the submitted request.",
-      },
-    );
+    const verdict: ToolVerdict = { class: "config", retryable: false };
+    return toolError(verdict, genericTexture(verdict, err.message));
   }
 
   return toolError(
@@ -1137,27 +1131,35 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
   // The execution-locus gate's two refusals, each a 403 whose `error_type`
   // names the policy: a fetched package declaring in-process Python structure
   // classes, and a method shipping custom Python (`.py`) on a deployment that
-  // is not sandbox-hosted. Both are about the method, not the credential, and
-  // the runner tags both `error_domain: input`, which the SDK reads. They must
-  // be caught ahead of the generic 401/403 arm, whose texture sends a caller
-  // whose credential is perfectly good to go and mint a new key. The second is
-  // a property of the PAIR — the method and the deployment — and the method is
-  // not malformed: the very same method runs on a sandbox-hosted deployment,
-  // which is where PipeFunc Python belongs.
+  // is not sandbox-hosted. Both are about the method, not the credential, so
+  // both override the SDK's class to `input_domain`: the runner sends the
+  // second with `error_domain: input` but the first with no domain at all
+  // (L-261007-31dea6), and the SDK's own reading of a bare 403 is
+  // `config`. They must be caught ahead of the generic 401/403 arm, whose
+  // texture sends a caller whose credential is perfectly good to go and mint a
+  // new key. The second is a property of the PAIR — the method and the
+  // deployment — and the method is not malformed: the very same method runs on
+  // a sandbox-hosted deployment, which is where PipeFunc Python belongs.
   if (err.status === 403 && err.errorType === "MethodStructuresRefusedError") {
-    return toolError(verdict, {
-      location: "method_ref",
-      message,
-      hint: "Hosted execution accepts MTHDS concepts and sandboxed PipeFuncs, not in-process Python — the referenced package declares Python structure classes. Express its types as MTHDS concepts, or run it on a self-hosted OSS runner.",
-    });
+    return toolError(
+      { ...verdict, class: "input_domain" },
+      {
+        location: "method_ref",
+        message,
+        hint: "Hosted execution accepts MTHDS concepts and sandboxed PipeFuncs, not in-process Python — the referenced package declares Python structure classes. Express its types as MTHDS concepts, or run it on a self-hosted OSS runner.",
+      },
+    );
   }
 
   if (err.status === 403 && err.errorType === "CustomCodeRequiresSandbox") {
-    return toolError(verdict, {
-      location: options.methodLocation,
-      message,
-      hint: "This deployment is not sandbox-hosted, so it refuses a method that ships custom Python (.py) — the credential is not the problem. Run the method on a sandbox-hosted deployment, or name one whose pipes are all MTHDS.",
-    });
+    return toolError(
+      { ...verdict, class: "input_domain" },
+      {
+        location: options.methodLocation,
+        message,
+        hint: "This deployment is not sandbox-hosted, so it refuses a method that ships custom Python (.py) — the credential is not the problem. Run the method on a sandbox-hosted deployment, or name one whose pipes are all MTHDS.",
+      },
+    );
   }
 
   if (err.status === 401 || err.status === 403) {

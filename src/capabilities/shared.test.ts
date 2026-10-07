@@ -522,8 +522,12 @@ async function uploadFailure(answer: () => Promise<Response>): Promise<unknown> 
 }
 
 /** The runner's own rendering of a refusal: `error_type`, `detail` and `error_domain`. */
-function runnerProblem(errorType: string, detail: string, errorDomain: string) {
-  return { error_type: errorType, detail, error_domain: errorDomain };
+function runnerProblem(errorType: string, detail: string, errorDomain?: string) {
+  return {
+    error_type: errorType,
+    detail,
+    ...(errorDomain === undefined ? {} : { error_domain: errorDomain }),
+  };
 }
 
 describe("classifyError", () => {
@@ -939,12 +943,15 @@ describe("classifyError", () => {
     });
 
     it("classifies the structures refusal (403 MethodStructuresRefusedError) at method_ref", async () => {
-      const error = classifyError(
-        await refused(
-          403,
-          runnerProblem("MethodStructuresRefusedError", "Structure classes refused.", "input"),
-        ),
+      // The runner sends this refusal with no `error_domain` (L-261007-31dea6),
+      // and the SDK reads a bare 403 as `config`: the arm overrides it.
+      const refusal = await refused(
+        403,
+        runnerProblem("MethodStructuresRefusedError", "Structure classes refused."),
       );
+      expect(refusal.errorDomain).toBe("config");
+
+      const error = classifyError(refusal);
 
       expect(error).toMatchObject({
         class: "input_domain",

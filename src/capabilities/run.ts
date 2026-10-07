@@ -1284,11 +1284,14 @@ const START_MAY_HAVE_RUN_STATUSES: ReadonlySet<number> = new Set([500, 502, 504,
  * (`catalog-write.ts`) does for a method create: the SDK's verdict says whether
  * asking again can succeed, never whether it is safe, and it does not depend on
  * the route. A retry that succeeds here is the second paid run, so it stays
- * refused until the client can send an idempotency key.
+ * refused until the client can send an idempotency key. The warning does not
+ * wait on the SDK's `retryable` either: the runner's catch-all 500 states
+ * `retryable: false` whatever it interrupted, and a start it interrupted after
+ * Temporal recorded the run must still say the run may exist.
  */
 export function classifyStartError(err: unknown, options: ClassifyErrorOptions): ToolError {
   const error = classifyError(err, options);
-  if (!error.retryable || !startMayHaveRun(err)) return error;
+  if (!startMayHaveRun(err)) return error;
   return { ...error, retryable: false, hint: START_MAY_HAVE_RUN_HINT };
 }
 
