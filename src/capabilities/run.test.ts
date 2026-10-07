@@ -42,7 +42,12 @@ import {
 } from "./run.js";
 import type { RunContext } from "./run.js";
 import { RECORDED_FAILED_RUNS } from "./failed-run-fixtures.js";
-import { classifyError, DEFAULT_API_URL, MAX_IMAGE_CANDIDATE_ENTRIES } from "./shared.js";
+import {
+  classifyError,
+  createPipelexApiClient,
+  DEFAULT_API_URL,
+  MAX_IMAGE_CANDIDATE_ENTRIES,
+} from "./shared.js";
 
 const RUN_ID = "01JRUN0000000000000000TEST";
 
@@ -1342,6 +1347,26 @@ describe("startMthdsRun", () => {
 
     expect(result.structuredContent.errors?.[0]?.hint).toContain("the run may have started");
     expect(result.summary).toMatch(/^Run may have started/);
+  });
+
+  it("says the run may exist when the start's acknowledgement came back unreadable", async () => {
+    // A 2xx the SDK could not read is a start the server accepted, which the
+    // SDK reports as a final ApiResponseError: the run exists all the same.
+    vi.stubGlobal("fetch", () => Promise.resolve(new Response("", { status: 202 })));
+    try {
+      const real = createPipelexApiClient({ baseUrl: DEFAULT_API_URL });
+      const result = await startMthdsRun(
+        { files: [{ content: 'domain = "demo"' }] },
+        contextWith({ start: (options: PipelexStartOptions) => real.start(options) }),
+      );
+
+      const error = result.structuredContent.errors?.[0];
+      expect(error?.retryable).toBe(false);
+      expect(error?.hint).toContain("the run may have started");
+      expect(result.summary).toMatch(/^Run may have started/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("refuses a retry of a 500 on the start, and nowhere else", async () => {

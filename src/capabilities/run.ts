@@ -1305,9 +1305,10 @@ function startMayHaveRun(err: unknown): boolean {
   // pipelex-server#145 (a 502 before): the runner wraps a failed Temporal start
   // call in PipelexBridgeDispatchError whether or not the workflow began. A 429
   // is a throttle refusing the request before it runs, and a 503 a platform
-  // that could not take it.
+  // that could not take it. A 2xx the SDK could not read is a start the server
+  // accepted whose acknowledgement was lost, so the run exists.
   if (err instanceof ApiResponseError) {
-    return START_MAY_HAVE_RUN_STATUSES.has(err.status);
+    return (err.status >= 200 && err.status < 300) || START_MAY_HAVE_RUN_STATUSES.has(err.status);
   }
   return false;
 }

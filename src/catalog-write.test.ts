@@ -5,7 +5,7 @@ import path from "node:path";
 import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
 import type { MethodData, MethodWriteInput, PipelexValidationResult } from "@pipelex/sdk";
 import { parseMethodFiles } from "mthds/protocol";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LINK_FILE_NAME, apiHostOf, readMethodLink } from "./capabilities/catalog-link.js";
 import {
@@ -15,7 +15,7 @@ import {
   storedSourceFiles,
 } from "./capabilities/catalog-write.js";
 import type { CatalogWriteClient, CatalogWriteContext } from "./capabilities/catalog-write.js";
-import { DEFAULT_API_URL } from "./capabilities/shared.js";
+import { DEFAULT_API_URL, createPipelexApiClient } from "./capabilities/shared.js";
 import type { ToolError } from "./capabilities/shared.js";
 import { localFileResolver } from "./files.js";
 
@@ -326,6 +326,29 @@ describe("saveMthdsMethod", () => {
     const [error] = errorsOf(result.structuredContent);
     expect(error.retryable).toBe(false);
     expect(error.hint).toContain("mthds_list_methods");
+  });
+
+  it("warns that the method may exist when the create's answer came back unreadable", async () => {
+    // A 2xx the SDK could not read is a create the platform accepted, which the
+    // SDK reports as a final ApiResponseError: the method exists all the same.
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+    vi.stubGlobal("fetch", () => Promise.resolve(new Response("", { status: 201 })));
+    try {
+      const real = createPipelexApiClient({ baseUrl: DEFAULT_API_URL });
+      const result = await saveMthdsMethod(
+        { files: [{ path: "methods/demo/bundle.mthds" }], name: "Demo" },
+        contextFor(
+          { ...clientNotCalled, createMethod: (input) => real.createMethod(input) },
+          validationAnswering(validReport),
+        ),
+      );
+
+      const [error] = errorsOf(result.structuredContent);
+      expect(error.retryable).toBe(false);
+      expect(error.hint).toContain("mthds_list_methods");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("leaves an update's transport fault retryable, PUT being idempotent", async () => {
