@@ -639,6 +639,24 @@ export async function saveMthdsMethod(
     return saveError("The method was not saved: request input is invalid.", outside);
   }
 
+  // Where the link file may go is a different question from what the files are
+  // NAMED relative to — see {@link linkDirectoryOf}.
+  const linkDir = linkDirectoryOf(parsed.data.files);
+  // The claim, and with it the draft token this save is held to, is read
+  // BEFORE the bytes it will send, because the token certifies the state those
+  // bytes were read against. Read after them — the files are resolved and the
+  // remote validation awaited first — a second save from this directory could
+  // land in between, move the draft and refresh the link, and this save would
+  // then send that newer token with its older bytes and replace the newer
+  // draft without a conflict. Read first, any save that refreshed the link
+  // since has moved the draft past this token, and the platform refuses it.
+  // It is also read once, before either arm touches the catalog, because both
+  // arms are irreversible in the same way: a create that ran first left a
+  // duplicate, and a draft write that ran first left a different method's
+  // draft replaced — per SPEC.md delete is admin-only, and a replaced draft is
+  // gone.
+  const claim = await linkedMethodAt(context, parsed.data.link_dir ?? linkDir);
+
   // Resolve ONCE. The bytes that are validated are the bytes that are saved:
   // splitting the two — validate in the skill, save in a second call — would
   // read the files twice and the verdict would not be provably about the saved
@@ -676,9 +694,6 @@ export async function saveMthdsMethod(
     );
   }
 
-  // Where the link file may go is a different question from what the files are
-  // NAMED relative to — see {@link linkDirectoryOf}.
-  const linkDir = linkDirectoryOf(parsed.data.files);
   const named = nameFiles(bundle.files, bundleDir, "method", ".mthds", "files");
   if (!named.ok) {
     return saveError("The method was not saved: request input is invalid.", [named.error]);
@@ -765,12 +780,6 @@ export async function saveMthdsMethod(
   let renameError: ToolError | undefined;
   let previousName: string | undefined;
   let draftMovedTo: string | undefined;
-
-  // Read ONCE, before either arm touches the catalog, because both arms are
-  // irreversible in the same way: a create that ran first left a duplicate,
-  // and a draft write that ran first left a different method's draft replaced
-  // — per SPEC.md delete is admin-only, and a replaced draft is gone.
-  const claim = await linkedMethodAt(context, parsed.data.link_dir ?? linkDir);
 
   if (targetId === undefined) {
     // Preventing a duplicate is the link file's whole purpose, and it was

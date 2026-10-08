@@ -586,6 +586,81 @@ describe("saveMthdsMethod", () => {
     );
   });
 
+  it("holds a save to the token its link recorded before its files were read", async () => {
+    await writeBundle("methods/demo", {
+      "bundle.mthds": 'domain = "older"',
+      [LINK_FILE_NAME]: JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "T0",
+      }),
+    });
+
+    // One draft, compare-and-swapped as the platform does.
+    let draft = { content: "", updatedAt: "T0", writes: 0 };
+    const client: CatalogWriteClient = {
+      ...clientNotCalled,
+      async writeDraft(_id, input) {
+        if (
+          input.expected_updated_at !== undefined &&
+          input.expected_updated_at !== draft.updatedAt
+        ) {
+          throw draftConflict();
+        }
+        draft = {
+          content: input.mthds,
+          updatedAt: `T${draft.writes + 1}`,
+          writes: draft.writes + 1,
+        };
+        return storedMethod({ updated_at: draft.updatedAt });
+      },
+      async getMethod() {
+        return storedMethod({ updated_at: draft.updatedAt });
+      },
+    };
+    // The first validation waits until the second save has landed.
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let validations = 0;
+    const validation = {
+      baseUrl: DEFAULT_API_URL,
+      client: {
+        async validate(): Promise<PipelexValidationResult> {
+          throw new Error("the selector leg must not be called by a save");
+        },
+        async validateFiles(): Promise<PipelexValidationResult> {
+          validations += 1;
+          if (validations === 1) await gate;
+          return validReport;
+        },
+      },
+    } as unknown as CatalogWriteContext["validation"];
+
+    const first = saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one" },
+      contextFor(client, validation),
+    );
+    await vi.waitFor(() => expect(validations).toBe(1));
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "newer"' });
+    const second = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one" },
+      contextFor(client, validation),
+    );
+    expect(second.structuredContent.status).toBe("ok");
+    release();
+
+    // The first save read its bytes against T0; the link moved to T1 while it
+    // validated, and sending T1 would replace the newer draft with older bytes.
+    const [error] = errorsOf((await first).structuredContent);
+    expect(error).toMatchObject({ location: "expected_updated_at" });
+    expect(draft.content).toContain("newer");
+    const link = await readMethodLink(path.join(root, "methods/demo"));
+    expect(link.kind === "link" && link.link.synced_updated_at).toBe("T1");
+  });
+
   it("reads mt_…@draft as the bare id, and refuses a version", async () => {
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
 
