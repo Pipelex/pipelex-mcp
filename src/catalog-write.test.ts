@@ -2476,7 +2476,10 @@ describe("the pull reads the draft by default, and a version on @n", () => {
     });
     expect(result.summary).toContain("now holds version 2, not the draft");
     expect(result.summary).toContain(`expected_updated_at ${stored.updated_at}`);
-    expect(result.summary).toContain("a save without it is refused");
+    expect(result.summary).toContain("a save without the token is refused");
+    // An omitted python keeps the draft's, so the restore must say what to send.
+    expect(result.summary).toContain("python: []");
+    expect(result.summary).toContain("not one to publish under");
     expect(result.summary).toContain("publishes nothing");
   });
 

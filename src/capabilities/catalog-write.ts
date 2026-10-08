@@ -254,7 +254,7 @@ export const mthdsGetMethodOutputSchema = z.object({
     .string()
     .optional()
     .describe(
-      "The draft's token as of this read, whichever content was read — what pipelex-method.json records and what a later save or publish sends.",
+      "The draft's token as of this read, whichever content was read — what pipelex-method.json records and what a later save sends. After a read of a version it is for a restore only, never a publish: the draft's content was not read.",
     ),
   latest_version: latestVersionSchema.optional(),
   publish_state: publishStateSchema.optional(),
@@ -1009,7 +1009,7 @@ function draftTokenOf(
         class: "input_domain",
         location: "expected_updated_at",
         message: `\`${claim.dir}\` holds version ${link.synced_version} of \`${methodId}\`, pulled over the draft, so this save would replace the draft with that version's files and any edits made to them: that restores version ${link.synced_version} as the draft, and loses whatever the draft held beyond it. Nothing was written.`,
-        hint: `If the user wants version ${link.synced_version} restored as the draft, save again with expected_updated_at "${link.synced_updated_at}". Otherwise pull the draft back into the directory (method_id "${methodId}") and work from it.`,
+        hint: `If the user wants version ${link.synced_version} restored as the draft, save again with expected_updated_at "${link.synced_updated_at}", and with python set to that version's .py files ([] when it has none), since an omitted python keeps the Python the draft holds. Otherwise pull the draft back into the directory (method_id "${methodId}") and work from it.`,
         retryable: false,
       },
     };
@@ -1309,6 +1309,17 @@ export async function getMthdsMethod(
     return inlineResult(stored, content, apiHost, await support);
   }
   return writtenResult(context, client, parsed.data, stored, content, apiHost, await support);
+}
+
+/**
+ * What a restore of a pulled version must send as `python`. An omitted
+ * `python` keeps the Python the draft holds, so a restore that leaves it out
+ * carries the draft's Python into a version that never had it.
+ */
+function restorePythonClause(python: MethodFile[]): string {
+  return python.length === 0
+    ? "python: [] (this version has no Python, and an omitted python keeps the draft's)"
+    : `python set to the version's ${python.map((file) => `\`${file.name}\``).join(", ")} (an omitted python keeps the draft's)`;
 }
 
 /** The draft's files, or the version's, as named files. */
@@ -1686,7 +1697,7 @@ async function writtenResult(
     if (callers !== undefined) lines.push(callers);
   } else {
     lines.push(
-      `The directory now holds version ${content.version}, not the draft. To restore it as the draft once the user has asked, save from here with expected_updated_at ${stored.updated_at}; a save without it is refused, so the draft (updated_at ${stored.updated_at}) is never replaced by accident. Restoring publishes nothing.`,
+      `The directory now holds version ${content.version}, not the draft. To restore it as the draft once the user has asked, save from here with expected_updated_at ${stored.updated_at} and ${restorePythonClause(content.python)}; a save without the token is refused, so the draft (updated_at ${stored.updated_at}) is never replaced by accident. Restoring publishes nothing, and that token is not one to publish under: the draft's content was not read here.`,
     );
   }
   if (content.synthesizedName) {

@@ -610,7 +610,7 @@ export const mthdsGetMethodTool = defineTool({
 const PUBLISH_METHOD_DESCRIPTION = [
   "Publish a saved method's draft as its next immutable version. Callers of the method's bare id (mt_…) run its latest published version, so this is the deployment gesture; mt_…@<n> pins one version.",
   "Call it ONLY when the user asks for a publish. Saving a draft with mthds_save_method is never a reason to publish.",
-  "Pass expected_draft_updated_at, the draft token you last saw (the updated_at of your last save or pull of this method, or pipelex-method.json's synced_updated_at): a draft that changed since is refused, so you never publish one you have not seen.",
+  "Pass expected_draft_updated_at, the draft token you last saw (the updated_at of your last save of this method or your last pull of its draft, or pipelex-method.json's synced_updated_at when it records no synced_version; a pull of mt_…@<n> reports the draft's token without its content, so never publish under it): a draft that changed since is refused, so you never publish one you have not seen.",
   "The answer is a verdict on outcome: published with the new version number, unchanged when the draft already equals the latest version, or refused with the validation errors when the draft does not validate or does not run yet.",
 ].join(" ");
 

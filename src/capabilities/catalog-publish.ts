@@ -53,7 +53,7 @@ export const mthdsPublishMethodInputSchema = {
     .string()
     .min(1)
     .describe(
-      `The draft token you last saw: the updated_at your last ${WORKSHOP_TOOL_NAMES.saveMethod} or ${WORKSHOP_TOOL_NAMES.getMethod} of this method reported, or pipelex-method.json's synced_updated_at. A draft that moved since is refused and nothing is published.`,
+      `The draft token you last saw: the updated_at your last ${WORKSHOP_TOOL_NAMES.saveMethod} of this method, or your last ${WORKSHOP_TOOL_NAMES.getMethod} of its draft, reported, or pipelex-method.json's synced_updated_at when it records no synced_version. A read of a version reports the draft's token without its content, so never publish under that one. A draft that moved since is refused and nothing is published.`,
     ),
 };
 
@@ -179,7 +179,7 @@ export async function publishMthdsMethod(
         class: "input_domain" as const,
         ...(issue.path.length === 0 ? {} : { location: issue.path.join(".") }),
         message: issue.message,
-        hint: "Pass the method's catalog id and the draft token you last saw (the updated_at of your last save or pull of it).",
+        hint: "Pass the method's catalog id and the draft token you last saw (the updated_at of your last save of it, or of your last pull of its draft).",
         retryable: false,
       })),
     );

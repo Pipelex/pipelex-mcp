@@ -2992,7 +2992,7 @@
             ]
           },
           "updated_at": {
-            "description": "The draft's token as of this read, whichever content was read — what pipelex-method.json records and what a later save or publish sends.",
+            "description": "The draft's token as of this read, whichever content was read — what pipelex-method.json records and what a later save sends. After a read of a version it is for a restore only, never a publish: the draft's content was not read.",
             "type": "string"
           },
           "latest_version": {
@@ -3169,7 +3169,7 @@
     },
     {
       "name": "mthds_publish_method",
-      "description": "Publish a saved method's draft as its next immutable version. Callers of the method's bare id (mt_…) run its latest published version, so this is the deployment gesture; mt_…@<n> pins one version. Call it ONLY when the user asks for a publish. Saving a draft with mthds_save_method is never a reason to publish. Pass expected_draft_updated_at, the draft token you last saw (the updated_at of your last save or pull of this method, or pipelex-method.json's synced_updated_at): a draft that changed since is refused, so you never publish one you have not seen. The answer is a verdict on outcome: published with the new version number, unchanged when the draft already equals the latest version, or refused with the validation errors when the draft does not validate or does not run yet.",
+      "description": "Publish a saved method's draft as its next immutable version. Callers of the method's bare id (mt_…) run its latest published version, so this is the deployment gesture; mt_…@<n> pins one version. Call it ONLY when the user asks for a publish. Saving a draft with mthds_save_method is never a reason to publish. Pass expected_draft_updated_at, the draft token you last saw (the updated_at of your last save of this method or your last pull of its draft, or pipelex-method.json's synced_updated_at when it records no synced_version; a pull of mt_…@<n> reports the draft's token without its content, so never publish under it): a draft that changed since is refused, so you never publish one you have not seen. The answer is a verdict on outcome: published with the new version number, unchanged when the draft already equals the latest version, or refused with the validation errors when the draft does not validate or does not run yet.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3181,7 +3181,7 @@
           "expected_draft_updated_at": {
             "type": "string",
             "minLength": 1,
-            "description": "The draft token you last saw: the updated_at your last mthds_save_method or mthds_get_method of this method reported, or pipelex-method.json's synced_updated_at. A draft that moved since is refused and nothing is published."
+            "description": "The draft token you last saw: the updated_at your last mthds_save_method of this method, or your last mthds_get_method of its draft, reported, or pipelex-method.json's synced_updated_at when it records no synced_version. A read of a version reports the draft's token without its content, so never publish under that one. A draft that moved since is refused and nothing is published."
           }
         },
         "required": [
