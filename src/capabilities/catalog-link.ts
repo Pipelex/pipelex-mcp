@@ -1,7 +1,7 @@
-import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { errorMessage, isMissingPathError } from "./workspace-boundary.js";
 
@@ -203,7 +203,7 @@ export interface LinkReplacement {
  *
  * Call it inside {@link inLinkTurn} and {@link withLinkLock}, which make the
  * compare and the write one step for every call in this process and in every
- * other workshop process on this machine.
+ * other workshop process of this user on this machine.
  */
 export async function replaceMethodLink(
   root: string,
@@ -275,7 +275,7 @@ export function sameLinkRead(a: LinkRead, b: LinkRead): boolean {
  * Within a turn the steps are atomic for this process. Every WRITE in one —
  * the save's compare-and-swap, the pull's whole landing — also holds
  * {@link withLinkLock}, which makes it atomic for every other workshop process
- * on this machine. A save's read takes no lock: a pull marks the link
+ * of this user on this machine. A save's read takes no lock: a pull marks the link
  * (`partial_pull`) before it writes a file and finishes it after the last, and
  * the save reads its links again after its files and refuses when they moved,
  * so a landing that overlaps the read is caught without one.
@@ -288,36 +288,32 @@ export function inLinkTurn<T>(work: () => Promise<T>): Promise<T> {
   return turn;
 }
 
-// ── one writer per directory, across processes ─────────────────────
+// ── one writer at a time, across processes ─────────────────────────
 
-/** How long a call waits for another workshop process to finish writing one directory. */
+/** How long a call waits for another workshop process to finish its write. */
 export const LINK_LOCK_WAIT_MS = 10_000;
-
-/**
- * The age past which a lock is taken for abandoned. A lock is held only for a
- * few local file operations — never across a call to the platform — so a lock
- * this old belongs to a process that was killed, or paused far longer than any
- * write it was making.
- */
-export const LINK_LOCK_STALE_MS = 30_000;
 
 const LINK_LOCK_POLL_MS = 5;
 
-/** Why a call could not take the lock of the directory it writes; nothing was written under it. */
+/** SQLite's "database is locked": another connection holds its transaction. */
+const SQLITE_BUSY = 5;
+
+/** Why a call could not take the workshop's write lock; nothing was written under it. */
 export class LinkLockError extends Error {
   override name = "LinkLockError";
-}
 
-/** Who holds a lock, as the lock file records it. */
-interface LockHolder {
-  pid: number;
-  host: string;
-  at: number;
+  /** `busy`: another workshop process holds it, and a retry in a moment succeeds; otherwise the lock cannot be had here at all. */
+  constructor(
+    message: string,
+    readonly busy: boolean,
+  ) {
+    super(message);
+  }
 }
 
 /**
- * Run `work` holding the lock every workshop process on this machine takes
- * before it writes the link file, or a pull's files, in `dir`.
+ * Run `work` holding the lock every workshop process of this user on this
+ * machine takes before it writes a link file or a pull's files, anywhere.
  *
  * The link's compare-and-swap is two file operations, a read and a write, and
  * only one process's turns are ordered by {@link inLinkTurn}. Between two
@@ -326,165 +322,157 @@ interface LockHolder {
  * then recorded its draft token over the version's files, and the next
  * ordinary save replaced the draft with that version — the restore guard
  * bypassed, and the bytes the first save sent gone from the draft and from
- * disk. Under contention the two processes lost about half their swaps to
- * each other. So every write holds this lock, and the compare and the write,
- * and a pull's provisional link, files and final link, are one step for every
+ * disk. Under contention two processes lost about half their swaps to each
+ * other. So every write holds this lock, and the compare and the write, and a
+ * pull's provisional link, files and final link, are one step for every
  * process that takes it.
  *
- * The lock is a file created exclusively under the OS temp directory, never
- * in the user's directory, which is committed. Its name is derived from the
- * directory's device and inode, so two spellings of one directory — a
- * symlink, a different case on a case-insensitive disk — take one lock. A
- * directory that does not exist yet is named by its nearest existing ancestor
- * and the rest of its path.
+ * **One lock for every directory**, the cross-process twin of
+ * {@link inLinkTurn}'s one queue, and for the same reasons: a save's files and
+ * its link can sit in different directories, two pulls into a directory and a
+ * subdirectory of it write the same file, and one directory has several
+ * spellings. Per-directory locks let a pull into `work` and one into
+ * `work/sub` both land `work/sub/helpers.py`, each link then vouching for its
+ * own method's copy; under one lock the second landing finds the file changed
+ * since its plan read it and is refused. A hold is a few file operations and
+ * never a call to the platform, so one lock costs nothing that matters.
  *
- * It is held for a few file operations and never across a call to the
- * platform. A holder that cannot have finished is taken for dead, which is
- * the guess any lock on disk must make: a holder on this host whose process is
- * gone is dead at once, and any holder older than {@link LINK_LOCK_STALE_MS}
- * is dead too. A holder merely paused past that age resumes inside the next
- * one's lock, which reopens the window this lock closes, but only after a
- * pause thousands of times longer than the hold. And the lock binds only
- * processes that share the temp directory — by default, one user's sessions on
- * one machine, which is where two workshops write one directory.
+ * **The lock is an exclusive SQLite transaction** on a file in a directory of
+ * this user's own under the OS temp directory, never in the user's directory,
+ * which is committed. SQLite takes it with the operating system's file lock,
+ * which the kernel releases the moment its holder's process ends, however it
+ * ends: there is no lock file to judge abandoned, so no guess about whether a
+ * holder is dead, paused or on another host, and no recovery that could take
+ * a live holder's lock — the failure every lock written as a file on disk
+ * carries. The directory is created private to the user and refused when
+ * another user owns it, since a temp directory may be shared between users.
+ * The lock binds the processes that share that directory: one user's sessions
+ * on one machine, which is where two workshops write one directory.
  *
- * Waits up to {@link LINK_LOCK_WAIT_MS}; past that, or when the lock file
- * cannot be created at all, it throws {@link LinkLockError} and `work` never
- * runs, so a caller refuses rather than write unguarded.
+ * Waits up to {@link LINK_LOCK_WAIT_MS}; past that, or when the lock cannot be
+ * opened at all, it throws {@link LinkLockError} and `work` never runs, so a
+ * caller refuses rather than write unguarded.
  */
-export async function withLinkLock<T>(
-  dir: string,
+export function withLinkLock<T>(
   work: () => Promise<T>,
   options: { waitMs?: number } = {},
 ): Promise<T> {
-  const lockPath = await linkLockPath(dir);
-  const token = await acquireLinkLock(lockPath, options.waitMs ?? LINK_LOCK_WAIT_MS);
+  const turn = lockTurn.then(() => holdingLinkLock(work, options.waitMs ?? LINK_LOCK_WAIT_MS));
+  lockTurn = turn.catch(() => undefined);
+  return turn;
+}
+
+/** The file whose exclusive transaction is the lock, in this user's private directory under the OS temp directory. */
+export function linkLockFile(): string {
+  const user =
+    typeof process.getuid === "function"
+      ? String(process.getuid())
+      : os.userInfo().username.replace(/[^A-Za-z0-9_-]/g, "_");
+  return path.join(os.tmpdir(), `pipelex-mcp-${user}`, "write-lock.sqlite");
+}
+
+/** This process's connection to each lock file it has opened; kept open, since closing one releases nothing it holds. */
+const lockConnections = new Map<string, DatabaseSync>();
+
+/** In-process order for {@link withLinkLock}: one connection holds one transaction at a time. */
+let lockTurn: Promise<unknown> = Promise.resolve();
+
+async function holdingLinkLock<T>(work: () => Promise<T>, waitMs: number): Promise<T> {
+  const file = linkLockFile();
+  const lock = await openLinkLock(file);
+  await beginExclusive(lock, waitMs);
   try {
     return await work();
   } finally {
-    await releaseLinkLock(lockPath, token);
+    releaseLinkLock(file, lock);
   }
 }
 
-/** Where the lock of `dir` lives — exported so a test can stand in for another process holding it. */
-export async function linkLockPath(dir: string): Promise<string> {
-  const key = await directoryKey(dir);
-  const name = createHash("sha256").update(key).digest("hex").slice(0, 32);
-  return path.join(os.tmpdir(), "pipelex-mcp-link-locks", `${name}.lock`);
-}
-
-/** The device and inode of `dir`, or of its nearest existing ancestor followed by the rest of its path. */
-async function directoryKey(dir: string): Promise<string> {
-  let current = path.resolve(dir);
-  const missing: string[] = [];
-  for (;;) {
-    try {
-      const stat = await fs.stat(current, { bigint: true });
-      return [`${stat.dev}:${stat.ino}`, ...missing.reverse()].join("/");
-    } catch (err) {
-      if (!isMissingPathError(err)) throw err;
-      const parent = path.dirname(current);
-      if (parent === current) return path.resolve(dir);
-      missing.push(path.basename(current));
-      current = parent;
-    }
-  }
-}
-
-async function acquireLinkLock(lockPath: string, waitMs: number): Promise<string> {
-  const holder: LockHolder = { pid: process.pid, host: os.hostname(), at: Date.now() };
-  const token = JSON.stringify({ ...holder, nonce: randomUUID() });
-  const deadline = Date.now() + waitMs;
+async function openLinkLock(file: string): Promise<DatabaseSync> {
+  const open = lockConnections.get(file);
+  if (open !== undefined) return open;
   try {
-    await fs.mkdir(path.dirname(lockPath), { recursive: true });
-    for (;;) {
-      try {
-        await fs.writeFile(lockPath, token, { encoding: "utf8", flag: "wx" });
-        return token;
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      }
-      await breakAbandonedLock(lockPath);
-      if (Date.now() >= deadline) {
-        throw new LinkLockError(
-          `another workshop process has been writing this directory for over ${Math.round(waitMs / 1000)} s`,
-        );
-      }
-      await new Promise((resolve) => setTimeout(resolve, LINK_LOCK_POLL_MS));
-    }
+    await ensurePrivateDirectory(path.dirname(file));
+    const lock = new DatabaseSync(file, { timeout: 0 });
+    lockConnections.set(file, lock);
+    return lock;
   } catch (err) {
     if (err instanceof LinkLockError) throw err;
     throw new LinkLockError(
-      `the workshop's lock for this directory could not be taken at ${lockPath} (${errorMessage(err)})`,
+      `the workshop's write lock could not be opened at ${file} (${errorMessage(err)})`,
+      false,
     );
   }
 }
 
 /**
- * Remove the lock at `lockPath` when its holder cannot still be writing.
- *
- * The removal renames the lock aside first, which only one of several callers
- * can do, and then checks that what it moved is the lock it judged: a holder
- * that took the lock in between is put back.
+ * Make `dir` this user's own directory, closed to everyone else, or refuse:
+ * under a temp directory other users share, a directory another user made
+ * first could hold a lock file that refuses every write here, or one that
+ * holds nothing at all.
  */
-async function breakAbandonedLock(lockPath: string): Promise<void> {
-  let raw: string;
-  let modifiedAt: number;
+async function ensurePrivateDirectory(dir: string): Promise<void> {
   try {
-    raw = await fs.readFile(lockPath, "utf8");
-    modifiedAt = (await fs.stat(lockPath)).mtimeMs;
+    await fs.mkdir(dir, { mode: 0o700 });
   } catch (err) {
-    if (isMissingPathError(err)) return;
-    throw err;
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
   }
-  const holder = lockHolderOf(raw);
-  // A lock file read between its creation and its first write is empty, so its
-  // age is the file's own.
-  const age = Date.now() - (holder?.at ?? modifiedAt);
-  const gone = holder !== undefined && holder.host === os.hostname() && !processAlive(holder.pid);
-  if (!gone && age < LINK_LOCK_STALE_MS) return;
-
-  const aside = `${lockPath}.abandoned-${randomUUID()}`;
-  try {
-    await fs.rename(lockPath, aside);
-  } catch (err) {
-    if (isMissingPathError(err)) return;
-    throw err;
+  const entry = await fs.lstat(dir);
+  if (!entry.isDirectory()) {
+    throw new LinkLockError(
+      `${dir}, where the workshop keeps its write lock, is not a directory`,
+      false,
+    );
   }
-  const moved = await fs.readFile(aside, "utf8").catch(() => undefined);
-  if (moved !== raw) {
-    // Not the lock judged abandoned: a live holder took it after the read.
-    await fs.link(aside, lockPath).catch(() => undefined);
+  if (typeof process.getuid !== "function") return;
+  if (entry.uid !== process.getuid()) {
+    throw new LinkLockError(
+      `${dir}, where the workshop keeps its write lock, belongs to another user`,
+      false,
+    );
   }
-  await fs.rm(aside, { force: true });
+  if ((entry.mode & 0o077) !== 0) await fs.chmod(dir, 0o700);
 }
 
-/** Remove the lock only while it is still this call's own, never one taken after it was broken. */
-async function releaseLinkLock(lockPath: string, token: string): Promise<void> {
-  const raw = await fs.readFile(lockPath, "utf8").catch(() => undefined);
-  if (raw === token) await fs.rm(lockPath, { force: true }).catch(() => undefined);
+async function beginExclusive(lock: DatabaseSync, waitMs: number): Promise<void> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      lock.exec("BEGIN EXCLUSIVE");
+      return;
+    } catch (err) {
+      if ((err as { errcode?: unknown }).errcode !== SQLITE_BUSY) {
+        throw new LinkLockError(
+          `the workshop's write lock could not be taken (${errorMessage(err)})`,
+          false,
+        );
+      }
+    }
+    if (Date.now() >= deadline) {
+      throw new LinkLockError(
+        `another workshop process on this machine has been writing for over ${Math.round(waitMs / 1000)} s`,
+        true,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, LINK_LOCK_POLL_MS));
+  }
 }
 
-function lockHolderOf(raw: string): LockHolder | undefined {
+/**
+ * End the transaction. Nothing was written in it, so ending it can only fail
+ * on a connection that is itself broken, and closing that one releases its
+ * lock as surely as a commit.
+ */
+function releaseLinkLock(file: string, lock: DatabaseSync): void {
   try {
-    const parsed = JSON.parse(raw) as Partial<LockHolder>;
-    return typeof parsed.pid === "number" &&
-      typeof parsed.host === "string" &&
-      typeof parsed.at === "number"
-      ? { pid: parsed.pid, host: parsed.host, at: parsed.at }
-      : undefined;
+    lock.exec("COMMIT");
   } catch {
-    return undefined;
-  }
-}
-
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // EPERM: the process exists and belongs to someone else.
-    return (err as NodeJS.ErrnoException).code === "EPERM";
+    lockConnections.delete(file);
+    try {
+      lock.close();
+    } catch {
+      // Already closed; nothing is held.
+    }
   }
 }
 

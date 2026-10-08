@@ -1375,7 +1375,7 @@ async function writeLinkForSave(
   // cannot be taken leaves the link unwritten rather than written unguarded,
   // and never fails the save, whose draft is already stored.
   try {
-    const replaced = await withLinkLock(target.dir, () =>
+    const replaced = await withLinkLock(() =>
       replaceMethodLink(target.root, target.dir, expected, buildMethodLink(fields)),
     );
     return { report: replaced.report, changed: replaced.changed };
@@ -1871,12 +1871,13 @@ async function writtenResult(
   // the directory under the plan, and so did an edit to a destination since
   // the plan read it, so the pull is refused before it writes a file, rather
   // than land on a state it never looked at. The whole landing holds the
-  // directory's lock, so another workshop process neither writes between a
-  // compare and its write nor resumes this pull while it is still writing.
+  // workshop's write lock, so another workshop process neither writes between
+  // a compare and its write, nor resumes this pull while it is still writing,
+  // nor lands into a directory nested in this one at the same time.
   let landed: PullLanding;
   try {
     landed = await inLinkTurn(() =>
-      withLinkLock(dir, () =>
+      withLinkLock(() =>
         landPull({
           root,
           dir,
@@ -1893,13 +1894,15 @@ async function writtenResult(
     );
   } catch (err) {
     if (!(err instanceof LinkLockError)) throw err;
-    return getError("The method was not written: its directory is being written by another call.", [
+    return getError("The method was not written: the workshop's write lock could not be taken.", [
       {
         class: "runtime",
         location: "output_dir",
         message: `${err.message}, so nothing was written.`,
-        hint: "Pull again in a moment: the other call is a save or a pull from another workshop process on this machine.",
-        retryable: true,
+        hint: err.busy
+          ? "Pull again in a moment: another workshop process on this machine is saving or pulling."
+          : "Fix what the message names, then pull again: no pull writes without that lock.",
+        retryable: err.busy,
       },
     ]);
   }

@@ -14,7 +14,12 @@ import type {
 import { parseMethodFiles } from "mthds/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { LINK_FILE_NAME, apiHostOf, readMethodLink } from "./capabilities/catalog-link.js";
+import {
+  LINK_FILE_NAME,
+  apiHostOf,
+  linkLockFile,
+  readMethodLink,
+} from "./capabilities/catalog-link.js";
 import {
   buildCatalogWriteContext,
   getMthdsMethod,
@@ -2657,7 +2662,7 @@ describe("round 1 of the convergence review", () => {
   });
 });
 
-describe("round 3 of the convergence review: the directory's lock", () => {
+describe("rounds 3 and 4 of the convergence review: the workshop's write lock", () => {
   const link = {
     method_id: "mt_one",
     name: "Summarize PDF",
@@ -2673,8 +2678,8 @@ describe("round 3 of the convergence review: the directory's lock", () => {
     savedTmpdir = process.env.TMPDIR;
     const blocked = path.join(root, "blocked-tmp");
     await fs.mkdir(blocked);
-    await fs.writeFile(path.join(blocked, "pipelex-mcp-link-locks"), "not a directory", "utf8");
     process.env.TMPDIR = blocked;
+    await fs.writeFile(path.dirname(linkLockFile()), "not a directory", "utf8");
   });
 
   afterEach(() => {
@@ -2682,7 +2687,7 @@ describe("round 3 of the convergence review: the directory's lock", () => {
     else process.env.TMPDIR = savedTmpdir;
   });
 
-  it("refuses a pull, writing nothing, when the directory's lock cannot be taken", async () => {
+  it("refuses a pull, writing nothing, when the workshop's write lock cannot be taken", async () => {
     const result = await getMthdsMethod(
       { method_id: "mt_one", output_dir: "work" },
       contextFor(
@@ -2696,14 +2701,16 @@ describe("round 3 of the convergence review: the directory's lock", () => {
       ),
     );
 
+    // Not busy: no retry takes a lock that cannot be opened, so it is not retryable.
     const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "runtime", location: "output_dir", retryable: true });
-    expect(error.message).toContain("lock for this directory could not be taken");
+    expect(error).toMatchObject({ class: "runtime", location: "output_dir", retryable: false });
+    expect(error.message).toContain("write lock");
+    expect(error.message).toContain("nothing was written");
     await expect(fs.access(path.join(root, "work", "bundle.mthds"))).rejects.toThrow();
     await expect(fs.access(path.join(root, "work", LINK_FILE_NAME))).rejects.toThrow();
   });
 
-  it("keeps the save, and leaves its link unwritten, when the directory's lock cannot be taken", async () => {
+  it("keeps the save, and leaves its link unwritten, when the workshop's write lock cannot be taken", async () => {
     await writeBundle("work", {
       "bundle.mthds": 'domain = "demo"',
       [LINK_FILE_NAME]: JSON.stringify(link),
@@ -2724,9 +2731,7 @@ describe("round 3 of the convergence review: the directory's lock", () => {
 
     expect(result.structuredContent).toMatchObject({ status: "ok", saved: "updated" });
     expect(linkFileOf(result.structuredContent)).toMatchObject({ written: false });
-    expect(linkFileOf(result.structuredContent)?.reason).toContain(
-      "lock for this directory could not be taken",
-    );
+    expect(linkFileOf(result.structuredContent)?.reason).toContain("write lock");
     expect(await fs.readFile(path.join(root, "work", LINK_FILE_NAME), "utf8")).toBe(
       JSON.stringify(link),
     );
