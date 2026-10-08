@@ -550,13 +550,9 @@ async function validateRequest(
       // selectors and one that does not yet, so the selector is planned against
       // the platform's answer (`method-versions.ts`) and the result says which
       // content was validated.
-      const planned = await planById(request.method_id, context.methodVersions, client, {
+      plan = await planById(request.method_id, context.methodVersions, client, {
         needBareReport: true,
       });
-      if (!planned.ok) {
-        return errorResult(planned.summary, [planned.error]);
-      }
-      plan = planned.plan;
       report = await client.validate({ method_id: plan.send }, true, undefined, undefined, [
         ...VALIDATE_VIEW_TOKENS,
       ]);
@@ -566,7 +562,7 @@ async function validateRequest(
     }
   } catch (err) {
     const classified = classifyError(err, { ...classifyOptions, auth: context.authError });
-    const error = selectorFailure(err, classified, plan, context.methodVersions);
+    const error = await selectorFailure(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);
   }
 

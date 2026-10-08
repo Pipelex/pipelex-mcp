@@ -39,9 +39,9 @@ async function planned(
   value: string,
   support: MethodVersionsSupport,
   needBareReport = true,
-): Promise<{ plan?: SelectorPlan; error?: ToolError; summary?: string; asked: number }> {
+): Promise<{ plan: SelectorPlan; asked: number }> {
   let asked = 0;
-  const outcome = await planMethodSelector(
+  const plan = await planMethodSelector(
     value,
     async () => {
       asked += 1;
@@ -49,9 +49,7 @@ async function planned(
     },
     { needBareReport },
   );
-  return outcome.ok
-    ? { plan: outcome.plan, asked }
-    : { error: outcome.error, summary: outcome.summary, asked };
+  return { plan, asked };
 }
 
 afterEach(() => {
@@ -160,25 +158,17 @@ describe("methodVersionsSupport", () => {
 
   it("asks again the moment the platform starts resolving selectors", async () => {
     // The transition a cached `unsupported` would have hidden: the next call
-    // reads the new answer, so a draft is never sent as the bare id after it.
+    // reads the new answer, so a bare id is never reported as the draft after it.
     const memory = createMethodVersionsMemory();
     let answer: unknown = UNSUPPORTED;
-    const read = async (): Promise<unknown> => answer;
+    const client = { version: async (): Promise<unknown> => answer };
 
-    expect(
-      (await planById("mt_a@draft", memory, { version: read }, { needBareReport: true })).ok,
-    ).toBe(true);
-    const before = await planById(
-      "mt_a@draft",
-      memory,
-      { version: read },
-      { needBareReport: true },
-    );
-    expect(before.ok && before.plan.send).toBe("mt_a");
+    const before = await planById("mt_a", memory, client, { needBareReport: true });
+    expect(before.reads).toBe("draft");
 
     answer = SUPPORTED;
-    const after = await planById("mt_a@draft", memory, { version: read }, { needBareReport: true });
-    expect(after.ok && after.plan.send).toBe("mt_a@draft");
+    const after = await planById("mt_a", memory, client, { needBareReport: true });
+    expect(after.reads).toBe("latest");
   });
 
   it("never caches unknown", async () => {
@@ -246,31 +236,18 @@ describe("planMethodSelector", () => {
     expect((await planned("mt_a", "unknown")).plan?.reads).toBeUndefined();
   });
 
-  it("sends @draft bare where a bare id reads the draft, and as given elsewhere", async () => {
-    expect((await planned("mt_a@draft", "unsupported")).plan).toMatchObject({
-      send: "mt_a",
-      reads: "draft",
-      translated: true,
-    });
-    for (const support of ["supported", "unknown"] as const) {
-      expect((await planned("mt_a@draft", support)).plan).toMatchObject({
-        send: "mt_a@draft",
-        reads: "draft",
-        translated: false,
+  it("sends every suffix as it was given, on every platform, without asking", async () => {
+    // Rewritten by a stale answer, @draft sent as the bare id would read or
+    // run the latest published version; a platform that cannot read a suffix
+    // refuses it instead, and its refusal says so.
+    for (const support of ["supported", "unsupported", "unknown"] as const) {
+      expect(await planned("mt_a@draft", support)).toMatchObject({
+        plan: { send: "mt_a@draft", reads: "draft" },
+        asked: 0,
       });
-    }
-  });
-
-  it("refuses @n where nothing can read a version by its id, before anything is sent", async () => {
-    const refused = await planned("mt_a@3", "unsupported");
-    expect(refused.error).toMatchObject({ class: "input_domain", location: "method_id" });
-    expect(refused.error?.hint).toContain('"mt_a@3"');
-    expect(refused.summary).toContain("Nothing was sent");
-
-    for (const support of ["supported", "unknown"] as const) {
-      expect((await planned("mt_a@3", support)).plan).toMatchObject({
-        send: "mt_a@3",
-        reads: 3,
+      expect(await planned("mt_a@3", support)).toMatchObject({
+        plan: { send: "mt_a@3", reads: 3 },
+        asked: 0,
       });
     }
   });
@@ -280,7 +257,7 @@ describe("what a tooling result says it read", () => {
   it("names the content, or says it could not tell", async () => {
     const sentence = async (value: string, support: MethodVersionsSupport) => {
       const { plan } = await planned(value, support);
-      return plan === undefined ? undefined : methodContentSentence(plan, "validated");
+      return methodContentSentence(plan, "validated");
     };
 
     expect(await sentence("mt_a", "supported")).toContain(
@@ -290,7 +267,7 @@ describe("what a tooling result says it read", () => {
       "this platform does not resolve versions yet, so a bare id reads the draft",
     );
     expect(await sentence("mt_a", "unknown")).toContain("could not ask the platform");
-    expect(await sentence("mt_a@draft", "unsupported")).toContain("the bare id was sent");
+    expect(await sentence("mt_a@draft", "unsupported")).toBe("This validated the draft of `mt_a`.");
     expect(await sentence("mt_a@3", "supported")).toBe("This validated version 3 of `mt_a`.");
     expect(await sentence("not-an-id", "supported")).toBeUndefined();
   });
@@ -311,14 +288,14 @@ describe("runContentReport", () => {
     expect(report.sentence).toContain("names no version");
   });
 
-  it("warns loudly when the run executes other content than was asked", async () => {
-    const { plan } = await planned("mt_a@draft", "unsupported");
-    const report = runContentReport(plan as SelectorPlan, 4);
-    expect(report.ran).toBe(4);
-    expect(report.sentence).toMatch(
-      /^WARNING: this run executes version 4 of `mt_a`, NOT the draft/,
-    );
-    expect(report.sentence).toContain("`mt_a@draft`");
+  it("reports an accepted suffix as what it named, acknowledged or not", async () => {
+    // A platform that does not resolve suffixes refuses one before a run
+    // exists, so an accepted one ran what it named.
+    const draft = runContentReport((await planned("mt_a@draft", "unknown")).plan, undefined);
+    expect(draft).toMatchObject({ ran: "draft", proved: false });
+    expect(draft.sentence).toBe("It runs the draft of `mt_a`.");
+    const third = runContentReport((await planned("mt_a@3", "unknown")).plan, undefined);
+    expect(third).toMatchObject({ ran: 3, proved: false });
   });
 
   it("ignores an acknowledgement version it cannot read", async () => {
@@ -330,7 +307,7 @@ describe("runContentReport", () => {
 });
 
 describe("noteSelectorRefusal", () => {
-  const unknownId: ToolError = {
+  const atMethodId: ToolError = {
     class: "input_domain",
     location: "method_id",
     message: "No such method.",
@@ -338,67 +315,105 @@ describe("noteSelectorRefusal", () => {
     retryable: false,
   };
 
-  function refusal(code: string): ApiResponseError {
+  /** A refusal as the SDK throws it, with the problem document's field errors. */
+  function refusal(
+    code: string,
+    status = 404,
+    errors?: { field: string; code: string }[],
+  ): ApiResponseError {
     return new ApiResponseError(
       "refused",
-      "https://api-dev.pipelex.com/v1/validate",
-      404,
-      "Not Found",
+      "https://api-dev.pipelex.com/v1/start",
+      status,
+      "Refused",
       "{}",
       undefined,
       "refused",
       undefined,
       code,
+      errors === undefined ? undefined : { problem: { status, code, errors } as never },
     );
   }
+  /** How the run route of a platform that does not resolve suffixes refuses the `@`. */
+  const patternRefusal = () =>
+    refusal("validation_failed", 422, [{ field: "method_id", code: "string_pattern_mismatch" }]);
 
-  it("reads a refused suffix as a platform that may not resolve it, and forgets supported", async () => {
+  it("says a platform that refused a suffix by its pattern does not resolve suffixes, and forgets supported", async () => {
     const memory = createMethodVersionsMemory();
     noteMethodVersionsSupported(memory);
-    const { plan } = await planned("mt_a@3", "supported");
+    const { plan } = await planned("mt_a@draft", "unknown");
 
-    const noted = noteSelectorRefusal(
-      refusal("not_found"),
-      unknownId,
-      plan as SelectorPlan,
-      memory,
+    const noted = await noteSelectorRefusal(patternRefusal(), atMethodId, plan, memory);
+
+    expect(noted.hint).toContain(
+      "does not resolve version suffixes yet, so it refused `mt_a@draft`",
     );
-
-    expect(noted.hint).toContain("may not resolve version suffixes yet");
+    expect(noted.hint).toContain("a bare `mt_a` reads the method's draft");
     expect(memory.cached).toBeUndefined();
   });
 
-  it("says to call again with @draft when the bare id sent for it met a platform that resolves suffixes", async () => {
+  it("reads a miss by what the platform answers: plain where it resolves suffixes, explained where it does not", async () => {
     const memory = createMethodVersionsMemory();
-    const { plan } = await planned("mt_a@draft", "unsupported");
-    const notPublished: ToolError = { ...unknownId, message: "mt_a is not published." };
+    noteMethodVersionsSupported(memory);
+    const resolving = await planById("mt_a@3", memory, {}, { needBareReport: true });
+    // A platform that resolves suffixes misses a method that does not exist
+    // the same way: the miss contradicts nothing, and the memory stays.
+    expect(await noteSelectorRefusal(refusal("not_found"), atMethodId, resolving, memory)).toBe(
+      atMethodId,
+    );
+    expect(memory.cached?.support).toBe("supported");
 
-    const noted = noteSelectorRefusal(
-      refusal("method_not_published"),
-      notPublished,
-      plan as SelectorPlan,
+    const fresh = createMethodVersionsMemory();
+    const old = await planById(
+      "mt_a@3",
+      fresh,
+      { version: async () => UNSUPPORTED },
+      { needBareReport: true },
+    );
+    expect(
+      (await noteSelectorRefusal(refusal("not_found"), atMethodId, old, fresh)).hint,
+    ).toContain("it was not found because this platform does not resolve version suffixes yet");
+
+    const silent = await planById(
+      "mt_a@3",
+      createMethodVersionsMemory(),
+      {},
+      { needBareReport: true },
+    );
+    expect(
+      (await noteSelectorRefusal(refusal("not_found"), atMethodId, silent, undefined)).hint,
+    ).toContain("may not resolve version suffixes yet");
+  });
+
+  it("names the method's own draft when a bare id meets a never-published method, and takes it as proof", async () => {
+    const memory = createMethodVersionsMemory();
+    const { plan } = await planned("mt_a", "unknown", false);
+
+    const noted = await noteSelectorRefusal(
+      refusal("method_not_published", 409),
+      atMethodId,
+      plan,
       memory,
     );
 
-    expect(noted.hint).toContain("call again with method_id `mt_a@draft`");
+    expect(noted.hint).toContain("`mt_a@draft`");
     expect(memory.cached?.support).toBe("supported");
   });
 
-  it("leaves alone a refusal that proves the suffix was read, and a bare id's", async () => {
+  it("reads nothing about suffixes into a refusal about something else, or a bare id's miss", async () => {
     const memory = createMethodVersionsMemory();
     noteMethodVersionsSupported(memory);
-    const { plan } = await planned("mt_a@3", "supported");
-
-    expect(
-      noteSelectorRefusal(
-        refusal("method_version_not_found"),
-        unknownId,
-        plan as SelectorPlan,
-        memory,
-      ),
-    ).toBe(unknownId);
-    const bare = (await planned("mt_a", "supported")).plan as SelectorPlan;
-    expect(noteSelectorRefusal(refusal("not_found"), unknownId, bare, memory)).toBe(unknownId);
+    const { plan } = await planned("mt_a@draft", "unknown");
+    for (const err of [
+      refusal("method_being_deleted", 409),
+      refusal("validation_failed", 422, [{ field: "inputs", code: "missing" }]),
+    ]) {
+      expect(await noteSelectorRefusal(err, atMethodId, plan, memory)).toBe(atMethodId);
+    }
+    const bare = (await planned("mt_a", "supported")).plan;
+    expect(await noteSelectorRefusal(refusal("not_found"), atMethodId, bare, memory)).toBe(
+      atMethodId,
+    );
     expect(memory.cached?.support).toBe("supported");
   });
 });

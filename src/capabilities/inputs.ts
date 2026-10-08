@@ -293,13 +293,9 @@ export async function buildMthdsInputs(
       // selectors yet, and the latest published version on one that does: the
       // selector is planned against the platform's answer, and the result says
       // which content the template came from (`method-versions.ts`).
-      const planned = await planById(request.method_id, context.methodVersions, client, {
+      plan = await planById(request.method_id, context.methodVersions, client, {
         needBareReport: true,
       });
-      if (!planned.ok) {
-        return errorResult(planned.summary, [planned.error]);
-      }
-      plan = planned.plan;
       sent = { ...request, method_id: plan.send };
     }
     report = await client.pipeIo(toPipeIoRequest(sent));
@@ -308,7 +304,7 @@ export async function buildMthdsInputs(
       ...inputsErrorOptions(request),
       auth: context.authError,
     });
-    const error = selectorFailure(err, classified, plan, context.methodVersions);
+    const error = await selectorFailure(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);
   }
 

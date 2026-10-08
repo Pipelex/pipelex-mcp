@@ -256,7 +256,7 @@ describe("prepareMthdsInputs — the SDK upload walk", () => {
       onPlatform(["runs"]),
     );
 
-    expect(captured.map((request) => request.method_id)).toEqual(["mt_123", "mt_123"]);
+    expect(captured.map((request) => request.method_id)).toEqual(["mt_123", "mt_123@draft"]);
     expect(latest.structuredContent.method_version).toBe("latest");
     expect(drafted.structuredContent.method_version).toBe("draft");
     expect(drafted.summary).toContain("the draft of `mt_123`");

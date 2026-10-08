@@ -290,13 +290,9 @@ export async function prepareMthdsInputs(
       // selectors yet, and the latest published version on one that does: the
       // selector is planned against the platform's answer, and the result says
       // whose signature the inputs were prepared against (`method-versions.ts`).
-      const planned = await planById(request.method_id, context.methodVersions, client, {
+      plan = await planById(request.method_id, context.methodVersions, client, {
         needBareReport: true,
       });
-      if (!planned.ok) {
-        return errorResult(planned.summary, [planned.error]);
-      }
-      plan = planned.plan;
       sent = { ...request, method_id: plan.send };
     }
     // Built inside the try for the same reason the client is: the selector
@@ -310,7 +306,7 @@ export async function prepareMthdsInputs(
     prepared = await prepareWithUpload(client, envelope);
   } catch (err) {
     const classified = classifyError(err, { ...classifyOptions, auth: context.authError });
-    const error = selectorFailure(err, classified, plan, context.methodVersions);
+    const error = await selectorFailure(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);
   }
 

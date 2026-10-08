@@ -459,7 +459,7 @@ describe("generateMthdsCode request mapping", () => {
     expect(captured).not.toHaveProperty("files");
   });
 
-  it("sends @draft bare and says it read the draft where versions do not resolve", async () => {
+  it("sends @draft as given and says it read the draft", async () => {
     let captured: CodegenRequest | undefined;
 
     const result = await generateMthdsCode(
@@ -478,7 +478,7 @@ describe("generateMthdsCode request mapping", () => {
       },
     );
 
-    expect(captured).toMatchObject({ method_id: "mt_123" });
+    expect(captured).toMatchObject({ method_id: "mt_123@draft" });
     expect(result.structuredContent.method_version).toBe("draft");
     expect(result.summary).toContain("generated code from the draft of `mt_123`");
   });

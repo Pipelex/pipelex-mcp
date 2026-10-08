@@ -676,7 +676,7 @@ describe("buildMthdsInputs by method_id, on both platforms", () => {
     expect(result.summary).toContain("the latest published version of `mt_123`");
   });
 
-  it("says a bare id read the draft, and sends @draft bare, where they do not", async () => {
+  it("says a bare id read the draft where they do not, and sends @draft as given", async () => {
     const requests: PipeIORequest[] = [];
     const bare = await buildMthdsInputs(
       { method_id: "mt_123", pipe_ref: "demo.main" },
@@ -688,7 +688,7 @@ describe("buildMthdsInputs by method_id, on both platforms", () => {
       { method_id: "mt_123@draft", pipe_ref: "demo.main" },
       onPlatform(["runs"], requests),
     );
-    expect(requests.map((request) => request.method_id)).toEqual(["mt_123", "mt_123"]);
+    expect(requests.map((request) => request.method_id)).toEqual(["mt_123", "mt_123@draft"]);
     expect(drafted.structuredContent.method_version).toBe("draft");
   });
 

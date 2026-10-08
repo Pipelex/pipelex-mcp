@@ -19,30 +19,38 @@ import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
  *
  * - **Without version resolution** (it does not list `method_versions` in
  *   `GET /v1/version`'s `extensions`), a bare id reads the method's stored
- *   content, which IS its draft, and a suffixed id is looked up literally and
- *   refused. There, `mt_abc@draft` is sent as the bare id, which reads the
- *   same draft, and `mt_abc@3` is refused here, since nothing on that platform
- *   can read a version by its id.
- * - **With version resolution**, every selector is sent as it was given, and a
- *   bare id reads the latest published version.
+ *   content, which IS its draft, and a suffixed id is refused: the run route's
+ *   body pattern refuses the `@` with a `422`, and the tooling routes look the
+ *   id up literally and miss it with a `404`.
+ * - **With version resolution**, a bare id reads the latest published version,
+ *   or is refused with a `409` `method_not_published` for a method never
+ *   published.
+ *
+ * **Every selector is sent as it was given, on both.** The workshop never
+ * rewrites a selector or refuses one by its own reading of the platform: that
+ * reading can be stale while a release reaches the platform's tasks unevenly,
+ * and a draft rewritten as the bare id would then read or run the latest
+ * published version — every method existing when the platform started
+ * resolving versions was published as version 1, so that version almost
+ * always differs from an edited draft. A platform that does not resolve a
+ * suffix refuses it, loudly, and the refusal's hint says that a bare id reads
+ * the draft there.
  *
  * Only `supported` is cached, for ten minutes, in the memory the workshop
  * shares across its tools (`createMethodVersionsMemory`). `unsupported` is
  * asked afresh by every call that depends on it, because it is the answer that
- * goes stale dangerously: once the platform resolves selectors, a draft sent as
- * a bare id reads the published version, and a bare id reported as the draft
- * is the published version, and a cached `unsupported` would keep doing both
- * for as long as it was believed. A fresh handshake narrows that to the time
+ * goes stale misleadingly: once the platform resolves selectors, a bare id
+ * reported as the draft is the published version, for as long as a cached
+ * `unsupported` would be believed. A fresh handshake narrows that to the time
  * between the handshake and the request, which a rolling deploy can still
  * stretch while old and new platform tasks answer side by side; a run's
  * acknowledgement catches it there, and a tooling route cannot. `unknown` is
  * never cached either. A handshake is given three seconds, and past that the
- * call reads `unknown`.
+ * call reads `unknown`. The answer is asked only for a bare id whose result
+ * says what it read, and for a refusal's hint.
  *
- * **Unknown fails safe**: every selector is then sent as it was given, so a
- * platform that resolves it reads exactly what was addressed and one that does
- * not refuses it, loudly, and nothing reads other content than the caller
- * named. Each tool's result says which content it ran or read: the draft, a
+ * **Unknown says so**: a bare id's result then says it cannot tell which
+ * content it read. Each tool's result says which content it ran or read: the draft, a
  * version number, the latest published version, or, for a bare id this server
  * could not place, that it could not tell. A run's start acknowledgement
  * carries `method_version` on a platform that resolves selectors, so a run
@@ -275,7 +283,7 @@ export interface MethodVersionsAware {
 
 /** What a by-id call sends, and what it can say about the content it reads. */
 export interface SelectorPlan {
-  /** The `method_id` to send. */
+  /** The `method_id` to send: the selector exactly as it was given. */
   send: string;
   /** The bare id, for the result's sentences. */
   methodId: string;
@@ -283,98 +291,56 @@ export interface SelectorPlan {
   selector: MethodSelector;
   /** The content the call reads, when this server can tell; absent when it cannot. */
   reads?: MethodVersionReport;
-  /** The platform's answer this plan was made on. */
+  /** The platform's answer, asked for a bare id whose result says what it read; `unknown` otherwise. */
   support: MethodVersionsSupport;
-  /** `@draft` sent as the bare id, because the platform reads its bare id as the draft. */
-  translated: boolean;
+  /** Asks the platform, for the hint of a refused suffix; absent when the client cannot. */
+  readVersion?: VersionReader;
 }
-
-/**
- * A refusal carries its own headline: nothing was sent, so the calling tool's
- * "the Pipelex API rejected the request" would misreport it.
- */
-export type PlanOutcome =
-  | { ok: true; plan: SelectorPlan }
-  | { ok: false; error: ToolError; summary: string };
 
 /**
  * Plan a by-id call of a tooling route (`mthds_validate`,
  * `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`) or of a
- * run, where the id alone names what runs.
+ * run, where the id alone names what runs. The selector is sent as it was
+ * given, always.
  *
- * `askSupport` is only called when the answer changes what is sent or what
- * the result can say: never for an opaque id, and for a bare id only when
- * `needBareReport` is set. The run passes it unset, since its acknowledgement
- * says which version it ran.
+ * `askSupport` is called for a bare id alone, and only when `needBareReport`
+ * is set: what a bare id reads depends on the platform, and the result says
+ * which. The run passes it unset, since its acknowledgement says which
+ * version it ran. A suffix needs no answer: a platform that reads it reads
+ * exactly what it names, and one that does not refuses it.
  */
 export async function planMethodSelector(
   value: string,
   askSupport: () => Promise<MethodVersionsSupport>,
   options: { needBareReport: boolean },
-): Promise<PlanOutcome> {
+  readVersion?: VersionReader,
+): Promise<SelectorPlan> {
   const selector = readMethodSelector(value);
-  const base = { methodId: selector.methodId, selector, translated: false };
-
-  if (selector.form === "opaque") {
-    return { ok: true, plan: { ...base, send: value, support: "unknown" } };
+  const base = {
+    send: value,
+    methodId: selector.methodId,
+    selector,
+    ...(readVersion === undefined ? {} : { readVersion }),
+  };
+  if (selector.form === "draft") return { ...base, reads: "draft", support: "unknown" };
+  if (selector.form === "version") {
+    return { ...base, reads: selector.version, support: "unknown" };
   }
-
-  if (selector.form === "bare") {
-    if (!options.needBareReport) {
-      return { ok: true, plan: { ...base, send: value, support: "unknown" } };
-    }
+  if (selector.form === "bare" && options.needBareReport) {
     const support = await askSupport();
     const reads: MethodVersionReport | undefined =
       support === "supported" ? "latest" : support === "unsupported" ? "draft" : undefined;
-    return {
-      ok: true,
-      plan: { ...base, send: value, support, ...(reads === undefined ? {} : { reads }) },
-    };
+    return { ...base, support, ...(reads === undefined ? {} : { reads }) };
   }
-
-  const support = await askSupport();
-
-  if (selector.form === "draft") {
-    // On a platform that reads a bare id as its stored content, that content
-    // IS the draft, so the bare id reads exactly what `@draft` names.
-    return support === "unsupported"
-      ? {
-          ok: true,
-          plan: { ...base, send: selector.methodId, reads: "draft", support, translated: true },
-        }
-      : { ok: true, plan: { ...base, send: value, reads: "draft", support } };
-  }
-
-  if (support === "unsupported") {
-    return {
-      ok: false,
-      error: versionUnresolvableError(selector.methodId, selector.version),
-      summary: `Nothing was sent: this Pipelex platform cannot read \`${value}\` by its id yet.`,
-    };
-  }
-  return { ok: true, plan: { ...base, send: value, reads: selector.version, support } };
-}
-
-/**
- * `mt_…@<n>` on a platform that cannot read a version by its id. It is
- * `input_domain`, not `config`, by the spec's test for the class: a request the
- * caller can write — the version's files, pulled — works on this same platform.
- */
-function versionUnresolvableError(methodId: string, version: number): ToolError {
-  return {
-    class: "input_domain",
-    location: "method_id",
-    message: `This Pipelex platform does not resolve version suffixes yet, so \`${methodId}@${version}\` cannot be read by its id here. Nothing was sent.`,
-    hint: `On this platform a bare \`${methodId}\` reads the method's draft. To use version ${version}, pull it with ${WORKSHOP_TOOL_NAMES.getMethod} ({ method_id: "${methodId}@${version}", output_dir }) and pass its files instead.`,
-    retryable: false,
-  };
+  return { ...base, support: "unknown" };
 }
 
 /**
  * The run's linkage form: files run, and `method_id` beside them only files the
  * run under the method, so it must be the bare id. A suffix would claim a
  * version that did not run; the platform refuses it with a 422, and this says
- * why before anything is sent.
+ * why before anything is sent. This refusal is the linkage form's own rule,
+ * true on every platform, and reads nothing of the platform's answer.
  */
 export function linkageSuffixError(value: string): ToolError | undefined {
   const selector = readMethodSelector(value);
@@ -410,9 +376,6 @@ export function methodContentSentence(plan: SelectorPlan, verb: string): string 
     return `This ${verb} \`${id}\` by its bare id, and this server could not ask the platform which content that names: the latest published version on a platform that resolves versions, the draft on one that does not yet. Pass \`${id}@draft\` or \`${id}@<n>\` to say which.`;
   }
   const phrase = methodContentPhrase(id, plan.reads);
-  if (plan.translated) {
-    return `This ${verb} ${phrase}. This platform does not resolve version suffixes yet, so the bare id was sent, which reads the draft there.`;
-  }
   if (plan.selector.form === "bare" && plan.reads === "draft") {
     return `This ${verb} ${phrase}: this platform does not resolve versions yet, so a bare id reads the draft. Once it does, a bare id reads the latest published version, and \`${id}@draft\` the draft.`;
   }
@@ -426,48 +389,100 @@ export function methodContentSentence(plan: SelectorPlan, verb: string): string 
 const SELECTOR_RESOLVED_CODES: ReadonlySet<string> = new Set([
   "method_version_not_found",
   "method_not_published",
-  "method_being_deleted",
 ]);
 
 /**
- * An error for a request whose suffixed id the platform refused as unknown or
- * malformed, which is also how a platform that does not resolve selectors
- * answers one: the hint says so, and the memory forgets a `supported` that the
- * refusal contradicts. A refusal carrying one of the version codes came from a
- * platform that read the suffix, and is left as it is — unless the call sent
- * `@draft` as the bare id, believing the platform did not resolve suffixes:
- * then the code proves it does, the bare id named the published version, and
- * the hint says to call again with `@draft`.
+ * Whether `err` is a refusal only a platform that resolves selectors sends: a
+ * `409` `method_not_published` or a `404` `method_version_not_found`. Either
+ * proves the capability, whatever the memory says.
  */
-export function noteSelectorRefusal(
+function provesMethodVersions(err: unknown): boolean {
+  return (
+    err instanceof ApiResponseError &&
+    err.code !== undefined &&
+    SELECTOR_RESOLVED_CODES.has(err.code)
+  );
+}
+
+/**
+ * How a platform that does not resolve selectors refuses a suffixed id, and
+ * how certain that reading is.
+ *
+ * - `unread`: the run route's body pattern refuses the `@` before any lookup,
+ *   with a `422` `validation_failed` naming `method_id`. A platform that
+ *   resolves selectors never answers a well-formed one so.
+ * - `missed`: the tooling routes look the id up literally and miss it, with a
+ *   `404` `not_found`, which a platform that resolves selectors also answers
+ *   for a method that does not exist.
+ *
+ * Any other refusal (a method being deleted, a draft with no source, inputs
+ * refused) says nothing about the suffix.
+ */
+function suffixRefusalOf(err: unknown): "unread" | "missed" | undefined {
+  if (!(err instanceof ApiResponseError)) return undefined;
+  if (
+    err.status === 422 &&
+    err.code === "validation_failed" &&
+    (err.errors ?? []).some((field) => field.field === "method_id")
+  ) {
+    return "unread";
+  }
+  if (err.status === 404 && err.code === "not_found") return "missed";
+  return undefined;
+}
+
+function neverPublishedHint(methodId: string): string {
+  return `\`${methodId}\` has a draft and no published version yet, and a bare id names the latest published version. Address its draft as \`${methodId}@draft\`, or publish it with ${WORKSHOP_TOOL_NAMES.publishMethod} — only when the user asks for a publish.`;
+}
+
+/**
+ * Read a failed by-id call for what it says about the platform, and word the
+ * error accordingly.
+ *
+ * A version refusal proves the capability, and a never-published one gets a
+ * hint naming this method's own draft selector. A suffix the caller addressed
+ * (`@draft` or `@<n>`) refused the way a platform that does not resolve
+ * suffixes refuses one gets a hint about it:
+ *
+ * - `unread`, which only such a platform sends, says so plainly, and the
+ *   memory forgets a `supported` the refusal contradicts.
+ * - `missed` is also how a platform that resolves suffixes answers a method
+ *   that does not exist, so it contradicts nothing, and the memory is left as
+ *   it is. The platform's answer decides the wording: the one in memory, else
+ *   one asked now. Where the platform resolves suffixes the miss is a plain
+ *   miss; where it does not, the hint says so, on the condition that the
+ *   method exists; where this server cannot tell, it hedges.
+ */
+export async function noteSelectorRefusal(
   err: unknown,
   error: ToolError,
   plan: SelectorPlan,
   memory: MethodVersionsMemory | undefined,
-): ToolError {
-  const resolvedCode =
-    err instanceof ApiResponseError &&
-    err.code !== undefined &&
-    SELECTOR_RESOLVED_CODES.has(err.code);
-  if (plan.translated && resolvedCode) {
+): Promise<ToolError> {
+  if (provesMethodVersions(err)) {
     noteMethodVersionsSupported(memory);
+    return err instanceof ApiResponseError && err.code === "method_not_published"
+      ? { ...error, hint: neverPublishedHint(plan.methodId) }
+      : error;
+  }
+  const addressed = plan.selector.form === "draft" || plan.selector.form === "version";
+  const refusal = addressed ? suffixRefusalOf(err) : undefined;
+  if (refusal === undefined) return error;
+  const id = plan.methodId;
+  if (refusal === "unread") {
+    forgetMethodVersionsSupported(memory);
     return {
       ...error,
-      hint: `${error.hint ?? ""} This platform resolves version suffixes now, so the bare \`${plan.methodId}\` sent for the draft named the latest published version: call again with method_id \`${plan.methodId}@draft\`.`.trim(),
+      hint: `This platform does not resolve version suffixes yet, so it refused \`${plan.send}\`. On it a bare \`${id}\` reads the method's draft.`,
     };
   }
-  const suffixed = plan.send !== plan.methodId && plan.selector.form !== "opaque";
-  if (!suffixed || error.location !== "method_id" || error.class !== "input_domain") {
-    return error;
-  }
-  if (resolvedCode) {
-    return error;
-  }
-  forgetMethodVersionsSupported(memory);
-  return {
-    ...error,
-    hint: `${error.hint ?? ""} If \`${plan.methodId}\` exists, this platform may not resolve version suffixes yet; on such a platform a bare \`${plan.methodId}\` reads the draft.`.trim(),
-  };
+  const support = await methodVersionsSupport(memory, plan.readVersion);
+  if (support === "supported") return error;
+  const reason =
+    support === "unsupported"
+      ? `it was not found because this platform does not resolve version suffixes yet; on it a bare \`${id}\` reads the draft.`
+      : `this platform may not resolve version suffixes yet; on such a platform a bare \`${id}\` reads the draft.`;
+  return { ...error, hint: `${error.hint ?? ""} If \`${id}\` exists, ${reason}`.trim() };
 }
 
 // ── the by-id wiring every method-taking tool shares ───────────────
@@ -483,21 +498,23 @@ export function planById(
   memory: MethodVersionsMemory | undefined,
   client: unknown,
   options: { needBareReport: boolean },
-): Promise<PlanOutcome> {
+): Promise<SelectorPlan> {
+  const readVersion = versionReaderOf(client);
   return planMethodSelector(
     value,
-    () => methodVersionsSupport(memory, versionReaderOf(client)),
+    () => methodVersionsSupport(memory, readVersion),
     options,
+    readVersion,
   );
 }
 
 /** A classified failure of a call that may have been planned: the selector note when it was. */
-export function selectorFailure(
+export async function selectorFailure(
   err: unknown,
   error: ToolError,
   plan: SelectorPlan | undefined,
   memory: MethodVersionsMemory | undefined,
-): ToolError {
+): Promise<ToolError> {
   return plan === undefined ? error : noteSelectorRefusal(err, error, plan, memory);
 }
 
@@ -542,36 +559,17 @@ export interface RunContentReport {
  * Read what a by-id run executes from its start acknowledgement.
  *
  * A platform that resolves selectors says which version it ran, on every run
- * by id; one that does not says nothing and runs its stored content, which is
- * the draft. A run whose acknowledgement contradicts what was addressed — the
- * draft asked for, a version run — can only come from a bare id sent for
- * `@draft` on a platform this server believed did not resolve versions yet,
- * and which started to in the meantime: the run is already going, so the
- * result says it loudly rather than let it pass as the draft.
+ * by id. One that does not says nothing: it refuses any suffix at the start,
+ * before a run exists, and runs a bare id as its stored content, which is the
+ * draft. So an acknowledgement naming no version still settles a suffix that
+ * was accepted: only a platform that resolves it accepts it.
  */
 export function runContentReport(plan: SelectorPlan, ackVersion: unknown): RunContentReport {
   const reported = ackVersionOf(ackVersion);
   const id = plan.methodId;
   const proved = reported !== undefined;
 
-  if (plan.selector.form === "opaque") {
-    return reported === undefined
-      ? { proved }
-      : { ran: reported, sentence: `It runs ${methodContentPhrase(id, reported)}.`, proved };
-  }
-
   if (reported !== undefined) {
-    const asked = plan.reads;
-    if (asked !== undefined && asked !== "latest" && asked !== reported) {
-      return {
-        ran: reported,
-        proved,
-        sentence:
-          asked === "draft"
-            ? `WARNING: this run executes ${methodContentPhrase(id, reported)}, NOT the draft you asked for. The platform started resolving versions after this server last checked, so the bare id it was sent for the draft now names the latest published version. Start the run again with method_id \`${id}@draft\` to run the draft.`
-            : `WARNING: this run executes ${methodContentPhrase(id, reported)}, not version ${asked} as asked.`,
-      };
-    }
     if (plan.selector.form === "bare" && typeof reported === "number") {
       return {
         ran: reported,
@@ -582,8 +580,7 @@ export function runContentReport(plan: SelectorPlan, ackVersion: unknown): RunCo
     return { ran: reported, proved, sentence: `It runs ${methodContentPhrase(id, reported)}.` };
   }
 
-  // The platform said nothing: it does not resolve selectors, and it runs the
-  // method's stored content, which is its draft.
+  if (plan.selector.form === "opaque") return { proved };
   if (plan.selector.form === "version") {
     return {
       ran: plan.selector.version,
@@ -597,6 +594,6 @@ export function runContentReport(plan: SelectorPlan, ackVersion: unknown): RunCo
     sentence:
       plan.selector.form === "bare"
         ? `It runs the draft of \`${id}\`: the acknowledgement names no version, which is how a platform that does not resolve versions yet answers, and there a bare id runs the draft. Once it does, a bare id runs the latest published version, and \`${id}@draft\` the draft.`
-        : `It runs the draft of \`${id}\`${plan.translated ? ", sent as the bare id, which runs the draft on this platform until it resolves versions" : ""}.`,
+        : `It runs the draft of \`${id}\`.`,
   };
 }

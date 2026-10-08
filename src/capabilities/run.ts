@@ -1297,13 +1297,9 @@ export async function startMthdsRun(
     const client = runClient(context);
     let sent = request;
     if (request.method_id !== undefined && request.files.length === 0) {
-      const planned = await planById(request.method_id, context.methodVersions, client, {
+      plan = await planById(request.method_id, context.methodVersions, client, {
         needBareReport: false,
       });
-      if (!planned.ok) {
-        return startErrorResult(planned.summary, [planned.error]);
-      }
-      plan = planned.plan;
       sent = { ...request, method_id: plan.send };
     }
     const ack = await client.start(toStartOptions(sent));
@@ -1315,7 +1311,7 @@ export async function startMthdsRun(
     return startResult(ack, content);
   } catch (err) {
     const classified = classifyStartError(err, { ...classifyOptions, auth: context.authError });
-    const error = selectorFailure(err, classified, plan, context.methodVersions);
+    const error = await selectorFailure(err, classified, plan, context.methodVersions);
     return startErrorResult(startSummaryForError(error), [error]);
   }
 }

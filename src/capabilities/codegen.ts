@@ -512,13 +512,9 @@ export async function generateMthdsCode(
       // selectors yet, and the latest published version on one that does: the
       // selector is planned against the platform's answer, and the result says
       // which content the code came from (`method-versions.ts`).
-      const planned = await planById(request.method_id, context.methodVersions, client, {
+      plan = await planById(request.method_id, context.methodVersions, client, {
         needBareReport: true,
       });
-      if (!planned.ok) {
-        return errorResult(planned.summary, [planned.error]);
-      }
-      plan = planned.plan;
       sent = { ...request, method_id: plan.send };
     }
     report = await client.codegen(toCodegenRequest(sent));
@@ -528,7 +524,7 @@ export async function generateMthdsCode(
       auth: context.authError,
       forbidden: forbiddenTexture(context.authError),
     });
-    const error = selectorFailure(err, classified, plan, context.methodVersions);
+    const error = await selectorFailure(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);
   }
 

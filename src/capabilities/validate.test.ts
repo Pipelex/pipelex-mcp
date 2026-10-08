@@ -1863,21 +1863,23 @@ describe("validateMthds by method_id, on both platforms", () => {
     expect(pinned.summary).toContain("This validated version 2 of `mt_123`.");
   });
 
-  it("reads the draft for a bare id where they do not, and refuses @n before the wire", async () => {
+  it("reads the draft for a bare id where they do not, and sends every suffix as given", async () => {
     const sent: ValidateMethodSelector[] = [];
 
     const bare = await validateMthds({ method_id: "mt_123" }, onPlatform(["runs"], sent));
     const drafted = await validateMthds({ method_id: "mt_123@draft" }, onPlatform(["runs"], sent));
     const pinned = await validateMthds({ method_id: "mt_123@2" }, onPlatform(["runs"], sent));
 
-    expect(sent).toEqual([{ method_id: "mt_123" }, { method_id: "mt_123" }]);
+    // A platform that cannot read a suffix refuses it; rewritten on a stale
+    // answer, @draft sent bare would read the latest published version.
+    expect(sent).toEqual([
+      { method_id: "mt_123" },
+      { method_id: "mt_123@draft" },
+      { method_id: "mt_123@2" },
+    ]);
     expect(bare.structuredContent.method_version).toBe("draft");
     expect(drafted.structuredContent.method_version).toBe("draft");
-    expect(pinned.structuredContent.status).toBe("error");
-    expect(pinned.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "method_id",
-    });
+    expect(pinned.structuredContent.method_version).toBe(2);
   });
 
   it("sends a suffix as given when it cannot ask, and reads a refusal of it as a platform that may not resolve it", async () => {
