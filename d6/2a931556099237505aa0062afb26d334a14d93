@@ -1,0 +1,40 @@
+src/inputs-path.test.ts
+  s_c463d182be7414::t_c6a46283fe0307 1-372
+  s_c463d182be7414::t_5b7aad4112f678 373-375
+CHANGELOG.md
+  s_c463d182be7414::t_c3c4952bf0420f 7-10
+SPEC.md
+  s_c463d182be7414::t_5f996f685d98a4 474-475,735-736,745,786,929,933-934,1054,1062,1103
+docs/architecture.md
+  s_c463d182be7414::t_b1a82f7d87a2ae 27,105-106
+docs/tools.md
+  s_c463d182be7414::t_4a9c5e72a6fab9 242,248-249,265-268,271
+src/capabilities/prepare.ts
+  s_c463d182be7414::t_ea26d3edd5682b 11-12,53,55,57,89-90,93,135-136,257-262,265-272
+src/capabilities/run.ts
+  s_c463d182be7414::t_a233ca1237e2de 34-35,109,111,362,365,492-493,1229-1234,1237-1244
+src/capabilities/shared.ts
+  s_c463d182be7414::t_c3f79fd94a3ea3 170-284
+src/files.ts
+  s_c463d182be7414::t_83318ed3f0ac13 14-31,46-47,52,54,63,67,90,95,102,111-117,124
+src/tools.ts
+  s_c463d182be7414::t_56267ba14b3601 98,139-146,175-176,368,394
+src/workshop.contract.json
+  s_c463d182be7414::t_8562d20c084f5a 1143,1199,1204-1208,1307,1363,1369-1372
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d62a931556099237505aa0062afb26d334a14d93",
+  "prompts": {},
+  "sessions": {
+    "s_c463d182be7414": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a600153b-71cd-472f-af02-5bd7f82a4fcb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thomashebrard <thomas@pipelex.com>"
+    }
+  }
+}

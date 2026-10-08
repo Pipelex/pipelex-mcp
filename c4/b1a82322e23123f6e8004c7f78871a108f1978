@@ -1,0 +1,27 @@
+src/inputs-path.test.ts
+  s_924dc452bfcbe0::t_fe0f11d4031edd 109-118
+src/capabilities/shared.ts
+  s_924dc452bfcbe0::t_fe0f11d4031edd 264-265
+CHANGELOG.md
+  s_924dc452bfcbe0::t_fe0f11d4031edd 9
+docs/tools.md
+  s_924dc452bfcbe0::t_66f22805069f02 267
+SPEC.md
+  s_924dc452bfcbe0::t_6f90d7b4114da2 474
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c4b1a82322e23123f6e8004c7f78871a108f1978",
+  "prompts": {},
+  "sessions": {
+    "s_924dc452bfcbe0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2a25d3f6-8d72-417a-9358-664bf792b380",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thomashebrard <thomas@pipelex.com>"
+    }
+  }
+}
