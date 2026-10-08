@@ -2866,6 +2866,42 @@ describe("the pull reads the draft by default, and a version on @n", () => {
     expect(result.summary).toContain("publishes nothing");
   });
 
+  it("records no version when the version pulled is the draft, file for file", async () => {
+    const stored = publishedMethod({ mthds: storedVersion().mthds }, false);
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one@2", output_dir: "work" },
+      contextFor(versionedClient(stored), validationAnswering(validReport)),
+    );
+
+    expect(result.structuredContent).toMatchObject({ status: "ok", version: 2 });
+    const link = await readMethodLink(path.join(root, "work"));
+    expect(link.kind === "link" && link.link).toMatchObject({
+      synced_updated_at: stored.updated_at,
+    });
+    expect(link.kind === "link" && link.link).not.toHaveProperty("synced_version");
+    expect(result.summary).toContain("Version 2 is identical to the draft");
+    expect(result.summary).not.toContain("not the draft");
+
+    // The directory holds the draft, so an ordinary save goes through on the link's token.
+    let sent: MethodDraftInput | undefined;
+    const saved = await saveMthdsMethod(
+      { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft(_id, input) {
+            sent = input;
+            return storedMethod({ updated_at: "2026-09-21T09:00:00Z" });
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+    expect(saved.structuredContent).toMatchObject({ status: "ok", saved: "updated" });
+    expect(sent?.expected_updated_at).toBe(stored.updated_at);
+  });
+
   it("pulls the draft back over the version it last pulled", async () => {
     const stored = publishedMethod();
     await writeBundle("work", { "bundle.mthds": VERSION_TWO });

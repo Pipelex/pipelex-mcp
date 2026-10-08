@@ -1665,15 +1665,22 @@ async function writtenResult(
     destinations.push({ file, name: file.name, absolute });
   }
 
+  // The draft's own files, on a version pull: the method read already carries
+  // them.
+  const draftContent = content.version === "draft" ? undefined : pulledContent(stored, undefined);
+  // A version whose files are exactly the draft's, by name and by byte, leaves
+  // the directory holding the draft, so the link records no version: marked,
+  // a save from here would be refused as a restore that restores nothing.
+  // Compared exactly rather than by digest, since a digest match says the
+  // platform found the two equal, not that these files are the draft's.
+  const versionIsDraft = draftContent !== undefined && sameFiles(content, draftContent);
   const link = await readMethodLink(dir);
   const plan = await planPull(dir, stored, destinations, input.overwrite === true, link, {
     target: content.version,
     // A version pull may land over the draft's own files, which are stored,
     // so writing over them loses nothing. For a draft pull the target IS the
     // draft, and a file differing from it is by definition not the draft.
-    ...(content.version === "draft"
-      ? {}
-      : { draft: filesByName(pulledContent(stored, undefined)) }),
+    ...(draftContent === undefined ? {} : { draft: filesByName(draftContent) }),
     readVersion: (number) => readVersionFiles(client, stored, number),
   });
   if (plan.kind === "refuse") {
@@ -1784,7 +1791,8 @@ async function writtenResult(
   // what a save from here sends, and a save from a directory holding a version
   // replaces the draft with it, which is how a version is restored. It records
   // the version too, so a later pull reads a file still holding that version's
-  // bytes as stored rather than as unsaved work.
+  // bytes as stored rather than as unsaved work — unless the version is the
+  // draft, file for file, when the directory holds the draft.
   const linkFile = await writeMethodLink(
     root,
     dir,
@@ -1793,7 +1801,7 @@ async function writtenResult(
       methodId: stored.method_id,
       name: stored.name,
       syncedUpdatedAt: stored.updated_at,
-      ...(content.version === "draft" ? {} : { syncedVersion: content.version }),
+      ...(content.version === "draft" || versionIsDraft ? {} : { syncedVersion: content.version }),
     }),
   );
 
@@ -1838,6 +1846,10 @@ async function writtenResult(
   if (content.version === "draft") {
     const callers = bareIdCallersSentence(stored, support);
     if (callers !== undefined) lines.push(callers);
+  } else if (versionIsDraft) {
+    lines.push(
+      `Version ${content.version} is identical to the draft (updated_at ${stored.updated_at}), file for file, so the directory holds the draft: the link records no version, and a save from here needs no token, sending the link's as it would after a pull of the draft.`,
+    );
   } else {
     lines.push(
       `The directory now holds version ${content.version}, not the draft. To restore it as the draft once the user has asked, save from here with expected_updated_at ${stored.updated_at} and ${restorePythonClause(content.python)}; a save without the token is refused, so the draft (updated_at ${stored.updated_at}) is never replaced by accident. Restoring publishes nothing, and that token is not one to publish under: the draft's content was not read here.`,
@@ -1875,6 +1887,26 @@ async function writtenResult(
   }
 
   return { structuredContent, summary: lines.join("\n") };
+}
+
+/**
+ * Whether two contents hold the same `.mthds` sources and the same Python: the
+ * same set of names in each, each with the same bytes.
+ */
+function sameFiles(
+  a: Pick<PulledContent, "sources" | "python">,
+  b: Pick<PulledContent, "sources" | "python">,
+): boolean {
+  const sameSet = (left: readonly MethodFile[], right: readonly MethodFile[]): boolean => {
+    const byName = new Map(right.map((file) => [file.name, file.content]));
+    return (
+      left.length === right.length &&
+      byName.size === right.length &&
+      new Set(left.map((file) => file.name)).size === left.length &&
+      left.every((file) => byName.get(file.name) === file.content)
+    );
+  };
+  return sameSet(a.sources, b.sources) && sameSet(a.python, b.python);
 }
 
 /** A pull's files keyed by name: the `.mthds` sources and the Python alike. */
