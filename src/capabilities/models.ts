@@ -78,13 +78,15 @@ const CHECK_PIPE_TYPE_OF: Record<ModelCheckCategory, string> = {
 
 /**
  * The categories a check takes, in the order it covers them: the protocol's,
- * then `doc_gen`. The `satisfies` fails the build on a name the SDK does not
- * take, and {@link CHECK_PIPE_TYPE_OF} on one the SDK gains.
+ * then `doc_gen`. They are the keys of {@link CHECK_PIPE_TYPE_OF}, in its
+ * insertion order, so the record's totality over the SDK's
+ * `ModelCheckCategory` is what holds this list to it, both ways; the cast
+ * only restores the non-empty tuple `z.enum` takes.
  */
-const CHECK_CATEGORIES = [
-  ...MODEL_CATEGORIES,
-  "doc_gen",
-] as const satisfies readonly ModelCheckCategory[];
+const CHECK_CATEGORIES = Object.keys(CHECK_PIPE_TYPE_OF) as [
+  ModelCheckCategory,
+  ...ModelCheckCategory[],
+];
 
 /**
  * A category as a deck or a verdict names it: one of the protocol's, or one
