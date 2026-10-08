@@ -476,10 +476,13 @@ describe("saveMthdsMethod", () => {
 
     // Saving a pulled version replaces the draft with it: a restore, which the
     // link's own token must not make silent.
+    const validated: { files?: unknown } = {};
     const refused = await saveMthdsMethod(
       { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one" },
-      contextFor(clientNotCalled, validationAnswering(validReport)),
+      contextFor(clientNotCalled, validationAnswering(validReport, validated)),
     );
+    // The link alone refuses it, so nothing is read or validated first.
+    expect(validated.files).toBeUndefined();
     const [error] = errorsOf(refused.structuredContent);
     expect(error).toMatchObject({
       class: "input_domain",
@@ -801,6 +804,8 @@ describe("saveMthdsMethod", () => {
     const link = await readMethodLink(path.join(root, "methods/demo"));
     expect(link.kind === "link" && link.link.synced_updated_at).toBe("2026-09-21T09:00:00Z");
     expect(result.summary).toContain("changed again right after this save");
+    // The token this save recorded is already stale: no publish is offered under it.
+    expect(result.summary).not.toContain("expected_draft_updated_at");
     expect(result.summary).toContain("2026-09-21T09:05:00Z");
   });
 

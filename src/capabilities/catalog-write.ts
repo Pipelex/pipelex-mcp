@@ -695,6 +695,63 @@ async function saveInTurn(
   // gone.
   const claim = await linkedMethodAt(context, parsed.data.link_dir ?? linkDir);
 
+  // Every refusal that needs only the claim is made here, before the files
+  // are read and validated remotely, so a save the link already refuses spends
+  // no validation and no handshake.
+  let token: string | undefined;
+  if (targetId === undefined) {
+    // Preventing a duplicate is the link file's whole purpose, and it was
+    // consulted too late to serve it: the create ran first, and only afterwards
+    // did the link write refuse to re-point — reporting `link_file.written:
+    // false` about a SECOND method that already existed.
+    if (claim !== undefined) {
+      return saveError("The method was not saved: that directory is already claimed.", [
+        claim.kind === "link"
+          ? {
+              class: "input_domain",
+              location: "method_id",
+              message: `\`${claim.dir}\` is linked to \`${claim.link.method_id}\` (${claim.link.name} on ${claim.link.api_host}), and this call names no method_id, so it would have created a SECOND method for the same directory.`,
+              hint: `Pass method_id: "${claim.link.method_id}" to save the draft of the method this directory is linked to, or point link_dir at a directory of its own to create a genuinely new method.`,
+              retryable: false,
+            }
+          : {
+              class: "input_domain",
+              location: "link_dir",
+              message: `\`${claim.dir}\` holds a \`${LINK_FILE_NAME}\` that cannot be read (${claim.reason}), so something already claims this directory. Creating a method from here would leave a SECOND method that this tool cannot delete.`,
+              hint: `Repair or remove \`${LINK_FILE_NAME}\` in that directory — if it names the method you meant, pass its method_id — or point link_dir at a directory of its own to create a genuinely new method.`,
+              retryable: false,
+            },
+      ]);
+    }
+  } else {
+    // The create arm reads the link BEFORE creating because a duplicate cannot
+    // be undone; this arm has the same irreversibility. A method_id read from
+    // the wrong place, or a stale one pasted by a user, would write THIS
+    // directory's bundle into that method's draft, and only afterwards would
+    // the link write report the mismatch — leaving the wrong draft replaced and
+    // the directory still linked to the right method. The ids are compared
+    // bare, since the link records the bare id and `@draft` names the same
+    // method.
+    if (claim?.kind === "link" && readMethodSelector(claim.link.method_id).methodId !== targetId) {
+      return saveError("The method was not saved: that directory is linked to another method.", [
+        {
+          class: "input_domain",
+          location: "method_id",
+          message: `\`${claim.dir}\` is linked to \`${claim.link.method_id}\` (${claim.link.name} on ${claim.link.api_host}), but this call names method_id \`${parsed.data.method_id}\`. Saving would have replaced a different method's draft with this directory's bundle, and a replaced draft cannot be given back.`,
+          hint: `Pass method_id: "${claim.link.method_id}" to save the draft of the method this directory is linked to. If you really mean to save this bundle as \`${targetId}\`, point link_dir at a directory of its own so the two stop sharing one link file.`,
+          retryable: false,
+        },
+      ]);
+    }
+
+    // The draft token this save is held to: see draftTokenOf.
+    const linked = draftTokenOf(claim, parsed.data.expected_updated_at, targetId);
+    if (!linked.ok) {
+      return saveError(linked.summary, [linked.error]);
+    }
+    token = linked.token;
+  }
+
   // Resolve ONCE. The bytes that are validated are the bytes that are saved:
   // splitting the two — validate in the skill, save in a second call — would
   // read the files twice and the verdict would not be provably about the saved
@@ -820,30 +877,6 @@ async function saveInTurn(
   let draftMovedTo: string | undefined;
 
   if (targetId === undefined) {
-    // Preventing a duplicate is the link file's whole purpose, and it was
-    // consulted too late to serve it: the create ran first, and only afterwards
-    // did the link write refuse to re-point — reporting `link_file.written:
-    // false` about a SECOND method that already existed.
-    if (claim !== undefined) {
-      return saveError("The method was not saved: that directory is already claimed.", [
-        claim.kind === "link"
-          ? {
-              class: "input_domain",
-              location: "method_id",
-              message: `\`${claim.dir}\` is linked to \`${claim.link.method_id}\` (${claim.link.name} on ${claim.link.api_host}), and this call names no method_id, so it would have created a SECOND method for the same directory.`,
-              hint: `Pass method_id: "${claim.link.method_id}" to save the draft of the method this directory is linked to, or point link_dir at a directory of its own to create a genuinely new method.`,
-              retryable: false,
-            }
-          : {
-              class: "input_domain",
-              location: "link_dir",
-              message: `\`${claim.dir}\` holds a \`${LINK_FILE_NAME}\` that cannot be read (${claim.reason}), so something already claims this directory. Creating a method from here would leave a SECOND method that this tool cannot delete.`,
-              hint: `Repair or remove \`${LINK_FILE_NAME}\` in that directory — if it names the method you meant, pass its method_id — or point link_dir at a directory of its own to create a genuinely new method.`,
-              retryable: false,
-            },
-      ]);
-    }
-
     const writeInput: MethodWriteInput = {
       // Present: the create arm was refused above without one.
       name: parsed.data.name ?? "",
@@ -860,26 +893,6 @@ async function saveInTurn(
     }
     saved = "created";
   } else {
-    // The create arm reads the link BEFORE creating because a duplicate cannot
-    // be undone; this arm has the same irreversibility. A method_id read from
-    // the wrong place, or a stale one pasted by a user, would write THIS
-    // directory's bundle into that method's draft, and only afterwards would
-    // the link write report the mismatch — leaving the wrong draft replaced and
-    // the directory still linked to the right method. The ids are compared
-    // bare, since the link records the bare id and `@draft` names the same
-    // method.
-    if (claim?.kind === "link" && readMethodSelector(claim.link.method_id).methodId !== targetId) {
-      return saveError("The method was not saved: that directory is linked to another method.", [
-        {
-          class: "input_domain",
-          location: "method_id",
-          message: `\`${claim.dir}\` is linked to \`${claim.link.method_id}\` (${claim.link.name} on ${claim.link.api_host}), but this call names method_id \`${parsed.data.method_id}\`. Saving would have replaced a different method's draft with this directory's bundle, and a replaced draft cannot be given back.`,
-          hint: `Pass method_id: "${claim.link.method_id}" to save the draft of the method this directory is linked to. If you really mean to save this bundle as \`${targetId}\`, point link_dir at a directory of its own so the two stop sharing one link file.`,
-          retryable: false,
-        },
-      ]);
-    }
-
     // The platform's own compare-and-swap on the draft token: a draft that
     // moved since the token is refused atomically and nothing is written. The
     // token is the caller's when given, and otherwise the link file's — the
@@ -889,11 +902,6 @@ async function saveInTurn(
     // unlinked directory, or an inline one, is last-writer-wins. `input_data`
     // is omitted, which keeps the form inputs a webapp user saved, and so is
     // the name: a rename is its own call below.
-    const linked = draftTokenOf(claim, parsed.data.expected_updated_at, targetId);
-    if (!linked.ok) {
-      return saveError(linked.summary, [linked.error]);
-    }
-    const token = linked.token;
     const draftInput: MethodDraftInput = {
       mthds,
       ...pythonField,
@@ -1228,7 +1236,9 @@ function saveSummary(
     lines.push(notes.callers);
   }
   lines.push(
-    `To validate or run what you just saved, pass method_id \`${id}@draft\`. Publish it only when the user asks for a publish: ${WORKSHOP_TOOL_NAMES.publishMethod} with method_id \`${id}\` and expected_draft_updated_at ${result.updated_at}.`,
+    notes.draftMovedTo === undefined
+      ? `To validate or run what you just saved, pass method_id \`${id}@draft\`. Publish it only when the user asks for a publish: ${WORKSHOP_TOOL_NAMES.publishMethod} with method_id \`${id}\` and expected_draft_updated_at ${result.updated_at}.`
+      : `\`${id}@draft\` now names that other save, not these files, and a publish needs the draft's current updated_at, which the user should see the draft for first.`,
   );
 
   if (result.link_file === undefined) {
