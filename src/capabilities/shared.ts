@@ -261,7 +261,8 @@ export async function resolveInputsSource(
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(resolution.content);
+    // Some Windows editors and PowerShell write UTF-8 with a byte-order mark, which JSON.parse refuses.
+    parsed = JSON.parse(resolution.content.replace(/^\uFEFF/, ""));
   } catch (err) {
     return refuse(
       "inputs_path",

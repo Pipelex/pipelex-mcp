@@ -106,6 +106,16 @@ describe("inputs_path on the workshop", () => {
       expect(seen[0]?.inputs).toEqual(INPUTS);
     });
 
+    it("reads a file written with a UTF-8 byte-order mark", async () => {
+      await writeInputs("inputs.json", `\uFEFF${JSON.stringify(INPUTS)}`);
+      const { context, seen } = runContext();
+
+      const result = await startMthdsRun({ files: FILES, inputs_path: "inputs.json" }, context);
+
+      expect(result.structuredContent.status).toBe("ok");
+      expect(seen[0]?.inputs).toEqual(INPUTS);
+    });
+
     it("refuses inputs and inputs_path together, at inputs_path, before any read", async () => {
       const { context, seen } = runContext();
 
