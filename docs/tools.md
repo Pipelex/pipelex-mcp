@@ -105,7 +105,7 @@ With `reference`, the tool checks that reference, which may be a preset (`$`), a
   resolution: "resolved" | "not_found" | "unconfirmed";
   matches: Array<{ category: string; target?: string; fallbacks?: string[]; via?: string[] }>;
   suggestions: string[];      // the nearest names, e.g. "$writing-factual" for "$writing-factul"
-  other_kinds: string[];      // the same name under another sigil, e.g. "@best-claude" for "best-claude"
+  other_kinds: string[];      // the same name under another sigil, e.g. "@best-gpt" for "best-gpt"
   other_categories: string[]; // with a category: where the reference resolves instead
 }
 ```

@@ -238,7 +238,7 @@ export const mthdsListMethodsTool = defineTool({
 const MODELS_DESCRIPTION = [
   "Look up the model references a method's pipes can name in their model field — presets ($), aliases (@) and waterfalls (~) — or check one reference before writing it into a method.",
   `Without reference it lists the deck, all of it or one category: ${CATEGORY_PIPE_TYPES}.`,
-  "With reference it says whether that reference resolves, and when it does not, the nearest names and the right sigil for a name that exists as another kind (best-claude exists as @best-claude).",
+  "With reference it says whether that reference resolves, and when it does not, the nearest names and the right sigil for a name that exists as another kind (best-gpt exists as @best-gpt).",
   "Call it when the user names a model or asks which ones exist, and check any reference the user typed. A pipe needs no model field unless the user wants one; when they do, prefer a preset.",
   "The deck is what the runner can serve, not what this account may use: a run can still refuse a listed model.",
   "It reads the deck and nothing else; no inference credit is spent.",

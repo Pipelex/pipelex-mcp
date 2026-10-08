@@ -219,7 +219,7 @@ export interface ModelReferenceCheck {
   matches: ReferenceMatch[];
   /** The nearest names, written with their sigils; empty when `resolved`. */
   suggestions: string[];
-  /** The same name under another kind, written with that kind's sigil (`best-claude` → `@best-claude`); empty when `resolved`. */
+  /** The same name under another kind, written with that kind's sigil (`best-gpt` → `@best-gpt`); empty when `resolved`. */
   other_kinds: string[];
   /** With a category: the other categories the same reference resolves in; empty otherwise. */
   other_categories: DeckCategoryName[];
