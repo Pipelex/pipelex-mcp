@@ -483,7 +483,7 @@ The public MCP input is:
 
 ```ts
 {
-  category?: "llm" | "extract" | "img_gen" | "search" | "judgment"; // for a PipeLLM, PipeExtract, PipeImgGen, PipeSearch, PipeJudge
+  category?: "llm" | "extract" | "img_gen" | "search" | "judgment" | "doc_gen"; // for a PipeLLM, PipeExtract, PipeImgGen, PipeSearch, PipeJudge, PipeDocGen; doc_gen only with reference
   reference?: string; // $preset, @alias, ~waterfall, a bare handle, or a preset:/alias:/waterfall:/handle: prefix
 }
 ```
@@ -514,7 +514,7 @@ Every reference is written as it is typed in a method (`$writing-factual`, `@bes
 ```ts
 {
   status: "ok";
-  category?: ModelCategory; // the category asked, absent when none was
+  category?: ModelCheckCategory; // the category asked, absent when none was: the protocol's or doc_gen
   reference: string;        // the caller's, trimmed by the runner
   kind: "preset" | "alias" | "waterfall" | "handle";
   name: string;             // the reference without its sigil or namespace

@@ -72,7 +72,7 @@ Lists the model deck, the references a pipe's `model` field can name, or has the
 
 ```ts
 {
-  category?: "llm" | "extract" | "img_gen" | "search" | "judgment";
+  category?: "llm" | "extract" | "img_gen" | "search" | "judgment" | "doc_gen"; // doc_gen only with reference
   reference?: string;
 }
 ```

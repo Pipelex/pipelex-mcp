@@ -762,8 +762,9 @@ interface CheckRefusal {
  * runner's `error_type`. A reference the runner cannot read (blank, a sigil or
  * a namespace with nothing after it, or past its length limit) is the
  * `reference`'s fault, and its message says which; an unknown `type` is the
- * category's, which, since this tool sends only the protocol's categories,
- * means a runner older than the category.
+ * category's. This tool sends only the protocol's categories and `doc_gen`,
+ * which the route has taken since it was first served, so the refusal means a
+ * runner older than a protocol category.
  */
 const CHECK_REFUSALS: ReadonlyMap<string, CheckRefusal> = new Map([
   [
