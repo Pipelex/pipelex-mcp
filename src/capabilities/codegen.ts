@@ -15,12 +15,10 @@ import { writeCodegenTree } from "./codegen-writer.js";
 import type { CodegenWriteSuccess } from "./codegen-writer.js";
 import {
   METHOD_ID_SELECTOR_SENTENCE,
-  methodContentSentence,
   methodVersionReportSchema,
-  methodVersionsSupport,
-  noteSelectorRefusal,
-  planMethodSelector,
-  versionReaderOf,
+  planById,
+  selectorFailure,
+  withMethodContent,
 } from "./method-versions.js";
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
 import {
@@ -514,11 +512,9 @@ export async function generateMthdsCode(
       // selectors yet, and the latest published version on one that does: the
       // selector is planned against the platform's answer, and the result says
       // which content the code came from (`method-versions.ts`).
-      const planned = await planMethodSelector(
-        request.method_id,
-        () => methodVersionsSupport(context.methodVersions, versionReaderOf(client)),
-        { needBareReport: true },
-      );
+      const planned = await planById(request.method_id, context.methodVersions, client, {
+        needBareReport: true,
+      });
       if (!planned.ok) {
         return errorResult(planned.summary, [planned.error]);
       }
@@ -532,17 +528,14 @@ export async function generateMthdsCode(
       auth: context.authError,
       forbidden: forbiddenTexture(context.authError),
     });
-    const error =
-      plan === undefined
-        ? classified
-        : noteSelectorRefusal(err, classified, plan, context.methodVersions);
+    const error = selectorFailure(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);
   }
 
   // A produced-invalid verdict never touches disk: it carries
   // no artifacts at all, so there is nothing to preflight and nothing to write.
   if (!report.is_valid) {
-    return withMethodContent(codegenResult(report), plan);
+    return withMethodContent(codegenResult(report), plan, "generated code from");
   }
 
   // The API responded; projecting it must not be reported as an unreachable
@@ -583,23 +576,14 @@ export async function generateMthdsCode(
   }
 
   try {
-    return withMethodContent(codegenResult(report, written, context.saveRoot !== undefined), plan);
+    return withMethodContent(
+      codegenResult(report, written, context.saveRoot !== undefined),
+      plan,
+      "generated code from",
+    );
   } catch (err) {
     return malformedReportError(err);
   }
-}
-
-/** A by-id answer, with which content it came from: in `method_version` and in a closing sentence. */
-function withMethodContent(result: CodegenResult, plan: SelectorPlan | undefined): CodegenResult {
-  if (plan === undefined) return result;
-  const sentence = methodContentSentence(plan, "generated code from");
-  return {
-    structuredContent: {
-      ...result.structuredContent,
-      ...(plan.reads === undefined ? {} : { method_version: plan.reads }),
-    },
-    summary: sentence === undefined ? result.summary : `${result.summary}\n\n${sentence}`,
-  };
 }
 
 /**

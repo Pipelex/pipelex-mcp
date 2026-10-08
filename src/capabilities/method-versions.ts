@@ -26,12 +26,18 @@ import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
  * - **With version resolution**, every selector is sent as it was given, and a
  *   bare id reads the latest published version.
  *
- * The answer is cached, asymmetrically, in the memory the workshop shares
- * across its tools (`createMethodVersionsMemory`): `supported` for ten
- * minutes, `unsupported` for thirty seconds, `unknown` never. The short one is
- * the answer that can go stale dangerously: once the platform resolves
- * selectors, a draft sent as a bare id would read the published version. A
- * handshake is given three seconds, and past that the call reads `unknown`.
+ * Only `supported` is cached, for ten minutes, in the memory the workshop
+ * shares across its tools (`createMethodVersionsMemory`). `unsupported` is
+ * asked afresh by every call that depends on it, because it is the answer that
+ * goes stale dangerously: once the platform resolves selectors, a draft sent as
+ * a bare id reads the published version, and a bare id reported as the draft
+ * is the published version, and a cached `unsupported` would keep doing both
+ * for as long as it was believed. A fresh handshake narrows that to the time
+ * between the handshake and the request, which a rolling deploy can still
+ * stretch while old and new platform tasks answer side by side; a run's
+ * acknowledgement catches it there, and a tooling route cannot. `unknown` is
+ * never cached either. A handshake is given three seconds, and past that the
+ * call reads `unknown`.
  *
  * **Unknown fails safe**: every selector is then sent as it was given, so a
  * platform that resolves it reads exactly what was addressed and one that does
@@ -58,11 +64,8 @@ export type MethodVersionsSupport = "supported" | "unsupported" | "unknown";
 
 type KnownSupport = Exclude<MethodVersionsSupport, "unknown">;
 
-/** How long each answer is believed. `unknown` is never cached. */
-export const METHOD_VERSIONS_TTL_MS: Readonly<Record<KnownSupport, number>> = {
-  supported: 10 * 60_000,
-  unsupported: 30_000,
-};
+/** How long `supported` is believed. `unsupported` and `unknown` are never cached. */
+export const METHOD_VERSIONS_TTL_MS = 10 * 60_000;
 
 /** How long a caller waits on the handshake before reading `unknown`. */
 export const METHOD_VERSIONS_HANDSHAKE_MS = 3_000;
@@ -73,7 +76,7 @@ export const METHOD_VERSIONS_HANDSHAKE_MS = 3_000;
  * tests do so that no answer leaks from one test into the next.
  */
 export interface MethodVersionsMemory {
-  cached?: { support: KnownSupport; expiresAt: number };
+  cached?: { support: "supported"; expiresAt: number };
   inFlight?: Promise<MethodVersionsSupport>;
   /** Bumped by every forget, so a handshake sent before it cannot restore a contradicted answer. */
   generation: number;
@@ -113,8 +116,8 @@ function isFresh(memory: MethodVersionsMemory, now: number): boolean {
   return memory.cached !== undefined && memory.cached.expiresAt > now;
 }
 
-function remember(memory: MethodVersionsMemory, support: KnownSupport): void {
-  memory.cached = { support, expiresAt: Date.now() + METHOD_VERSIONS_TTL_MS[support] };
+function rememberSupported(memory: MethodVersionsMemory): void {
+  memory.cached = { support: "supported", expiresAt: Date.now() + METHOD_VERSIONS_TTL_MS };
 }
 
 async function askPlatform(
@@ -144,7 +147,11 @@ async function askPlatform(
   if (support === "supported" && memory.generation !== askedAt) {
     return isFresh(memory, Date.now()) ? (memory.cached?.support ?? "unknown") : "unknown";
   }
-  remember(memory, support);
+  if (support === "supported") {
+    rememberSupported(memory);
+  } else {
+    memory.cached = undefined;
+  }
   return support;
 }
 
@@ -185,7 +192,7 @@ export function methodVersionsSupport(
 
 /** A response proved the capability: a start acknowledgement carrying `method_version`. */
 export function noteMethodVersionsSupported(memory: MethodVersionsMemory | undefined): void {
-  if (memory !== undefined) remember(memory, "supported");
+  if (memory !== undefined) rememberSupported(memory);
 }
 
 /**
@@ -423,7 +430,10 @@ const SELECTOR_RESOLVED_CODES: ReadonlySet<string> = new Set([
  * malformed, which is also how a platform that does not resolve selectors
  * answers one: the hint says so, and the memory forgets a `supported` that the
  * refusal contradicts. A refusal carrying one of the version codes came from a
- * platform that read the suffix, and is left as it is.
+ * platform that read the suffix, and is left as it is — unless the call sent
+ * `@draft` as the bare id, believing the platform did not resolve suffixes:
+ * then the code proves it does, the bare id named the published version, and
+ * the hint says to call again with `@draft`.
  */
 export function noteSelectorRefusal(
   err: unknown,
@@ -431,21 +441,79 @@ export function noteSelectorRefusal(
   plan: SelectorPlan,
   memory: MethodVersionsMemory | undefined,
 ): ToolError {
+  const resolvedCode =
+    err instanceof ApiResponseError &&
+    err.code !== undefined &&
+    SELECTOR_RESOLVED_CODES.has(err.code);
+  if (plan.translated && resolvedCode) {
+    noteMethodVersionsSupported(memory);
+    return {
+      ...error,
+      hint: `${error.hint ?? ""} This platform resolves version suffixes now, so the bare \`${plan.methodId}\` sent for the draft named the latest published version: call again with method_id \`${plan.methodId}@draft\`.`.trim(),
+    };
+  }
   const suffixed = plan.send !== plan.methodId && plan.selector.form !== "opaque";
   if (!suffixed || error.location !== "method_id" || error.class !== "input_domain") {
     return error;
   }
-  if (
-    err instanceof ApiResponseError &&
-    err.code !== undefined &&
-    SELECTOR_RESOLVED_CODES.has(err.code)
-  ) {
+  if (resolvedCode) {
     return error;
   }
   forgetMethodVersionsSupported(memory);
   return {
     ...error,
     hint: `${error.hint ?? ""} If \`${plan.methodId}\` exists, this platform may not resolve version suffixes yet; on such a platform a bare \`${plan.methodId}\` reads the draft.`.trim(),
+  };
+}
+
+// ── the by-id wiring every method-taking tool shares ───────────────
+
+/**
+ * Plan a by-id call, asking the platform through `client`'s own `version()`
+ * when the plan needs the answer — the one wiring `mthds_validate`,
+ * `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs` and
+ * `mthds_run` share.
+ */
+export function planById(
+  value: string,
+  memory: MethodVersionsMemory | undefined,
+  client: unknown,
+  options: { needBareReport: boolean },
+): Promise<PlanOutcome> {
+  return planMethodSelector(
+    value,
+    () => methodVersionsSupport(memory, versionReaderOf(client)),
+    options,
+  );
+}
+
+/** A classified failure of a call that may have been planned: the selector note when it was. */
+export function selectorFailure(
+  err: unknown,
+  error: ToolError,
+  plan: SelectorPlan | undefined,
+  memory: MethodVersionsMemory | undefined,
+): ToolError {
+  return plan === undefined ? error : noteSelectorRefusal(err, error, plan, memory);
+}
+
+/**
+ * A tooling result with the content it came from: `method_version` in its
+ * structured content and the closing sentence in its summary, `verb` being the
+ * tool's own past tense ("validated"). Unplanned results pass through.
+ */
+export function withMethodContent<
+  R extends { structuredContent: { method_version?: MethodVersionReport }; summary: string },
+>(result: R, plan: SelectorPlan | undefined, verb: string): R {
+  if (plan === undefined) return result;
+  const sentence = methodContentSentence(plan, verb);
+  return {
+    ...result,
+    structuredContent: {
+      ...result.structuredContent,
+      ...(plan.reads === undefined ? {} : { method_version: plan.reads }),
+    },
+    summary: sentence === undefined ? result.summary : `${result.summary}\n\n${sentence}`,
   };
 }
 

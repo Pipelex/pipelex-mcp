@@ -26,13 +26,11 @@ import { z } from "zod";
 import {
   RUN_METHOD_ID_SELECTOR_SENTENCE,
   linkageSuffixError,
-  methodVersionsSupport,
   noteMethodVersionsSupported,
-  noteSelectorRefusal,
-  planMethodSelector,
+  planById,
   runContentReport,
   runMethodVersionSchema,
-  versionReaderOf,
+  selectorFailure,
 } from "./method-versions.js";
 import type { MethodVersionsAware, RunContentReport, SelectorPlan } from "./method-versions.js";
 import {
@@ -1299,11 +1297,9 @@ export async function startMthdsRun(
     const client = runClient(context);
     let sent = request;
     if (request.method_id !== undefined && request.files.length === 0) {
-      const planned = await planMethodSelector(
-        request.method_id,
-        () => methodVersionsSupport(context.methodVersions, versionReaderOf(client)),
-        { needBareReport: false },
-      );
+      const planned = await planById(request.method_id, context.methodVersions, client, {
+        needBareReport: false,
+      });
       if (!planned.ok) {
         return startErrorResult(planned.summary, [planned.error]);
       }
@@ -1319,10 +1315,7 @@ export async function startMthdsRun(
     return startResult(ack, content);
   } catch (err) {
     const classified = classifyStartError(err, { ...classifyOptions, auth: context.authError });
-    const error =
-      plan === undefined
-        ? classified
-        : noteSelectorRefusal(err, classified, plan, context.methodVersions);
+    const error = selectorFailure(err, classified, plan, context.methodVersions);
     return startErrorResult(startSummaryForError(error), [error]);
   }
 }

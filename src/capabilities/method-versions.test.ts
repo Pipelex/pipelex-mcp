@@ -11,6 +11,7 @@ import {
   methodVersionsSupport,
   noteMethodVersionsSupported,
   noteSelectorRefusal,
+  planById,
   planMethodSelector,
   readMethodSelector,
   runContentReport,
@@ -118,7 +119,7 @@ describe("methodVersionsSupport", () => {
     expect([first, second]).toEqual(["supported", "supported"]);
     expect(reader.calls()).toBe(1);
 
-    await vi.advanceTimersByTimeAsync(METHOD_VERSIONS_TTL_MS.supported - 1_000);
+    await vi.advanceTimersByTimeAsync(METHOD_VERSIONS_TTL_MS - 1_000);
     expect(await methodVersionsSupport(memory, reader.read)).toBe("supported");
     expect(reader.calls()).toBe(1);
 
@@ -127,15 +128,37 @@ describe("methodVersionsSupport", () => {
     expect(reader.calls()).toBe(2);
   });
 
-  it("believes unsupported only briefly, since it is the answer that goes stale dangerously", async () => {
-    vi.useFakeTimers();
+  it("never caches unsupported, since it is the answer that goes stale dangerously", async () => {
     const memory = createMethodVersionsMemory();
     const reader = counting(UNSUPPORTED);
 
     expect(await methodVersionsSupport(memory, reader.read)).toBe("unsupported");
-    await vi.advanceTimersByTimeAsync(METHOD_VERSIONS_TTL_MS.unsupported + 1_000);
     expect(await methodVersionsSupport(memory, reader.read)).toBe("unsupported");
     expect(reader.calls()).toBe(2);
+    expect(memory.cached).toBeUndefined();
+  });
+
+  it("asks again the moment the platform starts resolving selectors", async () => {
+    // The transition a cached `unsupported` would have hidden: the next call
+    // reads the new answer, so a draft is never sent as the bare id after it.
+    const memory = createMethodVersionsMemory();
+    let answer: unknown = UNSUPPORTED;
+    const read = async (): Promise<unknown> => answer;
+
+    expect(
+      (await planById("mt_a@draft", memory, { version: read }, { needBareReport: true })).ok,
+    ).toBe(true);
+    const before = await planById(
+      "mt_a@draft",
+      memory,
+      { version: read },
+      { needBareReport: true },
+    );
+    expect(before.ok && before.plan.send).toBe("mt_a");
+
+    answer = SUPPORTED;
+    const after = await planById("mt_a@draft", memory, { version: read }, { needBareReport: true });
+    expect(after.ok && after.plan.send).toBe("mt_a@draft");
   });
 
   it("never caches unknown", async () => {
@@ -323,6 +346,22 @@ describe("noteSelectorRefusal", () => {
 
     expect(noted.hint).toContain("may not resolve version suffixes yet");
     expect(memory.cached).toBeUndefined();
+  });
+
+  it("says to call again with @draft when the bare id sent for it met a platform that resolves suffixes", async () => {
+    const memory = createMethodVersionsMemory();
+    const { plan } = await planned("mt_a@draft", "unsupported");
+    const notPublished: ToolError = { ...unknownId, message: "mt_a is not published." };
+
+    const noted = noteSelectorRefusal(
+      refusal("method_not_published"),
+      notPublished,
+      plan as SelectorPlan,
+      memory,
+    );
+
+    expect(noted.hint).toContain("call again with method_id `mt_a@draft`");
+    expect(memory.cached?.support).toBe("supported");
   });
 
   it("leaves alone a refusal that proves the suffix was read, and a bare id's", async () => {

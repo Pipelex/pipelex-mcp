@@ -4,12 +4,10 @@ import { z } from "zod";
 
 import {
   METHOD_ID_SELECTOR_SENTENCE,
-  methodContentSentence,
   methodVersionReportSchema,
-  methodVersionsSupport,
-  noteSelectorRefusal,
-  planMethodSelector,
-  versionReaderOf,
+  planById,
+  selectorFailure,
+  withMethodContent,
 } from "./method-versions.js";
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
 import {
@@ -292,11 +290,9 @@ export async function prepareMthdsInputs(
       // selectors yet, and the latest published version on one that does: the
       // selector is planned against the platform's answer, and the result says
       // whose signature the inputs were prepared against (`method-versions.ts`).
-      const planned = await planMethodSelector(
-        request.method_id,
-        () => methodVersionsSupport(context.methodVersions, versionReaderOf(client)),
-        { needBareReport: true },
-      );
+      const planned = await planById(request.method_id, context.methodVersions, client, {
+        needBareReport: true,
+      });
       if (!planned.ok) {
         return errorResult(planned.summary, [planned.error]);
       }
@@ -314,23 +310,15 @@ export async function prepareMthdsInputs(
     prepared = await prepareWithUpload(client, envelope);
   } catch (err) {
     const classified = classifyError(err, { ...classifyOptions, auth: context.authError });
-    const error =
-      plan === undefined
-        ? classified
-        : noteSelectorRefusal(err, classified, plan, context.methodVersions);
+    const error = selectorFailure(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);
   }
 
-  const result = prepareInputsResult(prepared, request.pipe_ref);
-  if (plan === undefined) return result;
-  const sentence = methodContentSentence(plan, "prepared the inputs against the signature of");
-  return {
-    structuredContent: {
-      ...result.structuredContent,
-      ...(plan.reads === undefined ? {} : { method_version: plan.reads }),
-    },
-    summary: sentence === undefined ? result.summary : `${result.summary}\n\n${sentence}`,
-  };
+  return withMethodContent(
+    prepareInputsResult(prepared, request.pipe_ref),
+    plan,
+    "prepared the inputs against the signature of",
+  );
 }
 
 /**

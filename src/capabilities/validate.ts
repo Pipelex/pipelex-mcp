@@ -15,12 +15,10 @@ import { z } from "zod";
 import { GRAPH_PAGE_FILENAME, graphPageSection, writeGraphPage } from "./graph-page.js";
 import {
   METHOD_ID_SELECTOR_SENTENCE,
-  methodContentSentence,
   methodVersionReportSchema,
-  methodVersionsSupport,
-  noteSelectorRefusal,
-  planMethodSelector,
-  versionReaderOf,
+  planById,
+  selectorFailure,
+  withMethodContent,
 } from "./method-versions.js";
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
 import type { GraphPageFile, GraphPageOutcome } from "./graph-page.js";
@@ -552,11 +550,9 @@ async function validateRequest(
       // selectors and one that does not yet, so the selector is planned against
       // the platform's answer (`method-versions.ts`) and the result says which
       // content was validated.
-      const planned = await planMethodSelector(
-        request.method_id,
-        () => methodVersionsSupport(context.methodVersions, versionReaderOf(client)),
-        { needBareReport: true },
-      );
+      const planned = await planById(request.method_id, context.methodVersions, client, {
+        needBareReport: true,
+      });
       if (!planned.ok) {
         return errorResult(planned.summary, [planned.error]);
       }
@@ -570,10 +566,7 @@ async function validateRequest(
     }
   } catch (err) {
     const classified = classifyError(err, { ...classifyOptions, auth: context.authError });
-    const error =
-      plan === undefined
-        ? classified
-        : noteSelectorRefusal(err, classified, plan, context.methodVersions);
+    const error = selectorFailure(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);
   }
 
@@ -582,7 +575,7 @@ async function validateRequest(
   // contract violation, surfaced as a runtime no-verdict error.
   try {
     const result = validationResult(report);
-    return plan === undefined ? result : withMethodContent(result, plan);
+    return withMethodContent(result, plan, "validated");
   } catch (err) {
     return errorResult(
       "Validation produced no verdict: the Pipelex API returned a malformed report.",
@@ -599,19 +592,6 @@ async function validateRequest(
       ],
     );
   }
-}
-
-/** A by-id verdict, with which content it is about: in `method_version` and in a closing sentence. */
-function withMethodContent(result: ValidationResult, plan: SelectorPlan): ValidationResult {
-  const sentence = methodContentSentence(plan, "validated");
-  return {
-    ...result,
-    structuredContent: {
-      ...result.structuredContent,
-      ...(plan.reads === undefined ? {} : { method_version: plan.reads }),
-    },
-    summary: sentence === undefined ? result.summary : `${result.summary}\n\n${sentence}`,
-  };
 }
 
 const ERROR_SUMMARIES: ErrorSummaries = {
