@@ -575,7 +575,7 @@ const GET_METHOD_DESCRIPTION = [
   "Pass output_dir (a directory of its own, relative to the working directory) to write the .mthds and .py files to disk with pipelex-method.json beside them — no source passes through the conversation, and the directory is then linked, so a later mthds_save_method from it writes this same method's draft.",
   "Without output_dir the sources come back inline. Use that arm only to READ a method you cannot see on disk; to work on one, write it out.",
   "It refuses rather than overwrite: a directory holding .mthds files that is not linked to this method is somebody else's bundle, and a linked directory whose files differ is only overwritten after you have asked the user and passed overwrite: true. Every refusal writes nothing at all.",
-  "Pulling a version into the method's linked directory, then saving from there, is how a version is restored as the draft.",
+  "Pulling a version into the method's linked directory, then saving from there with expected_updated_at, is how a version is restored as the draft; without it that save is refused.",
   "A method that exists but has no MTHDS source yet is reported as such — a different answer from an unknown id.",
 ].join(" ");
 

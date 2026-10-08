@@ -461,6 +461,131 @@ describe("saveMthdsMethod", () => {
     expect(link.kind === "link" && link.link.synced_updated_at).toBe("2026-09-19T00:00:00Z");
   });
 
+  it("refuses a save from a directory holding a pulled version unless the token is passed", async () => {
+    const link = {
+      method_id: "mt_one",
+      name: "Summarize PDF",
+      api_host: "api-dev.pipelex.com",
+      synced_updated_at: "2026-09-20T12:00:00Z",
+      synced_version: 2,
+    };
+    await writeBundle("methods/demo", {
+      "bundle.mthds": 'domain = "version_two"',
+      [LINK_FILE_NAME]: JSON.stringify(link),
+    });
+
+    // Saving a pulled version replaces the draft with it: a restore, which the
+    // link's own token must not make silent.
+    const refused = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one" },
+      contextFor(clientNotCalled, validationAnswering(validReport)),
+    );
+    const [error] = errorsOf(refused.structuredContent);
+    expect(error).toMatchObject({
+      class: "input_domain",
+      location: "expected_updated_at",
+      retryable: false,
+    });
+    expect(error.message).toContain("holds version 2");
+    expect(error.hint).toContain('expected_updated_at "2026-09-20T12:00:00Z"');
+    expect(refused.summary).toContain("holds a published version");
+
+    // With the token, after the user asked, the restore goes through.
+    let sent: MethodDraftInput | undefined;
+    const restored = await saveMthdsMethod(
+      {
+        files: [{ path: "methods/demo/bundle.mthds" }],
+        method_id: "mt_one",
+        expected_updated_at: "2026-09-20T12:00:00Z",
+      },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft(_id, input) {
+            sent = input;
+            return storedMethod({ updated_at: "2026-09-21T09:00:00Z" });
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+    expect(restored.structuredContent.status).toBe("ok");
+    expect(sent?.expected_updated_at).toBe("2026-09-20T12:00:00Z");
+    const relinked = await readMethodLink(path.join(root, "methods/demo"));
+    expect(relinked.kind === "link" && relinked.link).toMatchObject({
+      synced_updated_at: "2026-09-21T09:00:00Z",
+    });
+    expect(relinked.kind === "link" && relinked.link).not.toHaveProperty("synced_version");
+  });
+
+  it("refuses a save from a directory whose last pull never finished", async () => {
+    for (const fields of [
+      { synced_updated_at: "2026-09-20T12:00:00Z", partial_pull: true },
+      { synced_updated_at: "" },
+    ]) {
+      await writeBundle("methods/demo", {
+        "bundle.mthds": 'domain = "demo"',
+        [LINK_FILE_NAME]: JSON.stringify({
+          method_id: "mt_one",
+          name: "Summarize PDF",
+          api_host: "api-dev.pipelex.com",
+          ...fields,
+        }),
+      });
+
+      const result = await saveMthdsMethod(
+        { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one" },
+        contextFor(clientNotCalled, validationAnswering(validReport)),
+      );
+
+      const [error] = errorsOf(result.structuredContent);
+      expect(error).toMatchObject({ class: "input_domain", location: "link_dir" });
+      expect(error.message).toContain("was interrupted");
+      expect(error.hint).toContain("Pull the method into the directory again");
+    }
+  });
+
+  it("refuses a save from a directory whose link cannot be read, and leaves the link alone", async () => {
+    await writeBundle("methods/demo", {
+      "bundle.mthds": 'domain = "demo"',
+      [LINK_FILE_NAME]: "<<<<<<< HEAD",
+    });
+
+    // Read as no link, the save would send no token and replace the draft
+    // whatever it holds now.
+    const refused = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one" },
+      contextFor(clientNotCalled, validationAnswering(validReport)),
+    );
+    const [error] = errorsOf(refused.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "link_dir" });
+    expect(error.message).toContain("cannot be read");
+    expect(error.hint).toContain("merge conflict");
+
+    // An explicit token is its own guard; the broken link is still not touched.
+    const saved = await saveMthdsMethod(
+      {
+        files: [{ path: "methods/demo/bundle.mthds" }],
+        method_id: "mt_one",
+        expected_updated_at: "2026-09-20T12:00:00Z",
+      },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft() {
+            return storedMethod({ updated_at: "2026-09-21T09:00:00Z" });
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+    expect(saved.structuredContent.status).toBe("ok");
+    expect(saved.summary).toContain("cannot be read");
+    expect(await fs.readFile(path.join(root, "methods/demo", LINK_FILE_NAME), "utf8")).toBe(
+      "<<<<<<< HEAD",
+    );
+  });
+
   it("reads mt_…@draft as the bare id, and refuses a version", async () => {
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
 
@@ -515,6 +640,39 @@ describe("saveMthdsMethod", () => {
     expect(calls).toEqual(["writeDraft", "renameMethod:New name"]);
     expect(result.structuredContent).toMatchObject({ saved: "renamed", name: "New name" });
     expect(result.summary).toContain("renamed from **Summarize PDF**");
+  });
+
+  it("keeps the draft write's token when the rename reports a draft that moved", async () => {
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], name: "New name", method_id: "mt_one" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft() {
+            return storedMethod({ updated_at: "2026-09-21T09:00:00Z" });
+          },
+          async renameMethod() {
+            // Somebody saved the draft between the two calls.
+            return storedMethod({ name: "New name", updated_at: "2026-09-21T09:05:00Z" });
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    // Adopting the rename's token would let the next save from here replace
+    // the other writer's draft unseen.
+    expect(result.structuredContent).toMatchObject({
+      saved: "renamed",
+      name: "New name",
+      updated_at: "2026-09-21T09:00:00Z",
+    });
+    const link = await readMethodLink(path.join(root, "methods/demo"));
+    expect(link.kind === "link" && link.link.synced_updated_at).toBe("2026-09-21T09:00:00Z");
+    expect(result.summary).toContain("changed again right after this save");
+    expect(result.summary).toContain("2026-09-21T09:05:00Z");
   });
 
   it("does not rename when the name is unchanged", async () => {
@@ -2242,6 +2400,8 @@ describe("the pull reads the draft by default, and a version on @n", () => {
       synced_version: 2,
     });
     expect(result.summary).toContain("now holds version 2, not the draft");
+    expect(result.summary).toContain(`expected_updated_at ${stored.updated_at}`);
+    expect(result.summary).toContain("a save without it is refused");
     expect(result.summary).toContain("publishes nothing");
   });
 

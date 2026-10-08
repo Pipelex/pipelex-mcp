@@ -515,7 +515,7 @@ const GET_ERROR_OPTIONS: ClassifyErrorOptions = {
   },
   notFound: {
     location: "method_id",
-    hint: "No registered method with this id is visible to the API key's organization. The catalog is org-scoped, so a method from another organization reads exactly like a miss — check the id with mthds_list_methods.",
+    hint: `No registered method with this id is visible to the API key's organization. The catalog is org-scoped, so a method from another organization reads exactly like a miss — check the id with ${WORKSHOP_TOOL_NAMES.listMethods}.`,
   },
 };
 
@@ -550,19 +550,27 @@ export function methodRouteId(
   if (selector.form === "version") {
     return { ok: false, error: refuseVersion(selector) };
   }
-  if (selector.form === "opaque" && value.includes("@")) {
-    return {
-      ok: false,
-      error: {
-        class: "input_domain",
-        location: "method_id",
-        message: `\`${value}\` is not a method id: a catalog id is mt_… with at most one suffix, @<n> for a published version or @draft for the draft.`,
-        hint: "Pass the id as mthds_list_methods or pipelex-method.json gives it.",
-        retryable: false,
-      },
-    };
+  const malformed = malformedSuffixError(value, selector);
+  if (malformed !== undefined) {
+    return { ok: false, error: malformed };
   }
   return { ok: true, methodId: selector.methodId, selector };
+}
+
+/**
+ * A value carrying an `@` that is not a selector, refused with the grammar
+ * rather than sent for the SDK to throw on; the method routes' one check of
+ * the id's shape. Any other value is the server's to judge.
+ */
+function malformedSuffixError(value: string, selector: MethodSelector): ToolError | undefined {
+  if (selector.form !== "opaque" || !value.includes("@")) return undefined;
+  return {
+    class: "input_domain",
+    location: "method_id",
+    message: `\`${value}\` is not a method id: a catalog id is mt_… with at most one suffix, @<n> for a published version or @draft for the draft.`,
+    hint: `Pass the id as ${WORKSHOP_TOOL_NAMES.listMethods} or pipelex-method.json gives it.`,
+    retryable: false,
+  };
 }
 
 // ── mthds_save_method ───────────────────────────────────────────────
@@ -749,10 +757,14 @@ export async function saveMthdsMethod(
     });
     return saveError(summaryForToolError(error, SAVE_ERROR_SUMMARIES), [error]);
   }
+  // Asked beside the catalog calls rather than after them: it never rejects,
+  // and only the summary's sentence about callers waits on it.
+  const support = catalogVersionsSupport(context, client);
   let stored: MethodData;
   let saved: "created" | "updated" | "renamed";
   let renameError: ToolError | undefined;
   let previousName: string | undefined;
+  let draftMovedTo: string | undefined;
 
   // Read ONCE, before either arm touches the catalog, because both arms are
   // irreversible in the same way: a create that ran first left a duplicate,
@@ -830,9 +842,11 @@ export async function saveMthdsMethod(
     // unlinked directory, or an inline one, is last-writer-wins. `input_data`
     // is omitted, which keeps the form inputs a webapp user saved, and so is
     // the name: a rename is its own call below.
-    const token =
-      parsed.data.expected_updated_at ??
-      (claim?.kind === "link" ? claim.link.synced_updated_at : undefined);
+    const linked = draftTokenOf(claim, parsed.data.expected_updated_at, targetId);
+    if (!linked.ok) {
+      return saveError(linked.summary, [linked.error]);
+    }
+    const token = linked.token;
     const draftInput: MethodDraftInput = {
       mthds,
       ...pythonField,
@@ -857,11 +871,23 @@ export async function saveMthdsMethod(
     // the draft write, whose token check is what licenses touching this
     // method at all. A rename that fails leaves a saved draft behind, which the
     // result reports as saved, with the rename's error beside it.
+    //
+    // Only the NAME is taken from the rename's answer. The rename returns the
+    // row as it stands, so a save that landed between the two calls — the
+    // webapp autosaves — would hand back another writer's draft and token:
+    // recording that token beside these files would let the next save from
+    // here replace that draft without a conflict, and a publish under it would
+    // publish content nobody here has seen. The draft write's own snapshot is
+    // what this call saved, and a token that moved since is reported.
     const name = parsed.data.name;
     if (name !== undefined && name !== stored.name) {
       previousName = stored.name;
       try {
-        stored = await client.renameMethod(targetId, { name });
+        const renamed = await client.renameMethod(targetId, { name });
+        if (renamed.updated_at !== stored.updated_at) {
+          draftMovedTo = renamed.updated_at;
+        }
+        stored = { ...stored, name: renamed.name };
         saved = "renamed";
       } catch (err) {
         renameError = classifyError(err, { ...RENAME_ERROR_OPTIONS, auth: context.authError });
@@ -898,15 +924,88 @@ export async function saveMthdsMethod(
       : { validation_errors: validation.validation_errors }),
   };
 
-  const support = await catalogVersionsSupport(context, client);
   return {
     structuredContent,
     summary: saveSummary(structuredContent, {
       linkedAnyway: claim?.kind === "link",
+      claimUnreadable: claim?.kind === "unreadable",
       previousName,
-      callers: bareIdCallersSentence(stored, support),
+      draftMovedTo,
+      callers: bareIdCallersSentence(stored, await support),
     }),
   };
+}
+
+/**
+ * The draft token a save from this directory is held to: the caller's
+ * `expected_updated_at` when given, and otherwise the link file's
+ * `synced_updated_at` — but only when the link is a clean record of a sync
+ * with the DRAFT. Each other state of the link is refused before anything is
+ * written, because each would turn the compare-and-swap into a blind write:
+ *
+ * - a link that cannot be read offers no token, and a save without one
+ *   replaces whatever the draft holds — a git merge conflict in the committed
+ *   link, the team case the token exists for, is the usual cause;
+ * - a link carrying `partial_pull` records a pull that never finished, so the
+ *   files may mix two contents, and its token is the sync before that pull
+ *   (or empty, after an interrupted first pull);
+ * - a link carrying `synced_version` records a pulled VERSION, so the files
+ *   are that version's, and a save would replace the draft with them —
+ *   restoring the version and losing whatever the draft held beyond it, which
+ *   the caller makes happen only on purpose, by passing the token.
+ *
+ * An unlinked directory, or an inline submission, has no token and is
+ * last-writer-wins.
+ */
+function draftTokenOf(
+  claim: DirectoryClaim | undefined,
+  explicit: string | undefined,
+  methodId: string,
+): { ok: true; token?: string } | { ok: false; error: ToolError; summary: string } {
+  if (explicit !== undefined) return { ok: true, token: explicit };
+  if (claim === undefined) return { ok: true };
+  const toSaveAnyway = `To save these files as they stand, pass expected_updated_at with the draft's current updated_at (${WORKSHOP_TOOL_NAMES.getMethod} reports it) once the user has said to.`;
+  if (claim.kind === "unreadable") {
+    return {
+      ok: false,
+      summary: "The method was not saved: the directory's link file cannot be read.",
+      error: {
+        class: "input_domain",
+        location: "link_dir",
+        message: `\`${claim.dir}\` holds a \`${LINK_FILE_NAME}\` that cannot be read (${claim.reason}), so this save has no draft token to protect the draft with, and without one it would replace whatever the draft holds now. Nothing was written.`,
+        hint: `Repair it — a git merge conflict is the usual cause, and the side with the later synced_updated_at is the one to keep — or remove it and pull the method into the directory to relink it. ${toSaveAnyway}`,
+        retryable: false,
+      },
+    };
+  }
+  const link = claim.link;
+  if (link.partial_pull === true || link.synced_updated_at === "") {
+    return {
+      ok: false,
+      summary: "The method was not saved: an earlier pull into that directory never finished.",
+      error: {
+        class: "input_domain",
+        location: "link_dir",
+        message: `An earlier pull of \`${methodId}\` into \`${claim.dir}\` was interrupted, so the directory may hold a mix of two contents, and its \`${LINK_FILE_NAME}\` records no sync that finished. Saving would replace the draft with that mix. Nothing was written.`,
+        hint: `Pull the method into the directory again, which finishes the interrupted pull, then save. ${toSaveAnyway}`,
+        retryable: false,
+      },
+    };
+  }
+  if (link.synced_version !== undefined) {
+    return {
+      ok: false,
+      summary: "The method was not saved: the directory holds a published version, not the draft.",
+      error: {
+        class: "input_domain",
+        location: "expected_updated_at",
+        message: `\`${claim.dir}\` holds version ${link.synced_version} of \`${methodId}\`, pulled over the draft, so this save would replace the draft with that version's files and any edits made to them: that restores version ${link.synced_version} as the draft, and loses whatever the draft held beyond it. Nothing was written.`,
+        hint: `If the user wants version ${link.synced_version} restored as the draft, save again with expected_updated_at "${link.synced_updated_at}". Otherwise pull the draft back into the directory (method_id "${methodId}") and work from it.`,
+        retryable: false,
+      },
+    };
+  }
+  return { ok: true, token: link.synced_updated_at };
 }
 
 /**
@@ -963,7 +1062,7 @@ function notRetryableCreate(err: unknown, error: ToolError): ToolError {
   return {
     ...error,
     retryable: false,
-    hint: `${error.hint} This was a CREATE, and it must not be retried blindly: the API accepts an idempotency key but the SDK cannot send one, so a create whose response was lost would be minted twice. List the catalog with mthds_list_methods first — if the method is there, save again with its method_id, which writes its draft.`,
+    hint: `${error.hint} This was a CREATE, and it must not be retried blindly: the API accepts an idempotency key but the SDK cannot send one, so a create whose response was lost would be minted twice. List the catalog with ${WORKSHOP_TOOL_NAMES.listMethods} first — if the method is there, save again with its method_id, which writes its draft.`,
   };
 }
 
@@ -1035,7 +1134,13 @@ async function writeLinkForSave(
 
 function saveSummary(
   result: SaveMethodSuccess,
-  notes: { linkedAnyway: boolean; previousName?: string; callers?: string },
+  notes: {
+    linkedAnyway: boolean;
+    claimUnreadable: boolean;
+    previousName?: string;
+    draftMovedTo?: string;
+    callers?: string;
+  },
 ): string {
   const id = result.method_id ?? "";
   const lines: string[] = [];
@@ -1051,6 +1156,11 @@ function saveSummary(
   if (result.rename_error !== undefined) {
     lines.push(
       `The rename to the requested name FAILED, so the method keeps its name: ${result.rename_error.message} The draft itself was saved; save again with the same name to retry the rename alone.`,
+    );
+  }
+  if (notes.draftMovedTo !== undefined) {
+    lines.push(
+      `The draft changed again right after this save: somebody saved it at ${notes.draftMovedTo}, so it no longer holds these files. The link records this save's updated_at, so the next save from here, and a publish under that token, are refused until the user decides what to keep — pull the method into a directory of its own to see what the draft holds now.`,
     );
   }
 
@@ -1088,7 +1198,9 @@ function saveSummary(
       ? `Linked by \`${result.link_file.path}\` — commit it, so a teammate saves this same method instead of creating a second one.`
       : notes.linkedAnyway
         ? `The directory IS linked to this method, but \`${result.link_file.path}\` could not be refreshed (${result.link_file.reason}), so it still records an out-of-date synced_updated_at, and the next save from here will be refused as stale. Fix that and pull this method into the directory, which refreshes the link alone while the files match.`
-        : `The directory is NOT linked (${result.link_file.reason}), so the next save would create a SECOND method unless it passes method_id \`${id}\`.`,
+        : notes.claimUnreadable
+          ? `\`${result.link_file.path}\` cannot be read (${result.link_file.reason}), so it was not refreshed, and a save from here is refused until it is: repair or remove it, then pull this method into the directory to relink it.`
+          : `The directory is NOT linked (${result.link_file.reason}), so the next save would create a SECOND method unless it passes method_id \`${id}\`.`,
   );
   return lines.join("\n");
 }
@@ -1138,25 +1250,22 @@ export async function getMthdsMethod(
   // carries the name, the draft's token the link records, and the latest
   // version's number.
   const selector = readMethodSelector(parsed.data.method_id);
-  if (selector.form === "opaque" && parsed.data.method_id.includes("@")) {
-    return getError("The method was not fetched: request input is invalid.", [
-      {
-        class: "input_domain",
-        location: "method_id",
-        message: `\`${parsed.data.method_id}\` is not a method id: a catalog id is mt_… with at most one suffix, @<n> for a published version or @draft for the draft.`,
-        hint: "Pass the id as mthds_list_methods or pipelex-method.json gives it.",
-        retryable: false,
-      },
-    ]);
+  const malformed = malformedSuffixError(parsed.data.method_id, selector);
+  if (malformed !== undefined) {
+    return getError("The method was not fetched: request input is invalid.", [malformed]);
   }
   const methodId = selector.methodId;
   const wanted: number | "draft" = selector.form === "version" ? selector.version : "draft";
 
   let client: CatalogWriteClient;
+  let support: Promise<MethodVersionsSupport>;
   let stored: MethodData;
   let version: MethodVersion | undefined;
   try {
     client = catalogWriteClient(context);
+    // Asked beside the read rather than after it: it never rejects, and only
+    // the result's sentences wait on it.
+    support = catalogVersionsSupport(context, client);
     if (wanted === "draft") {
       stored = await client.getMethod(methodId);
     } else {
@@ -1186,12 +1295,11 @@ export async function getMthdsMethod(
     return emptySourceError();
   }
   const apiHost = apiHostOf(context.baseUrl);
-  const support = await catalogVersionsSupport(context, client);
 
   if (parsed.data.output_dir === undefined) {
-    return inlineResult(stored, content, apiHost, support);
+    return inlineResult(stored, content, apiHost, await support);
   }
-  return writtenResult(context, client, parsed.data, stored, content, apiHost, support);
+  return writtenResult(context, client, parsed.data, stored, content, apiHost, await support);
 }
 
 /** The draft's files, or the version's, as named files. */
@@ -1569,7 +1677,7 @@ async function writtenResult(
     if (callers !== undefined) lines.push(callers);
   } else {
     lines.push(
-      `The directory now holds version ${content.version}, not the draft. A save from it replaces the draft (updated_at ${stored.updated_at}) with these files, which is how a version is restored; it publishes nothing.`,
+      `The directory now holds version ${content.version}, not the draft. To restore it as the draft once the user has asked, save from here with expected_updated_at ${stored.updated_at}; a save without it is refused, so the draft (updated_at ${stored.updated_at}) is never replaced by accident. Restoring publishes nothing.`,
     );
   }
   if (content.synthesizedName) {
@@ -1589,7 +1697,7 @@ async function writtenResult(
     linkFile.written
       ? `Linked by \`${linkFile.path}\` — commit it, so a save from this directory writes this method's draft instead of creating a second method.`
       : linkedAnyway
-        ? `The files are written and the directory IS linked to this method, but \`${linkFile.path}\` could not be refreshed (${linkFile.reason}), so it still records an out-of-date synced_updated_at${provisional?.written === true ? " and this pull's interrupted-pull marker" : ""}. Fix that and pull again; a save from here still writes this method's draft.`
+        ? `The files are written and the directory IS linked to this method, but \`${linkFile.path}\` could not be refreshed (${linkFile.reason}), so it still records an out-of-date synced_updated_at${provisional?.written === true ? " and this pull's interrupted-pull marker" : ""}. Fix that and pull again${provisional?.written === true ? ": until then a save from here is refused, since the link marks this pull as unfinished." : " before saving from here: the link still describes the directory's previous sync, not these files."}`
         : `The directory is NOT linked (${linkFile.reason}), so a save from it would create a SECOND method unless it passes method_id \`${stored.method_id}\`.`,
   );
 
@@ -1975,7 +2083,7 @@ async function planPull(
     }
     return refusePull(
       `an earlier pull of this method was interrupted here, and ${unsaved.map((name) => `\`${name}\``).join(", ")} changed after it landed.`,
-      "Resuming would overwrite those bytes. Save them with mthds_save_method, or move them aside, then pull again — or pass overwrite: true if the stored version wins.",
+      `Resuming would overwrite those bytes. Save them with ${WORKSHOP_TOOL_NAMES.saveMethod}, or move them aside, then pull again — or pass overwrite: true if the stored version wins.`,
     );
   }
 
@@ -1995,7 +2103,7 @@ async function planPull(
     // answers "whose change is this", and here there is no question.
     return refusePull(
       `it holds changes to ${unsaved.map((name) => `\`${name}\``).join(", ")} that were never saved — the draft has not moved since this directory last synced with it.`,
-      "Those edits exist only here, so pulling would destroy them. Save them with mthds_save_method, or move them aside, then pull again.",
+      `Those edits exist only here, so pulling would destroy them. Save them with ${WORKSHOP_TOOL_NAMES.saveMethod}, or move them aside, then pull again.`,
     );
   }
 
@@ -2119,7 +2227,7 @@ function emptySourceError(): GetMethodResult {
       class: "input_domain",
       location: "method_id",
       message: "The stored method has no MTHDS source yet.",
-      hint: "The method exists but is empty — a different answer from an unknown id, which is a 404 at this same field. Open it in the Pipelex webapp and save a bundle into it, or save one from here with mthds_save_method and this method_id.",
+      hint: `The method exists but is empty — a different answer from an unknown id, which is a 404 at this same field. Open it in the Pipelex webapp and save a bundle into it, or save one from here with ${WORKSHOP_TOOL_NAMES.saveMethod} and this method_id.`,
       retryable: false,
     },
   ]);
