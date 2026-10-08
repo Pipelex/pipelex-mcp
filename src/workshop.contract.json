@@ -161,14 +161,15 @@
         "type": "object",
         "properties": {
           "category": {
-            "description": "Only this category: llm for a PipeLLM, extract for a PipeExtract, img_gen for a PipeImgGen, search for a PipeSearch, judgment for a PipeJudge. Omit it for every category; a check then covers doc_gen, for a PipeDocGen, as well.",
+            "description": "Only this category: llm for a PipeLLM, extract for a PipeExtract, img_gen for a PipeImgGen, search for a PipeSearch, judgment for a PipeJudge, or, when checking a reference, doc_gen for a PipeDocGen, which the deck does not list. Omit it for every category; a check then covers doc_gen as well.",
             "type": "string",
             "enum": [
               "llm",
               "extract",
               "img_gen",
               "search",
-              "judgment"
+              "judgment",
+              "doc_gen"
             ]
           },
           "reference": {
@@ -195,7 +196,8 @@
               "extract",
               "img_gen",
               "search",
-              "judgment"
+              "judgment",
+              "doc_gen"
             ]
           },
           "deck": {

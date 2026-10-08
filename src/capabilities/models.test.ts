@@ -146,15 +146,18 @@ function apiError(
 }
 
 describe("the categories", () => {
-  it("are the protocol's, in the protocol's order, each with the pipe type that names it", () => {
-    expect(mthdsModelsInputSchema.category.unwrap().options).toEqual([...MODEL_CATEGORIES]);
+  it("are the protocol's, in the protocol's order, then doc_gen, each with the pipe type that names it", () => {
+    expect(mthdsModelsInputSchema.category.unwrap().options).toEqual([
+      ...MODEL_CATEGORIES,
+      "doc_gen",
+    ]);
     expect(Object.keys(PIPE_TYPE_OF)).toEqual([...MODEL_CATEGORIES]);
     expect(PIPE_TYPE_OF.judgment).toBe("PipeJudge");
   });
 
   it("names every category and its pipe type in the category's description", () => {
     expect(mthdsModelsInputSchema.category.description).toBe(
-      "Only this category: llm for a PipeLLM, extract for a PipeExtract, img_gen for a PipeImgGen, search for a PipeSearch, judgment for a PipeJudge. Omit it for every category; a check then covers doc_gen, for a PipeDocGen, as well.",
+      "Only this category: llm for a PipeLLM, extract for a PipeExtract, img_gen for a PipeImgGen, search for a PipeSearch, judgment for a PipeJudge, or, when checking a reference, doc_gen for a PipeDocGen, which the deck does not list. Omit it for every category; a check then covers doc_gen as well.",
     );
   });
 });
@@ -588,7 +591,7 @@ describe("checking a reference", () => {
     expect(result.summary).toContain("- tts (a category this tool does not know) → `some-voice`");
   });
 
-  it("reads a resolution it does not know as not resolved", async () => {
+  it("reads a resolution it does not know as not resolved, and drops its matches", async () => {
     const { structured, result } = await check(
       { reference: "$vision" },
       verdict({
@@ -596,12 +599,33 @@ describe("checking a reference", () => {
         kind: "preset",
         name: "vision",
         resolution: "retired",
-        matches: [],
+        matches: [{ category: "llm", resolves_to: null, target: "gpt-4o", description: null }],
       }),
     );
 
     expect(structured.resolution).toBe("not_found");
+    expect(structured.matches).toEqual([]);
     expect(result.summary).toContain("`$vision` does not resolve");
+  });
+
+  it("checks a reference in doc_gen when asked, which the listing does not take", async () => {
+    const { structured, recorded, result } = await check(
+      { reference: "$docs-letter", category: "doc_gen" },
+      verdict({
+        reference: "$docs-letter",
+        kind: "preset",
+        name: "docs-letter",
+        category: "doc_gen",
+        resolution: "not_found",
+        matches: [],
+        other_categories: ["llm"],
+      }),
+    );
+
+    expect(recorded.checks).toEqual([{ reference: "$docs-letter", category: "doc_gen" }]);
+    expect(structured.category).toBe("doc_gen");
+    expect(mthdsModelsOutputSchema.safeParse(structured).success).toBe(true);
+    expect(result.summary).toContain("It resolves in llm (PipeLLM), not in doc_gen (PipeDocGen)");
   });
 
   it("keeps only the fields the contract declares", async () => {
@@ -684,6 +708,15 @@ describe("failures", () => {
     expect(recorded.listings).toEqual([]);
     expect(recorded.checks).toEqual([]);
     expect(firstError(result)).toMatchObject({ class: "input_domain", location: "category" });
+  });
+
+  it("refuses doc_gen without a reference before calling the API, since the deck lists none", async () => {
+    const recorded = contextAnswering();
+    const result = await readMthdsModels({ category: "doc_gen" }, recorded.context);
+
+    expect(recorded.listings).toEqual([]);
+    expect(firstError(result)).toMatchObject({ class: "input_domain", location: "category" });
+    expect(firstError(result)?.hint).toContain("Pass reference to check a doc_gen reference");
   });
 
   it("refuses a reference that is not text before calling the API", async () => {

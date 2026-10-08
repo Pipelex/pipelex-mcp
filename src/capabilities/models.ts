@@ -77,6 +77,16 @@ const CHECK_PIPE_TYPE_OF: Record<ModelCheckCategory, string> = {
 };
 
 /**
+ * The categories a check takes, in the order it covers them: the protocol's,
+ * then `doc_gen`. The `satisfies` fails the build on a name the SDK does not
+ * take, and {@link CHECK_PIPE_TYPE_OF} on one the SDK gains.
+ */
+const CHECK_CATEGORIES = [
+  ...MODEL_CATEGORIES,
+  "doc_gen",
+] as const satisfies readonly ModelCheckCategory[];
+
+/**
  * A category as a deck or a verdict names it: one of the protocol's, or one
  * this module does not know, kept under the runner's own name. The protocol's
  * reader rule: "A client reading a model list MUST NOT fail it because an entry
@@ -103,8 +113,12 @@ export const SIGIL_OF: Record<ReferenceKind, string> = {
   handle: "",
 };
 
-/** The filter: the protocol's closed set, which a runner refuses a value outside of. */
-const categorySchema = z.enum(MODEL_CATEGORIES);
+/**
+ * The filter: the closed set a check takes, which a runner refuses a value
+ * outside of. A listing takes the protocol's alone, since the deck has no
+ * `doc_gen` category, and the capability refuses `doc_gen` without a reference.
+ */
+const categorySchema = z.enum(CHECK_CATEGORIES);
 
 /** A category in a result: any name the deck or the verdict carried, the protocol's or not. */
 const deckCategoryNameSchema = z.string();
@@ -113,7 +127,7 @@ export const mthdsModelsInputSchema = {
   category: categorySchema
     .optional()
     .describe(
-      `Only this category: ${CATEGORY_PIPE_TYPES}. Omit it for every category; a check then covers doc_gen, for a PipeDocGen, as well.`,
+      `Only this category: ${CATEGORY_PIPE_TYPES}, or, when checking a reference, doc_gen for a PipeDocGen, which the deck does not list. Omit it for every category; a check then covers doc_gen as well.`,
     ),
   reference: z
     .string()
@@ -165,7 +179,7 @@ export const mthdsModelsOutputSchema = z.object({
 });
 
 export interface MthdsModelsInput {
-  category?: ModelCategory;
+  category?: ModelCheckCategory;
   reference?: string;
 }
 
@@ -210,7 +224,7 @@ export interface ModelDeckListing {
 
 export interface ModelReferenceCheck {
   status: "ok";
-  category?: ModelCategory;
+  category?: ModelCheckCategory;
   /** The reference as checked: the caller's, trimmed by the runner. */
   reference: string;
   kind: ReferenceKind;
@@ -274,15 +288,26 @@ export async function readMthdsModels(
         class: "input_domain",
         ...(issue.path.length === 0 ? {} : { location: issue.path.join(".") }),
         message: issue.message,
-        hint: `Use category as one of ${MODEL_CATEGORIES.join(", ")}, and reference as text.`,
+        hint: `Use category as one of ${CHECK_CATEGORIES.join(", ")}, and reference as text.`,
         retryable: false,
       })),
     );
   }
   const { category, reference } = parsedInput.data;
-  return reference === undefined
-    ? listDeck(category, context)
-    : checkReference(reference, category, context);
+  if (reference !== undefined) return checkReference(reference, category, context);
+  if (category === "doc_gen") {
+    return errorResult("Model deck was not read: the deck lists no doc_gen category.", [
+      {
+        class: "input_domain",
+        location: "category",
+        message:
+          "The MTHDS Protocol defines no doc_gen category, so the deck lists none; a check covers it.",
+        hint: `Pass reference to check a doc_gen reference, or list one of ${MODEL_CATEGORIES.join(", ")}.`,
+        retryable: false,
+      },
+    ]);
+  }
+  return listDeck(category, context);
 }
 
 async function listDeck(
@@ -324,7 +349,7 @@ async function listDeck(
 
 async function checkReference(
   reference: string,
-  category: ModelCategory | undefined,
+  category: ModelCheckCategory | undefined,
   context: ModelsContext,
 ): Promise<ModelsResult> {
   let wire: unknown;
@@ -523,17 +548,23 @@ type WireVerdict = z.infer<typeof wireVerdictSchema>;
 /**
  * The tool's check from the runner's verdict. `category` is the one the
  * caller asked about, which the runner echoes, so the output keeps the
- * listing's closed filter type and stays absent when none was asked.
+ * input's closed filter type and stays absent when none was asked. A
+ * resolution this tool does not know reads as `not_found`, and so drops the
+ * matches, which a `not_found` never carries.
  */
-function checkOf(verdict: WireVerdict, category: ModelCategory | undefined): ModelReferenceCheck {
+function checkOf(
+  verdict: WireVerdict,
+  category: ModelCheckCategory | undefined,
+): ModelReferenceCheck {
+  const resolved = verdict.resolution === "resolved";
   return {
     status: "ok",
     ...(category === undefined ? {} : { category }),
     reference: verdict.reference,
     kind: verdict.kind,
     name: verdict.name,
-    resolution: verdict.resolution === "resolved" ? "resolved" : "not_found",
-    matches: verdict.matches,
+    resolution: resolved ? "resolved" : "not_found",
+    matches: resolved ? verdict.matches : [],
     suggestions: verdict.suggestions,
     other_kinds: verdict.other_kinds,
     other_categories: verdict.other_categories,
