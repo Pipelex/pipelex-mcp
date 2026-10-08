@@ -14,6 +14,16 @@ import { z } from "zod";
 import { writeCodegenTree } from "./codegen-writer.js";
 import type { CodegenWriteSuccess } from "./codegen-writer.js";
 import {
+  METHOD_ID_SELECTOR_SENTENCE,
+  methodContentSentence,
+  methodVersionReportSchema,
+  methodVersionsSupport,
+  noteSelectorRefusal,
+  planMethodSelector,
+  versionReaderOf,
+} from "./method-versions.js";
+import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
+import {
   DEFAULT_AUTH_HINT,
   METHOD_REF_GRAMMAR,
   buildApiConfig,
@@ -132,7 +142,7 @@ export const mthdsCodegenInputSchema = {
     .string()
     .optional()
     .describe(
-      "Catalog id (mt_…) of a registered method. Generates from the method's CURRENT stored content, resolved server-side by the hosted platform — requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_ref / method_id.",
+      `Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of files / method_ref / method_id.`,
     ),
   target: codegenTargetSchema.describe(
     `Which typed projection to emit. Required, no default — choose it from the calling context, and the user's explicit request wins: ${CODEGEN_TARGET_DETAIL}. Field keys are snake_case in every target.`,
@@ -233,6 +243,7 @@ const codegenStructuredContentSchema = z.object({
     .describe(
       "Written arm only, present when non-empty — every check drift that is NOT an orphan, which would mean the write itself is broken.",
     ),
+  method_version: methodVersionReportSchema,
   validation_errors: z.array(z.unknown()).optional(),
   errors: z.array(toolErrorSchema).optional(),
 });
@@ -285,6 +296,8 @@ export interface CodegenStructuredContent {
   orphans?: string[];
   orphans_truncated?: boolean;
   drifts?: unknown[];
+  /** By-id calls only: the content the code was generated from, when this server can tell. */
+  method_version?: MethodVersionReport;
   validation_errors?: unknown[];
   errors?: ToolError[];
 }
@@ -297,9 +310,11 @@ export interface CodegenResult {
 /** The slice of `PipelexApiClient` the codegen capability calls (test seam). */
 export interface CodegenClient {
   codegen(request: CodegenRequest): Promise<CodegenResponse>;
+  /** `GET /v1/version`, read to learn whether a bare id names the draft or a version; optional on a test seam. */
+  version?(): Promise<unknown>;
 }
 
-export interface CodegenContext extends ApiConfig {
+export interface CodegenContext extends ApiConfig, MethodVersionsAware {
   client?: CodegenClient;
   /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
@@ -490,21 +505,44 @@ export async function generateMthdsCode(
         : CODEGEN_BY_ID_ERROR_OPTIONS;
 
   let report: CodegenResponse;
+  let plan: SelectorPlan | undefined;
   try {
-    report = await codegenClient(context).codegen(toCodegenRequest(request));
+    const client = codegenClient(context);
+    let sent = request;
+    if (request.method_id !== undefined) {
+      // A bare id reads the draft on a platform that does not resolve version
+      // selectors yet, and the latest published version on one that does: the
+      // selector is planned against the platform's answer, and the result says
+      // which content the code came from (`method-versions.ts`).
+      const planned = await planMethodSelector(
+        request.method_id,
+        () => methodVersionsSupport(context.methodVersions, versionReaderOf(client)),
+        { needBareReport: true },
+      );
+      if (!planned.ok) {
+        return errorResult(planned.summary, [planned.error]);
+      }
+      plan = planned.plan;
+      sent = { ...request, method_id: plan.send };
+    }
+    report = await client.codegen(toCodegenRequest(sent));
   } catch (err) {
-    const error = classifyError(err, {
+    const classified = classifyError(err, {
       ...classifyOptions,
       auth: context.authError,
       forbidden: forbiddenTexture(context.authError),
     });
+    const error =
+      plan === undefined
+        ? classified
+        : noteSelectorRefusal(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);
   }
 
   // A produced-invalid verdict never touches disk: it carries
   // no artifacts at all, so there is nothing to preflight and nothing to write.
   if (!report.is_valid) {
-    return codegenResult(report);
+    return withMethodContent(codegenResult(report), plan);
   }
 
   // The API responded; projecting it must not be reported as an unreachable
@@ -545,10 +583,23 @@ export async function generateMthdsCode(
   }
 
   try {
-    return codegenResult(report, written, context.saveRoot !== undefined);
+    return withMethodContent(codegenResult(report, written, context.saveRoot !== undefined), plan);
   } catch (err) {
     return malformedReportError(err);
   }
+}
+
+/** A by-id answer, with which content it came from: in `method_version` and in a closing sentence. */
+function withMethodContent(result: CodegenResult, plan: SelectorPlan | undefined): CodegenResult {
+  if (plan === undefined) return result;
+  const sentence = methodContentSentence(plan, "generated code from");
+  return {
+    structuredContent: {
+      ...result.structuredContent,
+      ...(plan.reads === undefined ? {} : { method_version: plan.reads }),
+    },
+    summary: sentence === undefined ? result.summary : `${result.summary}\n\n${sentence}`,
+  };
 }
 
 /**

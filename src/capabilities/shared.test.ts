@@ -1141,6 +1141,63 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("classifyError on the method-version codes", () => {
+  it("reads a never-published method's bare id as the caller's, naming the draft and the publish", async () => {
+    const error = classifyError(
+      await refused(409, { code: "method_not_published", detail: "mt_test is not published." }),
+      { route: "/v1/validate", methodLocation: "files" },
+    );
+
+    expect(error).toMatchObject({
+      class: "input_domain",
+      location: "method_id",
+      message: "mt_test is not published.",
+      retryable: false,
+    });
+    expect(error.hint).toContain("mt_…@draft");
+    expect(error.hint).toContain("mthds_publish_method");
+    expect(error.hint).toContain("only when the user asks");
+  });
+
+  it("locates a stale draft token where the route says, with its hint", async () => {
+    const conflict = await refused(409, { code: "method_update_conflict", detail: "Moved." });
+
+    expect(classifyError(conflict)).toMatchObject({
+      class: "input_domain",
+      location: "expected_updated_at",
+    });
+    expect(
+      classifyError(conflict, {
+        conflict: { location: "expected_draft_updated_at", hint: "Read it again." },
+      }),
+    ).toMatchObject({ location: "expected_draft_updated_at", hint: "Read it again." });
+  });
+
+  it("says a method being deleted is going away", async () => {
+    const error = classifyError(
+      await refused(409, { code: "method_being_deleted", detail: "Deleting." }),
+    );
+    expect(error).toMatchObject({ class: "input_domain", location: "method_id" });
+    expect(error.hint).toContain("being deleted");
+  });
+
+  it("reads an unknown version as the caller's, ahead of the route's unknown-method hint", async () => {
+    const error = classifyError(
+      await refused(404, { code: "method_version_not_found", detail: "No version 9." }),
+      { notFound: { location: "method_id", hint: "No registered method with this id." } },
+    );
+
+    expect(error).toMatchObject({
+      class: "input_domain",
+      location: "method_id",
+      message: "No version 9.",
+      retryable: false,
+    });
+    expect(error.hint).not.toContain("No registered method");
+    expect(error.hint).toContain("no published version with this number");
+  });
+});
+
 describe("summaryForToolError", () => {
   const summaries: ErrorSummaries = {
     config: "connectivity headline",

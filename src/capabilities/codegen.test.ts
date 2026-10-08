@@ -459,6 +459,30 @@ describe("generateMthdsCode request mapping", () => {
     expect(captured).not.toHaveProperty("files");
   });
 
+  it("sends @draft bare and says it read the draft where versions do not resolve", async () => {
+    let captured: CodegenRequest | undefined;
+
+    const result = await generateMthdsCode(
+      { method_id: "mt_123@draft", target: "ts-zod" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          async codegen(request) {
+            captured = request;
+            return recordedReport;
+          },
+          async version() {
+            return { version: "1.0.0", extensions: ["runs"] };
+          },
+        },
+      },
+    );
+
+    expect(captured).toMatchObject({ method_id: "mt_123" });
+    expect(result.structuredContent.method_version).toBe("draft");
+    expect(result.summary).toContain("generated code from the draft of `mt_123`");
+  });
+
   it("rejects a request with no selector without calling the route", async () => {
     const result = await generateMthdsCode(
       { target: "ts-zod" },

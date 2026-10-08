@@ -1195,6 +1195,7 @@ interface FakeRunClient {
   start(options: PipelexStartOptions): Promise<RunResultStart>;
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
+  version?(): Promise<unknown>;
 }
 
 const NEVER_CLIENT: FakeRunClient = {
@@ -2148,5 +2149,171 @@ describe("startMthdsRun path submissions", () => {
     expect(result.structuredContent.errors?.[0]?.location).toBe("files[0].path");
     expect(result.structuredContent.errors?.[0]?.hint).toContain("npx @pipelex/mcp");
     expect(result.summary).toBe("Run was not started: request input is invalid.");
+  });
+});
+
+describe("startMthdsRun by method_id, on both platforms", () => {
+  /** `GET /v1/version` on a platform that resolves version selectors. */
+  const versionsSupported = (): Promise<unknown> =>
+    Promise.resolve({ version: "1.0.0", extensions: ["runs", "method_versions"] });
+  /** `GET /v1/version` on a platform that does not yet. */
+  const versionsUnsupported = (): Promise<unknown> =>
+    Promise.resolve({ version: "1.0.0", extensions: ["runs"] });
+
+  function starting(
+    ack: Record<string, unknown>,
+    version: () => Promise<unknown>,
+    seen: { options?: PipelexStartOptions; versionCalls: number },
+  ): RunContext {
+    return contextWith({
+      start: (options: PipelexStartOptions) => {
+        seen.options = options;
+        return Promise.resolve({ pipeline_run_id: RUN_ID, ...ack });
+      },
+      version: () => {
+        seen.versionCalls += 1;
+        return version();
+      },
+    });
+  }
+
+  it("reports the version a bare id ran, from the acknowledgement, without a handshake", async () => {
+    const seen = { versionCalls: 0 } as { options?: PipelexStartOptions; versionCalls: number };
+    const result = await startMthdsRun(
+      { method_id: "mt_abc123" },
+      starting({ method_version: 4 }, versionsSupported, seen),
+    );
+
+    expect(seen.options).toEqual({ method_id: "mt_abc123" });
+    expect(seen.versionCalls).toBe(0);
+    expect(result.structuredContent).toMatchObject({ status: "ok", method_version: 4 });
+    expect(result.summary).toContain("It runs version 4 of `mt_abc123`, the latest published");
+  });
+
+  it("reports the draft for a bare id on a platform whose acknowledgement names no version", async () => {
+    const seen = { versionCalls: 0 } as { options?: PipelexStartOptions; versionCalls: number };
+    const result = await startMthdsRun(
+      { method_id: "mt_abc123" },
+      starting({}, versionsUnsupported, seen),
+    );
+
+    expect(seen.options).toEqual({ method_id: "mt_abc123" });
+    expect(result.structuredContent).toMatchObject({ method_version: "draft" });
+    expect(result.summary).toContain("It runs the draft of `mt_abc123`");
+  });
+
+  it("sends @draft as given where it resolves, and bare where a bare id runs the draft", async () => {
+    const supported = { versionCalls: 0 } as {
+      options?: PipelexStartOptions;
+      versionCalls: number;
+    };
+    const onPhaseTwo = await startMthdsRun(
+      { method_id: "mt_abc123@draft" },
+      starting({ method_version: "draft" }, versionsSupported, supported),
+    );
+    expect(supported.options).toEqual({ method_id: "mt_abc123@draft" });
+    expect(onPhaseTwo.structuredContent).toMatchObject({ method_version: "draft" });
+
+    const unsupported = { versionCalls: 0 } as {
+      options?: PipelexStartOptions;
+      versionCalls: number;
+    };
+    const onPhaseOne = await startMthdsRun(
+      { method_id: "mt_abc123@draft" },
+      starting({}, versionsUnsupported, unsupported),
+    );
+    expect(unsupported.options).toEqual({ method_id: "mt_abc123" });
+    expect(onPhaseOne.structuredContent).toMatchObject({ method_version: "draft" });
+    expect(onPhaseOne.summary).toContain("sent as the bare id");
+  });
+
+  it("warns when the platform ran a published version for a draft sent bare", async () => {
+    // The platform started resolving selectors between the handshake and the
+    // start: the bare id it was sent for the draft named the published version.
+    const seen = { versionCalls: 0 } as { options?: PipelexStartOptions; versionCalls: number };
+    const result = await startMthdsRun(
+      { method_id: "mt_abc123@draft" },
+      starting({ method_version: 4 }, versionsUnsupported, seen),
+    );
+
+    expect(result.structuredContent).toMatchObject({ status: "ok", method_version: 4 });
+    expect(result.summary).toContain("WARNING: this run executes version 4");
+    expect(result.summary).toContain("NOT the draft");
+  });
+
+  it("runs @n where it resolves, and refuses it before the wire where nothing can", async () => {
+    const supported = { versionCalls: 0 } as {
+      options?: PipelexStartOptions;
+      versionCalls: number;
+    };
+    const pinned = await startMthdsRun(
+      { method_id: "mt_abc123@3" },
+      starting({ method_version: 3 }, versionsSupported, supported),
+    );
+    expect(supported.options).toEqual({ method_id: "mt_abc123@3" });
+    expect(pinned.structuredContent).toMatchObject({ method_version: 3 });
+
+    const refused = await startMthdsRun(
+      { method_id: "mt_abc123@3" },
+      contextWith({ version: versionsUnsupported }),
+    );
+    expect(refused.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "method_id",
+    });
+    expect(refused.summary).toContain("Nothing was sent");
+  });
+
+  it("refuses a suffixed linkage id beside files", async () => {
+    const result = await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }], method_id: "mt_abc123@draft" },
+      contextWith({}),
+    );
+
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "method_id",
+    });
+  });
+
+  it("explains a never-published method's bare id", async () => {
+    const result = await startMthdsRun(
+      { method_id: "mt_abc123" },
+      contextWith({
+        start: () =>
+          Promise.reject(
+            new ApiResponseError(
+              "HTTP 409",
+              `${DEFAULT_API_URL}/v1/start`,
+              409,
+              "Conflict",
+              "{}",
+              undefined,
+              "mt_abc123 has never been published.",
+              undefined,
+              "method_not_published",
+            ),
+          ),
+      }),
+    );
+
+    const error = result.structuredContent.errors?.[0];
+    expect(error).toMatchObject({ class: "input_domain", location: "method_id" });
+    expect(error?.hint).toContain("mt_…@draft");
+  });
+
+  it("surfaces the version a run ran on its status read", async () => {
+    const read = {
+      pipeline_run_id: RUN_ID,
+      status: "RUNNING",
+      degraded: false,
+      created_at: "2026-09-20T12:00:00Z",
+      method_version: 4,
+    } as unknown as RunRead;
+
+    expect(statusResult(read).structuredContent.method_version).toBe(4);
+    expect(
+      statusResult({ ...read, method_version: null } as unknown as RunRead).structuredContent,
+    ).not.toHaveProperty("method_version");
   });
 });

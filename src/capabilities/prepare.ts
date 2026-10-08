@@ -3,6 +3,16 @@ import type { MthdsFileItem, PrepareInputsRequest, PreparedInputs } from "@pipel
 import { z } from "zod";
 
 import {
+  METHOD_ID_SELECTOR_SENTENCE,
+  methodContentSentence,
+  methodVersionReportSchema,
+  methodVersionsSupport,
+  noteSelectorRefusal,
+  planMethodSelector,
+  versionReaderOf,
+} from "./method-versions.js";
+import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
+import {
   METHOD_REF_GRAMMAR,
   buildApiConfig,
   classifyError,
@@ -38,7 +48,7 @@ export const mthdsPrepareInputsInputSchema = {
     .string()
     .optional()
     .describe(
-      "Catalog id (mt_…) of a registered method — the signature source. Uses the method's CURRENT stored content and requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_ref / method_id.",
+      `Catalog id (mt_…) of a registered method — the signature source, resolved server-side and requiring an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of files / method_ref / method_id.`,
     ),
   pipe_ref: z
     .string()
@@ -72,6 +82,7 @@ const prepareStructuredContentSchema = z.object({
     .describe(
       "The pipelex-storage:// uris of the assets uploaded this call; [] when all inputs pass through.",
     ),
+  method_version: methodVersionReportSchema,
   errors: z.array(toolErrorSchema).optional(),
 });
 
@@ -100,6 +111,8 @@ export interface PrepareStructuredContent {
   pipe_ref?: string;
   inputs?: Record<string, unknown>;
   uploads?: string[];
+  /** By-id calls only: the content whose signature the inputs were prepared against, when this server can tell. */
+  method_version?: MethodVersionReport;
   errors?: ToolError[];
 }
 
@@ -117,13 +130,15 @@ export interface PrepareResult {
  */
 interface PrepareClient {
   prepareInputs(request: PrepareInputsRequest): Promise<PreparedInputs>;
+  /** `GET /v1/version`, read to learn whether a bare id names the draft or a version; optional on a test seam. */
+  version?(): Promise<unknown>;
 }
 
 /**
  * `mthds_prepare_inputs` always uploads: the workshop is co-located with the
  * user's files.
  */
-export interface PrepareContext extends ApiConfig {
+export interface PrepareContext extends ApiConfig, MethodVersionsAware {
   client?: PrepareClient;
   /** Fills `{ path }` closure items from disk (local workshop). */
   resolver?: FileResolver;
@@ -268,22 +283,54 @@ export async function prepareMthdsInputs(
         : PREPARE_BY_ID_ERROR_OPTIONS;
 
   let prepared: PreparedInputs;
+  let plan: SelectorPlan | undefined;
   try {
+    const client = prepareClient(context);
+    let sent = request;
+    if (request.method_id !== undefined) {
+      // A bare id reads the draft on a platform that does not resolve version
+      // selectors yet, and the latest published version on one that does: the
+      // selector is planned against the platform's answer, and the result says
+      // whose signature the inputs were prepared against (`method-versions.ts`).
+      const planned = await planMethodSelector(
+        request.method_id,
+        () => methodVersionsSupport(context.methodVersions, versionReaderOf(client)),
+        { needBareReport: true },
+      );
+      if (!planned.ok) {
+        return errorResult(planned.summary, [planned.error]);
+      }
+      plan = planned.plan;
+      sent = { ...request, method_id: plan.send };
+    }
     // Built inside the try for the same reason the client is: the selector
     // narrowing throws on its own unreachable arm, and that must classify as a
     // ToolError rather than reject the MCP handler.
     const envelope: PrepareEnvelope = {
-      selector: prepareSelectorOf(request),
+      selector: prepareSelectorOf(sent),
       ...(request.pipe_ref === undefined ? {} : { pipe_ref: request.pipe_ref }),
       inputs: request.inputs,
     };
-    prepared = await prepareWithUpload(prepareClient(context), envelope);
+    prepared = await prepareWithUpload(client, envelope);
   } catch (err) {
-    const error = classifyError(err, { ...classifyOptions, auth: context.authError });
+    const classified = classifyError(err, { ...classifyOptions, auth: context.authError });
+    const error =
+      plan === undefined
+        ? classified
+        : noteSelectorRefusal(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);
   }
 
-  return prepareInputsResult(prepared, request.pipe_ref);
+  const result = prepareInputsResult(prepared, request.pipe_ref);
+  if (plan === undefined) return result;
+  const sentence = methodContentSentence(plan, "prepared the inputs against the signature of");
+  return {
+    structuredContent: {
+      ...result.structuredContent,
+      ...(plan.reads === undefined ? {} : { method_version: plan.reads }),
+    },
+    summary: sentence === undefined ? result.summary : `${result.summary}\n\n${sentence}`,
+  };
 }
 
 /**

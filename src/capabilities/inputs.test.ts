@@ -648,3 +648,57 @@ describe("buildMthdsInputs request shape", () => {
     expect(result.structuredContent.errors?.[0]?.location).toBe("files");
   });
 });
+
+describe("buildMthdsInputs by method_id, on both platforms", () => {
+  /** A context whose platform answers `extensions` to `GET /v1/version`. */
+  function onPlatform(extensions: string[], requests: PipeIORequest[]): InputsContext {
+    const context = contextWith(validReport, requests);
+    return {
+      ...context,
+      client: {
+        ...context.client!,
+        async version() {
+          return { version: "1.0.0", extensions };
+        },
+      },
+    };
+  }
+
+  it("says a bare id read the latest published version where versions resolve", async () => {
+    const requests: PipeIORequest[] = [];
+    const result = await buildMthdsInputs(
+      { method_id: "mt_123", pipe_ref: "demo.main" },
+      onPlatform(["runs", "method_versions"], requests),
+    );
+
+    expect(requests[0]?.method_id).toBe("mt_123");
+    expect(result.structuredContent.method_version).toBe("latest");
+    expect(result.summary).toContain("the latest published version of `mt_123`");
+  });
+
+  it("says a bare id read the draft, and sends @draft bare, where they do not", async () => {
+    const requests: PipeIORequest[] = [];
+    const bare = await buildMthdsInputs(
+      { method_id: "mt_123", pipe_ref: "demo.main" },
+      onPlatform(["runs"], requests),
+    );
+    expect(bare.structuredContent.method_version).toBe("draft");
+
+    const drafted = await buildMthdsInputs(
+      { method_id: "mt_123@draft", pipe_ref: "demo.main" },
+      onPlatform(["runs"], requests),
+    );
+    expect(requests.map((request) => request.method_id)).toEqual(["mt_123", "mt_123"]);
+    expect(drafted.structuredContent.method_version).toBe("draft");
+  });
+
+  it("says it could not tell when the platform does not answer", async () => {
+    const result = await buildMthdsInputs(
+      { method_id: "mt_123", pipe_ref: "demo.main" },
+      contextWith(validReport),
+    );
+
+    expect(result.structuredContent).not.toHaveProperty("method_version");
+    expect(result.summary).toContain("could not ask the platform");
+  });
+});
