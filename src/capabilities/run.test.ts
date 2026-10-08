@@ -1195,6 +1195,7 @@ interface FakeRunClient {
   start(options: PipelexStartOptions): Promise<RunResultStart>;
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
+  version?(): Promise<unknown>;
 }
 
 const NEVER_CLIENT: FakeRunClient = {
@@ -2148,5 +2149,153 @@ describe("startMthdsRun path submissions", () => {
     expect(result.structuredContent.errors?.[0]?.location).toBe("files[0].path");
     expect(result.structuredContent.errors?.[0]?.hint).toContain("npx @pipelex/mcp");
     expect(result.summary).toBe("Run was not started: request input is invalid.");
+  });
+});
+
+describe("startMthdsRun by method_id, on both platforms", () => {
+  /** `GET /v1/version` on a platform that resolves version selectors. */
+  const versionsSupported = (): Promise<unknown> =>
+    Promise.resolve({ version: "1.0.0", extensions: ["runs", "method_versions"] });
+  /** `GET /v1/version` on a platform that does not yet. */
+  const versionsUnsupported = (): Promise<unknown> =>
+    Promise.resolve({ version: "1.0.0", extensions: ["runs"] });
+
+  function starting(
+    ack: Record<string, unknown>,
+    version: () => Promise<unknown>,
+    seen: { options?: PipelexStartOptions; versionCalls: number },
+  ): RunContext {
+    return contextWith({
+      start: (options: PipelexStartOptions) => {
+        seen.options = options;
+        return Promise.resolve({ pipeline_run_id: RUN_ID, ...ack });
+      },
+      version: () => {
+        seen.versionCalls += 1;
+        return version();
+      },
+    });
+  }
+
+  it("reports the version a bare id ran, from the acknowledgement, without a handshake", async () => {
+    const seen = { versionCalls: 0 } as { options?: PipelexStartOptions; versionCalls: number };
+    const result = await startMthdsRun(
+      { method_id: "mt_abc123" },
+      starting({ method_version: 4 }, versionsSupported, seen),
+    );
+
+    expect(seen.options).toEqual({ method_id: "mt_abc123" });
+    expect(seen.versionCalls).toBe(0);
+    expect(result.structuredContent).toMatchObject({ status: "ok", method_version: 4 });
+    expect(result.summary).toContain("It runs version 4 of `mt_abc123`, the latest published");
+  });
+
+  it("reports the draft for a bare id on a platform whose acknowledgement names no version", async () => {
+    const seen = { versionCalls: 0 } as { options?: PipelexStartOptions; versionCalls: number };
+    const result = await startMthdsRun(
+      { method_id: "mt_abc123" },
+      starting({}, versionsUnsupported, seen),
+    );
+
+    expect(seen.options).toEqual({ method_id: "mt_abc123" });
+    expect(result.structuredContent).toMatchObject({ method_version: "draft" });
+    expect(result.summary).toContain("It runs the draft of `mt_abc123`");
+  });
+
+  it("sends @draft and @n as given on every platform, without asking", async () => {
+    // Rewritten by a stale answer, @draft sent bare would run the latest
+    // published version; a platform that cannot read a suffix refuses it.
+    for (const version of [versionsSupported, versionsUnsupported]) {
+      for (const methodId of ["mt_abc123@draft", "mt_abc123@3"]) {
+        const seen = { versionCalls: 0 } as {
+          options?: PipelexStartOptions;
+          versionCalls: number;
+        };
+        await startMthdsRun({ method_id: methodId }, starting({}, version, seen));
+        expect(seen.options).toEqual({ method_id: methodId });
+        expect(seen.versionCalls).toBe(0);
+      }
+    }
+
+    const seen = { versionCalls: 0 } as { options?: PipelexStartOptions; versionCalls: number };
+    const pinned = await startMthdsRun(
+      { method_id: "mt_abc123@3" },
+      starting({ method_version: 3 }, versionsSupported, seen),
+    );
+    expect(pinned.structuredContent).toMatchObject({ method_version: 3 });
+  });
+
+  it("says a platform that refused a suffix by its pattern does not resolve suffixes", async () => {
+    const result = await startMthdsRun(
+      { method_id: "mt_abc123@draft" },
+      contextWith({
+        start: () =>
+          Promise.reject(
+            new ApiResponseError(
+              "HTTP 422",
+              `${DEFAULT_API_URL}/v1/start`,
+              422,
+              "Unprocessable Entity",
+              "{}",
+              undefined,
+              "Request validation failed.",
+              undefined,
+              "validation_failed",
+              {
+                problem: {
+                  status: 422,
+                  code: "validation_failed",
+                  errors: [{ field: "method_id", code: "string_pattern_mismatch" }],
+                } as never,
+              },
+            ),
+          ),
+      }),
+    );
+
+    expect(result.structuredContent.errors?.[0]?.hint).toContain(
+      "does not resolve version suffixes yet, so it refused `mt_abc123@draft`",
+    );
+  });
+
+  it("explains a never-published method's bare id", async () => {
+    const result = await startMthdsRun(
+      { method_id: "mt_abc123" },
+      contextWith({
+        start: () =>
+          Promise.reject(
+            new ApiResponseError(
+              "HTTP 409",
+              `${DEFAULT_API_URL}/v1/start`,
+              409,
+              "Conflict",
+              "{}",
+              undefined,
+              "mt_abc123 has never been published.",
+              undefined,
+              "method_not_published",
+            ),
+          ),
+      }),
+    );
+
+    const error = result.structuredContent.errors?.[0];
+    expect(error).toMatchObject({ class: "input_domain", location: "method_id" });
+    expect(error?.hint).toContain("`mt_abc123@draft`");
+  });
+
+  it("surfaces the version a run ran on its status read", async () => {
+    const read = {
+      pipeline_run_id: RUN_ID,
+      status: "RUNNING",
+      degraded: false,
+      created_at: "2026-09-20T12:00:00Z",
+      method_version: 4,
+    } as unknown as RunRead;
+
+    expect(statusResult(read).structuredContent.method_version).toBe(4);
+    expect(
+      statusResult({ ...read, method_version: null } as unknown as RunRead).structuredContent,
+    ).not.toHaveProperty("method_version");
   });
 });

@@ -8,7 +8,7 @@ Workspace-level guidance lives in `../CLAUDE.md`.
 
 `pipelex-mcp` is **the workshop**, the MCP server that connects coding agents to Pipelex methods: one package at the repository root, published to npm as `@pipelex/mcp`.
 
-- **The workshop** is the local stdio server the Pipelex plugin runs for coding agents (Claude Code, Codex, Cursor), server name `pipelex-plugin`. Its method-taking tools take files, an address or an id. It registers `mthds_list_methods`, `mthds_models`, `mthds_validate`, `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`, `mthds_run`, `mthds_run_status`, `mthds_run_results`, `mthds_show_images`, `mthds_download_artifacts`, `mthds_save_method` and `mthds_get_method`. It registers no views.
+- **The workshop** is the local stdio server the Pipelex plugin runs for coding agents (Claude Code, Codex, Cursor), server name `pipelex-plugin`. Its method-taking tools take files, an address or an id. It registers `mthds_list_methods`, `mthds_models`, `mthds_validate`, `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`, `mthds_run`, `mthds_run_status`, `mthds_run_results`, `mthds_show_images`, `mthds_download_artifacts`, `mthds_save_method`, `mthds_get_method` and `mthds_publish_method`. It registers no views.
 - **`src/`** holds the server: its entry point, tool table and file resolver at the top, the capability core under `src/capabilities/`, the tool-definition shape and the shell-test helpers. tsup bundles it into `dist/main.js`, the one file the tarball ships besides the README and the licence.
 - **The root** holds the manifest, the Makefile, lint, format and test configuration, `scripts/` and the repository-level `tests/`.
 

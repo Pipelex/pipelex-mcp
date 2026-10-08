@@ -229,6 +229,39 @@ describe("prepareMthdsInputs — the SDK upload walk", () => {
     expect(captured).toEqual({ method_id: "mt_123", inputs: {} });
   });
 
+  it("plans the id against the platform, and says whose signature it prepared against", async () => {
+    const captured: PrepareInputsRequest[] = [];
+    const onPlatform = (extensions: string[]) => {
+      const client = uploadWith(async (request) => {
+        captured.push(request);
+        return { inputs: {}, uploads: [] };
+      });
+      return {
+        baseUrl: DEFAULT_API_URL,
+        client: {
+          ...client,
+          async version() {
+            return { version: "1.0.0", extensions };
+          },
+        },
+      };
+    };
+
+    const latest = await prepareMthdsInputs(
+      { method_id: "mt_123", inputs: {} },
+      onPlatform(["runs", "method_versions"]),
+    );
+    const drafted = await prepareMthdsInputs(
+      { method_id: "mt_123@draft", inputs: {} },
+      onPlatform(["runs"]),
+    );
+
+    expect(captured.map((request) => request.method_id)).toEqual(["mt_123", "mt_123@draft"]);
+    expect(latest.structuredContent.method_version).toBe("latest");
+    expect(drafted.structuredContent.method_version).toBe("draft");
+    expect(drafted.summary).toContain("the draft of `mt_123`");
+  });
+
   it("maps a rejected asset (413) to input_domain at inputs, naming the real ceiling", async () => {
     const result = await prepareMthdsInputs(
       { files, inputs: { photo: "/tmp/big.png" } },

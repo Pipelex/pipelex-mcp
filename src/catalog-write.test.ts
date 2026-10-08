@@ -3,7 +3,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
-import type { MethodData, MethodWriteInput, PipelexValidationResult } from "@pipelex/sdk";
+import type {
+  MethodData,
+  MethodDraftInput,
+  MethodVersion,
+  MethodVersionSummary,
+  MethodWriteInput,
+  PipelexValidationResult,
+} from "@pipelex/sdk";
 import { parseMethodFiles } from "mthds/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -80,8 +87,60 @@ function storedMethod(overrides: Partial<MethodData> = {}): MethodData {
     input_data: null,
     created_at: "2026-09-01T00:00:00Z",
     updated_at: "2026-09-20T12:00:00Z",
+    draft_digest: "a".repeat(64),
+    latest_version: null,
+    latest_published: null,
     ...overrides,
   };
+}
+
+/** A published version's summary; `source_digest` defaults to the draft's, so the draft is unchanged. */
+function versionSummary(overrides: Partial<MethodVersionSummary> = {}): MethodVersionSummary {
+  return {
+    version: 2,
+    source_digest: "a".repeat(64),
+    crate_fingerprint: "crate-fp",
+    runner_version: "0.78.0",
+    description: null,
+    published_at: "2026-09-19T08:00:00Z",
+    published_by: "user_1",
+    ...overrides,
+  };
+}
+
+/** A stored method published as version 2, with the draft ahead of it unless `aheadOf` is false. */
+function publishedMethod(overrides: Partial<MethodData> = {}, ahead = true): MethodData {
+  return storedMethod({
+    latest_version: 2,
+    latest_published: versionSummary(ahead ? { source_digest: "b".repeat(64) } : {}),
+    ...overrides,
+  });
+}
+
+/** A stored version of `mt_one`. */
+function storedVersion(overrides: Partial<MethodVersion> = {}): MethodVersion {
+  return {
+    ...versionSummary(),
+    method_id: "mt_one",
+    mthds: JSON.stringify([{ name: "bundle.mthds", content: 'domain = "version_two"' }]),
+    python: [],
+    ...overrides,
+  };
+}
+
+/** The 409 the draft write answers for a stale token. */
+function draftConflict(): ApiResponseError {
+  return new ApiResponseError(
+    "conflict",
+    "https://api-dev.pipelex.com/v1/methods/mt_one/draft",
+    409,
+    "Conflict",
+    "{}",
+    undefined,
+    "The method's draft changed since expected_updated_at.",
+    undefined,
+    "method_update_conflict",
+  );
 }
 
 /** A client whose every arm throws — each test opts into the one it needs. */
@@ -92,10 +151,29 @@ const clientNotCalled: CatalogWriteClient = {
   async createMethod(): Promise<MethodData> {
     throw new Error("createMethod must not be called in this test");
   },
-  async updateMethod(): Promise<MethodData> {
-    throw new Error("updateMethod must not be called in this test");
+  async writeDraft(): Promise<MethodData> {
+    throw new Error("writeDraft must not be called in this test");
+  },
+  async renameMethod(): Promise<MethodData> {
+    throw new Error("renameMethod must not be called in this test");
+  },
+  async getMethodVersion(): Promise<MethodVersion> {
+    throw new Error("getMethodVersion must not be called in this test");
+  },
+  async publishMethod(): Promise<never> {
+    throw new Error("publishMethod must not be called in this test");
   },
 };
+
+/** `GET /v1/version` as a platform that resolves version selectors answers it. */
+async function versionsSupported(): Promise<unknown> {
+  return { version: "1.0.0", extensions: ["runs", "method_versions"] };
+}
+
+/** `GET /v1/version` as a platform that does not resolve them yet answers it. */
+async function versionsUnsupported(): Promise<unknown> {
+  return { version: "1.0.0", extensions: ["runs"] };
+}
 
 let root: string;
 
@@ -204,40 +282,87 @@ describe("saveMthdsMethod", () => {
     expect(result.summary).toContain("commit it");
   });
 
-  it("saves nothing at all when the bundle is invalid, and says so as a verdict", async () => {
+  it("saves an invalid bundle as a draft, with the verdict beside the save", async () => {
     await writeBundle("methods/demo", { "bundle.mthds": "broken" });
 
     const result = await saveMthdsMethod(
       { files: [{ path: "methods/demo/bundle.mthds" }], name: "Demo" },
-      contextFor(clientNotCalled, validationAnswering(invalidReport)),
-    );
-
-    // A produced verdict, not a no-verdict: status ok, discriminated on is_valid.
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent).toMatchObject({ is_valid: false });
-    expect(result.structuredContent).not.toHaveProperty("method_id");
-    // Nothing anywhere: no link file either.
-    await expect(fs.access(path.join(root, "methods/demo", LINK_FILE_NAME))).rejects.toThrow();
-  });
-
-  it("updates through method_id and carries the stored input_data back unchanged", async () => {
-    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
-    const previous = storedMethod({ input_data: { topic: "pinned" } });
-
-    let sent: MethodWriteInput | undefined;
-    const result = await saveMthdsMethod(
-      {
-        files: [{ path: "methods/demo/bundle.mthds" }],
-        name: previous.name,
-        method_id: "mt_one",
-      },
       contextFor(
         {
           ...clientNotCalled,
-          async getMethod() {
-            return previous;
+          async createMethod() {
+            return storedMethod({ name: "Demo" });
           },
-          async updateMethod(_id, input) {
+        },
+        validationAnswering(invalidReport),
+      ),
+    );
+
+    // A produced verdict: status ok, discriminated on is_valid, and the draft
+    // saved all the same — a draft is work in progress, and a publish is where
+    // validity is required.
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      is_valid: false,
+      saved: "created",
+      method_id: "mt_one",
+      link_file: { written: true },
+    });
+    expect(result.structuredContent).toHaveProperty("validation_errors");
+    expect(result.summary).toContain("NOT valid");
+    expect(result.summary).toContain("a publish refuses it");
+  });
+
+  it("refuses the save when validation produces no verdict", async () => {
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+    const unreachable = {
+      baseUrl: DEFAULT_API_URL,
+      client: {
+        async validateFiles(): Promise<PipelexValidationResult> {
+          throw new ApiUnreachableError(
+            "down",
+            "https://api-dev.pipelex.com/v1/validate",
+            "ECONNREFUSED",
+          );
+        },
+      },
+    } as unknown as CatalogWriteContext["validation"];
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], name: "Demo" },
+      contextFor(clientNotCalled, unreachable),
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.summary).toContain("no validation verdict");
+  });
+
+  it("requires a name to create", async () => {
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }] },
+      contextFor(clientNotCalled, validationAnswering(validReport)),
+    );
+
+    expect(errorsOf(result.structuredContent)[0]).toMatchObject({
+      class: "input_domain",
+      location: "name",
+    });
+  });
+
+  it("writes the draft through method_id, sending neither input_data nor the name", async () => {
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+
+    let sentId: string | undefined;
+    let sent: MethodDraftInput | undefined;
+    const result = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft(id, input) {
+            sentId = id;
             sent = input;
             return storedMethod({ updated_at: "2026-09-21T09:00:00Z" });
           },
@@ -246,24 +371,407 @@ describe("saveMthdsMethod", () => {
       ),
     );
 
-    expect(result.structuredContent).toMatchObject({ saved: "updated" });
-    // The platform's write rewrites the whole row, so an omitted input_data
-    // would erase the form inputs a webapp user had saved.
-    expect(sent?.input_data).toEqual({ topic: "pinned" });
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      saved: "updated",
+      name: "Summarize PDF",
+      updated_at: "2026-09-21T09:00:00Z",
+      latest_version: null,
+      publish_state: "never_published",
+    });
+    expect(sentId).toBe("mt_one");
+    // The draft route keeps input_data on omission, so the form inputs a webapp
+    // user saved survive; the name is the method's, renamed by its own call.
+    expect(sent).not.toHaveProperty("input_data");
+    expect(sent).not.toHaveProperty("name");
+    // No token was given, so none is sent: the write is last-writer-wins.
+    expect(sent).not.toHaveProperty("expected_updated_at");
+    // The link carries the draft's new token, for the next write.
+    const link = await readMethodLink(path.join(root, "methods/demo"));
+    expect(link.kind === "link" && link.link.synced_updated_at).toBe("2026-09-21T09:00:00Z");
+    expect(link.kind === "link" && link.link).not.toHaveProperty("synced_version");
+    expect(result.summary).toContain("The draft of **Summarize PDF** was saved");
+    expect(result.summary).toContain("`mt_one@draft`");
+    expect(result.summary).toContain("only when the user asks");
   });
 
-  it("calls a changed name a rename", async () => {
+  it("forwards expected_updated_at to the draft write as its compare-and-swap", async () => {
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
 
+    let sent: MethodDraftInput | undefined;
+    await saveMthdsMethod(
+      {
+        files: [{ path: "methods/demo/bundle.mthds" }],
+        method_id: "mt_one",
+        expected_updated_at: "2026-09-20T12:00:00Z",
+      },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft(_id, input) {
+            sent = input;
+            return storedMethod();
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    expect(sent?.expected_updated_at).toBe("2026-09-20T12:00:00Z");
+  });
+
+  it("sends the link file's token when the caller gave none, and says where it came from", async () => {
+    await writeBundle("methods/demo", {
+      "bundle.mthds": 'domain = "demo"',
+      [LINK_FILE_NAME]: JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "2026-09-19T00:00:00Z",
+      }),
+    });
+
+    let sent: MethodDraftInput | undefined;
+    const result = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft(_id, input): Promise<MethodData> {
+            sent = input;
+            throw draftConflict();
+          },
+          async getMethod() {
+            return storedMethod({ updated_at: "2026-09-20T12:00:00Z" });
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    // A save from a linked directory never replaces a draft somebody saved
+    // since the directory synced: the link's token is the compare-and-swap.
+    expect(sent?.expected_updated_at).toBe("2026-09-19T00:00:00Z");
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ location: "expected_updated_at" });
+    expect(error.message).toContain(`as this directory's ${LINK_FILE_NAME} records`);
+    expect(error.hint).toContain("the draft's current updated_at");
+    // Refused: the link is left as it was.
+    const link = await readMethodLink(path.join(root, "methods/demo"));
+    expect(link.kind === "link" && link.link.synced_updated_at).toBe("2026-09-19T00:00:00Z");
+  });
+
+  it("refuses a save from a directory holding a pulled version unless the token is passed", async () => {
+    const link = {
+      method_id: "mt_one",
+      name: "Summarize PDF",
+      api_host: "api-dev.pipelex.com",
+      synced_updated_at: "2026-09-20T12:00:00Z",
+      synced_version: 2,
+    };
+    await writeBundle("methods/demo", {
+      "bundle.mthds": 'domain = "version_two"',
+      [LINK_FILE_NAME]: JSON.stringify(link),
+    });
+
+    // Saving a pulled version replaces the draft with it: a restore, which the
+    // link's own token must not make silent.
+    const validated: { files?: unknown } = {};
+    const refused = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one" },
+      contextFor(clientNotCalled, validationAnswering(validReport, validated)),
+    );
+    // The link alone refuses it, so nothing is read or validated first.
+    expect(validated.files).toBeUndefined();
+    const [error] = errorsOf(refused.structuredContent);
+    expect(error).toMatchObject({
+      class: "input_domain",
+      location: "expected_updated_at",
+      retryable: false,
+    });
+    expect(error.message).toContain("holds version 2");
+    expect(error.hint).toContain('expected_updated_at "2026-09-20T12:00:00Z"');
+    expect(refused.summary).toContain("holds a published version");
+
+    // With the token, after the user asked, the restore goes through.
+    let sent: MethodDraftInput | undefined;
+    const restored = await saveMthdsMethod(
+      {
+        files: [{ path: "methods/demo/bundle.mthds" }],
+        method_id: "mt_one",
+        expected_updated_at: "2026-09-20T12:00:00Z",
+      },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft(_id, input) {
+            sent = input;
+            return storedMethod({ updated_at: "2026-09-21T09:00:00Z" });
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+    expect(restored.structuredContent.status).toBe("ok");
+    expect(sent?.expected_updated_at).toBe("2026-09-20T12:00:00Z");
+    const relinked = await readMethodLink(path.join(root, "methods/demo"));
+    expect(relinked.kind === "link" && relinked.link).toMatchObject({
+      synced_updated_at: "2026-09-21T09:00:00Z",
+    });
+    expect(relinked.kind === "link" && relinked.link).not.toHaveProperty("synced_version");
+  });
+
+  it("refuses a save from a directory whose last pull never finished", async () => {
+    for (const fields of [
+      { synced_updated_at: "2026-09-20T12:00:00Z", partial_pull: true },
+      { synced_updated_at: "" },
+    ]) {
+      await writeBundle("methods/demo", {
+        "bundle.mthds": 'domain = "demo"',
+        [LINK_FILE_NAME]: JSON.stringify({
+          method_id: "mt_one",
+          name: "Summarize PDF",
+          api_host: "api-dev.pipelex.com",
+          ...fields,
+        }),
+      });
+
+      const result = await saveMthdsMethod(
+        { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one" },
+        contextFor(clientNotCalled, validationAnswering(validReport)),
+      );
+
+      const [error] = errorsOf(result.structuredContent);
+      expect(error).toMatchObject({ class: "input_domain", location: "link_dir" });
+      expect(error.message).toContain("was interrupted");
+      expect(error.hint).toContain("Pull the method into the directory again");
+    }
+  });
+
+  it("refuses a save from a directory whose link cannot be read, and leaves the link alone", async () => {
+    await writeBundle("methods/demo", {
+      "bundle.mthds": 'domain = "demo"',
+      [LINK_FILE_NAME]: "<<<<<<< HEAD",
+    });
+
+    // Read as no link, the save would send no token and replace the draft
+    // whatever it holds now.
+    const refused = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one" },
+      contextFor(clientNotCalled, validationAnswering(validReport)),
+    );
+    const [error] = errorsOf(refused.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "link_dir" });
+    expect(error.message).toContain("cannot be read");
+    expect(error.hint).toContain("merge conflict");
+
+    // An explicit token is its own guard; the broken link is still not touched.
+    const saved = await saveMthdsMethod(
+      {
+        files: [{ path: "methods/demo/bundle.mthds" }],
+        method_id: "mt_one",
+        expected_updated_at: "2026-09-20T12:00:00Z",
+      },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft() {
+            return storedMethod({ updated_at: "2026-09-21T09:00:00Z" });
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+    expect(saved.structuredContent.status).toBe("ok");
+    expect(saved.summary).toContain("cannot be read");
+    expect(await fs.readFile(path.join(root, "methods/demo", LINK_FILE_NAME), "utf8")).toBe(
+      "<<<<<<< HEAD",
+    );
+  });
+
+  /** A draft compare-and-swapped as the platform does, with its version 2 stored beside it. */
+  function platformDraft(initial: string) {
+    const state = { content: initial, updatedAt: "T0", writes: 0 };
+    const client: CatalogWriteClient = {
+      ...clientNotCalled,
+      async writeDraft(_id, input) {
+        if (
+          input.expected_updated_at !== undefined &&
+          input.expected_updated_at !== state.updatedAt
+        ) {
+          throw draftConflict();
+        }
+        state.writes += 1;
+        state.content = input.mthds;
+        state.updatedAt = `T${state.writes}`;
+        return storedMethod({ mthds: state.content, updated_at: state.updatedAt });
+      },
+      async getMethod() {
+        return storedMethod({
+          mthds: state.content,
+          updated_at: state.updatedAt,
+          latest_version: 2,
+          latest_published: versionSummary({ source_digest: "b".repeat(64) }),
+        });
+      },
+      async getMethodVersion() {
+        return storedVersion();
+      },
+    };
+    return { state, client };
+  }
+
+  /** A validation whose first call waits for `release`, counting every call. */
+  function gatedValidation() {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const counts = { validations: 0 };
+    const validation = {
+      baseUrl: DEFAULT_API_URL,
+      client: {
+        async validate(): Promise<PipelexValidationResult> {
+          throw new Error("the selector leg must not be called by a save");
+        },
+        async validateFiles(): Promise<PipelexValidationResult> {
+          counts.validations += 1;
+          if (counts.validations === 1) await gate;
+          return validReport;
+        },
+      },
+    } as unknown as CatalogWriteContext["validation"];
+    return { validation, counts, release: () => release() };
+  }
+
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 20));
+
+  it("lets one save at a time read and write a directory, so a second waits its turn", async () => {
+    await writeBundle("methods/demo", {
+      "bundle.mthds": 'domain = "older"',
+      [LINK_FILE_NAME]: JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "T0",
+      }),
+    });
+    const { state, client } = platformDraft(storedMethod().mthds);
+    const { validation, counts, release } = gatedValidation();
+    const save = () =>
+      saveMthdsMethod(
+        { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one" },
+        contextFor(client, validation),
+      );
+
+    const first = save();
+    await vi.waitFor(() => expect(counts.validations).toBe(1));
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "newer"' });
+    const second = save();
+    await settle();
+    // Interleaved, the second save's link refresh would hand the first a token
+    // its older bytes were never read against.
+    expect(counts.validations).toBe(1);
+    release();
+
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.structuredContent.status).toBe("ok");
+    expect(b.structuredContent.status).toBe("ok");
+    expect(state.content).toContain("newer");
+    const link = await readMethodLink(path.join(root, "methods/demo"));
+    expect(link.kind === "link" && link.link.synced_updated_at).toBe("T2");
+  });
+
+  it("keeps a version pull from landing inside a save, so the restore guard still holds", async () => {
+    const { state, client } = platformDraft(storedMethod().mthds);
+    await writeBundle("work", {
+      "bundle.mthds": 'domain = "demo"',
+      [LINK_FILE_NAME]: JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "T0",
+      }),
+    });
+    const { validation, release } = gatedValidation();
+    const context = contextFor(client, validation);
+
+    const saving = saveMthdsMethod(
+      { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one" },
+      context,
+    );
+    await settle();
+    const pulling = getMthdsMethod({ method_id: "mt_one@2", output_dir: "work" }, context);
+    await settle();
+    // Landing between the save's link read and its file read, the pull would
+    // hand the save version 2's files under the draft's token.
+    expect(await fs.readFile(path.join(root, "work", "bundle.mthds"), "utf8")).toBe(
+      'domain = "demo"',
+    );
+    release();
+
+    expect((await saving).structuredContent.status).toBe("ok");
+    expect(state.content).not.toContain("version_two");
+    expect((await pulling).structuredContent.status).toBe("ok");
+    const link = await readMethodLink(path.join(root, "work"));
+    expect(link.kind === "link" && link.link.synced_version).toBe(2);
+
+    // The directory holds version 2 under a link that says so: an ordinary
+    // save is refused rather than restoring it.
+    const after = await saveMthdsMethod(
+      { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one" },
+      contextFor(client, validationAnswering(validReport)),
+    );
+    expect(errorsOf(after.structuredContent)[0]).toMatchObject({
+      location: "expected_updated_at",
+    });
+    expect(state.writes).toBe(1);
+  });
+
+  it("reads mt_…@draft as the bare id, and refuses a version", async () => {
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+
+    let sentId: string | undefined;
+    const drafted = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one@draft" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft(id) {
+            sentId = id;
+            return storedMethod();
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+    expect(drafted.structuredContent.status).toBe("ok");
+    expect(sentId).toBe("mt_one");
+
+    const versioned = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one@3" },
+      contextFor(clientNotCalled, validationAnswering(validReport)),
+    );
+    const [error] = errorsOf(versioned.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "method_id" });
+    expect(error.hint).toContain('"mt_one"');
+  });
+
+  it("renames through its own call when the name changed, after the draft write", async () => {
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+
+    const calls: string[] = [];
     const result = await saveMthdsMethod(
       { files: [{ path: "methods/demo/bundle.mthds" }], name: "New name", method_id: "mt_one" },
       contextFor(
         {
           ...clientNotCalled,
-          async getMethod() {
+          async writeDraft() {
+            calls.push("writeDraft");
             return storedMethod();
           },
-          async updateMethod() {
+          async renameMethod(_id, input) {
+            calls.push(`renameMethod:${input.name}`);
             return storedMethod({ name: "New name" });
           },
         },
@@ -271,22 +779,183 @@ describe("saveMthdsMethod", () => {
       ),
     );
 
-    expect(result.structuredContent).toMatchObject({ saved: "renamed" });
+    expect(calls).toEqual(["writeDraft", "renameMethod:New name"]);
+    expect(result.structuredContent).toMatchObject({ saved: "renamed", name: "New name" });
+    expect(result.summary).toContain("renamed from **Summarize PDF**");
   });
 
-  it("refuses the save when expected_updated_at does not match, and writes nothing", async () => {
+  it("keeps the draft write's token when the rename reports a draft that moved", async () => {
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], name: "New name", method_id: "mt_one" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft() {
+            return storedMethod({ updated_at: "2026-09-21T09:00:00Z" });
+          },
+          async renameMethod() {
+            // Somebody saved the draft between the two calls.
+            return storedMethod({ name: "New name", updated_at: "2026-09-21T09:05:00Z" });
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    // Adopting the rename's token would let the next save from here replace
+    // the other writer's draft unseen.
+    expect(result.structuredContent).toMatchObject({
+      saved: "renamed",
+      name: "New name",
+      updated_at: "2026-09-21T09:00:00Z",
+    });
+    const link = await readMethodLink(path.join(root, "methods/demo"));
+    expect(link.kind === "link" && link.link.synced_updated_at).toBe("2026-09-21T09:00:00Z");
+    expect(result.summary).toContain("changed again right after this save");
+    // The token this save recorded is already stale: no publish is offered under it.
+    expect(result.summary).not.toContain("expected_draft_updated_at");
+    expect(result.summary).toContain("2026-09-21T09:05:00Z");
+  });
+
+  it("does not rename when the name is unchanged", async () => {
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
 
     const result = await saveMthdsMethod(
       {
         files: [{ path: "methods/demo/bundle.mthds" }],
-        name: "Demo",
+        name: "Summarize PDF",
+        method_id: "mt_one",
+      },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft() {
+            return storedMethod();
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    expect(result.structuredContent).toMatchObject({ saved: "updated" });
+  });
+
+  it("keeps a name renamed elsewhere when the name passed is the link's older one", async () => {
+    await writeBundle("methods/demo", {
+      "bundle.mthds": 'domain = "demo"',
+      [LINK_FILE_NAME]: JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "2026-09-20T12:00:00Z",
+      }),
+    });
+
+    const renames: string[] = [];
+    const client: CatalogWriteClient = {
+      ...clientNotCalled,
+      async writeDraft() {
+        return storedMethod({ name: "Renamed In Webapp", updated_at: "2026-09-21T09:00:00Z" });
+      },
+      async renameMethod(_id, input) {
+        renames.push(input.name);
+        return storedMethod({ name: input.name, updated_at: "2026-09-21T09:00:00Z" });
+      },
+    };
+    const save = () =>
+      saveMthdsMethod(
+        {
+          files: [{ path: "methods/demo/bundle.mthds" }],
+          name: "Summarize PDF",
+          method_id: "mt_one",
+        },
+        contextFor(client, validationAnswering(validReport)),
+      );
+
+    // The name read back out of the link would quietly undo the webapp's rename.
+    const first = await save();
+    expect(renames).toEqual([]);
+    expect(first.structuredContent).toMatchObject({
+      status: "ok",
+      saved: "updated",
+      name: "Renamed In Webapp",
+    });
+    expect(first.summary).toContain("keeps its stored name **Renamed In Webapp**");
+    expect(first.summary).toContain("renamed elsewhere");
+    expect(first.summary).toContain("renames the method back");
+    const link = await readMethodLink(path.join(root, "methods/demo"));
+    expect(link.kind === "link" && link.link.name).toBe("Renamed In Webapp");
+
+    // The link now records the stored name, so the same name is a rename meant.
+    const second = await save();
+    expect(renames).toEqual(["Summarize PDF"]);
+    expect(second.structuredContent).toMatchObject({ saved: "renamed", name: "Summarize PDF" });
+  });
+
+  it("reports a failed rename beside a saved draft", async () => {
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], name: "", method_id: "mt_one" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft() {
+            return storedMethod();
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+    // An empty name is refused by the input schema before anything is sent.
+    expect(result.structuredContent.status).toBe("error");
+
+    const failing = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], name: "New name", method_id: "mt_one" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft() {
+            return storedMethod();
+          },
+          async renameMethod(): Promise<MethodData> {
+            throw new ApiUnreachableError(
+              "down",
+              "https://api-dev.pipelex.com/v1/methods/mt_one",
+              "ECONNREFUSED",
+            );
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    expect(failing.structuredContent).toMatchObject({
+      status: "ok",
+      saved: "updated",
+      name: "Summarize PDF",
+      rename_error: { location: "PIPELEX_BASE_URL" },
+    });
+    expect(failing.summary).toContain("rename to the requested name FAILED");
+  });
+
+  it("refuses the save when the draft moved since expected_updated_at, naming both tokens", async () => {
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+
+    const result = await saveMthdsMethod(
+      {
+        files: [{ path: "methods/demo/bundle.mthds" }],
         method_id: "mt_one",
         expected_updated_at: "2026-09-19T00:00:00Z",
       },
       contextFor(
         {
           ...clientNotCalled,
+          async writeDraft(): Promise<MethodData> {
+            throw draftConflict();
+          },
           async getMethod() {
             return storedMethod({ updated_at: "2026-09-20T12:00:00Z" });
           },
@@ -296,9 +965,46 @@ describe("saveMthdsMethod", () => {
     );
 
     const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "input_domain", location: "expected_updated_at" });
+    expect(error).toMatchObject({
+      class: "input_domain",
+      location: "expected_updated_at",
+      retryable: false,
+    });
     expect(error.message).toContain("2026-09-20T12:00:00Z");
+    expect(error.message).toContain("2026-09-19T00:00:00Z");
+    expect(error.message).toContain("Nothing was written");
     await expect(fs.access(path.join(root, "methods/demo", LINK_FILE_NAME))).rejects.toThrow();
+  });
+
+  it("says what callers of the bare id run, by what the platform resolves", async () => {
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+    const save = (version: () => Promise<unknown>) =>
+      saveMthdsMethod(
+        { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one" },
+        contextFor(
+          {
+            ...clientNotCalled,
+            async writeDraft() {
+              return publishedMethod();
+            },
+            version,
+          },
+          validationAnswering(validReport),
+        ),
+      );
+
+    const supported = await save(versionsSupported);
+    expect(supported.structuredContent).toMatchObject({
+      latest_version: 2,
+      publish_state: "draft_ahead",
+    });
+    expect(supported.summary).toContain("still run version 2");
+    expect(supported.summary).not.toContain("wherever the platform resolves versions");
+
+    // A platform that reads a bare id as the draft: the save changes what
+    // every caller runs, and the result says so rather than promise otherwise.
+    const unsupported = await save(versionsUnsupported);
+    expect(unsupported.summary).toContain("runs this draft from its next call, not version 2");
   });
 
   it("classifies a create-side transport fault as NOT retryable", async () => {
@@ -351,18 +1057,15 @@ describe("saveMthdsMethod", () => {
     }
   });
 
-  it("leaves an update's transport fault retryable, PUT being idempotent", async () => {
+  it("leaves a draft write's transport fault retryable, PUT being idempotent", async () => {
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
 
     const result = await saveMthdsMethod(
-      { files: [{ path: "methods/demo/bundle.mthds" }], name: "Demo", method_id: "mt_one" },
+      { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one" },
       contextFor(
         {
           ...clientNotCalled,
-          async getMethod() {
-            return storedMethod();
-          },
-          async updateMethod(): Promise<MethodData> {
+          async writeDraft(): Promise<MethodData> {
             throw new ApiUnreachableError(
               "connection reset",
               "https://api-dev.pipelex.com/v1/methods",
@@ -375,6 +1078,23 @@ describe("saveMthdsMethod", () => {
     );
 
     expect(errorsOf(result.structuredContent)[0]?.retryable).toBe(true);
+  });
+
+  it("answers a malformed base URL as an error rather than throwing", async () => {
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+    const context: CatalogWriteContext = {
+      ...contextFor(clientNotCalled, validationAnswering(validReport)),
+      baseUrl: "not a url",
+      client: undefined,
+    };
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one" },
+      context,
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(errorsOf(result.structuredContent)).toHaveLength(1);
   });
 
   it("gates python on .py and locates the refusal at python[i]", async () => {
@@ -992,7 +1712,7 @@ describe("the save writes a link only where one belongs", () => {
     async getMethod() {
       return storedMethod({ method_id: methodId, name });
     },
-    async updateMethod() {
+    async writeDraft() {
       return storedMethod({ method_id: methodId, name });
     },
   });
@@ -1135,6 +1855,139 @@ describe("the save writes a link only where one belongs", () => {
       class: "input_domain",
       location: "python[0].path",
     });
+  });
+});
+
+describe("an explicit link_dir keeps the guards of the link beside the files", () => {
+  /** A link file in `dir` under the workspace, naming `mt_one` unless `fields` says otherwise. */
+  async function linkIn(dir: string, fields: Record<string, unknown> = {}): Promise<void> {
+    await fs.mkdir(path.join(root, dir), { recursive: true });
+    await fs.writeFile(
+      path.join(root, dir, LINK_FILE_NAME),
+      JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "2026-09-20T12:00:00Z",
+        ...fields,
+      }),
+      "utf8",
+    );
+  }
+
+  /** A client recording every draft write. */
+  function recordingDrafts(): { sent: MethodDraftInput[]; client: CatalogWriteClient } {
+    const sent: MethodDraftInput[] = [];
+    return {
+      sent,
+      client: {
+        ...clientNotCalled,
+        async writeDraft(_id, input) {
+          sent.push(input);
+          return storedMethod({ updated_at: "2026-09-21T09:00:00Z" });
+        },
+      },
+    };
+  }
+
+  beforeEach(async () => {
+    await writeBundle("work", { "bundle.mthds": 'domain = "demo"' });
+    await fs.mkdir(path.join(root, "elsewhere"), { recursive: true });
+  });
+
+  it("refuses a directory holding a pulled version, whatever link_dir names", async () => {
+    await linkIn("work", { synced_version: 2 });
+    const { sent, client } = recordingDrafts();
+
+    // Read only at link_dir, the empty directory offered no token and no
+    // version, and the version went out over the draft with no guard at all.
+    const result = await saveMthdsMethod(
+      { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one", link_dir: "elsewhere" },
+      contextFor(client, validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "expected_updated_at" });
+    expect(error.message).toContain("holds version 2");
+    expect(sent).toEqual([]);
+    expect(await readMethodLink(path.join(root, "elsewhere"))).toEqual({ kind: "none" });
+  });
+
+  it("refuses a directory whose last pull never finished, whatever link_dir names", async () => {
+    await linkIn("work", { partial_pull: true });
+    const { sent, client } = recordingDrafts();
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one", link_dir: "elsewhere" },
+      contextFor(client, validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "link_dir" });
+    expect(error.message).toContain("was interrupted");
+    expect(sent).toEqual([]);
+  });
+
+  it("still forks a directory linked to another method", async () => {
+    await linkIn("work", { method_id: "mt_teammate", name: "The teammate's method" });
+    const { sent, client } = recordingDrafts();
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one", link_dir: "elsewhere" },
+      contextFor(client, validationAnswering(validReport)),
+    );
+
+    expect(result.structuredContent).toMatchObject({ status: "ok", saved: "updated" });
+    // The teammate's link vouches for nothing about mt_one: no token is borrowed.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).not.toHaveProperty("expected_updated_at");
+    const forked = await readMethodLink(path.join(root, "elsewhere"));
+    expect(forked.kind === "link" && forked.link.method_id).toBe("mt_one");
+    const theirs = await readMethodLink(path.join(root, "work"));
+    expect(theirs.kind === "link" && theirs.link.method_id).toBe("mt_teammate");
+  });
+
+  it("sends the token of the link beside the files when link_dir offers none", async () => {
+    await linkIn("work", { synced_updated_at: "2026-09-19T00:00:00Z" });
+    const { sent, client } = recordingDrafts();
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one", link_dir: "elsewhere" },
+      contextFor(client, validationAnswering(validReport)),
+    );
+
+    expect(result.structuredContent).toMatchObject({ status: "ok" });
+    expect(sent.map((input) => input.expected_updated_at)).toEqual(["2026-09-19T00:00:00Z"]);
+  });
+
+  it("refuses when the two directories record different syncs of the draft", async () => {
+    await linkIn("work", { synced_updated_at: "2026-09-19T00:00:00Z" });
+    await linkIn("elsewhere", { synced_updated_at: "2026-09-20T12:00:00Z" });
+    const { sent, client } = recordingDrafts();
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one", link_dir: "elsewhere" },
+      contextFor(client, validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "link_dir" });
+    expect(error.message).toContain("different syncs");
+    expect(error.message).toContain("Nothing was written");
+    expect(sent).toEqual([]);
+
+    // An explicit token is the caller's own guard, and holds for both links.
+    const forced = await saveMthdsMethod(
+      {
+        files: [{ path: "work/bundle.mthds" }],
+        method_id: "mt_one",
+        link_dir: "elsewhere",
+        expected_updated_at: "2026-09-20T12:00:00Z",
+      },
+      contextFor(client, validationAnswering(validReport)),
+    );
+    expect(forced.structuredContent).toMatchObject({ status: "ok" });
+    expect(sent.map((input) => input.expected_updated_at)).toEqual(["2026-09-20T12:00:00Z"]);
   });
 });
 
@@ -1350,6 +2203,126 @@ describe("the pull resumes and refreshes without destroying work", () => {
     expect(result.summary).toContain("IS linked");
     expect(result.summary).not.toContain("NOT linked");
     await fs.chmod(path.join(root, "readonly-link", LINK_FILE_NAME), 0o644);
+  });
+});
+
+describe("a version pull whose link cannot be marked", () => {
+  it("writes nothing, so its files never read as the draft's to a later save", async () => {
+    const stored = storedMethod({
+      latest_version: 2,
+      latest_published: versionSummary({ source_digest: "b".repeat(64) }),
+    });
+    await writeBundle("work", {
+      "bundle.mthds": 'domain = "demo"',
+      [LINK_FILE_NAME]: JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: stored.updated_at,
+      }),
+    });
+    await fs.chmod(path.join(root, "work", LINK_FILE_NAME), 0o444);
+
+    try {
+      const result = await getMthdsMethod(
+        { method_id: "mt_one@2", output_dir: "work" },
+        contextFor(
+          {
+            ...clientNotCalled,
+            async getMethod() {
+              return stored;
+            },
+            async getMethodVersion() {
+              return storedVersion();
+            },
+          },
+          validationAnswering(validReport),
+        ),
+      );
+
+      // Written under the old link, version 2's files would carry the draft's
+      // current token and no version marker, and an ordinary save would then
+      // replace the draft with them, with no explicit token.
+      const [error] = errorsOf(result.structuredContent);
+      expect(error).toMatchObject({ class: "runtime", location: "output_dir" });
+      expect(error.message).toContain("holding version 2");
+      expect(await fs.readFile(path.join(root, "work", "bundle.mthds"), "utf8")).toBe(
+        'domain = "demo"',
+      );
+    } finally {
+      await fs.chmod(path.join(root, "work", LINK_FILE_NAME), 0o644);
+    }
+  });
+});
+
+describe("a draft pull over a link that records a version", () => {
+  const linked = {
+    method_id: "mt_one",
+    name: "Summarize PDF",
+    api_host: "api-dev.pipelex.com",
+    synced_updated_at: "2026-09-19T00:00:00Z",
+    synced_version: 2,
+  };
+
+  it("writes nothing when the link cannot be updated, so it never says the draft is a version", async () => {
+    await writeBundle("work", {
+      "bundle.mthds": 'domain = "version_two"',
+      [LINK_FILE_NAME]: JSON.stringify(linked),
+    });
+    await fs.chmod(path.join(root, "work", LINK_FILE_NAME), 0o444);
+
+    try {
+      const result = await getMthdsMethod(
+        { method_id: "mt_one", output_dir: "work", overwrite: true },
+        contextFor(
+          {
+            ...clientNotCalled,
+            async getMethod() {
+              return storedMethod();
+            },
+            async getMethodVersion() {
+              return storedVersion();
+            },
+          },
+          validationAnswering(validReport),
+        ),
+      );
+
+      const [error] = errorsOf(result.structuredContent);
+      expect(error).toMatchObject({ class: "runtime", location: "output_dir" });
+      expect(error.message).toContain("record of version 2 could not be cleared");
+      expect(await fs.readFile(path.join(root, "work", "bundle.mthds"), "utf8")).toBe(
+        'domain = "version_two"',
+      );
+    } finally {
+      await fs.chmod(path.join(root, "work", LINK_FILE_NAME), 0o644);
+    }
+  });
+
+  it("reads no version when overwrite already decides, the draft having moved", async () => {
+    await writeBundle("work", {
+      "bundle.mthds": 'domain = "edited here"',
+      [LINK_FILE_NAME]: JSON.stringify(linked),
+    });
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "work", overwrite: true },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async getMethod() {
+            return storedMethod();
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    // clientNotCalled's getMethodVersion would throw: overwrite decided first.
+    expect(result.structuredContent).toMatchObject({ status: "ok", version: "draft" });
+    expect(await fs.readFile(path.join(root, "work", "bundle.mthds"), "utf8")).toBe(
+      'domain = "demo"',
+    );
   });
 });
 
@@ -1743,5 +2716,269 @@ describe("the pull says what the directory holds that the method does not", () =
 
     expect((result.structuredContent as { unmanaged?: string[] }).unmanaged).toBeUndefined();
     expect(result.summary).not.toContain("which this method does not");
+  });
+});
+
+// ── drafts and versions ─────────────────────────────────────────────
+
+describe("the pull reads the draft by default, and a version on @n", () => {
+  const VERSION_TWO = 'domain = "version_two"';
+
+  /** A client holding `stored` as the draft and {@link storedVersion} as version 2. */
+  function versionedClient(
+    stored: MethodData,
+    seen: { versions: [string, number][] } = { versions: [] },
+  ): CatalogWriteClient {
+    return {
+      ...clientNotCalled,
+      async getMethod() {
+        return stored;
+      },
+      async getMethodVersion(id, version) {
+        seen.versions.push([id, version]);
+        if (version !== 2) {
+          throw new ApiResponseError(
+            "not found",
+            `https://api-dev.pipelex.com/v1/methods/${id}/versions/${version}`,
+            404,
+            "Not Found",
+            "{}",
+            undefined,
+            "No such version",
+            undefined,
+            "method_version_not_found",
+          );
+        }
+        return storedVersion();
+      },
+    };
+  }
+
+  async function linkTo(dir: string, fields: { synced: string; version?: number }): Promise<void> {
+    await fs.mkdir(path.join(root, dir), { recursive: true });
+    await fs.writeFile(
+      path.join(root, dir, LINK_FILE_NAME),
+      JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: fields.synced,
+        ...(fields.version === undefined ? {} : { synced_version: fields.version }),
+      }),
+      "utf8",
+    );
+  }
+
+  it("reads the draft for a bare id and for mt_…@draft, saying so", async () => {
+    for (const methodId of ["mt_one", "mt_one@draft"]) {
+      const result = await getMthdsMethod(
+        { method_id: methodId },
+        contextFor(versionedClient(publishedMethod()), validationAnswering(validReport)),
+      );
+
+      expect(result.structuredContent).toMatchObject({
+        status: "ok",
+        method_id: "mt_one",
+        version: "draft",
+        latest_version: 2,
+        publish_state: "draft_ahead",
+      });
+    }
+  });
+
+  it("reads version n for mt_…@n, with the method's name", async () => {
+    const seen = { versions: [] as [string, number][] };
+    let handshakes = 0;
+    const client = Object.assign(versionedClient(publishedMethod(), seen), {
+      async version() {
+        handshakes += 1;
+        return { version: "1.0.0", extensions: ["runs", "method_versions"] };
+      },
+    });
+    const result = await getMthdsMethod(
+      { method_id: "mt_one@2" },
+      contextFor(client, validationAnswering(validReport)),
+    );
+
+    expect(seen.versions).toEqual([["mt_one", 2]]);
+    // Only the draft's sentences read the versions handshake; a version read asks nothing.
+    expect(handshakes).toBe(0);
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      method_id: "mt_one",
+      name: "Summarize PDF",
+      version: 2,
+    });
+    const files = (result.structuredContent as { files: { content?: string }[] }).files;
+    expect(files.map((file) => file.content)).toEqual([VERSION_TWO]);
+    expect(result.summary).toContain("Version 2 of **Summarize PDF**");
+  });
+
+  it("refuses a version the method never had, naming the ones it has", async () => {
+    const result = await getMthdsMethod(
+      { method_id: "mt_one@7" },
+      contextFor(versionedClient(publishedMethod()), validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "method_id" });
+    expect(error.message).toContain("no version 7");
+    expect(error.message).toContain("latest published version is 2");
+  });
+
+  it("refuses a suffix it cannot read before anything is sent", async () => {
+    const result = await getMthdsMethod(
+      { method_id: "mt_one@latest" },
+      contextFor(clientNotCalled, validationAnswering(validReport)),
+    );
+
+    expect(errorsOf(result.structuredContent)[0]).toMatchObject({
+      class: "input_domain",
+      location: "method_id",
+    });
+  });
+
+  it("pulls a version over the draft it holds, and records the version in the link", async () => {
+    const stored = publishedMethod();
+    await writeBundle("work", { "bundle.mthds": 'domain = "demo"' });
+    await linkTo("work", { synced: stored.updated_at });
+
+    // The local files are the draft's, and the draft has not moved: without
+    // reading them as stored, this would be refused as unsaved work.
+    const result = await getMthdsMethod(
+      { method_id: "mt_one@2", output_dir: "work" },
+      contextFor(versionedClient(stored), validationAnswering(validReport)),
+    );
+
+    expect(result.structuredContent).toMatchObject({ status: "ok", version: 2 });
+    expect(await fs.readFile(path.join(root, "work", "bundle.mthds"), "utf8")).toBe(VERSION_TWO);
+    const link = await readMethodLink(path.join(root, "work"));
+    expect(link.kind === "link" && link.link).toMatchObject({
+      synced_updated_at: stored.updated_at,
+      synced_version: 2,
+    });
+    expect(result.summary).toContain("now holds version 2, not the draft");
+    expect(result.summary).toContain(`expected_updated_at ${stored.updated_at}`);
+    expect(result.summary).toContain("a save without the token is refused");
+    // An omitted python keeps the draft's, so the restore must say what to send.
+    expect(result.summary).toContain("python: []");
+    expect(result.summary).toContain("not one to publish under");
+    expect(result.summary).toContain("publishes nothing");
+  });
+
+  it("records no version when the version pulled is the draft, file for file", async () => {
+    const stored = publishedMethod({ mthds: storedVersion().mthds }, false);
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one@2", output_dir: "work" },
+      contextFor(versionedClient(stored), validationAnswering(validReport)),
+    );
+
+    expect(result.structuredContent).toMatchObject({ status: "ok", version: 2 });
+    const link = await readMethodLink(path.join(root, "work"));
+    expect(link.kind === "link" && link.link).toMatchObject({
+      synced_updated_at: stored.updated_at,
+    });
+    expect(link.kind === "link" && link.link).not.toHaveProperty("synced_version");
+    expect(result.summary).toContain("Version 2 is identical to the draft");
+    expect(result.summary).not.toContain("not the draft");
+
+    // The directory holds the draft, so an ordinary save goes through on the link's token.
+    let sent: MethodDraftInput | undefined;
+    const saved = await saveMthdsMethod(
+      { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft(_id, input) {
+            sent = input;
+            return storedMethod({ updated_at: "2026-09-21T09:00:00Z" });
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+    expect(saved.structuredContent).toMatchObject({ status: "ok", saved: "updated" });
+    expect(sent?.expected_updated_at).toBe(stored.updated_at);
+  });
+
+  it("pulls the draft back over the version it last pulled", async () => {
+    const stored = publishedMethod();
+    await writeBundle("work", { "bundle.mthds": VERSION_TWO });
+    await linkTo("work", { synced: stored.updated_at, version: 2 });
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "work" },
+      contextFor(versionedClient(stored), validationAnswering(validReport)),
+    );
+
+    expect(result.structuredContent).toMatchObject({ status: "ok", version: "draft" });
+    expect(await fs.readFile(path.join(root, "work", "bundle.mthds"), "utf8")).toBe(
+      'domain = "demo"',
+    );
+    // A draft pull clears the version: the directory holds the draft again.
+    const link = await readMethodLink(path.join(root, "work"));
+    expect(link.kind === "link" && link.link).not.toHaveProperty("synced_version");
+  });
+
+  it("still refuses a pull over local bytes the catalog stores nowhere", async () => {
+    const stored = publishedMethod();
+    await writeBundle("work", { "bundle.mthds": 'domain = "edited locally"' });
+    await linkTo("work", { synced: stored.updated_at, version: 2 });
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "work" },
+      contextFor(versionedClient(stored), validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "output_dir" });
+    expect(error.message).toContain("never saved");
+    expect(await fs.readFile(path.join(root, "work", "bundle.mthds"), "utf8")).toBe(
+      'domain = "edited locally"',
+    );
+  });
+});
+
+describe("the link file's synced_version", () => {
+  async function linkHolding(value: unknown): Promise<string> {
+    const dir = path.join(root, `v-${JSON.stringify(value) ?? "absent"}`);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(
+      path.join(dir, LINK_FILE_NAME),
+      JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "2026-09-20T12:00:00Z",
+        ...(value === undefined ? {} : { synced_version: value }),
+      }),
+      "utf8",
+    );
+    return dir;
+  }
+
+  it("is read as a version number, and absent or null means the draft", async () => {
+    for (const [value, expected] of [
+      [3, 3],
+      [null, undefined],
+      [undefined, undefined],
+    ] as const) {
+      const link = await readMethodLink(await linkHolding(value));
+      expect(link.kind).toBe("link");
+      expect(link.kind === "link" ? link.link.synced_version : "unread").toBe(expected);
+    }
+  });
+
+  it("makes the link unreadable when it is present but not a version number", async () => {
+    // Dropped, it would read as a directory holding the draft, and a save from
+    // it would replace the draft with a version's files without the token a
+    // restore needs.
+    for (const value of [0, 1.5, "3", true]) {
+      expect(await readMethodLink(await linkHolding(value))).toMatchObject({
+        kind: "unreadable",
+        reason: expect.stringContaining("synced_version"),
+      });
+    }
   });
 });

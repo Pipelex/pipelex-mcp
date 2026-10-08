@@ -19,10 +19,15 @@ import { errorMessage, isMissingPathError } from "./workspace-boundary.js";
  * method that vanished.
  *
  * It records NO source hashes, deliberately, and the cost is stated rather
- * than hidden — see `guardOutputDir` in `catalog-write.ts`, whose three-outcome
- * rule can tell "the stored method moved" from "this directory moved" only by
- * the recorded `synced_updated_at`, and so cannot say which side a difference
- * came from once both have moved.
+ * than hidden — see `planPull` in `catalog-write.ts`, whose three-outcome
+ * rule can tell "the draft moved" from "this directory moved" only by the
+ * recorded `synced_updated_at`, and so cannot say which side a difference came
+ * from once both have moved.
+ *
+ * What it does record is which content the directory was last synced with:
+ * the method's draft (no `synced_version`), or one of its published versions
+ * (`synced_version`), which a pull of `mt_…@<n>` writes. A later pull reads a
+ * file still holding that version's bytes as stored, not as unsaved work.
  */
 
 export const LINK_FILE_NAME = "pipelex-method.json";
@@ -39,8 +44,19 @@ export interface MethodLink {
   api_host: string;
   method_id: string;
   name: string;
-  /** The saved method's `updated_at` as of the last save or pull through this directory. */
+  /**
+   * The method's draft token — its `updated_at`, which moves on every draft
+   * write and on nothing else — as of the last save or pull through this
+   * directory. A save sends it as `expected_updated_at`, so the platform
+   * refuses to replace a draft that moved since.
+   */
   synced_updated_at: string;
+  /**
+   * The published version whose files the last pull wrote here, when it pulled
+   * `mt_…@<n>` rather than the draft. Absent after a save and after a pull of
+   * the draft, since the directory then holds the draft.
+   */
+  synced_version?: number;
   /**
    * Set while a pull is landing files, cleared when it finishes.
    *
@@ -66,6 +82,7 @@ export function buildMethodLink(fields: {
   methodId: string;
   name: string;
   syncedUpdatedAt: string;
+  syncedVersion?: number;
   partialPull?: boolean;
 }): MethodLink {
   return {
@@ -75,6 +92,7 @@ export function buildMethodLink(fields: {
     method_id: fields.methodId,
     name: fields.name,
     synced_updated_at: fields.syncedUpdatedAt,
+    ...(fields.syncedVersion === undefined ? {} : { synced_version: fields.syncedVersion }),
     ...(fields.partialPull === true ? { partial_pull: true } : {}),
   };
 }
@@ -200,6 +218,18 @@ export async function readMethodLink(dir: string): Promise<LinkRead> {
       return { kind: "unreadable", reason: `it has no string \`${field}\`` };
     }
   }
+  // A version marker that is present but not a version number is refused with
+  // the rest of a malformed link, never dropped: dropped, it would read as a
+  // directory holding the draft, and a save from it would replace the draft
+  // with a pulled version's files without the explicit token a restore needs.
+  // Absent or null still means the directory holds the draft.
+  if (
+    row.synced_version !== undefined &&
+    row.synced_version !== null &&
+    !isVersionNumber(row.synced_version)
+  ) {
+    return { kind: "unreadable", reason: "its `synced_version` is not a version number" };
+  }
 
   return {
     kind: "link",
@@ -210,9 +240,14 @@ export async function readMethodLink(dir: string): Promise<LinkRead> {
       method_id: row.method_id as string,
       name: row.name as string,
       synced_updated_at: row.synced_updated_at as string,
+      ...(isVersionNumber(row.synced_version) ? { synced_version: row.synced_version } : {}),
       ...(row.partial_pull === true ? { partial_pull: true } : {}),
     },
   };
+}
+
+function isVersionNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 }
 
 /**

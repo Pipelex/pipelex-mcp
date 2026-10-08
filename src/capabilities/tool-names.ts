@@ -24,4 +24,5 @@ export const WORKSHOP_TOOL_NAMES = {
   downloadArtifacts: "mthds_download_artifacts",
   saveMethod: "mthds_save_method",
   getMethod: "mthds_get_method",
+  publishMethod: "mthds_publish_method",
 } as const;

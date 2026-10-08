@@ -651,6 +651,18 @@ export interface ClassifyErrorOptions {
     hint: string;
   };
   /**
+   * Per-route texture for `409 method_update_conflict`: the method's draft
+   * moved since the token the call sent, so nothing was written or published.
+   * The locator is the field that carried the token, which differs per route
+   * (`expected_updated_at` on the save, `expected_draft_updated_at` on the
+   * publish). Unset, the arm locates at `expected_updated_at` with a generic
+   * hint.
+   */
+  conflict?: {
+    location?: string;
+    hint: string;
+  };
+  /**
    * The request field that named the method on this route — `files`,
    * `method_ref` or `method_id`, picked per request shape like
    * {@link badRequest}'s locator.
@@ -1181,6 +1193,19 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     );
   }
 
+  // A saved method's versions and draft, refused for a reason the platform
+  // names in its `code`. Each is about the method the caller named, and each
+  // would otherwise fall through to the generic arm as "HTTP 409", which says
+  // nothing a caller can act on. The class is pinned to `input_domain`, which
+  // is also the SDK's fallback for every one of them: the caller changes the
+  // selector, the token or the timing, never the environment.
+  if (err.status === 409) {
+    const arm = methodConflictTexture(err.code, options);
+    if (arm !== undefined) {
+      return toolError({ ...verdict, class: "input_domain" }, { ...arm, message });
+    }
+  }
+
   // Paywall: the platform reports a plan limit as 402 SubscriptionRequiredError.
   // Branch on the HTTP status only — its problem `code` is "forbidden" and must
   // never be sniffed. The class stays the SDK's `config` (the call cannot be
@@ -1195,6 +1220,19 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
   }
 
   if (err.status === 404) {
+    // `mt_…@<n>`, or a version read, naming a version the method never
+    // published. Ahead of the route's `notFound`, whose hint says the METHOD is
+    // unknown, which is the one thing this answer rules out.
+    if (err.code === "method_version_not_found") {
+      return toolError(
+        { ...verdict, class: "input_domain" },
+        {
+          location: "method_id",
+          message,
+          hint: `The method exists but has no published version with this number. ${WORKSHOP_TOOL_NAMES.getMethod} with its bare id reports its latest published version; address the draft as mt_…@draft.`,
+        },
+      );
+    }
     if (options.notFound !== undefined && verdict.class === "input_domain") {
       return toolError(verdict, {
         location: options.notFound.location,
@@ -1271,6 +1309,45 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
   }
 
   return toolError(verdict, { message, hint: `The Pipelex API returned HTTP ${err.status}.` });
+}
+
+/**
+ * The texture of a `409` about a saved method, by the platform's `code`, or
+ * `undefined` for a `409` this server has no wording of its own for.
+ *
+ * - `method_not_published`: a bare id names the latest published version, and
+ *   the method has none yet. The way forward is its draft, `mt_…@draft`, or a
+ *   publish, which only the user asks for.
+ * - `method_update_conflict`: the draft moved since the token the call sent,
+ *   so nothing was written or published. The route says which field carried
+ *   the token ({@link ClassifyErrorOptions.conflict}).
+ * - `method_being_deleted`: the method's erasure has started.
+ */
+function methodConflictTexture(
+  code: string | undefined,
+  options: ClassifyErrorOptions,
+): Omit<ToolTexture, "message"> | undefined {
+  switch (code) {
+    case "method_not_published":
+      return {
+        location: "method_id",
+        hint: `The method has a draft and no published version yet, and a bare id names the latest published version. Address its draft as mt_…@draft, or publish it with ${WORKSHOP_TOOL_NAMES.publishMethod} — only when the user asks for a publish.`,
+      };
+    case "method_update_conflict":
+      return {
+        location: options.conflict?.location ?? "expected_updated_at",
+        hint:
+          options.conflict?.hint ??
+          `The method's draft changed since the token this call sent — somebody saved it, and the webapp saves as it edits. Read it with ${WORKSHOP_TOOL_NAMES.getMethod}, then decide with the user what to keep.`,
+      };
+    case "method_being_deleted":
+      return {
+        location: "method_id",
+        hint: "The method is being deleted, so nothing was read or written. Its id stops resolving once the erasure finishes.",
+      };
+    default:
+      return undefined;
+  }
 }
 
 // ── the artifact fetch boundary, shared by the two tools that cross it ──
