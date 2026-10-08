@@ -25,6 +25,7 @@ import { z } from "zod";
 
 import {
   RUN_METHOD_ID_SELECTOR_SENTENCE,
+  forgetMethodVersionsSupported,
   linkageSuffixError,
   noteMethodVersionsSupported,
   planById,
@@ -41,6 +42,8 @@ import {
   createPipelexApiClient,
   filesInputSchema,
   imageCandidatesOf,
+  inputsPathSchema,
+  resolveInputsSource,
   resolveSubmittedFiles,
   summaryForToolError,
   toolErrorSchema,
@@ -114,8 +117,9 @@ export const mthdsRunInputSchema = {
     .record(z.string(), z.unknown())
     .optional()
     .describe(
-      "Method inputs — fill the template returned by mthds_inputs_template. Binary inputs ride reachable https URLs.",
+      "Method inputs — fill the template returned by mthds_inputs_template. Binary inputs ride reachable https URLs. Supply at most ONE of inputs / inputs_path.",
     ),
+  inputs_path: inputsPathSchema,
 };
 
 /** The input schema of the status and results tools alike, built afresh for each. */
@@ -373,9 +377,10 @@ export interface MthdsRunInput {
   method_id?: string;
   pipe_code?: string;
   inputs?: Record<string, unknown>;
+  inputs_path?: string;
 }
 
-/** The run request after `{ path }` resolution — what the checks and the API call consume. */
+/** The run request after `{ path }` and `inputs_path` resolution — what the checks and the API call consume. */
 interface ResolvedRunRequest {
   files: SubmittedFile[];
   method_ref?: string;
@@ -500,7 +505,7 @@ interface RunClient {
   start(options: PipelexStartOptions): Promise<PipelexRunResultStart>;
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
-  /** `GET /v1/version`, read to learn whether `mt_…@draft` must be sent bare; optional on a test seam. */
+  /** `GET /v1/version`, read only to word the hint of a refused suffix — a selector is always sent as given; optional on a test seam. */
   version?(): Promise<unknown>;
 }
 
@@ -508,6 +513,8 @@ export interface RunContext extends ApiConfig, MethodVersionsAware {
   client?: RunClient;
   /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
+  /** Reads `inputs_path` from disk (local workshop, `.json` only); without one `inputs_path` is refused. */
+  inputsResolver?: FileResolver;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
@@ -1259,11 +1266,22 @@ export async function startMthdsRun(
   context: RunContext = buildRunContext(),
 ): Promise<RunStartResult> {
   const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
-  if (resolution.errors.length > 0) {
-    return startErrorResult("Run was not started: request input is invalid.", resolution.errors);
+  const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
+    required: false,
+  });
+  const resolutionErrors = [...resolution.errors, ...inputsResolution.errors];
+  if (resolutionErrors.length > 0) {
+    return startErrorResult("Run was not started: request input is invalid.", resolutionErrors);
   }
 
-  const request: ResolvedRunRequest = { ...input, files: resolution.files };
+  // `inputs_path` is settled into `inputs` here and goes no further: the start
+  // request cannot tell a loaded file from an inline object.
+  const { inputs_path: _inputsPath, inputs: _inlineInputs, ...selection } = input;
+  const request: ResolvedRunRequest = {
+    ...selection,
+    files: resolution.files,
+    ...(inputsResolution.inputs === undefined ? {} : { inputs: inputsResolution.inputs }),
+  };
   const inputErrors = validateRunRequest(request);
   if (inputErrors.length > 0) {
     return startErrorResult("Run was not started: request input is invalid.", inputErrors);
@@ -1297,7 +1315,7 @@ export async function startMthdsRun(
     const client = runClient(context);
     let sent = request;
     if (request.method_id !== undefined && request.files.length === 0) {
-      plan = await planById(request.method_id, context.methodVersions, client, {
+      plan = planById(request.method_id, context.methodVersions, client, {
         needBareReport: false,
       });
       sent = { ...request, method_id: plan.send };
@@ -1306,8 +1324,11 @@ export async function startMthdsRun(
     if (plan === undefined) return startResult(ack);
     const content = runContentReport(plan, ack.method_version);
     // An acknowledgement naming the version that runs is the platform's own
-    // word that it resolves selectors, worth more than any cached answer.
+    // word that it resolves selectors, worth more than any cached answer; one
+    // naming none for a bare id is its word that it does not, so a cached
+    // `supported` is dropped before another tool reads a bare id as `latest`.
     if (content.proved) noteMethodVersionsSupported(context.methodVersions);
+    else if (content.disproved) forgetMethodVersionsSupported(context.methodVersions);
     return startResult(ack, content);
   } catch (err) {
     const classified = classifyStartError(err, { ...classifyOptions, auth: context.authError });

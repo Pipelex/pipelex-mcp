@@ -1,5 +1,7 @@
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { errorMessage, isMissingPathError } from "./workspace-boundary.js";
 
@@ -28,6 +30,14 @@ import { errorMessage, isMissingPathError } from "./workspace-boundary.js";
  * the method's draft (no `synced_version`), or one of its published versions
  * (`synced_version`), which a pull of `mt_…@<n>` writes. A later pull reads a
  * file still holding that version's bytes as stored, not as unsaved work.
+ *
+ * **Every write of it is a compare-and-swap on its own bytes**
+ * ({@link replaceMethodLink}): a save or a pull decides what to write from the
+ * link it read, and writes only while the file still holds exactly those
+ * bytes. A link another call wrote meanwhile describes what THAT call put in
+ * the directory, so it is left as it is and the result says so. That is what
+ * keeps the link truthful when two calls touch one directory, in this process
+ * ({@link inLinkTurn}) or in another workshop process ({@link withLinkLock}).
  */
 
 export const LINK_FILE_NAME = "pipelex-method.json";
@@ -122,7 +132,7 @@ export function apiHostOf(baseUrl: string): string {
  * linked, which is the consequence the caller has to act on: the next save
  * would create a second method unless they pass the id.
  */
-export async function writeMethodLink(
+async function writeMethodLink(
   root: string,
   dir: string,
   link: MethodLink,
@@ -138,10 +148,421 @@ export async function writeMethodLink(
     return { path: relative, written: false, reason: foreign };
   }
   try {
-    await fs.writeFile(absolute, `${JSON.stringify(link, null, 2)}\n`, "utf8");
+    await fs.writeFile(absolute, serializeMethodLink(link), "utf8");
     return { path: relative, written: true };
   } catch (err) {
     return { path: relative, written: false, reason: errorMessage(err) };
+  }
+}
+
+/** The link file's bytes, exactly as {@link writeMethodLink} writes them. */
+function serializeMethodLink(link: MethodLink): string {
+  return `${JSON.stringify(link, null, 2)}\n`;
+}
+
+/** A link file this call wrote, as a later compare-and-swap expects to find it. */
+export function linkAsWritten(link: MethodLink): LinkRead {
+  return { kind: "link", link, raw: serializeMethodLink(link) };
+}
+
+/** The read of a directory holding no link file. */
+export const NO_LINK: LinkRead = { kind: "none" };
+
+/** What a compare-and-swap of the link file did. */
+export interface LinkReplacement {
+  report: LinkFileReport;
+  /**
+   * The write was refused because the file no longer held what the caller
+   * read: another save or pull wrote it meanwhile, so it describes what that
+   * call put in the directory, or it was removed or became unreadable. It was
+   * left as it is.
+   */
+  changed: boolean;
+  /** What the file holds after a write this call made; absent when it made none. */
+  wrote?: LinkRead;
+}
+
+/**
+ * Write the link file only while it still holds exactly what `expected` read
+ * — a compare-and-swap on the file's own bytes.
+ *
+ * A save and a pull each decide what to write from the link they read: a save
+ * records the token its bytes were sent under, and a pull records which
+ * content it landed. A link another call wrote between that read and this
+ * write describes the directory as THAT call left it — a version pulled over
+ * the files, an interrupted pull, another save's token — and writing over it
+ * would make the link say something about the directory that this call does
+ * not know to be true. So the write is refused, nothing is lost, and the
+ * caller reports it.
+ *
+ * A link that cannot be read is never written over, whatever was expected:
+ * something claims the directory, and following it would be guesswork. One
+ * that BECAME unreadable after the caller read it is a change like any other,
+ * reported as such — a merge conflict landing in the file mid-call is the
+ * usual cause — so a caller that refuses on a change refuses on it too.
+ *
+ * Call it inside {@link inLinkTurn} and {@link withLinkLock}, which make the
+ * compare and the write one step for every call in this process and in every
+ * other workshop process of this user on this machine.
+ */
+export async function replaceMethodLink(
+  root: string,
+  dir: string,
+  expected: LinkRead,
+  link: MethodLink,
+): Promise<LinkReplacement> {
+  const relative = path.relative(root, path.join(dir, LINK_FILE_NAME));
+  const current = await readMethodLink(dir);
+  if (!sameLinkRead(expected, current)) {
+    return {
+      report: {
+        path: relative,
+        written: false,
+        reason:
+          current.kind === "none"
+            ? "it was removed while this call ran, so it was not recreated"
+            : current.kind === "unreadable"
+              ? `it became unreadable while this call ran (${current.reason}), and overwriting it would destroy whatever it holds`
+              : "another save or pull rewrote it while this call ran, so it was left as that one wrote it",
+      },
+      changed: true,
+    };
+  }
+  if (current.kind === "unreadable") {
+    return {
+      report: {
+        path: relative,
+        written: false,
+        reason: `it is there but cannot be read (${current.reason}), and overwriting it would destroy whatever it holds`,
+      },
+      changed: false,
+    };
+  }
+  const report = await writeMethodLink(root, dir, link);
+  return report.written
+    ? { report, changed: false, wrote: linkAsWritten(link) }
+    : { report, changed: false };
+}
+
+/**
+ * Whether two reads saw the same link file: both absent, both the same bytes,
+ * or both unreadable for the same reason. {@link replaceMethodLink} never
+ * writes over an unreadable file whatever this says, so the last case only
+ * lets a save that reads such a file twice, and writes no link there, carry on.
+ */
+export function sameLinkRead(a: LinkRead, b: LinkRead): boolean {
+  if (a.kind === "link" && b.kind === "link") return a.raw === b.raw;
+  if (a.kind === "unreadable" && b.kind === "unreadable") return a.reason === b.reason;
+  return a.kind === "none" && b.kind === "none";
+}
+
+// ── one local step at a time ────────────────────────────────────────
+
+/**
+ * The tail of the queue the workshop's link work takes its turns in.
+ *
+ * A turn holds only LOCAL filesystem work, never a call to the platform: a
+ * save's read of its link and its files, a save's compare-and-swap of its
+ * link, and a pull's landing (its provisional link, its files and its final
+ * link). Each of those is a few file operations, so serializing every one of
+ * them across the whole process costs nothing that matters, and holding none
+ * across a remote validation or a draft write is what keeps a slow save from
+ * delaying every pull. One queue for the process rather than one per
+ * directory: a save's files and its link can sit in different directories, a
+ * pull can write into a directory nested in another's, and symlinks and case
+ * make two spellings of one directory.
+ *
+ * Within a turn the steps are atomic for this process. Every turn — the
+ * save's read of its links and files, the save's compare-and-swap, the pull's
+ * whole landing — also holds {@link withLinkLock}, which makes it atomic for
+ * every other workshop process of this user on this machine. The save's read
+ * needs the lock as much as a write does: without it, another workshop
+ * process's pull could land while the save read, and a pull into a nested
+ * directory changes the parent bundle's files without touching the parent's
+ * link, so no second read of that link would see it. The save still reads its
+ * links again after its files and refuses when they moved, which answers a
+ * writer that takes no lock at all: an editor, a git checkout, an older
+ * workshop.
+ */
+let linkTurn: Promise<unknown> = Promise.resolve();
+
+export function inLinkTurn<T>(work: () => Promise<T>): Promise<T> {
+  const turn = linkTurn.then(work);
+  linkTurn = turn.catch(() => undefined);
+  return turn;
+}
+
+// ── one writer at a time, across processes ─────────────────────────
+
+/** How long a call waits for another workshop process to finish its write. */
+export const LINK_LOCK_WAIT_MS = 10_000;
+
+const LINK_LOCK_POLL_MS = 5;
+
+/** SQLite's "database is locked": another connection holds its transaction. */
+const SQLITE_BUSY = 5;
+
+/** Why a call could not take the workshop's write lock; nothing was written under it. */
+export class LinkLockError extends Error {
+  override name = "LinkLockError";
+
+  /** `busy`: another workshop process holds it, and a retry in a moment succeeds; otherwise the lock cannot be had here at all. */
+  constructor(
+    message: string,
+    readonly busy: boolean,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Run `work` holding the lock every workshop process of this user on this
+ * machine takes before it writes a link file or a pull's files, anywhere, and
+ * while a save reads the links and files it is about to send.
+ *
+ * The link's compare-and-swap is two file operations, a read and a write, and
+ * only one process's turns are ordered by {@link inLinkTurn}. Between two
+ * processes nothing ordered them: a pull of a published version from a second
+ * workshop process could land between a save's compare and its write, the save
+ * then recorded its draft token over the version's files, and the next
+ * ordinary save replaced the draft with that version — the restore guard
+ * bypassed, and the bytes the first save sent gone from the draft and from
+ * disk. Under contention two processes lost about half their swaps to each
+ * other. So every write holds this lock, and the compare and the write, and a
+ * pull's provisional link, files and final link, are one step for every
+ * process that takes it. A save's read holds it too, so no pull lands while a
+ * save reads what it is about to send ({@link inLinkTurn} says why the second
+ * read of the links cannot stand in for it).
+ *
+ * **One lock for every directory**, the cross-process twin of
+ * {@link inLinkTurn}'s one queue, and for the same reasons: a save's files and
+ * its link can sit in different directories, two pulls into a directory and a
+ * subdirectory of it write the same file, and one directory has several
+ * spellings. Per-directory locks let a pull into `work` and one into
+ * `work/sub` both land `work/sub/helpers.py`, each link then vouching for its
+ * own method's copy; under one lock the second landing finds the file changed
+ * since its plan read it and is refused. A hold is a few file operations and
+ * never a call to the platform, so one lock costs nothing that matters.
+ *
+ * **The lock is an exclusive SQLite transaction** on a file in a directory of
+ * this user's own under the home directory ({@link linkLockFile}), never in the
+ * user's working directory, which is committed. SQLite takes it with the
+ * operating system's file lock, which the kernel releases the moment its
+ * holder's process ends, however it ends: there is no lock file to judge
+ * abandoned, so no guess about whether a holder is dead, paused or on another
+ * host, and no recovery that could take a live holder's lock — the failure
+ * every lock written as a file on disk carries. The lock binds the processes
+ * that compute the same file: one user's sessions on one machine, which is
+ * where two workshops write one directory.
+ *
+ * **Not under the OS temp directory**, where it first lived, for two reasons.
+ * The temp directory can differ between one user's processes, since it comes
+ * from `TMPDIR`, and two processes computing two files exclude nothing. And a
+ * temp cleaner deletes old files there — macOS's daily one removes what has
+ * gone unchanged for three days under `/var/folders`, and holding the lock
+ * changes nothing in the file — after which a process still connected to the
+ * deleted file stops excluding every process started later, since those
+ * create a new one. The home directory is stable for the user and nothing
+ * cleans it; and should the file be deleted anyway, the next acquisition sees
+ * it and reopens ({@link openLinkLock}).
+ *
+ * Waits up to {@link LINK_LOCK_WAIT_MS}; past that, or when the lock cannot be
+ * opened at all, it throws {@link LinkLockError} and `work` never runs, so a
+ * caller refuses rather than read or write unguarded.
+ */
+export function withLinkLock<T>(
+  work: () => Promise<T>,
+  options: { waitMs?: number } = {},
+): Promise<T> {
+  const turn = lockTurn.then(() => holdingLinkLock(work, options.waitMs ?? LINK_LOCK_WAIT_MS));
+  lockTurn = turn.catch(() => undefined);
+  return turn;
+}
+
+/**
+ * The file whose exclusive transaction is the lock, in this user's private
+ * directory under the home directory: `~/.local/state/pipelex-mcp` on POSIX
+ * and `~/AppData/Local/pipelex-mcp` on Windows, the places a program keeps
+ * state that is not configuration.
+ *
+ * `XDG_STATE_HOME` is deliberately not read, although the POSIX location is its
+ * default: a variable that can differ between one user's processes is exactly
+ * what moved the lock off the temp directory, since two processes that compute
+ * two files exclude nothing.
+ */
+export function linkLockFile(): string {
+  const home = os.homedir();
+  const dir =
+    process.platform === "win32"
+      ? path.join(home, "AppData", "Local", "pipelex-mcp")
+      : path.join(home, ".local", "state", "pipelex-mcp");
+  return path.join(dir, "write-lock.sqlite");
+}
+
+/** An open connection to a lock file, and which file it opened: `dev` and `ino` as they were right after opening. */
+interface LockConnection {
+  db: DatabaseSync;
+  dev: bigint;
+  ino: bigint;
+}
+
+/** This process's connection to each lock file it has opened; kept open, since closing one releases nothing it holds. */
+const lockConnections = new Map<string, LockConnection>();
+
+/** In-process order for {@link withLinkLock}: one connection holds one transaction at a time. */
+let lockTurn: Promise<unknown> = Promise.resolve();
+
+async function holdingLinkLock<T>(work: () => Promise<T>, waitMs: number): Promise<T> {
+  const file = linkLockFile();
+  const lock = await openLinkLock(file);
+  await beginExclusive(file, lock, waitMs);
+  try {
+    return await work();
+  } finally {
+    releaseLinkLock(file, lock);
+  }
+}
+
+/**
+ * This process's connection to `file`, opened on first use and kept.
+ *
+ * A kept connection is used only while it is still connected to the file at
+ * that path, which every acquisition checks first. A connection outlives the
+ * file it opened when something deletes it — a cleaner, a user tidying up —
+ * and SQLite then locks the deleted file without complaint, while every
+ * process started since creates a new file at the path and locks that one: the
+ * two exclude nothing. So a file that is gone, or that is no longer the one the
+ * connection opened (another device or inode), drops the kept connection and
+ * opens the file at the path afresh.
+ */
+async function openLinkLock(file: string): Promise<DatabaseSync> {
+  const kept = lockConnections.get(file);
+  if (kept !== undefined) {
+    if (await isSameFile(file, kept)) return kept.db;
+    dropLinkLock(file, kept.db);
+  }
+  try {
+    await ensurePrivateDirectory(path.dirname(file));
+    const db = new DatabaseSync(file, { timeout: 0 });
+    try {
+      // SQLite creates the file as it opens it, so this is the file this
+      // connection holds.
+      const opened = await fs.stat(file, { bigint: true });
+      lockConnections.set(file, { db, dev: opened.dev, ino: opened.ino });
+    } catch (err) {
+      db.close();
+      throw err;
+    }
+    return db;
+  } catch (err) {
+    if (err instanceof LinkLockError) throw err;
+    throw new LinkLockError(
+      `the workshop's write lock could not be opened at ${file} (${errorMessage(err)})`,
+      false,
+    );
+  }
+}
+
+/** Whether the file at `file` is still the one `connection` opened. Any failure to tell answers no, and the reopen reports it. */
+async function isSameFile(file: string, connection: LockConnection): Promise<boolean> {
+  try {
+    const current = await fs.stat(file, { bigint: true });
+    return current.dev === connection.dev && current.ino === connection.ino;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Make `dir` this user's own directory, closed to everyone else, or refuse.
+ *
+ * Its parents are the user's ordinary directories (`.local/state`,
+ * `AppData/Local`), made as any program makes them, so only `dir` itself is
+ * created private. Under the home directory nobody else should be able to make
+ * it, but one that `sudo` made belongs to root, and a lock file in a
+ * directory this user does not own could refuse every write here, or hold
+ * nothing at all; one left open to the group or the world is closed.
+ */
+async function ensurePrivateDirectory(dir: string): Promise<void> {
+  await fs.mkdir(path.dirname(dir), { recursive: true });
+  try {
+    await fs.mkdir(dir, { mode: 0o700 });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
+  const entry = await fs.lstat(dir);
+  if (!entry.isDirectory()) {
+    throw new LinkLockError(
+      `${dir}, where the workshop keeps its write lock, is not a directory`,
+      false,
+    );
+  }
+  if (typeof process.getuid !== "function") return;
+  if (entry.uid !== process.getuid()) {
+    throw new LinkLockError(
+      `${dir}, where the workshop keeps its write lock, belongs to another user`,
+      false,
+    );
+  }
+  if ((entry.mode & 0o077) !== 0) await fs.chmod(dir, 0o700);
+}
+
+/**
+ * Begin the exclusive transaction, polling while another connection holds it.
+ *
+ * Any other failure means this connection cannot take the lock now, and
+ * possibly never: the file is damaged, or the connection itself is broken. The
+ * connection is dropped, so the next call opens the file afresh rather than
+ * fail on the same connection for the life of the process, and the message
+ * names the file, since removing a damaged one is the cure.
+ */
+async function beginExclusive(file: string, lock: DatabaseSync, waitMs: number): Promise<void> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      lock.exec("BEGIN EXCLUSIVE");
+      return;
+    } catch (err) {
+      // `errcode` is SQLite's extended result code, whose low byte is the primary one.
+      const errcode = (err as { errcode?: unknown }).errcode;
+      if (typeof errcode !== "number" || (errcode & 0xff) !== SQLITE_BUSY) {
+        dropLinkLock(file, lock);
+        throw new LinkLockError(
+          `the workshop's write lock at ${file} could not be taken (${errorMessage(err)}); remove that file if it is damaged`,
+          false,
+        );
+      }
+    }
+    if (Date.now() >= deadline) {
+      throw new LinkLockError(
+        `another workshop process on this machine has been writing for over ${Math.round(waitMs / 1000)} s`,
+        true,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, LINK_LOCK_POLL_MS));
+  }
+}
+
+/**
+ * End the transaction. Nothing was written in it, so ending it can only fail
+ * on a connection that is itself broken, and closing that one releases its
+ * lock as surely as a commit.
+ */
+function releaseLinkLock(file: string, lock: DatabaseSync): void {
+  try {
+    lock.exec("COMMIT");
+  } catch {
+    dropLinkLock(file, lock);
+  }
+}
+
+/** Forget `lock` as this process's connection to `file`, and close it. */
+function dropLinkLock(file: string, lock: DatabaseSync): void {
+  if (lockConnections.get(file)?.db === lock) lockConnections.delete(file);
+  try {
+    lock.close();
+  } catch {
+    // Already closed; nothing is held.
   }
 }
 
@@ -169,9 +590,13 @@ export async function foreignEntryReason(absolute: string): Promise<string | und
   return undefined;
 }
 
+/**
+ * A directory's link file as read. The `link` arm keeps the file's exact bytes
+ * in `raw`, which a later {@link replaceMethodLink} compares against.
+ */
 export type LinkRead =
   | { kind: "none" }
-  | { kind: "link"; link: MethodLink }
+  | { kind: "link"; link: MethodLink; raw: string }
   | { kind: "unreadable"; reason: string };
 
 /**
@@ -233,6 +658,7 @@ export async function readMethodLink(dir: string): Promise<LinkRead> {
 
   return {
     kind: "link",
+    raw: text,
     link: {
       comment: typeof row.comment === "string" ? row.comment : LINK_COMMENT,
       generator: typeof row.generator === "string" ? row.generator : LINK_GENERATOR,

@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
 import type {
@@ -1861,6 +1861,35 @@ describe("validateMthds by method_id, on both platforms", () => {
     expect(drafted.structuredContent.method_version).toBe("draft");
     expect(pinned.structuredContent.method_version).toBe(2);
     expect(pinned.summary).toContain("This validated version 2 of `mt_123`.");
+  });
+
+  it("sends a bare id without waiting on the handshake, and still says what it validated", async () => {
+    // Nothing sent depends on the platform's answer. Awaited first, it cost
+    // every bare-id call a handshake, up to its deadline where the platform
+    // does not resolve versions and so never caches its answer.
+    const sent: ValidateMethodSelector[] = [];
+    let answer: (info: unknown) => void = () => undefined;
+    const context: ValidationContext = {
+      baseUrl: DEFAULT_API_URL,
+      client: {
+        ...validateFilesNotCalled,
+        async validate(source) {
+          sent.push(source);
+          return validReport;
+        },
+        version() {
+          return new Promise((resolve) => {
+            answer = resolve;
+          });
+        },
+      },
+    };
+
+    const result = validateMthds({ method_id: "mt_123" }, context);
+    await vi.waitFor(() => expect(sent).toEqual([{ method_id: "mt_123" }]));
+    answer({ version: "1.0.0", extensions: ["runs"] });
+
+    expect((await result).structuredContent.method_version).toBe("draft");
   });
 
   it("reads the draft for a bare id where they do not, and sends every suffix as given", async () => {

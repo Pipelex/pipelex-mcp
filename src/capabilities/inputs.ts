@@ -291,9 +291,9 @@ export async function buildMthdsInputs(
     if (request.method_id !== undefined) {
       // A bare id reads the draft on a platform that does not resolve version
       // selectors yet, and the latest published version on one that does: the
-      // selector is planned against the platform's answer, and the result says
-      // which content the template came from (`method-versions.ts`).
-      plan = await planById(request.method_id, context.methodVersions, client, {
+      // platform is asked beside the request, which never waits on it, and the
+      // result says which content the template came from (`method-versions.ts`).
+      plan = planById(request.method_id, context.methodVersions, client, {
         needBareReport: true,
       });
       sent = { ...request, method_id: plan.send };
@@ -317,7 +317,7 @@ export async function buildMthdsInputs(
       explicit: request.explicit ?? true,
       format: request.format ?? "json",
     });
-    return withMethodContent(result, plan, "projected the template from");
+    return await withMethodContent(result, plan, "projected the template from");
   } catch (err) {
     return errorResult(
       "Inputs template produced no verdict: the Pipelex API returned a malformed report.",

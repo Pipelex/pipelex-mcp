@@ -5,7 +5,7 @@ import type {
   MethodPublishResult,
   MethodVersionSummary,
 } from "@pipelex/sdk";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { publishMethodToolResult, publishMthdsMethod } from "./catalog-publish.js";
 import type { PublishMethodSuccess } from "./catalog-publish.js";
@@ -133,6 +133,40 @@ describe("publishMthdsMethod", () => {
     );
 
     expect(result.summary).toContain("still reads the draft; once it does, it reads version 3");
+  });
+
+  it("asks whether versions resolve beside the publish, not after it", async () => {
+    // Only the published result's sentence about callers waits on the answer,
+    // so the publish does not wait a handshake after it has finished.
+    const order: string[] = [];
+    let finish: () => void = () => undefined;
+    const result = publishMthdsMethod(
+      { method_id: "mt_one", expected_draft_updated_at: TOKEN },
+      contextFor(
+        publishing(
+          async () => {
+            order.push("publish sent");
+            await new Promise<void>((resolve) => {
+              finish = resolve;
+            });
+            order.push("publish answered");
+            return { outcome: "published", version: versionSummary(), method: method() };
+          },
+          {
+            async version() {
+              order.push("handshake sent");
+              return { extensions: ["runs", "method_versions"] };
+            },
+          } as Partial<CatalogWriteClient>,
+        ),
+      ),
+    );
+    await vi.waitFor(() => expect(order).toContain("publish sent"));
+    expect(order).toContain("handshake sent");
+    finish();
+
+    expect((await result).summary).toContain("Every caller of the bare `mt_one` runs version 3");
+    expect(order.indexOf("handshake sent")).toBeLessThan(order.indexOf("publish answered"));
   });
 
   it("reads @draft as the bare id, and refuses a version, which never changes", async () => {

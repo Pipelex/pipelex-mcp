@@ -17,15 +17,20 @@ import { z } from "zod";
 
 import {
   LINK_FILE_NAME,
+  LinkLockError,
+  NO_LINK,
   apiHostOf,
   buildMethodLink,
   bundleFilesIn,
   existingDestinations,
   foreignEntryReason,
+  inLinkTurn,
   readMethodLink,
-  writeMethodLink,
+  replaceMethodLink,
+  sameLinkRead,
+  withLinkLock,
 } from "./catalog-link.js";
-import type { LinkFileReport, LinkRead, MethodLink } from "./catalog-link.js";
+import type { LinkFileReport, LinkRead, LinkReplacement, MethodLink } from "./catalog-link.js";
 import { methodVersionsSupport, readMethodSelector, versionReaderOf } from "./method-versions.js";
 import type {
   MethodSelector,
@@ -49,6 +54,7 @@ import type {
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
+  ResolvedFiles,
   SubmittedFile,
   SubmittedFileInput,
   ToolError,
@@ -60,6 +66,7 @@ import {
   containedPath,
   createContainedSubdirectory,
   errorMessage,
+  escapedDirectoryError,
   isInsideRoot,
   isMissingPathError,
   resolveSaveDir,
@@ -83,6 +90,38 @@ import {
  * records, so a save never replaces a draft that moved since this directory
  * synced with it — the webapp autosaves the same draft. A pull reads the draft
  * by default and a published version on `mt_…@<n>`.
+ *
+ * **The invariants**, and what holds each one:
+ *
+ * 1. A draft is never replaced by older bytes, or by a version's bytes,
+ *    without the caller's explicit, informed choice. A save sends the token of
+ *    the link that vouches for its bytes, read before them, so the platform
+ *    refuses it when the draft moved since; a link recording a pulled version,
+ *    an unfinished pull or no token refuses the save unless the caller passes
+ *    `expected_updated_at`, which is that choice. The links are read again
+ *    after the files, so bytes a concurrent pull was writing are never sent.
+ * 2. A link file says truthfully what its directory holds. Every write of it
+ *    is a compare-and-swap on the bytes the writer decided from
+ *    (`replaceMethodLink`), so a save never records its token over a version
+ *    a pull landed meanwhile, and a pull never lands on a directory whose link
+ *    moved, or whose files changed, since it read them — the link before the
+ *    method, so the link is never ahead of the content; a pull marks the link
+ *    before its first file and finishes it after its last; and a save writes
+ *    its link only beside the bundle it sent, or in a directory holding no
+ *    bundle (`otherBundleAt`).
+ * 3. No argument bypasses a guard. `link_dir` moves where the link is
+ *    written, never which link vouches for the bytes (the one beside the files
+ *    keeps its guards); `overwrite` opens only the two questions it answers;
+ *    `mt_…@draft` is the bare id; and `expected_updated_at` is the one
+ *    deliberate override, named in every refusal it lifts.
+ *
+ * The local work — a save's read of its links and files, its link write, a
+ * pull's landing — takes turns across the process (`inLinkTurn`) and holds the
+ * workshop's write lock across processes (`withLinkLock`), and neither is held
+ * across a call to the platform but a create's turn: creates take turns among
+ * themselves from claim read to link write (`inCreateTurn`), since the link
+ * one writes last is what refuses a duplicate from the next. `catalog-link.ts`
+ * says what the lock covers and what it does not.
  */
 
 // ── the inline budget ───────────────────────────────────────────────
@@ -573,45 +612,9 @@ function malformedSuffixError(value: string, selector: MethodSelector): ToolErro
   };
 }
 
-// ── one turn at a time ──────────────────────────────────────────────
-
-/**
- * The tail of the queue every save and every writing pull takes its turn in.
- * Each reads a directory's link, reads or writes its files and writes the link
- * back, and the link only means something when those happen together: a
- * version pull landing between a save's link read and its file read handed
- * the save the version's files under the draft's token, and a version pull
- * landing before a save's final link write lost its version marker to it —
- * either way an ordinary save then replaced the draft with a version, with no
- * explicit token. The MCP server starts each request without waiting for the
- * last, so two such calls can interleave.
- *
- * One queue for the whole process rather than one per directory: a save's
- * files and its link can sit in different directories, a pull can write into
- * a directory nested in another's, and symlinks and case make two spellings
- * of one directory. These calls are paced by a person or an agent's turn, so
- * serializing all of them costs nothing that matters. A second workshop
- * process on the same directory is not covered: that would take a lock on
- * disk.
- */
-let catalogTurn: Promise<unknown> = Promise.resolve();
-
-function inCatalogTurn<T>(work: () => Promise<T>): Promise<T> {
-  const turn = catalogTurn.then(work);
-  catalogTurn = turn.catch(() => undefined);
-  return turn;
-}
-
 // ── mthds_save_method ───────────────────────────────────────────────
 
-export function saveMthdsMethod(
-  input: MthdsSaveMethodInput,
-  context: CatalogWriteContext,
-): Promise<SaveMethodResult> {
-  return inCatalogTurn(() => saveInTurn(input, context));
-}
-
-async function saveInTurn(
+export async function saveMthdsMethod(
   input: MthdsSaveMethodInput,
   context: CatalogWriteContext,
 ): Promise<SaveMethodResult> {
@@ -678,156 +681,101 @@ async function saveInTurn(
   // Where the link file may go is a different question from what the files are
   // NAMED relative to — see {@link linkDirectoryOf}.
   const linkDir = linkDirectoryOf(parsed.data.files);
-  // The claim, and with it the draft token this save is held to, is read
-  // BEFORE the bytes it will send, because the token certifies the state those
-  // bytes were read against. Read after them — the files are resolved and the
-  // remote validation awaited first — a second save from this directory could
-  // land in between, move the draft and refresh the link, and this save would
-  // then send that newer token with its older bytes and replace the newer
-  // draft without a conflict. Read first, any save that refreshed the link
-  // since has moved the draft past this token, and the platform refuses it.
-  // Within this process saves and pulls also take turns (inCatalogTurn); the
-  // order is what still holds against a save from another workshop process.
-  // It is also read once, before either arm touches the catalog, because both
-  // arms are irreversible in the same way: a create that ran first left a
-  // duplicate, and a draft write that ran first left a different method's
-  // draft replaced — per SPEC.md delete is admin-only, and a replaced draft is
-  // gone.
-  const claim = await linkedMethodAt(context, parsed.data.link_dir ?? linkDir);
+  const linkTarget = parsed.data.link_dir ?? linkDir;
 
-  // Every refusal that needs only the claim is made here, before the files
-  // are read and validated remotely, so a save the link already refuses spends
-  // no validation and no handshake.
-  let token: string | undefined;
-  // The link that names the method this update writes, for the rename below.
-  let namingLink: MethodLink | undefined;
-  if (targetId === undefined) {
-    // Preventing a duplicate is the link file's whole purpose, and it was
-    // consulted too late to serve it: the create ran first, and only afterwards
-    // did the link write refuse to re-point — reporting `link_file.written:
-    // false` about a SECOND method that already existed.
-    if (claim !== undefined) {
-      return saveError("The method was not saved: that directory is already claimed.", [
-        claim.kind === "link"
-          ? {
-              class: "input_domain",
-              location: "method_id",
-              message: `\`${claim.dir}\` is linked to \`${claim.link.method_id}\` (${claim.link.name} on ${claim.link.api_host}), and this call names no method_id, so it would have created a SECOND method for the same directory.`,
-              hint: `Pass method_id: "${claim.link.method_id}" to save the draft of the method this directory is linked to, or point link_dir at a directory of its own to create a genuinely new method.`,
-              retryable: false,
-            }
-          : {
-              class: "input_domain",
-              location: "link_dir",
-              message: `\`${claim.dir}\` holds a \`${LINK_FILE_NAME}\` that cannot be read (${claim.reason}), so something already claims this directory. Creating a method from here would leave a SECOND method that this tool cannot delete.`,
-              hint: `Repair or remove \`${LINK_FILE_NAME}\` in that directory — if it names the method you meant, pass its method_id — or point link_dir at a directory of its own to create a genuinely new method.`,
-              retryable: false,
-            },
-      ]);
+  // The save reads a link, and lists a bundle, in link_dir and in the files'
+  // own directory, so each must REALLY be inside the working directory before
+  // anything reads it. Contained only as strings, a link_dir symlinked to a
+  // directory outside had its file names echoed in a refusal, and its link
+  // read and trusted, with the validation and the catalog write able to run
+  // before the link write refused it. The files' own directory would be
+  // refused by the resolver, but only after its link had been read.
+  if (context.saveRoot !== undefined) {
+    const escaped: ToolError[] = [];
+    for (const [dir, location] of [
+      [parsed.data.link_dir, "link_dir"],
+      [linkDir, "files"],
+    ] as const) {
+      if (dir === undefined) continue;
+      const error = await escapedDirectoryError(context.saveRoot, dir, location);
+      if (error !== undefined) escaped.push(error);
     }
-  } else {
-    // The create arm reads the link BEFORE creating because a duplicate cannot
-    // be undone; this arm has the same irreversibility. A method_id read from
-    // the wrong place, or a stale one pasted by a user, would write THIS
-    // directory's bundle into that method's draft, and only afterwards would
-    // the link write report the mismatch — leaving the wrong draft replaced and
-    // the directory still linked to the right method. The ids are compared
-    // bare, since the link records the bare id and `@draft` names the same
-    // method.
-    if (claim?.kind === "link" && readMethodSelector(claim.link.method_id).methodId !== targetId) {
-      return saveError("The method was not saved: that directory is linked to another method.", [
-        {
-          class: "input_domain",
-          location: "method_id",
-          message: `\`${claim.dir}\` is linked to \`${claim.link.method_id}\` (${claim.link.name} on ${claim.link.api_host}), but this call names method_id \`${parsed.data.method_id}\`. Saving would have replaced a different method's draft with this directory's bundle, and a replaced draft cannot be given back.`,
-          hint: `Pass method_id: "${claim.link.method_id}" to save the draft of the method this directory is linked to. If you really mean to save this bundle as \`${targetId}\`, point link_dir at a directory of its own so the two stop sharing one link file.`,
-          retryable: false,
-        },
-      ]);
-    }
-
-    // The draft token this save is held to: see draftTokenOf.
-    const linked = draftTokenOf(claim, parsed.data.expected_updated_at, targetId);
-    if (!linked.ok) {
-      return saveError(linked.summary, [linked.error]);
-    }
-    token = linked.token;
-    if (claim?.kind === "link") {
-      namingLink = claim.link;
-    }
-
-    // An explicit link_dir moves where the link is WRITTEN, not where the
-    // files were read from. When the files' own directory is linked to this
-    // same method, its link describes the bytes being sent, so its guards hold
-    // too: read only at link_dir, a directory holding a pulled version, or an
-    // unfinished pull, saved with link_dir pointed at an empty directory went
-    // out with no token at all, replacing the draft without the restore guard.
-    // A source link naming ANOTHER method is left alone, since link_dir is the
-    // documented fork for exactly that directory, and so is one that cannot be
-    // read, which refuses only a save that writes its link there.
-    const source = await sourceLinkOf(context, parsed.data.link_dir, linkDir);
-    if (source !== undefined && readMethodSelector(source.link.method_id).methodId === targetId) {
-      const fromSource = draftTokenOf(source, parsed.data.expected_updated_at, targetId);
-      if (!fromSource.ok) {
-        return saveError(fromSource.summary, [fromSource.error]);
-      }
-      if (token === undefined) {
-        // link_dir offers no token, and the source link describes these bytes.
-        token = fromSource.token;
-      } else if (fromSource.token !== undefined && fromSource.token !== token) {
-        return saveError(
-          "The method was not saved: the files' directory and link_dir record different syncs.",
-          [
-            {
-              class: "input_domain",
-              location: "link_dir",
-              message: `\`${source.dir}\`, where the files are, records a sync of \`${targetId}\` at ${fromSource.token}, while link_dir \`${claim?.dir ?? parsed.data.link_dir}\` records one at ${token}: the two directories record different syncs of the draft, so this save cannot tell which one its files were read against. Nothing was written.`,
-              hint: `Pull the method into the directory the files are in, so its link records the draft as it stands, then save again. To save these files as they stand, pass expected_updated_at with the draft's current updated_at (${WORKSHOP_TOOL_NAMES.getMethod} reports it) once the user has said to.`,
-              retryable: false,
-            },
-          ],
-        );
-      }
-      namingLink ??= source.link;
+    if (escaped.length > 0) {
+      return saveError("The method was not saved: request input is invalid.", escaped);
     }
   }
 
-  // Resolve ONCE. The bytes that are validated are the bytes that are saved:
-  // splitting the two — validate in the skill, save in a second call — would
-  // read the files twice and the verdict would not be provably about the saved
-  // bytes.
-  const bundle = await resolveSubmittedFiles(parsed.data.files, context.resolver);
-  if (bundle.errors.length > 0) {
-    return saveError("The method was not saved: request input is invalid.", bundle.errors);
-  }
-  if (bundle.files.length === 0) {
-    return saveError("The method was not saved: request input is invalid.", [
+  // A create holds a turn of its own across its whole flow — see inCreateTurn.
+  const run = () =>
+    saveToCatalog(context, parsed.data, { targetId, bundleDir, linkDir, linkTarget });
+  return targetId === undefined && linkTarget !== undefined ? inCreateTurn(run) : run();
+}
+
+/**
+ * The tail of the queue a create that writes a link takes its turn in, from
+ * its claim read to its link write, its calls to the platform included.
+ *
+ * A create is refused when its directory is already claimed, and what claims
+ * it is the link the create before it writes last. Two creates from one
+ * directory that overlapped both read it unclaimed and both minted a method,
+ * and the second's link write then found the first's link and wrote nothing,
+ * leaving a duplicate only an administrator can delete. Queued, the second
+ * reads the first's link and is refused. One queue for the process rather
+ * than one per directory, for the reasons {@link inLinkTurn} gives, and
+ * holding remote calls costs little here: creates are rare and paced by a
+ * person, only another create waits on one, and an update never does.
+ * Another workshop process creating from the same directory at the same
+ * moment is not covered.
+ */
+let createTurn: Promise<unknown> = Promise.resolve();
+
+function inCreateTurn<T>(work: () => Promise<T>): Promise<T> {
+  const turn = createTurn.then(work);
+  createTurn = turn.catch(() => undefined);
+  return turn;
+}
+
+/** A save from its read of the links and files to its result. */
+async function saveToCatalog(
+  context: CatalogWriteContext,
+  data: z.infer<typeof mthdsSaveMethodInputObjectSchema>,
+  where: {
+    targetId: string | undefined;
+    bundleDir: string | undefined;
+    linkDir: string | undefined;
+    linkTarget: string | undefined;
+  },
+): Promise<SaveMethodResult> {
+  const { targetId, bundleDir, linkDir, linkTarget } = where;
+
+  // The links and the files are read in one local turn, holding the workshop's
+  // write lock and no call to the platform, and every refusal the links make
+  // is made there, before the validation and the catalog write: see
+  // readSaveSources. A lock that cannot be taken refuses the save before
+  // anything is sent, since a read it does not guard may mix two contents.
+  let sources: SaveSources;
+  try {
+    sources = await inLinkTurn(() =>
+      withLinkLock(() => readSaveSources(context, { data, targetId, linkDir, linkTarget })),
+    );
+  } catch (err) {
+    if (!(err instanceof LinkLockError)) throw err;
+    return saveError("The method was not saved: the workshop's write lock could not be taken.", [
       {
-        class: "input_domain",
-        location: "files",
-        message: "files must not be empty.",
-        hint: "Submit the bundle's .mthds files with the root file — the one carrying the bundle's `domain` — first.",
-        retryable: false,
+        class: "runtime",
+        location: "link_dir",
+        message: `${err.message}, so this save read nothing and sent nothing.`,
+        hint: err.busy
+          ? "Save again in a moment: another workshop process on this machine is saving or pulling."
+          : "Fix what the message names, then save again: no save reads its files without that lock.",
+        retryable: err.busy,
       },
     ]);
   }
-
-  const python =
-    parsed.data.python === undefined
-      ? undefined
-      : await resolveSubmittedFiles(parsed.data.python, context.pythonResolver);
-  if (python !== undefined && python.errors.length > 0) {
-    return saveError(
-      "The method was not saved: request input is invalid.",
-      python.errors.map((error) => ({
-        ...error,
-        // resolveSubmittedFiles locates at `files[i]`; this set is `python`.
-        ...(error.location === undefined
-          ? {}
-          : { location: error.location.replace(/^files\[/, "python[") }),
-      })),
-    );
+  if (!sources.ok) {
+    return sources.result;
   }
+  const { claim, claimRead, token, namingLink, bundle, python } = sources;
 
   const named = nameFiles(bundle.files, bundleDir, "method", ".mthds", "files");
   if (!named.ok) {
@@ -920,7 +868,7 @@ async function saveInTurn(
   if (targetId === undefined) {
     const writeInput: MethodWriteInput = {
       // Present: the create arm was refused above without one.
-      name: parsed.data.name ?? "",
+      name: data.name ?? "",
       mthds,
       ...pythonField,
     };
@@ -956,7 +904,7 @@ async function saveInTurn(
         error.location === "expected_updated_at" && token !== undefined
           ? await draftConflictError(error, client, targetId, {
               token,
-              fromLink: parsed.data.expected_updated_at === undefined,
+              fromLink: data.expected_updated_at === undefined,
             })
           : error;
       return saveError(summaryForToolError(reported, SAVE_ERROR_SUMMARIES), [reported]);
@@ -982,7 +930,7 @@ async function saveInTurn(
     // it would quietly undo that rename. The stored name is kept, and the link
     // written below records it, so saving again with the old name is then a
     // rename the caller means.
-    const name = parsed.data.name;
+    const name = data.name;
     if (name !== undefined && name !== stored.name && name === namingLink?.name) {
       staleName = name;
     } else if (name !== undefined && name !== stored.name) {
@@ -1001,12 +949,18 @@ async function saveInTurn(
   }
 
   const apiHost = apiHostOf(context.baseUrl);
-  const linkFile = await writeLinkForSave(context, parsed.data.link_dir, linkDir, {
-    apiHost,
-    methodId: stored.method_id,
-    name: stored.name,
-    syncedUpdatedAt: stored.updated_at,
-  });
+  // Written only while the link still holds what this save read before its
+  // files: anything else describes what another save or a pull put in the
+  // directory since, which this save's token says nothing about.
+  const written = await inLinkTurn(() =>
+    writeLinkForSave(context, linkTarget, claimRead, {
+      apiHost,
+      methodId: stored.method_id,
+      name: stored.name,
+      syncedUpdatedAt: stored.updated_at,
+    }),
+  );
+  const linkFile = written.report;
 
   const latestVersion = latestVersionOf(stored);
   const publishState = publishStateOf(stored);
@@ -1022,23 +976,265 @@ async function saveInTurn(
     ...(latestVersion === undefined ? {} : { latest_version: latestVersion }),
     ...(publishState === undefined ? {} : { publish_state: publishState }),
     api_host: apiHost,
-    ...(linkFile === undefined ? {} : { link_file: linkFile }),
+    link_file: linkFile,
     ...(renameError === undefined ? {} : { rename_error: renameError }),
     ...(validation.validation_errors === undefined
       ? {}
       : { validation_errors: validation.validation_errors }),
   };
 
+  const answer = await support;
   return {
     structuredContent,
     summary: saveSummary(structuredContent, {
+      support: answer,
+      linkChanged: written.changed,
       linkedAnyway: claim?.kind === "link",
       claimUnreadable: claim?.kind === "unreadable",
       previousName,
       staleName,
       draftMovedTo,
-      callers: bareIdCallersSentence(stored, await support),
+      callers: bareIdCallersSentence(stored, answer),
     }),
+  };
+}
+
+/** What a save read from disk, in one turn, before it sent anything. */
+type SaveSources =
+  | { ok: false; result: SaveMethodResult }
+  | {
+      ok: true;
+      claim: DirectoryClaim | undefined;
+      /** The link where this save writes its own, as read: what that write compares against. */
+      claimRead: LinkRead;
+      token?: string;
+      /** The link that names the method this update writes, for the rename. */
+      namingLink?: MethodLink;
+      bundle: ResolvedFiles;
+      python?: ResolvedFiles;
+    };
+
+/**
+ * A save's local read, made in one turn ({@link inLinkTurn}) holding the
+ * workshop's write lock ({@link withLinkLock}), with no call to the platform
+ * in it: the link this save will write, the link beside the files when that is
+ * another one, every refusal those links make, then the files.
+ *
+ * The lock keeps every workshop pull out of the read, in this process and in
+ * every other: a pull landing while the save read would leave it a mix of two
+ * contents, which a caller passing `expected_updated_at` sends past the
+ * `partial_pull` refusal, and a pull into a directory nested in the bundle's
+ * changes the bundle's files without touching its link.
+ *
+ * The links are read BEFORE the bytes they vouch for, because the token
+ * certifies the state those bytes were read against. Read after them, a save
+ * from the same directory landing in between could move the draft and refresh
+ * the link, and this save would send that newer token with older bytes and
+ * replace the newer draft without a conflict.
+ *
+ * They are read again AFTER the files, and the save is refused when either
+ * moved: something wrote a link while the files were read, so the bytes in
+ * hand may be its, or a mix, and no link vouches for them. The lock keeps
+ * every workshop pull out, so this answers a writer that takes no lock: an
+ * editor, a git checkout, a workshop too old to share this one's lock.
+ *
+ * Every refusal is made here, before the remote validation and the catalog
+ * write, because both arms are irreversible in the same way: a create that
+ * ran first left a duplicate, and a draft write that ran first left a
+ * different method's draft replaced — delete is admin-only, and a replaced
+ * draft is gone. A save the links refuse spends no validation and no
+ * handshake.
+ */
+async function readSaveSources(
+  context: CatalogWriteContext,
+  request: {
+    data: z.infer<typeof mthdsSaveMethodInputObjectSchema>;
+    targetId: string | undefined;
+    linkDir: string | undefined;
+    linkTarget: string | undefined;
+  },
+): Promise<SaveSources> {
+  const { data, targetId, linkDir, linkTarget } = request;
+  const refuse = (summary: string, errors: ToolError[]): SaveSources => ({
+    ok: false,
+    result: saveError(summary, errors),
+  });
+
+  const at = await linkAt(context, linkTarget);
+  const claim = claimOf(at);
+  const claimRead = at?.read ?? NO_LINK;
+
+  let token: string | undefined;
+  let namingLink: MethodLink | undefined;
+  if (targetId === undefined) {
+    // Preventing a duplicate is the link file's whole purpose, and it was
+    // consulted too late to serve it: the create ran first, and only afterwards
+    // did the link write refuse to re-point — reporting `link_file.written:
+    // false` about a SECOND method that already existed.
+    if (claim !== undefined) {
+      return refuse("The method was not saved: that directory is already claimed.", [
+        claim.kind === "link"
+          ? {
+              class: "input_domain",
+              location: "method_id",
+              message: `\`${claim.dir}\` is linked to \`${claim.link.method_id}\` (${claim.link.name} on ${claim.link.api_host}), and this call names no method_id, so it would have created a SECOND method for the same directory.`,
+              hint: `Pass method_id: "${claim.link.method_id}" to save the draft of the method this directory is linked to, or point link_dir at a directory of its own to create a genuinely new method.`,
+              retryable: false,
+            }
+          : {
+              class: "input_domain",
+              location: "link_dir",
+              message: `\`${claim.dir}\` holds a \`${LINK_FILE_NAME}\` that cannot be read (${claim.reason}), so something already claims this directory. Creating a method from here would leave a SECOND method that this tool cannot delete.`,
+              hint: `Repair or remove \`${LINK_FILE_NAME}\` in that directory — if it names the method you meant, pass its method_id — or point link_dir at a directory of its own to create a genuinely new method.`,
+              retryable: false,
+            },
+      ]);
+    }
+  } else {
+    // A method_id read from the wrong place, or a stale one pasted by a user,
+    // would write THIS directory's bundle into that method's draft, and only
+    // afterwards would the link write report the mismatch — leaving the wrong
+    // draft replaced and the directory still linked to the right method. The
+    // ids are compared bare, since the link records the bare id and `@draft`
+    // names the same method.
+    if (claim?.kind === "link" && readMethodSelector(claim.link.method_id).methodId !== targetId) {
+      return refuse("The method was not saved: that directory is linked to another method.", [
+        {
+          class: "input_domain",
+          location: "method_id",
+          message: `\`${claim.dir}\` is linked to \`${claim.link.method_id}\` (${claim.link.name} on ${claim.link.api_host}), but this call names method_id \`${data.method_id}\`. Saving would have replaced a different method's draft with this directory's bundle, and a replaced draft cannot be given back.`,
+          hint: `Pass method_id: "${claim.link.method_id}" to save the draft of the method this directory is linked to. If you really mean to save this bundle as \`${targetId}\`, point link_dir at a directory of its own so the two stop sharing one link file.`,
+          retryable: false,
+        },
+      ]);
+    }
+    const linked = draftTokenOf(claim, data.expected_updated_at, targetId);
+    if (!linked.ok) {
+      return refuse(linked.summary, [linked.error]);
+    }
+    token = linked.token;
+    if (claim?.kind === "link") {
+      namingLink = claim.link;
+    }
+  }
+
+  // The link says what the directory it sits in holds, so it goes only where
+  // the files being saved are: the files' own directory, or a directory
+  // holding no bundle at all — the fork link_dir exists for. Written beside
+  // another bundle, it would vouch for THAT bundle as this save's draft, and a
+  // save from there would replace the draft with it without a conflict.
+  const elsewhere = await otherBundleAt(context, linkTarget, linkDir);
+  if (elsewhere !== undefined) {
+    return refuse("The method was not saved: link_dir holds a bundle of its own.", [elsewhere]);
+  }
+
+  // An explicit link_dir moves where the link is WRITTEN, not where the files
+  // were read from. When the files' own directory is linked to this same
+  // method, its link describes the bytes being sent, so its guards hold too:
+  // read only at link_dir, a directory holding a pulled version, or an
+  // unfinished pull, saved with link_dir pointed at an empty directory went
+  // out with no token at all, replacing the draft without the restore guard.
+  // A source link naming ANOTHER method is left alone, since link_dir is the
+  // documented fork for exactly that directory, and so is one that cannot be
+  // read, which refuses only a save that writes its link there.
+  const sourceAt =
+    targetId !== undefined &&
+    linkDir !== undefined &&
+    !(await sameDirectory(context, linkTarget, linkDir))
+      ? await linkAt(context, linkDir)
+      : undefined;
+  const source = claimOf(sourceAt);
+  if (
+    targetId !== undefined &&
+    source?.kind === "link" &&
+    readMethodSelector(source.link.method_id).methodId === targetId
+  ) {
+    const fromSource = draftTokenOf(source, data.expected_updated_at, targetId);
+    if (!fromSource.ok) {
+      return refuse(fromSource.summary, [fromSource.error]);
+    }
+    if (token === undefined) {
+      // link_dir offers no token, and the source link describes these bytes.
+      token = fromSource.token;
+    } else if (fromSource.token !== undefined && fromSource.token !== token) {
+      return refuse(
+        "The method was not saved: the files' directory and link_dir record different syncs.",
+        [
+          {
+            class: "input_domain",
+            location: "link_dir",
+            message: `\`${source.dir}\`, where the files are, records a sync of \`${targetId}\` at ${fromSource.token}, while link_dir \`${claim?.dir ?? data.link_dir}\` records one at ${token}: the two directories record different syncs of the draft, so this save cannot tell which one its files were read against. Nothing was written.`,
+            hint: `Pull the method into the directory the files are in, so its link records the draft as it stands, then save again. To save these files as they stand, pass expected_updated_at with the draft's current updated_at (${WORKSHOP_TOOL_NAMES.getMethod} reports it) once the user has said to.`,
+            retryable: false,
+          },
+        ],
+      );
+    }
+    namingLink ??= source.link;
+  }
+
+  // Resolve ONCE. The bytes that are validated are the bytes that are saved:
+  // splitting the two — validate in the skill, save in a second call — would
+  // read the files twice and the verdict would not be provably about the saved
+  // bytes.
+  const bundle = await resolveSubmittedFiles(data.files, context.resolver);
+  if (bundle.errors.length > 0) {
+    return refuse("The method was not saved: request input is invalid.", bundle.errors);
+  }
+  if (bundle.files.length === 0) {
+    return refuse("The method was not saved: request input is invalid.", [
+      {
+        class: "input_domain",
+        location: "files",
+        message: "files must not be empty.",
+        hint: "Submit the bundle's .mthds files with the root file — the one carrying the bundle's `domain` — first.",
+        retryable: false,
+      },
+    ]);
+  }
+
+  const python =
+    data.python === undefined
+      ? undefined
+      : await resolveSubmittedFiles(data.python, context.pythonResolver);
+  if (python !== undefined && python.errors.length > 0) {
+    return refuse(
+      "The method was not saved: request input is invalid.",
+      python.errors.map((error) => ({
+        ...error,
+        // resolveSubmittedFiles locates at `files[i]`; this set is `python`.
+        ...(error.location === undefined
+          ? {}
+          : { location: error.location.replace(/^files\[/, "python[") }),
+      })),
+    );
+  }
+
+  // The second read of the links, now that the bytes are in hand.
+  for (const before of [at, sourceAt]) {
+    if (before === undefined) continue;
+    const after = await readMethodLink(before.absolute);
+    if (!sameLinkRead(before.read, after)) {
+      return refuse("The method was not saved: the directory changed while this save read it.", [
+        {
+          class: "runtime",
+          location: before === at ? "link_dir" : "files",
+          message: `\`${path.join(before.dir, LINK_FILE_NAME)}\` changed while this save read the files — something that does not take the workshop's write lock, an editor, a git checkout or an older workshop, wrote into \`${before.dir}\` meanwhile — so the bytes read may not be the ones its link vouches for. Nothing was written.`,
+          hint: "Look at what the directory holds now, then save again.",
+          retryable: true,
+        },
+      ]);
+    }
+  }
+
+  return {
+    ok: true,
+    claim,
+    claimRead,
+    ...(token === undefined ? {} : { token }),
+    ...(namingLink === undefined ? {} : { namingLink }),
+    bundle,
+    ...(python === undefined ? {} : { python }),
   };
 }
 
@@ -1172,75 +1368,83 @@ function notRetryableCreate(err: unknown, error: ToolError): ToolError {
   };
 }
 
+/**
+ * The save's link write, made only over the link this save read before its
+ * files ({@link replaceMethodLink}). That one compare carries every rule the
+ * write used to re-check on its own: the save's guards already refused a link
+ * naming another method (a takeover would send a teammate's next save to this
+ * method) and refused to create beside any link, a link that cannot be read is
+ * never written over (truncating it destroyed whatever it held), and a link
+ * that changed since the read — a version pulled over the files, another
+ * save's token — is left as that call wrote it. Called inside the turn.
+ */
 async function writeLinkForSave(
   context: CatalogWriteContext,
-  linkDir: string | undefined,
-  bundleDir: string | undefined,
+  requested: string | undefined,
+  expected: LinkRead,
   fields: { apiHost: string; methodId: string; name: string; syncedUpdatedAt: string },
-): Promise<LinkFileReport | undefined> {
-  const requested = linkDir ?? bundleDir;
+): Promise<{ report: LinkFileReport; changed: boolean }> {
   if (requested === undefined) {
     // An inline-only submission has no directory to put the link in. Say so:
     // without a link the next save creates a second method unless the caller
     // passes the id.
     return {
-      path: LINK_FILE_NAME,
-      written: false,
-      reason:
-        "the submission was inline only and no link_dir was given, so there is no directory to link",
+      report: {
+        path: LINK_FILE_NAME,
+        written: false,
+        reason:
+          "the submission was inline only and no link_dir was given, so there is no directory to link",
+      },
+      changed: false,
     };
   }
   if (context.saveRoot === undefined) {
     return {
-      path: LINK_FILE_NAME,
-      written: false,
-      reason: "this deployment has no working directory to write into",
+      report: {
+        path: LINK_FILE_NAME,
+        written: false,
+        reason: "this deployment has no working directory to write into",
+      },
+      changed: false,
     };
   }
 
   const target = await resolveSaveDir(context.saveRoot, requested, "link_dir");
   if (!target.ok) {
-    return { path: LINK_FILE_NAME, written: false, reason: target.error.message };
-  }
-
-  // The pull path refuses a directory linked to a different method; the save
-  // path used to write straight over it. The link file is COMMITTED, so the
-  // takeover was durable and silent: the teammate's next save from that
-  // directory would write this new method's draft instead of theirs.
-  const existing = await readMethodLink(target.dir);
-  if (
-    existing.kind === "link" &&
-    readMethodSelector(existing.link.method_id).methodId !== fields.methodId
-  ) {
     return {
-      path: path.relative(target.root, path.join(target.dir, LINK_FILE_NAME)),
-      written: false,
-      reason: `it is already linked to a different method (\`${existing.link.method_id}\` — ${existing.link.name} on ${existing.link.api_host}), and re-pointing it would send a teammate's next save to this method instead of theirs`,
-    };
-  }
-  // A link nobody can parse is not an empty slot. The pull path already refuses
-  // this exact state — something claims the directory and following it would be
-  // guesswork — while the save path fell through and TRUNCATED the file, after
-  // the catalog write, destroying whatever it held: a hand-edited link, another
-  // tool's file of the same name, a teammate's association. `foreignEntryReason`
-  // stops a symlink or a directory; an ordinary file with the wrong contents
-  // reached `writeFile` unopposed.
-  if (existing.kind === "unreadable") {
-    return {
-      path: path.relative(target.root, path.join(target.dir, LINK_FILE_NAME)),
-      written: false,
-      reason: `it is there but cannot be read (${existing.reason}), and overwriting it would destroy whatever it holds`,
+      report: { path: LINK_FILE_NAME, written: false, reason: target.error.message },
+      changed: false,
     };
   }
 
   // A save makes the directory the draft, so the link records no published
-  // version, whatever an earlier pull of one left there.
-  return writeMethodLink(target.root, target.dir, buildMethodLink(fields));
+  // version, whatever an earlier pull of one left there. The lock makes the
+  // compare and the write one step for other workshop processes too; one that
+  // cannot be taken leaves the link unwritten rather than written unguarded,
+  // and never fails the save, whose draft is already stored.
+  try {
+    const replaced = await withLinkLock(() =>
+      replaceMethodLink(target.root, target.dir, expected, buildMethodLink(fields)),
+    );
+    return { report: replaced.report, changed: replaced.changed };
+  } catch (err) {
+    if (!(err instanceof LinkLockError)) throw err;
+    return {
+      report: {
+        path: path.relative(target.root, path.join(target.dir, LINK_FILE_NAME)),
+        written: false,
+        reason: `${err.message}, so it was not written`,
+      },
+      changed: false,
+    };
+  }
 }
 
 function saveSummary(
   result: SaveMethodSuccess,
   notes: {
+    support: MethodVersionsSupport;
+    linkChanged: boolean;
     linkedAnyway: boolean;
     claimUnreadable: boolean;
     previousName?: string;
@@ -1296,10 +1500,13 @@ function saveSummary(
   if (notes.callers !== undefined) {
     lines.push(notes.callers);
   }
+  // Where the platform does not resolve versions, a suffix is refused and the
+  // bare id is what reads the draft, as the callers' sentence above says.
+  const draftId = notes.support === "unsupported" ? id : `${id}@draft`;
   lines.push(
     notes.draftMovedTo === undefined
-      ? `To validate or run what you just saved, pass method_id \`${id}@draft\`. Publish it only when the user asks for a publish: ${WORKSHOP_TOOL_NAMES.publishMethod} with method_id \`${id}\` and expected_draft_updated_at ${result.updated_at}.`
-      : `\`${id}@draft\` now names that other save, not these files, and a publish needs the draft's current updated_at, which the user should see the draft for first.`,
+      ? `To validate or run what you just saved, pass method_id \`${draftId}\`${notes.support === "unsupported" ? `, the bare id, which reads the draft here; \`${id}@draft\` would be refused until the platform resolves versions` : ""}. Publish it only when the user asks for a publish: ${WORKSHOP_TOOL_NAMES.publishMethod} with method_id \`${id}\` and expected_draft_updated_at ${result.updated_at}.`
+      : `\`${draftId}\` now names that other save, not these files, and a publish needs the draft's current updated_at, which the user should see the draft for first.`,
   );
 
   if (result.link_file === undefined) {
@@ -1314,11 +1521,13 @@ function saveSummary(
   lines.push(
     result.link_file.written
       ? `Linked by \`${result.link_file.path}\` — commit it, so a teammate saves this same method instead of creating a second one.`
-      : notes.linkedAnyway
-        ? `The directory IS linked to this method, but \`${result.link_file.path}\` could not be refreshed (${result.link_file.reason}), so it still records an out-of-date synced_updated_at, and the next save from here will be refused as stale. Fix that and pull this method into the directory, which refreshes the link alone while the files match.`
-        : notes.claimUnreadable
-          ? `\`${result.link_file.path}\` cannot be read (${result.link_file.reason}), so it was not refreshed, and a save from here is refused until it is: repair or remove it, then pull this method into the directory to relink it.`
-          : `The directory is NOT linked (${result.link_file.reason}), so the next save would create a SECOND method unless it passes method_id \`${id}\`.`,
+      : notes.linkChanged
+        ? `\`${result.link_file.path}\` was not refreshed: ${result.link_file.reason}. It no longer holds what this save read, so it does not describe the files this save sent: look at what the directory holds before saving from it again — a save from it is held to that link.`
+        : notes.linkedAnyway
+          ? `The directory IS linked to this method, but \`${result.link_file.path}\` could not be refreshed (${result.link_file.reason}), so it still records an out-of-date synced_updated_at, and the next save from here will be refused as stale. Fix that and pull this method into the directory, which refreshes the link alone while the files match.`
+          : notes.claimUnreadable
+            ? `\`${result.link_file.path}\` cannot be read (${result.link_file.reason}), so it was not refreshed, and a save from here is refused until it is: repair or remove it, then pull this method into the directory to relink it.`
+            : `The directory is NOT linked (${result.link_file.reason}), so the next save would create a SECOND method unless it passes method_id \`${id}\`.`,
   );
   return lines.join("\n");
 }
@@ -1375,6 +1584,18 @@ export async function getMthdsMethod(
   const methodId = selector.methodId;
   const wanted: number | "draft" = selector.form === "version" ? selector.version : "draft";
 
+  // The output directory's link is read BEFORE the method, so the link the
+  // pull plans against never records a sync newer than the content it read.
+  // Read after it, a save landing in between — the draft written, the link
+  // refreshed — handed the pull a link ahead of its method: it called the
+  // draft moved when the directory was ahead, and under `overwrite` wrote the
+  // older content back. Read first, that save rewrote the link since, and the
+  // landing's compare-and-swap refuses the pull.
+  const linkBefore =
+    parsed.data.output_dir === undefined
+      ? undefined
+      : (await linkAt(context, parsed.data.output_dir))?.read;
+
   let client: CatalogWriteClient;
   let support: Promise<MethodVersionsSupport>;
   let stored: MethodData;
@@ -1421,10 +1642,7 @@ export async function getMthdsMethod(
   if (parsed.data.output_dir === undefined) {
     return inlineResult(stored, content, apiHost, await support);
   }
-  const answer = await support;
-  return inCatalogTurn(() =>
-    writtenResult(context, client, parsed.data, stored, content, apiHost, answer),
-  );
+  return writtenResult(context, client, parsed.data, stored, content, apiHost, support, linkBefore);
 }
 
 /**
@@ -1605,7 +1823,11 @@ async function writtenResult(
   stored: MethodData,
   content: PulledContent,
   apiHost: string,
-  support: MethodVersionsSupport,
+  // Awaited only for the summary, once the files and the link have landed:
+  // nothing written depends on it.
+  support: Promise<MethodVersionsSupport>,
+  // The directory's link as read before the method was; see getMthdsMethod.
+  linkBefore: LinkRead | undefined,
 ): Promise<GetMethodResult> {
   if (context.saveRoot === undefined) {
     return getError("The method was not written: this deployment cannot write files.", [
@@ -1674,8 +1896,9 @@ async function writtenResult(
   // Compared exactly rather than by digest, since a digest match says the
   // platform found the two equal, not that these files are the draft's.
   const versionIsDraft = draftContent !== undefined && sameFiles(content, draftContent);
-  const link = await readMethodLink(dir);
-  const plan = await planPull(dir, stored, destinations, input.overwrite === true, link, {
+  const link = linkBefore ?? (await readMethodLink(dir));
+  const observed = await observeDestinations(destinations);
+  const plan = await planPull(dir, stored, destinations, observed, input.overwrite === true, link, {
     target: content.version,
     // A version pull may land over the draft's own files, which are stored,
     // so writing over them loses nothing. For a draft pull the target IS the
@@ -1689,121 +1912,54 @@ async function writtenResult(
     ]);
   }
 
-  // `containedPath` is lexical — it joins and compares strings. A destination
-  // that is a symlink passes it and then sends `writeFile` to the link's
-  // target, which is how a pull wrote outside the workspace entirely. Inspect
-  // every destination on REAL entries before anything is created or written,
-  // exactly as `codegen-writer.ts` does.
-  for (const destination of destinations) {
-    const foreign = await foreignEntryReason(destination.absolute);
-    if (foreign !== undefined) {
-      return getError("The method was not written: output_dir holds an entry it may not write.", [
-        {
-          class: "input_domain",
-          location: "output_dir",
-          message: `\`${destination.name}\` cannot be written: ${foreign}. No files were written.`,
-          hint: "A method's files are written as ordinary files. Remove or move that entry aside, or point output_dir at a directory of its own.",
-          retryable: false,
-        },
-      ]);
-    }
-  }
-
-  // A pull whose destinations already match writes NOTHING and refreshes the
-  // link alone. Rewriting identical bytes changed every mtime, woke every
-  // watcher, and — where one source file was read-only — turned a pure link
-  // refresh into a mid-write failure that marked the directory as an
-  // interrupted pull having written nothing at all, which the next pull then
-  // read as licence to overwrite.
-  let provisional: LinkFileReport | undefined;
-  if (plan.kind === "write") {
-    // The link goes down BEFORE the files, marked `partial_pull`, so that a
-    // failure between two files leaves the directory owned by this method
-    // instead of looking like somebody else's bundle — which is what made the
-    // retry this failure advertises impossible to perform. It keeps the sync
-    // the directory had, since the files are not yet what this pull brings, and
-    // is rewritten without the marker once every file has landed.
-    provisional = await writeMethodLink(
-      root,
-      dir,
-      buildMethodLink({
-        apiHost,
-        methodId: stored.method_id,
-        name: stored.name,
-        syncedUpdatedAt: link.kind === "link" ? link.link.synced_updated_at : "",
-        ...(link.kind === "link" && link.link.synced_version !== undefined
-          ? { syncedVersion: link.link.synced_version }
-          : {}),
-        partialPull: true,
-      }),
+  // The landing is one local turn — the provisional link, the files, the final
+  // link — and every link write in it is a compare-and-swap: the first against
+  // the link this pull planned on, the last against the provisional one it
+  // wrote. A save or a pull that wrote the link after this pull read it moved
+  // the directory under the plan, and so did an edit to a destination since
+  // the plan read it, so the pull is refused before it writes a file, rather
+  // than land on a state it never looked at. The whole landing holds the
+  // workshop's write lock, so another workshop process neither writes between
+  // a compare and its write, nor resumes this pull while it is still writing,
+  // nor lands into a directory nested in this one at the same time, nor reads
+  // the directory for a save while this pull is half landed.
+  let landed: PullLanding;
+  try {
+    landed = await inLinkTurn(() =>
+      withLinkLock(() =>
+        landPull({
+          root,
+          dir,
+          link,
+          plan,
+          destinations,
+          observed,
+          stored,
+          content,
+          versionIsDraft,
+          apiHost,
+        }),
+      ),
     );
-    // A version's files land only under a link that says so. Without the
-    // marker, the link left in place records the draft's current token and no
-    // version, so it would vouch for these files as the draft, and an ordinary
-    // save from here would replace the draft with the version, with no
-    // explicit token: the restore guard the save keeps would never see them.
-    // A draft pull over a link that records a version is refused the same way:
-    // left in place, that link would say the directory holds the version while
-    // it held the draft, and a later save would be refused on that false
-    // premise, with a restore hint that sends the draft back with the wrong
-    // Python. Any other draft pull needs no refusal — a link still describing
-    // an older sync is refused as stale, or the files are the draft's own.
-    const markedVersion = link.kind === "link" ? link.link.synced_version : undefined;
-    if (!provisional.written && (content.version !== "draft" || markedVersion !== undefined)) {
-      const consequence =
-        content.version === "draft"
-          ? `so its record of version ${markedVersion} could not be cleared, and the draft's files would have sat under a link saying they are that version`
-          : `so the directory could not be marked as holding version ${content.version}, and its files would have read as the draft's to a later save`;
-      return getError("The method was not written: its link file could not be updated.", [
-        {
-          class: "runtime",
-          location: "output_dir",
-          message: `\`${provisional.path}\` could not be written (${provisional.reason ?? "unknown reason"}), ${consequence}. Nothing was written.`,
-          hint: "Check the link file's and the directory's permissions, then pull again — or pull the version into a directory of its own.",
-          retryable: false,
-        },
-      ]);
-    }
-
-    const written: string[] = [];
-    for (const destination of destinations) {
-      const parent = path.dirname(destination.absolute);
-      if (parent !== dir) {
-        const escaped = await createSubdirectory(dir, parent);
-        if (escaped !== undefined) {
-          return getError("The method was only partly written.", [
-            midWriteError(destination.name, escaped, written, provisional.written),
-          ]);
-        }
-      }
-      try {
-        await fs.writeFile(destination.absolute, destination.file.content, "utf8");
-      } catch (err) {
-        return getError("The method was only partly written.", [
-          midWriteError(destination.name, errorMessage(err), written, provisional.written),
-        ]);
-      }
-      written.push(destination.name);
-    }
+  } catch (err) {
+    if (!(err instanceof LinkLockError)) throw err;
+    return getError("The method was not written: the workshop's write lock could not be taken.", [
+      {
+        class: "runtime",
+        location: "output_dir",
+        message: `${err.message}, so nothing was written.`,
+        hint: err.busy
+          ? "Pull again in a moment: another workshop process on this machine is saving or pulling."
+          : "Fix what the message names, then pull again: no pull writes without that lock.",
+        retryable: err.busy,
+      },
+    ]);
   }
-
-  // The link records the draft's token whichever content was pulled: it is
-  // what a save from here sends, and a save from a directory holding a version
-  // replaces the draft with it, which is how a version is restored. It records
-  // the version too, so a later pull reads a file still holding that version's
-  // bytes as stored rather than as unsaved work — unless the version is the
-  // draft, file for file, when the directory holds the draft.
-  const linkFile = await writeMethodLink(
-    root,
-    dir,
-    buildMethodLink({
-      apiHost,
-      methodId: stored.method_id,
-      name: stored.name,
-      syncedUpdatedAt: stored.updated_at,
-      ...(content.version === "draft" || versionIsDraft ? {} : { syncedVersion: content.version }),
-    }),
-  );
+  if (!landed.ok) {
+    return landed.result;
+  }
+  const { provisional, final } = landed;
+  const linkFile = final.report;
 
   // What is here that this method does not have. The pull writes the files the
   // catalog holds NOW, so a file a teammate removed from the stored method is
@@ -1844,7 +2000,7 @@ async function writtenResult(
     `${contentTitle(stored, content)} written to \`${relativeDir}\` (${contentCoordinates(stored, content, apiHost)}).`,
   ];
   if (content.version === "draft") {
-    const callers = bareIdCallersSentence(stored, support);
+    const callers = bareIdCallersSentence(stored, await support);
     if (callers !== undefined) lines.push(callers);
   } else if (versionIsDraft) {
     lines.push(
@@ -1867,13 +2023,16 @@ async function writtenResult(
   // provisionally still carries the interrupted-pull marker, and one written by
   // an earlier pull still carries that pull's synced_updated_at — neither is
   // the refresh this pull owed, and both leave the directory linked.
-  const linkedAnyway = provisional?.written === true || link.kind === "link";
+  const marked = provisional?.report.written === true;
+  const linkedAnyway = marked || link.kind === "link";
   lines.push(
     linkFile.written
       ? `Linked by \`${linkFile.path}\` — commit it, so a save from this directory writes this method's draft instead of creating a second method.`
-      : linkedAnyway
-        ? `The files are written and the directory IS linked to this method, but \`${linkFile.path}\` could not be refreshed (${linkFile.reason}), so it still records an out-of-date synced_updated_at${provisional?.written === true ? " and this pull's interrupted-pull marker" : ""}. Fix that and pull again${provisional?.written === true ? ": until then a save from here is refused, since the link marks this pull as unfinished." : " before saving from here: the link still describes the directory's previous sync, not these files."}`
-        : `The directory is NOT linked (${linkFile.reason}), so a save from it would create a SECOND method unless it passes method_id \`${stored.method_id}\`.`,
+      : final.changed
+        ? `The files are written, but \`${linkFile.path}\` was not refreshed: ${linkFile.reason}. It may not describe these files, so pull again before saving from here.`
+        : linkedAnyway
+          ? `The files are written and the directory IS linked to this method, but \`${linkFile.path}\` could not be refreshed (${linkFile.reason}), so it still records an out-of-date synced_updated_at${marked ? " and this pull's interrupted-pull marker" : ""}. Fix that and pull again${marked ? ": until then a save from here is refused, since the link marks this pull as unfinished." : " before saving from here: the link still describes the directory's previous sync, not these files."}`
+          : `The directory is NOT linked (${linkFile.reason}), so a save from it would create a SECOND method unless it passes method_id \`${stored.method_id}\`.`,
   );
 
   if (unmanaged.length > 0) {
@@ -1887,6 +2046,224 @@ async function writtenResult(
   }
 
   return { structuredContent, summary: lines.join("\n") };
+}
+
+/** What a pull's landing did, or the refusal it made before writing a file. */
+type PullLanding =
+  | { ok: false; result: GetMethodResult }
+  | { ok: true; provisional?: LinkReplacement; final: LinkReplacement };
+
+/**
+ * Land a planned pull: the provisional link, the files, the final link. Called
+ * inside the turn ({@link inLinkTurn}), so within this process nothing reads
+ * or writes the directory's link or files between those steps; every step is
+ * local, so the turn is short.
+ *
+ * Both link writes are compare-and-swaps ({@link replaceMethodLink}). The
+ * first expects the link this pull planned on: one that moved since was
+ * written by a save or a pull that changed what the directory holds, so the
+ * plan is about a state that is gone, and the pull is refused before a file
+ * is written. The last expects the provisional link this pull wrote.
+ */
+async function landPull(landing: {
+  root: string;
+  dir: string;
+  link: LinkRead;
+  plan: Exclude<PullPlan, { kind: "refuse" }>;
+  destinations: readonly { file: MethodFile; name: string; absolute: string }[];
+  observed: readonly ObservedFile[];
+  stored: MethodData;
+  content: PulledContent;
+  versionIsDraft: boolean;
+  apiHost: string;
+}): Promise<PullLanding> {
+  const {
+    root,
+    dir,
+    link,
+    plan,
+    destinations,
+    observed,
+    stored,
+    content,
+    versionIsDraft,
+    apiHost,
+  } = landing;
+  const linkFields = { apiHost, methodId: stored.method_id, name: stored.name };
+  const moved = (report: LinkFileReport): PullLanding => ({
+    ok: false,
+    result: getError("The method was not written: its directory changed while this pull ran.", [
+      {
+        class: "runtime",
+        location: "output_dir",
+        message: `\`${report.path}\` changed after this pull read it — ${report.reason ?? "another save or pull rewrote it"} — so what this pull planned to write is about a directory that is gone. Nothing was written.`,
+        hint: "Pull again: the next pull plans against the directory as it stands now.",
+        retryable: true,
+      },
+    ]),
+  });
+
+  // `containedPath` is lexical — it joins and compares strings. A destination
+  // that is a symlink passes it and then sends `writeFile` to the link's
+  // target, which is how a pull wrote outside the workspace entirely. Inspect
+  // every destination on REAL entries before anything is created or written,
+  // exactly as `codegen-writer.ts` does, and inside the turn, so the entry
+  // inspected is the one written. A link-only refresh is refused too: it would
+  // vouch for a file that is not an ordinary file of this directory.
+  for (const destination of destinations) {
+    const foreign = await foreignEntryReason(destination.absolute);
+    if (foreign !== undefined) {
+      return {
+        ok: false,
+        result: getError(
+          "The method was not written: output_dir holds an entry it may not write.",
+          [
+            {
+              class: "input_domain",
+              location: "output_dir",
+              message: `\`${destination.name}\` cannot be written: ${foreign}. No files were written.`,
+              hint: "A method's files are written as ordinary files. Remove or move that entry aside, or point output_dir at a directory of its own.",
+              retryable: false,
+            },
+          ],
+        ),
+      };
+    }
+  }
+
+  // A pull whose destinations already match writes NOTHING and refreshes the
+  // link alone. Rewriting identical bytes changed every mtime, woke every
+  // watcher, and — where one source file was read-only — turned a pure link
+  // refresh into a mid-write failure that marked the directory as an
+  // interrupted pull having written nothing at all, which the next pull then
+  // read as licence to overwrite.
+  let provisional: LinkReplacement | undefined;
+  let landedOn = link;
+  if (plan.kind === "write") {
+    const edited = await changedDestinations(destinations, observed);
+    if (edited.length > 0) {
+      return {
+        ok: false,
+        result: getError("The method was not written: its files changed while this pull ran.", [
+          {
+            class: "runtime",
+            location: "output_dir",
+            message: `${edited.map((name) => `\`${name}\``).join(", ")} changed after this pull read ${edited.length === 1 ? "it" : "them"}, so the plan to write over ${edited.length === 1 ? "it" : "them"} is about bytes that are gone. Nothing was written.`,
+            hint: "Pull again once the edit is done: the next pull compares the files as they stand.",
+            retryable: true,
+          },
+        ]),
+      };
+    }
+
+    // The link goes down BEFORE the files, marked `partial_pull`, so that a
+    // failure between two files leaves the directory owned by this method
+    // instead of looking like somebody else's bundle — which is what made the
+    // retry this failure advertises impossible to perform. It keeps the sync
+    // the directory had, since the files are not yet what this pull brings, and
+    // is rewritten without the marker once every file has landed. A save holds
+    // the same lock while it reads, so none reads this landing half done; one
+    // from a workshop too old to share the lock sees this link move when it
+    // reads its link again after its files.
+    provisional = await replaceMethodLink(
+      root,
+      dir,
+      link,
+      buildMethodLink({
+        ...linkFields,
+        syncedUpdatedAt: link.kind === "link" ? link.link.synced_updated_at : "",
+        ...(link.kind === "link" && link.link.synced_version !== undefined
+          ? { syncedVersion: link.link.synced_version }
+          : {}),
+        partialPull: true,
+      }),
+    );
+    if (provisional.changed) {
+      return moved(provisional.report);
+    }
+    // A version's files land only under a link that says so. Without the
+    // marker, the link left in place records the draft's current token and no
+    // version, so it would vouch for these files as the draft, and an ordinary
+    // save from here would replace the draft with the version, with no
+    // explicit token: the restore guard the save keeps would never see them.
+    // A draft pull over a link that records a version is refused the same way:
+    // left in place, that link would say the directory holds the version while
+    // it held the draft, and a later save would be refused on that false
+    // premise, with a restore hint that sends the draft back with the wrong
+    // Python. Any other draft pull needs no refusal — a link still describing
+    // an older sync is refused as stale, or the files are the draft's own.
+    const markedVersion = link.kind === "link" ? link.link.synced_version : undefined;
+    const report = provisional.report;
+    if (!report.written && (content.version !== "draft" || markedVersion !== undefined)) {
+      const consequence =
+        content.version === "draft"
+          ? `so its record of version ${markedVersion} could not be cleared, and the draft's files would have sat under a link saying they are that version`
+          : `so the directory could not be marked as holding version ${content.version}, and its files would have read as the draft's to a later save`;
+      return {
+        ok: false,
+        result: getError("The method was not written: its link file could not be updated.", [
+          {
+            class: "runtime",
+            location: "output_dir",
+            message: `\`${report.path}\` could not be written (${report.reason ?? "unknown reason"}), ${consequence}. Nothing was written.`,
+            hint: "Check the link file's and the directory's permissions, then pull again — or pull the version into a directory of its own.",
+            retryable: false,
+          },
+        ]),
+      };
+    }
+    landedOn = provisional.wrote ?? link;
+
+    const written: string[] = [];
+    for (const destination of destinations) {
+      const parent = path.dirname(destination.absolute);
+      if (parent !== dir) {
+        const escaped = await createSubdirectory(dir, parent);
+        if (escaped !== undefined) {
+          return {
+            ok: false,
+            result: getError("The method was only partly written.", [
+              midWriteError(destination.name, escaped, written, report.written),
+            ]),
+          };
+        }
+      }
+      try {
+        await fs.writeFile(destination.absolute, destination.file.content, "utf8");
+      } catch (err) {
+        return {
+          ok: false,
+          result: getError("The method was only partly written.", [
+            midWriteError(destination.name, errorMessage(err), written, report.written),
+          ]),
+        };
+      }
+      written.push(destination.name);
+    }
+  }
+
+  // The link records the draft's token whichever content was pulled: it is
+  // what a save from here sends, and a save from a directory holding a version
+  // replaces the draft with it, which is how a version is restored. It records
+  // the version too, so a later pull reads a file still holding that version's
+  // bytes as stored rather than as unsaved work — unless the version is the
+  // draft, file for file, when the directory holds the draft.
+  const final = await replaceMethodLink(
+    root,
+    dir,
+    landedOn,
+    buildMethodLink({
+      ...linkFields,
+      syncedUpdatedAt: stored.updated_at,
+      ...(content.version === "draft" || versionIsDraft ? {} : { syncedVersion: content.version }),
+    }),
+  );
+  // A refresh alone writes no file, so a link that moved under it leaves
+  // nothing half done: the pull is refused as one that never ran.
+  if (final.changed && plan.kind === "link-only") {
+    return moved(final.report);
+  }
+  return { ok: true, ...(provisional === undefined ? {} : { provisional }), final };
 }
 
 /**
@@ -2211,6 +2588,7 @@ async function planPull(
   dir: string,
   stored: MethodData,
   destinations: readonly { name: string; file: MethodFile; absolute: string }[],
+  observed: readonly ObservedFile[],
   overwrite: boolean,
   link: LinkRead,
   elsewhere: StoredElsewhere,
@@ -2258,7 +2636,7 @@ async function planPull(
     );
   }
 
-  const local = await compareDestinations(destinations);
+  const local = compareDestinations(destinations, observed);
   // Where `overwrite` already decides — an interrupted pull, or a draft that
   // moved since the sync — the files the catalog stores elsewhere change
   // nothing, so no version is read to find them.
@@ -2404,26 +2782,73 @@ interface LocalComparison {
   missing: string[];
 }
 
-async function compareDestinations(
-  destinations: readonly { name: string; file: MethodFile; absolute: string }[],
-): Promise<LocalComparison> {
-  const differing: LocalFile[] = [];
-  const missing: string[] = [];
+/** What one destination held when the pull looked: its bytes, nothing, or something unreadable. */
+type ObservedFile =
+  | { kind: "bytes"; content: string }
+  | { kind: "missing" }
+  | { kind: "unreadable" };
+
+/**
+ * What each destination holds, read once. The plan decides on these reads,
+ * and the landing writes only while every destination still holds what was
+ * read here ({@link changedDestinations}).
+ */
+async function observeDestinations(
+  destinations: readonly { absolute: string }[],
+): Promise<ObservedFile[]> {
+  const observed: ObservedFile[] = [];
   for (const destination of destinations) {
     try {
-      const content = await fs.readFile(destination.absolute, "utf8");
-      if (content !== destination.file.content) {
-        differing.push({ name: destination.name, content });
-      }
+      observed.push({ kind: "bytes", content: await fs.readFile(destination.absolute, "utf8") });
     } catch (err) {
-      if (isMissingPathError(err)) {
-        missing.push(destination.name);
-      } else {
-        differing.push({ name: destination.name });
-      }
+      observed.push(isMissingPathError(err) ? { kind: "missing" } : { kind: "unreadable" });
+    }
+  }
+  return observed;
+}
+
+function compareDestinations(
+  destinations: readonly { name: string; file: MethodFile }[],
+  observed: readonly ObservedFile[],
+): LocalComparison {
+  const differing: LocalFile[] = [];
+  const missing: string[] = [];
+  for (const [index, destination] of destinations.entries()) {
+    const seen = observed[index] ?? { kind: "unreadable" };
+    if (seen.kind === "missing") {
+      missing.push(destination.name);
+    } else if (seen.kind === "unreadable") {
+      differing.push({ name: destination.name });
+    } else if (seen.content !== destination.file.content) {
+      differing.push({ name: destination.name, content: seen.content });
     }
   }
   return { differing, missing };
+}
+
+/**
+ * The destinations that no longer hold what the plan read. The plan reads the
+ * files, may then wait on the platform for a version's files, and only then
+ * lands; an edit made meanwhile — an editor saving, another tool — moves no
+ * link, so the link's compare-and-swap cannot see it, and the plan's verdict
+ * that a file held stored bytes would overwrite the edit. Read again inside
+ * the landing turn, so the window left is that turn's.
+ */
+async function changedDestinations(
+  destinations: readonly { name: string; absolute: string }[],
+  observed: readonly ObservedFile[],
+): Promise<string[]> {
+  const now = await observeDestinations(destinations);
+  return destinations.flatMap((destination, index) => {
+    const before = observed[index];
+    const after = now[index];
+    const same =
+      before !== undefined &&
+      after !== undefined &&
+      before.kind === after.kind &&
+      (before.kind !== "bytes" || (after.kind === "bytes" && before.content === after.content));
+    return same ? [] : [destination.name];
+  });
 }
 
 function emptySourceError(): GetMethodResult {
@@ -2586,8 +3011,16 @@ type DirectoryClaim =
   | { kind: "link"; dir: string; link: MethodLink }
   | { kind: "unreadable"; dir: string; reason: string };
 
+/** A directory's link as read: where, and exactly what was there. */
+interface LinkAt {
+  /** Relative to the working directory, for messages. */
+  dir: string;
+  absolute: string;
+  read: LinkRead;
+}
+
 /**
- * What a directory already claims, read WITHOUT creating anything.
+ * A directory's link, read WITHOUT creating anything.
  *
  * `resolveSaveDir` is the write path's routine and it makes the directory it
  * contains; this question is asked before a create, where making a directory in
@@ -2595,20 +3028,11 @@ type DirectoryClaim =
  * path is contained lexically, what is there is read, and anything that cannot
  * be resolved answers `undefined` — the link write that follows asks again with
  * the real routine and reports its own refusal.
- *
- * `unreadable` is kept rather than folded into `undefined`, and that IS the
- * question the create arm asks. `readMethodLink` reports a malformed, truncated
- * or symlinked link file as `unreadable` precisely because something claims the
- * directory; flattening it to "no link" let the create run, mint a second
- * method, and only then have the link write refuse — the very ordering the
- * create arm's own comment says was fixed, and a duplicate this tool cannot
- * delete. Not knowing whether a directory is claimed is not the same as knowing
- * it is free.
  */
-async function linkedMethodAt(
+async function linkAt(
   context: CatalogWriteContext,
   requested: string | undefined,
-): Promise<DirectoryClaim | undefined> {
+): Promise<LinkAt | undefined> {
   if (requested === undefined || context.saveRoot === undefined) {
     return undefined;
   }
@@ -2616,36 +3040,94 @@ async function linkedMethodAt(
   if (absolute !== context.saveRoot && !isInsideRoot(context.saveRoot, absolute)) {
     return undefined;
   }
-  const read = await readMethodLink(absolute);
-  if (read.kind === "none") {
-    return undefined;
-  }
   const relative = path.relative(context.saveRoot, absolute);
-  const dir = relative === "" ? "." : relative;
-  return read.kind === "link"
-    ? { kind: "link", dir, link: read.link }
-    : { kind: "unreadable", dir, reason: read.reason };
+  return { dir: relative === "" ? "." : relative, absolute, read: await readMethodLink(absolute) };
 }
 
 /**
- * The link beside the submitted files, read only when an explicit `link_dir`
- * names another directory: without one, that link IS the claim. `undefined`
- * when there is no such link, or when it cannot be read — an unreadable file
- * there is not this save's to refuse on, since the link is written elsewhere.
+ * What a directory already claims: its link, or a link file nobody can read.
+ *
+ * `unreadable` is kept rather than folded into `undefined`, and that IS the
+ * question the create arm asks. `readMethodLink` reports a malformed, truncated
+ * or symlinked link file as `unreadable` precisely because something claims the
+ * directory; flattening it to "no link" let the create run, mint a second
+ * method, and only then have the link write refuse — a duplicate this tool
+ * cannot delete. Not knowing whether a directory is claimed is not the same as
+ * knowing it is free.
  */
-async function sourceLinkOf(
+function claimOf(at: LinkAt | undefined): DirectoryClaim | undefined {
+  if (at === undefined || at.read.kind === "none") {
+    return undefined;
+  }
+  return at.read.kind === "link"
+    ? { kind: "link", dir: at.dir, link: at.read.link }
+    : { kind: "unreadable", dir: at.dir, reason: at.read.reason };
+}
+
+/**
+ * Whether two directories under the working directory are one — compared on
+ * real paths when both exist, so `work`, `./work/` and a symlink to it agree,
+ * and lexically otherwise.
+ */
+async function sameDirectory(
   context: CatalogWriteContext,
-  requested: string | undefined,
+  a: string | undefined,
+  b: string | undefined,
+): Promise<boolean> {
+  if (a === undefined || b === undefined || context.saveRoot === undefined) {
+    return a === b;
+  }
+  const left = path.resolve(context.saveRoot, a);
+  const right = path.resolve(context.saveRoot, b);
+  if (left === right) {
+    return true;
+  }
+  const [realLeft, realRight] = await Promise.all([
+    realPathOrUndefined(left),
+    realPathOrUndefined(right),
+  ]);
+  return realLeft !== undefined && realLeft === realRight;
+}
+
+/**
+ * Why a save may not write its link at `linkTarget`: the directory holds a
+ * bundle of its own, and the files being saved are not it. `undefined` when
+ * the link goes beside the files, or into a directory holding no `.mthds`
+ * file at all, which is the fork `link_dir` exists for.
+ *
+ * The link says what its directory holds. Written beside another bundle — a
+ * pulled copy of the same method, a stranger's unlinked bundle — it would
+ * vouch for that bundle as the draft this save wrote, under this save's
+ * token, and the next save from that directory would replace the draft with
+ * it without a conflict. It is the pull's ownership question
+ * ({@link bundleFilesIn}), asked by the save before it writes anything.
+ */
+async function otherBundleAt(
+  context: CatalogWriteContext,
+  linkTarget: string | undefined,
   filesDir: string | undefined,
-): Promise<Extract<DirectoryClaim, { kind: "link" }> | undefined> {
-  if (requested === undefined || filesDir === undefined || context.saveRoot === undefined) {
+): Promise<ToolError | undefined> {
+  if (linkTarget === undefined || context.saveRoot === undefined) {
     return undefined;
   }
-  if (path.resolve(context.saveRoot, requested) === path.resolve(context.saveRoot, filesDir)) {
+  if (filesDir !== undefined && (await sameDirectory(context, linkTarget, filesDir))) {
     return undefined;
   }
-  const read = await linkedMethodAt(context, filesDir);
-  return read?.kind === "link" ? read : undefined;
+  const absolute = path.resolve(context.saveRoot, linkTarget);
+  if (absolute !== context.saveRoot && !isInsideRoot(context.saveRoot, absolute)) {
+    return undefined;
+  }
+  const bundle = await bundleFilesIn(absolute);
+  if (bundle.length === 0) {
+    return undefined;
+  }
+  return {
+    class: "input_domain",
+    location: "link_dir",
+    message: `link_dir \`${linkTarget}\` holds a bundle of its own (${bundle.map((name) => `\`${name}\``).join(", ")}), and the files this save sends ${filesDir === undefined ? "came inline" : `are in \`${filesDir}\``}. Its ${LINK_FILE_NAME} would then vouch for that bundle as this save's draft, and a save from there would replace the draft with it without a conflict. Nothing was written.`,
+    hint: `Omit link_dir to link the files' own directory, or point it at a directory holding no .mthds file. To save the bundle in \`${linkTarget}\`, submit its own files as { path } items.`,
+    retryable: false,
+  };
 }
 
 /**

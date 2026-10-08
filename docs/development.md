@@ -37,10 +37,10 @@ Neither target reads `.env`: the server takes `PIPELEX_BASE_URL` and `PIPELEX_AP
 
 ```bash
 npm run build  # the workshop: tsup → dist/main.js (the npm-distributed bin)
-npm run check  # lint + format:check + check:instructions + check:tool-texts + build + typecheck
+npm run check  # lint + format:check + check:instructions + check:tool-texts + build + check:bundle + typecheck
 ```
 
-`make build-local` runs the same build. tsup bundles `src/main.ts` into one ESM file with a Node shebang, inlining the core and leaving external exactly what `package.json`'s `dependencies` name. The manifest's `prepack` rebuilds the bin, so a pack or publish can never ship a stale or absent one. `make clean` removes `dist/`, and also the `packages/*/dist` a checkout built before the flatten still holds, untracked, which a tool still pointed at `packages/workshop/dist/main.js` would otherwise run without a word.
+`make build-local` runs the same build. tsup bundles `src/main.ts` into one ESM file with a Node shebang, inlining the core and leaving external exactly what `package.json`'s `dependencies` name. Node built-ins keep their `node:` prefix (`removeNodeProtocol: false`), because `node:sqlite`, which the write lock uses, answers to no other name. The manifest's `prepack` rebuilds the bin, so a pack or publish can never ship a stale or absent one. `make clean` removes `dist/`, and also the `packages/*/dist` a checkout built before the flatten still holds, untracked, which a tool still pointed at `packages/workshop/dist/main.js` would otherwise run without a word.
 
 ### What `make check` runs, and in what order
 
@@ -50,6 +50,7 @@ npm run check  # lint + format:check + check:instructions + check:tool-texts + b
 - `check:instructions` holds this repository's agent instruction files to their ceilings: `CLAUDE.md`, which Claude Code loads into every session opened here, and each path-scoped rule under `.claude/rules/`. `CLAUDE.md` is a map, so when the gate fails, move the detail to the page that owns it (this directory, `SPEC.md`, a rule or a code comment) rather than raising the ceiling. `scripts/instruction-budget.ts` holds the ceilings and says why they sit where they do.
 - `check:tool-texts` is the length gate on what a host shows the model. It builds the workshop's server in process, reads the `instructions` from `initialize` and every tool `description` from `tools/list` — the emitted strings, not the source constants, since some descriptions are assembled from parts — and fails when any is over 1,800 Unicode code points. Claude Code cuts each of those texts at 2,048, and the workshop's instructions once reached the model cut mid-word because nothing measured them; the ceiling leaves headroom for one more sentence and for hosts whose cap nobody has measured. Its report also lists schema sizes and the `tools/list` payload, for information only. When it fails, move the detail to the layer that owns it rather than raising the ceiling. It reads no build output, so it runs before the build.
 - `build` bundles the workshop's bin, as described above.
+- `check:bundle` refuses a `dist/main.js` that an installed copy could not load: every import it makes must be a Node built-in under the very name it uses, or a package `dependencies` declares. The tests run the workshop from source, so nothing else loads the shipped file, and a build that stripped `node:` from `node:sqlite` once passed every other gate while the bin failed at load. `scripts/bundle-imports.ts` holds the rule.
 - `typecheck` runs `tsc` over `src/`, `scripts/` and `tests/`, one program under the one `tsconfig.json`.
 
 ## Tests
