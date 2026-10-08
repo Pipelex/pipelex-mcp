@@ -1614,6 +1614,24 @@ async function writtenResult(
         partialPull: true,
       }),
     );
+    // A version's files land only under a link that says so. Without the
+    // marker, the link left in place records the draft's current token and no
+    // version, so it would vouch for these files as the draft, and an ordinary
+    // save from here would replace the draft with the version, with no
+    // explicit token: the restore guard the save keeps would never see them.
+    // A draft's files need no such refusal — a link still describing an older
+    // sync is refused as stale, or the files are the draft's own bytes.
+    if (!provisional.written && content.version !== "draft") {
+      return getError("The method was not written: its link file could not be updated.", [
+        {
+          class: "runtime",
+          location: "output_dir",
+          message: `\`${provisional.path}\` could not be written (${provisional.reason ?? "unknown reason"}), so the directory could not be marked as holding version ${content.version}, and its files would have read as the draft's to a later save. Nothing was written.`,
+          hint: "Check the link file's and the directory's permissions, then pull again — or pull the version into a directory of its own.",
+          retryable: false,
+        },
+      ]);
+    }
 
     const written: string[] = [];
     for (const destination of destinations) {

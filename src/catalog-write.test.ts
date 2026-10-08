@@ -1952,6 +1952,55 @@ describe("the pull resumes and refreshes without destroying work", () => {
   });
 });
 
+describe("a version pull whose link cannot be marked", () => {
+  it("writes nothing, so its files never read as the draft's to a later save", async () => {
+    const stored = storedMethod({
+      latest_version: 2,
+      latest_published: versionSummary({ source_digest: "b".repeat(64) }),
+    });
+    await writeBundle("work", {
+      "bundle.mthds": 'domain = "demo"',
+      [LINK_FILE_NAME]: JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: stored.updated_at,
+      }),
+    });
+    await fs.chmod(path.join(root, "work", LINK_FILE_NAME), 0o444);
+
+    try {
+      const result = await getMthdsMethod(
+        { method_id: "mt_one@2", output_dir: "work" },
+        contextFor(
+          {
+            ...clientNotCalled,
+            async getMethod() {
+              return stored;
+            },
+            async getMethodVersion() {
+              return storedVersion();
+            },
+          },
+          validationAnswering(validReport),
+        ),
+      );
+
+      // Written under the old link, version 2's files would carry the draft's
+      // current token and no version marker, and an ordinary save would then
+      // replace the draft with them, with no explicit token.
+      const [error] = errorsOf(result.structuredContent);
+      expect(error).toMatchObject({ class: "runtime", location: "output_dir" });
+      expect(error.message).toContain("holding version 2");
+      expect(await fs.readFile(path.join(root, "work", "bundle.mthds"), "utf8")).toBe(
+        'domain = "demo"',
+      );
+    } finally {
+      await fs.chmod(path.join(root, "work", LINK_FILE_NAME), 0o644);
+    }
+  });
+});
+
 describe("the save reads only what belongs to the bundle", () => {
   const creating = (name = "Demo"): CatalogWriteClient => ({
     ...clientNotCalled,
