@@ -277,7 +277,7 @@ export const PUBLISHED_METHOD_EXPECTED_SENTENCES = 3;
 
 /**
  * The durable fixture method's name, and the whole reason it is durable: the
- * SDK exposes `createMethod` / `updateMethod` and NO delete of any kind, so a
+ * SDK exposes `createMethod`, `writeDraft` and `publishMethod` and NO delete of any kind, so a
  * create-per-run suite would leak a method into the organization on every run.
  * One method, seeded once, asserted by name.
  */
@@ -333,14 +333,14 @@ export const FIXTURE_BUNDLE_URI = "e2e/mcp_e2e_fixture.mthds";
  * same way and for a sharper reason than the first.
  *
  * `catalog-write.e2e.ts` saves through `mthds_save_method`, and a create is a
- * check-then-act across two round trips with no compare-and-swap: two first
- * runs in one organization would each read no row and each create one. A
+ * check-then-act across two round trips with nothing unique to collide on: two
+ * first runs in one organization would each read no row and each create one. A
  * duplicate cannot be undone — the platform makes delete admin-only — and from
- * then on every run updates whichever row the server happens to list first. So
+ * then on every run writes whichever row the server happens to list first. So
  * the create lives in `make seed-e2e-fixture`, hand-invoked once per
- * organization, and the suite only ever updates. That also keeps `make
- * test-e2e` free of catalog writes, which is the whole reason the seed target
- * exists as a separate gesture.
+ * organization, and the suite only ever writes this row's draft and publishes
+ * it. That also keeps `make test-e2e` free of catalog creates, which is the
+ * whole reason the seed target exists as a separate gesture.
  */
 export const CATALOG_WRITE_FIXTURE_NAME = "pipelex_mcp_e2e_catalog_write";
 
@@ -490,8 +490,8 @@ async function lookupFixtureMethodId(): Promise<string> {
 
 const MISSING_WRITE_FIXTURE_HINT =
   `No registered method named "${CATALOG_WRITE_FIXTURE_NAME}" is visible to this API key. The write ` +
-  "suite updates one durable row per organization and deliberately never creates it: a create is " +
-  "check-then-act with no compare-and-swap, so two first runs would mint a duplicate the platform " +
+  "suite writes one durable row per organization and deliberately never creates it: a create is " +
+  "check-then-act with nothing unique to collide on, so two first runs would mint a duplicate the platform " +
   "cannot delete. Seed it with `make seed-e2e-fixture`, then re-run. If the key is right but the org " +
   "is not, mint a key in the organization that holds the fixture — the catalog is org-scoped, so " +
   "another org's method reads exactly like a miss.";
