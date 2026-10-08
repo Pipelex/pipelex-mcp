@@ -41,6 +41,8 @@ import {
   createPipelexApiClient,
   filesInputSchema,
   imageCandidatesOf,
+  inputsPathSchema,
+  resolveInputsSource,
   resolveSubmittedFiles,
   summaryForToolError,
   toolErrorSchema,
@@ -114,8 +116,9 @@ export const mthdsRunInputSchema = {
     .record(z.string(), z.unknown())
     .optional()
     .describe(
-      "Method inputs — fill the template returned by mthds_inputs_template. Binary inputs ride reachable https URLs.",
+      "Method inputs — fill the template returned by mthds_inputs_template. Binary inputs ride reachable https URLs. Supply at most ONE of inputs / inputs_path.",
     ),
+  inputs_path: inputsPathSchema,
 };
 
 /** The input schema of the status and results tools alike, built afresh for each. */
@@ -373,9 +376,10 @@ export interface MthdsRunInput {
   method_id?: string;
   pipe_code?: string;
   inputs?: Record<string, unknown>;
+  inputs_path?: string;
 }
 
-/** The run request after `{ path }` resolution — what the checks and the API call consume. */
+/** The run request after `{ path }` and `inputs_path` resolution — what the checks and the API call consume. */
 interface ResolvedRunRequest {
   files: SubmittedFile[];
   method_ref?: string;
@@ -508,6 +512,8 @@ export interface RunContext extends ApiConfig, MethodVersionsAware {
   client?: RunClient;
   /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
+  /** Reads `inputs_path` from disk (local workshop, `.json` only); without one `inputs_path` is refused. */
+  inputsResolver?: FileResolver;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
@@ -1259,11 +1265,22 @@ export async function startMthdsRun(
   context: RunContext = buildRunContext(),
 ): Promise<RunStartResult> {
   const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
-  if (resolution.errors.length > 0) {
-    return startErrorResult("Run was not started: request input is invalid.", resolution.errors);
+  const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
+    required: false,
+  });
+  const resolutionErrors = [...resolution.errors, ...inputsResolution.errors];
+  if (resolutionErrors.length > 0) {
+    return startErrorResult("Run was not started: request input is invalid.", resolutionErrors);
   }
 
-  const request: ResolvedRunRequest = { ...input, files: resolution.files };
+  // `inputs_path` is settled into `inputs` here and goes no further: the start
+  // request cannot tell a loaded file from an inline object.
+  const { inputs_path: _inputsPath, inputs: _inlineInputs, ...selection } = input;
+  const request: ResolvedRunRequest = {
+    ...selection,
+    files: resolution.files,
+    ...(inputsResolution.inputs === undefined ? {} : { inputs: inputsResolution.inputs }),
+  };
   const inputErrors = validateRunRequest(request);
   if (inputErrors.length > 0) {
     return startErrorResult("Run was not started: request input is invalid.", inputErrors);
