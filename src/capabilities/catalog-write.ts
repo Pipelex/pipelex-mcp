@@ -1674,14 +1674,23 @@ async function writtenResult(
     // version, so it would vouch for these files as the draft, and an ordinary
     // save from here would replace the draft with the version, with no
     // explicit token: the restore guard the save keeps would never see them.
-    // A draft's files need no such refusal — a link still describing an older
-    // sync is refused as stale, or the files are the draft's own bytes.
-    if (!provisional.written && content.version !== "draft") {
+    // A draft pull over a link that records a version is refused the same way:
+    // left in place, that link would say the directory holds the version while
+    // it held the draft, and a later save would be refused on that false
+    // premise, with a restore hint that sends the draft back with the wrong
+    // Python. Any other draft pull needs no refusal — a link still describing
+    // an older sync is refused as stale, or the files are the draft's own.
+    const markedVersion = link.kind === "link" ? link.link.synced_version : undefined;
+    if (!provisional.written && (content.version !== "draft" || markedVersion !== undefined)) {
+      const consequence =
+        content.version === "draft"
+          ? `so its record of version ${markedVersion} could not be cleared, and the draft's files would have sat under a link saying they are that version`
+          : `so the directory could not be marked as holding version ${content.version}, and its files would have read as the draft's to a later save`;
       return getError("The method was not written: its link file could not be updated.", [
         {
           class: "runtime",
           location: "output_dir",
-          message: `\`${provisional.path}\` could not be written (${provisional.reason ?? "unknown reason"}), so the directory could not be marked as holding version ${content.version}, and its files would have read as the draft's to a later save. Nothing was written.`,
+          message: `\`${provisional.path}\` could not be written (${provisional.reason ?? "unknown reason"}), ${consequence}. Nothing was written.`,
           hint: "Check the link file's and the directory's permissions, then pull again — or pull the version into a directory of its own.",
           retryable: false,
         },
@@ -2157,6 +2166,16 @@ async function planPull(
   }
 
   const local = await compareDestinations(destinations);
+  // Where `overwrite` already decides — an interrupted pull, or a draft that
+  // moved since the sync — the files the catalog stores elsewhere change
+  // nothing, so no version is read to find them.
+  if (
+    overwrite &&
+    local.differing.length > 0 &&
+    (link.link.partial_pull === true || link.link.synced_updated_at !== stored.updated_at)
+  ) {
+    return { kind: "write" };
+  }
   const unsaved = await storedElsewhere(local.differing, link.link, elsewhere);
 
   if (link.link.partial_pull === true) {

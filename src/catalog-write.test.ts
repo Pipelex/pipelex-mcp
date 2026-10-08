@@ -597,27 +597,37 @@ describe("saveMthdsMethod", () => {
       async writeDraft(_id, input) {
         if (
           input.expected_updated_at !== undefined &&
-          input.expected_updated_at !== draft.updatedAt
+          input.expected_updated_at !== state.updatedAt
         ) {
           throw draftConflict();
         }
-        draft = {
-          content: input.mthds,
-          updatedAt: `T${draft.writes + 1}`,
-          writes: draft.writes + 1,
-        };
-        return storedMethod({ updated_at: draft.updatedAt });
+        state.writes += 1;
+        state.content = input.mthds;
+        state.updatedAt = `T${state.writes}`;
+        return storedMethod({ mthds: state.content, updated_at: state.updatedAt });
       },
       async getMethod() {
-        return storedMethod({ updated_at: draft.updatedAt });
+        return storedMethod({
+          mthds: state.content,
+          updated_at: state.updatedAt,
+          latest_version: 2,
+          latest_published: versionSummary({ source_digest: "b".repeat(64) }),
+        });
+      },
+      async getMethodVersion() {
+        return storedVersion();
       },
     };
-    // The first validation waits until the second save has landed.
+    return { state, client };
+  }
+
+  /** A validation whose first call waits for `release`, counting every call. */
+  function gatedValidation() {
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
-    let validations = 0;
+    const counts = { validations: 0 };
     const validation = {
       baseUrl: DEFAULT_API_URL,
       client: {
@@ -625,8 +635,8 @@ describe("saveMthdsMethod", () => {
           throw new Error("the selector leg must not be called by a save");
         },
         async validateFiles(): Promise<PipelexValidationResult> {
-          validations += 1;
-          if (validations === 1) await gate;
+          counts.validations += 1;
+          if (counts.validations === 1) await gate;
           return validReport;
         },
       },
@@ -2057,6 +2067,77 @@ describe("a version pull whose link cannot be marked", () => {
     } finally {
       await fs.chmod(path.join(root, "work", LINK_FILE_NAME), 0o644);
     }
+  });
+});
+
+describe("a draft pull over a link that records a version", () => {
+  const linked = {
+    method_id: "mt_one",
+    name: "Summarize PDF",
+    api_host: "api-dev.pipelex.com",
+    synced_updated_at: "2026-09-19T00:00:00Z",
+    synced_version: 2,
+  };
+
+  it("writes nothing when the link cannot be updated, so it never says the draft is a version", async () => {
+    await writeBundle("work", {
+      "bundle.mthds": 'domain = "version_two"',
+      [LINK_FILE_NAME]: JSON.stringify(linked),
+    });
+    await fs.chmod(path.join(root, "work", LINK_FILE_NAME), 0o444);
+
+    try {
+      const result = await getMthdsMethod(
+        { method_id: "mt_one", output_dir: "work", overwrite: true },
+        contextFor(
+          {
+            ...clientNotCalled,
+            async getMethod() {
+              return storedMethod();
+            },
+            async getMethodVersion() {
+              return storedVersion();
+            },
+          },
+          validationAnswering(validReport),
+        ),
+      );
+
+      const [error] = errorsOf(result.structuredContent);
+      expect(error).toMatchObject({ class: "runtime", location: "output_dir" });
+      expect(error.message).toContain("record of version 2 could not be cleared");
+      expect(await fs.readFile(path.join(root, "work", "bundle.mthds"), "utf8")).toBe(
+        'domain = "version_two"',
+      );
+    } finally {
+      await fs.chmod(path.join(root, "work", LINK_FILE_NAME), 0o644);
+    }
+  });
+
+  it("reads no version when overwrite already decides, the draft having moved", async () => {
+    await writeBundle("work", {
+      "bundle.mthds": 'domain = "edited here"',
+      [LINK_FILE_NAME]: JSON.stringify(linked),
+    });
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "work", overwrite: true },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async getMethod() {
+            return storedMethod();
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    // clientNotCalled's getMethodVersion would throw: overwrite decided first.
+    expect(result.structuredContent).toMatchObject({ status: "ok", version: "draft" });
+    expect(await fs.readFile(path.join(root, "work", "bundle.mthds"), "utf8")).toBe(
+      'domain = "demo"',
+    );
   });
 });
 
