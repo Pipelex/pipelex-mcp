@@ -573,9 +573,45 @@ function malformedSuffixError(value: string, selector: MethodSelector): ToolErro
   };
 }
 
+// ── one turn at a time ──────────────────────────────────────────────
+
+/**
+ * The tail of the queue every save and every writing pull takes its turn in.
+ * Each reads a directory's link, reads or writes its files and writes the link
+ * back, and the link only means something when those happen together: a
+ * version pull landing between a save's link read and its file read handed
+ * the save the version's files under the draft's token, and a version pull
+ * landing before a save's final link write lost its version marker to it —
+ * either way an ordinary save then replaced the draft with a version, with no
+ * explicit token. The MCP server starts each request without waiting for the
+ * last, so two such calls can interleave.
+ *
+ * One queue for the whole process rather than one per directory: a save's
+ * files and its link can sit in different directories, a pull can write into
+ * a directory nested in another's, and symlinks and case make two spellings
+ * of one directory. These calls are paced by a person or an agent's turn, so
+ * serializing all of them costs nothing that matters. A second workshop
+ * process on the same directory is not covered: that would take a lock on
+ * disk.
+ */
+let catalogTurn: Promise<unknown> = Promise.resolve();
+
+function inCatalogTurn<T>(work: () => Promise<T>): Promise<T> {
+  const turn = catalogTurn.then(work);
+  catalogTurn = turn.catch(() => undefined);
+  return turn;
+}
+
 // ── mthds_save_method ───────────────────────────────────────────────
 
-export async function saveMthdsMethod(
+export function saveMthdsMethod(
+  input: MthdsSaveMethodInput,
+  context: CatalogWriteContext,
+): Promise<SaveMethodResult> {
+  return inCatalogTurn(() => saveInTurn(input, context));
+}
+
+async function saveInTurn(
   input: MthdsSaveMethodInput,
   context: CatalogWriteContext,
 ): Promise<SaveMethodResult> {
@@ -650,6 +686,8 @@ export async function saveMthdsMethod(
   // then send that newer token with its older bytes and replace the newer
   // draft without a conflict. Read first, any save that refreshed the link
   // since has moved the draft past this token, and the platform refuses it.
+  // Within this process saves and pulls also take turns (inCatalogTurn); the
+  // order is what still holds against a save from another workshop process.
   // It is also read once, before either arm touches the catalog, because both
   // arms are irreversible in the same way: a create that ran first left a
   // duplicate, and a draft write that ran first left a different method's
@@ -1312,7 +1350,10 @@ export async function getMthdsMethod(
   if (parsed.data.output_dir === undefined) {
     return inlineResult(stored, content, apiHost, await support);
   }
-  return writtenResult(context, client, parsed.data, stored, content, apiHost, await support);
+  const answer = await support;
+  return inCatalogTurn(() =>
+    writtenResult(context, client, parsed.data, stored, content, apiHost, answer),
+  );
 }
 
 /**
