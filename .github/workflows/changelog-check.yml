@@ -1,14 +1,11 @@
-# On a release PR into main, require a matching entry in the changelog of the
-# server it releases:
-#
-#   release/vX.Y.Z          the workshop, packages/workshop/CHANGELOG.md
-#   release/console-vX.Y.Z  the console,  packages/console/CHANGELOG.md
+# On a release PR into main, require a matching entry in the workshop's
+# changelog, CHANGELOG.md, for the version its release/vX.Y.Z branch names.
 #
 # Adapted from the sibling TS repos, with one deliberate difference: pipelex-mcp
-# changelog headings have NO prefix — `## [X.Y.Z] - YYYY-MM-DD`. The `v` and the
-# `console-v` live on the branch name and the git tag only (see
-# docs/development.md and the /release skill). The branch ref is read into env: and never interpolated
-# into the shell.
+# changelog headings have NO prefix — `## [X.Y.Z] - YYYY-MM-DD`. The `v` lives
+# on the branch name and the git tag only (see docs/development.md and the
+# /release skill). The branch ref is read into env: and never interpolated into
+# the shell.
 name: Changelog Version Check
 
 on:
@@ -31,14 +28,11 @@ jobs:
         env:
           HEAD: ${{ github.head_ref }}
         run: |
-          if [[ "$HEAD" =~ ^release/console-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            CHANGELOG=packages/console/CHANGELOG.md
-          elif [[ "$HEAD" =~ ^release/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            CHANGELOG=packages/workshop/CHANGELOG.md
-          else
-            echo "::error::Branch name '$HEAD' matches neither 'release/vX.Y.Z' (the workshop) nor 'release/console-vX.Y.Z' (the console)."
+          if [[ ! "$HEAD" =~ ^release/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::Branch name '$HEAD' does not match 'release/vX.Y.Z'."
             exit 1
           fi
+          CHANGELOG=CHANGELOG.md
           VERSION="${BASH_REMATCH[1]}"
           echo "Checking $CHANGELOG for version $VERSION (no prefix in the heading)..."
 

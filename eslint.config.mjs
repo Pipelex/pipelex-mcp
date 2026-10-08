@@ -8,7 +8,7 @@ export default [
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    ignores: ["**/dist/**", "coverage/**", "**/.skybridge/**", "**/.vercel/**"],
+    ignores: ["**/dist/**", "coverage/**"],
   },
   {
     languageOptions: {
@@ -39,12 +39,7 @@ export default [
   // Every call to the Pipelex API goes through `createPipelexApiClient`, which
   // names this server in the User-Agent (docs/client-identification.md).
   {
-    files: [
-      "packages/*/src/**/*.{ts,tsx}",
-      "packages/*/scripts/**/*.{ts,mjs}",
-      "scripts/**/*.{ts,mjs}",
-      "tests/**/*.ts",
-    ],
+    files: ["src/**/*.ts", "scripts/**/*.{ts,mjs}", "tests/**/*.ts"],
     plugins: { pipelex: pipelexApiBoundary },
     rules: {
       "pipelex/sdk-client-factory": "error",
@@ -53,36 +48,18 @@ export default [
   },
   // The factory itself.
   {
-    files: ["packages/core/src/capabilities/shared.ts"],
+    files: ["src/capabilities/shared.ts"],
     rules: { "pipelex/sdk-client-factory": "off" },
   },
   // The one sanctioned subclass, which the factory constructs.
   {
-    files: ["packages/core/src/capabilities/upload-ceiling.ts"],
+    files: ["src/capabilities/upload-ceiling.ts"],
     rules: { "pipelex/sdk-client-factory": ["error", { allowExtends: true }] },
-  },
-  // The attachment fetch boundary fetches a host-supplied third-party link,
-  // whose User-Agent the spec says must not change.
-  {
-    files: ["packages/core/src/capabilities/attachment-fetch.ts"],
-    rules: { "pipelex/no-raw-fetch": "off" },
-  },
-  // The views read a stored file from its presigned app-bucket link, to hand
-  // its bytes to the host, never the Pipelex API.
-  {
-    files: ["packages/console/src/views/stored-file-bytes.ts"],
-    rules: { "pipelex/no-raw-fetch": "off" },
-  },
-  // The bundle boot check fetches the console it has just started on loopback,
-  // never the Pipelex API.
-  {
-    files: ["packages/console/scripts/check-server-bundle.mjs"],
-    rules: { "pipelex/no-raw-fetch": "off" },
   },
   // The graph page's live check fetches the public CDN files the page pins,
   // never the Pipelex API.
   {
-    files: ["packages/core/src/capabilities/graph-page.e2e.ts"],
+    files: ["src/capabilities/graph-page.e2e.ts"],
     rules: { "pipelex/no-raw-fetch": "off" },
   },
   // Unit tests build clients directly to test them, and stub the global fetch.

@@ -1,127 +1,103 @@
-# Ships this repository's two servers from `main`, each on its own release
-# track:
+# Publishes the workshop, @pipelex/mcp, to npm from `main`, from the
+# repository root, and tags the release `vX.Y.Z`. Its version is the root
+# `package.json` version, read through `.github/scripts/track-version.sh`,
+# which also reads a parent from the workspace layout the history holds.
 #
-#   workshop  @pipelex/mcp on npm (packages/workshop)        tag vX.Y.Z
-#   console   the hosted console on Alpic (packages/console)  tag console-vX.Y.Z
-#
-# A track's version is its own member's `package.json` version, read through
-# `.github/scripts/track-version.sh`, and a release of one track never ships
-# the other: a workshop release publishes to npm and tags `vX.Y.Z`, a console
-# release deploys to Alpic and tags `console-vX.Y.Z`.
-#
-# It fires on the push to `main` — the merge of a `release/vX.Y.Z` (workshop)
-# or `release/console-vX.Y.Z` (console) pull request — so a release ships from
-# the merge itself, the way every other library in this workspace publishes,
-# and the landing gesture can verify the run keyed to the merge SHA.
-# `workflow_dispatch` stays beside it for retrying one track after a partial
-# failure, and is the only trigger that takes a typed `track` and `version`.
+# It fires on the push to `main` — the merge of a `release/vX.Y.Z` pull
+# request — so a release ships from the merge itself, the way every other
+# library in this workspace publishes, and the landing gesture can verify the
+# run keyed to the merge SHA. `workflow_dispatch` stays beside it for retrying
+# after a partial failure, and is the only trigger that takes a typed
+# `version`.
 #
 # What makes an unconditional on-merge trigger safe is that "is this push a
-# release, and of which track?" is answered from the pushed commit and from
-# nothing else. The `detect` job reads each track's version at the pushed
-# commit and at its first parent: a push is a release of a track exactly when it
-# brings `main` a version of that track `main` did not have. That is a property
-# of the commit, so it stays true however the registry, an earlier run or a
-# break-glass publish left things, and everything else hangs off it — an
-# ordinary push to `main` ends green with the gate, both tracks and both tags
-# skipped, without spending `make all` on it. What holds a bump to its release
-# branch's name, to a strict increase, and to one track per release is
-# `version-check.yml`, on the pull request, before any of this. Should a commit
-# nonetheless raise both versions, both tracks ship, each under its own guards.
+# release?" is answered from the pushed commit and from nothing else. The
+# `detect` job reads the workshop's version at the pushed commit and at its
+# first parent: a push is a release exactly when it brings `main` a version
+# `main` did not have. That is a property of the commit, so it stays true
+# however the registry, an earlier run or a break-glass publish left things,
+# and everything else hangs off it — an ordinary push to `main` ends green with
+# the gate, the publish and the tag skipped, without spending `make all` on
+# it. What holds a bump to its release branch's name and to a strict increase
+# is `version-check.yml`, on the pull request, before any of this.
 #
-# `guard` then decides whether that commit is shippable: the changelog of each
-# track it releases must carry a matching `## [X.Y.Z]` heading, the whole
-# `make all` gate is re-run on the merge commit rather than trusted from the
-# pull request, and, for a workshop release, `npm view` is asked whether the
-# version is already on the registry — an answer the registry could not give
-# fails the run rather than being guessed at. That lookup is only what its name
-# says, a double-publish guard on the npm leg: a release whose version reached
-# npm by another route — the documented break-glass `make publish`, or a re-run
-# of a run that published before it failed — skips the publish and still cuts
-# the tag instead of ending green having shipped nothing. It is never asked on a
-# console release, so an unreachable registry cannot block the console. A
-# dispatch answers to one check more, that the typed `version` equals what the
-# commit carries for the typed `track`, which is what refuses a run fired at the
+# `guard` then decides whether that commit is shippable: the changelog must
+# carry a matching `## [X.Y.Z]` heading, the whole `make all` gate is re-run on
+# the merge commit rather than trusted from the pull request, and `npm view` is
+# asked whether the version is already on the registry — an answer the
+# registry could not give fails the run rather than being guessed at. That
+# lookup is only what its name says, a double-publish guard: a release whose
+# version reached npm by another route — the documented break-glass
+# `make publish`, or a re-run of a run that published before it failed — skips
+# the publish and still cuts the tag instead of ending green having shipped
+# nothing. A dispatch answers to one check more, that the typed `version`
+# equals what the commit carries, which is what refuses a run fired at the
 # wrong bump.
 #
 # The commit the whole run ships is resolved once, by `detect`, and passed down
 # as a SHA rather than as a branch name, so every job checks out what `detect`
 # read and `guard` verified. A push pins its own merge commit. A dispatch reads
 # `main` whatever ref it was fired from, so it cannot ship a feature branch, and
-# it refuses to run at all unless that tip still brings a new version of the
-# typed track — a tip that does not is no longer that release's commit, and a
-# retry must not ship a tree that landed on `main` after the release.
+# it refuses to run at all unless that tip still brings a new version — a tip
+# that does not is no longer that release's commit, and a retry must not ship a
+# tree that landed on `main` after the release.
 #
 # Pinning a run to its own commit is what lets a re-run finish a release after
 # `main` has moved on, and it must not let one finish a release `main` has moved
-# PAST. That refusal — `.github/scripts/assert-not-behind-main.sh`, which
-# compares within one track — therefore runs inside each shipping leg and not
-# only in `detect`: GitHub's "Re-run failed jobs" re-runs the jobs that failed
-# and the jobs below them, so a job that succeeded is never re-executed and its
-# outputs reach the re-run as the values it wrote before the newer release
-# existed. `detect`'s own call is the cheap refusal on the ordinary path; the
-# legs' calls are what protect them. Both legs need it, and neither can borrow
-# the other's property: `npm publish` carries no `--tag` and so writes the
-# `latest` dist-tag, and the Alpic deploy ships whatever tree it is handed. Only
-# the tag jobs need nothing, because they leave an existing tag alone.
+# PAST. That refusal — `.github/scripts/assert-not-behind-main.sh` — therefore
+# runs inside the publish job and not only in `detect`: GitHub's "Re-run failed
+# jobs" re-runs the jobs that failed and the jobs below them, so a job that
+# succeeded is never re-executed and its outputs reach the re-run as the values
+# it wrote before the newer release existed. `detect`'s own call is the cheap
+# refusal on the ordinary path; the publish job's call is what protects it,
+# since `npm publish` carries no `--tag` and so writes the `latest` dist-tag.
+# Only the tag job needs nothing, because it leaves an existing tag alone.
 #
-# Both tracks are re-runnable at the same version: an npm publish is skipped
-# when that version already exists, and Alpic deploys are idempotent per commit.
-# Finish a partial failure by re-running the merge's own run, which finishes the
-# release whatever npm already holds, or with a dispatch naming the track and
-# the same version (`-f track=workshop -f version=X.Y.Z`, or `-f track=console`).
-# This is the /release skill's "retry at the same version" rule.
+# A release is re-runnable at the same version: the npm publish is skipped when
+# that version already exists. Finish a partial failure by re-running the
+# merge's own run, which finishes the release whatever npm already holds, or
+# with a dispatch naming the same version (`-f version=X.Y.Z`). This is the
+# /release skill's "retry at the same version" rule.
 #
-# One-time external setup:
-#   - npm: register `@pipelex/mcp` as a trusted publisher on npmjs.com
-#     (package settings) for `Pipelex/pipelex-mcp` with workflow filename
-#     `release.yml` — the same OIDC pattern `pipelex-sdk` and `mthds-js`
-#     use, so no long-lived npm secret exists anywhere. **The registration is
-#     bound to this filename**: renaming or moving this workflow breaks
-#     publishing until the trusted publisher is re-registered. Publishing from
-#     a workspace member changes nothing there: the registration names the
-#     repository and the workflow, not a directory.
-#   - `ALPIC_API_KEY` repo secret (Alpic dashboard → API key). The project and
-#     environment ids come from the tracked `.alpic/project.json`, and the
-#     build from the root `alpic.json`, which names the console member's output.
-name: Release (publish + deploy)
+# One-time external setup: register `@pipelex/mcp` as a trusted publisher on
+# npmjs.com (package settings) for `Pipelex/pipelex-mcp` with workflow filename
+# `release.yml` — the same OIDC pattern `pipelex-sdk` and `mthds-js` use, so no
+# long-lived npm secret exists anywhere. **The registration is bound to this
+# filename**: renaming or moving this workflow breaks publishing until the
+# trusted publisher is re-registered. Where in the repository the package is
+# published from changes nothing there: the registration names the repository
+# and the workflow, not a directory.
+name: Release (publish)
 
 on:
-  # The merge of a release pull request. Each track's version is whatever
-  # `main`'s member `package.json` says, and a track ships when it rose.
+  # The merge of a release pull request. The version is whatever `main`'s
+  # `package.json` says, and the workshop ships when it rose.
   push:
     branches:
       - main
 
-  # The retry door: one track at a time, at a version typed by hand.
+  # The retry door, at a version typed by hand.
   workflow_dispatch:
     inputs:
-      track:
-        description: 'Which server to ship: the workshop (npm) or the console (Alpic)'
-        required: true
-        type: choice
-        options:
-          - workshop
-          - console
       version:
-        description: "Version to ship — must match that server's package.json on main (e.g. 0.12.0, no prefix)"
+        description: "Version to ship — must match package.json on main (e.g. 0.12.0, no prefix)"
         required: true
         type: string
 
 permissions: {}
 
 # One release at a time: a half-published run is worse than a queued one, and
-# two overlapping workshop releases would race for npm's `latest` tag, which is
-# why the group is not keyed per commit or per track. `cancel-in-progress`
-# protects the run in flight but not a run still pending — a group holds one of
-# each, and a third arrival cancels the pending one without anything turning
-# red. So while a release run is in flight, a release merge queued behind it is
-# evicted by the next push to `main`, whatever that push is: a queued run has
-# not started, so it occupies the pending slot rather than passing through
-# `detect` and leaving. That is accepted deliberately, and the acceptance rests
-# on the landing rather than on the odds: it requires a successful run keyed to
-# the merge SHA and the tag that run pushed, never merely a green newest run, so
-# an evicted merge stops the landing instead of passing as a release.
+# two overlapping releases would race for npm's `latest` tag, which is why the
+# group is not keyed per commit. `cancel-in-progress` protects the run in
+# flight but not a run still pending — a group holds one of each, and a third
+# arrival cancels the pending one without anything turning red. So while a
+# release run is in flight, a release merge queued behind it is evicted by the
+# next push to `main`, whatever that push is: a queued run has not started, so
+# it occupies the pending slot rather than passing through `detect` and
+# leaving. That is accepted deliberately, and the acceptance rests on the
+# landing rather than on the odds: it requires a successful run keyed to the
+# merge SHA and the tag that run pushed, never merely a green newest run, so an
+# evicted merge stops the landing instead of passing as a release.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -137,12 +113,10 @@ jobs:
       # so a dispatch pins what was read rather than re-reading `main` in each
       # job at whatever moment it happens to start.
       sha: ${{ steps.commit.outputs.sha }}
-      # Whether that commit is a release of each track — read from the commit,
-      # never from the registry — and the version it carries.
-      workshop_release: ${{ steps.commit.outputs.workshop_release }}
-      workshop_version: ${{ steps.commit.outputs.workshop_version }}
-      console_release: ${{ steps.commit.outputs.console_release }}
-      console_version: ${{ steps.commit.outputs.console_version }}
+      # Whether that commit is a release — read from the commit, never from
+      # the registry — and the version it carries.
+      release: ${{ steps.commit.outputs.release }}
+      version: ${{ steps.commit.outputs.version }}
 
     steps:
       - name: Checkout the commit to ship, and its parent
@@ -150,102 +124,75 @@ jobs:
         with:
           # A push ships its own merge commit; a dispatch always reads `main`,
           # whatever ref it was fired from, so it cannot ship a feature branch.
-          # Depth 2 is what makes the parent's manifests readable.
+          # Depth 2 is what makes the parent's manifest readable.
           ref: ${{ github.event_name == 'push' && github.sha || 'main' }}
           fetch-depth: 2
 
-      # Two comparisons per track, and each one closes a way of shipping a stale
-      # tree under a version that is already out.
+      # Two comparisons, and each one closes a way of shipping a stale tree
+      # under a version that is already out.
       #
-      # Against the PARENT, the track's version must RISE rather than merely
-      # differ. A revert that lowers it would otherwise read as a release: the
-      # changelog heading for the old version is still there, `npm view` finds
-      # the version published and skips the npm leg, and the console leg — which
-      # never reads the registry — would push the reverted tree to Production
-      # under a version already tagged. `version-check.yml` cannot cover that:
-      # it runs on pull requests only.
+      # Against the PARENT, the version must RISE rather than merely differ. A
+      # revert that lowers it would otherwise read as a release: the changelog
+      # heading for the old version is still there, and only the registry
+      # lookup would stand between the reverted tree and a publish.
+      # `version-check.yml` cannot cover that: it runs on pull requests only.
       #
       # Against `main`'s CURRENT tip, the version must not have been left
       # behind. That one is about re-runs rather than about merges, it is shared
-      # with the shipping legs, and it is explained in the script all of them
-      # call: `.github/scripts/assert-not-behind-main.sh`.
-      - name: Compare each track's version with the one it replaces
+      # with the publish job, and it is explained in the script both call:
+      # `.github/scripts/assert-not-behind-main.sh`.
+      - name: Compare the version with the one it replaces
         id: commit
         env:
           EVENT_NAME: ${{ github.event_name }}
-          DISPATCHED_TRACK: ${{ inputs.track }}
         run: |
           SHA=$(git rev-parse HEAD)
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
-          # Every version is read before anything is fetched: the freshness
+          # Both versions are read before anything is fetched: the freshness
           # script's shallow fetch of `main` can cut this checkout's history to
-          # the tip, after which `HEAD^` is no longer there to read.
-          # Each read is a plain assignment before it is stored, because `set -e`
-          # sees a command substitution's failure only there: inside `printf -v`
-          # an unreadable version became an empty one, which the comparison
-          # below reads as a release against no version at all.
-          for TRACK in workshop console; do
-            CURRENT=$(bash .github/scripts/track-version.sh "$TRACK" HEAD)
-            BEFORE=$(bash .github/scripts/track-version.sh "$TRACK" HEAD^)
-            printf -v "VERSION_$TRACK" '%s' "$CURRENT"
-            printf -v "PARENT_$TRACK" '%s' "$BEFORE"
-            echo "${TRACK}_version=${CURRENT}" >> "$GITHUB_OUTPUT"
-          done
+          # the tip, after which `HEAD^` is no longer there to read. Each read
+          # is a plain assignment, because `set -e` sees a command
+          # substitution's failure only there.
+          CURRENT=$(bash .github/scripts/track-version.sh HEAD)
+          BEFORE=$(bash .github/scripts/track-version.sh HEAD^)
+          echo "version=${CURRENT}" >> "$GITHUB_OUTPUT"
 
-          RELEASES=0
-          for TRACK in workshop console; do
-            # A dispatch retries the one track it names; the other is not its business.
-            if [ "$EVENT_NAME" != "push" ] && [ "$TRACK" != "$DISPATCHED_TRACK" ]; then
-              echo "${TRACK}_release=false" >> "$GITHUB_OUTPUT"
-              continue
-            fi
-
-            NAME="VERSION_$TRACK"
-            CURRENT=${!NAME}
-            NAME="PARENT_$TRACK"
-            BEFORE=${!NAME}
-            HIGHEST=$(printf '%s\n%s\n' "$BEFORE" "$CURRENT" | sort -V | tail -1)
-            if [ "$CURRENT" != "$BEFORE" ] && [ "$HIGHEST" = "$CURRENT" ]; then
-              # A run is pinned to its own commit, which is what lets a re-run
-              # finish a release after `main` has moved on. It must not let one
-              # finish a release `main` has moved PAST, so the same refusal runs
-              # here and again inside each shipping leg — see the script.
-              bash .github/scripts/assert-not-behind-main.sh "$TRACK" "$CURRENT"
-              echo "${TRACK}_release=true" >> "$GITHUB_OUTPUT"
-              echo "Shipping the $TRACK at $CURRENT from $SHA — its first parent was at $BEFORE." \
-                | tee -a "$GITHUB_STEP_SUMMARY"
-              RELEASES=$((RELEASES + 1))
-            else
-              echo "${TRACK}_release=false" >> "$GITHUB_OUTPUT"
-              echo "The $TRACK stays at $CURRENT here (its first parent was at $BEFORE)."
-            fi
-          done
-
-          if [ "$RELEASES" -gt 0 ]; then
+          HIGHEST=$(printf '%s\n%s\n' "$BEFORE" "$CURRENT" | sort -V | tail -1)
+          if [ "$CURRENT" != "$BEFORE" ] && [ "$HIGHEST" = "$CURRENT" ]; then
+            # A run is pinned to its own commit, which is what lets a re-run
+            # finish a release after `main` has moved on. It must not let one
+            # finish a release `main` has moved PAST, so the same refusal runs
+            # here and again inside the publish job — see the script.
+            bash .github/scripts/assert-not-behind-main.sh "$CURRENT"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "Shipping the workshop at $CURRENT from $SHA — its first parent was at $BEFORE." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+
+          echo "release=false" >> "$GITHUB_OUTPUT"
           if [ "$EVENT_NAME" = "push" ]; then
-            echo "$SHA raises neither server's version, so this push is not a release." \
-                 "Nothing to publish, deploy or tag." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "$SHA keeps the workshop at $CURRENT (its first parent was at $BEFORE), so this push is not a release." \
+                 "Nothing to publish or tag." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          echo "::error::main's tip $SHA does not raise the $DISPATCHED_TRACK's version above its parent's." \
-               "A dispatch ships main's tip, and that tip is not a $DISPATCHED_TRACK release commit — something" \
+          echo "::error::main's tip $SHA does not raise the workshop's version above its parent's." \
+               "A dispatch ships main's tip, and that tip is not a release commit — something" \
                "landed on main after the release merge, or no release has been cut. Fix main rather than shipping from it."
           exit 1
 
   guard:
     name: Verify main is shippable
     needs: detect
-    if: needs.detect.outputs.workshop_release == 'true' || needs.detect.outputs.console_release == 'true'
+    if: needs.detect.outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
       already_published: ${{ steps.published.outputs.already_published }}
-      # Read from the workshop's `package.json` beside the lookup, so the run
-      # summary the release play reads names whatever was actually published.
+      # Read from `package.json` beside the lookup, so the run summary the
+      # release play reads names whatever was actually published.
       package: ${{ steps.published.outputs.package }}
 
     steps:
@@ -256,38 +203,30 @@ jobs:
 
       # A merge ships the version the release pull request brought with it, so
       # there is no typed number that could disagree with it. Only a dispatch
-      # carries one, and it must name the version the commit actually holds for
-      # the track it names.
+      # carries one, and it must name the version the commit actually holds.
       - name: Verify the typed version matches the commit
         if: github.event_name != 'push'
         env:
-          TRACK: ${{ inputs.track }}
           REQUESTED: ${{ inputs.version }}
-          ACTUAL: ${{ inputs.track == 'console' && needs.detect.outputs.console_version || needs.detect.outputs.workshop_version }}
+          ACTUAL: ${{ needs.detect.outputs.version }}
         run: |
           if [ "$ACTUAL" != "$REQUESTED" ]; then
-            echo "::error::Requested the $TRACK at $REQUESTED but main carries it at $ACTUAL." \
+            echo "::error::Requested the workshop at $REQUESTED but main carries it at $ACTUAL." \
                  "Did the release PR merge? Never edit the version here — cut it with the /release skill."
             exit 1
           fi
 
-      - name: Verify each released track's changelog has an entry for it
+      - name: Verify the changelog has an entry for it
         env:
-          WORKSHOP_RELEASE: ${{ needs.detect.outputs.workshop_release }}
-          WORKSHOP_VERSION: ${{ needs.detect.outputs.workshop_version }}
-          CONSOLE_RELEASE: ${{ needs.detect.outputs.console_release }}
-          CONSOLE_VERSION: ${{ needs.detect.outputs.console_version }}
+          VERSION: ${{ needs.detect.outputs.version }}
         run: |
-          # The heading carries no prefix — `v` and `console-v` live on the branch and tag only.
-          check() {
-            if ! grep -q "^## \[$2\]" "$1"; then
-              echo "::error::$1 has no '## [$2]' heading. Promote ## [Unreleased] before shipping."
-              exit 1
-            fi
-            echo "$1 has an entry for $2."
-          }
-          if [ "$WORKSHOP_RELEASE" = "true" ]; then check packages/workshop/CHANGELOG.md "$WORKSHOP_VERSION"; fi
-          if [ "$CONSOLE_RELEASE" = "true" ]; then check packages/console/CHANGELOG.md "$CONSOLE_VERSION"; fi
+          # The heading carries no prefix — `v` lives on the branch and tag only.
+          CHANGELOG=CHANGELOG.md
+          if ! grep -q "^## \[$VERSION\]" "$CHANGELOG"; then
+            echo "::error::$CHANGELOG has no '## [$VERSION]' heading. Promote ## [Unreleased] before shipping."
+            exit 1
+          fi
+          echo "$CHANGELOG has an entry for $VERSION."
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -303,24 +242,21 @@ jobs:
       - name: Run quality checks and tests
         run: make all
 
-      # The double-publish guard on the npm leg, and nothing more: whether this
-      # commit is a release was settled by `detect`, so an answer here decides
-      # only whether `npm publish` would collide. It still must never be a
-      # guess. `npm view` reports `E404` when the version is genuinely absent,
-      # and some other code — a rate limit, a 5xx, a DNS failure — when it could
-      # not find out; only the first of those is an answer. An inconclusive
-      # lookup therefore fails the guard rather than reading as "not published".
-      # The package is read from the workshop's `package.json` rather than
-      # typed, so the lookup cannot come to name something other than what
-      # `npm publish` ships. Asked only when the run releases the workshop, so
-      # an unreachable registry can never take a console release down with it.
+      # The double-publish guard, and nothing more: whether this commit is a
+      # release was settled by `detect`, so an answer here decides only whether
+      # `npm publish` would collide. It still must never be a guess. `npm view`
+      # reports `E404` when the version is genuinely absent, and some other
+      # code — a rate limit, a 5xx, a DNS failure — when it could not find out;
+      # only the first of those is an answer. An inconclusive lookup therefore
+      # fails the guard rather than reading as "not published". The package is
+      # read from `package.json` rather than typed, so the lookup cannot come
+      # to name something other than what `npm publish` ships.
       - name: Check whether this version is already on npm
         id: published
-        if: needs.detect.outputs.workshop_release == 'true'
         env:
-          VERSION: ${{ needs.detect.outputs.workshop_version }}
+          VERSION: ${{ needs.detect.outputs.version }}
         run: |
-          PACKAGE=$(node -p "require('./packages/workshop/package.json').name")
+          PACKAGE=$(node -p "require('./package.json').name")
           echo "package=$PACKAGE" >> "$GITHUB_OUTPUT"
           if LOOKUP=$(npm view "$PACKAGE@$VERSION" version --json 2>&1); then
             echo "already_published=true" >> "$GITHUB_OUTPUT"
@@ -338,12 +274,12 @@ jobs:
   publish:
     name: Publish the workshop, @pipelex/mcp, to npm
     needs: [detect, guard]
-    # Only a workshop release. Whether the version is already on npm gates the
-    # steps rather than the job, so a release that reached the registry by
-    # another route still reports the skip and still gets its tag. What keeps
-    # this leg from publishing a version `main` has moved past is its own
-    # freshness step below, not `detect`'s.
-    if: needs.detect.outputs.workshop_release == 'true'
+    # Whether the version is already on npm gates the steps rather than the
+    # job, so a release that reached the registry by another route still
+    # reports the skip and still gets its tag. What keeps this job from
+    # publishing a version `main` has moved past is its own freshness step
+    # below, not `detect`'s.
+    if: needs.detect.outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -369,13 +305,13 @@ jobs:
       # `npx @pipelex/mcp` at the older workshop. `detect` made this same
       # comparison, but a job that succeeded is not re-run by "Re-run failed
       # jobs", so its verdict reaches a partial re-run as a cached output that
-      # predates the newer release. This leg asks for itself, before anything
+      # predates the newer release. This job asks for itself, before anything
       # reaches the registry.
       - name: Refuse a version main has already moved past
         if: needs.guard.outputs.already_published == 'false'
         env:
-          VERSION: ${{ needs.detect.outputs.workshop_version }}
-        run: bash .github/scripts/assert-not-behind-main.sh workshop "$VERSION"
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: bash .github/scripts/assert-not-behind-main.sh "$VERSION"
 
       - name: Update npm to support trusted publishing
         if: needs.guard.outputs.already_published == 'false'
@@ -385,18 +321,22 @@ jobs:
         if: needs.guard.outputs.already_published == 'false'
         run: npm ci
 
-      # The workshop member's `prepack` rebuilds `dist/main.js` and copies the
-      # repository's README and licence in, so the tarball is built from this
-      # commit rather than from whatever a previous step left behind. Auth is
-      # OIDC trusted publishing — no token; `--provenance` is what binds the
-      # published tarball to this workflow, this repo, and this commit.
+      # `npm publish` runs two of the manifest's scripts first. Its
+      # `prepublishOnly` is the publish guard, `scripts/check-publishable.ts`,
+      # which refuses a sprint pin or a git or local source among the
+      # dependencies, naming the package, so a pin the release train failed to
+      # collapse never reaches npm. Its `prepack` rebuilds `dist/main.js`, so
+      # the tarball is built from this commit rather than from whatever a
+      # previous step left behind. Auth is OIDC trusted publishing — no token;
+      # `--provenance` is what binds the published tarball to this workflow,
+      # this repo, and this commit.
       - name: Publish
         if: needs.guard.outputs.already_published == 'false'
-        run: npm publish --workspace @pipelex/mcp --access public --provenance
+        run: npm publish --access public --provenance
 
       - name: Summary
         env:
-          VERSION: ${{ needs.detect.outputs.workshop_version }}
+          VERSION: ${{ needs.detect.outputs.version }}
           SKIPPED: ${{ needs.guard.outputs.already_published }}
           PACKAGE: ${{ needs.guard.outputs.package }}
         run: |
@@ -406,13 +346,13 @@ jobs:
             echo "Published $PACKAGE@$VERSION to npm." >> "$GITHUB_STEP_SUMMARY"
           fi
 
-  tag-workshop:
-    name: Tag the workshop release
+  tag:
+    name: Tag the release
     needs: [detect, publish]
-    # Reached only when the publish leg succeeded in this run, whether it
-    # published or found the version already there. On a run that releases no
-    # workshop, `publish` is skipped and the skip propagates down `needs`.
-    if: needs.detect.outputs.workshop_release == 'true'
+    # Reached only when the publish job succeeded in this run, whether it
+    # published or found the version already there. On a run that releases
+    # nothing, `publish` is skipped and the skip propagates down `needs`.
+    if: needs.detect.outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -425,92 +365,9 @@ jobs:
 
       - name: Create and push the tag
         env:
-          TAG: v${{ needs.detect.outputs.workshop_version }}
+          TAG: v${{ needs.detect.outputs.version }}
         run: |
           # The `v` prefix lives on the tag, never in package.json or the changelog heading.
-          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists — leaving it alone." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          git tag "$TAG"
-          git push origin "$TAG"
-          echo "Tagged $TAG at $(git rev-parse HEAD)." >> "$GITHUB_STEP_SUMMARY"
-
-  deploy:
-    name: Deploy the hosted console to Alpic
-    needs: [detect, guard]
-    # Only a console release; the registry does not gate this leg at all. What
-    # keeps it from becoming a rollback door is its own freshness step below.
-    # It cannot be `detect`'s: a job that succeeded is not re-run by "Re-run
-    # failed jobs", so a verdict it reached before a newer release shipped is
-    # still what a partial re-run reads. This is the surface with no ordering
-    # property of its own — it ships whatever tree it is handed — and the one
-    # that is hard to undo, so it asks for itself.
-    if: needs.detect.outputs.console_release == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout the commit to ship
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.detect.outputs.sha }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: 'npm'
-
-      - name: Refuse a version main has already moved past
-        env:
-          VERSION: ${{ needs.detect.outputs.console_version }}
-        run: bash .github/scripts/assert-not-behind-main.sh console "$VERSION"
-
-      - name: Install dependencies
-        run: npm ci
-
-      # Project/team/environment ids come from the tracked `.alpic/project.json`,
-      # and the build from the root `alpic.json`, so this needs no ids of its
-      # own — only the API key. `--non-interactive` makes a missing or stale
-      # link fail loudly instead of hanging on a prompt.
-      - name: Deploy
-        env:
-          ALPIC_API_KEY: ${{ secrets.ALPIC_API_KEY }}
-        run: |
-          if [ -z "$ALPIC_API_KEY" ]; then
-            echo "::error::ALPIC_API_KEY repo secret is not set — cannot deploy the console."
-            exit 1
-          fi
-          npx alpic deploy --non-interactive
-
-      - name: Summary
-        env:
-          VERSION: ${{ needs.detect.outputs.console_version }}
-        run: echo "Deployed the hosted console at $VERSION to Alpic." >> "$GITHUB_STEP_SUMMARY"
-
-  tag-console:
-    name: Tag the console release
-    needs: [detect, deploy]
-    # Reached only when the console deployed in this run. On a run that
-    # releases no console, `deploy` is skipped and the skip propagates.
-    if: needs.detect.outputs.console_release == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout the commit to ship
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.detect.outputs.sha }}
-
-      - name: Create and push the tag
-        env:
-          TAG: console-v${{ needs.detect.outputs.console_version }}
-        run: |
-          # The `console-v` prefix lives on the tag, never in package.json or the changelog heading.
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
             echo "Tag $TAG already exists — leaving it alone." >> "$GITHUB_STEP_SUMMARY"
             exit 0

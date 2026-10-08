@@ -17,7 +17,7 @@ async function boundaryViolations(code: string, filePath: string): Promise<strin
     .filter((ruleId) => ruleId.startsWith("pipelex/"));
 }
 
-const PROBE = "packages/core/src/capabilities/probe.ts";
+const PROBE = "src/capabilities/probe.ts";
 
 describe("the Pipelex API boundary lint rules", () => {
   it("refuse constructing an SDK client outside the factory, however it is imported", async () => {
@@ -52,12 +52,10 @@ describe("the Pipelex API boundary lint rules", () => {
     ].join("\n");
 
     expect(await boundaryViolations(code, PROBE)).toEqual(["pipelex/sdk-client-factory"]);
-    expect(
-      await boundaryViolations(code, "packages/core/src/capabilities/upload-ceiling.ts"),
-    ).toEqual([]);
+    expect(await boundaryViolations(code, "src/capabilities/upload-ceiling.ts")).toEqual([]);
   });
 
-  it("refuse a bare fetch outside the third-party fetch boundary", async () => {
+  it("refuse a bare fetch outside the files exempted from it", async () => {
     const code = [
       'export const a = fetch("https://api.pipelex.com/v1/version");',
       'export const b = globalThis.fetch("https://api.pipelex.com/health");',
@@ -71,15 +69,10 @@ describe("the Pipelex API boundary lint rules", () => {
       "pipelex/no-raw-fetch",
       "pipelex/no-raw-fetch",
     ]);
-    expect(
-      await boundaryViolations(code, "packages/core/src/capabilities/attachment-fetch.ts"),
-    ).toEqual([]);
     // The graph page's live check fetches its pinned CDN files; the shipped
     // module it checks is not exempt.
-    expect(
-      await boundaryViolations(code, "packages/core/src/capabilities/graph-page.e2e.ts"),
-    ).toEqual([]);
-    expect(await boundaryViolations(code, "packages/core/src/capabilities/graph-page.ts")).toEqual([
+    expect(await boundaryViolations(code, "src/capabilities/graph-page.e2e.ts")).toEqual([]);
+    expect(await boundaryViolations(code, "src/capabilities/graph-page.ts")).toEqual([
       "pipelex/no-raw-fetch",
       "pipelex/no-raw-fetch",
     ]);
@@ -93,9 +86,7 @@ describe("the Pipelex API boundary lint rules", () => {
     const injected =
       "export const run = (fetcher: { fetch(u: string): void }) => fetcher.fetch('x');";
 
-    expect(await boundaryViolations(factory, "packages/core/src/capabilities/shared.ts")).toEqual(
-      [],
-    );
+    expect(await boundaryViolations(factory, "src/capabilities/shared.ts")).toEqual([]);
     expect(await boundaryViolations(injected, PROBE)).toEqual([]);
   });
 });

@@ -1,32 +1,30 @@
 # Tools reference
 
-Pipelex MCP is two servers with two tool sets. The console, the hosted Pipelex connector (server name `pipelex`), registers `pipelex_*` tools; the workshop, the Pipelex plugin's local stdio server (server name `pipelex-plugin`), registers `mthds_*` tools. No tool name is registered by both. This page gives every tool's input, its `structuredContent`, and how it behaves. Full contracts (verdict discipline, `_meta` channels, view behavior) live in [`SPEC.md`](../SPEC.md).
+The workshop is the Pipelex plugin's local MCP server, published to npm as `@pipelex/mcp` under the server name `pipelex-plugin`: a coding agent spawns it over stdio in your project, and it registers the `mthds_*` tools below. This page gives every tool's input, its `structuredContent`, and how it behaves; [Registering the workshop in a host](hosts.md) gives each host's configuration, and the full contracts (verdict discipline, the `_meta` channel) live in [`SPEC.md`](../SPEC.md). Chat hosts do not run the workshop: they use the Pipelex connector at `https://mcp.pipelex.com/mcp`, a separate product ([Chat hosts use the Pipelex connector](../README.md#chat-hosts-use-the-pipelex-connector)).
 
-## Which server registers which tool
+## The tools at a glance
 
-| What it does | Console (`pipelex`) | Workshop (`pipelex-plugin`) |
-| --- | --- | --- |
-| List the saved methods | `pipelex_list_methods` | `mthds_list_methods` |
-| Show a method: signature, inputs template, graph and form | `pipelex_show_method` | none |
-| Validate a method | none | `mthds_validate` |
-| Project an inputs template | inside `pipelex_show_method` | `mthds_inputs_template` |
-| Generate typed code | none | `mthds_codegen` |
-| Prepare filled inputs | inside `pipelex_run` | `mthds_prepare_inputs` |
-| Ingest a chat attachment | `pipelex_upload_attachments` (ChatGPT) | none |
-| Grant the run form an upload | `pipelex_request_upload` (called by the view) | none |
-| Start, follow and read a run | `pipelex_run`, `pipelex_run_status`, `pipelex_run_results` | `mthds_run`, `mthds_run_status`, `mthds_run_results` |
-| Show a run's pictures | `pipelex_show_images` | `mthds_show_images` |
-| Save a run to disk | none | `mthds_download_artifacts` |
-| Save a method to the catalog, and pull one back | none | `mthds_save_method`, `mthds_get_method` |
-| List the model deck and check a model reference | none | `mthds_models` |
+| What it does | Tool |
+| --- | --- |
+| List the saved methods | `mthds_list_methods` |
+| List the model deck and check a model reference | `mthds_models` |
+| Validate a method | `mthds_validate` |
+| Project an inputs template | `mthds_inputs_template` |
+| Generate typed code | `mthds_codegen` |
+| Prepare filled inputs | `mthds_prepare_inputs` |
+| Start, follow and read a run | `mthds_run`, `mthds_run_status`, `mthds_run_results` |
+| Show a run's pictures | `mthds_show_images` |
+| Save a run to disk | `mthds_download_artifacts` |
+| Save a method's draft to the catalog, and pull a draft or a version back | `mthds_save_method`, `mthds_get_method` |
+| Publish a method's draft as its next version, when the user asks | `mthds_publish_method` |
 
-A chatbot runs methods; it does not author them. So the console names a method by reference only, a saved method's catalog id or a published method's address, and none of its tools takes `files`. It has no validate, inputs template, codegen or prepare tool: `pipelex_show_method` reports whether a method can run and hands over its inputs template, and `pipelex_run` puts its own file inputs in the shape the run needs. The workshop keeps every tool, because writing, repairing and integrating a method needs its files. The tools only one server has each turn on something the other lacks: `pipelex_upload_attachments` takes an attachment reference that only ChatGPT substitutes, `pipelex_request_upload` is called by a view and the workshop has none, and `mthds_download_artifacts`, `mthds_save_method` and `mthds_get_method` read or write the working directory only the workshop has. `mthds_models` serves the writing of a pipe's `model` field, which a chatbot never does.
+## The tools
 
-## The console's tools (`pipelex`)
+Every call runs on the `plx_sk_` key in `PIPELEX_API_KEY`. The method-taking tools take a method three ways: `files`, a published method's address as `method_ref`, or a catalog id as `method_id`. `files` uses `SubmittedFileInput`, `{ content: string; uri?: string | null } | { path: string }`, described in [Files on the workshop, by path](../README.md#files-on-the-workshop-by-path).
 
-Every console call runs on the caller's own sign-in, so the catalog it sees and the runs it spends are the signed-in organization's.
+**A `method_id` names a content, not just a method.** A saved method has a draft, which every save writes, and published versions numbered from 1, which only a publish makes. A bare `mt_…` names the latest published version, `mt_…@<n>` version n, and `mt_…@draft` the draft; beside `files` on `mthds_run` the id must be bare. The workshop works against platforms that resolve the suffix and ones that do not yet: it sends every selector exactly as given on both, so a platform that does not resolve the suffix refuses it, and the refusal's hint says that a bare id reads the draft there. It asks `GET /v1/version` whether `method_versions` is among its extensions only to say what a bare id read. Every by-id result says which content it read or ran, in `method_version` and in its summary: a number, `"draft"`, or `"latest"` for a bare id on a platform that resolves versions. `SPEC.md` → "Method versions, on two platforms" has the whole rule, including the caching and what happens when the platform does not answer. The workshop registers no views, so every `available_view_specs` it returns is empty and none of its results carries the graph or a form on `_meta`; `mthds_validate` writes the method's flowchart as an HTML page instead (see [the method graph page](#mthds_validate)).
 
-### `pipelex_list_methods`
+### `mthds_list_methods`
 
 ```ts
 // input
@@ -52,7 +50,7 @@ Every console call runs on the caller's own sign-in, so the catalog it sees and 
 }
 ```
 
-The console's read-only, no-view catalog entry point; the workshop's `mthds_list_methods` has the same shape. Search and paging are the server's job: `query` is applied across the whole organization catalog rather than over one page, and rows arrive already ordered newest first by the immutable `created_at` the catalog pages on. Continue a listing by passing the returned `next_cursor` back as `cursor`. Names are bounded to 200 Unicode code points and descriptions to 500, with explicit truncation flags. Empty catalogs and no-match queries are successful empty results.
+The read-only catalog entry point, over the API key's organization. Search and paging are the server's job: `query` is applied across the whole organization catalog rather than over one page, and rows arrive already ordered newest first by the immutable `created_at` the catalog pages on. Continue a listing by passing the returned `next_cursor` back as `cursor`. Names are bounded to 200 Unicode code points and descriptions to 500, with explicit truncation flags. Empty catalogs and no-match queries are successful empty results.
 
 There is deliberately no total: counting a catalog means reading all of it, which is the cost paging exists to avoid.
 
@@ -61,151 +59,9 @@ The projection is deliberately source-free: `mthds`, Python, stored inputs and o
 Name-to-run flow:
 
 ```text
-pipelex_list_methods({ query: "invoice" })
-  → choose/disambiguate method_id
-  → pipelex_show_method({ method_id })            # signature, template, and on a view host the graph and form
-  → fill the template, or the user fills the form
-  → pipelex_run({ method_id, pipe_ref, inputs })
-```
-
-No method source crosses the conversation in this flow.
-
-### `pipelex_show_method`
-
-```ts
-// input — exactly ONE of method_id / method_ref
-{
-  method_id?: string;   // catalog id (mt_…) of a saved method — shows its CURRENT stored content
-  method_ref?: string;  // published method address — github.com/<owner>/<repo>[/<selector>][@<tag>]
-  pipe_ref?: string;    // qualified domain.pipe_code; omitted → the method's entry pipe
-}
-
-// structuredContent
-{
-  status: "ok" | "error";
-  method_id?: string;                // echoed selector
-  method_ref?: string;
-  is_valid: boolean;
-  is_runnable: boolean;              // pipelex_run can execute it
-  pipe_ref?: string;                 // the pipe the signature and template are for — pass it to pipelex_run
-  main_pipe?: MainPipeSignature;     // the same signature mthds_validate returns, below
-  inputs?: Record<string, unknown>;  // the fill-in template, runnable methods only
-  pending_signatures: string[];
-  validation_errors?: unknown[];
-  available_view_specs: Array<"dry_run_graph" | "input_form">;
-  errors?: ToolError[];
-}
-```
-
-The console's one way to look at a method before running it. The model gets the pipe's signature and a fill-in inputs template in the explicit `{ concept, content }` shape, ready to fill and pass to `pipelex_run`; on a host that renders views, the user gets the `run-graph` view, with the method's graph and an input form whose Run button starts the run from the view, which then shows the run's output in the form's place. Nothing executes and no inference credit is spent. It reads one `POST /v1/pipe-io` for the whole method, which loads the method without a dry run, so a method that does not load, or whose signatures are still pending, comes back as not runnable with the reason, and no template; a method whose dry run would fail is only found out when its run fails. `pipe_ref` shows another pipe than the entry pipe; a bare or unknown one is refused, naming the pipes the method declares.
-
-The graph is the method's static graph, drawn on the server from the method's files by `@pipelex/mthds-ui`'s static builder, starting at the pipe the show is for: the `pipe_ref` you named, else the entry pipe, which for a published package whose manifest names a `main_pipe` is that pipe. With neither, it starts at the first `main_pipe` the method's files declare, so a pipe clicked there can still open a form, and files that declare none give no graph. Only the graph ships: the method's source never leaves the server. A method that does not validate comes with no graph. The graph and the form's artifacts ride the view-only `_meta` channel and never reach the model; the view token that announces the graph is still called `dry_run_graph`.
-
-The summary tells the model who goes first. If the user already gave the input values, it fills the template and calls `pipelex_run` straight away. Otherwise it stops and lets the user choose between the form, where the host shows one, and giving the values in chat, and it never calls `pipelex_run` while the user may be filling in the form, since the method would run twice. Which of the two hosts it is on comes from the console's instructions, which differ between a host that renders views and one that does not. See `SPEC.md` → "Show Method Scope".
-
-### `pipelex_upload_attachments`
-
-```ts
-// input — the host fills this in; never construct one yourself
-{
-  attachments: Array<{
-    download_url: string;   // required — the host's signed HTTPS URL
-    file_id: string;        // required — e.g. "sediment://file_0000…"
-    mime_type?: string;
-    file_name?: string;
-  }>;
-}
-
-// structuredContent
-{
-  status: "ok" | "error";
-  is_valid: boolean;                  // true only when EVERY attachment ingested
-  attachments?: Array<{
-    file_id: string;
-    file_name?: string;
-    uri?: string;                     // the pipelex-storage:// reference, on success
-    content_type?: string;
-    size?: number;                    // decoded bytes
-    error?: ToolError;                // per-item failure
-  }>;
-  uploads?: string[];                 // the successful uris
-  errors?: ToolError[];               // no-verdict only
-}
-```
-
-Registered on the console, and populated by **ChatGPT only** — see [Chat attachments](../README.md#chat-attachments-chatgpt-only) for the flow and the 7 MiB cap, and the fetch boundary below. The four-field attachment shape is mandated, not chosen: OpenAI's app review requires exactly these properties with exactly this required/optional split, and the host's runtime substitution is gated on the same schema — so a deliberately lenient variant would never be populated. **Partial success is a produced verdict**: `status: "ok"` with `is_valid: false`, the successful `uploads` returned alongside per-item errors rather than discarded. No Skybridge view — the returned URIs are small structured data the model reads directly, repeated in the `content` summary.
-
-**Attachment fetch boundary.** Fetching a host-supplied URL from a public endpoint is an SSRF surface, so the fetch is a deny-by-default policy: `https:` only; the host must be `oaiusercontent.com` at the apex or on any subdomain (OpenAI's own locked domain — where live attachment traffic is served), or `oaisdmntpr<azure-region>.blob.core.windows.net` (where it used to be, and where the `oaisdmntpr` prefix stays **required**, because that suffix is multi-tenant and a suffix-only rule would admit any Azure customer's storage account); no credentials in the URL, no non-default port; redirects refused; the size cap enforced from `content-length` before the body is read *and* again mid-stream; a bounded timeout; no headers forwarded; non-2xx refused. Because these hosts are undocumented vendor infrastructure that changes without notice — it already has once — the cap, the timeout, and the no-redirect rule hold on their own; the host check is a filter, not the defence.
-
-### `pipelex_request_upload`
-
-Called by the `run-graph` view, never by the model.
-
-```ts
-// input — the file's description, never its bytes
-{ filename: string; content_type?: string; size: number }
-
-// structuredContent — the grant's URL and signed headers ride _meta.upload_grant
-{
-  status: "ok" | "error";
-  uri?: string;          // the pipelex-storage:// reference, once the file is sent
-  expires_at?: string;   // after which storage refuses the upload
-  max_bytes?: number;    // the upload cap (50 MiB)
-  errors?: ToolError[];
-}
-```
-
-The `run-graph` view's input form calls it when the user picks a file for a file-bearing input, then sends the file itself with `@pipelex/sdk/upload`'s `uploadWithGrant`: the bytes go from the browser straight to the app bucket, crossing neither the conversation, the host's relay, this server nor the API gateway, which is why a file up to 50 MiB is accepted here while an attachment stops at 7 MiB. The grant is a one-time, create-only permission to write one object, so it rides the view-only `_meta` channel and never `structuredContent`. The tool is declared `_meta.ui.visibility: ["app"]`, so a host that honours the MCP Apps standard never offers it to the model. See `SPEC.md` → "Run-Form Upload Scope".
-
-### `pipelex_run`
-
-```ts
-// input — exactly ONE of method_id / method_ref
-{
-  method_id?: string;                // catalog id (mt_…) — runs the method's CURRENT stored content
-  method_ref?: string;               // published address — resolved server-side at the tag
-  pipe_ref?: string;                 // qualified domain.pipe_code, as pipelex_show_method reports it; omitted → the entry pipe
-  inputs?: Record<string, unknown>;  // pipelex_show_method's template, filled
-}
-
-// structuredContent
-{
-  status: "ok" | "error";
-  run_id?: string;                   // the durable run id — the handle for everything else
-  run_status?: RunStatus;
-  created_at?: string;
-  method_provenance?: { address: string; tag: string | null; commit_sha: string };  // method_ref runs only
-  available_view_specs: Array<"live_run_status">;
-  errors?: ToolError[];
-}
-```
-
-Starts a durable run of a method named by reference and returns its `run_id` at once, never blocking. There is no `files` argument: a saved method runs by its catalog id, and its **current** stored content runs, since methods are not versioned; a published method runs by its address, and the commit the tag resolved to comes back as `method_provenance`. `pipe_ref` rides the run as its `pipe_code`, and only when the caller named one; it must be qualified (`domain.pipe_code`), and a bare one is refused before any call.
-
-When `inputs` is given, the tool checks them against the pipe's declared signature before the run starts, read from the MTHDS input-form descriptor that one `POST /v1/pipe-io` returns (no dry run), and reshapes them itself: a file input takes an `http(s)` URL or a `pipelex-storage://` reference, and each one is put in the `{ url }` content the run expects, the explicit `{ concept, content }` envelope preserved. It never uploads: a local path, a `data:` URL or inline bytes is refused before anything starts, with a hint to pass a URL or a storage reference, and a file the user attached in the chat goes through `pipelex_upload_attachments` first. During that check, a method whose bundle does not validate is refused at the selector with a hint to call `pipelex_show_method` for the diagnostics, and a `pipe_ref` the method does not declare, or a method with no single entry pipe, is refused at `pipe_ref`; with no inputs there is no check, and the start's own errors apply. A start that failed in a way that may still have created the run (a timeout, a connection lost after sending, a 500, 502, 504 or 408) is reported as not retryable, because starting it again would be a second paid run. It executes the method on the hosted Pipelex API and spends inference credit. On a host that renders views, the `run-follow` card follows the run live, shows its output when it is over, rendered by the form kernel's result viewer, and hands the conversation back to the model. See `SPEC.md` → "`pipelex_run` and its input walk".
-
-### `pipelex_run_status` / `pipelex_run_results`
-
-The console's names for the run lifecycle reads, with the contract of `mthds_run_status` and `mthds_run_results` below. On the console, a completed result also carries the full output, the executed graph and the artifacts that describe its data on the view-only `_meta` channel, which is what lets both views render the output and show each graph node's actual value, plus `_meta.resolved_urls`, a fresh link for each stored file the output and the graph reference, minted at read time, which is what the views paint images and preview documents from, with `_meta.resolved_urls_partial` set when a request for them failed in a way that may pass (a timeout, an unreachable API, a 5xx, a 408 or a 429) so that some went without one, which the views read the results again for; the summary names `pipelex_show_images` when the run stored pictures; and an unknown run id reads as a run not visible to your organization. There is no download tool on the console: the user saves a run's output and files from the view's download controls, which deliver through the host, or from the app's UI.
-
-### `pipelex_show_images`
-
-The console's name for the image tool, with the contract of [`mthds_show_images`](#mthds_show_images) below.
-
-## The workshop's tools (`pipelex-plugin`)
-
-Every workshop call runs on the `plx_sk_` key in `PIPELEX_API_KEY`. The method-taking tools take a method three ways: `files`, a published method's address as `method_ref`, or a catalog id as `method_id`. `files` uses `SubmittedFileInput`, `{ content: string; uri?: string | null } | { path: string }`, described in [Files on the workshop, by path](../README.md#files-on-the-workshop-by-path). The workshop registers no views, so every `available_view_specs` it returns is empty and none of its results carries the graph or a form on `_meta`; `mthds_validate` writes the method's flowchart as an HTML page instead (see [the method graph page](#mthds_validate)).
-
-### `mthds_list_methods`
-
-The same input and result as `pipelex_list_methods`, over the API key's organization.
-
-Name-to-run flow:
-
-```text
 mthds_list_methods({ query: "invoice" })
   → choose/disambiguate method_id
-  → mthds_validate({ method_id })                 # optional current-content check
+  → mthds_validate({ method_id })                 # optional check of the version that will run
   → mthds_inputs_template({ method_id })
   → fill inputs; prepare/upload assets if needed
   → mthds_run({ method_id, inputs })
@@ -219,12 +75,12 @@ Lists the model deck, the references a pipe's `model` field can name, or checks 
 
 ```ts
 {
-  category?: "llm" | "extract" | "img_gen" | "search";
+  category?: "llm" | "extract" | "img_gen" | "search" | "judgment";
   reference?: string; // at most 199 characters
 }
 ```
 
-`category` narrows either use to the references of one pipe type: `llm` for a PipeLLM, `extract` for a PipeExtract, `img_gen` for a PipeImgGen and `search` for a PipeSearch. Without `reference`, the tool lists the deck:
+`category` narrows either use to the references of one pipe type: `llm` for a PipeLLM, `extract` for a PipeExtract, `img_gen` for a PipeImgGen, `search` for a PipeSearch and `judgment` for a PipeJudge. These are the MTHDS protocol's categories, and a runner that implements an older protocol than the one that defined a category refuses it as a filter, as a runner before protocol 0.7.0 refuses `judgment`; omit `category` to list what that runner serves. Without `reference`, the tool lists the deck:
 
 ```ts
 {
@@ -239,7 +95,7 @@ Lists the model deck, the references a pipe's `model` field can name, or checks 
 }
 ```
 
-Every reference is written the way a method writes it, and every category in scope is present, empty or not. Presets pair a model with settings for a kind of task and are the ones to prefer. The deck names no model handle on its own: a handle appears only as an alias's target or a waterfall's step.
+Every reference is written the way a method writes it, and every category in scope is present, empty or not. A category the tool does not know, which a runner of a later protocol may report, is not dropped: a listing of every category shows it after the protocol's under the runner's own name, a check resolves in it, and the summary says the tool does not know which pipe type names it. Presets pair a model with settings for a kind of task and are the ones to prefer. The deck names no model handle on its own: a handle appears only as an alias's target or a waterfall's step.
 
 With `reference`, the tool checks that reference, which may be a preset (`$`), an alias (`@`), a waterfall (`~`), a bare model handle, or any of them with the `preset:`, `alias:`, `waterfall:` or `handle:` prefix the runner also accepts. A check reads the whole deck, so it can tell a reference written into the wrong pipe type from one that does not exist:
 
@@ -252,7 +108,7 @@ With `reference`, the tool checks that reference, which may be a preset (`$`), a
   resolution: "resolved" | "not_found" | "unconfirmed";
   matches: Array<{ category: string; target?: string; fallbacks?: string[]; via?: string[] }>;
   suggestions: string[];      // the nearest names, e.g. "$writing-factual" for "$writing-factul"
-  other_kinds: string[];      // the same name under another sigil, e.g. "@best-claude" for "best-claude"
+  other_kinds: string[];      // the same name under another sigil, e.g. "@best-gpt" for "best-gpt"
   other_categories: string[]; // with a category: where the reference resolves instead
 }
 ```
@@ -306,11 +162,11 @@ With `reference`, the tool checks that reference, which may be a preset (`$`), a
 }
 ```
 
-`main_pipe` is the main pipe's typed signature — what an agent needs to write a call site against a method whose source it never sees (a `method_ref` or `method_id` call), instead of guessing the produced concept. It is present on every valid verdict for which the server settled an effective entry pipe — for a published method, the one its manifest names — pending signatures included, on the workshop as much as the console: it does not ride the views branch. Its absence means no entry pipe was settled, not that the method declares none. Any malformed member omits the whole signature rather than emitting a partial one; the verdict is unaffected. The same thing is rendered as one line of the Markdown summary, `demo.main(document: legal.Contract, notes?: native.Text, tags: native.Text[]) -> analysis.Report[2]` (`?` may be omitted, `[]` a list, `[N]` exactly N).
+`main_pipe` is the main pipe's typed signature — what an agent needs to write a call site against a method whose source it never sees (a `method_ref` or `method_id` call), instead of guessing the produced concept. It is present on every valid verdict for which the server settled an effective entry pipe — for a published method, the one its manifest names — pending signatures included. Its absence means no entry pipe was settled, not that the method declares none. Any malformed member omits the whole signature rather than emitting a partial one; the verdict is unaffected. The same thing is rendered as one line of the Markdown summary, `demo.main(document: legal.Contract, notes?: native.Text, tags: native.Text[]) -> analysis.Report[2]` (`?` may be omitted, `[]` a list, `[N]` exactly N).
 
 `output.images` answers "will this method produce pictures?" before anything runs. It lists where images sit inside the produced output, as paths from its root: `$` is the output itself, `$.name` a field of it, `$[]` an element of a list, `$[].name` a field of one — so a top-level `Image` output is `["$"]`, an `Image[]` is `["$[]"]`, and the question is `images.length > 0`. It is read from the MTHDS standard's output-form descriptor, which the capability requests from the API, so it costs nothing at run time. An empty array and an absent member are **different answers**: `[]` means the output was described and holds no image, while absence means nothing described it — unknown, not none. The rendered summary line says it too, as a trailing ` (produces images)`.
 
-The graph and the form's artifacts are view-only data, and the workshop renders no views, so a workshop verdict never carries them; on the console, `pipelex_show_method` reads them from `POST /v1/pipe-io` instead, projects them by the same rules and delivers them to the `run-graph` view. The MCP `content` text is the API's rendered summary, with the signature line appended. The three source forms are **mutually exclusive — supply exactly one**. `method_ref` validates a published method by its address (`github.com/<owner>/<repo>[/<selector>][@<tag>]`, e.g. `github.com/Pipelex/methods/documents@v0.1.0`); `method_id` validates a registered method by its catalog id (requires an API key, since the catalog is org-scoped). Both are **server pass-throughs**: the selector rides the `/v1/validate` body and the hosted API resolves it — no method source enters the conversation.
+The MCP `content` text is the API's rendered summary, with the signature line appended. The three source forms are **mutually exclusive — supply exactly one**. `method_ref` validates a published method by its address (`github.com/<owner>/<repo>[/<selector>][@<tag>]`, e.g. `github.com/Pipelex/methods/documents@v0.1.0`); `method_id` validates a registered method by its catalog id, the content its suffix names (requires an API key, since the catalog is org-scoped). Both are **server pass-throughs**: the selector rides the `/v1/validate` body and the hosted API resolves it — no method source enters the conversation.
 
 **The method graph page.** The workshop shows no views, so it gives the builder the flowchart as a file instead: when every item of `files` is a `{ path }`, the call writes `method-graph.html` into the directory holding them (the deepest one holding them all, when they span several) and reports it under `graph_page`. The page embeds the `.mthds` files as validated and loads `@pipelex/mthds-ui`'s standalone viewer and elkjs from jsDelivr, pinned by exact version and Subresource Integrity, and the viewer builds the static graph in the browser, the way a Mermaid page carries its diagram's text. So it opens from disk with no server and no Pipelex install, needs a network connection to draw, and draws a method that does not validate too, with the notes reading its source turned up. It is written whatever the verdict, even when the API produced none, and each validation of the files rewrites it, so it never shows an older version of the method. The write goes through the workshop's write boundary and follows `mthds_codegen`'s policy rather than the download tool's: it replaces only a page carrying its own generator mark, and a file it did not write at that name, a symlink or a directory is left untouched and reported as `graph_page.error`. A page that could not be written never changes the verdict. Inline `{ content }` files, `method_ref` and `method_id` write nothing, and `graph_page: false` skips the page. The summary's `## Method graph` section says where the page is, and on its first write that it is a generated file a project under version control may want to ignore.
 
@@ -341,7 +197,7 @@ The graph and the form's artifacts are view-only data, and the workshop renders 
 }
 ```
 
-`pipe_ref` is a qualified `domain.pipe_code`; omit it for the method's entry pipe — a package manifest's `main_pipe`, else the closure's single `main_pipe` declaration. A `pipe_ref` the method does not declare, and a method with no single entry pipe, are refused at `pipe_ref` with the route's reason. `explicit` (default true) emits the ceremonial `{concept, content}` envelope per input — the declared concept ref plus the canonical content shape; pass `false` for the light shape (bare example values). `format` (default `"json"`) chooses the template encoding. The three source forms are **mutually exclusive — supply exactly one**. `method_ref` projects a published method by address, resolved server-side; `method_id` projects a registered method's current stored content, resolved by the hosted platform (requires an API key, since the catalog is org-scoped). The tool reads one `POST /v1/pipe-io`, with no dry run, and projects the template client-side from the pipe's input-form descriptor, with the same helper as the console's `pipelex_show_method`; a closure that does not load comes back as a produced `is_valid: false` verdict with its `validation_errors`. No Skybridge view — the template is small structured data the model reads directly, and the `content` summary repeats it in a fenced block, followed by the next step: `mthds_prepare_inputs`, or straight to `mthds_run` when every file value is already a URL or a `pipelex-storage://` reference.
+`pipe_ref` is a qualified `domain.pipe_code`; omit it for the method's entry pipe — a package manifest's `main_pipe`, else the closure's single `main_pipe` declaration. A `pipe_ref` the method does not declare, and a method with no single entry pipe, are refused at `pipe_ref` with the route's reason. `explicit` (default true) emits the ceremonial `{concept, content}` envelope per input — the declared concept ref plus the canonical content shape; pass `false` for the light shape (bare example values). `format` (default `"json"`) chooses the template encoding. The three source forms are **mutually exclusive — supply exactly one**. `method_ref` projects a published method by address, resolved server-side; `method_id` projects the content a registered method's id names (see above), resolved by the hosted platform (requires an API key, since the catalog is org-scoped). The tool reads one `POST /v1/pipe-io`, with no dry run, and projects the template client-side from the pipe's input-form descriptor; a closure that does not load comes back as a produced `is_valid: false` verdict with its `validation_errors`. The template is small structured data the model reads directly, and the `content` summary repeats it in a fenced block, followed by the next step: `mthds_prepare_inputs`, or straight to `mthds_run` when every file value is already a URL or a `pipelex-storage://` reference.
 
 ### `mthds_codegen`
 
@@ -381,7 +237,7 @@ Projects the method's concept set into typed models through the Pipelex codegen 
 
 **Pass `output_dir`** — a dedicated generated directory relative to the working directory, such as `src/generated/<method>/`. The tool writes the artifacts and `codegen.lock` there verbatim and returns no file content at all: `output_dir`, `written_to` per file, `is_current` and any `orphans` instead. It overwrites files it generated (they carry a codegen stamp) and the lock beside them, and refuses the whole write rather than touch anything else — a symlink, a directory, or a file it did not write. Orphans, a stamped file the new lock does not list, are reported and never deleted, so a directory holding two generations stays non-current by design; give each generation its own directory.
 
-**Without `output_dir`**, write every artifact at its path and the lock as `codegen.lock` beside them, **verbatim**, into a dedicated generated directory; `pipelex codegen check` (or `runCodegenCheck` from `@pipelex/sdk`) then passes on that tree. The `content` summary repeats each file in a fenced block tagged for its language. A large set is withheld by whole file rather than cut (`truncated: true`, `content` absent on the withheld entries; the lock's bytes are reserved first, so the trust anchor always rides). No Skybridge view.
+**Without `output_dir`**, write every artifact at its path and the lock as `codegen.lock` beside them, **verbatim**, into a dedicated generated directory; `pipelex codegen check` (or `runCodegenCheck` from `@pipelex/sdk`) then passes on that tree. The `content` summary repeats each file in a fenced block tagged for its language. A large set is withheld by whole file rather than cut (`truncated: true`, `content` absent on the withheld entries; the lock's bytes are reserved first, so the trust anchor always rides).
 
 ### `mthds_prepare_inputs`
 
@@ -406,13 +262,13 @@ Projects the method's concept set into typed models through the Pipelex codegen 
 }
 ```
 
-Sits between `mthds_inputs_template` (produces the empty template) and `mthds_run` (executes the filled inputs): it makes file-bearing inputs run-ready. The pipe's declared signature identifies which values are assets — read from the MTHDS standard's **input-form descriptor**, which states the kind of every input at every depth, so an optional nested file field prepares like a required one and a text field merely *named* `url` stays untouched. Each asset is uploaded to Pipelex storage and rewritten to `pipelex-storage://`. `http(s)` URLs and existing `pipelex-storage://` references pass through unchanged, so an inputs set that is already all pass-through can skip this step. All three selectors are resolved server-side, by the one `POST /v1/pipe-io` the signature comes from, which runs no dry run and, for an address, fetches only the package's `.mthds` files, so a published package that ships Python prepares on any deployment. Omitting `pipe_ref` prepares the method's entry pipe; a method with no single entry pipe, or a `pipe_ref` it does not declare, is refused at `pipe_ref` with the route's reason. Local paths, `data:` URLs and inline bytes are uploaded with your API key. No Skybridge view — the prepared inputs are small structured data the model reads directly, repeated in the `content` summary. Unlike the other tools this has **no produced-invalid arm**: an unresolvable closure is a no-verdict `status: "error"` (recover via `mthds_validate` / `mthds_inputs_template`). See `SPEC.md` → "Prepare Inputs Scope" for the full contract.
+Sits between `mthds_inputs_template` (produces the empty template) and `mthds_run` (executes the filled inputs): it makes file-bearing inputs run-ready. The pipe's declared signature identifies which values are assets — read from the MTHDS standard's **input-form descriptor**, which states the kind of every input at every depth, so an optional nested file field prepares like a required one and a text field merely *named* `url` stays untouched. Each asset is uploaded to Pipelex storage and rewritten to `pipelex-storage://`. `http(s)` URLs and existing `pipelex-storage://` references pass through unchanged, so an inputs set that is already all pass-through can skip this step. All three selectors are resolved server-side, by the one `POST /v1/pipe-io` the signature comes from, which runs no dry run and, for an address, fetches only the package's `.mthds` files, so a published package that ships Python prepares on any deployment. Omitting `pipe_ref` prepares the method's entry pipe; a method with no single entry pipe, or a `pipe_ref` it does not declare, is refused at `pipe_ref` with the route's reason. Local paths, `data:` URLs and inline bytes are uploaded with your API key. The prepared inputs are small structured data the model reads directly, repeated in the `content` summary. Unlike the other tools this has **no produced-invalid arm**: an unresolvable closure is a no-verdict `status: "error"` (recover via `mthds_validate` / `mthds_inputs_template`). See `SPEC.md` → "Prepare Inputs Scope" for the full contract.
 
 ### `mthds_run` / `mthds_run_status` / `mthds_run_results`
 
-Durable (async) method execution on the hosted Pipelex API. `mthds_run` starts a run — from submitted files (`files?`, plus `pipe_code?` and `inputs?`), from a published method's address (`method_ref?` — `github.com/<owner>/<repo>[/<selector>][@<tag>]`, resolved server-side with the resolved commit SHA echoed back as `method_provenance`), or from a registered method's catalog id (`method_id?`, mt_…) — and returns a durable `run_id` immediately (never blocks); `mthds_run_status` is a cheap read of the coarse lifecycle state; `mthds_run_results` fetches the terminal outcome (main output on success, why it failed otherwise) along with a compact run-level `usage` object — its `state` (`records`, `no_inference` or `unavailable`), total USD cost (null-aware), tokens, inference-call count and any usage-assembly error — projected from the SDK's `summarizeUsage`. The per-pipe rollup and the full per-call record list ride the view-only `_meta` (`_meta.usage_by_pipe` / `_meta.tokens_usages`) for a future detailed-cost surface, and usage never appears in the prose. On the console, a completed result also carries the executed graph and the artifacts that describe its data on the same channel, for its run card; the workshop, which has no views, carries none of them and does not ask the platform for them: each results read names the artifacts it uses, so the platform reads nothing the tool would drop. A by-id run executes the method's **current** stored content (methods are not versioned) and requires an API key; when both `files` and `method_id` are supplied, the files run and the id is recorded as run-history linkage on the platform. `method_ref` is a complete run source of its own and pairs with nothing — beside `files` or `method_id` the request is refused. All run state lives behind the durable `run_id` on the platform, so the flow survives conversation gaps — days later, the same id still answers. These are plain tools, with no view. See `SPEC.md` → "Run Scope" for the full contract.
+Durable (async) method execution on the hosted Pipelex API. `mthds_run` starts a run — from submitted files (`files?`, plus `pipe_code?` and `inputs?`), from a published method's address (`method_ref?` — `github.com/<owner>/<repo>[/<selector>][@<tag>]`, resolved server-side with the resolved commit SHA echoed back as `method_provenance`), or from a registered method's catalog id (`method_id?`, mt_…) — and returns a durable `run_id` immediately (never blocks); `mthds_run_status` is a cheap read of the coarse lifecycle state; `mthds_run_results` fetches the terminal outcome (main output on success, why it failed otherwise) along with a compact run-level `usage` object — its `state` (`records`, `no_inference` or `unavailable`), total USD cost (null-aware), tokens, inference-call count and any usage-assembly error — projected from the SDK's `summarizeUsage`. The per-pipe rollup and the full per-call record list ride the view-only `_meta` (`_meta.usage_by_pipe` / `_meta.tokens_usages`) for a future detailed-cost surface, and usage never appears in the prose. A completed result carries neither the executed graph nor the artifacts that describe its data, and the tool does not ask the platform for them: each results read names the artifacts it uses, so the platform reads nothing the tool would drop. A by-id run executes the content its `method_id` names — a bare id the latest published version, `@<n>` that version, `@draft` the draft — requires an API key, and reports what ran in `method_version`, which `mthds_run_status` also carries when the platform records it; when both `files` and `method_id` are supplied, the files run and the id, which must then be bare, is recorded as run-history linkage on the platform. `method_ref` is a complete run source of its own and pairs with nothing — beside `files` or `method_id` the request is refused. All run state lives behind the durable `run_id` on the platform, so the flow survives conversation gaps — days later, the same id still answers. See `SPEC.md` → "Run Scope" for the full contract.
 
-The pipe selector is `pipe_code` here and `pipe_ref` on `mthds_inputs_template` / `mthds_prepare_inputs` (and on every console tool) — the same qualified `domain.pipe_code` value under the name each underlying route uses; each description names the other, so copying the value across the two calls is expected.
+The pipe selector is `pipe_code` here and `pipe_ref` on `mthds_inputs_template` / `mthds_prepare_inputs` — the same qualified `domain.pipe_code` value under the name each underlying route uses; each description names the other, so copying the value across the two calls is expected.
 
 A completed `mthds_run_results` also reports, for free, what the run **stored**: `image_candidates` lists the `pipelex-storage://` references whose key looks like an image, and the prose says how many stored files there are and what can be done with them. Nothing is fetched to produce it — the walk is in memory over the full output, so a reference pruned out of the bounded `main_stuff` still appears. The list is capped at 32 entries, with any remainder counted in `image_candidates_omitted`; the cap is a prefix, so an index into it still means the same thing to `mthds_show_images`, which walks the whole set. **The results tool never returns an image itself, and takes no flag that would make it**; showing a picture is `mthds_show_images` below.
 
@@ -433,11 +289,11 @@ A completed `mthds_run_results` also reports, for free, what the run **stored**:
 }
 ```
 
-The summary says it in sentences: why the run failed (the report's title and message), what to do (the report's advice, or a sentence chosen by its `kind`, and never the runner's "the system will retry automatically", which is untrue of a run that has ended), whether running it again can help (only when the report says, never a retry when it says no, and a no worded as the report's expectation rather than a certainty), and a line for support with the run id, the error type and the time the run ended. The provider's raw metadata is never carried, the message is cut at 2,000 code points and every other text at 300, and a `wait_and_retry` action carries this server's own advice in `structuredContent` too. A run with no stored report, such as one the platform timed out itself, carries its status alone and says so. The results, image and download tools read the report from the results route's failed arm when it relays one, and otherwise from one status read of the same run, bounded at five seconds, which is also where the time comes from; when that read fails and the arm carried nothing, the summary says the reason is unknown for now rather than that the run stored none. On the console, the views show the person why the run failed, what to do and the support line with a Copy button, and never the report's message.
+The summary says it in sentences: why the run failed (the report's title and message), what to do (the report's advice, or a sentence chosen by its `kind`, and never the runner's "the system will retry automatically", which is untrue of a run that has ended), whether running it again can help (only when the report says, never a retry when it says no, and a no worded as the report's expectation rather than a certainty), and a line for support with the run id, the error type and the time the run ended. The provider's raw metadata is never carried, the message is cut at 2,000 code points and every other text at 300, and a `wait_and_retry` action carries this server's own advice in `structuredContent` too. A run with no stored report, such as one the platform timed out itself, carries its status alone and says so. The results, image and download tools read the report from the results route's failed arm when it relays one, and otherwise from one status read of the same run, bounded at five seconds, which is also where the time comes from; when that read fails and the arm carried nothing, the summary says the reason is unknown for now rather than that the run stored none.
 
 ### `mthds_show_images`
 
-Put the pictures a completed run produced in front of the model, as MCP **image content blocks**. The console's `pipelex_show_images` has the same contract.
+Put the pictures a completed run produced in front of the model, as MCP **image content blocks**.
 
 ```ts
 // input
@@ -508,20 +364,20 @@ Every completed save writes the run's **full** main output to `main_stuff.json`,
 
 A completed run's results also carry a produced image, PDF or document with a `pipelex-storage://` reference beside a presigned `public_url` that expires within the hour. Pass the run id here instead of racing that link: every reference in the run's full output is resolved to a *fresh* link through the API and streamed into a file beside `main_stuff.json`, so the same call still works days later. The walk, the links and the download are `@pipelex/sdk`'s artifact stack (`locateArtifacts`, `downloadArtifacts`), so the tool needs a Pipelex platform serving the bulk resolve route (`POST /v1/resolve-storage-url/bulk`); a bare `pipelex-api` runner has none.
 
-Each file is named after the field it fills in the output: the picture at `$.rooms[3].staged_photo.url` is saved as `rooms-3-staged_photo.png`, and an output that is one image as `main_stuff.png`. The storage key supplies only the extension. Each entry's `found_at` lists the paths in `main_stuff.json` where its reference sits, the first being the one that named the file; an output that repeats one reference lists the first few and counts the rest in `found_at_omitted`. Files are **never overwritten**: a collision gets a numeric suffix, `main_stuff.json` included, and since the output is written first, a produced file never takes its name. `dir` cannot escape the working directory (no absolute paths, no `..`, no symlink out). Plain `http:` links are accepted only against a plain-http `PIPELEX_BASE_URL` unless `PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP` says otherwise. A `running` or `failed` run is a produced verdict with nothing to save, a failed one saying why it failed as `mthds_run_results` does, and partial success is a produced verdict with the failures on their items. On the workshop, every completed `mthds_run_results` summary names this tool as the way to keep the run, and a truncated one names it as the way to read the rest. See `SPEC.md` → "Artifact Download Scope" for the full contract and the reasoning behind a companion tool rather than a flag on `mthds_run_results`.
+Each file is named after the field it fills in the output: the picture at `$.rooms[3].staged_photo.url` is saved as `rooms-3-staged_photo.png`, and an output that is one image as `main_stuff.png`. The storage key supplies only the extension. Each entry's `found_at` lists the paths in `main_stuff.json` where its reference sits, the first being the one that named the file; an output that repeats one reference lists the first few and counts the rest in `found_at_omitted`. Files are **never overwritten**: a collision gets a numeric suffix, `main_stuff.json` included, and since the output is written first, a produced file never takes its name. `dir` cannot escape the working directory (no absolute paths, no `..`, no symlink out). Plain `http:` links are accepted only against a plain-http `PIPELEX_BASE_URL` unless `PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP` says otherwise. A `running` or `failed` run is a produced verdict with nothing to save, a failed one saying why it failed as `mthds_run_results` does, and partial success is a produced verdict with the failures on their items. Every completed `mthds_run_results` summary names this tool as the way to keep the run, and a truncated one names it as the way to read the rest. See `SPEC.md` → "Artifact Download Scope" for the full contract and the reasoning behind a companion tool rather than a flag on `mthds_run_results`.
 
-### `mthds_save_method` / `mthds_get_method`
+### `mthds_save_method` / `mthds_get_method` / `mthds_publish_method`
 
-Two tools carry a bundle between the working directory and the organization's catalog: `mthds_save_method` saves the files on disk as a method, creating one or updating one, and `mthds_get_method` brings a saved method's files back. A save whose root file is a `{ path }` item, or that names a `link_dir`, writes `pipelex-method.json` there, and so does a pull with `output_dir`; that link file ties a directory to the method it was saved as. Commit it, so that a teammate's save from the same directory updates the same method instead of creating a second one. A save sent inline with no `link_dir`, and a pull without `output_dir`, write no link, so the next save must pass `method_id` or it creates a second method; `link_file.written` on the save's result says which happened. Every `{ path }` item, `python` included, must sit at or under the root file's directory, and the root file must itself be a `{ path }` for any other item to be read from disk.
+Three tools carry a bundle between the working directory and the organization's catalog: `mthds_save_method` saves the files on disk as a method's draft, creating the method or writing the draft of an existing one; `mthds_get_method` brings back a saved method's draft, or one of its published versions; and `mthds_publish_method` makes the draft the method's next published version, which is what callers of its bare id run. A save never publishes, so a save never changes what those callers run on a platform that resolves versions; the publish is called only when the user asks for one. A save whose root file is a `{ path }` item, or that names a `link_dir`, writes `pipelex-method.json` there, and so does a pull with `output_dir`; that link file ties a directory to the method it was saved as. Commit it, so that a teammate's save from the same directory writes the same method's draft instead of creating a second method. A save sent inline with no `link_dir`, and a pull without `output_dir`, write no link, so the next save must pass `method_id` or it creates a second method; `link_file.written` on the save's result says which happened. Every `{ path }` item, `python` included, must sit at or under the root file's directory, and the root file must itself be a `{ path }` for any other item to be read from disk.
 
 ```ts
 // mthds_save_method — input
 {
   files: SubmittedFileInput[];    // the bundle's .mthds files, ROOT FILE FIRST — { path } items to link the directory
-  name: string;                   // the catalog name; on an update, a changed name is a rename
-  method_id?: string;             // absent creates; present updates THAT method
+  name?: string;                  // required on a create; on an update, omitted keeps the name and a changed one renames
+  method_id?: string;             // absent creates; present writes THAT method's draft (bare, or mt_…@draft)
   python?: SubmittedFileInput[];  // the bundle's .py files, replaced as a set
-  expected_updated_at?: string;   // the stored updated_at this save believes it is overwriting
+  expected_updated_at?: string;   // the draft token to compare-and-swap on; defaults to the link file's
   link_dir?: string;              // where to write pipelex-method.json; defaults to the root file's directory when that file is a { path } item — an inline-only save with no link_dir writes no link
 }
 
@@ -533,21 +389,24 @@ Two tools carry a bundle between the working directory and the organization's ca
   pending_signatures?: string[];
   method_id?: string;
   name?: string;
-  saved?: "created" | "updated" | "renamed";   // renamed = updated with a changed name
-  updated_at?: string;
+  saved?: "created" | "updated" | "renamed";   // renamed = the draft written and the method renamed
+  updated_at?: string;                          // the draft's new token
+  latest_version?: number | null;               // null: never published
+  publish_state?: "never_published" | "draft_unchanged" | "draft_ahead";
   api_host?: string;
   link_file?: { path: string; written: boolean; reason?: string };
+  rename_error?: ToolError;                     // the draft was saved; the rename was not
   validation_errors?: unknown[];
   errors?: ToolError[];
 }
 ```
 
-`mthds_save_method` validates the files and saves those same bytes in one call; an invalid bundle is an `is_valid: false` verdict that saves nothing and writes nothing. The root file goes first because the platform derives the method's listed description from it. `name` is required on an update as on a create, because the platform rewrites the whole row. Omitting `python` keeps the stored Python, `[]` clears it, and files replace the set. `expected_updated_at` is a best-effort precondition, not an atomic one, since the platform offers no compare-and-swap. A directory already linked to another method is refused rather than re-pointed, and a create is never retried automatically, because a retry after a lost response would create a second method. No source comes back.
+`mthds_save_method` validates the files and saves those same bytes as the draft in one call, with the verdict beside the save: an invalid bundle is saved all the same, as `is_valid: false` with its `validation_errors`, because a draft is work in progress and a publish is where validity is required. Only a validation that produced no verdict refuses the save. The root file goes first because the platform derives the method's listed description from it. The draft write carries neither the name nor the form inputs, so both are kept: a different `name` renames the method through a call of its own, and a failed rename leaves the draft saved and says so in `rename_error`. A name that is the one `pipelex-method.json` recorded before the method was renamed elsewhere, in the webapp or by a teammate, keeps the stored name instead of undoing that rename; the summary says so, and since the link then records the stored name, saving again with the older name renames the method back. Omitting `python` keeps the draft's Python, `[]` clears it, and files replace the set. The write is a compare-and-swap on the draft's token: `expected_updated_at` when given, and otherwise the linked directory's `synced_updated_at`, so a save from a linked directory never replaces a draft somebody saved since the directory synced, the webapp's autosave included. Such a save is refused at `expected_updated_at` with both tokens named; to replace that draft knowingly, after asking the user, pass its current `updated_at`. A link that cannot vouch for the draft is refused rather than read as no token: one that cannot be read, or whose last pull never finished, at `link_dir`, and one holding a pulled version, at `expected_updated_at`, since saving it is a restore. A `link_dir` naming another directory changes where the link is written, not these guards: when the link beside the files names the same method, its refusals still apply, its token is sent when `link_dir` offers none, and two links recording different syncs are refused at `link_dir`. A rename keeps the draft write's token, so a save by somebody else between the two calls is never adopted as this one. A directory already linked to another method is refused rather than re-pointed, and a create is never retried automatically, because a retry after a lost response would create a second method. No source comes back; the summary names `mt_…@draft` as the id that validates or runs what was saved, and the publish call for when the user asks for one.
 
 ```ts
 // mthds_get_method — input
 {
-  method_id: string;
+  method_id: string;     // bare or mt_…@draft: the draft; mt_…@<n>: version n
   output_dir?: string;   // write the sources here; omitted, they come back inline
   overwrite?: boolean;   // only meaningful with output_dir; see the linked-directory rule
 }
@@ -557,7 +416,10 @@ Two tools carry a bundle between the working directory and the organization's ca
   status: "ok" | "error";
   method_id?: string;
   name?: string;
-  updated_at?: string;
+  version?: number | "draft";                   // which content was read
+  updated_at?: string;                          // the draft's token, whichever content was read
+  latest_version?: number | null;
+  publish_state?: "never_published" | "draft_unchanged" | "draft_ahead";
   api_host?: string;
   files?: Array<{ name: string; bytes: number; content?: string; written_to?: string }>;
   python?: Array<{ name: string; bytes: number; content?: string; written_to?: string }>;
@@ -570,11 +432,43 @@ Two tools carry a bundle between the working directory and the organization's ca
 }
 ```
 
-**With `output_dir`**, `mthds_get_method` writes the method's `.mthds` and `.py` files verbatim under the working directory, with the link file beside them, and no source passes through the conversation. It refuses rather than overwrite work it does not own. A directory not linked to this method is written only when it holds none of the files the pull would land and no bundle of its own, and one linked to another method is refused outright. In a directory linked to this method, files that differ from the stored ones are refused as unsaved local work while the stored method has not moved, and refused without `overwrite: true` once it has, which the caller sends only after asking the user. A symlinked destination is refused. Files in the directory that the method does not have are named in `unmanaged` and never deleted. **Without `output_dir`**, the sources come back inline, bounded by whole file, for explaining a method the model cannot see on disk. See `SPEC.md` → "Catalog Write Scope" for the full contract.
+**With `output_dir`**, `mthds_get_method` writes the content's `.mthds` and `.py` files verbatim under the working directory, with the link file beside them, and no source passes through the conversation. It refuses rather than overwrite work it does not own. A directory not linked to this method is written only when it holds none of the files the pull would land and no bundle of its own, and one linked to another method is refused outright. In a directory linked to this method, files that differ from the pulled ones are refused as unsaved local work while the draft has not moved, and refused without `overwrite: true` once it has, which the caller sends only after asking the user; files whose bytes the catalog already stores, as the draft's or as the version the directory last pulled, are written over freely. A pull of a version records it in the link as `synced_version`, and saving from that directory with the draft's token as `expected_updated_at` is how a version is restored: the save replaces the draft with those files and publishes nothing, and without the token it is refused, so a version pulled to be read is never saved over the draft by accident. A version whose files are exactly the draft's is recorded as no version, since the directory then holds the draft, and a save from it needs no token. The restore sends `python` as the version's `.py` files, or `[]` when it has none, since an omitted `python` keeps the draft's. A symlinked destination is refused. Files in the directory that the method does not have are named in `unmanaged` and never deleted. **Without `output_dir`**, the sources come back inline, bounded by whole file, for explaining a method the model cannot see on disk.
+
+```ts
+// mthds_publish_method — input
+{
+  method_id: string;                  // bare, or mt_…@draft; a version is refused
+  expected_draft_updated_at: string;  // the draft token you last saw — required
+}
+
+// mthds_publish_method — structuredContent
+{
+  status: "ok" | "error";
+  outcome?: "published" | "unchanged" | "refused";
+  method_id?: string;
+  name?: string;
+  version?: number;                    // published and unchanged
+  published_at?: string;
+  crate_fingerprint?: string | null;
+  reason?: "invalid" | "not_runnable"; // refused
+  message?: string;
+  is_valid?: boolean;
+  is_runnable?: boolean;
+  pending_signatures?: string[];
+  validation_errors?: unknown[];
+  updated_at?: string;                 // the draft's token
+  latest_version?: number | null;
+  publish_state?: "never_published" | "draft_unchanged" | "draft_ahead";
+  api_host?: string;
+  errors?: ToolError[];
+}
+```
+
+`mthds_publish_method` publishes the draft its caller has seen: a draft that moved since `expected_draft_updated_at` is refused at that field, with the draft's current token named, and nothing is published. The token is the updated_at of a save or of a pull of the draft; a pull of a version reports the draft's token without its content, for a restore only, so it is never one to publish under. Each outcome is a produced verdict: `published` with the new version, which `mt_…@<n>` names for good; `unchanged` when the draft already equals the latest version, so nothing was added; and `refused` with the runner's verdict when the draft does not validate or does not run yet. It is annotated destructive, since it changes what every caller of the bare id runs and a published version is never taken back. See `SPEC.md` → "Catalog Write Scope" for the full contract of the three tools.
 
 ## Result streams
 
-Every result carries its machine contract on `structuredContent` and a Markdown summary on `content`. What the model need not read rides `_meta`, which a host does not put in front of it: on both servers a completed run's full output and its per-call usage records, and a valid verdict's entry pipe (`main_pipe_ref`), and on the console the graph, the form's artifacts and the fresh links its views paint files from. `structuredContent.available_view_specs` names the views a result can drive. [SPEC.md](../SPEC.md#the-result-streams) states the rule.
+Every result carries its machine contract on `structuredContent` and a Markdown summary on `content`. What the model need not read rides `_meta`, which a host does not put in front of it: a completed run's full output and its per-call usage records, and a valid verdict's entry pipe (`main_pipe_ref`). [SPEC.md](../SPEC.md#the-result-streams) states the rule.
 
 ## Success and verdict discipline
 

@@ -1,5 +1,5 @@
 /**
- * The length budget for the texts a host puts in front of the model: each
+ * The length budget for the texts a host puts in front of the model: the
  * server's `instructions` and each tool's `description`.
  *
  * Claude Code cuts MCP server instructions and each tool description at 2,048
@@ -16,7 +16,7 @@
  * Lengths are counted in Unicode code points (`[...text].length`), which is
  * how the cut was measured. The arithmetic lives here, and not in
  * `scripts/check-tool-texts.ts`, so the hermetic suite covers it; the script
- * only builds both servers, reads what they emit, and reports.
+ * only builds the server, reads what it emits, and reports.
  */
 
 /** Where Claude Code cuts a server's instructions and each tool description. */
@@ -25,19 +25,15 @@ export const HOST_TEXT_CAP = 2048;
 /** The budget every model-facing text is held to, with headroom under the cap. */
 export const TOOL_TEXT_CEILING = 1800;
 
-/** One text as a shell emitted it, before shells that emit it identically are merged. */
+/** One text as the server emits it. */
 export interface EmittedText {
-  /** The shell that emitted it: `console` or `workshop`. */
-  shell: string;
   /** What the text is: `instructions`, or the name of the tool it describes. */
   name: string;
   text: string;
 }
 
-/** One distinct text, measured against the ceiling. */
+/** One text, measured against the ceiling. */
 export interface TextBudgetEntry {
-  /** Every shell that emits this exact text, in first-seen order. */
-  shells: string[];
   name: string;
   /** Length in Unicode code points. */
   length: number;
@@ -49,40 +45,17 @@ export function textLength(text: string): number {
   return [...text].length;
 }
 
-/**
- * Measure every emitted text against the ceiling, largest first.
- *
- * A text two shells emit identically — the description of a tool both shells
- * register, while their two tables still word it alike — is one entry naming
- * both shells, so the report does not list it twice. The same name with different texts stays two
- * entries: that is the case for the two shells' instructions.
- */
+/** Measure every emitted text against the ceiling, largest first, then by name. */
 export function budgetEmittedTexts(
   texts: readonly EmittedText[],
   ceiling: number = TOOL_TEXT_CEILING,
 ): TextBudgetEntry[] {
-  const merged = new Map<string, { shells: string[]; name: string; text: string }>();
-  for (const { shell, name, text } of texts) {
-    const key = JSON.stringify([name, text]);
-    const existing = merged.get(key);
-    if (existing) {
-      if (!existing.shells.includes(shell)) existing.shells.push(shell);
-    } else {
-      merged.set(key, { shells: [shell], name, text });
-    }
-  }
-
-  return [...merged.values()]
-    .map(({ shells, name, text }) => {
+  return texts
+    .map(({ name, text }) => {
       const length = textLength(text);
-      return { shells, name, length, headroom: ceiling - length };
+      return { name, length, headroom: ceiling - length };
     })
-    .sort(
-      (a, b) =>
-        b.length - a.length ||
-        a.name.localeCompare(b.name) ||
-        a.shells.join().localeCompare(b.shells.join()),
-    );
+    .sort((a, b) => b.length - a.length || a.name.localeCompare(b.name));
 }
 
 /** The entries over the ceiling. A text exactly at it is within budget. */

@@ -8,12 +8,12 @@
  * the ceiling sits where it does and owns the arithmetic, which the hermetic
  * suite tests.
  *
- * It measures what the two servers actually EMIT, not the source constants:
+ * It measures what the workshop actually EMITS, not the source constants:
  * some descriptions are assembled from parts (codegen's target rule is derived
  * from its target profiles), and a host sees only the assembled string. So it
- * builds both shells in process, exactly as the shell tests do,
- * connects a client to each over an in-memory transport, and reads the
- * `instructions` from `initialize` and every `description` from `tools/list`.
+ * builds the server in process, exactly as the shell tests do, connects a
+ * client to it over an in-memory transport, and reads the `instructions` from
+ * `initialize` and every `description` from `tools/list`.
  * Nothing here touches the network or a build output, which is why
  * `npm run check` can run it before `build`.
  *
@@ -30,9 +30,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 
-import { createHostedServer } from "../packages/console/src/hosted/server.js";
-import { TEST_OAUTH } from "../packages/console/src/hosted/test-oauth.js";
-import { createLocalServer } from "../packages/workshop/src/server.js";
+import { createLocalServer } from "../src/server.js";
 import {
   HOST_TEXT_CAP,
   TOOL_TEXT_CEILING,
@@ -55,39 +53,21 @@ interface ConnectableServer {
 
 type ListedTool = Awaited<ReturnType<Client["listTools"]>>["tools"][number];
 
-interface ShellReading {
-  shell: string;
+interface ServerReading {
   instructions: string;
   tools: ListedTool[];
   /** UTF-8 bytes of the whole `tools/list` result as the host receives it. */
   toolsListBytes: number;
 }
 
-/**
- * What a host that renders MCP Apps views declares at `initialize`. The console
- * tailors its instructions per handshake, so each variant is its own emitted
- * text, and the one a views host receives is read through this declaration.
- */
-const VIEWS_HOST_CAPABILITIES = {
-  extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] } },
-};
-
-async function readShell(
-  shell: string,
-  server: ConnectableServer,
-  capabilities: ConstructorParameters<typeof Client>[1] = undefined,
-): Promise<ShellReading> {
+async function readServer(server: ConnectableServer): Promise<ServerReading> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client(
-    { name: "pipelex-mcp-check-tool-texts", version: "0.0.0" },
-    capabilities,
-  );
+  const client = new Client({ name: "pipelex-mcp-check-tool-texts", version: "0.0.0" });
   await server.connect(serverTransport);
   await client.connect(clientTransport);
   try {
     const listed = await client.listTools();
     return {
-      shell,
       instructions: client.getInstructions() ?? "",
       tools: listed.tools,
       toolsListBytes: jsonBytes(listed),
@@ -111,70 +91,45 @@ function label(name: string): string {
 }
 
 async function main(): Promise<void> {
-  const readings = [
-    await readShell("console", createHostedServer(TEST_OAUTH)),
-    await readShell("workshop", createLocalServer()),
-  ];
-  // The console's other instructions variant: only the instructions differ,
-  // so only they are read off this handshake.
-  const viewsHost = await readShell("console (views host)", createHostedServer(TEST_OAUTH), {
-    capabilities: VIEWS_HOST_CAPABILITIES,
-  });
+  const { instructions, tools, toolsListBytes } = await readServer(createLocalServer());
 
   const emitted: EmittedText[] = [
-    ...readings.flatMap(({ shell, instructions, tools }) => [
-      { shell, name: "instructions", text: instructions },
-      ...tools.map((tool) => ({ shell, name: tool.name, text: tool.description ?? "" })),
-    ]),
-    { shell: viewsHost.shell, name: "instructions", text: viewsHost.instructions },
+    { name: "instructions", text: instructions },
+    ...tools.map((tool) => ({ name: tool.name, text: tool.description ?? "" })),
   ];
   const entries = budgetEmittedTexts(emitted);
 
   say(
-    `Model-facing texts, as each shell emits them: ceiling ${formatCount(TOOL_TEXT_CEILING)} ` +
+    `Model-facing texts, as the workshop emits them: ceiling ${formatCount(TOOL_TEXT_CEILING)} ` +
       `code points (Claude Code cuts at ${formatCount(HOST_TEXT_CAP)}).`,
   );
   say();
-  say(`${"length".padStart(7)}  ${"headroom".padStart(8)}  ${"shells".padEnd(17)}  text`);
+  say(`${"length".padStart(7)}  ${"headroom".padStart(8)}  text`);
   for (const entry of entries) {
     say(
       `${formatCount(entry.length).padStart(7)}  ${formatCount(entry.headroom).padStart(8)}  ` +
-        `${entry.shells.join("+").padEnd(17)}  ${label(entry.name)}`,
+        label(entry.name),
     );
   }
 
   say();
   say("Schema weight in UTF-8 bytes, for information only (no ceiling):");
   say();
-  // One row per tool whose schemas both shells emit at the same size, as for the texts.
-  const schemaRows = new Map<
-    string,
-    { name: string; shells: string[]; input: number; output: number }
-  >();
-  for (const { shell, tools } of readings) {
-    for (const tool of tools) {
-      const input = jsonBytes(tool.inputSchema);
-      const output = jsonBytes(tool.outputSchema);
-      const key = `${tool.name}:${input}:${output}`;
-      const row = schemaRows.get(key);
-      if (row) row.shells.push(shell);
-      else schemaRows.set(key, { name: tool.name, shells: [shell], input, output });
-    }
-  }
-  say(`${"input".padStart(7)}  ${"output".padStart(7)}  ${"shells".padEnd(17)}  tool`);
-  const sortedRows = [...schemaRows.values()].sort(
-    (a, b) => b.input + b.output - (a.input + a.output),
-  );
-  for (const row of sortedRows) {
+  const schemaRows = tools
+    .map((tool) => ({
+      name: tool.name,
+      input: jsonBytes(tool.inputSchema),
+      output: jsonBytes(tool.outputSchema),
+    }))
+    .sort((a, b) => b.input + b.output - (a.input + a.output));
+  say(`${"input".padStart(7)}  ${"output".padStart(7)}  tool`);
+  for (const row of schemaRows) {
     say(
-      `${formatCount(row.input).padStart(7)}  ${formatCount(row.output).padStart(7)}  ` +
-        `${row.shells.join("+").padEnd(17)}  ${row.name}`,
+      `${formatCount(row.input).padStart(7)}  ${formatCount(row.output).padStart(7)}  ${row.name}`,
     );
   }
   say();
-  for (const { shell, toolsListBytes } of readings) {
-    say(`tools/list payload, ${shell}: ${formatCount(toolsListBytes)} bytes`);
-  }
+  say(`tools/list payload: ${formatCount(toolsListBytes)} bytes`);
 
   const over = overCeiling(entries);
   say();
@@ -185,7 +140,7 @@ async function main(): Promise<void> {
   say(`FAIL: ${over.length} text(s) over the ${formatCount(TOOL_TEXT_CEILING)} ceiling:`);
   for (const entry of over) {
     say(
-      `  ${entry.shells.join("+")} ${label(entry.name)}: ${formatCount(entry.length)} ` +
+      `  ${label(entry.name)}: ${formatCount(entry.length)} ` +
         `(${formatCount(-entry.headroom)} over)`,
     );
   }

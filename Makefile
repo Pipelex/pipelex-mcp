@@ -1,48 +1,20 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint format format-check typecheck test agent-test test-watch test-coverage smoke live-preflight test-e2e test-e2e-run test-all seed-e2e-fixture te check check-no-local-deps check-release-ready check-workshop-released check-console-released build build-local all clean dev dev-local inspect-local dev-tunnel start deploy deploy-prod deploy-dev deploy-staging deploy-envs alpic-deploy publish c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
+.PHONY: help install lint format format-check typecheck test agent-test test-watch test-coverage smoke live-preflight test-e2e test-e2e-run test-all seed-e2e-fixture te check check-no-local-deps check-publishable check-release-ready check-workshop-released build-local all clean dev-local inspect-local publish c t use-local use-npm use-local-ui use-npm-ui use-local-sdk use-npm-sdk ul un
 
 # Sibling checkouts for live development of our npm dependencies (see use-local / use-npm).
 # @pipelex/sdk lives in the js/ directory of the pipelex-sdk monorepo.
 MTHDS_UI_DIR := ../mthds-ui
 PIPELEX_SDK_DIR := ../pipelex-sdk/js
 
-# The port the hosted console's dev server listens on. Skybridge defaults to
-# 3000 and, finding it busy, walks up to the next free port. That reflex is
-# exactly wrong for this console: the WorkOS Resource Indicator names the port
-# (`http://localhost:<port>/` becomes the token's `aud`), so a console that
-# drifted to 3001 booted cleanly and then failed every tool call at audience
-# verification — and 3000 is busy whenever any Next.js app in the workspace is
-# running. `dev` / `dev-tunnel` pass `--port`, which turns the fallback off, and
-# the number is one nothing else in the workspace listens on ("MTHD" on a phone
-# keypad). It is the port to register in the WorkOS dashboard — the Resource
-# Indicator and the DevTools origin on the CORS list — and to name in `.env`'s
-# PIPELEX_MCP_RESOURCE_INDICATOR.
-#
-# It is exported, and the console recipes read it back from the shell rather
-# than from make, so it follows the same precedence as every other console
-# variable (see "The console dev loop" below): `make dev CONSOLE_PORT=<n>`
-# overrides it for one run, a `CONSOLE_PORT=<n>` line in `.env` sets it for
-# the checkout, and the shell environment or this default stands otherwise.
-export CONSOLE_PORT ?= 6843
-
 define HELP
-Manage pipelex-mcp located in $(CURDIR): an npm workspace holding the core
-(packages/core), the workshop published as @pipelex/mcp (packages/workshop)
-and the hosted console deployed to Alpic (packages/console).
+Manage pipelex-mcp located in $(CURDIR): the workshop, the local MCP server
+published to npm as @pipelex/mcp from this directory.
 Usage:
 
 make install        - Install dependencies
-make dev            - Start Skybridge dev server on port $(CONSOLE_PORT) unless .env sets CONSOLE_PORT (make dev VAR=... overrides both)
 make dev-local      - Start the local stdio server from TypeScript
 make inspect-local  - Open MCP Inspector against the local stdio server
-make dev-tunnel     - Start Skybridge dev server with tunnel (same port and .env rules as dev)
-make start          - Start the built console from its server bundle, as Alpic does
-make deploy         - Deploy the hosted console to Alpic Production (from a clean main; break-glass)
-make deploy-prod    - Same as deploy
-make deploy-staging - Deploy the working tree to the Alpic Staging console
-make deploy-dev     - Deploy the working tree to the Alpic Dev console
-make deploy-envs    - List this project's Alpic environments and their URLs
 make publish        - Publish the workshop, @pipelex/mcp, to npm (from a clean main; break-glass)
 
 make lint           - Run ESLint
@@ -64,14 +36,14 @@ make test-e2e-run     - Same, plus the run family (SPENDS INFERENCE CREDIT)
 make seed-e2e-fixture - Create/refresh the durable fixture methods the live suites need
 make test-all         - EVERY test: hermetic + smoke + live incl. run family (SPENDS CREDIT)
 
-make build          - Build the console (Skybridge app and its server bundle)
-make build-local    - Build the workshop, the npm-distributed stdio server
-make check          - Run lint, format check, typecheck, and build
+make build-local    - Build the workshop's executable, dist/main.js
+make check          - Run lint, format check, the text budgets, the build and typecheck
+make check-publishable - Refuse a dependency that may not be published (a sprint pin, a git or local source)
 make all            - Clean, check, and test
 make clean          - Remove generated artifacts
 make c              - Shorthand -> check
 
-make use-local      - Switch @pipelex/mthds-ui AND @pipelex/sdk to their sibling repos (file links), in every manifest naming them
+make use-local      - Switch @pipelex/mthds-ui AND @pipelex/sdk to their sibling repos (file links)
 make use-npm        - Switch both back to npm (latest)
 make use-local-ui   - Switch only @pipelex/mthds-ui to sibling ../mthds-ui
 make use-npm-ui     - Switch only @pipelex/mthds-ui back to npm [VERSION=x.y.z]
@@ -162,18 +134,18 @@ agent-test:
 #
 # They read their OWN pair, `PIPELEX_E2E_BASE_URL` and `PIPELEX_E2E_API_KEY`,
 # and never `PIPELEX_BASE_URL` / `PIPELEX_API_KEY`. Those two names belong to
-# every other tool and to the console's dev loop: a shell profile exporting the
+# every other tool and to the server itself: a shell profile exporting the
 # production pair for other tools aimed `make test-e2e` at production, and with
-# the shell clear it followed `.env`, which names whatever `make dev` is pointed
-# at. Neither is the deployment the durable fixture is seeded in, so every by-id
-# leg failed with a fixture miss that read like drift. `PIPELEX_E2E_BASE_URL` is
+# the shell clear it followed `.env`, which named whatever the local server was
+# pointed at. Neither is the deployment the durable fixture is seeded in, so
+# every by-id leg failed with a fixture miss that read like drift. `PIPELEX_E2E_BASE_URL` is
 # also the name the live suite of @pipelex/sdk, in pipelex-sdk/js, uses.
 #
 # The pair is resolved ONCE here and exported, so the URL these targets
-# preflight is the URL the suites call (`packages/core/src/capabilities/e2e-support.ts` reads
+# preflight is the URL the suites call (`src/capabilities/e2e-support.ts` reads
 # the same two names). Precedence is the make command line, then `.env`, then the
-# shell, then the default — `make dev`'s order, for the same reason: `.env` is
-# this checkout's own configuration and the shell is ambient. Each value is taken
+# shell, then the default, because `.env` is this checkout's own configuration
+# and the shell is ambient. Each value is taken
 # whole from the first source that sets it, and the preflight prints which one.
 #
 # The default is DEV, not production, and that is a statement about what these
@@ -293,115 +265,32 @@ test-all: live-preflight
 check: check-no-local-deps
 	npm run check
 
-# Every manifest in the workspace, since `use-local` links a package in each
-# member that declares it.
-MANIFESTS := package.json $(wildcard packages/*/package.json)
-
 check-no-local-deps:
-	@if grep -qE '"@pipelex/(mthds-ui|sdk)":[[:space:]]*"(file:|link:|portal:)' $(MANIFESTS); then \
-		grep -nE '"@pipelex/(mthds-ui|sdk)":[[:space:]]*"(file:|link:|portal:)' $(MANIFESTS); \
+	@if grep -qE '"@pipelex/(mthds-ui|sdk)":[[:space:]]*"(file:|link:|portal:)' package.json; then \
+		grep -nE '"@pipelex/(mthds-ui|sdk)":[[:space:]]*"(file:|link:|portal:)' package.json; \
 		echo "ERROR: a @pipelex dependency above is a local link. Run 'make use-npm' first."; exit 1; \
 	fi
 
-build:
-	npm run build
+# The publish guard, which `npm publish` also runs as the manifest's
+# `prepublishOnly` script, so every route to the registry passes through it:
+# `release.yml`, `make publish` and a bare `npm publish` alike. `make publish`
+# runs it as a prerequisite as well, since an npm configured with
+# `ignore-scripts` skips every lifecycle script. It is not part
+# of `make check`, which stays green while a sprint pin is deliberately in
+# place on a sprint branch. `scripts/publish-guard.ts` says what it refuses.
+check-publishable:
+	npm run check:publishable
 
 build-local:
-	npm run build:local
+	npm run build
 
 all: clean check test
 
+# `packages/*/dist` is the workspace layout's build output, which a checkout
+# built before the flatten still holds, untracked: a tool still pointed at
+# `packages/workshop/dist/main.js` would run that old workshop without a word.
 clean:
-	rm -rf coverage *.tsbuildinfo packages/*/dist packages/*/*.tsbuildinfo
-
-# --- The console dev loop ---
-# `make dev` runs THIS checkout's console, so `.env` is its configuration and
-# the ambient shell is not: the recipe sources `.env` ahead of `npm run dev`,
-# which lets a value in the file win over one the shell already exports, the
-# order the live targets above use for their own `PIPELEX_E2E_*` pair too. Here,
-# Node's `--env-file-if-exists` in `nodemon.json` cannot override an inherited
-# variable, and a `PIPELEX_BASE_URL` exported in a shell profile for other
-# tools was silently sending the console to a different deployment than the
-# one `.env` named. A variable given on the make command line
-# (`make dev PIPELEX_BASE_URL=http://localhost:8080`) is the one explicit
-# gesture and is put back after `.env`, so it still wins over both; the
-# env-prefix form (`PIPELEX_BASE_URL=... make dev`) is just the shell and
-# loses to `.env`. Precedence: make command line > .env > shell > the server's
-# own default — for CONSOLE_PORT too, which is why the recipes read the port
-# from the shell as `$CONSOLE_PORT` rather than from make. The recipe prints
-# the effective API target so a wrong one is visible at startup rather than
-# at the first failing tool call.
-#
-# The command-line overrides are put back by NAME, from the environment make
-# already exported them into: `_cli_X="$X"` before `.env` is sourced, then
-# `X="$_cli_X"; export X` after it. Only the names pass through make —
-# `$(MAKEOVERRIDES)` is a whitespace-split, escaped serialization, so a value
-# with a space or a quote cannot survive a trip through it — and a name cannot
-# contain whitespace, so any value survives.
-#
-# `.env` is read here by `sh`, before Node's `--env-file` ever sees it, and
-# Node never overrides an inherited value, so sh's reading is the one the
-# server gets. Keep the file to plain `KEY=value` lines (no `$`, `#`, spaces or
-# backticks inside a value; none of the console's keys carry any), because that
-# is where the two parsers agree. `set -a` exports the whole file to every
-# process under `npm run dev` — Skybridge, nodemon, tsc, Vite and, on
-# `dev-tunnel`, the `alpic tunnel` CLI — where before only the server process
-# read it. The file is dev-only and gitignored; that reach is the accepted cost
-# of the precedence.
-#
-# `dev-local` / `inspect-local` are left as they were: their npm scripts never
-# read `.env`, and the workshop is documented to run keyless from the
-# environment. `npm run dev` on its own keeps the plain `--env-file` behavior
-# and Skybridge's default port with its fallback.
-MAKE_CLI_VARS = $(sort $(foreach o,$(MAKEOVERRIDES),$(if $(findstring =,$(o)),$(firstword $(subst =, ,$(o))))))
-CONSOLE_DEV_ENV = $(foreach v,$(MAKE_CLI_VARS),_cli_$(v)="$$$(v)";) $(DOTENV) $(foreach v,$(MAKE_CLI_VARS),$(v)="$$_cli_$(v)"; export $(v);) echo "-> console API target: $${PIPELEX_BASE_URL:-https://api.pipelex.com (the server default)}";
-
-# Three refusals before the server starts, for the mistakes that would
-# otherwise surface only at the first tool call as "reconnect the connector and
-# sign in again" — or, for a held port, as Skybridge painting its UI while the
-# server underneath died on EADDRINUSE (a pinned port does not fall back).
-#
-#   - the port is not a number in range: named as such, rather than as "in use";
-#   - the port is held: `lsof` sees every listener on the port whatever address
-#     it bound, and the node probe behind it (a wildcard bind) covers a machine
-#     without `lsof`;
-#   - the Resource Indicator is a localhost origin that cannot match: either the
-#     port is right but the shape is wrong (no trailing slash, or a path such as
-#     `/mcp`), which gets its own message because the server's more exact one
-#     would otherwise be buried under Skybridge's UI, or the port differs — an
-#     indicator with no port means 80, and `[::1]` counts as localhost.
-#
-# The checks run in the shell that sourced `.env` and put the command-line
-# overrides back, so they see the port and the indicator the server will see.
-# A non-localhost indicator (a tunnel URL) is left alone: the tunnel forwards
-# to whatever port the console runs on.
-define CONSOLE_PORT_GUARD
-case "$$CONSOLE_PORT" in ''|*[!0-9]*) \
-	echo "error: CONSOLE_PORT must be a port number, got '$$CONSOLE_PORT'." >&2; exit 1 ;; \
-esac; \
-if [ "$$CONSOLE_PORT" -lt 1 ] || [ "$$CONSOLE_PORT" -gt 65535 ]; then \
-	echo "error: CONSOLE_PORT must be between 1 and 65535, got $$CONSOLE_PORT." >&2; exit 1; \
-fi; \
-if lsof -nP -iTCP:$$CONSOLE_PORT -sTCP:LISTEN >/dev/null 2>&1 || ! node -e 'const s=require("node:net").createServer();s.once("error",()=>process.exit(1));s.listen(Number(process.env.CONSOLE_PORT),()=>s.close(()=>process.exit(0)))'; then \
-	echo "error: port $$CONSOLE_PORT is already in use:" >&2; \
-	lsof -nP -iTCP:$$CONSOLE_PORT -sTCP:LISTEN >&2 2>/dev/null || true; \
-	echo "The console is pinned to $$CONSOLE_PORT because the WorkOS Resource Indicator names it, so it does not fall back to another port. Stop that process, or pass CONSOLE_PORT=<port> for a port registered in WorkOS." >&2; \
-	exit 1; \
-fi; \
-case "$${PIPELEX_MCP_RESOURCE_INDICATOR:-}" in \
-	http://localhost:$$CONSOLE_PORT/|http://127.0.0.1:$$CONSOLE_PORT/|http://\[::1\]:$$CONSOLE_PORT/|"") ;; \
-	http://localhost:$$CONSOLE_PORT|http://localhost:$$CONSOLE_PORT/*|http://127.0.0.1:$$CONSOLE_PORT|http://127.0.0.1:$$CONSOLE_PORT/*|http://\[::1\]:$$CONSOLE_PORT|http://\[::1\]:$$CONSOLE_PORT/*) \
-		echo "error: PIPELEX_MCP_RESOURCE_INDICATOR is $$PIPELEX_MCP_RESOURCE_INDICATOR: the port is right, but the indicator must be exactly the origin with a trailing slash and no path, http://localhost:$$CONSOLE_PORT/, because it has to byte-match the token's audience." >&2; \
-		exit 1 ;; \
-	http://localhost|http://localhost/*|http://localhost:*|http://127.0.0.1|http://127.0.0.1/*|http://127.0.0.1:*|http://\[::1\]*) \
-		echo "error: PIPELEX_MCP_RESOURCE_INDICATOR is $$PIPELEX_MCP_RESOURCE_INDICATOR, but the console listens on port $$CONSOLE_PORT (an indicator with no port means 80)." >&2; \
-		echo "The indicator becomes the token's audience, so every tool call would fail at audience verification. Set it to http://localhost:$$CONSOLE_PORT/ in .env (and register that port in the WorkOS dashboard), or pass CONSOLE_PORT=<port> to match it." >&2; \
-		exit 1 ;; \
-esac
-endef
-
-dev:
-	@$(CONSOLE_DEV_ENV) $(CONSOLE_PORT_GUARD); npm run dev -- --port "$$CONSOLE_PORT"
+	rm -rf coverage *.tsbuildinfo dist packages/*/dist
 
 dev-local:
 	npm run dev:local
@@ -409,107 +298,46 @@ dev-local:
 inspect-local:
 	npm run inspect:local
 
-dev-tunnel:
-	@$(CONSOLE_DEV_ENV) $(CONSOLE_PORT_GUARD); npm run dev:tunnel -- --port "$$CONSOLE_PORT"
-
-start:
-	npm run start
-
-# --- Release-only publish/deploy (break-glass) ---
+# --- Release-only publish (break-glass) ---
 # A release ships from the merge of its pull request into main, through
-# release.yml, one server at a time: a workshop release publishes to npm, a
-# console release deploys to Alpic (see docs/development.md "CI and releases"
-# and the /release skill). These two targets are the escape hatches for a CI outage,
-# and each ships one server only. check-release-ready demands a clean main, and
+# release.yml, which publishes the workshop to npm (see docs/development.md
+# "CI and releases" and the /release skill). `make publish` is the escape hatch
+# for a CI outage. check-release-ready demands a clean main, and
 # check-no-local-deps refuses a @pipelex file: link, which would ship a broken
-# install (npm) or fail to resolve on Alpic's build machine (deploy).
+# install; check-publishable runs the publish guard, which `npm publish` runs
+# again as `prepublishOnly`. `--ignore-scripts=false` keeps an npm configured
+# with `ignore-scripts` from skipping that and the `prepack` build, which would
+# publish whatever `dist/` already held.
 
 check-release-ready:
 	@current_branch="$$(git rev-parse --abbrev-ref HEAD)"; \
 	if [ "$$current_branch" != "main" ]; then \
-		echo "ERROR: must run from main (currently on $$current_branch). Publish/deploy only ship from main."; exit 1; \
+		echo "ERROR: must run from main (currently on $$current_branch). Publish only ships from main."; exit 1; \
 	fi
 	@if [ -n "$$(git status --porcelain)" ]; then \
-		echo "ERROR: working tree is not clean. Commit or stash changes before publishing/deploying."; exit 1; \
+		echo "ERROR: working tree is not clean. Commit or stash changes before publishing."; exit 1; \
 	fi
 	@git fetch -q origin main || { echo "ERROR: could not fetch origin/main, so nothing says this checkout is its tip."; exit 1; }; \
 	if [ "$$(git rev-parse HEAD)" != "$$(git rev-parse FETCH_HEAD)" ]; then \
-		echo "ERROR: HEAD is not origin/main's tip. Publish/deploy ship only main's tip: pull it, and if main has moved past the release you meant to ship, cut a new release instead."; exit 1; \
+		echo "ERROR: HEAD is not origin/main's tip. Publish ships only main's tip: pull it, and if main has moved past the release you meant to ship, cut a new release instead."; exit 1; \
 	fi
 
-# Each target also ships only from the commit that released its own track: the
-# merge whose first parent carried another version of that track. main moves past
-# that commit when the other server releases, and its tip then still carries this
-# track's released version with code that version never shipped, so a recovery
-# from the tip would put the wrong bytes under the right number. Past that point
-# the cure is a new release of the track, not a recovery. The rise must be strict,
-# so a revert that lowers the version never reads as a release, and
-# check-release-ready holds HEAD to origin/main's tip, so a stale local main
-# sitting on an older release commit cannot roll Production back.
-check-workshop-released: TRACK := workshop
-check-console-released: TRACK := console
-check-workshop-released check-console-released:
-	@now="$$(bash .github/scripts/track-version.sh $(TRACK) HEAD)" && \
-	before="$$(bash .github/scripts/track-version.sh $(TRACK) HEAD^)" || exit 1; \
+# The publish also ships only from the commit that released the workshop: the
+# merge whose first parent carried another version. A tip that did not raise
+# the version carries the released number with code that version never
+# shipped, so a recovery from it would put the wrong bytes under the right
+# number. Past that point the cure is a new release, not a recovery. The rise
+# must be strict, so a revert that lowers the version never reads as a
+# release, and check-release-ready holds HEAD to origin/main's tip.
+check-workshop-released:
+	@now="$$(bash .github/scripts/track-version.sh HEAD)" && \
+	before="$$(bash .github/scripts/track-version.sh HEAD^)" || exit 1; \
 	if [ "$$now" = "$$before" ] || [ "$$(printf '%s\n%s\n' "$$before" "$$now" | sort -V | tail -1)" != "$$now" ]; then \
-		echo "ERROR: HEAD did not raise the $(TRACK) version: it carries $(TRACK) $$now over its first parent's $$before. A break-glass ship runs only from the commit that raised the $(TRACK) version; once main has moved past it, cut a new $(TRACK) release instead."; exit 1; \
+		echo "ERROR: HEAD did not raise the workshop version: it carries $$now over its first parent's $$before. A break-glass publish runs only from the commit that raised the version; once main has moved past it, cut a new release instead."; exit 1; \
 	fi
 
-deploy: check-no-local-deps check-release-ready check-console-released
-	npm run deploy
-
-deploy-prod: deploy
-
-publish: check-no-local-deps check-release-ready check-workshop-released
-	npm publish --workspace @pipelex/mcp
-
-# --- The non-production consoles ---
-# `make deploy` above ships Production through the tracked `.alpic/project.json`,
-# exactly as release.yml does. These two name their environment explicitly and
-# drop the release guards: shipping a work branch to Dev or Staging is the point.
-# `check-no-local-deps` still applies — a @pipelex `file:` link does not resolve
-# on Alpic's build machine, so it would fail the build there instead of here.
-#
-# There is no Alpic git integration on this project. A deploy uploads the
-# WORKING TREE, not the branch the environment is named after, so the banner
-# says which branch (and whether it is dirty) is actually being shipped.
-#
-# Run `make deploy-envs` for the current ids; these are pinned so a deploy
-# needs no lookup, and a renamed or recreated environment fails loudly.
-ALPIC_PROJECT_ID := prj_csxv0ybe166jmf0kohzu8
-ALPIC_ENV_DEV := env_2jw695sbltlu6vzjjqyrx
-ALPIC_ENV_STAGING := env_mfgz1sycy0si0sdc9vsd4
-
-deploy-dev: check-no-local-deps
-	@$(MAKE) --no-print-directory alpic-deploy ALPIC_ENV_NAME=Dev ALPIC_ENV_ID=$(ALPIC_ENV_DEV)
-
-deploy-staging: check-no-local-deps
-	@$(MAKE) --no-print-directory alpic-deploy ALPIC_ENV_NAME=Staging ALPIC_ENV_ID=$(ALPIC_ENV_STAGING)
-
-deploy-envs:
-	npx alpic environment list --project-id $(ALPIC_PROJECT_ID)
-
-# Shared recipe behind deploy-dev / deploy-staging. The CLI relinks
-# `.alpic/project.json` to whatever environment it just deployed, and that file
-# is tracked, pins Production, and is the only thing telling release.yml (which
-# deploys with no ids of its own) where a release goes — so a leftover Dev link
-# would silently ship the next release to the wrong console.
-#
-# The restore is a `trap`, not a line after the CLI call, on purpose: the CLI
-# waits on the build for minutes, so Ctrl-C is the LIKELY way this recipe ends,
-# and a restore that only runs on a clean exit is exactly the one that misses.
-alpic-deploy:
-	@branch="$$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '(unknown)')"; \
-	dirty=""; \
-	if [ -n "$$(git status --porcelain 2>/dev/null)" ]; then dirty=" + uncommitted changes"; fi; \
-	echo "-> Deploying to the Alpic $(ALPIC_ENV_NAME) console ($(ALPIC_ENV_ID))"; \
-	echo "   shipping the working tree at $$branch$$dirty"; \
-	link=.alpic/project.json; \
-	if [ -f "$$link" ]; then \
-		backup="$$(mktemp)"; cp "$$link" "$$backup"; \
-		trap "if [ -f \$$backup ]; then if ! cmp -s \$$link \$$backup; then cp \$$backup \$$link; echo 'Restored .alpic/project.json — it stays pinned to Production for make deploy and release.yml.'; fi; rm -f \$$backup; fi" EXIT INT TERM; \
-	fi; \
-	npx alpic deploy --non-interactive --project-id $(ALPIC_PROJECT_ID) --environment-id $(ALPIC_ENV_ID)
+publish: check-no-local-deps check-release-ready check-workshop-released check-publishable
+	npm publish --ignore-scripts=false
 
 c: check
 t: test
@@ -519,18 +347,11 @@ te: test-e2e
 # use-local / use-npm act on BOTH @pipelex/mthds-ui and @pipelex/sdk.
 # The per-package targets act on one, and take VERSION=x.y.z to pin an npm version.
 #
-# Each package is installed into exactly the workspace members that declare it,
-# never into the root, and both go into all three members, which carry the same
-# range (tests/workspace-manifests.test.ts fails when they drift apart). npm
-# updates an entry in the block it already sits in, so a bump keeps @pipelex/sdk
-# in `dependencies` everywhere and @pipelex/mthds-ui in the core's and the
-# workshop's `devDependencies`: the console's views import it at runtime, while
-# the core imports only its `./static-graph` embed serializer, which tsup inlines
-# into the workshop's bundle. What reaches every `npx @pipelex/mcp` install is the
-# workshop's `dependencies` alone, so read the diff of
-# packages/workshop/package.json before committing a bump.
-UI_WORKSPACES := --workspace @pipelex/mcp-core --workspace @pipelex/mcp --workspace @pipelex/mcp-console
-SDK_WORKSPACES := --workspace @pipelex/mcp-core --workspace @pipelex/mcp --workspace @pipelex/mcp-console
+# npm updates an entry in the block it already sits in, so a bump keeps
+# @pipelex/sdk in `dependencies` and @pipelex/mthds-ui in `devDependencies`: the
+# capabilities import only its `./static-graph` embed serializer, which tsup
+# inlines into the bundle. What reaches every `npx @pipelex/mcp` install is
+# `dependencies` alone, so read the diff of package.json before committing a bump.
 
 use-local: use-local-ui use-local-sdk
 
@@ -539,26 +360,26 @@ use-npm: use-npm-ui use-npm-sdk
 use-local-ui:
 	@if [ ! -d $(MTHDS_UI_DIR) ]; then echo "ERROR: $(MTHDS_UI_DIR) not found. Clone it next to pipelex-mcp."; exit 1; fi
 	cd $(MTHDS_UI_DIR) && npm install && npm run build
-	npm install $(UI_WORKSPACES) @pipelex/mthds-ui@file:$(abspath $(MTHDS_UI_DIR))
+	npm install @pipelex/mthds-ui@file:$(abspath $(MTHDS_UI_DIR))
 	@echo "Switched to local mthds-ui (file link). Run 'make use-npm-ui' to switch back."
 
 use-npm-ui:
 	@VERSION="$${VERSION:-latest}" && \
 	echo "Installing @pipelex/mthds-ui@$$VERSION from npm" && \
-	npm install $(UI_WORKSPACES) @pipelex/mthds-ui@$$VERSION && \
-	echo "Switched to npm @pipelex/mthds-ui@$$VERSION. Review the diff, then commit packages/*/package.json + package-lock.json."
+	npm install @pipelex/mthds-ui@$$VERSION && \
+	echo "Switched to npm @pipelex/mthds-ui@$$VERSION. Review the diff, then commit package.json + package-lock.json."
 
 use-local-sdk:
 	@if [ ! -d $(PIPELEX_SDK_DIR) ]; then echo "ERROR: $(PIPELEX_SDK_DIR) not found. Clone Pipelex/pipelex-sdk next to pipelex-mcp."; exit 1; fi
 	cd $(PIPELEX_SDK_DIR) && npm install && npm run build
-	npm install $(SDK_WORKSPACES) @pipelex/sdk@file:$(abspath $(PIPELEX_SDK_DIR))
+	npm install @pipelex/sdk@file:$(abspath $(PIPELEX_SDK_DIR))
 	@echo "Switched to local @pipelex/sdk from $(PIPELEX_SDK_DIR) (file link). Run 'make use-npm-sdk' to switch back."
 
 use-npm-sdk:
 	@VERSION="$${VERSION:-latest}" && \
 	echo "Installing @pipelex/sdk@$$VERSION from npm" && \
-	npm install $(SDK_WORKSPACES) @pipelex/sdk@$$VERSION && \
-	echo "Switched to npm @pipelex/sdk@$$VERSION. Review the diff, then commit packages/*/package.json + package-lock.json."
+	npm install @pipelex/sdk@$$VERSION && \
+	echo "Switched to npm @pipelex/sdk@$$VERSION. Review the diff, then commit package.json + package-lock.json."
 
 ul: use-local
 un: use-npm

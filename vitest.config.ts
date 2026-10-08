@@ -1,24 +1,22 @@
 import { defineConfig } from "vitest/config";
 
-// One hermetic suite for the whole workspace: each package's colocated tests,
-// the repository's own scripts, and the cross-package tests under `tests/`
-// (the shells side by side, and the root Makefile). Workspace packages are
-// resolved through the root `node_modules`, as every build resolves them.
+// One hermetic suite for the whole repository: the colocated tests under
+// `src/`, the repository's own scripts, and the tests under `tests/` (the
+// manifest, the lint rules and the Makefile).
 export default defineConfig({
   test: {
-    include: ["packages/*/src/**/*.test.{ts,tsx}", "scripts/**/*.test.ts", "tests/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "scripts/**/*.test.ts", "tests/**/*.test.ts"],
     environment: "node",
     coverage: {
       provider: "v8",
-      include: ["packages/*/src/**/*.{ts,tsx}"],
+      include: ["src/**/*.ts"],
       // `*.e2e.ts` and their shared support module are the live suite; they are
       // not shipped code and never run under this config (see vitest.e2e.config.ts).
-      // `shell-test-support.ts` and `test-oauth.ts` are the shell tests' own harness.
+      // `shell-test-support.ts` is the shell tests' own harness.
       exclude: [
-        "packages/*/src/**/*.test.{ts,tsx}",
-        "packages/*/src/**/*e2e*",
-        "packages/core/src/shell-test-support.ts",
-        "packages/console/src/hosted/test-oauth.ts",
+        "src/**/*.test.ts",
+        "src/**/*e2e*",
+        "src/shell-test-support.ts",
         "**/dist/**",
         "coverage/**",
       ],
