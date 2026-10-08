@@ -28,6 +28,14 @@ import { errorMessage, isMissingPathError } from "./workspace-boundary.js";
  * the method's draft (no `synced_version`), or one of its published versions
  * (`synced_version`), which a pull of `mt_…@<n>` writes. A later pull reads a
  * file still holding that version's bytes as stored, not as unsaved work.
+ *
+ * **Every write of it is a compare-and-swap on its own bytes**
+ * ({@link replaceMethodLink}): a save or a pull decides what to write from the
+ * link it read, and writes only while the file still holds exactly those
+ * bytes. A link another call wrote meanwhile describes what THAT call put in
+ * the directory, so it is left as it is and the result says so. That is what
+ * keeps the link truthful when two calls touch one directory, in this process
+ * or in another workshop process; see {@link inLinkTurn} for what is left.
  */
 
 export const LINK_FILE_NAME = "pipelex-method.json";
@@ -122,7 +130,7 @@ export function apiHostOf(baseUrl: string): string {
  * linked, which is the consequence the caller has to act on: the next save
  * would create a second method unless they pass the id.
  */
-export async function writeMethodLink(
+async function writeMethodLink(
   root: string,
   dir: string,
   link: MethodLink,
@@ -138,11 +146,142 @@ export async function writeMethodLink(
     return { path: relative, written: false, reason: foreign };
   }
   try {
-    await fs.writeFile(absolute, `${JSON.stringify(link, null, 2)}\n`, "utf8");
+    await fs.writeFile(absolute, serializeMethodLink(link), "utf8");
     return { path: relative, written: true };
   } catch (err) {
     return { path: relative, written: false, reason: errorMessage(err) };
   }
+}
+
+/** The link file's bytes, exactly as {@link writeMethodLink} writes them. */
+function serializeMethodLink(link: MethodLink): string {
+  return `${JSON.stringify(link, null, 2)}\n`;
+}
+
+/** A link file this call wrote, as a later compare-and-swap expects to find it. */
+export function linkAsWritten(link: MethodLink): LinkRead {
+  return { kind: "link", link, raw: serializeMethodLink(link) };
+}
+
+/** The read of a directory holding no link file. */
+export const NO_LINK: LinkRead = { kind: "none" };
+
+/** What a compare-and-swap of the link file did. */
+export interface LinkReplacement {
+  report: LinkFileReport;
+  /**
+   * The write was refused because the file no longer held what the caller
+   * read: another save or pull wrote it meanwhile, so it describes what that
+   * call put in the directory, and it was left as it is.
+   */
+  changed: boolean;
+  /** What the file holds after a write this call made; absent when it made none. */
+  wrote?: LinkRead;
+}
+
+/**
+ * Write the link file only while it still holds exactly what `expected` read
+ * — a compare-and-swap on the file's own bytes.
+ *
+ * A save and a pull each decide what to write from the link they read: a save
+ * records the token its bytes were sent under, and a pull records which
+ * content it landed. A link another call wrote between that read and this
+ * write describes the directory as THAT call left it — a version pulled over
+ * the files, an interrupted pull, another save's token — and writing over it
+ * would make the link say something about the directory that this call does
+ * not know to be true. So the write is refused, nothing is lost, and the
+ * caller reports it.
+ *
+ * A link that cannot be read is never written over, whatever was expected:
+ * something claims the directory, and following it would be guesswork.
+ *
+ * Call it inside {@link inLinkTurn}, which makes the compare and the write one
+ * step for every call in this process.
+ */
+export async function replaceMethodLink(
+  root: string,
+  dir: string,
+  expected: LinkRead,
+  link: MethodLink,
+): Promise<LinkReplacement> {
+  const relative = path.relative(root, path.join(dir, LINK_FILE_NAME));
+  const current = await readMethodLink(dir);
+  if (current.kind === "unreadable") {
+    return {
+      report: {
+        path: relative,
+        written: false,
+        reason: `it is there but cannot be read (${current.reason}), and overwriting it would destroy whatever it holds`,
+      },
+      changed: false,
+    };
+  }
+  if (!sameLinkRead(expected, current)) {
+    return {
+      report: {
+        path: relative,
+        written: false,
+        reason:
+          current.kind === "none"
+            ? "it was removed while this call ran, so it was not recreated"
+            : "another save or pull rewrote it while this call ran, so it was left as that one wrote it",
+      },
+      changed: true,
+    };
+  }
+  const report = await writeMethodLink(root, dir, link);
+  return report.written
+    ? { report, changed: false, wrote: linkAsWritten(link) }
+    : { report, changed: false };
+}
+
+/**
+ * Whether two reads saw the same link file: both absent, both the same bytes,
+ * or both unreadable for the same reason. {@link replaceMethodLink} never
+ * writes over an unreadable file whatever this says, so the last case only
+ * lets a save that reads such a file twice, and writes no link there, carry on.
+ */
+export function sameLinkRead(a: LinkRead, b: LinkRead): boolean {
+  if (a.kind === "link" && b.kind === "link") return a.raw === b.raw;
+  if (a.kind === "unreadable" && b.kind === "unreadable") return a.reason === b.reason;
+  return a.kind === "none" && b.kind === "none";
+}
+
+// ── one local step at a time ────────────────────────────────────────
+
+/**
+ * The tail of the queue the workshop's link work takes its turns in.
+ *
+ * A turn holds only LOCAL filesystem work, never a call to the platform: a
+ * save's read of its link and its files, a save's compare-and-swap of its
+ * link, and a pull's landing (its provisional link, its files and its final
+ * link). Each of those is a few file operations, so serializing every one of
+ * them across the whole process costs nothing that matters, and holding none
+ * across a remote validation or a draft write is what keeps a slow save from
+ * delaying every pull. One queue for the process rather than one per
+ * directory: a save's files and its link can sit in different directories, a
+ * pull can write into a directory nested in another's, and symlinks and case
+ * make two spellings of one directory.
+ *
+ * Within a turn the steps are atomic for this process. Across processes, two
+ * properties stand in for it: a pull marks the link (`partial_pull`) before it
+ * writes a file and finishes it after the last, and a save reads its links
+ * again after its files and refuses when they moved; and every link write is
+ * {@link replaceMethodLink}'s compare-and-swap. What another workshop process
+ * on the same directory can still do is land in the instant between this
+ * process's compare and its write, or resume a pull this process is still
+ * writing, since an interrupted pull and one in flight carry the same marker.
+ * Both need two processes writing one directory at the same moment; closing
+ * them would take a lock file on disk, whose recovery from a process killed
+ * while holding it is guesswork and which would sit in a directory the user
+ * commits.
+ */
+let linkTurn: Promise<unknown> = Promise.resolve();
+
+export function inLinkTurn<T>(work: () => Promise<T>): Promise<T> {
+  const turn = linkTurn.then(work);
+  linkTurn = turn.catch(() => undefined);
+  return turn;
 }
 
 /**
@@ -169,9 +308,13 @@ export async function foreignEntryReason(absolute: string): Promise<string | und
   return undefined;
 }
 
+/**
+ * A directory's link file as read. The `link` arm keeps the file's exact bytes
+ * in `raw`, which a later {@link replaceMethodLink} compares against.
+ */
 export type LinkRead =
   | { kind: "none" }
-  | { kind: "link"; link: MethodLink }
+  | { kind: "link"; link: MethodLink; raw: string }
   | { kind: "unreadable"; reason: string };
 
 /**
@@ -233,6 +376,7 @@ export async function readMethodLink(dir: string): Promise<LinkRead> {
 
   return {
     kind: "link",
+    raw: text,
     link: {
       comment: typeof row.comment === "string" ? row.comment : LINK_COMMENT,
       generator: typeof row.generator === "string" ? row.generator : LINK_GENERATOR,

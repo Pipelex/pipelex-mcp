@@ -2,6 +2,15 @@
 
 This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the Pipelex plugin runs. Up to and including 0.20.0 every release also deployed the hosted console at the same version, so those entries describe both servers. After 0.20.0 the console has its own release track and changelog, kept with the Pipelex connector rather than here, and the `console-vX.Y.Z` tags in this repository's history are its releases from that time; this file and the `vX.Y.Z` tags cover the workshop alone.
 
+## [Unreleased]
+
+### Fixed
+
+- **A slow `mthds_save_method` no longer holds up every pull, and a pull no longer waits for one**: a save waited on its remote validation and its draft write while holding a turn every save and every writing `mthds_get_method` of the workshop shared. Only a save's read of its files and its link write take turns now, so a pull lands while a save validates; two overlapping saves from one directory are still never both written, since the platform takes one draft write under the token both read and refuses the other.
+- **`pipelex-method.json` is written only over what the call read**: a save that finished after a pull had landed a version in its directory wrote its own link over the pull's, dropping the record of the version, and a pull planned against a link another call rewrote went ahead regardless. A save now leaves a link that changed while it ran, saying so in `link_file`, refuses when its directory's link moved while it read the files, and a pull refuses, writing nothing, when the link moved between its plan and its write; this holds between two workshop processes on one directory too.
+- **`mthds_save_method` refuses a `link_dir` holding a bundle of its own**: a `link_dir` other than the files' directory that already held `.mthds` files received a link vouching for that bundle as the saved draft, so the next save from there replaced the draft with it without a conflict. Such a save is now refused at `link_dir` before anything is read or written, an inline save and a create included; a `link_dir` holding no `.mthds` file still takes the link.
+- **A bare `method_id` no longer waits on the version handshake**: `mthds_validate`, `mthds_inputs_template`, `mthds_codegen` and `mthds_prepare_inputs` asked the platform whether it resolves versions before sending a bare id, which cost each call a handshake, up to three seconds, where the platform does not resolve them. The question is now asked beside the request, and only the result's sentence about what it read waits for the answer.
+
 ## [0.23.0] - 2026-10-08
 
 ### Added
