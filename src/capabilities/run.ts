@@ -25,6 +25,7 @@ import { z } from "zod";
 
 import {
   RUN_METHOD_ID_SELECTOR_SENTENCE,
+  forgetMethodVersionsSupported,
   linkageSuffixError,
   noteMethodVersionsSupported,
   planById,
@@ -504,7 +505,7 @@ interface RunClient {
   start(options: PipelexStartOptions): Promise<PipelexRunResultStart>;
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
-  /** `GET /v1/version`, read to learn whether `mt_…@draft` must be sent bare; optional on a test seam. */
+  /** `GET /v1/version`, read only to word the hint of a refused suffix — a selector is always sent as given; optional on a test seam. */
   version?(): Promise<unknown>;
 }
 
@@ -1314,7 +1315,7 @@ export async function startMthdsRun(
     const client = runClient(context);
     let sent = request;
     if (request.method_id !== undefined && request.files.length === 0) {
-      plan = await planById(request.method_id, context.methodVersions, client, {
+      plan = planById(request.method_id, context.methodVersions, client, {
         needBareReport: false,
       });
       sent = { ...request, method_id: plan.send };
@@ -1323,8 +1324,11 @@ export async function startMthdsRun(
     if (plan === undefined) return startResult(ack);
     const content = runContentReport(plan, ack.method_version);
     // An acknowledgement naming the version that runs is the platform's own
-    // word that it resolves selectors, worth more than any cached answer.
+    // word that it resolves selectors, worth more than any cached answer; one
+    // naming none for a bare id is its word that it does not, so a cached
+    // `supported` is dropped before another tool reads a bare id as `latest`.
     if (content.proved) noteMethodVersionsSupported(context.methodVersions);
+    else if (content.disproved) forgetMethodVersionsSupported(context.methodVersions);
     return startResult(ack, content);
   } catch (err) {
     const classified = classifyStartError(err, { ...classifyOptions, auth: context.authError });

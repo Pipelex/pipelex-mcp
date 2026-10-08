@@ -199,9 +199,13 @@ export async function publishMthdsMethod(
   const expected = parsed.data.expected_draft_updated_at;
 
   let client: CatalogWriteClient | undefined;
+  let support: Promise<MethodVersionsSupport> = Promise.resolve("unknown");
   let result: MethodPublishResult;
   try {
     client = catalogWriteClient(context);
+    // Asked beside the publish rather than after it: it never rejects, and
+    // only a published result's sentence about callers waits on it.
+    support = catalogVersionsSupport(context, client);
     result = await client.publishMethod(methodId, { expected_draft_updated_at: expected });
   } catch (err) {
     const error = classifyError(err, { ...PUBLISH_ERROR_OPTIONS, auth: context.authError });
@@ -214,9 +218,8 @@ export async function publishMthdsMethod(
 
   const apiHost = apiHostOf(context.baseUrl);
   const structuredContent = publishContent(result, apiHost);
-  const support =
-    result.outcome === "published" ? await catalogVersionsSupport(context, client) : "unknown";
-  return { structuredContent, summary: publishSummary(structuredContent, support) };
+  const answer = result.outcome === "published" ? await support : "unknown";
+  return { structuredContent, summary: publishSummary(structuredContent, answer) };
 }
 
 /**

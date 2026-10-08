@@ -202,6 +202,38 @@ export async function resolveSaveDir(
   return { ok: true, root, dir: real };
 }
 
+/**
+ * Why `dir` may not be read through, asked BEFORE anything reads it and
+ * creating nothing: its real path, or that of its deepest existing ancestor
+ * when it does not exist yet, leaves `saveRoot`. `undefined` when it stays
+ * inside.
+ *
+ * A lexical check contains the string and then reads wherever the string
+ * leads: `link_dir` naming a symlink to a directory outside the workspace
+ * passed it, so that directory was listed and its files read and trusted
+ * before anything refused. The path is resolved against `saveRoot` as given,
+ * as the reads that follow resolve it, and judged against `saveRoot`'s real
+ * path. A path that cannot be resolved for another reason, or a working
+ * directory that cannot be, is not refused here: nothing can be read through
+ * it either, and the reads that follow report it in their own words.
+ */
+export async function escapedDirectoryError(
+  saveRoot: string,
+  dir: string,
+  location: string,
+): Promise<ToolError | undefined> {
+  let root: string;
+  try {
+    root = await fs.realpath(saveRoot);
+  } catch {
+    return undefined;
+  }
+  const ancestor = await checkDeepestExistingAncestor(root, path.resolve(saveRoot, dir));
+  return !ancestor.ok && ancestor.reason === "escape"
+    ? escapeError(dir, root, location)
+    : undefined;
+}
+
 export function escapeError(dir: string, root: string, location: string): ToolError {
   return {
     class: "input_domain",

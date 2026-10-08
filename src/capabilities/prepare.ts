@@ -306,9 +306,10 @@ export async function prepareMthdsInputs(
     if (request.method_id !== undefined) {
       // A bare id reads the draft on a platform that does not resolve version
       // selectors yet, and the latest published version on one that does: the
-      // selector is planned against the platform's answer, and the result says
-      // whose signature the inputs were prepared against (`method-versions.ts`).
-      plan = await planById(request.method_id, context.methodVersions, client, {
+      // platform is asked beside the request, which never waits on it, and the
+      // result says whose signature the inputs were prepared against
+      // (`method-versions.ts`).
+      plan = planById(request.method_id, context.methodVersions, client, {
         needBareReport: true,
       });
       sent = { ...request, method_id: plan.send };
@@ -328,7 +329,7 @@ export async function prepareMthdsInputs(
     return errorResult(summaryForError(error), [error]);
   }
 
-  return withMethodContent(
+  return await withMethodContent(
     prepareInputsResult(prepared, request.pipe_ref),
     plan,
     "prepared the inputs against the signature of",

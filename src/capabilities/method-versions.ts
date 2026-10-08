@@ -47,7 +47,9 @@ import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
  * acknowledgement catches it there, and a tooling route cannot. `unknown` is
  * never cached either. A handshake is given three seconds, and past that the
  * call reads `unknown`. The answer is asked only for a bare id whose result
- * says what it read, and for a refusal's hint.
+ * says what it read, and for a refusal's hint, and a bare id's is asked
+ * beside its request, never before it: what is sent never depends on it, so
+ * only the result's sentence waits for it.
  *
  * **Unknown says so**: a bare id's result then says it cannot tell which
  * content it read. Each tool's result says which content it ran or read: the draft, a
@@ -289,10 +291,16 @@ export interface SelectorPlan {
   methodId: string;
   /** What the caller addressed. */
   selector: MethodSelector;
-  /** The content the call reads, when this server can tell; absent when it cannot. */
-  reads?: MethodVersionReport;
-  /** The platform's answer, asked for a bare id whose result says what it read; `unknown` otherwise. */
-  support: MethodVersionsSupport;
+  /**
+   * The content the call reads, when this server can tell; `undefined` when it
+   * cannot. Settled at once for a suffix. For a bare id whose result says what
+   * it read, it waits on the platform's answer, asked when the plan is made and
+   * awaited only once the request has its answer: the request never waited
+   * for it, since what is sent does not depend on it, and waiting cost every
+   * by-id call a handshake, up to its deadline where the platform does not
+   * resolve versions and so never caches its answer. Never rejects.
+   */
+  reads: Promise<MethodVersionReport | undefined>;
   /** Asks the platform, for the hint of a refused suffix; absent when the client cannot. */
   readVersion?: VersionReader;
 }
@@ -301,7 +309,8 @@ export interface SelectorPlan {
  * Plan a by-id call of a tooling route (`mthds_validate`,
  * `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`) or of a
  * run, where the id alone names what runs. The selector is sent as it was
- * given, always.
+ * given, always, so the plan is made at once and the request goes out
+ * without waiting on the platform.
  *
  * `askSupport` is called for a bare id alone, and only when `needBareReport`
  * is set: what a bare id reads depends on the platform, and the result says
@@ -309,12 +318,12 @@ export interface SelectorPlan {
  * version it ran. A suffix needs no answer: a platform that reads it reads
  * exactly what it names, and one that does not refuses it.
  */
-export async function planMethodSelector(
+export function planMethodSelector(
   value: string,
   askSupport: () => Promise<MethodVersionsSupport>,
   options: { needBareReport: boolean },
   readVersion?: VersionReader,
-): Promise<SelectorPlan> {
+): SelectorPlan {
   const selector = readMethodSelector(value);
   const base = {
     send: value,
@@ -322,17 +331,20 @@ export async function planMethodSelector(
     selector,
     ...(readVersion === undefined ? {} : { readVersion }),
   };
-  if (selector.form === "draft") return { ...base, reads: "draft", support: "unknown" };
-  if (selector.form === "version") {
-    return { ...base, reads: selector.version, support: "unknown" };
-  }
+  if (selector.form === "draft") return { ...base, reads: Promise.resolve("draft") };
+  if (selector.form === "version") return { ...base, reads: Promise.resolve(selector.version) };
   if (selector.form === "bare" && options.needBareReport) {
-    const support = await askSupport();
-    const reads: MethodVersionReport | undefined =
-      support === "supported" ? "latest" : support === "unsupported" ? "draft" : undefined;
-    return { ...base, support, ...(reads === undefined ? {} : { reads }) };
+    // Caught as well as never rejecting by contract: when the request fails,
+    // nothing awaits this answer, and it must not surface as an unhandled
+    // rejection.
+    const reads = askSupport().then(
+      (support): MethodVersionReport | undefined =>
+        support === "supported" ? "latest" : support === "unsupported" ? "draft" : undefined,
+      () => undefined,
+    );
+    return { ...base, reads };
   }
-  return { ...base, support: "unknown" };
+  return { ...base, reads: Promise.resolve(undefined) };
 }
 
 /**
@@ -366,20 +378,25 @@ export function methodContentPhrase(methodId: string, reads: MethodVersionReport
 /**
  * The sentence a tooling result carries about the content it read, or
  * `undefined` for an opaque id, which says nothing this server could place.
- * `verb` is the tool's own past tense ("validated", "projected the template
- * from"), so the sentence reads as the tool's.
+ * `reads` is the plan's settled answer, and `verb` is the tool's own past
+ * tense ("validated", "projected the template from"), so the sentence reads
+ * as the tool's.
  */
-export function methodContentSentence(plan: SelectorPlan, verb: string): string | undefined {
+export function methodContentSentence(
+  plan: Pick<SelectorPlan, "selector" | "methodId">,
+  reads: MethodVersionReport | undefined,
+  verb: string,
+): string | undefined {
   if (plan.selector.form === "opaque") return undefined;
   const id = plan.methodId;
-  if (plan.reads === undefined) {
+  if (reads === undefined) {
     return `This ${verb} \`${id}\` by its bare id, and this server could not ask the platform which content that names: the latest published version on a platform that resolves versions, the draft on one that does not yet. Pass \`${id}@draft\` or \`${id}@<n>\` to say which.`;
   }
-  const phrase = methodContentPhrase(id, plan.reads);
-  if (plan.selector.form === "bare" && plan.reads === "draft") {
+  const phrase = methodContentPhrase(id, reads);
+  if (plan.selector.form === "bare" && reads === "draft") {
     return `This ${verb} ${phrase}: this platform does not resolve versions yet, so a bare id reads the draft. Once it does, a bare id reads the latest published version, and \`${id}@draft\` the draft.`;
   }
-  if (plan.reads === "latest") {
+  if (reads === "latest") {
     return `This ${verb} ${phrase}, which is what a bare id names; \`${id}@draft\` names the draft, and \`${id}@<n>\` a fixed version.`;
   }
   return `This ${verb} ${phrase}.`;
@@ -491,14 +508,15 @@ export async function noteSelectorRefusal(
  * Plan a by-id call, asking the platform through `client`'s own `version()`
  * when the plan needs the answer — the one wiring `mthds_validate`,
  * `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs` and
- * `mthds_run` share.
+ * `mthds_run` share. The plan is made at once; the answer settles beside the
+ * request.
  */
 export function planById(
   value: string,
   memory: MethodVersionsMemory | undefined,
   client: unknown,
   options: { needBareReport: boolean },
-): Promise<SelectorPlan> {
+): SelectorPlan {
   const readVersion = versionReaderOf(client);
   return planMethodSelector(
     value,
@@ -521,18 +539,21 @@ export async function selectorFailure(
 /**
  * A tooling result with the content it came from: `method_version` in its
  * structured content and the closing sentence in its summary, `verb` being the
- * tool's own past tense ("validated"). Unplanned results pass through.
+ * tool's own past tense ("validated"). Unplanned results pass through. This is
+ * where a bare id's answer from the platform is awaited, once the request has
+ * its own.
  */
-export function withMethodContent<
+export async function withMethodContent<
   R extends { structuredContent: { method_version?: MethodVersionReport }; summary: string },
->(result: R, plan: SelectorPlan | undefined, verb: string): R {
+>(result: R, plan: SelectorPlan | undefined, verb: string): Promise<R> {
   if (plan === undefined) return result;
-  const sentence = methodContentSentence(plan, verb);
+  const reads = await plan.reads;
+  const sentence = methodContentSentence(plan, reads, verb);
   return {
     ...result,
     structuredContent: {
       ...result.structuredContent,
-      ...(plan.reads === undefined ? {} : { method_version: plan.reads }),
+      ...(reads === undefined ? {} : { method_version: reads }),
     },
     summary: sentence === undefined ? result.summary : `${result.summary}\n\n${sentence}`,
   };
@@ -553,6 +574,12 @@ export interface RunContentReport {
   sentence?: string;
   /** The acknowledgement carried `method_version`, which proves the platform resolves selectors. */
   proved: boolean;
+  /**
+   * A run by bare id was acknowledged with no `method_version`, which only a
+   * platform that does not resolve selectors sends: it contradicts a cached
+   * `supported`, which the memory then forgets.
+   */
+  disproved?: true;
 }
 
 /**
@@ -588,12 +615,13 @@ export function runContentReport(plan: SelectorPlan, ackVersion: unknown): RunCo
       sentence: `It runs ${methodContentPhrase(id, plan.selector.version)}.`,
     };
   }
-  return {
-    ran: "draft",
-    proved,
-    sentence:
-      plan.selector.form === "bare"
-        ? `It runs the draft of \`${id}\`: the acknowledgement names no version, which is how a platform that does not resolve versions yet answers, and there a bare id runs the draft. Once it does, a bare id runs the latest published version, and \`${id}@draft\` the draft.`
-        : `It runs the draft of \`${id}\`.`,
-  };
+  if (plan.selector.form === "bare") {
+    return {
+      ran: "draft",
+      proved,
+      disproved: true,
+      sentence: `It runs the draft of \`${id}\`: the acknowledgement names no version, which is how a platform that does not resolve versions yet answers, and there a bare id runs the draft. Once it does, a bare id runs the latest published version, and \`${id}@draft\` the draft.`,
+    };
+  }
+  return { ran: "draft", proved, sentence: `It runs the draft of \`${id}\`.` };
 }
