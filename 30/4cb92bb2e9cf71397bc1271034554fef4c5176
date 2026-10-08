@@ -1,0 +1,19 @@
+CHANGELOG.md
+  s_924dc452bfcbe0::t_954b57b716041b 5,9-11,15-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "304cb92bb2e9cf71397bc1271034554fef4c5176",
+  "prompts": {},
+  "sessions": {
+    "s_924dc452bfcbe0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2a25d3f6-8d72-417a-9358-664bf792b380",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thomashebrard <thomas@pipelex.com>"
+    }
+  }
+}
