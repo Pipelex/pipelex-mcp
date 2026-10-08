@@ -736,7 +736,19 @@ export async function saveMthdsMethod(
   // stored Python.
   const pythonField = namedPython === undefined ? {} : { python: namedPython.files };
 
-  const client = catalogWriteClient(context);
+  // Built inside a try, as the pull and the publish build theirs: the SDK's
+  // constructor refuses a malformed base URL by throwing, and that must come
+  // back as a ToolError rather than reject the MCP handler.
+  let client: CatalogWriteClient;
+  try {
+    client = catalogWriteClient(context);
+  } catch (err) {
+    const error = classifyError(err, {
+      ...(targetId === undefined ? CREATE_ERROR_OPTIONS : DRAFT_ERROR_OPTIONS),
+      auth: context.authError,
+    });
+    return saveError(summaryForToolError(error, SAVE_ERROR_SUMMARIES), [error]);
+  }
   let stored: MethodData;
   let saved: "created" | "updated" | "renamed";
   let renameError: ToolError | undefined;

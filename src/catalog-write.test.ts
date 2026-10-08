@@ -726,6 +726,23 @@ describe("saveMthdsMethod", () => {
     expect(errorsOf(result.structuredContent)[0]?.retryable).toBe(true);
   });
 
+  it("answers a malformed base URL as an error rather than throwing", async () => {
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+    const context: CatalogWriteContext = {
+      ...contextFor(clientNotCalled, validationAnswering(validReport)),
+      baseUrl: "not a url",
+      client: undefined,
+    };
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one" },
+      context,
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(errorsOf(result.structuredContent)).toHaveLength(1);
+  });
+
   it("gates python on .py and locates the refusal at python[i]", async () => {
     await writeBundle("methods/demo", {
       "bundle.mthds": 'domain = "demo"',
