@@ -2457,6 +2457,137 @@ describe("a pull lands only on the link it planned against", () => {
   });
 });
 
+describe("round 1 of the convergence review", () => {
+  const link = {
+    method_id: "mt_one",
+    name: "Summarize PDF",
+    api_host: "api-dev.pipelex.com",
+    synced_updated_at: "2026-09-20T12:00:00Z",
+  };
+
+  it("creates one method when two creates from one directory overlap", async () => {
+    // Both used to read the directory unclaimed and both minted a method; the
+    // second's link write then found the first's link and wrote nothing,
+    // leaving a duplicate only an administrator can delete.
+    await writeBundle("fresh", { "bundle.mthds": 'domain = "demo"' });
+    let created = 0;
+    const client: CatalogWriteClient = {
+      ...clientNotCalled,
+      async createMethod() {
+        created += 1;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return storedMethod({ method_id: `mt_new${created}`, name: "Fresh" });
+      },
+    };
+    const save = () =>
+      saveMthdsMethod(
+        { files: [{ path: "fresh/bundle.mthds" }], name: "Fresh" },
+        contextFor(client, validationAnswering(validReport)),
+      );
+
+    const [first, second] = await Promise.all([save(), save()]);
+
+    expect(created).toBe(1);
+    expect(first.structuredContent).toMatchObject({ status: "ok", saved: "created" });
+    expect(errorsOf(second.structuredContent)[0]).toMatchObject({
+      class: "input_domain",
+      location: "method_id",
+    });
+    expect(errorsOf(second.structuredContent)[0]?.message).toContain("mt_new1");
+  });
+
+  it("refuses a pull whose file was edited while it read a version, keeping the edit", async () => {
+    // The plan read the file as version 2's bytes, then waited on the platform
+    // for version 2; an edit landing meanwhile moved no link, and the pull
+    // wrote the draft over it.
+    await writeBundle("work", {
+      "bundle.mthds": 'domain = "version_two"',
+      [LINK_FILE_NAME]: JSON.stringify({ ...link, synced_version: 2 }),
+    });
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "work" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async getMethod() {
+            return storedMethod();
+          },
+          async getMethodVersion() {
+            await fs.writeFile(
+              path.join(root, "work", "bundle.mthds"),
+              'domain = "edited"',
+              "utf8",
+            );
+            return storedVersion();
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "runtime", location: "output_dir", retryable: true });
+    expect(error.message).toContain("`bundle.mthds` changed after this pull read it");
+    expect(await fs.readFile(path.join(root, "work", "bundle.mthds"), "utf8")).toBe(
+      'domain = "edited"',
+    );
+  });
+
+  it("refuses a pull when a save refreshed the link while the method was read", async () => {
+    // Read after the method, the link was ahead of it: the pull wrote the older
+    // draft back and moved the link to its older token.
+    await writeBundle("work", { [LINK_FILE_NAME]: JSON.stringify(link) });
+    const refreshed = JSON.stringify({ ...link, synced_updated_at: "2026-09-21T09:00:00Z" });
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "work", overwrite: true },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async getMethod() {
+            await fs.writeFile(path.join(root, "work", LINK_FILE_NAME), refreshed, "utf8");
+            return storedMethod();
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    expect(errorsOf(result.structuredContent)[0]?.message).toContain(
+      "rewritten by another save or pull after this pull read it",
+    );
+    expect(await fs.readFile(path.join(root, "work", LINK_FILE_NAME), "utf8")).toBe(refreshed);
+    await expect(fs.access(path.join(root, "work", "bundle.mthds"))).rejects.toThrow();
+  });
+
+  it("names the bare id for the draft where the platform does not resolve versions", async () => {
+    await writeBundle("work", {
+      "bundle.mthds": 'domain = "demo"',
+      [LINK_FILE_NAME]: JSON.stringify(link),
+    });
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft() {
+            return storedMethod({ updated_at: "2026-09-21T09:00:00Z" });
+          },
+          version: versionsUnsupported,
+        } as CatalogWriteClient,
+        validationAnswering(validReport),
+      ),
+    );
+
+    // A suffix is refused there, so `@draft` would cost the caller a round trip.
+    expect(result.summary).toContain(
+      "pass method_id `mt_one`, the bare id, which reads the draft here",
+    );
+  });
+});
+
 describe("a save writes its link only beside the bundle it sends", () => {
   async function linkIn(dir: string, fields: Record<string, unknown> = {}): Promise<void> {
     await fs.mkdir(path.join(root, dir), { recursive: true });
