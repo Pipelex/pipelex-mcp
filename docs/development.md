@@ -21,7 +21,7 @@ The workshop is a stdio server: a host spawns it and talks to it over its standa
 Prerequisites:
 
 - Node.js 24.14.1 or later
-- A Pipelex API. The workshop calls the hosted Pipelex API at `https://api.pipelex.com` unless `PIPELEX_BASE_URL` names another, with the `plx_sk_` key in `PIPELEX_API_KEY`; [the environment section of the hosts page](hosts.md#environment) lists every variable it reads. `mthds_inputs_template` and `mthds_prepare_inputs` read a method's signature from `POST /v1/pipe-io`, which needs pipelex-api 0.33.1 or later.
+- A Pipelex API. The workshop calls the hosted Pipelex API at `https://api.pipelex.com` unless `PIPELEX_BASE_URL` names another, with the `plx_sk_` key in `PIPELEX_API_KEY`; [the environment section of the hosts page](hosts.md#environment) lists every variable it reads. `mthds_inputs_template` and `mthds_prepare_inputs` read a method's signature from `POST /v1/pipe-io`, which needs pipelex-api 0.33.1 or later. `mthds_models` checks a reference through `GET /v1/models/check`, which needs pipelex-api 0.78.0 or later; an older runner answers a check with a `404`, which the tool reports as a `config` error naming the route.
 
 Install the dependencies, then start the server:
 

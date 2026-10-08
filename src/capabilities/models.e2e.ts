@@ -1,15 +1,18 @@
 /**
  * Live e2e — `mthds_models` against a real Pipelex API.
  *
- * `models.test.ts` proves the projection and the check against a deck shaped
- * like the one the dev API answered. This proves that shape is still what the
- * runner sends: a renamed `aliases` extension, or presets no longer stamped with
- * their category, would leave every unit test green while the tool listed an
- * empty deck. It reads the deck and nothing else, so it writes nothing and
- * spends no inference credit.
+ * `models.test.ts` proves the projection against a deck shaped like the one the
+ * dev API answered, and the check against verdicts shaped as the spec writes
+ * them. This proves both shapes are still what the API sends: a renamed
+ * `aliases` extension, presets no longer stamped with their category, or a
+ * reshaped `GET /v1/models/check` verdict would leave every unit test green
+ * while the tool listed an empty deck or refused every check as malformed. It
+ * reads and checks and nothing else, so it writes nothing and spends no
+ * inference credit.
  */
 
 import { MODEL_CATEGORIES } from "mthds/protocol";
+import type { ModelCategory } from "mthds/protocol";
 import { describe, expect, it } from "vitest";
 
 import { liveApiConfig } from "./e2e-support.js";
@@ -36,8 +39,14 @@ async function liveListing(category?: ModelDeckListing["category"]): Promise<Mod
   return result.structuredContent as ModelDeckListing;
 }
 
-async function liveCheck(reference: string): Promise<ModelReferenceCheck> {
-  const result = await readMthdsModels({ reference }, context);
+async function liveCheck(
+  reference: string,
+  category?: ModelCategory,
+): Promise<ModelReferenceCheck> {
+  const result = await readMthdsModels(
+    category === undefined ? { reference } : { reference, category },
+    context,
+  );
   expect(result.structuredContent.status, result.summary).toBe("ok");
   return result.structuredContent as ModelReferenceCheck;
 }
@@ -86,21 +95,64 @@ describe("mthds_models against the live API", () => {
     expect(preset, "the live deck lists no LLM preset").toBeDefined();
 
     const resolved = await liveCheck(preset as string);
+    expect(resolved.kind).toBe("preset");
     expect(resolved.resolution).toBe("resolved");
-    expect(resolved.matches.map((match) => match.category)).toContain("llm");
+    const match = resolved.matches.find((each) => each.category === "llm");
+    expect(match, resolved.reference).toBeDefined();
+    // A preset's match carries its binding, its description and what a run calls.
+    expect(typeof match?.target).toBe("string");
+    expect(match).toHaveProperty("description");
+    expect(match).toHaveProperty("resolves_to");
 
     const mistyped = await liveCheck((preset as string).slice(0, -1));
     expect(mistyped.resolution).toBe("not_found");
     expect(mistyped.suggestions).toContain(preset);
   });
 
-  it("resolves an alias's model as a handle named by that alias", async () => {
-    const alias = (await liveListing()).deck.flatMap((each) => each.aliases)[0];
-    expect(alias, "the live deck lists no alias").toBeDefined();
+  it("places a preset asked in another category in the category that holds it", async () => {
+    const preset = (await liveListing("llm")).deck[0]?.presets[0];
+    expect(preset, "the live deck lists no LLM preset").toBeDefined();
 
-    const handle = await liveCheck(alias?.target as string);
-    expect(handle.kind).toBe("handle");
-    expect(handle.resolution).toBe("resolved");
-    expect(handle.matches.flatMap((match) => match.via ?? [])).toContain(alias?.reference);
+    const misplaced = await liveCheck(preset as string, "img_gen");
+    expect(misplaced.category).toBe("img_gen");
+    expect(misplaced.resolution).toBe("not_found");
+    expect(misplaced.other_categories).toContain("llm");
+  });
+
+  it("resolves the model an alias runs as a handle that alias names", async () => {
+    const aliases = (await liveListing()).deck.flatMap((each) =>
+      each.aliases.map((alias) => ({ ...alias, category: each.category })),
+    );
+    expect(aliases.length, "the live deck lists no alias").toBeGreaterThan(0);
+
+    // A handle resolves only where the runner can call it, which an alias's
+    // target need not be, so the leg takes the first alias whose run calls
+    // its own target. Checked without a category, so a category the hosted
+    // runner may refuse as a filter is never sent.
+    for (const alias of aliases) {
+      const checked = await liveCheck(alias.reference);
+      const match = checked.matches.find((each) => each.category === alias.category);
+      if (match?.resolves_to !== alias.target) continue;
+
+      const handle = await liveCheck(alias.target);
+      expect(handle.kind).toBe("handle");
+      expect(handle.resolution).toBe("resolved");
+      const there = handle.matches.find((each) => each.category === alias.category);
+      expect(there?.via, alias.target).toContain(alias.reference);
+      return;
+    }
+    expect.fail("no alias of the live deck runs its own target");
+  });
+
+  it("refuses a reference the runner cannot read at reference", async () => {
+    const result = await readMthdsModels({ reference: "$" }, context);
+
+    expect(result.structuredContent.status, result.summary).toBe("error");
+    if (result.structuredContent.status !== "error") return;
+    expect(result.structuredContent.errors[0], result.summary).toMatchObject({
+      class: "input_domain",
+      location: "reference",
+      retryable: false,
+    });
   });
 });

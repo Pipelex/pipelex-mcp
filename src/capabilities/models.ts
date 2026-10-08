@@ -3,37 +3,36 @@
  * model references a method's pipes can name in their `model` field, or check
  * one reference before it is written into a method.
  *
- * It reads `GET /v1/models`, the MTHDS Protocol's `ModelDeck`, through the SDK's
- * `models()`. On the Pipelex runner that deck is the flat `models` list, which
- * holds the PRESETS, each stamped with its category, plus two category-keyed
- * extensions: `aliases` (alias name → model handle) and `waterfalls` (waterfall
- * name → handles tried in order). It lists no model handle as such: a handle
- * appears only as an alias's target or a waterfall's step. So a bare handle the
- * deck does not name is `unconfirmed`, never `not_found`; validation checks a
- * handle against the runner's full model list, and the answer says so.
+ * A listing reads `GET /v1/models`, the MTHDS Protocol's `ModelDeck`, through
+ * the SDK's `models()`. On the Pipelex runner that deck is the flat `models`
+ * list, which holds the PRESETS, each stamped with its category, plus two
+ * category-keyed extensions: `aliases` (alias name → model handle) and
+ * `waterfalls` (waterfall name → handles tried in order). It lists no model
+ * handle as such: a handle appears only as an alias's target or a waterfall's
+ * step.
+ *
+ * A check asks the runner: `GET /v1/models/check`, through the SDK's
+ * `checkModelReference`. The runner answers from pipelex's own reference
+ * parser, resolver and suggestion rule, the ones a validation runs, and it
+ * knows every model it can call, so its verdict is definitive either way and
+ * a reference it finds `resolved` in a category is one a validation accepts
+ * there. This module therefore parses nothing and ranks nothing: it relays the
+ * verdict, checking its shape rather than trusting it, and words the summary.
  *
  * The deck is what the runner can route to, not what the caller's account may
  * use: a gateway can refuse a listed model when a run starts. The description
  * and every summary say so, since that is the one thing a model reading the deck
  * would otherwise take for granted.
- *
- * The check mirrors the runner's own (`pipelex/cogt/models/model_suggestion.py`,
- * behind `pipelex-agent check-model` and validation's "did you mean"): the same
- * sigils, the same namespace prefixes, and `closeMatches`, a port of difflib's
- * `get_close_matches`, at the same cutoffs. The candidates are where the two
- * part. For a preset, an alias or a waterfall checked in one category they are
- * the runner's, so the names suggested here are the ones a failed validation of
- * the same reference would suggest. But the runner matches a handle against
- * every model of the pipe's type, which the deck does not list, and it checks
- * within one type, where a check here with no category pools every category.
  */
 
 import { ApiResponseError } from "@pipelex/sdk";
+import type { ModelCheckCategory, ModelReferenceVerdict } from "@pipelex/sdk";
 import { MODEL_CATEGORIES } from "mthds/protocol";
 import type { ModelCategory, ModelDeck, ModelInfo } from "mthds/protocol";
 import { z } from "zod";
 
 import {
+  asOneLine,
   buildApiConfig,
   classifyError,
   createPipelexApiClient,
@@ -66,13 +65,25 @@ export const PIPE_TYPE_OF: Record<ModelCategory, string> = {
 };
 
 /**
- * A category as a deck names it: one of the protocol's, or one this module does
- * not know, kept under the runner's own name. The protocol's reader rule: "A
- * client reading a model list MUST NOT fail it because an entry carries a
- * category it does not recognize; it keeps that entry with its raw value or
- * leaves it out." This tool keeps it, so a runner of a later protocol minor
- * still has its new category listed and checked, labelled as one this tool
- * cannot place on a pipe type.
+ * The same table over the categories the runner's check covers, which are the
+ * protocol's plus `doc_gen`, the family of `PipeDocGen`: the protocol defines no
+ * category for it, so the listing leaves it out, but a method names a `doc_gen`
+ * model like any other and a check without a category answers in it. Total over
+ * the SDK's `ModelCheckCategory`, so the build fails when the SDK gains one.
+ */
+const CHECK_PIPE_TYPE_OF: Record<ModelCheckCategory, string> = {
+  ...PIPE_TYPE_OF,
+  doc_gen: "PipeDocGen",
+};
+
+/**
+ * A category as a deck or a verdict names it: one of the protocol's, or one
+ * this module does not know, kept under the runner's own name. The protocol's
+ * reader rule: "A client reading a model list MUST NOT fail it because an entry
+ * carries a category it does not recognize; it keeps that entry with its raw
+ * value or leaves it out." This tool keeps it, so a runner of a later protocol
+ * minor still has its new category listed and checked, labelled as one this
+ * tool cannot place on a pipe type.
  */
 export type DeckCategoryName = NonNullable<ModelInfo["type"]>;
 
@@ -92,44 +103,20 @@ export const SIGIL_OF: Record<ReferenceKind, string> = {
   handle: "",
 };
 
-/** The runner also accepts a spelled-out namespace in place of a sigil. */
-const NAMESPACE_OF: Record<ReferenceKind, string> = {
-  preset: "preset:",
-  alias: "alias:",
-  waterfall: "waterfall:",
-  handle: "handle:",
-};
-
-/** The runner's cutoffs and counts: nearest names of the same kind, then of the other kinds. */
-const SAME_KIND_MATCHES = 5;
-const SAME_KIND_CUTOFF = 0.5;
-const OTHER_KIND_MATCHES = 3;
-const OTHER_KIND_CUTOFF = 0.7;
-
-/**
- * The longest reference the tool takes. No model name comes near it (the
- * longest the runner knows is about sixty characters), and a reference over
- * three times a candidate's length cannot reach the nearest-name cutoff, so it
- * refuses nothing a method could use. It bounds the work of the match, which
- * is linear in the reference's length for every candidate, and it keeps the
- * word under the 200 characters from which difflib's junk heuristic would
- * apply, so the port below stays exact (see `similarity`).
- */
-export const MAX_REFERENCE_LENGTH = 199;
-
 /** The filter: the protocol's closed set, which a runner refuses a value outside of. */
 const categorySchema = z.enum(MODEL_CATEGORIES);
 
-/** A category in a result: any name the deck carried, the protocol's or not. */
+/** A category in a result: any name the deck or the verdict carried, the protocol's or not. */
 const deckCategoryNameSchema = z.string();
 
 export const mthdsModelsInputSchema = {
   category: categorySchema
     .optional()
-    .describe(`Only this category: ${CATEGORY_PIPE_TYPES}. Omit it for every category.`),
+    .describe(
+      `Only this category: ${CATEGORY_PIPE_TYPES}. Omit it for every category; a check then covers doc_gen, for a PipeDocGen, as well.`,
+    ),
   reference: z
     .string()
-    .max(MAX_REFERENCE_LENGTH)
     .optional()
     .describe(
       "A model reference to check, exactly as it would be written in a pipe's model field: $preset, @alias, ~waterfall, or a bare model handle (preset:, alias:, waterfall: and handle: prefixes work too). Omit it to list the deck instead.",
@@ -147,7 +134,14 @@ const deckCategorySchema = z.object({
 
 const matchSchema = z.object({
   category: deckCategoryNameSchema,
+  resolves_to: z
+    .string()
+    .nullable()
+    .describe(
+      "The model a run through the reference calls now in this category; null when it reaches none, so a run fails although validation accepts the reference.",
+    ),
   target: z.string().optional(),
+  description: z.string().nullable().optional(),
   fallbacks: z.array(z.string()).optional(),
   via: z.array(z.string()).optional(),
 });
@@ -161,7 +155,8 @@ export const mthdsModelsOutputSchema = z.object({
   deck: z.array(deckCategorySchema).optional(),
   reference: z.string().optional(),
   kind: z.enum(REFERENCE_KINDS).optional(),
-  resolution: z.enum(["resolved", "not_found", "unconfirmed"]).optional(),
+  name: z.string().optional(),
+  resolution: z.enum(["resolved", "not_found"]).optional(),
   matches: z.array(matchSchema).optional(),
   suggestions: z.array(z.string()).optional(),
   other_kinds: z.array(z.string()).optional(),
@@ -182,25 +177,30 @@ export interface DeckCategory {
   waterfalls: Array<{ reference: string; fallbacks: string[] }>;
 }
 
-/** One category a checked reference resolves in, with what it resolves to there. */
+/**
+ * What a checked reference is in one category it resolves in. A field that
+ * does not apply to the reference's kind is absent, as on the runner's verdict.
+ */
 export interface ReferenceMatch {
   category: DeckCategoryName;
-  /** An alias's model handle. */
+  /** The model a run through the reference calls now in this category, or `null` when it reaches none. */
+  resolves_to: string | null;
+  /** A preset's or an alias's binding, as the deck writes it, which may itself be a reference. */
   target?: string;
-  /** A waterfall's handles, in the order they are tried. */
+  /** A preset's description, or `null` when the deck gives it none. */
+  description?: string | null;
+  /** A waterfall's steps, in order. */
   fallbacks?: string[];
-  /** For a handle: the aliases and waterfalls of this category that name it. */
+  /** For a handle: the presets, aliases and waterfalls of this category whose binding names it. */
   via?: string[];
 }
 
 /**
- * - `resolved`: the reference names something in the categories checked.
- * - `not_found`: a preset, alias or waterfall the deck does not hold, which is
- *   definitive, since the deck lists every one of them.
- * - `unconfirmed`: a bare handle no alias or waterfall names, which the deck
- *   cannot settle either way.
+ * The runner's two answers, both definitive since it knows every name it
+ * holds. A value it sends that this tool does not know reads as `not_found`,
+ * under the spec's reader rule that such a reference is treated as unresolved.
  */
-export type ReferenceResolution = "resolved" | "not_found" | "unconfirmed";
+export type ReferenceResolution = "resolved" | "not_found";
 
 export interface ModelDeckListing {
   status: "ok";
@@ -211,13 +211,15 @@ export interface ModelDeckListing {
 export interface ModelReferenceCheck {
   status: "ok";
   category?: ModelCategory;
-  /** The reference as checked: the caller's, trimmed. */
+  /** The reference as checked: the caller's, trimmed by the runner. */
   reference: string;
   kind: ReferenceKind;
+  /** The reference without its sigil or namespace. */
+  name: string;
   resolution: ReferenceResolution;
   /** Where it resolves; empty unless `resolved`. */
   matches: ReferenceMatch[];
-  /** The nearest names, written with their sigils; empty when `resolved`. */
+  /** The nearest names, written as a method writes them; empty when `resolved`. */
   suggestions: string[];
   /** The same name under another kind, written with that kind's sigil (`best-gpt` → `@best-gpt`); empty when `resolved`. */
   other_kinds: string[];
@@ -240,6 +242,10 @@ export interface ModelsResult {
 /** The narrow SDK seam the tests supply. */
 export interface ModelsClient {
   models(category?: ModelCategory): Promise<ModelDeck>;
+  checkModelReference(
+    reference: string,
+    category?: ModelCheckCategory,
+  ): Promise<ModelReferenceVerdict>;
 }
 
 export interface ModelsContext extends ApiConfig {
@@ -256,14 +262,6 @@ function modelsClient(context: ModelsContext): ModelsClient {
   return context.client ?? createPipelexApiClient(context);
 }
 
-export interface ParsedReference {
-  /** The caller's reference, trimmed. */
-  raw: string;
-  kind: ReferenceKind;
-  /** The name without its sigil or namespace. */
-  name: string;
-}
-
 export async function readMthdsModels(
   input: MthdsModelsInput,
   context: ModelsContext,
@@ -276,40 +274,30 @@ export async function readMthdsModels(
         class: "input_domain",
         ...(issue.path.length === 0 ? {} : { location: issue.path.join(".") }),
         message: issue.message,
-        hint: `Use category as one of ${MODEL_CATEGORIES.join(", ")}, and reference as text of at most ${MAX_REFERENCE_LENGTH} characters.`,
+        hint: `Use category as one of ${MODEL_CATEGORIES.join(", ")}, and reference as text.`,
         retryable: false,
       })),
     );
   }
-  const { category } = parsedInput.data;
+  const { category, reference } = parsedInput.data;
+  return reference === undefined
+    ? listDeck(category, context)
+    : checkReference(reference, category, context);
+}
 
-  let reference: ParsedReference | undefined;
-  if (parsedInput.data.reference !== undefined) {
-    const parsed = parseModelReference(parsedInput.data.reference);
-    if (!parsed.ok) {
-      // The headline names the fault the error names: a bare "$" is not empty,
-      // and a model told it sent nothing would send the same "$" again.
-      const fault =
-        parsedInput.data.reference.trim() === ""
-          ? "it is empty"
-          : "it has no name after its prefix";
-      return errorResult(`Model reference was not checked: ${fault}.`, [parsed.error]);
-    }
-    reference = parsed.reference;
-  }
-
+async function listDeck(
+  category: ModelCategory | undefined,
+  context: ModelsContext,
+): Promise<ModelsResult> {
   let wire: ModelDeck;
   try {
-    // A check reads the whole deck, so that a reference missing from the
-    // category asked about can still be reported as living in another one: a
-    // `$gen-image` written into a PipeLLM is a wrong category, not a typo. A
-    // listing asks the route for the category, which is the route's own filter.
-    // Client construction stays inside the caught path, so a malformed base URL
-    // becomes a classified error rather than a rejected handler.
-    wire = await modelsClient(context).models(reference === undefined ? category : undefined);
+    // The route's own filter. Client construction stays inside the caught
+    // path, so a malformed base URL becomes a classified error rather than a
+    // rejected handler.
+    wire = await modelsClient(context).models(category);
   } catch (err) {
-    const error = classifyError(err, modelsErrorOptions(context, err));
-    return errorResult(summaryForToolError(error, ERROR_SUMMARIES), [error]);
+    const error = classifyError(err, listingErrorOptions(context, err));
+    return errorResult(summaryForToolError(error, LISTING_ERROR_SUMMARIES), [error]);
   }
 
   let deck: Map<DeckCategoryName, DeckCategory>;
@@ -326,69 +314,52 @@ export async function readMthdsModels(
     ]);
   }
 
-  if (reference === undefined) {
-    const listing: ModelDeckListing = {
-      status: "ok",
-      ...(category === undefined ? {} : { category }),
-      deck: scopeOf(deck, category),
-    };
-    return { structuredContent: listing, summary: listingSummary(listing) };
+  const listing: ModelDeckListing = {
+    status: "ok",
+    ...(category === undefined ? {} : { category }),
+    deck: scopeOf(deck, category),
+  };
+  return { structuredContent: listing, summary: listingSummary(listing) };
+}
+
+async function checkReference(
+  reference: string,
+  category: ModelCategory | undefined,
+  context: ModelsContext,
+): Promise<ModelsResult> {
+  let wire: unknown;
+  try {
+    // The reference goes as the caller wrote it: the runner trims it, parses
+    // it and refuses one it cannot read, and its rule is the only one.
+    wire = await modelsClient(context).checkModelReference(reference, category);
+  } catch (err) {
+    const refusal = checkRefusalOf(err);
+    const error = classifyError(err, checkErrorOptions(context, err, refusal));
+    return errorResult(refusal?.headline ?? summaryForToolError(error, CHECK_ERROR_SUMMARIES), [
+      error,
+    ]);
   }
 
-  const check = checkReference(reference, deck, category);
+  const parsed = wireVerdictSchema.safeParse(wire);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const at = issue === undefined || issue.path.length === 0 ? "" : ` at ${issue.path.join(".")}`;
+    return errorResult(
+      "Model reference check produced no answer: the API returned a malformed verdict.",
+      [
+        {
+          class: "runtime",
+          message: `The model reference verdict is malformed${at}: ${issue?.message ?? "it is not an object"}.`,
+          hint: "The API responded, but its verdict violated the shape of GET /v1/models/check; inspect the hosted API.",
+          retryable: false,
+        },
+      ],
+    );
+  }
+
+  const check = checkOf(parsed.data, category);
   return { structuredContent: check, summary: checkSummary(check) };
 }
-
-/**
- * Parse a reference the way the runner does (`ModelReference.parse`): a sigil,
- * then a spelled-out namespace, else a bare handle. The name after a sigil or a
- * namespace must not be empty.
- */
-export function parseModelReference(
-  value: string,
-): { ok: true; reference: ParsedReference } | { ok: false; error: ToolError } {
-  const raw = value.trim();
-  if (raw === "") {
-    return {
-      ok: false,
-      error: {
-        class: "input_domain",
-        location: "reference",
-        message: "The model reference is empty.",
-        hint: "Pass a reference such as $writing-factual or @best-gpt, or omit reference to list the deck.",
-        retryable: false,
-      },
-    };
-  }
-
-  for (const kind of REFERENCE_KINDS) {
-    for (const prefix of [SIGIL_OF[kind], NAMESPACE_OF[kind]]) {
-      if (prefix === "" || !raw.startsWith(prefix)) continue;
-      const name = raw.slice(prefix.length);
-      if (name === "") {
-        return {
-          ok: false,
-          error: {
-            class: "input_domain",
-            location: "reference",
-            message: `The model reference "${raw}" has no name after its "${prefix}" prefix.`,
-            hint: `Write the ${kind}'s name after the prefix, such as ${SIGIL_OF[kind]}${EXAMPLE_NAME_OF[kind]}.`,
-            retryable: false,
-          },
-        };
-      }
-      return { ok: true, reference: { raw, kind, name } };
-    }
-  }
-  return { ok: true, reference: { raw, kind: "handle", name: raw } };
-}
-
-const EXAMPLE_NAME_OF: Record<ReferenceKind, string> = {
-  preset: "writing-factual",
-  alias: "best-gpt",
-  waterfall: "robust-llm",
-  handle: "gpt-4o",
-};
 
 /**
  * Validate the wire and index it by category: the protocol's categories first,
@@ -485,15 +456,11 @@ function categoryEntries(
   return entries;
 }
 
-function isModelCategory(value: unknown): value is ModelCategory {
-  return MODEL_CATEGORIES.some((category) => category === value);
-}
-
 function emptyCategory(category: DeckCategoryName): DeckCategory {
   return { category, presets: [], aliases: [], waterfalls: [] };
 }
 
-/** The categories a listing or a check covers: the one named, else every one the deck holds. */
+/** The categories a listing covers: the one named, else every one the deck holds. */
 function scopeOf(
   deck: Map<DeckCategoryName, DeckCategory>,
   category: ModelCategory | undefined,
@@ -503,205 +470,91 @@ function scopeOf(
     : [deck.get(category) ?? emptyCategory(category)];
 }
 
-/** A category as a summary names it: with its pipe type, or as one this tool does not know. */
-function categoryLabel(category: DeckCategoryName): string {
-  return isModelCategory(category)
-    ? `${category} (${PIPE_TYPE_OF[category]})`
-    : `${category} (a category this tool does not know)`;
-}
+// ── the runner's verdict, checked ──
+//
+// The SDK hands the verdict back as parsed JSON typed as `ModelReferenceVerdict`
+// without checking it, so these schemas do, one arm per kind as the wire is
+// discriminated, each match holding exactly the fields its kind carries. Parsing
+// strips any field the shape does not name, which is the projection: what
+// reaches `structuredContent` is what the output schema declares. `resolution`
+// and every category are read open, as the spec and the SDK read them.
 
-/** The bare names one category holds for one kind, in the deck's order. */
-function namesOf(deck: DeckCategory, kind: ReferenceKind): string[] {
-  switch (kind) {
-    case "preset":
-      return deck.presets.map((preset) => preset.slice(SIGIL_OF.preset.length));
-    case "alias":
-      return deck.aliases.map((alias) => alias.reference.slice(SIGIL_OF.alias.length));
-    case "waterfall":
-      return deck.waterfalls.map((waterfall) =>
-        waterfall.reference.slice(SIGIL_OF.waterfall.length),
-      );
-    case "handle":
-      return unique([
-        ...deck.aliases.map((alias) => alias.target),
-        ...deck.waterfalls.flatMap((waterfall) => waterfall.fallbacks),
-      ]);
-  }
-}
+const wireMatchBase = {
+  category: z.string().min(1),
+  resolves_to: z.string().nullable(),
+};
 
-function matchIn(deck: DeckCategory, reference: ParsedReference): ReferenceMatch | undefined {
-  const { kind, name } = reference;
-  switch (kind) {
-    case "preset":
-      return deck.presets.includes(`${SIGIL_OF.preset}${name}`)
-        ? { category: deck.category }
-        : undefined;
-    case "alias": {
-      const alias = deck.aliases.find((each) => each.reference === `${SIGIL_OF.alias}${name}`);
-      return alias === undefined ? undefined : { category: deck.category, target: alias.target };
-    }
-    case "waterfall": {
-      const waterfall = deck.waterfalls.find(
-        (each) => each.reference === `${SIGIL_OF.waterfall}${name}`,
-      );
-      return waterfall === undefined
-        ? undefined
-        : { category: deck.category, fallbacks: waterfall.fallbacks };
-    }
-    case "handle": {
-      const via = [
-        ...deck.aliases.filter((alias) => alias.target === name).map((alias) => alias.reference),
-        ...deck.waterfalls
-          .filter((waterfall) => waterfall.fallbacks.includes(name))
-          .map((waterfall) => waterfall.reference),
-      ];
-      return via.length === 0 ? undefined : { category: deck.category, via };
-    }
-  }
-}
+const wireVerdictBase = {
+  reference: z.string(),
+  name: z.string(),
+  resolution: z.string(),
+  suggestions: z.array(z.string()),
+  other_kinds: z.array(z.string()),
+  other_categories: z.array(z.string().min(1)),
+};
 
-export function checkReference(
-  reference: ParsedReference,
-  deck: Map<DeckCategoryName, DeckCategory>,
-  category: ModelCategory | undefined,
-): ModelReferenceCheck {
-  const scope = scopeOf(deck, category);
-  const matches = scope.flatMap((each) => matchIn(each, reference) ?? []);
-  const base = {
-    status: "ok" as const,
-    ...(category === undefined ? {} : { category }),
-    reference: reference.raw,
-    kind: reference.kind,
-  };
+const wireVerdictSchema = z.discriminatedUnion("kind", [
+  z.object({
+    ...wireVerdictBase,
+    kind: z.literal("preset"),
+    matches: z.array(
+      z.object({ ...wireMatchBase, target: z.string(), description: z.string().nullable() }),
+    ),
+  }),
+  z.object({
+    ...wireVerdictBase,
+    kind: z.literal("alias"),
+    matches: z.array(z.object({ ...wireMatchBase, target: z.string() })),
+  }),
+  z.object({
+    ...wireVerdictBase,
+    kind: z.literal("waterfall"),
+    matches: z.array(z.object({ ...wireMatchBase, fallbacks: z.array(z.string()) })),
+  }),
+  z.object({
+    ...wireVerdictBase,
+    kind: z.literal("handle"),
+    matches: z.array(z.object({ ...wireMatchBase, via: z.array(z.string()) })),
+  }),
+]);
 
-  if (matches.length > 0) {
-    return {
-      ...base,
-      resolution: "resolved",
-      matches,
-      suggestions: [],
-      other_kinds: [],
-      other_categories: [],
-    };
-  }
+type WireVerdict = z.infer<typeof wireVerdictSchema>;
 
-  const candidatesOf = (kind: ReferenceKind) =>
-    unique(scope.flatMap((each) => namesOf(each, kind)));
-
-  const suggestions = closeMatches(
-    reference.name,
-    candidatesOf(reference.kind),
-    SAME_KIND_MATCHES,
-    SAME_KIND_CUTOFF,
-  ).map((name) => `${SIGIL_OF[reference.kind]}${name}`);
-  const otherKinds: string[] = [];
-  for (const kind of REFERENCE_KINDS) {
-    if (kind === reference.kind) continue;
-    const candidates = candidatesOf(kind);
-    if (candidates.includes(reference.name)) {
-      otherKinds.push(`${SIGIL_OF[kind]}${reference.name}`);
-      continue;
-    }
-    for (const name of closeMatches(
-      reference.name,
-      candidates,
-      OTHER_KIND_MATCHES,
-      OTHER_KIND_CUTOFF,
-    )) {
-      suggestions.push(`${SIGIL_OF[kind]}${name}`);
-    }
-  }
-
-  const otherCategories =
-    category === undefined
-      ? []
-      : [...deck.values()]
-          .filter((other) => other.category !== category && matchIn(other, reference) !== undefined)
-          .map((other) => other.category);
-
+/**
+ * The tool's check from the runner's verdict. `category` is the one the
+ * caller asked about, which the runner echoes, so the output keeps the
+ * listing's closed filter type and stays absent when none was asked.
+ */
+function checkOf(verdict: WireVerdict, category: ModelCategory | undefined): ModelReferenceCheck {
   return {
-    ...base,
-    resolution: reference.kind === "handle" ? "unconfirmed" : "not_found",
-    matches: [],
-    suggestions: unique(suggestions),
-    other_kinds: otherKinds,
-    other_categories: otherCategories,
+    status: "ok",
+    ...(category === undefined ? {} : { category }),
+    reference: verdict.reference,
+    kind: verdict.kind,
+    name: verdict.name,
+    resolution: verdict.resolution === "resolved" ? "resolved" : "not_found",
+    matches: verdict.matches,
+    suggestions: verdict.suggestions,
+    other_kinds: verdict.other_kinds,
+    other_categories: verdict.other_categories,
   };
 }
 
-/**
- * difflib's `get_close_matches`: the candidates whose similarity to `word`
- * reaches `cutoff`, best first, at most `count` of them. Ties are broken the way
- * difflib's `heapq.nlargest` over `(score, candidate)` breaks them — the greater
- * candidate first — so the order matches the runner's own suggestions.
- */
-export function closeMatches(
-  word: string,
-  candidates: readonly string[],
-  count: number,
-  cutoff: number,
-): string[] {
-  return candidates
-    .map((candidate) => ({ candidate, score: similarity(candidate, word) }))
-    .filter(({ score }) => score >= cutoff)
-    .sort((a, b) => (b.score !== a.score ? b.score - a.score : a.candidate < b.candidate ? 1 : -1))
-    .slice(0, count)
-    .map(({ candidate }) => candidate);
+// ── summaries ──
+
+/** The pipe type that names a category, for the categories this tool knows. */
+function pipeTypeOf(category: string): string | undefined {
+  return Object.hasOwn(CHECK_PIPE_TYPE_OF, category)
+    ? CHECK_PIPE_TYPE_OF[category as ModelCheckCategory]
+    : undefined;
 }
 
-/**
- * difflib's `SequenceMatcher(None, a, b).ratio()`: twice the characters the two
- * strings share in their matching blocks, over their total length. The blocks
- * are found as difflib finds them — the longest common run, earliest in `a` and
- * then in `b` on a tie, then the same on each side of it. difflib's junk
- * heuristic is left out: `get_close_matches` applies it to the word, which is
- * `b` here, and only from 200 characters, while `MAX_REFERENCE_LENGTH` keeps a
- * reference, and so the name it carries, below that.
- */
-export function similarity(a: string, b: string): number {
-  const left = Array.from(a);
-  const right = Array.from(b);
-  const total = left.length + right.length;
-  if (total === 0) return 1;
-
-  const positionsInRight = new Map<string, number[]>();
-  right.forEach((char, index) => {
-    const positions = positionsInRight.get(char);
-    if (positions === undefined) positionsInRight.set(char, [index]);
-    else positions.push(index);
-  });
-
-  let matched = 0;
-  const queue: Array<[number, number, number, number]> = [[0, left.length, 0, right.length]];
-  while (queue.length > 0) {
-    const [aLow, aHigh, bLow, bHigh] = queue.pop() as [number, number, number, number];
-    let bestI = aLow;
-    let bestJ = bLow;
-    let bestSize = 0;
-    let runEndingAt = new Map<number, number>();
-    for (let i = aLow; i < aHigh; i++) {
-      const next = new Map<number, number>();
-      for (const j of positionsInRight.get(left[i] as string) ?? []) {
-        if (j < bLow) continue;
-        if (j >= bHigh) break;
-        const size = (runEndingAt.get(j - 1) ?? 0) + 1;
-        next.set(j, size);
-        if (size > bestSize) {
-          bestI = i - size + 1;
-          bestJ = j - size + 1;
-          bestSize = size;
-        }
-      }
-      runEndingAt = next;
-    }
-    if (bestSize === 0) continue;
-    matched += bestSize;
-    if (aLow < bestI && bLow < bestJ) queue.push([aLow, bestI, bLow, bestJ]);
-    if (bestI + bestSize < aHigh && bestJ + bestSize < bHigh) {
-      queue.push([bestI + bestSize, aHigh, bestJ + bestSize, bHigh]);
-    }
-  }
-  return (2 * matched) / total;
+/** A category as a summary names it: with its pipe type, or as one this tool does not know. */
+function categoryLabel(category: string): string {
+  const pipeType = pipeTypeOf(category);
+  return pipeType === undefined
+    ? `${category} (a category this tool does not know)`
+    : `${category} (${pipeType})`;
 }
 
 const ACCOUNT_CAVEAT =
@@ -743,32 +596,30 @@ function listingSummary(listing: ModelDeckListing): string {
 }
 
 function checkSummary(check: ModelReferenceCheck): string {
-  const where =
-    check.category === undefined
-      ? "any category"
-      : `${check.category} (${PIPE_TYPE_OF[check.category]})`;
+  const where = check.category === undefined ? "any category" : categoryLabel(check.category);
   const lines: string[] = [];
 
-  switch (check.resolution) {
-    case "resolved":
-      lines.push(`${code(check.reference)} resolves: it is ${article(check.kind)} ${check.kind}.`);
-      for (const match of check.matches) {
-        lines.push(`- ${categoryLabel(match.category)}${matchDetail(match)}`);
-      }
-      break;
-    case "not_found":
+  if (check.resolution === "resolved") {
+    lines.push(`${code(check.reference)} resolves: it is ${article(check.kind)} ${check.kind}.`);
+    for (const match of check.matches) {
+      lines.push(`- ${categoryLabel(match.category)}${matchDetail(check, match)}`);
+    }
+    if (check.matches.some((match) => match.resolves_to === null)) {
       lines.push(
-        `${code(check.reference)} does not resolve: no ${check.kind} in ${where} has that name.`,
+        "Where it reaches no model, a validation accepts it but a run through it fails: treat that as a warning, and prefer a reference that reaches one.",
       );
-      break;
-    case "unconfirmed":
-      lines.push(
-        `${code(check.reference)} is a bare model handle the deck cannot confirm: no alias or waterfall in ${where} names it, and the deck lists no handle otherwise.`,
-      );
-      break;
+    }
+  } else {
+    const holder =
+      check.kind === "handle"
+        ? `no model this runner can call in ${where}, and no alias or waterfall there,`
+        : `no ${check.kind} in ${where}`;
+    lines.push(
+      `${code(check.reference)} does not resolve: ${holder} has that name, so a validation refuses it too.`,
+    );
   }
 
-  // The likeliest fault first: a name the deck holds under another sigil is
+  // The likeliest fault first: a name the runner holds under another sigil is
   // almost always a sigil left off or mistyped, so it leads what follows.
   for (const other of check.other_kinds) {
     const kind = kindOf(other);
@@ -785,28 +636,38 @@ function checkSummary(check: ModelReferenceCheck): string {
   if (check.suggestions.length > 0) {
     lines.push(`Nearest names: ${check.suggestions.map(code).join(", ")}.`);
   }
-  if (
-    check.resolution === "unconfirmed" &&
-    check.other_kinds.length === 0 &&
-    check.other_categories.length === 0
-  ) {
-    lines.push(
-      "mthds_validate checks a handle against the runner's full model list; prefer a preset where one fits.",
-    );
-  }
 
   lines.push(ACCOUNT_CAVEAT);
   return lines.join("\n");
 }
 
-function matchDetail(match: ReferenceMatch): string {
-  if (match.target !== undefined) return ` → ${code(match.target)}`;
-  if (match.fallbacks !== undefined) return ` → ${match.fallbacks.map(code).join(", ")}`;
-  if (match.via !== undefined) return `, named by ${match.via.map(code).join(", ")}`;
-  return "";
+/** What a match says beyond its category: the binding, the steps or who names it, then what a run calls. */
+function matchDetail(check: ModelReferenceCheck, match: ReferenceMatch): string {
+  let shown: string | undefined;
+  let detail = "";
+  if (match.target !== undefined) {
+    shown = match.target;
+    detail = ` → ${code(match.target)}`;
+  } else if (match.fallbacks !== undefined) {
+    detail = ` → ${match.fallbacks.map(code).join(", ")}`;
+  } else if (match.via !== undefined) {
+    shown = check.name;
+    detail = match.via.length === 0 ? "" : `, named by ${match.via.map(code).join(", ")}`;
+  }
+
+  if (match.resolves_to === null) {
+    detail += ", which reaches no model this runner can call now";
+  } else if (match.resolves_to !== shown) {
+    detail += `, which runs ${code(match.resolves_to)} now`;
+  }
+
+  if (typeof match.description === "string" && match.description.trim() !== "") {
+    detail += `: ${asOneLine(match.description)}`;
+  }
+  return detail;
 }
 
-/** The kind a sigiled reference this module wrote is of. */
+/** The kind a reference the runner wrote is of, read from its sigil. */
 function kindOf(reference: string): ReferenceKind {
   return (
     REFERENCE_KINDS.find((kind) => kind !== "handle" && reference.startsWith(SIGIL_OF[kind])) ??
@@ -826,51 +687,128 @@ function listOrNone(items: string[]): string {
   return items.length === 0 ? "none." : items.join(", ");
 }
 
-function unique(values: string[]): string[] {
-  return [...new Set(values)];
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// ── failures ──
+
 /**
- * The 400/422 arm is picked by status, as the upload grant's is, because the
- * two refusals come from two layers. A 422 is the runner's, and its only one on
- * this route is a `type` it does not know, which only a listing with a category
- * sends. This tool declares the protocol's categories, so a runner refuses one
- * only when it implements an older protocol than the one that defined it, as a
- * runner before protocol 0.7.0 refuses `judgment`; the hint says so rather than
- * offering the refused value back. A 400 is the platform's missing active-organization refusal: the
- * route takes a user credential alone today and never answers it, but the
- * refusal is the platform's on every organization-scoped route, and it would
- * arrive with a category or without one, so the category must not take the
- * blame for it.
+ * The listing's 400/422 arm is picked by status, as the upload grant's is,
+ * because the two refusals come from two layers. A 422 is the runner's, and its
+ * only one on this route is a `type` it does not know, which only a listing with
+ * a category sends. This tool declares the protocol's categories, so a runner
+ * refuses one only when it implements an older protocol than the one that
+ * defined it, as a runner before protocol 0.7.0 refuses `judgment`; the hint
+ * says so rather than offering the refused value back. A 400 is the platform's
+ * missing active-organization refusal: the route takes a user credential alone
+ * today and never answers it, but the refusal is the platform's on every
+ * organization-scoped route, and it would arrive with a category or without
+ * one, so the category must not take the blame for it.
  */
-function modelsErrorOptions(context: ModelsContext, err: unknown): ClassifyErrorOptions {
-  const orgless = err instanceof ApiResponseError && err.status === 400;
+function listingErrorOptions(context: ModelsContext, err: unknown): ClassifyErrorOptions {
   return {
     route: "/v1/models",
-    badRequest: orgless
-      ? {
-          class: "config",
-          location: context.authError?.location ?? "PIPELEX_API_KEY",
-          hint: "The model deck needs an active organization context. Use a platform key minted for the intended organization, then retry.",
-        }
-      : {
-          location: "category",
-          hint: "The runner does not know this category, which happens when it implements an older MTHDS protocol than the one that defined it. Omit category to list every category it serves.",
-        },
+    badRequest: isOrglessRefusal(err)
+      ? orglessTexture(context)
+      : { location: "category", hint: OLDER_PROTOCOL_HINT },
     auth: context.authError,
   };
 }
 
-const ERROR_SUMMARIES: ErrorSummaries = {
+const OLDER_PROTOCOL_HINT =
+  "The runner does not know this category, which happens when it implements an older MTHDS protocol than the one that defined it. Omit category to cover every category it serves.";
+
+/** A typed refusal of the check route: where it points, what to do, and its headline. */
+interface CheckRefusal {
+  location: string;
+  hint: string;
+  headline: string;
+}
+
+/**
+ * The check route's two `422`s that name the caller's argument, by the
+ * runner's `error_type`. A reference the runner cannot read (blank, a sigil or
+ * a namespace with nothing after it, or past its length limit) is the
+ * `reference`'s fault, and its message says which; an unknown `type` is the
+ * category's, which, since this tool sends only the protocol's categories,
+ * means a runner older than the category.
+ */
+const CHECK_REFUSALS: ReadonlyMap<string, CheckRefusal> = new Map([
+  [
+    "InvalidModelReference",
+    {
+      location: "reference",
+      hint: "Write the reference as a pipe's model field does — $preset, @alias, ~waterfall or a bare handle, with a name after any sigil or prefix — or omit reference to list the deck.",
+      headline: "Model reference was not checked: the runner cannot read it as a reference.",
+    },
+  ],
+  [
+    "InvalidModelCategory",
+    {
+      location: "category",
+      hint: OLDER_PROTOCOL_HINT,
+      headline: "Model reference was not checked: the runner does not know the category.",
+    },
+  ],
+]);
+
+function checkRefusalOf(err: unknown): CheckRefusal | undefined {
+  return err instanceof ApiResponseError && err.status === 422 && err.errorType !== undefined
+    ? CHECK_REFUSALS.get(err.errorType)
+    : undefined;
+}
+
+/**
+ * The check's 400/422 arm, by status and then by `error_type`. A 400 is the
+ * platform's missing active organization, as on the listing. A 422 that names
+ * the reference or the category takes that argument's texture; any other 422 is
+ * about a request this tool built itself, a parameter missing or repeated
+ * (`ValidationError`), which no argument changes, so it is `config`: the
+ * runner serves another version of the route than this tool speaks.
+ */
+function checkErrorOptions(
+  context: ModelsContext,
+  err: unknown,
+  refusal: CheckRefusal | undefined,
+): ClassifyErrorOptions {
+  const badRequest: ClassifyErrorOptions["badRequest"] = isOrglessRefusal(err)
+    ? orglessTexture(context)
+    : refusal !== undefined
+      ? { location: refusal.location, hint: refusal.hint }
+      : {
+          class: "config",
+          hint: "The runner refused the check request this tool built, which happens when it serves another version of /v1/models/check; the message says what it refused.",
+        };
+  return { route: "/v1/models/check", badRequest, auth: context.authError };
+}
+
+function isOrglessRefusal(err: unknown): boolean {
+  return err instanceof ApiResponseError && err.status === 400;
+}
+
+function orglessTexture(context: ModelsContext): NonNullable<ClassifyErrorOptions["badRequest"]> {
+  return {
+    class: "config",
+    location: context.authError?.location ?? "PIPELEX_API_KEY",
+    hint: "The model deck needs an active organization context. Use a platform key minted for the intended organization, then retry.",
+  };
+}
+
+const LISTING_ERROR_SUMMARIES: ErrorSummaries = {
   config: "Model deck could not be read: the Pipelex API or its access is misconfigured.",
   input_domain: "Model deck was not read: the Pipelex API rejected the request.",
   runtime: "Model deck could not be read: the Pipelex API returned an error.",
   paywall:
     "Model deck could not be read: the organization's Pipelex plan does not cover this call.",
+};
+
+const CHECK_ERROR_SUMMARIES: ErrorSummaries = {
+  config: "Model reference could not be checked: the Pipelex API or its access is misconfigured.",
+  input_domain: "Model reference was not checked: the Pipelex API rejected the request.",
+  runtime: "Model reference could not be checked: the Pipelex API returned an error.",
+  paywall:
+    "Model reference could not be checked: the organization's Pipelex plan does not cover this call.",
 };
 
 function errorResult(summary: string, errors: ToolError[]): ModelsResult {

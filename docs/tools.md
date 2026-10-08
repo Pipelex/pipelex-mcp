@@ -68,16 +68,16 @@ No method source crosses the conversation in this flow.
 
 ### `mthds_models`
 
-Lists the model deck, the references a pipe's `model` field can name, or checks one reference before it is written into a method. It reads `GET /v1/models`, writes nothing and spends no inference credit.
+Lists the model deck, the references a pipe's `model` field can name, or has the runner check one reference before it is written into a method. A listing reads `GET /v1/models` and a check `GET /v1/models/check`; the tool writes nothing and spends no inference credit.
 
 ```ts
 {
   category?: "llm" | "extract" | "img_gen" | "search" | "judgment";
-  reference?: string; // at most 199 characters
+  reference?: string;
 }
 ```
 
-`category` narrows either use to the references of one pipe type: `llm` for a PipeLLM, `extract` for a PipeExtract, `img_gen` for a PipeImgGen, `search` for a PipeSearch and `judgment` for a PipeJudge. These are the MTHDS protocol's categories, and a runner that implements an older protocol than the one that defined a category refuses it as a filter, as a runner before protocol 0.7.0 refuses `judgment`; omit `category` to list what that runner serves. Without `reference`, the tool lists the deck:
+`category` narrows either use to the references of one pipe type: `llm` for a PipeLLM, `extract` for a PipeExtract, `img_gen` for a PipeImgGen, `search` for a PipeSearch and `judgment` for a PipeJudge. These are the MTHDS protocol's categories, and a runner that implements an older protocol than the one that defined a category refuses it as a filter, as a runner before protocol 0.7.0 refuses `judgment`; omit `category` to list what that runner serves. A check without `category` covers every category the runner checks in, `doc_gen` for a PipeDocGen included, which the filter does not take since the protocol does not define it. Without `reference`, the tool lists the deck:
 
 ```ts
 {
@@ -94,7 +94,7 @@ Lists the model deck, the references a pipe's `model` field can name, or checks 
 
 Every reference is written the way a method writes it, and every category in scope is present, empty or not. A category the tool does not know, which a runner of a later protocol may report, is not dropped: a listing of every category shows it after the protocol's under the runner's own name, a check resolves in it, and the summary says the tool does not know which pipe type names it. Presets pair a model with settings for a kind of task and are the ones to prefer. The deck names no model handle on its own: a handle appears only as an alias's target or a waterfall's step.
 
-With `reference`, the tool checks that reference, which may be a preset (`$`), an alias (`@`), a waterfall (`~`), a bare model handle, or any of them with the `preset:`, `alias:`, `waterfall:` or `handle:` prefix the runner also accepts. A check reads the whole deck, so it can tell a reference written into the wrong pipe type from one that does not exist:
+With `reference`, the runner checks that reference, which may be a preset (`$`), an alias (`@`), a waterfall (`~`), a bare model handle, or any of them with the `preset:`, `alias:`, `waterfall:` or `handle:` prefix. The runner applies the rule a validation applies, so a reference it finds `resolved` in a category is one a validation accepts there and one it finds `not_found` is one a validation refuses; the tool relays its answer:
 
 ```ts
 {
@@ -102,15 +102,23 @@ With `reference`, the tool checks that reference, which may be a preset (`$`), a
   category?: string;
   reference: string;
   kind: "preset" | "alias" | "waterfall" | "handle";
-  resolution: "resolved" | "not_found" | "unconfirmed";
-  matches: Array<{ category: string; target?: string; fallbacks?: string[]; via?: string[] }>;
+  name: string;               // the reference without its sigil or prefix
+  resolution: "resolved" | "not_found";
+  matches: Array<{
+    category: string;
+    resolves_to: string | null;  // the model a run calls now; null when it reaches none
+    target?: string;             // a preset's or an alias's binding
+    description?: string | null; // a preset's description
+    fallbacks?: string[];        // a waterfall's steps, in order
+    via?: string[];              // for a handle: the presets, aliases and waterfalls that name it
+  }>;
   suggestions: string[];      // the nearest names, e.g. "$writing-factual" for "$writing-factul"
   other_kinds: string[];      // the same name under another sigil, e.g. "@best-gpt" for "best-gpt"
   other_categories: string[]; // with a category: where the reference resolves instead
 }
 ```
 
-`resolved` says where the reference resolves and what it resolves to. `not_found` is a preset, alias or waterfall the deck does not hold. `unconfirmed` is a bare handle that no alias or waterfall names: the deck cannot say whether the runner serves it, but `mthds_validate` checks a handle against the runner's full model list. For a preset, alias or waterfall checked with a category, the nearest names are the ones the runner itself suggests when a validation fails on the same reference. A handle's nearest names come only from the handles the deck names, and a check without a category draws on every category, so there they can differ from validation's.
+`resolved` says in which categories the reference resolves, what the deck binds it to there and which model a run through it calls now. A match whose `resolves_to` is `null` names something the runner holds that reaches no model it can call, such as an alias whose target sits on a backend it has not enabled: a validation accepts it, but a run through it fails, and the summary says so. `not_found` is definitive for every kind, a bare model handle included, since the runner knows every model it can call; the lists then say what was probably meant, the wrong sigil first. A reference the runner cannot read at all, such as a blank one or a sigil with no name after it, is an error at `reference` carrying the runner's reason.
 
 **The deck is what the runner can serve, not what your account may use.** A gateway can refuse a listed model when a run starts, after the method validated. The tool's description and every summary say so.
 
