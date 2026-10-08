@@ -500,7 +500,7 @@ interface RunClient {
   start(options: PipelexStartOptions): Promise<PipelexRunResultStart>;
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
-  /** `GET /v1/version`, read to learn whether `mt_…@draft` must be sent bare; optional on a test seam. */
+  /** `GET /v1/version`, read only to word the hint of a refused suffix — a selector is always sent as given; optional on a test seam. */
   version?(): Promise<unknown>;
 }
 
