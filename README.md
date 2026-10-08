@@ -47,7 +47,7 @@ A host that spawns MCP servers but takes no plugin, such as Cursor, can run the 
 
 ## What this repository is
 
-This repository is **the workshop**, the MCP server inside the Pipelex plugin (server name `pipelex-plugin`): an npm-distributed stdio server (`@pipelex/mcp`, bin `pipelex-mcp`) that coding-agent hosts spawn via `npx`. It wraps the Pipelex API through the `@pipelex/sdk` `PipelexApiClient`. Its tools are `mthds_*`: they find a saved method, validate a method, template its inputs, generate typed code for it, prepare its files, run it, look up the model references it can name, and save it to the catalog and pull it back. Its headline feature is the `{ path }` file arm: it reads `.mthds` files from disk instead of having the model hand-copy their contents. It is **tools-first and ships no views on any host**, so it reports structured results and text summaries directly.
+This repository is **the workshop**, the MCP server inside the Pipelex plugin (server name `pipelex-plugin`): an npm-distributed stdio server (`@pipelex/mcp`, bin `pipelex-mcp`) that coding-agent hosts spawn via `npx`. It wraps the Pipelex API through the `@pipelex/sdk` `PipelexApiClient`. Its tools are `mthds_*`: they find a saved method, validate a method, template its inputs, generate typed code for it, prepare its files, run it, look up the model references it can name, save it to the catalog as a draft and pull it back, and publish the draft as a version when you ask. Its headline feature is the `{ path }` file arm: it reads `.mthds` files from disk instead of having the model hand-copy their contents. It is **tools-first and ships no views on any host**, so it reports structured results and text summaries directly.
 
 The Pipelex MCP for chatbots, at `mcp.pipelex.com`, is the hosted Pipelex connector, a separate product with tools of its own, named `pipelex_*`: see [Chat hosts use the Pipelex connector](#chat-hosts-use-the-pipelex-connector).
 
@@ -68,8 +68,9 @@ The Pipelex MCP for chatbots, at `mcp.pipelex.com`, is the hosted Pipelex connec
 | [`mthds_run_results`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_run--mthds_run_status--mthds_run_results) | Fetch a run's outcome, and list for free which of its stored files look like images. |
 | [`mthds_show_images`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_show_images) | Show the pictures a completed run produced, as image content that stays in the conversation. |
 | [`mthds_download_artifacts`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_download_artifacts) | Save a completed run to disk: its output as `main_stuff.json`, and the files it produced. |
-| [`mthds_save_method`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_save_method--mthds_get_method) | Validate a bundle and save it to your organization's catalog, linking the directory to the saved method when the bundle was given by path. |
-| [`mthds_get_method`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_save_method--mthds_get_method) | Bring a saved method's files back, to disk or inline. |
+| [`mthds_save_method`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_save_method--mthds_get_method--mthds_publish_method) | Validate a bundle and save it as a method's draft in your organization's catalog, linking the directory to the saved method when the bundle was given by path. A save never publishes. |
+| [`mthds_get_method`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_save_method--mthds_get_method--mthds_publish_method) | Bring a saved method's draft, or one of its published versions, back, to disk or inline. |
+| [`mthds_publish_method`](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/tools.md#mthds_save_method--mthds_get_method--mthds_publish_method) | Publish a method's draft as its next version, which callers of its bare id then run, when you ask for a publish. |
 
 ## Files on the workshop, by path
 

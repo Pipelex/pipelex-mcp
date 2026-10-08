@@ -66,7 +66,7 @@ make test-all     # all of the above plus the run family — SPENDS INFERENCE CR
 
 `make test-all` chains all three in cost order and adds the run family, so a single command covers every test in the repo; it spends inference credit, which is why `make all` does not reach it. `make agent-test` is the same hermetic suite as `make test` with its output captured and replayed only on failure, plus a heartbeat while it runs — meant for coding agents, whose context a few hundred lines of green vitest output would otherwise fill.
 
-The by-id paths and the catalog-write suite need durable fixture methods in the API key's organization; `make seed-e2e-fixture` creates or refreshes them, idempotently, and no `make test-e2e` run ever creates one. See [`testing.md`](testing.md) for the suites, the seams they fake, the fixtures and why each live leg exists.
+The by-id paths and the catalog-write suite need durable fixture methods in the API key's organization; `make seed-e2e-fixture` creates or refreshes them and publishes them, idempotently, and no `make test-e2e` run ever creates one. See [`testing.md`](testing.md) for the suites, the seams they fake, the fixtures and why each live leg exists.
 
 ## Versioning
 
