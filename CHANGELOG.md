@@ -2,16 +2,18 @@
 
 This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the Pipelex plugin runs. Up to and including 0.20.0 every release also deployed the hosted console at the same version, so those entries describe both servers. After 0.20.0 the console has its own release track and changelog, kept with the Pipelex connector rather than here, and the `console-vX.Y.Z` tags in this repository's history are its releases from that time; this file and the `vX.Y.Z` tags cover the workshop alone.
 
+## [Unreleased]
+
+### Added
+
+- **`mthds_run` and `mthds_prepare_inputs` read their inputs from a file**: Both tools take `inputs_path`, the path of a `.json` file holding the inputs object, as the alternative to inline `inputs`, so an agent whose inputs a script computes, or that run to tens of kilobytes, never retypes them into the conversation. The two are mutually exclusive, and supplying both is refused at `inputs_path`; `mthds_prepare_inputs` still requires one of them, so its `inputs` is now optional in the schema. The file is read under the same bounds as a `{ path }` method file: only `.json`, checked before the disk is touched, only inside the server's working directory with symlinks followed, only a regular file of at most 1 MiB, and only a JSON object, a leading UTF-8 byte-order mark being skipped; each refusal is an `input_domain` error at `inputs_path`. Once read, the object is used exactly as the same object inline. The pinned contract changes accordingly: both tools gain the field and a sentence in their descriptions saying when to use it.
+
 ## [0.23.0] - 2026-10-08
 
 ### Added
 
 - **`mthds_publish_method`**: publishes a saved method's draft as its next immutable version, which callers of the method's bare id then run, and is called only when the user asks for a publish. It takes the method's bare id and `expected_draft_updated_at`, the draft token the caller last saw, so a draft that moved since is refused and nothing is published; the answer is a verdict on `outcome` — `published` with the new version, `unchanged` when the draft already equals the latest version, or `refused` with the runner's validation verdict.
 - **Version selectors on every by-id tool**: a `method_id` may be `mt_…@<n>` for version n or `mt_…@draft` for the draft, while a bare `mt_…` names the latest published version, and every by-id result of `mthds_validate`, `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs` and `mthds_run` says which content it read or ran, in `method_version` and in its summary; `mthds_run_status` carries `method_version` too. Every selector is sent exactly as given on every platform: one that does not resolve the suffix yet refuses it, and the refusal's hint says a bare id reads the draft there, so a stale reading of the platform never sends a draft as the bare id that would run the published version. A suffix beside `files` on `mthds_run` is refused, since the files are what runs.
-
-### Added
-
-- **`mthds_run` and `mthds_prepare_inputs` read their inputs from a file**: Both tools take `inputs_path`, the path of a `.json` file holding the inputs object, as the alternative to inline `inputs`, so an agent whose inputs a script computes, or that run to tens of kilobytes, never retypes them into the conversation. The two are mutually exclusive, and supplying both is refused at `inputs_path`; `mthds_prepare_inputs` still requires one of them, so its `inputs` is now optional in the schema. The file is read under the same bounds as a `{ path }` method file: only `.json`, checked before the disk is touched, only inside the server's working directory with symlinks followed, only a regular file of at most 1 MiB, and only a JSON object, a leading UTF-8 byte-order mark being skipped; each refusal is an `input_domain` error at `inputs_path`. Once read, the object is used exactly as the same object inline. The pinned contract changes accordingly: both tools gain the field and a sentence in their descriptions saying when to use it.
 
 ### Changed
 
