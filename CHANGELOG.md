@@ -4,6 +4,10 @@ This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the
 
 ## [Unreleased]
 
+### Added
+
+- **`mthds_run` and `mthds_prepare_inputs` read their inputs from a file**: Both tools take `inputs_path`, the path of a `.json` file holding the inputs object, as the alternative to inline `inputs`, so an agent whose inputs a script computes, or that run to tens of kilobytes, never retypes them into the conversation. The two are mutually exclusive, and supplying both is refused at `inputs_path`; `mthds_prepare_inputs` still requires one of them, so its `inputs` is now optional in the schema. The file is read under the same bounds as a `{ path }` method file: only `.json`, checked before the disk is touched, only inside the server's working directory with symlinks followed, only a regular file of at most 1 MiB, and only a JSON object, a leading UTF-8 byte-order mark being skipped; each refusal is an `input_domain` error at `inputs_path`. Once read, the object is used exactly as the same object inline. The pinned contract changes accordingly: both tools gain the field and a sentence in their descriptions saying when to use it.
+
 ### Fixed
 
 - **A slow `mthds_save_method` no longer holds up every pull, and a pull no longer waits for one**: a save waited on its remote validation and its draft write while holding a turn every save and every writing `mthds_get_method` of the workshop shared. Only a save's read of its files and its link write take turns now, so a pull lands while a save validates; two overlapping saves from one directory are still never both written, since the platform takes one draft write under the token both read and refuses the other, and two overlapping creates still take turns, so the second is refused rather than mint a duplicate.
