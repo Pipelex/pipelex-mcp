@@ -2463,12 +2463,21 @@ describe("the pull reads the draft by default, and a version on @n", () => {
 
   it("reads version n for mt_…@n, with the method's name", async () => {
     const seen = { versions: [] as [string, number][] };
+    let handshakes = 0;
+    const client = Object.assign(versionedClient(publishedMethod(), seen), {
+      async version() {
+        handshakes += 1;
+        return { version: "1.0.0", extensions: ["runs", "method_versions"] };
+      },
+    });
     const result = await getMthdsMethod(
       { method_id: "mt_one@2" },
-      contextFor(versionedClient(publishedMethod(), seen), validationAnswering(validReport)),
+      contextFor(client, validationAnswering(validReport)),
     );
 
     expect(seen.versions).toEqual([["mt_one", 2]]);
+    // Only the draft's sentences read the versions handshake; a version read asks nothing.
+    expect(handshakes).toBe(0);
     expect(result.structuredContent).toMatchObject({
       status: "ok",
       method_id: "mt_one",

@@ -1273,8 +1273,12 @@ export async function getMthdsMethod(
   try {
     client = catalogWriteClient(context);
     // Asked beside the read rather than after it: it never rejects, and only
-    // the result's sentences wait on it.
-    support = catalogVersionsSupport(context, client);
+    // the draft's sentences wait on it. A version read's result never reads it,
+    // so it does not ask.
+    support =
+      wanted === "draft"
+        ? catalogVersionsSupport(context, client)
+        : Promise.resolve<MethodVersionsSupport>("unknown");
     if (wanted === "draft") {
       stored = await client.getMethod(methodId);
     } else {

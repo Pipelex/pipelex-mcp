@@ -180,10 +180,14 @@ export function methodVersionsSupport(
     const handshake = askPlatform(read, memory);
     const answer = withinDeadline(handshake);
     memory.inFlight = answer;
-    // The handshake goes on past the deadline, so a late answer still reaches
-    // the memory; the identity check keeps an old handshake from releasing a
+    // Released when the deadline-bounded ANSWER settles, not the handshake: a
+    // handshake that outlives its deadline answered `unknown`, and holding that
+    // promise until the request ends would serve `unknown` to every call for
+    // the rest of the request, a cached `unknown` in all but name. The
+    // handshake still goes on, so a late answer reaches the memory through
+    // `askPlatform`; the identity check keeps an old answer from releasing a
     // newer one.
-    void handshake.finally(() => {
+    void answer.finally(() => {
       if (memory.inFlight === answer) memory.inFlight = undefined;
     });
   }

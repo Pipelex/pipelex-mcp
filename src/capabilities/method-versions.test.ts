@@ -107,6 +107,26 @@ describe("methodVersionsSupport", () => {
     expect(await answer).toBe("unknown");
   });
 
+  it("asks again once a handshake has missed its deadline, while that request still hangs", async () => {
+    vi.useFakeTimers();
+    const memory = createMethodVersionsMemory();
+    let calls = 0;
+    const read = (): Promise<unknown> => {
+      calls += 1;
+      // The first request hangs well past the deadline; the platform then recovers.
+      return calls === 1 ? new Promise(() => undefined) : Promise.resolve(UNSUPPORTED);
+    };
+
+    const first = methodVersionsSupport(memory, read);
+    await vi.advanceTimersByTimeAsync(METHOD_VERSIONS_HANDSHAKE_MS);
+    expect(await first).toBe("unknown");
+
+    // Holding the timed-out answer until the request ends would serve
+    // `unknown` to every call meanwhile: a cached `unknown` in all but name.
+    expect(await methodVersionsSupport(memory, read)).toBe("unsupported");
+    expect(calls).toBe(2);
+  });
+
   it("believes supported for its TTL, and asks once for concurrent callers", async () => {
     vi.useFakeTimers();
     const memory = createMethodVersionsMemory();
