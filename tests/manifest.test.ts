@@ -79,9 +79,11 @@ describe("the manifest", () => {
  * `--dry-run` were ignored. Its dependencies are fixed specs rather than the
  * live manifest's, which a sprint pin or `make use-local-sdk` deliberately
  * changes, and `--ignore-scripts=false` keeps an npm configured to skip
- * lifecycle scripts from skipping the guard under test.
+ * lifecycle scripts from skipping the guard under test. Each case spawns npm,
+ * which runs the guard under tsx, and that takes several seconds: past
+ * Vitest's default budget on an ordinary machine, so the cases get their own.
  */
-describe("npm publish", () => {
+describe("npm publish", { timeout: 30_000 }, () => {
   let dir: string;
 
   beforeEach(async () => {

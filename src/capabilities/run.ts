@@ -1279,10 +1279,19 @@ const START_MAY_HAVE_RUN_STATUSES: ReadonlySet<number> = new Set([500, 502, 504,
  * answered for a request it may have accepted; and for a 500, which the platform
  * relays from the runner when its start call failed, and which can arrive after
  * Temporal has already recorded the start.
+ *
+ * This overrides the SDK's `retryable` on purpose, as `notRetryableCreate`
+ * (`catalog-write.ts`) does for a method create: the SDK's verdict says whether
+ * asking again can succeed, never whether it is safe, and it does not depend on
+ * the route. A retry that succeeds here is the second paid run, so it stays
+ * refused until the client can send an idempotency key. The warning does not
+ * wait on the SDK's `retryable` either: the runner's catch-all 500 states
+ * `retryable: false` whatever it interrupted, and a start it interrupted after
+ * Temporal recorded the run must still say the run may exist.
  */
 export function classifyStartError(err: unknown, options: ClassifyErrorOptions): ToolError {
   const error = classifyError(err, options);
-  if (!error.retryable || !startMayHaveRun(err)) return error;
+  if (!startMayHaveRun(err)) return error;
   return { ...error, retryable: false, hint: START_MAY_HAVE_RUN_HINT };
 }
 
@@ -1296,9 +1305,10 @@ function startMayHaveRun(err: unknown): boolean {
   // pipelex-server#145 (a 502 before): the runner wraps a failed Temporal start
   // call in PipelexBridgeDispatchError whether or not the workflow began. A 429
   // is a throttle refusing the request before it runs, and a 503 a platform
-  // that could not take it.
+  // that could not take it. A 2xx the SDK could not read is a start the server
+  // accepted whose acknowledgement was lost, so the run exists.
   if (err instanceof ApiResponseError) {
-    return START_MAY_HAVE_RUN_STATUSES.has(err.status);
+    return (err.status >= 200 && err.status < 300) || START_MAY_HAVE_RUN_STATUSES.has(err.status);
   }
   return false;
 }

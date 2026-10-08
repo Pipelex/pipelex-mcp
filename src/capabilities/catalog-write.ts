@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { EmptyMethodSourceError } from "@pipelex/sdk";
+import { ApiResponseError, EmptyMethodSourceError } from "@pipelex/sdk";
 import type { MethodData, MethodWriteInput } from "@pipelex/sdk";
 import type { MethodFile } from "mthds/protocol";
 import { parseMethodFiles, serializeMethodFiles } from "mthds/protocol";
@@ -559,17 +559,10 @@ export async function saveMthdsMethod(
     try {
       created = await client.createMethod(writeInput);
     } catch (err) {
-      return saveError(
-        summaryForToolError(
-          classifyError(err, { ...CREATE_ERROR_OPTIONS, auth: context.authError }),
-          SAVE_ERROR_SUMMARIES,
-        ),
-        [
-          notRetryableCreate(
-            classifyError(err, { ...CREATE_ERROR_OPTIONS, auth: context.authError }),
-          ),
-        ],
-      );
+      const error = classifyError(err, { ...CREATE_ERROR_OPTIONS, auth: context.authError });
+      return saveError(summaryForToolError(error, SAVE_ERROR_SUMMARIES), [
+        notRetryableCreate(err, error),
+      ]);
     }
     stored = created;
     saved = "created";
@@ -671,13 +664,20 @@ export async function saveMthdsMethod(
  * honours an `Idempotency-Key` and `@pipelex/sdk` exposes no way to send one, so
  * the retry mints a SECOND method under the same name. A create-side transport
  * fault is therefore reported as not retryable, with the cure that does work.
- * An update has no such hazard — `PUT` is idempotent by construction — so its
- * faults keep whatever `classifyError` decided.
+ * This overrides the SDK's `retryable` on purpose, as `classifyStartError`
+ * (`run.ts`) does for a start: the SDK's verdict says whether asking again can
+ * succeed, never whether it is safe. An update has no such hazard — `PUT` is
+ * idempotent by construction — so its faults keep the SDK's verdict.
+ *
+ * A 2xx the SDK could not read gets the warning too, although the SDK calls it
+ * final: the create was accepted and only its answer was lost, so the method
+ * exists and a second save without its id would mint another.
  *
  * When the SDK gains the key, this function goes.
  */
-function notRetryableCreate(error: ToolError): ToolError {
-  if (!error.retryable) {
+function notRetryableCreate(err: unknown, error: ToolError): ToolError {
+  const accepted = err instanceof ApiResponseError && err.status >= 200 && err.status < 300;
+  if (!error.retryable && !accepted) {
     return error;
   }
   return {

@@ -198,10 +198,10 @@ const INPUTS_BY_FILES_ERROR_OPTIONS: ClassifyErrorOptions = {
  * (parse, fetch, ambiguity), a `404` is the runner's no-matching-package
  * refusal, and a `501` is the reserved registry form — all the caller's own
  * selector, located at `method_ref`. The route fetches a package's `.mthds`
- * files alone, so the execution-locus gate never fires here. The `404`
- * texture is `typedOnly`, here and on the id shape: a runner too old to serve
- * the route answers a bare `404` too, and that is the deployment, not the
- * caller's selector.
+ * files alone, so the execution-locus gate never fires here. A runner too old
+ * to serve the route answers a bare `404` too, which the SDK reads as the
+ * deployment's rather than the caller's, so it keeps the missing-route arm
+ * here and on the id shape.
  */
 const INPUTS_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: INPUTS_ROUTE,
@@ -213,7 +213,6 @@ const INPUTS_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
   notFound: {
     location: "method_ref",
     hint: "The repository was fetched but holds no package matching this address by manifest identity. Check the package selector against the repository's METHODS.toml manifests.",
-    typedOnly: true,
   },
   notImplemented: {
     location: "method_ref",
@@ -238,7 +237,6 @@ const INPUTS_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
   notFound: {
     location: "method_id",
     hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.",
-    typedOnly: true,
   },
   selection: INPUTS_SELECTION_TEXTURE,
 };

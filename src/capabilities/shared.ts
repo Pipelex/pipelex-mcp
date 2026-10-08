@@ -3,13 +3,13 @@ import {
   ApiUnreachableError,
   ArtifactAuthenticationError,
   ArtifactOperationError,
-  ClientAuthenticationError,
   EmptyMethodSourceError,
   InputPreparationError,
   InvalidLocalSourceError,
   MissingMainStuffError,
   PIPELEX_STORAGE_SCHEME,
   PipelexApiClient,
+  PipelexRequestError,
   PipelineRequestError,
   RejectedAssetError,
   RunLifecycleUnavailableError,
@@ -18,8 +18,9 @@ import {
   UploadAuthenticationError,
   UploadTransportError,
   collectArtifacts,
+  errorVerdictOf,
 } from "@pipelex/sdk";
-import type { PipelexApiClientOptions } from "@pipelex/sdk";
+import type { ErrorDomain, ErrorVerdict, PipelexApiClientOptions } from "@pipelex/sdk";
 import { z } from "zod";
 
 import { BARE_APP_INFO } from "./client-identification.js";
@@ -212,11 +213,11 @@ export interface ToolError {
   message: string;
   hint?: string;
   /**
-   * Whether retrying the same call may succeed. Decided where the concrete
-   * SDK error / HTTP status is still known ({@link classifyError}): the
-   * `class`+`location` pair alone is too coarse — an unreachable API and a
-   * permanently missing run lifecycle both classify as `config` at
-   * `PIPELEX_BASE_URL`, yet only the former is worth retrying.
+   * Whether retrying the same call may succeed. For a failure the SDK raised it
+   * is the SDK's own verdict ({@link classifyError}): the `class`+`location`
+   * pair alone is too coarse — an unreachable API and a permanently missing run
+   * lifecycle both classify as `config` at `PIPELEX_BASE_URL`, yet only the
+   * former is worth retrying.
    */
   retryable: boolean;
 }
@@ -614,42 +615,40 @@ export function validateRunIdRequest(runId: string): ToolError[] {
 }
 
 /**
- * Route-specific texture for {@link classifyError}. The classification itself
- * (which HTTP status or SDK error maps to which `ErrorClass`) is shared; only
- * the locator and hint of a 400/422 rejection and the route named in the 404
- * hint differ per capability.
+ * Route-specific texture for {@link classifyError}. Who can fix a failure and
+ * whether a retry can help are the SDK's verdict, which every error it throws
+ * carries; what differs per capability is the texture: the locator and hint of
+ * a 400/422 rejection, the route named in the 404 hint, and the few refusals a
+ * route knows more about than its status says.
  */
 export interface ClassifyErrorOptions {
   /** The API route the capability calls, named in the 404 hint. */
   route?: string;
   /** Locator + hint for a 400/422 no-verdict rejection. */
   badRequest?: {
-    /** Override the default input_domain classification for route-level 400/422 responses. */
+    /**
+     * Overrides the SDK's class for the route's 400/422, which it reads as the
+     * caller's request (`input`). A route sets it when it knows its refusal is
+     * about something no tool argument changes: a request this server built
+     * itself, or a key that acts for no organization.
+     */
     class?: ErrorClass;
     location?: string;
     hint: string;
   };
   /**
-   * Per-route 404 override. By default a 404 means the route itself is
-   * missing (`config` — wrong base URL). Routes keyed by a resource id (the
-   * run routes) set this so a 404 classifies as `input_domain` ("no run with
-   * this id") instead. The SDK separates the missing-route case up front by
-   * throwing `RunLifecycleUnavailableError`, so an `ApiResponseError` 404 on
-   * those routes really is an unknown id.
+   * Per-route 404 texture, for a route keyed by something the caller named: a
+   * run id, a method id, an address. It applies to a 404 the SDK reads as the
+   * caller's (`input`), which is one that names what was not found — the
+   * runner's `MethodPackageNotFoundError`, the platform's `not_found` code. A
+   * bare 404, which is how a runner answers a route it does not serve, keeps
+   * the missing-route `config` arm, and so does every 404 on a route without
+   * this texture. The run routes see no bare 404 at all: the SDK throws
+   * `RunLifecycleUnavailableError` for it up front.
    */
   notFound?: {
     location?: string;
     hint: string;
-    /**
-     * Take the texture only for a 404 that names what was not found — one
-     * carrying an `error_type` (the runner's `MethodPackageNotFoundError`) or
-     * a problem `code` (the platform's `not_found` for an unknown method id).
-     * A bare 404, which is how a runner answers a route it does not serve,
-     * then keeps the missing-route `config` arm. Set on a route recent enough
-     * that a deployment may not serve it at all (`/v1/pipe-io`), where the
-     * SDK throws the same `ApiResponseError` for both.
-     */
-    typedOnly?: boolean;
   };
   /**
    * The request field that named the method on this route — `files`,
@@ -681,9 +680,9 @@ export interface ClassifyErrorOptions {
    * Per-route 501 override. A 501 on a method-taking route is the reserved
    * registry form of `method_ref` (any non-address reference) — the caller's
    * own selector, not a server fault — so selector-shaped requests set this to
-   * classify it `input_domain` at `method_ref` with the address-grammar hint.
-   * Routes that never send a `method_ref` leave it unset and keep the generic
-   * unexpected-status arm.
+   * classify it `input_domain` at `method_ref` with the address-grammar hint,
+   * overriding the SDK's `config`. Routes that never send a `method_ref` leave
+   * it unset and keep the SDK's verdict.
    */
   notImplemented?: {
     location?: string;
@@ -711,8 +710,8 @@ export interface ClassifyErrorOptions {
     hint: string;
   };
   /**
-   * Per-deployment texture for auth failures (`ClientAuthenticationError`,
-   * HTTP 401/403). The default wording points at the `PIPELEX_API_KEY` env
+   * Per-deployment texture for auth failures (HTTP 401/403, and the upload and
+   * artifact families' authentication errors). The default wording points at the `PIPELEX_API_KEY` env
    * var — right for the workshop, where the caller owns the process env. A
    * deployment whose callers authenticate some other way overrides it, and
    * capabilities thread it from their context's `authError` field; the
@@ -814,162 +813,216 @@ function isPipeSelectionRefusal(err: unknown): err is ApiResponseError {
   );
 }
 
+/**
+ * This server's class for each error domain the SDK decides. The two say the
+ * same thing — who can fix the failure — and differ only in the name of the
+ * caller's own class, which this server's contract fixed first.
+ */
+const CLASS_OF_DOMAIN: Readonly<Record<ErrorDomain, ErrorClass>> = {
+  input: "input_domain",
+  config: "config",
+  runtime: "runtime",
+};
+
+/** The half of a {@link ToolError} that says who can fix it and whether a retry can help. */
+type ToolVerdict = Pick<ToolError, "class" | "retryable">;
+
+/** The half a capability words: where, what, and what to do. */
+interface ToolTexture {
+  kind?: ErrorKind;
+  location?: string;
+  message: string;
+  hint?: string;
+}
+
+/** An SDK verdict in this server's terms. */
+function toolVerdictOf(verdict: ErrorVerdict): ToolVerdict {
+  return { class: CLASS_OF_DOMAIN[verdict.errorDomain], retryable: verdict.retryable };
+}
+
+/** A verdict and a texture, as one {@link ToolError}, keeping the shape's field order. */
+function toolError(verdict: ToolVerdict, texture: ToolTexture): ToolError {
+  return {
+    class: verdict.class,
+    ...(texture.kind === undefined ? {} : { kind: texture.kind }),
+    ...(texture.location === undefined ? {} : { location: texture.location }),
+    message: texture.message,
+    ...(texture.hint === undefined ? {} : { hint: texture.hint }),
+    retryable: verdict.retryable,
+  };
+}
+
+/**
+ * Classify a failure as a {@link ToolError}.
+ *
+ * **The verdict is the SDK's.** Every error `@pipelex/sdk` throws carries
+ * `errorDomain`, who can fix it, and `retryable`, whether asking again can
+ * succeed, decided from the server's own members when it sent them and from
+ * the SDK's reading of the status otherwise. This function maps the domain
+ * onto this server's class and takes `retryable` as it comes. What it adds is
+ * this server's own: the wording, the locator a tool's caller can act on, the
+ * hint and the `kind`. A few arms override the SDK's class on purpose — a
+ * rejected credential, the execution-locus gate's refusals, a route's 400 that
+ * no argument fixes, the reserved registry form of `method_ref`, a 404 on a
+ * route that names no resource — and each says why where it does. Callers
+ * override `retryable` the same way for a write that may already have
+ * happened: `classifyStartError` (`run.ts`) for a run's start and
+ * `notRetryableCreate` (`catalog-write.ts`) for a method's create.
+ *
+ * A failure that is not the SDK's keeps this server's reading: a bare
+ * `PipelineRequestError` from `mthds` is `config`, and a fault nothing names is
+ * retryable `runtime`, since wrongly stopping a live follow is worse than one
+ * more read.
+ */
 export function classifyError(err: unknown, options: ClassifyErrorOptions = {}): ToolError {
+  if (err instanceof ApiResponseError) return classifyApiResponseError(err, options);
+  if (err instanceof UploadTransportError) return classifyUploadTransportError(err, options);
+  if (err instanceof PipelexRequestError) {
+    return toolError(toolVerdictOf(err), sdkErrorTexture(err, options));
+  }
+
+  // An error carrying a verdict without being this copy's class: a consumer's
+  // own subclass, or `mthds`'s `ApiResponseError` when the runner sent both members.
+  const carried = errorVerdictOf(err);
+  if (carried !== undefined && err instanceof Error) {
+    const verdict = toolVerdictOf(carried);
+    return toolError(verdict, genericTexture(verdict, err.message));
+  }
+
+  if (err instanceof PipelineRequestError) {
+    const verdict: ToolVerdict = { class: "config", retryable: false };
+    return toolError(verdict, genericTexture(verdict, err.message));
+  }
+
+  return toolError(
+    { class: "runtime", retryable: true },
+    {
+      message: err instanceof Error ? err.message : "Unknown failure.",
+      hint: "Inspect the MCP server logs and local pipelex-api logs.",
+    },
+  );
+}
+
+/**
+ * The texture of an SDK error other than a refused request or a wrapped upload
+ * failure, by its class. Ordered most specific first: each family's subclasses
+ * before its base.
+ */
+function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions): ToolTexture {
+  const message = err.message;
+
   if (err instanceof ApiUnreachableError) {
+    // The SDK's own request timeout reached an API that took the request and
+    // did not answer in time; the SDK reads it as `runtime`, and no base URL
+    // fixes it.
+    if (err.code === "ABORT_TIMEOUT") {
+      return {
+        message,
+        hint: "The Pipelex API took the request but did not answer in time; try again, and inspect the API if it persists.",
+      };
+    }
     return {
-      class: "config",
       location: "PIPELEX_BASE_URL",
-      message: err.message,
+      message,
       hint: "Start pipelex-api locally or set PIPELEX_BASE_URL to a reachable host-only API base URL.",
-      retryable: true,
     };
   }
 
-  if (err instanceof ClientAuthenticationError) {
-    return {
-      class: "config",
-      location: options.auth?.location ?? "PIPELEX_API_KEY",
-      message: err.message,
-      hint: options.auth?.hint ?? "Check the API key for the configured Pipelex API.",
-      retryable: false,
-    };
-  }
-
-  if (err instanceof ApiResponseError) {
-    return classifyApiResponseError(err, options);
-  }
-
-  // The SDK raises this when the configured base URL serves the protocol
-  // routes but not the durable run lifecycle (a bare pipelex-api runner).
+  // The configured base URL serves the protocol routes but not the durable run
+  // lifecycle (a bare pipelex-api runner).
   if (err instanceof RunLifecycleUnavailableError) {
     return {
-      class: "config",
       location: "PIPELEX_BASE_URL",
-      message: err.message,
+      message,
       hint: "Durable runs need the hosted Pipelex API; point PIPELEX_BASE_URL at a deployment serving /v1/runs/* (a bare pipelex-api runner does not).",
-      retryable: false,
     };
   }
 
-  // A completed run that delivers no main output is a reachable contract
-  // violation — the API answered, but its report is malformed.
+  // A completed run that delivers no main output: the API answered, but its
+  // report is malformed.
   if (err instanceof MissingMainStuffError) {
     return {
-      class: "runtime",
-      message: err.message,
+      message,
       hint: "The API reported the run completed but delivered no main output; inspect the run on the platform.",
-      retryable: false,
     };
   }
 
   // ── Input-preparation family (mthds_prepare_inputs) ──
-  // Every one of these derives from PipelineRequestError, so they MUST be
-  // classified here, ahead of the generic PipelineRequestError arm below.
-  // Ordered most-specific first: subclasses before the InputPreparationError
-  // base.
 
   // Normally caught by its caller (`mthds_get_method` composes its own
   // refusal); mapped defensively so a stray one still locates at method_id,
   // not pipe_ref.
   if (err instanceof EmptyMethodSourceError) {
     return {
-      class: "input_domain",
       location: "method_id",
-      message: err.message,
+      message,
       hint: "The stored method has no MTHDS source yet. Add MTHDS content to it, or submit files instead.",
-      retryable: false,
     };
-  }
-
-  // The upload ceiling's local refusal (`upload-ceiling.ts`) is thrown from
-  // inside the client's `upload()`, and the SDK's `uploadFile` wraps anything
-  // `upload()` throws that is neither an API response nor an unreachable host in
-  // an `UploadTransportError`. So the refusal arrives as that error's cause, and
-  // the transport arm below would call an oversize file retryable.
-  if (err instanceof UploadTransportError && err.cause instanceof RejectedAssetError) {
-    return classifyError(err.cause, options);
   }
 
   // A missing/unreadable local path or an asset the storage service refused
   // (413): the caller's input value is the problem.
   if (err instanceof InvalidLocalSourceError || err instanceof RejectedAssetError) {
     return {
-      class: "input_domain",
       location: options.asset?.location ?? "inputs",
-      message: err.message,
+      message,
       hint:
         err instanceof RejectedAssetError
           ? (options.asset?.hint ??
             "Pipelex storage refused the asset (too large). Shrink the file, or reference it by an http(s) URL instead.")
           : "Check the file path is correct and readable, or reference the asset by an http(s) URL / pipelex-storage:// URI instead.",
-      retryable: false,
     };
   }
 
-  // The configured deployment has no upload route (a bare pipelex-api runner):
-  // an environment/config problem, not the caller's request.
+  // The configured deployment has no upload route (a bare pipelex-api runner).
   if (err instanceof UnsupportedUploadCapabilityError) {
     return {
-      class: "config",
       location: "PIPELEX_BASE_URL",
-      message: err.message,
+      message,
       hint: "The configured Pipelex deployment has no /v1/upload route. Point PIPELEX_BASE_URL at the hosted Pipelex API, or pass assets as http(s) URLs / pipelex-storage:// references.",
-      retryable: false,
     };
   }
 
   if (err instanceof UploadAuthenticationError) {
     return {
-      class: "config",
       location: options.auth?.location ?? "PIPELEX_API_KEY",
-      message: err.message,
+      message,
       hint: options.auth?.hint ?? "Check the API key for the configured Pipelex API.",
-      retryable: false,
-    };
-  }
-
-  // A network/server fault reaching the upload route stays retryable.
-  if (err instanceof UploadTransportError) {
-    return {
-      class: "runtime",
-      message: err.message,
-      hint: "The upload could not reach Pipelex storage; retry, and inspect the API if it persists.",
-      retryable: true,
     };
   }
 
   // The base class: an unqualified or unknown pipe_ref, no single default pipe,
-  // or a caller value at a file position that was malformed/unsupported. All are
-  // request-domain problems, and all are raised CLIENT-SIDE — so they locate at
-  // `preparation`, which a route separates from `badRequest` when its 400/422
-  // is about a different field. `badRequest` remains the fallback for a route that has no
-  // such distinction to draw.
+  // or a caller value at a file position that was malformed/unsupported, all
+  // raised CLIENT-SIDE — so they locate at `preparation`, which a route
+  // separates from `badRequest` when its 400/422 is about a different field.
+  // The one the SDK reads as anything but the caller's, an input walk whose
+  // answer it could not read, gets no such locator.
   if (err instanceof InputPreparationError) {
+    if (err.errorDomain !== "input") {
+      return {
+        message,
+        hint: "The Pipelex API's answer to the input walk could not be read; inspect the API.",
+      };
+    }
     const texture = options.preparation ?? options.badRequest ?? DEFAULT_BAD_REQUEST;
     return {
-      class: "input_domain",
       ...(texture.location === undefined ? {} : { location: texture.location }),
-      message: err.message,
+      message,
       hint: texture.hint,
-      retryable: false,
     };
   }
 
   // ── Artifact family (mthds_download_artifacts) ──
   // The SDK's artifact operations throw only when no verdict can be produced;
-  // per-reference failures are values on the verdict. These derive from
-  // PipelineRequestError too, so they MUST be classified here, ahead of the
-  // generic arm below. Most-specific first: subclasses before the base.
+  // per-reference failures are values on the verdict.
 
   // The resolve route refused the credential (401/403) — the auth arm, like
   // UploadAuthenticationError on the upload leg.
   if (err instanceof ArtifactAuthenticationError) {
     return {
-      class: "config",
       location: options.auth?.location ?? "PIPELEX_API_KEY",
-      message: err.message,
+      message,
       hint: options.auth?.hint ?? DEFAULT_AUTH_HINT,
-      retryable: false,
     };
   }
 
@@ -977,10 +1030,8 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
   // but its report is malformed — the MissingMainStuffError reading.
   if (err instanceof ScopeUnavailableError) {
     return {
-      class: "runtime",
-      message: err.message,
+      message,
       hint: "The API reported the run completed but its results carry no output to walk for files; inspect the run on the platform.",
-      retryable: false,
     };
   }
 
@@ -988,44 +1039,72 @@ export function classifyError(err: unknown, options: ClassifyErrorOptions = {}):
   // could not use after containment approved it. Neither is the caller's input.
   if (err instanceof ArtifactOperationError) {
     return {
-      class: "runtime",
-      message: err.message,
+      message,
       hint: "The download could not proceed; inspect the MCP server logs and the API.",
-      retryable: false,
     };
   }
 
-  if (err instanceof PipelineRequestError) {
-    return {
-      class: "config",
-      location: "PIPELEX_BASE_URL",
+  // The rest — an argument the SDK refused before sending anything, paging
+  // that never ends, a run still going or failed — read by their verdict.
+  return genericTexture(toolVerdictOf(err), message);
+}
+
+/** The texture of an error this server has no wording of its own for, by its class. */
+function genericTexture(verdict: ToolVerdict, message: string): ToolTexture {
+  switch (verdict.class) {
+    case "config":
+      return {
+        location: "PIPELEX_BASE_URL",
+        message,
+        hint: "Check PIPELEX_BASE_URL and the submitted request.",
+      };
+    case "input_domain":
+      return {
+        message,
+        hint: "The request was refused before it was sent; check the submitted arguments.",
+      };
+    case "runtime":
+      return { message, hint: "Inspect the MCP server logs and the Pipelex API." };
+  }
+}
+
+/**
+ * An `UploadTransportError`: the SDK's `uploadFile` wraps what the client's
+ * `upload()` throws when it is neither a credential nor a size refusal, and the
+ * wrapper takes its cause's verdict. Where the cause is a fault this server
+ * words, the cause is classified instead, so the texture says what happened:
+ * the upload ceiling's local refusal (`upload-ceiling.ts`, thrown from inside
+ * `upload()`), a plan limit, an unreachable API.
+ */
+function classifyUploadTransportError(
+  err: UploadTransportError,
+  options: ClassifyErrorOptions,
+): ToolError {
+  const cause = err.cause;
+  if (
+    cause instanceof RejectedAssetError ||
+    cause instanceof ApiUnreachableError ||
+    (cause instanceof ApiResponseError && cause.status === 402)
+  ) {
+    return classifyError(cause, options);
+  }
+  const verdict = toolVerdictOf(err);
+  if (verdict.retryable) {
+    return toolError(verdict, {
       message: err.message,
-      hint: "Check PIPELEX_BASE_URL and the submitted request.",
-      retryable: false,
-    };
+      hint: "The upload could not reach Pipelex storage; retry, and inspect the API if it persists.",
+    });
   }
-
-  // Unknown faults stay retryable: for the poll loops, wrongly stopping a
-  // live follow is worse than one more read against a fault we can't name.
-  if (err instanceof Error) {
-    return {
-      class: "runtime",
-      message: err.message,
-      hint: "Inspect the MCP server logs and local pipelex-api logs.",
-      retryable: true,
-    };
-  }
-
-  return {
-    class: "runtime",
-    message: "Unknown failure.",
-    hint: "Inspect the MCP server logs and local pipelex-api logs.",
-    retryable: true,
-  };
+  return toolError(verdict, {
+    ...(verdict.class === "input_domain" ? { location: options.asset?.location ?? "inputs" } : {}),
+    message: err.message,
+    hint: "Pipelex storage refused the upload, and the same file meets the same answer; the message says why.",
+  });
 }
 
 function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorOptions): ToolError {
   const message = err.serverMessage ?? err.message;
+  const verdict = toolVerdictOf(err);
   const badRequest = options.badRequest ?? DEFAULT_BAD_REQUEST;
   const route = options.route ?? "the Pipelex API";
 
@@ -1033,173 +1112,165 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
   // refused pipe selection is about the pipe, and the route's `detail` names
   // the candidates where there are some.
   if (options.selection !== undefined && isPipeSelectionRefusal(err)) {
-    return {
-      class: "input_domain",
-      ...(options.selection.location === undefined ? {} : { location: options.selection.location }),
+    return toolError(verdict, {
+      location: options.selection.location,
       message,
       hint: options.selection.hint,
-      retryable: false,
-    };
+    });
   }
 
   if (err.status === 400 || err.status === 422) {
-    return {
-      class: badRequest.class ?? "input_domain",
-      ...(badRequest.location === undefined ? {} : { location: badRequest.location }),
-      message,
-      hint: badRequest.hint,
-      retryable: false,
-    };
+    // A route whose 400/422 no tool argument fixes declares its class, which
+    // overrides the SDK's reading of a refused request as the caller's own.
+    return toolError(
+      { ...verdict, class: badRequest.class ?? verdict.class },
+      { location: badRequest.location, message, hint: badRequest.hint },
+    );
   }
 
-  // A fetched package that declares in-process Python structure classes is
-  // refused with a 403 whose `error_type` names the policy — a caller-input
-  // condition, not an auth failure, so it must be caught ahead of the generic
-  // 401/403 arm (which would send the caller to debug their API key).
-  // Branching on `errorType` is the runner's declared contract: each
-  // MethodRefError subclass keeps its class name as the distinct error_type
-  // for callers to branch on.
-  if (err.status === 403 && err.errorType === "MethodStructuresRefusedError") {
-    return {
-      class: "input_domain",
-      location: "method_ref",
-      message,
-      hint: "Hosted execution accepts MTHDS concepts and sandboxed PipeFuncs, not in-process Python — the referenced package declares Python structure classes. Express its types as MTHDS concepts, or run it on a self-hosted OSS runner.",
-      retryable: false,
-    };
-  }
-
-  // The execution-locus gate's other refusal, and the one that reads worst
-  // when it is missed: a method shipping custom Python (`.py`) is refused by a
-  // deployment that is not sandbox-hosted, because running it would import
-  // caller-supplied code into the runner's own process. Unlike the structures
-  // refusal above this one is a property of the PAIR — the method and the
+  // The execution-locus gate's two refusals, each a 403 whose `error_type`
+  // names the policy: a fetched package declaring in-process Python structure
+  // classes, and a method shipping custom Python (`.py`) on a deployment that
+  // is not sandbox-hosted. Both are about the method, not the credential, so
+  // both override the SDK's class to `input_domain`: the runner sends the
+  // second with `error_domain: input` but the first with no domain at all
+  // (L-261007-31dea6), and the SDK's own reading of a bare 403 is
+  // `config`. They must be caught ahead of the generic 401/403 arm, whose
+  // texture sends a caller whose credential is perfectly good to go and mint a
+  // new key. The second is a property of the PAIR — the method and the
   // deployment — and the method is not malformed: the very same method runs on
-  // a sandbox-hosted deployment, which is where PipeFunc Python belongs. The
-  // class is still `input_domain`, by this repo's own test for it: a request
-  // the caller can write does work around it (a Python-free method), which is
-  // what separates `input_domain` from `config`. The runner reads
-  // it the same way — `raise_forbidden` tags this refusal `error_domain:
-  // input` (`pipelex-api/api/errors.py`) — though the SDK surfaces no
-  // `error_domain`, which is why the branch is on `errorType`. What must not
-  // happen is the generic 401/403 arm, which told a caller whose credential is
-  // perfectly good to go and mint a new key.
+  // a sandbox-hosted deployment, which is where PipeFunc Python belongs.
+  if (err.status === 403 && err.errorType === "MethodStructuresRefusedError") {
+    return toolError(
+      { ...verdict, class: "input_domain" },
+      {
+        location: "method_ref",
+        message,
+        hint: "Hosted execution accepts MTHDS concepts and sandboxed PipeFuncs, not in-process Python — the referenced package declares Python structure classes. Express its types as MTHDS concepts, or run it on a self-hosted OSS runner.",
+      },
+    );
+  }
+
   if (err.status === 403 && err.errorType === "CustomCodeRequiresSandbox") {
-    return {
-      class: "input_domain",
-      ...(options.methodLocation === undefined ? {} : { location: options.methodLocation }),
-      message,
-      hint: "This deployment is not sandbox-hosted, so it refuses a method that ships custom Python (.py) — the credential is not the problem. Run the method on a sandbox-hosted deployment, or name one whose pipes are all MTHDS.",
-      retryable: false,
-    };
+    return toolError(
+      { ...verdict, class: "input_domain" },
+      {
+        location: options.methodLocation,
+        message,
+        hint: "This deployment is not sandbox-hosted, so it refuses a method that ships custom Python (.py) — the credential is not the problem. Run the method on a sandbox-hosted deployment, or name one whose pipes are all MTHDS.",
+      },
+    );
   }
 
   if (err.status === 401 || err.status === 403) {
-    return {
-      class: "config",
-      location: options.auth?.location ?? "PIPELEX_API_KEY",
-      message,
-      hint:
-        err.status === 403 && options.forbidden !== undefined
-          ? options.forbidden.hint
-          : (options.auth?.hint ?? DEFAULT_AUTH_HINT),
-      retryable: false,
-    };
+    // Overrides the SDK's class: a rejected credential is `config` here,
+    // whatever the server tagged it. The runner tags its own 401 and 403
+    // `input` (L-261007-8dffe5), the request carrying the credential, while
+    // this server's credential is its environment, which no tool argument
+    // changes, and the SDK's own reading of both statuses is `config`.
+    return toolError(
+      { ...verdict, class: "config" },
+      {
+        location: options.auth?.location ?? "PIPELEX_API_KEY",
+        message,
+        hint:
+          err.status === 403 && options.forbidden !== undefined
+            ? options.forbidden.hint
+            : (options.auth?.hint ?? DEFAULT_AUTH_HINT),
+      },
+    );
   }
 
   // Paywall: the platform reports a plan limit as 402 SubscriptionRequiredError.
   // Branch on the HTTP status only — its problem `code` is "forbidden" and must
-  // never be sniffed. The class stays `config` (the settled contract: the call
-  // cannot be made as credentialed), and `kind` is what carries the cause into
-  // each capability's headline — see {@link summaryForToolError}.
+  // never be sniffed. The class stays the SDK's `config` (the call cannot be
+  // made as credentialed), and `kind` is what carries the cause into each
+  // capability's headline — see {@link summaryForToolError}.
   if (err.status === 402) {
-    return {
-      class: "config",
+    return toolError(verdict, {
       kind: "paywall",
       message,
       hint: "The organization's plan does not cover this call. Review the plan and billing for the API key's organization on app.pipelex.com.",
-      retryable: false,
-    };
+    });
   }
 
   if (err.status === 404) {
-    const named = err.errorType !== undefined || err.code !== undefined;
-    if (options.notFound && (options.notFound.typedOnly !== true || named)) {
-      return {
-        class: "input_domain",
-        ...(options.notFound.location === undefined ? {} : { location: options.notFound.location }),
+    if (options.notFound !== undefined && verdict.class === "input_domain") {
+      return toolError(verdict, {
+        location: options.notFound.location,
         message,
         hint: options.notFound.hint,
-        retryable: false,
-      };
+      });
     }
-    return {
-      class: "config",
-      location: "PIPELEX_BASE_URL",
-      message,
-      hint: `Check that PIPELEX_BASE_URL points to a host serving ${route}.`,
-      retryable: false,
-    };
+    // Overrides the SDK's class where it differs: a bare 404, and any 404 on
+    // a route that names no resource, is the deployment not serving the route.
+    // The platform renders a path it does not serve with the code `not_found`,
+    // which the SDK reads as a named miss, so a route without a `notFound`
+    // texture would otherwise tell the caller to fix a request it cannot.
+    return toolError(
+      { ...verdict, class: "config" },
+      {
+        location: "PIPELEX_BASE_URL",
+        message,
+        hint: `Check that PIPELEX_BASE_URL points to a host serving ${route}.`,
+      },
+    );
   }
 
-  // The reserved registry form of `method_ref` — the caller's own selector,
-  // classified only on routes that declared the texture (selector-shaped
-  // requests); elsewhere a 501 keeps the generic unexpected-status arm below.
+  // The reserved registry form of `method_ref`, classified only on routes that
+  // declared the texture (selector-shaped requests). The runner tags it
+  // `config`, a capability it does not serve; it is overridden to the caller's
+  // class because the caller's own argument chose that form, and an address
+  // works. Elsewhere a 501 keeps the SDK's verdict and the server-error arm.
   if (err.status === 501 && options.notImplemented) {
-    return {
-      class: "input_domain",
-      ...(options.notImplemented.location === undefined
-        ? {}
-        : { location: options.notImplemented.location }),
-      message,
-      hint: options.notImplemented.hint,
-      retryable: false,
-    };
+    return toolError(
+      { ...verdict, class: "input_domain" },
+      {
+        location: options.notImplemented.location,
+        message,
+        hint: options.notImplemented.hint,
+      },
+    );
   }
 
   if (err.status === 413 && options.tooLarge) {
-    return {
-      class: "input_domain",
-      ...(options.tooLarge.location === undefined ? {} : { location: options.tooLarge.location }),
+    return toolError(verdict, {
+      location: options.tooLarge.location,
       message,
       hint: options.tooLarge.hint,
-      retryable: false,
-    };
+    });
   }
 
   // A throttle or a request that timed out on its way in: refused for its
-  // timing, not its content, so the same call may pass a moment later. Left to
-  // the unexpected-status arm below, a throttled status read stopped a live
-  // follow for good.
+  // timing, not its content, so the same call may pass a moment later.
   if (err.status === 429 || err.status === 408) {
-    return {
-      class: "runtime",
+    return toolError(verdict, {
       message,
       hint:
         err.status === 429
           ? "The Pipelex API is limiting requests; try again in a moment."
           : "The request timed out before the Pipelex API received it; try again.",
-      retryable: true,
-    };
+    });
+  }
+
+  if (err.status === 501) {
+    return toolError(verdict, {
+      location: "PIPELEX_BASE_URL",
+      message,
+      hint: `The deployment PIPELEX_BASE_URL points at does not implement ${route}.`,
+    });
   }
 
   if (err.status >= 500) {
-    return {
-      class: "runtime",
+    return toolError(verdict, {
       message,
       hint:
         options.serverError?.hint ??
         "The Pipelex API returned a server error; inspect pipelex-api logs.",
-      retryable: true,
-    };
+    });
   }
 
-  return {
-    class: "runtime",
-    message,
-    hint: `The Pipelex API returned HTTP ${err.status}.`,
-    retryable: false,
-  };
+  return toolError(verdict, { message, hint: `The Pipelex API returned HTTP ${err.status}.` });
 }
 
 // ── the artifact fetch boundary, shared by the two tools that cross it ──
@@ -1396,6 +1467,12 @@ const UNKNOWN_ITEM_ERROR: ItemErrorTexture = {
  * `{ code, detail }` shape is the SDK's `ArtifactItemError`; a thrown
  * `ArtifactFetchError` is adapted to it by its caller, since the two carry the
  * same closed `code` vocabulary.
+ *
+ * A thrown `ArtifactFetchError` carries the SDK's own verdict, and this table
+ * deliberately does not take it: the SDK's says whether fetching the same link
+ * again can succeed, while a retry here is a new call of the tool, which mints
+ * a fresh link. That is why a store's refusal, final for the link, reads as
+ * retryable here.
  *
  * The code comes verbatim off the bulk resolve route's wire, so the table is
  * read by own key only: a code of `constructor` or `toString` would otherwise

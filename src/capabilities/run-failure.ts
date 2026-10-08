@@ -16,12 +16,14 @@
  *
  * Nothing here is inferred. Whether running it again can help comes from the
  * report's `retryable` alone, and a report without one gets no retry sentence
- * either way. The runner owns the report's shape, so every field is narrowed as
- * it arrives, the way `narrowMethodProvenance` treats provenance: a field of the
- * wrong type reads as absent, and a report with nothing to say reads as no report.
+ * either way. The runner owns the report's shape, and `@pipelex/sdk` checks it
+ * field by field before handing it back, so a field of the wrong type already
+ * reads as absent and a `user_action` arrives whole or not at all. What this
+ * module decides is presentation: a blank field says nothing, every text is
+ * bounded, and a report with nothing to say reads as no report.
  */
 
-import type { RunStatus } from "@pipelex/sdk";
+import type { RunErrorReport, RunStatus } from "@pipelex/sdk";
 
 /** The next step the report advises: `kind` names the category, `detail` says it in words. */
 export interface RunFailureUserAction {
@@ -82,8 +84,8 @@ export function boundedFailureText(value: string, max: number): string {
 /**
  * The `failure` object for a run, from its stored report, or `undefined` when
  * there is none to carry: a `null` report (a run the platform finalized itself),
- * one that is not an object, and one carrying none of the fields that say what
- * happened (`error_type`, `title`, `message`, `user_action`). Every text field
+ * and one carrying none of the fields that say what happened (`error_type`,
+ * `title`, `message`, `user_action`), a blank one saying nothing. Every text field
  * is bounded (`FAILURE_MESSAGE_MAX_CODE_POINTS` for the message,
  * `FAILURE_FIELD_MAX_CODE_POINTS` for the rest), and a `wait_and_retry` action
  * carries this module's own advice rather than the runner's, for the reason
@@ -91,10 +93,10 @@ export function boundedFailureText(value: string, max: number): string {
  */
 export function runFailureOf(
   runId: string,
-  report: unknown,
+  report: RunErrorReport | null | undefined,
   finishedAt?: string | null,
 ): RunFailure | undefined {
-  if (!isRecord(report)) return undefined;
+  if (report === null || report === undefined) return undefined;
   const errorType = field(report.error_type);
   const title = field(report.title);
   const rawMessage = text(report.message);
@@ -102,7 +104,7 @@ export function runFailureOf(
     rawMessage === undefined
       ? undefined
       : boundedFailureText(rawMessage, FAILURE_MESSAGE_MAX_CODE_POINTS);
-  const retryable = typeof report.retryable === "boolean" ? report.retryable : undefined;
+  const retryable = report.retryable ?? undefined;
   const userAction = userActionOf(report.user_action, retryable);
   if (
     errorType === undefined &&
@@ -244,29 +246,25 @@ export function failureSummaryLines(
  * about a run that has ended.
  */
 function userActionOf(
-  value: unknown,
+  action: RunErrorReport["user_action"],
   retryable: boolean | undefined,
 ): RunFailureUserAction | undefined {
-  if (!isRecord(value)) return undefined;
-  const kind = field(value.kind);
-  if (kind === undefined || typeof value.detail !== "string") return undefined;
+  if (action === null || action === undefined) return undefined;
+  const kind = field(action.kind);
+  if (kind === undefined) return undefined;
   if (kind === "wait_and_retry") {
     return { kind, detail: retryable === false ? "" : NEXT_STEP_BY_KIND.wait_and_retry };
   }
-  return { kind, detail: boundedFailureText(value.detail, FAILURE_FIELD_MAX_CODE_POINTS) };
+  return { kind, detail: boundedFailureText(action.detail, FAILURE_FIELD_MAX_CODE_POINTS) };
 }
 
-/** A non-blank string, as given; anything else reads as absent. */
-function text(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+/** A non-blank string, as given; a blank one, `null` and absence read as absent. */
+function text(value: string | null | undefined): string | undefined {
+  return value !== null && value !== undefined && value.trim() !== "" ? value : undefined;
 }
 
 /** A non-blank string bounded to `FAILURE_FIELD_MAX_CODE_POINTS`; anything else reads as absent. */
-function field(value: unknown): string | undefined {
+function field(value: string | null | undefined): string | undefined {
   const given = text(value);
   return given === undefined ? undefined : boundedFailureText(given, FAILURE_FIELD_MAX_CODE_POINTS);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -1,25 +1,35 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ApiResponseError,
   ApiUnreachableError,
   ArtifactAuthenticationError,
   ArtifactOperationError,
-  ClientAuthenticationError,
   EmptyMethodSourceError,
+  InputPreparationError,
+  InvalidLocalSourceError,
   MissingMainStuffError,
+  PagingNotTerminatingError,
   PipelineRequestError,
+  RejectedAssetError,
+  RequestArgumentError,
   RunLifecycleUnavailableError,
+  RunTimeoutError,
   ScopeUnavailableError,
+  UnsupportedUploadCapabilityError,
+  UploadAuthenticationError,
+  UploadTransportError,
 } from "@pipelex/sdk";
 
 import {
   ALLOW_HTTP_ENV,
+  BULK_RESOLVE_ERROR_OPTIONS,
   allowsPlainHttp,
   blueprintMainPipeRefOf,
   buildApiConfig,
   buildArtifactFetchConfig,
   classifyError,
+  createPipelexApiClient,
   DEFAULT_API_URL,
   filesInputSchema,
   imageCandidatesOf,
@@ -428,547 +438,667 @@ describe("validateRunIdRequest", () => {
   });
 });
 
+/**
+ * What the SDK throws when the API refuses a request: the real client, reading
+ * a stubbed answer, so the verdict on the error is the one the SDK decides from
+ * the problem document it parsed. `problem` is the document's members; a
+ * string is sent as the raw body, as a bare runner or a gateway answers.
+ */
+async function refused(
+  status: number,
+  problem: Record<string, unknown> | string = {},
+): Promise<ApiResponseError> {
+  const body = typeof problem === "string" ? problem : JSON.stringify({ status, ...problem });
+  vi.stubGlobal("fetch", () =>
+    Promise.resolve(
+      new Response(body, {
+        status,
+        headers: { "content-type": "application/problem+json" },
+      }),
+    ),
+  );
+  try {
+    await createPipelexApiClient({ baseUrl: DEFAULT_API_URL }).getMethod("mt_test");
+  } catch (err) {
+    if (err instanceof ApiResponseError) return err;
+    throw err;
+  }
+  throw new Error("the client did not refuse");
+}
+
+/** What the SDK throws when nothing answers: an `ApiUnreachableError` carrying the network code. */
+async function unreachable(code: string): Promise<unknown> {
+  vi.stubGlobal("fetch", () =>
+    Promise.reject(
+      new TypeError("fetch failed", { cause: Object.assign(new Error(code), { code }) }),
+    ),
+  );
+  return createPipelexApiClient({ baseUrl: DEFAULT_API_URL })
+    .getMethod("mt_test")
+    .then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+}
+
+/**
+ * What input preparation throws once the client's `upload()` met `answer`: the
+ * SDK's `prepareInputs` on the real client, asked for one image whose value is
+ * bytes to upload, so the `UploadTransportError` wrapping the refusal is the
+ * SDK's own.
+ */
+async function uploadFailure(answer: () => Promise<Response>): Promise<unknown> {
+  vi.stubGlobal("fetch", (url: string) =>
+    String(url).endsWith("/v1/pipe-io")
+      ? Promise.resolve(
+          Response.json({
+            is_valid: true,
+            pipe_ref: "demo.main",
+            pipe_io_contracts: {},
+            input_form: {
+              "demo.main": {
+                fields: [
+                  { kind: "image", required: true, name: "photo", presence: "plain", gating: true },
+                ],
+              },
+            },
+            output_form: {},
+            default_pipe_ref: "demo.main",
+            pending_signatures: [],
+            is_runnable: true,
+          }),
+        )
+      : answer(),
+  );
+  return createPipelexApiClient({ baseUrl: DEFAULT_API_URL })
+    .prepareInputs({
+      files: [{ content: 'domain = "demo"' }],
+      inputs: { photo: "data:image/png;base64,AQ==" },
+    })
+    .then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+}
+
+/** The runner's own rendering of a refusal: `error_type`, `detail` and `error_domain`. */
+function runnerProblem(errorType: string, detail: string, errorDomain?: string) {
+  return {
+    error_type: errorType,
+    detail,
+    ...(errorDomain === undefined ? {} : { error_domain: errorDomain }),
+  };
+}
+
 describe("classifyError", () => {
-  it("classifies unreachable API failures as config, retryable", () => {
-    const error = classifyError(
-      new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED"),
-    );
-
-    expect(error.class).toBe("config");
-    expect(error.location).toBe("PIPELEX_BASE_URL");
-    expect(error.retryable).toBe(true);
-  });
-
-  it("classifies API request-shape responses as input_domain", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 422",
-        `${DEFAULT_API_URL}/v1/validate`,
-        422,
-        "Unprocessable Entity",
-        "{}",
-        "validation_error",
-        "Bad request body",
-        undefined, // validationErrors
-        undefined, // code
-      ),
-    );
-
-    expect(error.class).toBe("input_domain");
-    expect(error.location).toBe("files");
-    expect(error.message).toBe("Bad request body");
-    expect(error.retryable).toBe(false);
-  });
-
-  it("applies route-specific bad-request texture when provided", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 422",
-        `${DEFAULT_API_URL}/v1/build/inputs`,
-        422,
-        "Unprocessable Entity",
-        "{}",
-        "validation_error",
-        "Unknown pipe: demo.missing",
-        undefined, // validationErrors
-        undefined, // code
-      ),
-      {
-        route: "/v1/build/inputs",
-        badRequest: { location: "pipe_ref", hint: "Pass a qualified domain.pipe_code." },
-      },
-    );
-
-    expect(error.class).toBe("input_domain");
-    expect(error.location).toBe("pipe_ref");
-    expect(error.hint).toBe("Pass a qualified domain.pipe_code.");
-  });
-
-  it("locates a refused pipe selection at the selection texture, ahead of the selector's", () => {
-    const refusal = (errorType: string) =>
-      new ApiResponseError(
-        "HTTP 422",
-        `${DEFAULT_API_URL}/v1/pipe-io`,
-        422,
-        "Unprocessable Entity",
-        "{}",
-        errorType,
-        "Several domains declare a main_pipe: a.main, b.main.",
-        undefined, // validationErrors
-        undefined, // code
+  describe("takes the verdict from the SDK's error", () => {
+    it("reads a refused request's class and retryable flag as the SDK decided them", async () => {
+      const error = classifyError(
+        await refused(422, runnerProblem("ValidationError", "Bad request body", "input")),
       );
-    const withoutSelection = {
-      route: "/v1/pipe-io",
-      badRequest: { location: "method_ref", hint: "Check the address." },
-    };
-    const options = {
-      ...withoutSelection,
-      selection: { location: "pipe_ref", hint: "Name the pipe." },
-    };
 
-    for (const errorType of ["EntryPipeNotFoundError", "EntryPipeAmbiguousError"]) {
-      expect(classifyError(refusal(errorType), options)).toEqual({
+      expect(error).toEqual({
         class: "input_domain",
-        location: "pipe_ref",
-        message: "Several domains declare a main_pipe: a.main, b.main.",
-        hint: "Name the pipe.",
+        location: "files",
+        message: "Bad request body",
+        hint: "Check the submitted file contents and provenance fields.",
         retryable: false,
       });
-    }
-
-    // Any other 422 keeps the selector's texture, and a route that declared no
-    // selection texture keeps the generic arm for the typed refusal too.
-    expect(classifyError(refusal("ValidationError"), options).location).toBe("method_ref");
-    expect(classifyError(refusal("EntryPipeNotFoundError"), withoutSelection).location).toBe(
-      "method_ref",
-    );
-  });
-
-  it("takes a typedOnly not-found texture only for a 404 that names what was not found", () => {
-    const notFound = (errorType: string | undefined, code: string | undefined) =>
-      new ApiResponseError(
-        "HTTP 404",
-        `${DEFAULT_API_URL}/v1/pipe-io`,
-        404,
-        "Not Found",
-        "{}",
-        errorType,
-        "Not Found",
-        undefined, // validationErrors
-        code,
-      );
-    const texture = { location: "method_ref", hint: "No such package." };
-    const gated = { route: "/v1/pipe-io", notFound: { ...texture, typedOnly: true } };
-
-    // A runner's typed refusal and the platform's coded one both name the miss.
-    expect(classifyError(notFound("MethodPackageNotFoundError", undefined), gated).location).toBe(
-      "method_ref",
-    );
-    expect(classifyError(notFound(undefined, "not_found"), gated).location).toBe("method_ref");
-
-    // A bare 404 is the deployment not serving the route.
-    const bare = classifyError(notFound(undefined, undefined), gated);
-    expect(bare.class).toBe("config");
-    expect(bare.location).toBe("PIPELEX_BASE_URL");
-    expect(bare.hint).toContain("/v1/pipe-io");
-
-    // Without the flag every 404 takes the texture, as the run routes need.
-    const ungated = { route: "/v1/pipe-io", notFound: texture };
-    expect(classifyError(notFound(undefined, undefined), ungated).location).toBe("method_ref");
-  });
-
-  it("locates a stray EmptyMethodSourceError at method_id", () => {
-    const error = classifyError(new EmptyMethodSourceError("mt_123"));
-
-    expect(error.class).toBe("input_domain");
-    expect(error.location).toBe("method_id");
-    expect(error.retryable).toBe(false);
-  });
-
-  it("classifies a 413 at the declared size only on a route that declared the texture", () => {
-    const tooLarge = () =>
-      new ApiResponseError(
-        "HTTP 413",
-        `${DEFAULT_API_URL}/v1/upload/grant`,
-        413,
-        "Payload Too Large",
-        "{}",
-        "PayloadTooLargeError",
-        "Declared file size exceeds the 50 MiB limit.",
-        undefined, // validationErrors
-        "payload_too_large",
-      );
-
-    const declared = classifyError(tooLarge(), {
-      route: "/v1/upload/grant",
-      tooLarge: { location: "size", hint: "Pick a smaller file." },
-    });
-    expect(declared).toEqual({
-      class: "input_domain",
-      location: "size",
-      message: "Declared file size exceeds the 50 MiB limit.",
-      hint: "Pick a smaller file.",
-      retryable: false,
     });
 
-    // Elsewhere a 413 keeps the unexpected-status arm it always had.
-    const undeclared = classifyError(tooLarge(), { route: "/v1/validate" });
-    expect(undeclared.class).toBe("runtime");
-    expect(undeclared.hint).toBe("The Pipelex API returned HTTP 413.");
-  });
+    it("follows the server's own members over the status", async () => {
+      // A runner's engine configuration error is a 500 that names its domain
+      // and says nothing of a retry: the SDK reads it as config, not retryable,
+      // where the status alone would have called it a passing fault.
+      const configFault = classifyError(
+        await refused(500, runnerProblem("ConfigError", "Missing secret", "config")),
+      );
+      expect(configFault).toMatchObject({ class: "config", retryable: false });
 
-  it("names the route in the 404 hint", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 404",
-        `${DEFAULT_API_URL}/v1/build/inputs`,
-        404,
-        "Not Found",
-        "{}",
-        "not_found",
-        "Not found",
-        undefined, // validationErrors
-        undefined, // code
-      ),
-      { route: "/v1/build/inputs" },
-    );
-
-    expect(error.class).toBe("config");
-    expect(error.location).toBe("PIPELEX_BASE_URL");
-    expect(error.hint).toContain("/v1/build/inputs");
-    expect(error.retryable).toBe(false);
-  });
-
-  it("classifies auth responses as config", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 401",
-        `${DEFAULT_API_URL}/v1/validate`,
-        401,
-        "Unauthorized",
-        "{}",
-        "unauthorized",
-        "Missing key",
-        undefined, // validationErrors
-        undefined, // code
-      ),
-    );
-
-    expect(error.class).toBe("config");
-    expect(error.location).toBe("PIPELEX_API_KEY");
-    expect(error.retryable).toBe(false);
-  });
-
-  it("applies deployment auth texture to a 401 response", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 401",
-        `${DEFAULT_API_URL}/v1/validate`,
-        401,
-        "Unauthorized",
-        "{}",
-        "unauthorized",
-        "Missing key",
-        undefined, // validationErrors
-        undefined, // code
-      ),
-      { auth: { location: "api_key", hint: "Bring your own key." } },
-    );
-
-    expect(error.class).toBe("config");
-    expect(error.location).toBe("api_key");
-    expect(error.hint).toBe("Bring your own key.");
-    expect(error.retryable).toBe(false);
-  });
-
-  it("applies deployment auth texture to a ClientAuthenticationError", () => {
-    const error = classifyError(new ClientAuthenticationError("Unauthorized"), {
-      auth: { location: "api_key", hint: "Bring your own key." },
+      const finalFault = classifyError(
+        await refused(503, { detail: "Gone for good", error_domain: "runtime", retryable: false }),
+      );
+      expect(finalFault).toMatchObject({ class: "runtime", retryable: false });
     });
 
-    expect(error.class).toBe("config");
-    expect(error.location).toBe("api_key");
-    expect(error.hint).toBe("Bring your own key.");
-    expect(error.retryable).toBe(false);
-  });
+    it("reads the SDK's fallback when the server sent no verdict", async () => {
+      const server = classifyError(await refused(500, { detail: "Server fault" }));
+      expect(server).toMatchObject({ class: "runtime", message: "Server fault", retryable: true });
 
-  it("uses the route's forbidden texture on a 403, keeping the auth locator", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 403",
-        `${DEFAULT_API_URL}/v1/codegen`,
-        403,
-        "Forbidden",
-        "{}",
-        "forbidden",
-        "Feature not enabled",
-        undefined, // validationErrors
-        undefined, // code
-      ),
-      {
-        auth: { location: "authorization", hint: "Sign in again." },
-        forbidden: { hint: "Sign in again. If that is fine, the feature is gated." },
-      },
-    );
+      // A conflict is the caller's request meeting the stored state.
+      expect(classifyError(await refused(409, { code: "conflict" }))).toMatchObject({
+        class: "input_domain",
+        hint: "The Pipelex API returned HTTP 409.",
+        retryable: false,
+      });
 
-    expect(error.class).toBe("config");
-    expect(error.location).toBe("authorization");
-    expect(error.hint).toBe("Sign in again. If that is fine, the feature is gated.");
-    expect(error.retryable).toBe(false);
-  });
+      // Refused for its timing, not its content: a poll loop must keep going.
+      for (const status of [429, 408]) {
+        expect(classifyError(await refused(status))).toMatchObject({
+          class: "runtime",
+          retryable: true,
+        });
+      }
+    });
 
-  it("classifies the sandbox refusal (403 CustomCodeRequiresSandbox) at the method, not the key", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 403",
-        `${DEFAULT_API_URL}/v1/validate`,
-        403,
-        "Forbidden",
-        "{}",
-        "CustomCodeRequiresSandbox",
-        "This bundle ships custom Python (.py); running it requires a sandbox-hosted deployment.",
-        undefined, // validationErrors
-        undefined, // code
-      ),
-      {
-        methodLocation: "method_ref",
-        // The textures that would otherwise win: a deployment auth wording and
-        // a route gate. Neither may reach a refusal about the method itself.
-        auth: { location: "authorization", hint: "Sign in again." },
-        forbidden: { hint: "The feature is gated." },
-      },
-    );
+    it("reads an unreachable API as retryable config at the base URL", async () => {
+      const error = classifyError(await unreachable("ECONNREFUSED"));
 
-    expect(error.class).toBe("input_domain");
-    expect(error.location).toBe("method_ref");
-    expect(error.hint).toMatch(/sandbox-hosted/);
-    expect(error.hint).not.toMatch(/sign in/i);
-    expect(error.retryable).toBe(false);
-  });
+      expect(error.class).toBe("config");
+      expect(error.location).toBe("PIPELEX_BASE_URL");
+      expect(error.retryable).toBe(true);
+    });
 
-  it("locates the sandbox refusal wherever the request named the method", () => {
-    const refusal = (methodLocation: string): ToolError =>
-      classifyError(
-        new ApiResponseError(
-          "HTTP 403",
-          `${DEFAULT_API_URL}/v1/start`,
-          403,
-          "Forbidden",
-          "{}",
-          "CustomCodeRequiresSandbox",
-          "This bundle ships custom Python (.py).",
-          undefined, // validationErrors
-          undefined, // code
-        ),
-        { methodLocation },
-      );
-
-    // `/v1/start` applies the gate to a submitted bundle and to a stored
-    // method's injected source as well as to a fetched package, so the locator
-    // follows the request shape rather than being hardcoded to method_ref.
-    expect(refusal("files").location).toBe("files");
-    expect(refusal("method_id").location).toBe("method_id");
-  });
-
-  it("reports no location for a sandbox refusal on a route that names no method field", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 403",
-        `${DEFAULT_API_URL}/v1/validate`,
-        403,
-        "Forbidden",
-        "{}",
-        "CustomCodeRequiresSandbox",
-        "This bundle ships custom Python (.py).",
-        undefined, // validationErrors
-        undefined, // code
-      ),
-      {},
-    );
-
-    // A missing locator is the honest answer — better than pointing the caller
-    // at a field this route never had.
-    expect(error.class).toBe("input_domain");
-    expect(error.location).toBeUndefined();
-  });
-
-  it("never applies the sandbox arm to a 401 carrying the same error_type", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 401",
-        `${DEFAULT_API_URL}/v1/validate`,
-        401,
-        "Unauthorized",
-        "{}",
-        "CustomCodeRequiresSandbox",
-        "Missing key",
-        undefined, // validationErrors
-        undefined, // code
-      ),
-      { methodLocation: "method_ref" },
-    );
-
-    expect(error.class).toBe("config");
-    expect(error.location).toBe("PIPELEX_API_KEY");
-  });
-
-  it("never applies the forbidden texture to a 401 — a rejected credential is not a gate", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 401",
-        `${DEFAULT_API_URL}/v1/codegen`,
-        401,
-        "Unauthorized",
-        "{}",
-        "unauthorized",
-        "Missing key",
-        undefined, // validationErrors
-        undefined, // code
-      ),
-      {
-        auth: { location: "authorization", hint: "Sign in again." },
-        forbidden: { hint: "The feature is gated." },
-      },
-    );
-
-    expect(error.location).toBe("authorization");
-    expect(error.hint).toBe("Sign in again.");
-  });
-
-  it("keeps the env-var auth texture when no override is provided", () => {
-    const error = classifyError(new ClientAuthenticationError("Unauthorized"));
-
-    expect(error.location).toBe("PIPELEX_API_KEY");
-    expect(error.hint).toBe("Check the API key for the configured Pipelex API.");
-  });
-
-  it("classifies a paywall 402 as config with the billing hint", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 402",
-        `${DEFAULT_API_URL}/v1/start`,
-        402,
-        "Payment Required",
-        "{}",
-        "subscription_required",
-        "Subscription required to run methods",
-        undefined, // validationErrors
-        // The platform's problem code for 402 is "forbidden" — classification
-        // must branch on the status, never on this.
-        "forbidden",
-      ),
-    );
-
-    expect(error.class).toBe("config");
-    // The class stays `config` (settled contract); `kind` is what tells a
-    // billing refusal from an unreachable API, for the headline and for a
-    // machine consumer that would otherwise have to sniff the message.
-    expect(error.kind).toBe("paywall");
-    expect(error.location).toBeUndefined();
-    expect(error.message).toBe("Subscription required to run methods");
-    expect(error.hint).toContain("app.pipelex.com");
-    expect(error.retryable).toBe(false);
-  });
-
-  it("falls back to the transport message on a 402 without a server message", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 402",
-        `${DEFAULT_API_URL}/v1/start`,
-        402,
-        "Payment Required",
-        "{}",
-        undefined, // errorType
-        undefined, // serverMessage
-        undefined, // validationErrors
-        undefined, // code
-      ),
-    );
-
-    expect(error.class).toBe("config");
-    expect(error.kind).toBe("paywall");
-    expect(error.message).toBe("HTTP 402");
-    expect(error.retryable).toBe(false);
-  });
-
-  it("classifies API server failures as runtime, retryable", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 500",
-        `${DEFAULT_API_URL}/v1/validate`,
-        500,
-        "Internal Server Error",
-        "{}",
-        "internal",
-        "Server fault",
-        undefined, // validationErrors
-        undefined, // code
-      ),
-    );
-
-    expect(error.class).toBe("runtime");
-    expect(error.message).toBe("Server fault");
-    expect(error.retryable).toBe(true);
-  });
-
-  it("classifies a throttle (429) or a request timeout (408) as runtime, retryable", () => {
-    // Refused for its timing, not its content: a poll loop must keep going.
-    for (const status of [429, 408]) {
+    it("reads the SDK's own request timeout as a retryable runtime fault, not the base URL", () => {
       const error = classifyError(
-        new ApiResponseError(
-          `HTTP ${status}`,
-          `${DEFAULT_API_URL}/v1/runs/run_1`,
-          status,
-          "Slow down",
-          "{}",
-          undefined,
-          undefined,
-          undefined, // validationErrors
-          undefined, // code
-        ),
+        new ApiUnreachableError("no answer in time", DEFAULT_API_URL, "ABORT_TIMEOUT"),
       );
 
       expect(error.class).toBe("runtime");
+      expect(error.location).toBeUndefined();
+      expect(error.hint).toMatch(/did not answer in time/);
       expect(error.retryable).toBe(true);
-    }
+    });
+
+    it("reads the client's refusal of its own arguments by their verdict", () => {
+      // A base URL carrying a path is refused at construction, as `config`.
+      let construction: unknown;
+      try {
+        createPipelexApiClient({ baseUrl: `${DEFAULT_API_URL}/v1` });
+      } catch (err) {
+        construction = err;
+      }
+      expect(construction).toBeInstanceOf(RequestArgumentError);
+      expect(classifyError(construction)).toMatchObject({
+        class: "config",
+        location: "PIPELEX_BASE_URL",
+        retryable: false,
+      });
+
+      const argument = classifyError(new RequestArgumentError("No run source given."));
+      expect(argument).toMatchObject({ class: "input_domain", retryable: false });
+      expect(argument.location).toBeUndefined();
+    });
+
+    it("reads the run family and the paging guard by their verdict", () => {
+      expect(classifyError(new RunTimeoutError("still going", "run_1", 1_000))).toMatchObject({
+        class: "runtime",
+        retryable: true,
+      });
+      expect(classifyError(new PagingNotTerminatingError("cursors never end", 100))).toMatchObject({
+        class: "runtime",
+        retryable: false,
+      });
+      expect(
+        classifyError(new MissingMainStuffError("Completed run 'x' returned no main stuff.", "x")),
+      ).toMatchObject({
+        class: "runtime",
+        message: expect.stringMatching(/main stuff/i),
+        retryable: false,
+      });
+    });
+
+    it("reads a missing run lifecycle as config, pointing at the hosted API", async () => {
+      vi.stubGlobal("fetch", () =>
+        Promise.resolve(Response.json({ detail: "Not Found" }, { status: 404 })),
+      );
+      const err = await createPipelexApiClient({ baseUrl: DEFAULT_API_URL })
+        .getRunStatus("run_1")
+        .then(
+          () => undefined,
+          (e: unknown) => e,
+        );
+      expect(err).toBeInstanceOf(RunLifecycleUnavailableError);
+
+      const error = classifyError(err);
+      expect(error.class).toBe("config");
+      expect(error.location).toBe("PIPELEX_BASE_URL");
+      expect(error.hint).toMatch(/hosted/i);
+      expect(error.retryable).toBe(false);
+    });
+
+    it("reads a verdict carried by an error that is not this copy's class", () => {
+      const foreign = Object.assign(new Error("refused elsewhere"), {
+        retryable: false,
+        errorDomain: "input",
+      });
+
+      expect(classifyError(foreign)).toMatchObject({ class: "input_domain", retryable: false });
+    });
+
+    it("keeps its own reading of a failure that carries no verdict", () => {
+      const bare = classifyError(new PipelineRequestError("Invalid API base URL"));
+      expect(bare).toMatchObject({
+        class: "config",
+        location: "PIPELEX_BASE_URL",
+        retryable: false,
+      });
+
+      // A fault nothing names stays retryable: for the poll loops, wrongly
+      // stopping a live follow is worse than one more read.
+      expect(classifyError(new Error("boom"))).toMatchObject({ class: "runtime", retryable: true });
+      expect(classifyError("boom")).toMatchObject({
+        class: "runtime",
+        message: "Unknown failure.",
+        retryable: true,
+      });
+    });
   });
 
-  it("classifies an unexpected non-5xx status as runtime, not retryable", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 418",
-        `${DEFAULT_API_URL}/v1/validate`,
-        418,
-        "I'm a teapot",
-        "{}",
-        "teapot",
-        "Teapot",
-        undefined, // validationErrors
-        undefined, // code
-      ),
-    );
+  describe("overrides the SDK's class where this server knows better, and says why", () => {
+    it("reads every rejected credential as config, whatever the server tagged it", async () => {
+      // The runner tags its own 401 `input`; the platform sends no domain.
+      const fromRunner = await refused(
+        401,
+        runnerProblem("Unauthenticated", "Missing key", "input"),
+      );
+      expect(fromRunner.errorDomain).toBe("input");
+      for (const err of [fromRunner, await refused(401, { code: "unauthorized" })]) {
+        expect(classifyError(err)).toMatchObject({
+          class: "config",
+          location: "PIPELEX_API_KEY",
+          hint: "Check PIPELEX_API_KEY for the configured API.",
+          retryable: false,
+        });
+      }
+    });
 
-    expect(error.class).toBe("runtime");
-    expect(error.retryable).toBe(false);
+    it("takes a route's declared class for a 400 no argument fixes", async () => {
+      const orgless = await refused(400, { code: "bad_request", detail: "No active organization" });
+      expect(orgless.errorDomain).toBe("input");
+
+      expect(classifyError(orgless, BULK_RESOLVE_ERROR_OPTIONS)).toMatchObject({
+        class: "config",
+        retryable: false,
+      });
+    });
+
+    it("reads the registry form of method_ref as the caller's, on a route that declared it", async () => {
+      const registry = await refused(
+        501,
+        runnerProblem("MethodRefNotImplemented", "Registry refs are reserved.", "config"),
+      );
+      const texture = { location: "method_ref", hint: "Use an address." };
+
+      expect(classifyError(registry, { notImplemented: texture })).toEqual({
+        class: "input_domain",
+        location: "method_ref",
+        message: "Registry refs are reserved.",
+        hint: "Use an address.",
+        retryable: false,
+      });
+      // Elsewhere the deployment does not implement the route.
+      expect(classifyError(registry, { route: "/v1/codegen" })).toMatchObject({
+        class: "config",
+        location: "PIPELEX_BASE_URL",
+        hint: expect.stringContaining("/v1/codegen"),
+        retryable: false,
+      });
+    });
+
+    it("reads a 404 as the caller's miss only where the route takes a name and the SDK reads it so", async () => {
+      const texture = { location: "method_ref", hint: "No such package." };
+      const options = { route: "/v1/pipe-io", notFound: texture };
+
+      // A runner's typed refusal and the platform's coded one both name the miss.
+      const typed = await refused(
+        404,
+        runnerProblem("MethodPackageNotFoundError", "No package matches.", "input"),
+      );
+      expect(classifyError(typed, options)).toMatchObject({
+        class: "input_domain",
+        location: "method_ref",
+        retryable: false,
+      });
+      const coded = await refused(404, { code: "not_found", detail: "Method not found" });
+      expect(classifyError(coded, options).location).toBe("method_ref");
+
+      // A bare 404 is the deployment not serving the route.
+      const bare = classifyError(await refused(404, '{"detail":"Not Found"}'), options);
+      expect(bare).toMatchObject({
+        class: "config",
+        location: "PIPELEX_BASE_URL",
+        retryable: false,
+      });
+      expect(bare.hint).toContain("/v1/pipe-io");
+
+      // On a route that names no resource, even a coded 404 is the route
+      // missing: the platform renders a path it does not serve that way.
+      expect(classifyError(coded, { route: "/v1/methods" })).toMatchObject({
+        class: "config",
+        location: "PIPELEX_BASE_URL",
+        hint: expect.stringContaining("/v1/methods"),
+      });
+    });
   });
 
-  it("classifies unknown faults as runtime, retryable", () => {
-    const error = classifyError(new Error("boom"));
+  describe("words each refusal for this server's caller", () => {
+    it("applies route-specific bad-request texture when provided", async () => {
+      const error = classifyError(
+        await refused(422, runnerProblem("ValidationError", "Unknown pipe: demo.missing", "input")),
+        {
+          route: "/v1/pipe-io",
+          badRequest: { location: "pipe_ref", hint: "Pass a qualified domain.pipe_code." },
+        },
+      );
 
-    expect(error.class).toBe("runtime");
-    expect(error.retryable).toBe(true);
+      expect(error).toMatchObject({
+        class: "input_domain",
+        location: "pipe_ref",
+        hint: "Pass a qualified domain.pipe_code.",
+      });
+    });
+
+    it("locates a refused pipe selection at the selection texture, ahead of the selector's", async () => {
+      const refusal = (errorType: string) =>
+        refused(
+          422,
+          runnerProblem(errorType, "Several domains declare a main_pipe: a.main, b.main.", "input"),
+        );
+      const withoutSelection = {
+        route: "/v1/pipe-io",
+        badRequest: { location: "method_ref", hint: "Check the address." },
+      };
+      const options = {
+        ...withoutSelection,
+        selection: { location: "pipe_ref", hint: "Name the pipe." },
+      };
+
+      for (const errorType of ["EntryPipeNotFoundError", "EntryPipeAmbiguousError"]) {
+        expect(classifyError(await refusal(errorType), options)).toEqual({
+          class: "input_domain",
+          location: "pipe_ref",
+          message: "Several domains declare a main_pipe: a.main, b.main.",
+          hint: "Name the pipe.",
+          retryable: false,
+        });
+      }
+
+      // Any other 422 keeps the selector's texture, and a route that declared no
+      // selection texture keeps the generic arm for the typed refusal too.
+      expect(classifyError(await refusal("ValidationError"), options).location).toBe("method_ref");
+      expect(
+        classifyError(await refusal("EntryPipeNotFoundError"), withoutSelection).location,
+      ).toBe("method_ref");
+    });
+
+    it("locates a stray EmptyMethodSourceError at method_id", () => {
+      expect(classifyError(new EmptyMethodSourceError("mt_123"))).toMatchObject({
+        class: "input_domain",
+        location: "method_id",
+        retryable: false,
+      });
+    });
+
+    it("locates a 413 at the declared size only on a route that declared the texture", async () => {
+      const tooLarge = () =>
+        refused(413, {
+          code: "payload_too_large",
+          detail: "Declared file size exceeds the 50 MiB limit.",
+        });
+
+      expect(
+        classifyError(await tooLarge(), {
+          route: "/v1/upload/grant",
+          tooLarge: { location: "size", hint: "Pick a smaller file." },
+        }),
+      ).toEqual({
+        class: "input_domain",
+        location: "size",
+        message: "Declared file size exceeds the 50 MiB limit.",
+        hint: "Pick a smaller file.",
+        retryable: false,
+      });
+
+      // Elsewhere a 413 keeps the SDK's verdict and names its status.
+      const undeclared = classifyError(await tooLarge(), { route: "/v1/validate" });
+      expect(undeclared).toMatchObject({ class: "input_domain", retryable: false });
+      expect(undeclared.location).toBeUndefined();
+      expect(undeclared.hint).toBe("The Pipelex API returned HTTP 413.");
+    });
+
+    it("applies deployment auth texture to a 401 response", async () => {
+      const error = classifyError(await refused(401, { code: "unauthorized" }), {
+        auth: { location: "api_key", hint: "Bring your own key." },
+      });
+
+      expect(error).toMatchObject({
+        class: "config",
+        location: "api_key",
+        hint: "Bring your own key.",
+        retryable: false,
+      });
+    });
+
+    it("uses the route's forbidden texture on a 403, keeping the auth locator", async () => {
+      const error = classifyError(await refused(403, { code: "forbidden" }), {
+        auth: { location: "authorization", hint: "Sign in again." },
+        forbidden: { hint: "Sign in again. If that is fine, the feature is gated." },
+      });
+
+      expect(error).toMatchObject({
+        class: "config",
+        location: "authorization",
+        hint: "Sign in again. If that is fine, the feature is gated.",
+        retryable: false,
+      });
+    });
+
+    it("never applies the forbidden texture to a 401 — a rejected credential is not a gate", async () => {
+      const error = classifyError(await refused(401, { code: "unauthorized" }), {
+        auth: { location: "authorization", hint: "Sign in again." },
+        forbidden: { hint: "The feature is gated." },
+      });
+
+      expect(error.location).toBe("authorization");
+      expect(error.hint).toBe("Sign in again.");
+    });
+
+    it("classifies the sandbox refusal (403 CustomCodeRequiresSandbox) at the method, not the key", async () => {
+      const error = classifyError(
+        await refused(
+          403,
+          runnerProblem(
+            "CustomCodeRequiresSandbox",
+            "This bundle ships custom Python (.py); running it requires a sandbox-hosted deployment.",
+            "input",
+          ),
+        ),
+        {
+          methodLocation: "method_ref",
+          // The textures that would otherwise win: a deployment auth wording and
+          // a route gate. Neither may reach a refusal about the method itself.
+          auth: { location: "authorization", hint: "Sign in again." },
+          forbidden: { hint: "The feature is gated." },
+        },
+      );
+
+      expect(error.class).toBe("input_domain");
+      expect(error.location).toBe("method_ref");
+      expect(error.hint).toMatch(/sandbox-hosted/);
+      expect(error.hint).not.toMatch(/sign in/i);
+      expect(error.retryable).toBe(false);
+    });
+
+    it("locates the sandbox refusal wherever the request named the method, or nowhere", async () => {
+      const sandbox = await refused(
+        403,
+        runnerProblem(
+          "CustomCodeRequiresSandbox",
+          "This bundle ships custom Python (.py).",
+          "input",
+        ),
+      );
+
+      // `/v1/start` applies the gate to a submitted bundle and to a stored
+      // method's injected source as well as to a fetched package, so the locator
+      // follows the request shape rather than being hardcoded to method_ref.
+      expect(classifyError(sandbox, { methodLocation: "files" }).location).toBe("files");
+      expect(classifyError(sandbox, { methodLocation: "method_id" }).location).toBe("method_id");
+      // A missing locator is the honest answer — better than pointing the caller
+      // at a field this route never had.
+      const unlocated = classifyError(sandbox, {});
+      expect(unlocated.class).toBe("input_domain");
+      expect(unlocated.location).toBeUndefined();
+    });
+
+    it("classifies the structures refusal (403 MethodStructuresRefusedError) at method_ref", async () => {
+      // The runner sends this refusal with no `error_domain` (L-261007-31dea6),
+      // and the SDK reads a bare 403 as `config`: the arm overrides it.
+      const refusal = await refused(
+        403,
+        runnerProblem("MethodStructuresRefusedError", "Structure classes refused."),
+      );
+      expect(refusal.errorDomain).toBe("config");
+
+      const error = classifyError(refusal);
+
+      expect(error).toMatchObject({
+        class: "input_domain",
+        location: "method_ref",
+        retryable: false,
+      });
+    });
+
+    it("never applies the sandbox arm to a 401 carrying the same error_type", async () => {
+      const error = classifyError(
+        await refused(401, runnerProblem("CustomCodeRequiresSandbox", "Missing key", "input")),
+        { methodLocation: "method_ref" },
+      );
+
+      expect(error.class).toBe("config");
+      expect(error.location).toBe("PIPELEX_API_KEY");
+    });
+
+    it("classifies a paywall 402 as config with the billing hint", async () => {
+      // The platform's problem code for 402 is "forbidden" — the arm branches
+      // on the status, never on this.
+      const error = classifyError(
+        await refused(402, { code: "forbidden", detail: "Subscription required to run methods" }),
+      );
+
+      // The class stays `config`; `kind` is what tells a billing refusal from
+      // an unreachable API, for the headline and for a machine consumer that
+      // would otherwise have to sniff the message.
+      expect(error).toEqual({
+        class: "config",
+        kind: "paywall",
+        message: "Subscription required to run methods",
+        hint: expect.stringContaining("app.pipelex.com"),
+        retryable: false,
+      });
+    });
+
+    it("falls back to the transport message on a 402 without a server message", async () => {
+      const error = classifyError(await refused(402, ""));
+
+      expect(error).toMatchObject({ class: "config", kind: "paywall", retryable: false });
+      expect(error.message).toMatch(/402/);
+    });
   });
 
-  it("classifies client request construction failures as config, not retryable", () => {
-    const error = classifyError(new PipelineRequestError("Invalid API base URL"));
+  describe("the upload leg", () => {
+    it("reads a wrapped plan refusal as the paywall it is, not a passing fault", async () => {
+      const err = await uploadFailure(() =>
+        Promise.resolve(
+          Response.json({ status: 402, code: "forbidden", detail: "Plan limit" }, { status: 402 }),
+        ),
+      );
+      expect(err).toBeInstanceOf(UploadTransportError);
 
-    expect(error.class).toBe("config");
-    expect(error.location).toBe("PIPELEX_BASE_URL");
-    expect(error.retryable).toBe(false);
+      expect(classifyError(err)).toMatchObject({
+        class: "config",
+        kind: "paywall",
+        message: "Plan limit",
+        retryable: false,
+      });
+    });
+
+    it("reads a wrapped unreachable API as retryable config at the base URL", async () => {
+      const err = await uploadFailure(() =>
+        Promise.reject(
+          new TypeError("fetch failed", {
+            cause: Object.assign(new Error("ECONNREFUSED"), { code: "ECONNREFUSED" }),
+          }),
+        ),
+      );
+      expect(err).toBeInstanceOf(UploadTransportError);
+
+      expect(classifyError(err)).toMatchObject({
+        class: "config",
+        location: "PIPELEX_BASE_URL",
+        retryable: true,
+      });
+    });
+
+    it("reads a wrapped server fault by its verdict, with the upload's own hint", async () => {
+      const err = await uploadFailure(() =>
+        Promise.resolve(Response.json({ status: 503, detail: "Busy" }, { status: 503 })),
+      );
+
+      expect(classifyError(err)).toMatchObject({
+        class: "runtime",
+        hint: expect.stringMatching(/could not reach Pipelex storage/),
+        retryable: true,
+      });
+
+      const refusal = await uploadFailure(() =>
+        Promise.resolve(Response.json({ status: 400, detail: "Bad file" }, { status: 400 })),
+      );
+      expect(classifyError(refusal, { asset: { location: "inputs.photo" } })).toMatchObject({
+        class: "input_domain",
+        location: "inputs.photo",
+        retryable: false,
+      });
+    });
+
+    it("reads the rest of the preparation family by its verdict, located at the asset", () => {
+      const options = { asset: { location: "inputs.photo", hint: "Shrink it." } };
+
+      expect(
+        classifyError(new RejectedAssetError("too large", "photo.png", 413), options),
+      ).toMatchObject({
+        class: "input_domain",
+        location: "inputs.photo",
+        hint: "Shrink it.",
+        retryable: false,
+      });
+      expect(
+        classifyError(new InvalidLocalSourceError("unreadable", "./photo.png"), options),
+      ).toMatchObject({ class: "input_domain", location: "inputs.photo", retryable: false });
+      expect(classifyError(new UnsupportedUploadCapabilityError("no upload route"))).toMatchObject({
+        class: "config",
+        location: "PIPELEX_BASE_URL",
+        retryable: false,
+      });
+      expect(
+        classifyError(new UploadAuthenticationError("refused", 401), {
+          auth: { location: "api_key", hint: "Bring your own key." },
+        }),
+      ).toMatchObject({ class: "config", location: "api_key", retryable: false });
+    });
+
+    it("locates the preparation base error at the pipe, unless the SDK reads it as no fault of the caller's", () => {
+      const options = { preparation: { location: "pipe_ref", hint: "Name the pipe." } };
+
+      expect(classifyError(new InputPreparationError("Unknown pipe."), options)).toMatchObject({
+        class: "input_domain",
+        location: "pipe_ref",
+        retryable: false,
+      });
+
+      const unreadable = classifyError(
+        new InputPreparationError("is_valid is not a boolean", {
+          verdict: { errorDomain: "runtime", retryable: false },
+        }),
+        options,
+      );
+      expect(unreadable).toMatchObject({ class: "runtime", retryable: false });
+      expect(unreadable.location).toBeUndefined();
+    });
   });
 
-  it("classifies a missing run lifecycle as config, pointing at the hosted API", () => {
-    const error = classifyError(
-      new RunLifecycleUnavailableError("run lifecycle not served", DEFAULT_API_URL),
-    );
-
-    expect(error.class).toBe("config");
-    expect(error.location).toBe("PIPELEX_BASE_URL");
-    expect(error.hint).toMatch(/hosted/i);
-    expect(error.retryable).toBe(false);
-  });
-
-  it("classifies a completed run missing its main stuff as runtime, not retryable", () => {
-    const error = classifyError(
-      new MissingMainStuffError("Completed run 'x' returned no main stuff.", "x"),
-    );
-
-    expect(error.class).toBe("runtime");
-    expect(error.message).toMatch(/main stuff/i);
-    expect(error.retryable).toBe(false);
-  });
-
-  it("classifies the artifact family ahead of the generic PipelineRequestError arm", () => {
+  it("classifies the artifact family by its verdict, with its own texture", () => {
     const verdict = {
       scope: "main_stuff" as const,
       artifacts: [],
@@ -1005,31 +1135,10 @@ describe("classifyError", () => {
     expect(operation).toMatchObject({ class: "runtime", retryable: false });
     expect(operation.location).toBeUndefined();
   });
+});
 
-  it("overrides the 404 arm to input_domain when the route says so", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 404",
-        `${DEFAULT_API_URL}/v1/runs/unknown/status`,
-        404,
-        "Not Found",
-        "{}",
-        "not_found",
-        "Run not found",
-        undefined, // validationErrors
-        undefined, // code
-      ),
-      {
-        route: "/v1/runs/{id}/status",
-        notFound: { location: "run_id", hint: "Check the run id." },
-      },
-    );
-
-    expect(error.class).toBe("input_domain");
-    expect(error.location).toBe("run_id");
-    expect(error.hint).toBe("Check the run id.");
-    expect(error.retryable).toBe(false);
-  });
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe("summaryForToolError", () => {

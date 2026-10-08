@@ -42,7 +42,12 @@ import {
 } from "./run.js";
 import type { RunContext } from "./run.js";
 import { RECORDED_FAILED_RUNS } from "./failed-run-fixtures.js";
-import { classifyError, DEFAULT_API_URL, MAX_IMAGE_CANDIDATE_ENTRIES } from "./shared.js";
+import {
+  classifyError,
+  createPipelexApiClient,
+  DEFAULT_API_URL,
+  MAX_IMAGE_CANDIDATE_ENTRIES,
+} from "./shared.js";
 
 const RUN_ID = "01JRUN0000000000000000TEST";
 
@@ -1317,6 +1322,53 @@ describe("startMthdsRun", () => {
     }
   });
 
+  it("warns that the run may exist even when the server says a retry cannot help", async () => {
+    // The runner's catch-all 500 states `retryable: false` whatever it
+    // interrupted, so the SDK's verdict says nothing about whether the start
+    // was recorded: the warning is decided by the failure, never by that flag.
+    const catchAll = new ApiResponseError(
+      "HTTP 500",
+      `${DEFAULT_API_URL}/v1/start`,
+      500,
+      "Internal Server Error",
+      "{}",
+      "UnexpectedError",
+      "An unexpected error occurred",
+      undefined,
+      undefined,
+      { problem: { errorDomain: "runtime", retryable: false } },
+    );
+    expect(catchAll.retryable).toBe(false);
+
+    const result = await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }] },
+      contextWith({ start: () => Promise.reject(catchAll) }),
+    );
+
+    expect(result.structuredContent.errors?.[0]?.hint).toContain("the run may have started");
+    expect(result.summary).toMatch(/^Run may have started/);
+  });
+
+  it("says the run may exist when the start's acknowledgement came back unreadable", async () => {
+    // A 2xx the SDK could not read is a start the server accepted, which the
+    // SDK reports as a final ApiResponseError: the run exists all the same.
+    vi.stubGlobal("fetch", () => Promise.resolve(new Response("", { status: 202 })));
+    try {
+      const real = createPipelexApiClient({ baseUrl: DEFAULT_API_URL });
+      const result = await startMthdsRun(
+        { files: [{ content: 'domain = "demo"' }] },
+        contextWith({ start: (options: PipelexStartOptions) => real.start(options) }),
+      );
+
+      const error = result.structuredContent.errors?.[0];
+      expect(error?.retryable).toBe(false);
+      expect(error?.hint).toContain("the run may have started");
+      expect(result.summary).toMatch(/^Run may have started/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("refuses a retry of a 500 on the start, and nowhere else", async () => {
     // A 500 from the status route reads nothing into being and stays retryable.
     const status = await getMthdsRunStatus(
@@ -1397,6 +1449,8 @@ describe("startMthdsRun by method_ref", () => {
             "The method declares in-process Python structures",
             undefined,
             undefined,
+            // The runner sends this refusal with no `error_domain`
+            // (L-261007-31dea6), which the SDK reads as `config`.
           ),
         ),
     });
@@ -1422,6 +1476,8 @@ describe("startMthdsRun by method_ref", () => {
           "This bundle ships custom Python (.py); running it requires a sandbox-hosted deployment.",
           undefined,
           undefined,
+          // The runner tags this refusal `error_domain: input` (raise_forbidden).
+          { problem: { errorDomain: "input" } },
         ),
       );
 
