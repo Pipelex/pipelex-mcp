@@ -642,7 +642,7 @@ The route returns no `rendered_markdown`, so the capability composes its own `co
 
 ### Codegen Scope (`mthds_codegen`)
 
-`mthds_codegen` projects a method's concept set into typed artifacts in the language the calling context needs, wrapping `POST /v1/codegen` through `@pipelex/sdk`'s `codegen()`. It is a plain tool: no view, no `_meta` channel, no `available_view_specs` field — decided on 2026-08-29: the summary's fenced blocks already carry the artifacts to every host. It takes the same thin-front-end posture as every other tool here: the engine projects, the MCP selects the method, chooses nothing on the user's behalf that the model can choose from context, and hands the artifacts back verbatim so the codegen trust chain (stamps, `codegen.lock`, the offline check — the workspace's `docs/specs/pipelex-codegen.md`) survives the trip through a conversation.
+`mthds_codegen` projects a method's concept set into typed artifacts in the language the calling context needs, wrapping `POST /v1/codegen` through `@pipelex/sdk`'s `codegen()`. It is a plain tool: no view, no `_meta` channel, no `available_view_specs` field — decided on 2026-08-29: the summary's fenced blocks already carry the artifacts to every host. It takes the same thin-front-end posture as every other tool here: the engine projects, the MCP selects the method, chooses nothing on the user's behalf that the model can choose from context, and hands the artifacts back verbatim so the codegen trust chain (stamps, `codegen.lock`, the offline check — `conformance/specs/pipelex-codegen.md`, in the `conformance` repository beside the tests that verify it) survives the trip through a conversation.
 
 The public MCP input shape is:
 
