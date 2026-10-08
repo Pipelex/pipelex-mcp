@@ -17,6 +17,7 @@ import { z } from "zod";
 
 import {
   LINK_FILE_NAME,
+  LinkLockError,
   NO_LINK,
   apiHostOf,
   buildMethodLink,
@@ -27,6 +28,7 @@ import {
   readMethodLink,
   replaceMethodLink,
   sameLinkRead,
+  withLinkLock,
 } from "./catalog-link.js";
 import type { LinkFileReport, LinkRead, LinkReplacement, MethodLink } from "./catalog-link.js";
 import { methodVersionsSupport, readMethodSelector, versionReaderOf } from "./method-versions.js";
@@ -1368,14 +1370,26 @@ async function writeLinkForSave(
   }
 
   // A save makes the directory the draft, so the link records no published
-  // version, whatever an earlier pull of one left there.
-  const replaced = await replaceMethodLink(
-    target.root,
-    target.dir,
-    expected,
-    buildMethodLink(fields),
-  );
-  return { report: replaced.report, changed: replaced.changed };
+  // version, whatever an earlier pull of one left there. The lock makes the
+  // compare and the write one step for other workshop processes too; one that
+  // cannot be taken leaves the link unwritten rather than written unguarded,
+  // and never fails the save, whose draft is already stored.
+  try {
+    const replaced = await withLinkLock(target.dir, () =>
+      replaceMethodLink(target.root, target.dir, expected, buildMethodLink(fields)),
+    );
+    return { report: replaced.report, changed: replaced.changed };
+  } catch (err) {
+    if (!(err instanceof LinkLockError)) throw err;
+    return {
+      report: {
+        path: path.relative(target.root, path.join(target.dir, LINK_FILE_NAME)),
+        written: false,
+        reason: `${err.message}, so it was not written`,
+      },
+      changed: false,
+    };
+  }
 }
 
 function saveSummary(
@@ -1856,21 +1870,39 @@ async function writtenResult(
   // wrote. A save or a pull that wrote the link after this pull read it moved
   // the directory under the plan, and so did an edit to a destination since
   // the plan read it, so the pull is refused before it writes a file, rather
-  // than land on a state it never looked at.
-  const landed = await inLinkTurn(() =>
-    landPull({
-      root,
-      dir,
-      link,
-      plan,
-      destinations,
-      observed,
-      stored,
-      content,
-      versionIsDraft,
-      apiHost,
-    }),
-  );
+  // than land on a state it never looked at. The whole landing holds the
+  // directory's lock, so another workshop process neither writes between a
+  // compare and its write nor resumes this pull while it is still writing.
+  let landed: PullLanding;
+  try {
+    landed = await inLinkTurn(() =>
+      withLinkLock(dir, () =>
+        landPull({
+          root,
+          dir,
+          link,
+          plan,
+          destinations,
+          observed,
+          stored,
+          content,
+          versionIsDraft,
+          apiHost,
+        }),
+      ),
+    );
+  } catch (err) {
+    if (!(err instanceof LinkLockError)) throw err;
+    return getError("The method was not written: its directory is being written by another call.", [
+      {
+        class: "runtime",
+        location: "output_dir",
+        message: `${err.message}, so nothing was written.`,
+        hint: "Pull again in a moment: the other call is a save or a pull from another workshop process on this machine.",
+        retryable: true,
+      },
+    ]);
+  }
   if (!landed.ok) {
     return landed.result;
   }

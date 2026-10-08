@@ -1,4 +1,6 @@
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { errorMessage, isMissingPathError } from "./workspace-boundary.js";
@@ -35,7 +37,7 @@ import { errorMessage, isMissingPathError } from "./workspace-boundary.js";
  * bytes. A link another call wrote meanwhile describes what THAT call put in
  * the directory, so it is left as it is and the result says so. That is what
  * keeps the link truthful when two calls touch one directory, in this process
- * or in another workshop process; see {@link inLinkTurn} for what is left.
+ * ({@link inLinkTurn}) or in another workshop process ({@link withLinkLock}).
  */
 
 export const LINK_FILE_NAME = "pipelex-method.json";
@@ -199,8 +201,9 @@ export interface LinkReplacement {
  * reported as such — a merge conflict landing in the file mid-call is the
  * usual cause — so a caller that refuses on a change refuses on it too.
  *
- * Call it inside {@link inLinkTurn}, which makes the compare and the write one
- * step for every call in this process.
+ * Call it inside {@link inLinkTurn} and {@link withLinkLock}, which make the
+ * compare and the write one step for every call in this process and in every
+ * other workshop process on this machine.
  */
 export async function replaceMethodLink(
   root: string,
@@ -269,18 +272,13 @@ export function sameLinkRead(a: LinkRead, b: LinkRead): boolean {
  * pull can write into a directory nested in another's, and symlinks and case
  * make two spellings of one directory.
  *
- * Within a turn the steps are atomic for this process. Across processes, two
- * properties stand in for it: a pull marks the link (`partial_pull`) before it
- * writes a file and finishes it after the last, and a save reads its links
- * again after its files and refuses when they moved; and every link write is
- * {@link replaceMethodLink}'s compare-and-swap. What another workshop process
- * on the same directory can still do is land in the instant between this
- * process's compare and its write, or resume a pull this process is still
- * writing, since an interrupted pull and one in flight carry the same marker.
- * Both need two processes writing one directory at the same moment; closing
- * them would take a lock file on disk, whose recovery from a process killed
- * while holding it is guesswork and which would sit in a directory the user
- * commits.
+ * Within a turn the steps are atomic for this process. Every WRITE in one —
+ * the save's compare-and-swap, the pull's whole landing — also holds
+ * {@link withLinkLock}, which makes it atomic for every other workshop process
+ * on this machine. A save's read takes no lock: a pull marks the link
+ * (`partial_pull`) before it writes a file and finishes it after the last, and
+ * the save reads its links again after its files and refuses when they moved,
+ * so a landing that overlaps the read is caught without one.
  */
 let linkTurn: Promise<unknown> = Promise.resolve();
 
@@ -288,6 +286,206 @@ export function inLinkTurn<T>(work: () => Promise<T>): Promise<T> {
   const turn = linkTurn.then(work);
   linkTurn = turn.catch(() => undefined);
   return turn;
+}
+
+// ── one writer per directory, across processes ─────────────────────
+
+/** How long a call waits for another workshop process to finish writing one directory. */
+export const LINK_LOCK_WAIT_MS = 10_000;
+
+/**
+ * The age past which a lock is taken for abandoned. A lock is held only for a
+ * few local file operations — never across a call to the platform — so a lock
+ * this old belongs to a process that was killed, or paused far longer than any
+ * write it was making.
+ */
+export const LINK_LOCK_STALE_MS = 30_000;
+
+const LINK_LOCK_POLL_MS = 5;
+
+/** Why a call could not take the lock of the directory it writes; nothing was written under it. */
+export class LinkLockError extends Error {
+  override name = "LinkLockError";
+}
+
+/** Who holds a lock, as the lock file records it. */
+interface LockHolder {
+  pid: number;
+  host: string;
+  at: number;
+}
+
+/**
+ * Run `work` holding the lock every workshop process on this machine takes
+ * before it writes the link file, or a pull's files, in `dir`.
+ *
+ * The link's compare-and-swap is two file operations, a read and a write, and
+ * only one process's turns are ordered by {@link inLinkTurn}. Between two
+ * processes nothing ordered them: a pull of a published version from a second
+ * workshop process could land between a save's compare and its write, the save
+ * then recorded its draft token over the version's files, and the next
+ * ordinary save replaced the draft with that version — the restore guard
+ * bypassed, and the bytes the first save sent gone from the draft and from
+ * disk. Under contention the two processes lost about half their swaps to
+ * each other. So every write holds this lock, and the compare and the write,
+ * and a pull's provisional link, files and final link, are one step for every
+ * process that takes it.
+ *
+ * The lock is a file created exclusively under the OS temp directory, never
+ * in the user's directory, which is committed. Its name is derived from the
+ * directory's device and inode, so two spellings of one directory — a
+ * symlink, a different case on a case-insensitive disk — take one lock. A
+ * directory that does not exist yet is named by its nearest existing ancestor
+ * and the rest of its path.
+ *
+ * It is held for a few file operations and never across a call to the
+ * platform. A holder that cannot have finished is taken for dead, which is
+ * the guess any lock on disk must make: a holder on this host whose process is
+ * gone is dead at once, and any holder older than {@link LINK_LOCK_STALE_MS}
+ * is dead too. A holder merely paused past that age resumes inside the next
+ * one's lock, which reopens the window this lock closes, but only after a
+ * pause thousands of times longer than the hold. And the lock binds only
+ * processes that share the temp directory — by default, one user's sessions on
+ * one machine, which is where two workshops write one directory.
+ *
+ * Waits up to {@link LINK_LOCK_WAIT_MS}; past that, or when the lock file
+ * cannot be created at all, it throws {@link LinkLockError} and `work` never
+ * runs, so a caller refuses rather than write unguarded.
+ */
+export async function withLinkLock<T>(
+  dir: string,
+  work: () => Promise<T>,
+  options: { waitMs?: number } = {},
+): Promise<T> {
+  const lockPath = await linkLockPath(dir);
+  const token = await acquireLinkLock(lockPath, options.waitMs ?? LINK_LOCK_WAIT_MS);
+  try {
+    return await work();
+  } finally {
+    await releaseLinkLock(lockPath, token);
+  }
+}
+
+/** Where the lock of `dir` lives — exported so a test can stand in for another process holding it. */
+export async function linkLockPath(dir: string): Promise<string> {
+  const key = await directoryKey(dir);
+  const name = createHash("sha256").update(key).digest("hex").slice(0, 32);
+  return path.join(os.tmpdir(), "pipelex-mcp-link-locks", `${name}.lock`);
+}
+
+/** The device and inode of `dir`, or of its nearest existing ancestor followed by the rest of its path. */
+async function directoryKey(dir: string): Promise<string> {
+  let current = path.resolve(dir);
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      const stat = await fs.stat(current, { bigint: true });
+      return [`${stat.dev}:${stat.ino}`, ...missing.reverse()].join("/");
+    } catch (err) {
+      if (!isMissingPathError(err)) throw err;
+      const parent = path.dirname(current);
+      if (parent === current) return path.resolve(dir);
+      missing.push(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+async function acquireLinkLock(lockPath: string, waitMs: number): Promise<string> {
+  const holder: LockHolder = { pid: process.pid, host: os.hostname(), at: Date.now() };
+  const token = JSON.stringify({ ...holder, nonce: randomUUID() });
+  const deadline = Date.now() + waitMs;
+  try {
+    await fs.mkdir(path.dirname(lockPath), { recursive: true });
+    for (;;) {
+      try {
+        await fs.writeFile(lockPath, token, { encoding: "utf8", flag: "wx" });
+        return token;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      }
+      await breakAbandonedLock(lockPath);
+      if (Date.now() >= deadline) {
+        throw new LinkLockError(
+          `another workshop process has been writing this directory for over ${Math.round(waitMs / 1000)} s`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, LINK_LOCK_POLL_MS));
+    }
+  } catch (err) {
+    if (err instanceof LinkLockError) throw err;
+    throw new LinkLockError(
+      `the workshop's lock for this directory could not be taken at ${lockPath} (${errorMessage(err)})`,
+    );
+  }
+}
+
+/**
+ * Remove the lock at `lockPath` when its holder cannot still be writing.
+ *
+ * The removal renames the lock aside first, which only one of several callers
+ * can do, and then checks that what it moved is the lock it judged: a holder
+ * that took the lock in between is put back.
+ */
+async function breakAbandonedLock(lockPath: string): Promise<void> {
+  let raw: string;
+  let modifiedAt: number;
+  try {
+    raw = await fs.readFile(lockPath, "utf8");
+    modifiedAt = (await fs.stat(lockPath)).mtimeMs;
+  } catch (err) {
+    if (isMissingPathError(err)) return;
+    throw err;
+  }
+  const holder = lockHolderOf(raw);
+  // A lock file read between its creation and its first write is empty, so its
+  // age is the file's own.
+  const age = Date.now() - (holder?.at ?? modifiedAt);
+  const gone = holder !== undefined && holder.host === os.hostname() && !processAlive(holder.pid);
+  if (!gone && age < LINK_LOCK_STALE_MS) return;
+
+  const aside = `${lockPath}.abandoned-${randomUUID()}`;
+  try {
+    await fs.rename(lockPath, aside);
+  } catch (err) {
+    if (isMissingPathError(err)) return;
+    throw err;
+  }
+  const moved = await fs.readFile(aside, "utf8").catch(() => undefined);
+  if (moved !== raw) {
+    // Not the lock judged abandoned: a live holder took it after the read.
+    await fs.link(aside, lockPath).catch(() => undefined);
+  }
+  await fs.rm(aside, { force: true });
+}
+
+/** Remove the lock only while it is still this call's own, never one taken after it was broken. */
+async function releaseLinkLock(lockPath: string, token: string): Promise<void> {
+  const raw = await fs.readFile(lockPath, "utf8").catch(() => undefined);
+  if (raw === token) await fs.rm(lockPath, { force: true }).catch(() => undefined);
+}
+
+function lockHolderOf(raw: string): LockHolder | undefined {
+  try {
+    const parsed = JSON.parse(raw) as Partial<LockHolder>;
+    return typeof parsed.pid === "number" &&
+      typeof parsed.host === "string" &&
+      typeof parsed.at === "number"
+      ? { pid: parsed.pid, host: parsed.host, at: parsed.at }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: the process exists and belongs to someone else.
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 /**

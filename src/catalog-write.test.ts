@@ -2657,6 +2657,82 @@ describe("round 1 of the convergence review", () => {
   });
 });
 
+describe("round 3 of the convergence review: the directory's lock", () => {
+  const link = {
+    method_id: "mt_one",
+    name: "Summarize PDF",
+    api_host: "api-dev.pipelex.com",
+    synced_updated_at: "2026-09-20T12:00:00Z",
+  };
+  let savedTmpdir: string | undefined;
+
+  // The lock lives under the OS temp directory, which `os.tmpdir()` reads from
+  // TMPDIR on every call: a temp directory whose lock folder is a plain file is
+  // one where the lock cannot be taken at all, without waiting out its bound.
+  beforeEach(async () => {
+    savedTmpdir = process.env.TMPDIR;
+    const blocked = path.join(root, "blocked-tmp");
+    await fs.mkdir(blocked);
+    await fs.writeFile(path.join(blocked, "pipelex-mcp-link-locks"), "not a directory", "utf8");
+    process.env.TMPDIR = blocked;
+  });
+
+  afterEach(() => {
+    if (savedTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = savedTmpdir;
+  });
+
+  it("refuses a pull, writing nothing, when the directory's lock cannot be taken", async () => {
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "work" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async getMethod() {
+            return storedMethod();
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "runtime", location: "output_dir", retryable: true });
+    expect(error.message).toContain("lock for this directory could not be taken");
+    await expect(fs.access(path.join(root, "work", "bundle.mthds"))).rejects.toThrow();
+    await expect(fs.access(path.join(root, "work", LINK_FILE_NAME))).rejects.toThrow();
+  });
+
+  it("keeps the save, and leaves its link unwritten, when the directory's lock cannot be taken", async () => {
+    await writeBundle("work", {
+      "bundle.mthds": 'domain = "demo"',
+      [LINK_FILE_NAME]: JSON.stringify(link),
+    });
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft() {
+            return storedMethod({ updated_at: "2026-09-21T09:00:00Z" });
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    expect(result.structuredContent).toMatchObject({ status: "ok", saved: "updated" });
+    expect(linkFileOf(result.structuredContent)).toMatchObject({ written: false });
+    expect(linkFileOf(result.structuredContent)?.reason).toContain(
+      "lock for this directory could not be taken",
+    );
+    expect(await fs.readFile(path.join(root, "work", LINK_FILE_NAME), "utf8")).toBe(
+      JSON.stringify(link),
+    );
+  });
+});
+
 describe("a save writes its link only beside the bundle it sends", () => {
   async function linkIn(dir: string, fields: Record<string, unknown> = {}): Promise<void> {
     await fs.mkdir(path.join(root, dir), { recursive: true });
