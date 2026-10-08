@@ -2,7 +2,7 @@
 
 This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the Pipelex plugin runs. Up to and including 0.20.0 every release also deployed the hosted console at the same version, so those entries describe both servers. After 0.20.0 the console has its own release track and changelog, kept with the Pipelex connector rather than here, and the `console-vX.Y.Z` tags in this repository's history are its releases from that time; this file and the `vX.Y.Z` tags cover the workshop alone.
 
-## [Unreleased]
+## [0.23.0] - 2026-10-08
 
 ### Added
 
