@@ -842,6 +842,58 @@ describe("saveMthdsMethod", () => {
     expect(result.structuredContent).toMatchObject({ saved: "updated" });
   });
 
+  it("keeps a name renamed elsewhere when the name passed is the link's older one", async () => {
+    await writeBundle("methods/demo", {
+      "bundle.mthds": 'domain = "demo"',
+      [LINK_FILE_NAME]: JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "2026-09-20T12:00:00Z",
+      }),
+    });
+
+    const renames: string[] = [];
+    const client: CatalogWriteClient = {
+      ...clientNotCalled,
+      async writeDraft() {
+        return storedMethod({ name: "Renamed In Webapp", updated_at: "2026-09-21T09:00:00Z" });
+      },
+      async renameMethod(_id, input) {
+        renames.push(input.name);
+        return storedMethod({ name: input.name, updated_at: "2026-09-21T09:00:00Z" });
+      },
+    };
+    const save = () =>
+      saveMthdsMethod(
+        {
+          files: [{ path: "methods/demo/bundle.mthds" }],
+          name: "Summarize PDF",
+          method_id: "mt_one",
+        },
+        contextFor(client, validationAnswering(validReport)),
+      );
+
+    // The name read back out of the link would quietly undo the webapp's rename.
+    const first = await save();
+    expect(renames).toEqual([]);
+    expect(first.structuredContent).toMatchObject({
+      status: "ok",
+      saved: "updated",
+      name: "Renamed In Webapp",
+    });
+    expect(first.summary).toContain("keeps its stored name **Renamed In Webapp**");
+    expect(first.summary).toContain("renamed elsewhere");
+    expect(first.summary).toContain("renames the method back");
+    const link = await readMethodLink(path.join(root, "methods/demo"));
+    expect(link.kind === "link" && link.link.name).toBe("Renamed In Webapp");
+
+    // The link now records the stored name, so the same name is a rename meant.
+    const second = await save();
+    expect(renames).toEqual(["Summarize PDF"]);
+    expect(second.structuredContent).toMatchObject({ saved: "renamed", name: "Summarize PDF" });
+  });
+
   it("reports a failed rename beside a saved draft", async () => {
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
 
@@ -1803,6 +1855,139 @@ describe("the save writes a link only where one belongs", () => {
       class: "input_domain",
       location: "python[0].path",
     });
+  });
+});
+
+describe("an explicit link_dir keeps the guards of the link beside the files", () => {
+  /** A link file in `dir` under the workspace, naming `mt_one` unless `fields` says otherwise. */
+  async function linkIn(dir: string, fields: Record<string, unknown> = {}): Promise<void> {
+    await fs.mkdir(path.join(root, dir), { recursive: true });
+    await fs.writeFile(
+      path.join(root, dir, LINK_FILE_NAME),
+      JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "2026-09-20T12:00:00Z",
+        ...fields,
+      }),
+      "utf8",
+    );
+  }
+
+  /** A client recording every draft write. */
+  function recordingDrafts(): { sent: MethodDraftInput[]; client: CatalogWriteClient } {
+    const sent: MethodDraftInput[] = [];
+    return {
+      sent,
+      client: {
+        ...clientNotCalled,
+        async writeDraft(_id, input) {
+          sent.push(input);
+          return storedMethod({ updated_at: "2026-09-21T09:00:00Z" });
+        },
+      },
+    };
+  }
+
+  beforeEach(async () => {
+    await writeBundle("work", { "bundle.mthds": 'domain = "demo"' });
+    await fs.mkdir(path.join(root, "elsewhere"), { recursive: true });
+  });
+
+  it("refuses a directory holding a pulled version, whatever link_dir names", async () => {
+    await linkIn("work", { synced_version: 2 });
+    const { sent, client } = recordingDrafts();
+
+    // Read only at link_dir, the empty directory offered no token and no
+    // version, and the version went out over the draft with no guard at all.
+    const result = await saveMthdsMethod(
+      { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one", link_dir: "elsewhere" },
+      contextFor(client, validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "expected_updated_at" });
+    expect(error.message).toContain("holds version 2");
+    expect(sent).toEqual([]);
+    expect(await readMethodLink(path.join(root, "elsewhere"))).toEqual({ kind: "none" });
+  });
+
+  it("refuses a directory whose last pull never finished, whatever link_dir names", async () => {
+    await linkIn("work", { partial_pull: true });
+    const { sent, client } = recordingDrafts();
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one", link_dir: "elsewhere" },
+      contextFor(client, validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "link_dir" });
+    expect(error.message).toContain("was interrupted");
+    expect(sent).toEqual([]);
+  });
+
+  it("still forks a directory linked to another method", async () => {
+    await linkIn("work", { method_id: "mt_teammate", name: "The teammate's method" });
+    const { sent, client } = recordingDrafts();
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one", link_dir: "elsewhere" },
+      contextFor(client, validationAnswering(validReport)),
+    );
+
+    expect(result.structuredContent).toMatchObject({ status: "ok", saved: "updated" });
+    // The teammate's link vouches for nothing about mt_one: no token is borrowed.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).not.toHaveProperty("expected_updated_at");
+    const forked = await readMethodLink(path.join(root, "elsewhere"));
+    expect(forked.kind === "link" && forked.link.method_id).toBe("mt_one");
+    const theirs = await readMethodLink(path.join(root, "work"));
+    expect(theirs.kind === "link" && theirs.link.method_id).toBe("mt_teammate");
+  });
+
+  it("sends the token of the link beside the files when link_dir offers none", async () => {
+    await linkIn("work", { synced_updated_at: "2026-09-19T00:00:00Z" });
+    const { sent, client } = recordingDrafts();
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one", link_dir: "elsewhere" },
+      contextFor(client, validationAnswering(validReport)),
+    );
+
+    expect(result.structuredContent).toMatchObject({ status: "ok" });
+    expect(sent.map((input) => input.expected_updated_at)).toEqual(["2026-09-19T00:00:00Z"]);
+  });
+
+  it("refuses when the two directories record different syncs of the draft", async () => {
+    await linkIn("work", { synced_updated_at: "2026-09-19T00:00:00Z" });
+    await linkIn("elsewhere", { synced_updated_at: "2026-09-20T12:00:00Z" });
+    const { sent, client } = recordingDrafts();
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one", link_dir: "elsewhere" },
+      contextFor(client, validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "link_dir" });
+    expect(error.message).toContain("different syncs");
+    expect(error.message).toContain("Nothing was written");
+    expect(sent).toEqual([]);
+
+    // An explicit token is the caller's own guard, and holds for both links.
+    const forced = await saveMthdsMethod(
+      {
+        files: [{ path: "work/bundle.mthds" }],
+        method_id: "mt_one",
+        link_dir: "elsewhere",
+        expected_updated_at: "2026-09-20T12:00:00Z",
+      },
+      contextFor(client, validationAnswering(validReport)),
+    );
+    expect(forced.structuredContent).toMatchObject({ status: "ok" });
+    expect(sent.map((input) => input.expected_updated_at)).toEqual(["2026-09-20T12:00:00Z"]);
   });
 });
 

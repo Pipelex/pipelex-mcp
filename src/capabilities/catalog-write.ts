@@ -699,6 +699,8 @@ async function saveInTurn(
   // are read and validated remotely, so a save the link already refuses spends
   // no validation and no handshake.
   let token: string | undefined;
+  // The link that names the method this update writes, for the rename below.
+  let namingLink: MethodLink | undefined;
   if (targetId === undefined) {
     // Preventing a duplicate is the link file's whole purpose, and it was
     // consulted too late to serve it: the create ran first, and only afterwards
@@ -750,6 +752,44 @@ async function saveInTurn(
       return saveError(linked.summary, [linked.error]);
     }
     token = linked.token;
+    if (claim?.kind === "link") {
+      namingLink = claim.link;
+    }
+
+    // An explicit link_dir moves where the link is WRITTEN, not where the
+    // files were read from. When the files' own directory is linked to this
+    // same method, its link describes the bytes being sent, so its guards hold
+    // too: read only at link_dir, a directory holding a pulled version, or an
+    // unfinished pull, saved with link_dir pointed at an empty directory went
+    // out with no token at all, replacing the draft without the restore guard.
+    // A source link naming ANOTHER method is left alone, since link_dir is the
+    // documented fork for exactly that directory, and so is one that cannot be
+    // read, which refuses only a save that writes its link there.
+    const source = await sourceLinkOf(context, parsed.data.link_dir, linkDir);
+    if (source !== undefined && readMethodSelector(source.link.method_id).methodId === targetId) {
+      const fromSource = draftTokenOf(source, parsed.data.expected_updated_at, targetId);
+      if (!fromSource.ok) {
+        return saveError(fromSource.summary, [fromSource.error]);
+      }
+      if (token === undefined) {
+        // link_dir offers no token, and the source link describes these bytes.
+        token = fromSource.token;
+      } else if (fromSource.token !== undefined && fromSource.token !== token) {
+        return saveError(
+          "The method was not saved: the files' directory and link_dir record different syncs.",
+          [
+            {
+              class: "input_domain",
+              location: "link_dir",
+              message: `\`${source.dir}\`, where the files are, records a sync of \`${targetId}\` at ${fromSource.token}, while link_dir \`${claim?.dir ?? parsed.data.link_dir}\` records one at ${token}: the two directories record different syncs of the draft, so this save cannot tell which one its files were read against. Nothing was written.`,
+              hint: `Pull the method into the directory the files are in, so its link records the draft as it stands, then save again. To save these files as they stand, pass expected_updated_at with the draft's current updated_at (${WORKSHOP_TOOL_NAMES.getMethod} reports it) once the user has said to.`,
+              retryable: false,
+            },
+          ],
+        );
+      }
+      namingLink ??= source.link;
+    }
   }
 
   // Resolve ONCE. The bytes that are validated are the bytes that are saved:
@@ -874,6 +914,7 @@ async function saveInTurn(
   let saved: "created" | "updated" | "renamed";
   let renameError: ToolError | undefined;
   let previousName: string | undefined;
+  let staleName: string | undefined;
   let draftMovedTo: string | undefined;
 
   if (targetId === undefined) {
@@ -934,8 +975,17 @@ async function saveInTurn(
     // here replace that draft without a conflict, and a publish under it would
     // publish content nobody here has seen. The draft write's own snapshot is
     // what this call saved, and a token that moved since is reported.
+    //
+    // A name that is the one the link recorded is not a rename asked for: it
+    // is what an agent reads back out of pipelex-method.json, and when the
+    // method was renamed elsewhere since — in the webapp, by a teammate — sending
+    // it would quietly undo that rename. The stored name is kept, and the link
+    // written below records it, so saving again with the old name is then a
+    // rename the caller means.
     const name = parsed.data.name;
-    if (name !== undefined && name !== stored.name) {
+    if (name !== undefined && name !== stored.name && name === namingLink?.name) {
+      staleName = name;
+    } else if (name !== undefined && name !== stored.name) {
       previousName = stored.name;
       try {
         const renamed = await client.renameMethod(targetId, { name });
@@ -985,6 +1035,7 @@ async function saveInTurn(
       linkedAnyway: claim?.kind === "link",
       claimUnreadable: claim?.kind === "unreadable",
       previousName,
+      staleName,
       draftMovedTo,
       callers: bareIdCallersSentence(stored, await support),
     }),
@@ -1193,6 +1244,7 @@ function saveSummary(
     linkedAnyway: boolean;
     claimUnreadable: boolean;
     previousName?: string;
+    staleName?: string;
     draftMovedTo?: string;
     callers?: string;
   },
@@ -1211,6 +1263,15 @@ function saveSummary(
   if (result.rename_error !== undefined) {
     lines.push(
       `The rename to the requested name FAILED, so the method keeps its name: ${result.rename_error.message} The draft itself was saved; save again with the same name to retry the rename alone.`,
+    );
+  }
+  if (notes.staleName !== undefined) {
+    lines.push(
+      `The method keeps its stored name **${result.name}**: the name passed, **${notes.staleName}**, is the one ${LINK_FILE_NAME} recorded before the method was renamed elsewhere, so it was not taken as a rename. ${
+        result.link_file?.written === true
+          ? `This save recorded the stored name in the link, so saving again with **${notes.staleName}** renames the method back.`
+          : `The link could not be refreshed, so a save with **${notes.staleName}** keeps the stored name again until it is.`
+      }`,
     );
   }
   if (notes.draftMovedTo !== undefined) {
@@ -2532,6 +2593,27 @@ async function linkedMethodAt(
   return read.kind === "link"
     ? { kind: "link", dir, link: read.link }
     : { kind: "unreadable", dir, reason: read.reason };
+}
+
+/**
+ * The link beside the submitted files, read only when an explicit `link_dir`
+ * names another directory: without one, that link IS the claim. `undefined`
+ * when there is no such link, or when it cannot be read — an unreadable file
+ * there is not this save's to refuse on, since the link is written elsewhere.
+ */
+async function sourceLinkOf(
+  context: CatalogWriteContext,
+  requested: string | undefined,
+  filesDir: string | undefined,
+): Promise<Extract<DirectoryClaim, { kind: "link" }> | undefined> {
+  if (requested === undefined || filesDir === undefined || context.saveRoot === undefined) {
+    return undefined;
+  }
+  if (path.resolve(context.saveRoot, requested) === path.resolve(context.saveRoot, filesDir)) {
+    return undefined;
+  }
+  const read = await linkedMethodAt(context, filesDir);
+  return read?.kind === "link" ? read : undefined;
 }
 
 /**
