@@ -547,10 +547,10 @@ async function validateRequest(
       );
     } else if (request.method_id !== undefined) {
       // What a bare id reads differs between a platform that resolves version
-      // selectors and one that does not yet, so the selector is planned against
-      // the platform's answer (`method-versions.ts`) and the result says which
-      // content was validated.
-      plan = await planById(request.method_id, context.methodVersions, client, {
+      // selectors and one that does not yet, so the platform is asked beside
+      // the request, which never waits on it (`method-versions.ts`), and the
+      // result says which content was validated.
+      plan = planById(request.method_id, context.methodVersions, client, {
         needBareReport: true,
       });
       report = await client.validate({ method_id: plan.send }, true, undefined, undefined, [
@@ -571,7 +571,7 @@ async function validateRequest(
   // contract violation, surfaced as a runtime no-verdict error.
   try {
     const result = validationResult(report);
-    return withMethodContent(result, plan, "validated");
+    return await withMethodContent(result, plan, "validated");
   } catch (err) {
     return errorResult(
       "Validation produced no verdict: the Pipelex API returned a malformed report.",

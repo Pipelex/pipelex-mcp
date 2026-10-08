@@ -510,9 +510,9 @@ export async function generateMthdsCode(
     if (request.method_id !== undefined) {
       // A bare id reads the draft on a platform that does not resolve version
       // selectors yet, and the latest published version on one that does: the
-      // selector is planned against the platform's answer, and the result says
-      // which content the code came from (`method-versions.ts`).
-      plan = await planById(request.method_id, context.methodVersions, client, {
+      // platform is asked beside the request, which never waits on it, and the
+      // result says which content the code came from (`method-versions.ts`).
+      plan = planById(request.method_id, context.methodVersions, client, {
         needBareReport: true,
       });
       sent = { ...request, method_id: plan.send };
@@ -531,7 +531,7 @@ export async function generateMthdsCode(
   // A produced-invalid verdict never touches disk: it carries
   // no artifacts at all, so there is nothing to preflight and nothing to write.
   if (!report.is_valid) {
-    return withMethodContent(codegenResult(report), plan, "generated code from");
+    return await withMethodContent(codegenResult(report), plan, "generated code from");
   }
 
   // The API responded; projecting it must not be reported as an unreachable
@@ -572,7 +572,7 @@ export async function generateMthdsCode(
   }
 
   try {
-    return withMethodContent(
+    return await withMethodContent(
       codegenResult(report, written, context.saveRoot !== undefined),
       plan,
       "generated code from",

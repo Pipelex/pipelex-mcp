@@ -17,7 +17,11 @@ import {
   runContentReport,
   versionReaderOf,
 } from "./method-versions.js";
-import type { MethodVersionsSupport, SelectorPlan } from "./method-versions.js";
+import type {
+  MethodVersionReport,
+  MethodVersionsSupport,
+  SelectorPlan,
+} from "./method-versions.js";
 import type { ToolError } from "./shared.js";
 
 const SUPPORTED = { version: "1.0.0", extensions: ["runs", "method_versions"] };
@@ -39,9 +43,9 @@ async function planned(
   value: string,
   support: MethodVersionsSupport,
   needBareReport = true,
-): Promise<{ plan: SelectorPlan; asked: number }> {
+): Promise<{ plan: SelectorPlan; asked: number; reads: MethodVersionReport | undefined }> {
   let asked = 0;
-  const plan = await planMethodSelector(
+  const plan = planMethodSelector(
     value,
     async () => {
       asked += 1;
@@ -49,7 +53,7 @@ async function planned(
     },
     { needBareReport },
   );
-  return { plan, asked };
+  return { plan, asked, reads: await plan.reads };
 }
 
 afterEach(() => {
@@ -163,12 +167,12 @@ describe("methodVersionsSupport", () => {
     let answer: unknown = UNSUPPORTED;
     const client = { version: async (): Promise<unknown> => answer };
 
-    const before = await planById("mt_a", memory, client, { needBareReport: true });
-    expect(before.reads).toBe("draft");
+    const before = planById("mt_a", memory, client, { needBareReport: true });
+    expect(await before.reads).toBe("draft");
 
     answer = SUPPORTED;
-    const after = await planById("mt_a", memory, client, { needBareReport: true });
-    expect(after.reads).toBe("latest");
+    const after = planById("mt_a", memory, client, { needBareReport: true });
+    expect(await after.reads).toBe("latest");
   });
 
   it("never caches unknown", async () => {
@@ -216,24 +220,56 @@ describe("methodVersionsSupport", () => {
 
 describe("planMethodSelector", () => {
   it("sends an opaque id untouched, without asking", async () => {
-    const { plan, asked } = await planned("not-an-id", "unsupported");
-    expect(plan).toMatchObject({ send: "not-an-id", support: "unknown" });
-    expect(plan?.reads).toBeUndefined();
+    const { plan, asked, reads } = await planned("not-an-id", "unsupported");
+    expect(plan).toMatchObject({ send: "not-an-id" });
+    expect(reads).toBeUndefined();
     expect(asked).toBe(0);
   });
 
   it("asks about a bare id only when the result must say what it read", async () => {
     expect((await planned("mt_a", "supported", false)).asked).toBe(0);
 
-    expect((await planned("mt_a", "supported")).plan).toMatchObject({
-      send: "mt_a",
+    expect(await planned("mt_a", "supported")).toMatchObject({
+      plan: { send: "mt_a" },
       reads: "latest",
     });
-    expect((await planned("mt_a", "unsupported")).plan).toMatchObject({
-      send: "mt_a",
+    expect(await planned("mt_a", "unsupported")).toMatchObject({
+      plan: { send: "mt_a" },
       reads: "draft",
     });
-    expect((await planned("mt_a", "unknown")).plan?.reads).toBeUndefined();
+    expect((await planned("mt_a", "unknown")).reads).toBeUndefined();
+  });
+
+  it("plans a bare id at once, and settles what it read beside the request", async () => {
+    // Nothing sent depends on the platform's answer, so the plan does not wait
+    // for it: awaiting it first cost every by-id call a handshake, up to its
+    // deadline on a platform that never caches its answer.
+    let answer: (support: MethodVersionsSupport) => void = () => undefined;
+    const plan = planMethodSelector(
+      "mt_a",
+      () =>
+        new Promise<MethodVersionsSupport>((resolve) => {
+          answer = resolve;
+        }),
+      { needBareReport: true },
+    );
+    expect(plan.send).toBe("mt_a");
+    let settled = false;
+    void plan.reads.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    answer("unsupported");
+    expect(await plan.reads).toBe("draft");
+  });
+
+  it("settles a bare id's answer as unknown when asking fails, never rejecting", async () => {
+    const plan = planMethodSelector("mt_a", () => Promise.reject(new Error("down")), {
+      needBareReport: true,
+    });
+    expect(await plan.reads).toBeUndefined();
   });
 
   it("sends every suffix as it was given, on every platform, without asking", async () => {
@@ -242,11 +278,13 @@ describe("planMethodSelector", () => {
     // refuses it instead, and its refusal says so.
     for (const support of ["supported", "unsupported", "unknown"] as const) {
       expect(await planned("mt_a@draft", support)).toMatchObject({
-        plan: { send: "mt_a@draft", reads: "draft" },
+        plan: { send: "mt_a@draft" },
+        reads: "draft",
         asked: 0,
       });
       expect(await planned("mt_a@3", support)).toMatchObject({
-        plan: { send: "mt_a@3", reads: 3 },
+        plan: { send: "mt_a@3" },
+        reads: 3,
         asked: 0,
       });
     }
@@ -256,8 +294,8 @@ describe("planMethodSelector", () => {
 describe("what a tooling result says it read", () => {
   it("names the content, or says it could not tell", async () => {
     const sentence = async (value: string, support: MethodVersionsSupport) => {
-      const { plan } = await planned(value, support);
-      return methodContentSentence(plan, "validated");
+      const { plan, reads } = await planned(value, support);
+      return methodContentSentence(plan, reads, "validated");
     };
 
     expect(await sentence("mt_a", "supported")).toContain(
@@ -355,7 +393,7 @@ describe("noteSelectorRefusal", () => {
   it("reads a miss by what the platform answers: plain where it resolves suffixes, explained where it does not", async () => {
     const memory = createMethodVersionsMemory();
     noteMethodVersionsSupported(memory);
-    const resolving = await planById("mt_a@3", memory, {}, { needBareReport: true });
+    const resolving = planById("mt_a@3", memory, {}, { needBareReport: true });
     // A platform that resolves suffixes misses a method that does not exist
     // the same way: the miss contradicts nothing, and the memory stays.
     expect(await noteSelectorRefusal(refusal("not_found"), atMethodId, resolving, memory)).toBe(
@@ -364,7 +402,7 @@ describe("noteSelectorRefusal", () => {
     expect(memory.cached?.support).toBe("supported");
 
     const fresh = createMethodVersionsMemory();
-    const old = await planById(
+    const old = planById(
       "mt_a@3",
       fresh,
       { version: async () => UNSUPPORTED },
@@ -374,12 +412,7 @@ describe("noteSelectorRefusal", () => {
       (await noteSelectorRefusal(refusal("not_found"), atMethodId, old, fresh)).hint,
     ).toContain("it was not found because this platform does not resolve version suffixes yet");
 
-    const silent = await planById(
-      "mt_a@3",
-      createMethodVersionsMemory(),
-      {},
-      { needBareReport: true },
-    );
+    const silent = planById("mt_a@3", createMethodVersionsMemory(), {}, { needBareReport: true });
     expect(
       (await noteSelectorRefusal(refusal("not_found"), atMethodId, silent, undefined)).hint,
     ).toContain("may not resolve version suffixes yet");

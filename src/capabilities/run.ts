@@ -1297,7 +1297,7 @@ export async function startMthdsRun(
     const client = runClient(context);
     let sent = request;
     if (request.method_id !== undefined && request.files.length === 0) {
-      plan = await planById(request.method_id, context.methodVersions, client, {
+      plan = planById(request.method_id, context.methodVersions, client, {
         needBareReport: false,
       });
       sent = { ...request, method_id: plan.send };
