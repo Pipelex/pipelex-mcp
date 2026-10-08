@@ -1,0 +1,33 @@
+SPEC.md
+  s_924dc452bfcbe0::t_2f4e793de52f7b 733,742,783,1048,1056,1097
+docs/architecture.md
+  s_924dc452bfcbe0::t_464f9d75dee38e 27
+docs/tools.md
+  s_924dc452bfcbe0::t_3acc372f7d2e56 242,248,266
+src/capabilities/prepare.ts
+  s_924dc452bfcbe0::t_89873bb9e71bdf 52,85,88,250-251,254
+src/capabilities/run.ts
+  s_924dc452bfcbe0::t_378e062c4b3784 107,361,1223-1224,1227
+src/files.ts
+  s_924dc452bfcbe0::t_e138ef26468f95 28,42,46,69,74,81,90,97
+src/tools.ts
+  s_924dc452bfcbe0::t_1e8d2197ab05b3 166-167
+src/workshop.contract.json
+  s_924dc452bfcbe0::t_faea6ac27ac2a7 1143,1203-1204,1207-1209,1306,1362
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e36e52afe0723793e795a081284ce43ea03553be",
+  "prompts": {},
+  "sessions": {
+    "s_924dc452bfcbe0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2a25d3f6-8d72-417a-9358-664bf792b380",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thomashebrard <thomas@pipelex.com>"
+    }
+  }
+}
