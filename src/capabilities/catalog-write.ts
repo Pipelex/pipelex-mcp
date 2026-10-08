@@ -66,6 +66,7 @@ import {
   containedPath,
   createContainedSubdirectory,
   errorMessage,
+  escapedDirectoryError,
   isInsideRoot,
   isMissingPathError,
   resolveSaveDir,
@@ -115,11 +116,12 @@ import {
  *    deliberate override, named in every refusal it lifts.
  *
  * The local work — a save's read of its links and files, its link write, a
- * pull's landing — takes turns across the process (`inLinkTurn`), and no turn
- * is held across a call to the platform but a create's: creates take turns
- * among themselves from claim read to link write (`inCreateTurn`), since the
- * link one writes last is what refuses a duplicate from the next. `catalog-link.ts` says what another
- * workshop process on the same directory can still do.
+ * pull's landing — takes turns across the process (`inLinkTurn`) and holds the
+ * workshop's write lock across processes (`withLinkLock`), and neither is held
+ * across a call to the platform but a create's turn: creates take turns among
+ * themselves from claim read to link write (`inCreateTurn`), since the link
+ * one writes last is what refuses a duplicate from the next. `catalog-link.ts`
+ * says what the lock covers and what it does not.
  */
 
 // ── the inline budget ───────────────────────────────────────────────
@@ -681,6 +683,28 @@ export async function saveMthdsMethod(
   const linkDir = linkDirectoryOf(parsed.data.files);
   const linkTarget = parsed.data.link_dir ?? linkDir;
 
+  // The save reads a link, and lists a bundle, in link_dir and in the files'
+  // own directory, so each must REALLY be inside the working directory before
+  // anything reads it. Contained only as strings, a link_dir symlinked to a
+  // directory outside had its file names echoed in a refusal, and its link
+  // read and trusted, with the validation and the catalog write able to run
+  // before the link write refused it. The files' own directory would be
+  // refused by the resolver, but only after its link had been read.
+  if (context.saveRoot !== undefined) {
+    const escaped: ToolError[] = [];
+    for (const [dir, location] of [
+      [parsed.data.link_dir, "link_dir"],
+      [linkDir, "files"],
+    ] as const) {
+      if (dir === undefined) continue;
+      const error = await escapedDirectoryError(context.saveRoot, dir, location);
+      if (error !== undefined) escaped.push(error);
+    }
+    if (escaped.length > 0) {
+      return saveError("The method was not saved: request input is invalid.", escaped);
+    }
+  }
+
   // A create holds a turn of its own across its whole flow — see inCreateTurn.
   const run = () =>
     saveToCatalog(context, parsed.data, { targetId, bundleDir, linkDir, linkTarget });
@@ -724,12 +748,30 @@ async function saveToCatalog(
 ): Promise<SaveMethodResult> {
   const { targetId, bundleDir, linkDir, linkTarget } = where;
 
-  // The links and the files are read in one local turn, which holds no call to
-  // the platform, and every refusal the links make is made there, before the
-  // validation and the catalog write: see readSaveSources.
-  const sources = await inLinkTurn(() =>
-    readSaveSources(context, { data, targetId, linkDir, linkTarget }),
-  );
+  // The links and the files are read in one local turn, holding the workshop's
+  // write lock and no call to the platform, and every refusal the links make
+  // is made there, before the validation and the catalog write: see
+  // readSaveSources. A lock that cannot be taken refuses the save before
+  // anything is sent, since a read it does not guard may mix two contents.
+  let sources: SaveSources;
+  try {
+    sources = await inLinkTurn(() =>
+      withLinkLock(() => readSaveSources(context, { data, targetId, linkDir, linkTarget })),
+    );
+  } catch (err) {
+    if (!(err instanceof LinkLockError)) throw err;
+    return saveError("The method was not saved: the workshop's write lock could not be taken.", [
+      {
+        class: "runtime",
+        location: "link_dir",
+        message: `${err.message}, so this save read nothing and sent nothing.`,
+        hint: err.busy
+          ? "Save again in a moment: another workshop process on this machine is saving or pulling."
+          : "Fix what the message names, then save again: no save reads its files without that lock.",
+        retryable: err.busy,
+      },
+    ]);
+  }
   if (!sources.ok) {
     return sources.result;
   }
@@ -973,9 +1015,16 @@ type SaveSources =
     };
 
 /**
- * A save's local read, made in one turn ({@link inLinkTurn}) with no call to
- * the platform in it: the link this save will write, the link beside the files
- * when that is another one, every refusal those links make, then the files.
+ * A save's local read, made in one turn ({@link inLinkTurn}) holding the
+ * workshop's write lock ({@link withLinkLock}), with no call to the platform
+ * in it: the link this save will write, the link beside the files when that is
+ * another one, every refusal those links make, then the files.
+ *
+ * The lock keeps every workshop pull out of the read, in this process and in
+ * every other: a pull landing while the save read would leave it a mix of two
+ * contents, which a caller passing `expected_updated_at` sends past the
+ * `partial_pull` refusal, and a pull into a directory nested in the bundle's
+ * changes the bundle's files without touching its link.
  *
  * The links are read BEFORE the bytes they vouch for, because the token
  * certifies the state those bytes were read against. Read after them, a save
@@ -984,11 +1033,10 @@ type SaveSources =
  * replace the newer draft without a conflict.
  *
  * They are read again AFTER the files, and the save is refused when either
- * moved. A pull marks the link before it writes a file, so a pull that landed
- * while the files were read has moved a link by now; the bytes in hand may be
- * that pull's, or a mix, and no link vouches for them. Within this process
- * the turn keeps every pull out, so this answers a pull from another workshop
- * process.
+ * moved: something wrote a link while the files were read, so the bytes in
+ * hand may be its, or a mix, and no link vouches for them. The lock keeps
+ * every workshop pull out, so this answers a writer that takes no lock: an
+ * editor, a git checkout, a workshop too old to share this one's lock.
  *
  * Every refusal is made here, before the remote validation and the catalog
  * write, because both arms are irreversible in the same way: a create that
@@ -1171,7 +1219,7 @@ async function readSaveSources(
         {
           class: "runtime",
           location: before === at ? "link_dir" : "files",
-          message: `\`${path.join(before.dir, LINK_FILE_NAME)}\` changed while this save read the files — another workshop process pulled or saved into \`${before.dir}\` meanwhile — so the bytes read may not be the ones its link vouches for. Nothing was written.`,
+          message: `\`${path.join(before.dir, LINK_FILE_NAME)}\` changed while this save read the files — something that does not take the workshop's write lock, an editor, a git checkout or an older workshop, wrote into \`${before.dir}\` meanwhile — so the bytes read may not be the ones its link vouches for. Nothing was written.`,
           hint: "Look at what the directory holds now, then save again.",
           retryable: true,
         },
@@ -1873,7 +1921,8 @@ async function writtenResult(
   // than land on a state it never looked at. The whole landing holds the
   // workshop's write lock, so another workshop process neither writes between
   // a compare and its write, nor resumes this pull while it is still writing,
-  // nor lands into a directory nested in this one at the same time.
+  // nor lands into a directory nested in this one at the same time, nor reads
+  // the directory for a save while this pull is half landed.
   let landed: PullLanding;
   try {
     landed = await inLinkTurn(() =>
@@ -2112,9 +2161,10 @@ async function landPull(landing: {
     // instead of looking like somebody else's bundle — which is what made the
     // retry this failure advertises impossible to perform. It keeps the sync
     // the directory had, since the files are not yet what this pull brings, and
-    // is rewritten without the marker once every file has landed. It is also
-    // what a save in another workshop process sees move when it reads its
-    // link again after its files.
+    // is rewritten without the marker once every file has landed. A save holds
+    // the same lock while it reads, so none reads this landing half done; one
+    // from a workshop too old to share the lock sees this link move when it
+    // reads its link again after its files.
     provisional = await replaceMethodLink(
       root,
       dir,

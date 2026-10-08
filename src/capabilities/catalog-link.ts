@@ -272,13 +272,17 @@ export function sameLinkRead(a: LinkRead, b: LinkRead): boolean {
  * pull can write into a directory nested in another's, and symlinks and case
  * make two spellings of one directory.
  *
- * Within a turn the steps are atomic for this process. Every WRITE in one —
- * the save's compare-and-swap, the pull's whole landing — also holds
- * {@link withLinkLock}, which makes it atomic for every other workshop process
- * of this user on this machine. A save's read takes no lock: a pull marks the link
- * (`partial_pull`) before it writes a file and finishes it after the last, and
- * the save reads its links again after its files and refuses when they moved,
- * so a landing that overlaps the read is caught without one.
+ * Within a turn the steps are atomic for this process. Every turn — the
+ * save's read of its links and files, the save's compare-and-swap, the pull's
+ * whole landing — also holds {@link withLinkLock}, which makes it atomic for
+ * every other workshop process of this user on this machine. The save's read
+ * needs the lock as much as a write does: without it, another workshop
+ * process's pull could land while the save read, and a pull into a nested
+ * directory changes the parent bundle's files without touching the parent's
+ * link, so no second read of that link would see it. The save still reads its
+ * links again after its files and refuses when they moved, which answers a
+ * writer that takes no lock at all: an editor, a git checkout, an older
+ * workshop.
  */
 let linkTurn: Promise<unknown> = Promise.resolve();
 
@@ -313,7 +317,8 @@ export class LinkLockError extends Error {
 
 /**
  * Run `work` holding the lock every workshop process of this user on this
- * machine takes before it writes a link file or a pull's files, anywhere.
+ * machine takes before it writes a link file or a pull's files, anywhere, and
+ * while a save reads the links and files it is about to send.
  *
  * The link's compare-and-swap is two file operations, a read and a write, and
  * only one process's turns are ordered by {@link inLinkTurn}. Between two
@@ -325,7 +330,9 @@ export class LinkLockError extends Error {
  * disk. Under contention two processes lost about half their swaps to each
  * other. So every write holds this lock, and the compare and the write, and a
  * pull's provisional link, files and final link, are one step for every
- * process that takes it.
+ * process that takes it. A save's read holds it too, so no pull lands while a
+ * save reads what it is about to send ({@link inLinkTurn} says why the second
+ * read of the links cannot stand in for it).
  *
  * **One lock for every directory**, the cross-process twin of
  * {@link inLinkTurn}'s one queue, and for the same reasons: a save's files and
@@ -338,20 +345,30 @@ export class LinkLockError extends Error {
  * never a call to the platform, so one lock costs nothing that matters.
  *
  * **The lock is an exclusive SQLite transaction** on a file in a directory of
- * this user's own under the OS temp directory, never in the user's directory,
- * which is committed. SQLite takes it with the operating system's file lock,
- * which the kernel releases the moment its holder's process ends, however it
- * ends: there is no lock file to judge abandoned, so no guess about whether a
- * holder is dead, paused or on another host, and no recovery that could take
- * a live holder's lock — the failure every lock written as a file on disk
- * carries. The directory is created private to the user and refused when
- * another user owns it, since a temp directory may be shared between users.
- * The lock binds the processes that share that directory: one user's sessions
- * on one machine, which is where two workshops write one directory.
+ * this user's own under the home directory ({@link linkLockFile}), never in the
+ * user's working directory, which is committed. SQLite takes it with the
+ * operating system's file lock, which the kernel releases the moment its
+ * holder's process ends, however it ends: there is no lock file to judge
+ * abandoned, so no guess about whether a holder is dead, paused or on another
+ * host, and no recovery that could take a live holder's lock — the failure
+ * every lock written as a file on disk carries. The lock binds the processes
+ * that compute the same file: one user's sessions on one machine, which is
+ * where two workshops write one directory.
+ *
+ * **Not under the OS temp directory**, where it first lived, for two reasons.
+ * The temp directory can differ between one user's processes, since it comes
+ * from `TMPDIR`, and two processes computing two files exclude nothing. And a
+ * temp cleaner deletes old files there — macOS's daily one removes what has
+ * gone unchanged for three days under `/var/folders`, and holding the lock
+ * changes nothing in the file — after which a process still connected to the
+ * deleted file stops excluding every process started later, since those
+ * create a new one. The home directory is stable for the user and nothing
+ * cleans it; and should the file be deleted anyway, the next acquisition sees
+ * it and reopens ({@link openLinkLock}).
  *
  * Waits up to {@link LINK_LOCK_WAIT_MS}; past that, or when the lock cannot be
  * opened at all, it throws {@link LinkLockError} and `work` never runs, so a
- * caller refuses rather than write unguarded.
+ * caller refuses rather than read or write unguarded.
  */
 export function withLinkLock<T>(
   work: () => Promise<T>,
@@ -362,17 +379,35 @@ export function withLinkLock<T>(
   return turn;
 }
 
-/** The file whose exclusive transaction is the lock, in this user's private directory under the OS temp directory. */
+/**
+ * The file whose exclusive transaction is the lock, in this user's private
+ * directory under the home directory: `~/.local/state/pipelex-mcp` on POSIX
+ * and `~/AppData/Local/pipelex-mcp` on Windows, the places a program keeps
+ * state that is not configuration.
+ *
+ * `XDG_STATE_HOME` is deliberately not read, although the POSIX location is its
+ * default: a variable that can differ between one user's processes is exactly
+ * what moved the lock off the temp directory, since two processes that compute
+ * two files exclude nothing.
+ */
 export function linkLockFile(): string {
-  const user =
-    typeof process.getuid === "function"
-      ? String(process.getuid())
-      : os.userInfo().username.replace(/[^A-Za-z0-9_-]/g, "_");
-  return path.join(os.tmpdir(), `pipelex-mcp-${user}`, "write-lock.sqlite");
+  const home = os.homedir();
+  const dir =
+    process.platform === "win32"
+      ? path.join(home, "AppData", "Local", "pipelex-mcp")
+      : path.join(home, ".local", "state", "pipelex-mcp");
+  return path.join(dir, "write-lock.sqlite");
+}
+
+/** An open connection to a lock file, and which file it opened: `dev` and `ino` as they were right after opening. */
+interface LockConnection {
+  db: DatabaseSync;
+  dev: bigint;
+  ino: bigint;
 }
 
 /** This process's connection to each lock file it has opened; kept open, since closing one releases nothing it holds. */
-const lockConnections = new Map<string, DatabaseSync>();
+const lockConnections = new Map<string, LockConnection>();
 
 /** In-process order for {@link withLinkLock}: one connection holds one transaction at a time. */
 let lockTurn: Promise<unknown> = Promise.resolve();
@@ -380,7 +415,7 @@ let lockTurn: Promise<unknown> = Promise.resolve();
 async function holdingLinkLock<T>(work: () => Promise<T>, waitMs: number): Promise<T> {
   const file = linkLockFile();
   const lock = await openLinkLock(file);
-  await beginExclusive(lock, waitMs);
+  await beginExclusive(file, lock, waitMs);
   try {
     return await work();
   } finally {
@@ -388,14 +423,37 @@ async function holdingLinkLock<T>(work: () => Promise<T>, waitMs: number): Promi
   }
 }
 
+/**
+ * This process's connection to `file`, opened on first use and kept.
+ *
+ * A kept connection is used only while it is still connected to the file at
+ * that path, which every acquisition checks first. A connection outlives the
+ * file it opened when something deletes it — a cleaner, a user tidying up —
+ * and SQLite then locks the deleted file without complaint, while every
+ * process started since creates a new file at the path and locks that one: the
+ * two exclude nothing. So a file that is gone, or that is no longer the one the
+ * connection opened (another device or inode), drops the kept connection and
+ * opens the file at the path afresh.
+ */
 async function openLinkLock(file: string): Promise<DatabaseSync> {
-  const open = lockConnections.get(file);
-  if (open !== undefined) return open;
+  const kept = lockConnections.get(file);
+  if (kept !== undefined) {
+    if (await isSameFile(file, kept)) return kept.db;
+    dropLinkLock(file, kept.db);
+  }
   try {
     await ensurePrivateDirectory(path.dirname(file));
-    const lock = new DatabaseSync(file, { timeout: 0 });
-    lockConnections.set(file, lock);
-    return lock;
+    const db = new DatabaseSync(file, { timeout: 0 });
+    try {
+      // SQLite creates the file as it opens it, so this is the file this
+      // connection holds.
+      const opened = await fs.stat(file, { bigint: true });
+      lockConnections.set(file, { db, dev: opened.dev, ino: opened.ino });
+    } catch (err) {
+      db.close();
+      throw err;
+    }
+    return db;
   } catch (err) {
     if (err instanceof LinkLockError) throw err;
     throw new LinkLockError(
@@ -405,13 +463,28 @@ async function openLinkLock(file: string): Promise<DatabaseSync> {
   }
 }
 
+/** Whether the file at `file` is still the one `connection` opened. Any failure to tell answers no, and the reopen reports it. */
+async function isSameFile(file: string, connection: LockConnection): Promise<boolean> {
+  try {
+    const current = await fs.stat(file, { bigint: true });
+    return current.dev === connection.dev && current.ino === connection.ino;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Make `dir` this user's own directory, closed to everyone else, or refuse:
- * under a temp directory other users share, a directory another user made
- * first could hold a lock file that refuses every write here, or one that
- * holds nothing at all.
+ * Make `dir` this user's own directory, closed to everyone else, or refuse.
+ *
+ * Its parents are the user's ordinary directories (`.local/state`,
+ * `AppData/Local`), made as any program makes them, so only `dir` itself is
+ * created private. Under the home directory nobody else should be able to make
+ * it, but one that `sudo` made belongs to root, and a lock file in a
+ * directory this user does not own could refuse every write here, or hold
+ * nothing at all; one left open to the group or the world is closed.
  */
 async function ensurePrivateDirectory(dir: string): Promise<void> {
+  await fs.mkdir(path.dirname(dir), { recursive: true });
   try {
     await fs.mkdir(dir, { mode: 0o700 });
   } catch (err) {
@@ -434,16 +507,28 @@ async function ensurePrivateDirectory(dir: string): Promise<void> {
   if ((entry.mode & 0o077) !== 0) await fs.chmod(dir, 0o700);
 }
 
-async function beginExclusive(lock: DatabaseSync, waitMs: number): Promise<void> {
+/**
+ * Begin the exclusive transaction, polling while another connection holds it.
+ *
+ * Any other failure means this connection cannot take the lock now, and
+ * possibly never: the file is damaged, or the connection itself is broken. The
+ * connection is dropped, so the next call opens the file afresh rather than
+ * fail on the same connection for the life of the process, and the message
+ * names the file, since removing a damaged one is the cure.
+ */
+async function beginExclusive(file: string, lock: DatabaseSync, waitMs: number): Promise<void> {
   const deadline = Date.now() + waitMs;
   for (;;) {
     try {
       lock.exec("BEGIN EXCLUSIVE");
       return;
     } catch (err) {
-      if ((err as { errcode?: unknown }).errcode !== SQLITE_BUSY) {
+      // `errcode` is SQLite's extended result code, whose low byte is the primary one.
+      const errcode = (err as { errcode?: unknown }).errcode;
+      if (typeof errcode !== "number" || (errcode & 0xff) !== SQLITE_BUSY) {
+        dropLinkLock(file, lock);
         throw new LinkLockError(
-          `the workshop's write lock could not be taken (${errorMessage(err)})`,
+          `the workshop's write lock at ${file} could not be taken (${errorMessage(err)}); remove that file if it is damaged`,
           false,
         );
       }
@@ -467,12 +552,17 @@ function releaseLinkLock(file: string, lock: DatabaseSync): void {
   try {
     lock.exec("COMMIT");
   } catch {
-    lockConnections.delete(file);
-    try {
-      lock.close();
-    } catch {
-      // Already closed; nothing is held.
-    }
+    dropLinkLock(file, lock);
+  }
+}
+
+/** Forget `lock` as this process's connection to `file`, and close it. */
+function dropLinkLock(file: string, lock: DatabaseSync): void {
+  if (lockConnections.get(file)?.db === lock) lockConnections.delete(file);
+  try {
+    lock.close();
+  } catch {
+    // Already closed; nothing is held.
   }
 }
 

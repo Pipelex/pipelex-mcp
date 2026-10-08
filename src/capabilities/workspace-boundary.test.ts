@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { isInsideRoot, resolveSaveDir } from "./workspace-boundary.js";
+import { escapedDirectoryError, isInsideRoot, resolveSaveDir } from "./workspace-boundary.js";
 
 const tempDirs: string[] = [];
 
@@ -104,5 +104,31 @@ describe("resolveSaveDir", () => {
     if (result.ok) return;
     expect(result.error.location).toBe("output_dir");
     expect(result.error.message).toContain("output_dir");
+  });
+});
+
+describe("escapedDirectoryError", () => {
+  it("passes a directory that really stays inside, existing or not, and creates nothing", async () => {
+    const root = await makeTempDir();
+    await fs.mkdir(path.join(root, "work"));
+
+    expect(await escapedDirectoryError(root, "work", "link_dir")).toBeUndefined();
+    expect(await escapedDirectoryError(root, ".", "link_dir")).toBeUndefined();
+    expect(await escapedDirectoryError(root, "work/new/deeper", "link_dir")).toBeUndefined();
+    await expect(fs.access(path.join(root, "work", "new"))).rejects.toThrow();
+  });
+
+  it("refuses a directory whose real path, or that of its deepest existing ancestor, leaves the root", async () => {
+    const root = await makeTempDir();
+    const outside = await makeTempDir("pipelex-boundary-outside-");
+    await fs.symlink(outside, path.join(root, "linked"));
+
+    for (const dir of ["linked", "linked/not-yet", "../elsewhere"]) {
+      expect(await escapedDirectoryError(root, dir, "link_dir")).toMatchObject({
+        class: "input_domain",
+        location: "link_dir",
+      });
+    }
+    await expect(fs.access(path.join(outside, "not-yet"))).rejects.toThrow();
   });
 });

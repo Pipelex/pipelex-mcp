@@ -181,13 +181,25 @@ async function versionsUnsupported(): Promise<unknown> {
 }
 
 let root: string;
+let home: string;
+let savedHome: string | undefined;
 
+// Every save and pull takes the workshop's write lock, which lives under the
+// home directory, and `os.homedir()` reads HOME on every call: each test gets
+// a home of its own, outside the working directory, so none contends with
+// another file's, writes into the real one, or leaves anything in `root`.
 beforeEach(async () => {
   root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), "catalog-write-")));
+  home = await fs.mkdtemp(path.join(tmpdir(), "catalog-write-home-"));
+  savedHome = process.env.HOME;
+  process.env.HOME = home;
 });
 
 afterEach(async () => {
+  if (savedHome === undefined) delete process.env.HOME;
+  else process.env.HOME = savedHome;
   await fs.rm(root, { recursive: true, force: true });
+  await fs.rm(home, { recursive: true, force: true });
 });
 
 function contextFor(
@@ -736,9 +748,10 @@ describe("saveMthdsMethod", () => {
   });
 
   it("refuses a save whose link moved while it read the files, sending nothing", async () => {
-    // Another workshop process pulling version 2 into the directory marks the
-    // link before its first file, so the save sees the link move by the time
-    // its own files are in hand: the bytes may be the version's, or a mix.
+    // A writer that takes no write lock — an editor, a git checkout, an older
+    // workshop pulling version 2 — moves the link while the save reads the
+    // files, so the save sees it move by the time its own files are in hand:
+    // the bytes may be that writer's, or a mix.
     await writeBundle("work", {
       "bundle.mthds": 'domain = "demo"',
       [LINK_FILE_NAME]: JSON.stringify({
@@ -2669,23 +2682,20 @@ describe("rounds 3 and 4 of the convergence review: the workshop's write lock", 
     api_host: "api-dev.pipelex.com",
     synced_updated_at: "2026-09-20T12:00:00Z",
   };
-  let savedTmpdir: string | undefined;
-
-  // The lock lives under the OS temp directory, which `os.tmpdir()` reads from
-  // TMPDIR on every call: a temp directory whose lock folder is a plain file is
-  // one where the lock cannot be taken at all, without waiting out its bound.
+  // The lock lives under the home directory, which every test here has to
+  // itself (HOME, set above): a home whose lock folder is a plain file is one
+  // where the lock cannot be taken at all, without waiting out its bound.
   beforeEach(async () => {
-    savedTmpdir = process.env.TMPDIR;
-    const blocked = path.join(root, "blocked-tmp");
-    await fs.mkdir(blocked);
-    process.env.TMPDIR = blocked;
-    await fs.writeFile(path.dirname(linkLockFile()), "not a directory", "utf8");
+    await blockLock();
   });
 
-  afterEach(() => {
-    if (savedTmpdir === undefined) delete process.env.TMPDIR;
-    else process.env.TMPDIR = savedTmpdir;
-  });
+  /** Put a plain file where the lock's directory goes, so no call can take the lock. */
+  async function blockLock(): Promise<void> {
+    const dir = path.dirname(linkLockFile());
+    await fs.rm(dir, { recursive: true, force: true });
+    await fs.mkdir(path.dirname(dir), { recursive: true });
+    await fs.writeFile(dir, "not a directory", "utf8");
+  }
 
   it("refuses a pull, writing nothing, when the workshop's write lock cannot be taken", async () => {
     const result = await getMthdsMethod(
@@ -2710,11 +2720,58 @@ describe("rounds 3 and 4 of the convergence review: the workshop's write lock", 
     await expect(fs.access(path.join(root, "work", LINK_FILE_NAME))).rejects.toThrow();
   });
 
-  it("keeps the save, and leaves its link unwritten, when the workshop's write lock cannot be taken", async () => {
+  it("refuses a save, sending nothing, when the workshop's write lock cannot be taken for its read", async () => {
+    // The save's read held no lock, so another workshop process's pull could
+    // land while it read, and a caller passing expected_updated_at sent the mix.
     await writeBundle("work", {
       "bundle.mthds": 'domain = "demo"',
       [LINK_FILE_NAME]: JSON.stringify(link),
     });
+    const calls: string[] = [];
+    const client: CatalogWriteClient = {
+      ...clientNotCalled,
+      async writeDraft() {
+        calls.push("writeDraft");
+        return storedMethod();
+      },
+      async createMethod() {
+        calls.push("createMethod");
+        return storedMethod();
+      },
+    };
+
+    for (const input of [
+      {
+        files: [{ path: "work/bundle.mthds" }],
+        method_id: "mt_one",
+        expected_updated_at: "2026-09-20T12:00:00Z",
+      },
+      { files: [{ path: "work/bundle.mthds" }], name: "Fresh", link_dir: "fresh" },
+    ]) {
+      const result = await saveMthdsMethod(
+        input,
+        contextFor(client, validationAnswering(validReport)),
+      );
+
+      const [error] = errorsOf(result.structuredContent);
+      expect(error).toMatchObject({ class: "runtime", location: "link_dir", retryable: false });
+      expect(error.message).toContain("write lock");
+      expect(error.message).toContain("sent nothing");
+    }
+    expect(calls).toEqual([]);
+    expect(await fs.readFile(path.join(root, "work", LINK_FILE_NAME), "utf8")).toBe(
+      JSON.stringify(link),
+    );
+  });
+
+  it("keeps the save, and leaves its link unwritten, when the write lock is lost after the read", async () => {
+    await writeBundle("work", {
+      "bundle.mthds": 'domain = "demo"',
+      [LINK_FILE_NAME]: JSON.stringify(link),
+    });
+    // The read takes the lock; it is blocked while the draft is written, so
+    // the link write after it cannot take it.
+    await fs.rm(path.dirname(linkLockFile()));
 
     const result = await saveMthdsMethod(
       { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one" },
@@ -2722,6 +2779,7 @@ describe("rounds 3 and 4 of the convergence review: the workshop's write lock", 
         {
           ...clientNotCalled,
           async writeDraft() {
+            await blockLock();
             return storedMethod({ updated_at: "2026-09-21T09:00:00Z" });
           },
         },
@@ -2829,6 +2887,94 @@ describe("a save writes its link only beside the bundle it sends", () => {
     expect(result.structuredContent).toMatchObject({ status: "ok" });
     expect(sent.map((input) => input.expected_updated_at)).toEqual(["2026-09-20T12:00:00Z"]);
     expect(linkFileOf(result.structuredContent)?.written).toBe(true);
+  });
+
+  /** A client that records every call instead of answering it. */
+  function recordingClient(calls: string[]): CatalogWriteClient {
+    const record = (name: string) => async (): Promise<never> => {
+      calls.push(name);
+      throw new Error(`${name} must not be called in this test`);
+    };
+    return {
+      getMethod: record("getMethod"),
+      createMethod: record("createMethod"),
+      writeDraft: record("writeDraft"),
+      renameMethod: record("renameMethod"),
+      getMethodVersion: record("getMethodVersion"),
+      publishMethod: record("publishMethod"),
+    };
+  }
+
+  /** A directory outside the working directory holding a bundle and a link naming `mt_one`. */
+  async function outsideBundle(): Promise<string> {
+    const outside = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), "catalog-outside-")));
+    await fs.writeFile(path.join(outside, "outside_secret.mthds"), 'domain = "theirs"', "utf8");
+    await fs.writeFile(
+      path.join(outside, LINK_FILE_NAME),
+      JSON.stringify({
+        method_id: "mt_one",
+        name: "Outside name",
+        api_host: "outside.example",
+        synced_updated_at: "2026-09-20T12:00:00Z",
+      }),
+      "utf8",
+    );
+    return outside;
+  }
+
+  it("refuses a link_dir symlinked out of the working directory before reading anything there", async () => {
+    // Contained only as a string, a link_dir symlinked to a directory outside
+    // had that directory listed, its file names echoed in a refusal, and its
+    // link read and trusted, before the link write refused it.
+    const outside = await outsideBundle();
+    try {
+      await writeBundle("work", { "bundle.mthds": 'domain = "demo"' });
+      await fs.symlink(outside, path.join(root, "linked"));
+      const calls: string[] = [];
+      const validated: { files?: unknown } = {};
+
+      const result = await saveMthdsMethod(
+        { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one", link_dir: "linked" },
+        contextFor(recordingClient(calls), validationAnswering(validReport, validated)),
+      );
+
+      const [error] = errorsOf(result.structuredContent);
+      expect(error).toMatchObject({ class: "input_domain", location: "link_dir" });
+      expect(error.message).toContain("resolves outside the server's working directory");
+      const reported = JSON.stringify(result);
+      expect(reported).not.toContain("outside_secret");
+      expect(reported).not.toContain("Outside name");
+      expect(calls).toEqual([]);
+      expect(validated.files).toBeUndefined();
+      expect((await fs.readdir(outside)).sort()).toEqual(["outside_secret.mthds", LINK_FILE_NAME]);
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses files whose directory is symlinked out of the working directory before reading its link", async () => {
+    // The resolver refuses such files, but only after the save had read the
+    // link beside them and could refuse in that link's words.
+    const outside = await outsideBundle();
+    try {
+      await fs.symlink(outside, path.join(root, "elsewhere"));
+      const calls: string[] = [];
+
+      const result = await saveMthdsMethod(
+        { files: [{ path: "elsewhere/outside_secret.mthds" }], method_id: "mt_other" },
+        contextFor(recordingClient(calls), validationAnswering(validReport)),
+      );
+
+      const [error] = errorsOf(result.structuredContent);
+      expect(error).toMatchObject({ class: "input_domain", location: "files" });
+      expect(error.message).toContain("resolves outside the server's working directory");
+      const reported = JSON.stringify(result);
+      expect(reported).not.toContain("Outside name");
+      expect(reported).not.toContain("outside.example");
+      expect(calls).toEqual([]);
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
   });
 });
 

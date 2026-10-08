@@ -20,18 +20,22 @@ const MODULE_PATH = fileURLToPath(new URL("./catalog-link.ts", import.meta.url))
 const REPO_ROOT = path.resolve(path.dirname(MODULE_PATH), "..", "..");
 
 let root: string;
+let savedHome: string | undefined;
 let savedTmpdir: string | undefined;
 
-// Each test keeps its lock under a temp directory of its own: `os.tmpdir()`
-// reads TMPDIR on every call, so no test contends with another file's writes.
+// Each test keeps its lock under a home directory of its own: `os.homedir()`
+// reads HOME on every call, so no test contends with another file's writes,
+// and none writes into the real home directory.
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "pipelex-mcp-link-lock-"));
+  savedHome = process.env.HOME;
   savedTmpdir = process.env.TMPDIR;
-  await fs.mkdir(path.join(root, "tmp"));
-  process.env.TMPDIR = path.join(root, "tmp");
+  process.env.HOME = path.join(root, "home");
 });
 
 afterEach(async () => {
+  if (savedHome === undefined) delete process.env.HOME;
+  else process.env.HOME = savedHome;
   if (savedTmpdir === undefined) delete process.env.TMPDIR;
   else process.env.TMPDIR = savedTmpdir;
   await fs.rm(root, { recursive: true, force: true });
@@ -116,25 +120,85 @@ describe("withLinkLock, the lock every workshop process takes to write", () => {
     expect(acquiredAt).toBeGreaterThanOrEqual(killedAt);
   });
 
+  it.skipIf(process.platform === "win32")(
+    "keeps the lock under the home directory, whatever the temp directory is",
+    async () => {
+      // Under the temp directory, two processes of one user with two TMPDIRs
+      // computed two lock files, and excluded nothing.
+      process.env.TMPDIR = path.join(root, "one-tmp");
+      const first = linkLockFile();
+      process.env.TMPDIR = path.join(root, "another-tmp");
+
+      await withLinkLock(async () => undefined);
+
+      expect(linkLockFile()).toBe(first);
+      expect(first).toBe(
+        path.join(root, "home", ".local", "state", "pipelex-mcp", "write-lock.sqlite"),
+      );
+      expect((await fs.stat(first)).isFile()).toBe(true);
+    },
+  );
+
   it.skipIf(typeof process.getuid !== "function")(
     "keeps its directory private to the user, and refuses one it cannot trust",
     async () => {
       const dir = path.dirname(linkLockFile());
+      await fs.mkdir(path.dirname(dir), { recursive: true });
       await fs.mkdir(dir, { mode: 0o755 });
       await fs.chmod(dir, 0o755);
 
       await withLinkLock(async () => undefined);
       expect((await fs.stat(dir)).mode & 0o777).toBe(0o700);
 
-      // A shared temp directory where the name is already something else.
-      process.env.TMPDIR = path.join(root, "elsewhere");
-      await fs.mkdir(process.env.TMPDIR);
+      // A home directory where the name is already something else.
+      process.env.HOME = path.join(root, "elsewhere");
+      await fs.mkdir(path.dirname(path.dirname(linkLockFile())), { recursive: true });
       await fs.symlink(dir, path.dirname(linkLockFile()));
       const refused = await withLinkLock(async () => undefined).catch((err: unknown) => err);
       expect(refused).toBeInstanceOf(LinkLockError);
       expect((refused as LinkLockError).busy).toBe(false);
     },
   );
+
+  it("reopens a lock file deleted since its last hold, so it still excludes a process started after", async () => {
+    // A temp cleaner deleted the file under a process holding a kept
+    // connection to it, which then locked the deleted file while every process
+    // started later created a new one and locked that: the two excluded nothing.
+    await withLinkLock(async () => undefined);
+    await fs.rm(linkLockFile());
+    const other = new DatabaseSync(linkLockFile(), { timeout: 0 });
+    other.exec("BEGIN EXCLUSIVE");
+    const order: string[] = [];
+    setTimeout(() => {
+      order.push("released");
+      other.exec("COMMIT");
+    }, 60);
+
+    await withLinkLock(async () => {
+      order.push("ran");
+    });
+
+    expect(order).toEqual(["released", "ran"]);
+    other.close();
+  });
+
+  it("refuses a damaged lock file by name, and takes the lock once it is removed", async () => {
+    // A connection that failed with anything but busy stayed kept for the
+    // life of the process, and the refusal did not say which file to fix.
+    const file = linkLockFile();
+    await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+    await fs.writeFile(file, "this is not a SQLite database. ".repeat(20), "utf8");
+
+    const refused = await withLinkLock(async () => undefined).catch((err: unknown) => err);
+
+    expect(refused).toBeInstanceOf(LinkLockError);
+    expect((refused as LinkLockError).busy).toBe(false);
+    expect((refused as LinkLockError).message).toContain(file);
+    expect((refused as LinkLockError).message).toContain("remove that file if it is damaged");
+
+    await fs.rm(file);
+    await expect(withLinkLock(async () => "ran")).resolves.toBe("ran");
+  });
 
   it("loses no compare-and-swap between two real workshop processes", async () => {
     // Round 3: without the lock, two processes swapping one link lost about
