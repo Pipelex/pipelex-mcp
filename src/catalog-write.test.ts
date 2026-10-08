@@ -2519,29 +2519,44 @@ describe("the pull reads the draft by default, and a version on @n", () => {
 });
 
 describe("the link file's synced_version", () => {
-  it("is read only as a version number", async () => {
+  async function linkHolding(value: unknown): Promise<string> {
+    const dir = path.join(root, `v-${JSON.stringify(value) ?? "absent"}`);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(
+      path.join(dir, LINK_FILE_NAME),
+      JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "2026-09-20T12:00:00Z",
+        ...(value === undefined ? {} : { synced_version: value }),
+      }),
+      "utf8",
+    );
+    return dir;
+  }
+
+  it("is read as a version number, and absent or null means the draft", async () => {
     for (const [value, expected] of [
       [3, 3],
-      [0, undefined],
-      [1.5, undefined],
-      ["3", undefined],
+      [null, undefined],
+      [undefined, undefined],
     ] as const) {
-      const dir = path.join(root, `v-${String(value)}`);
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(
-        path.join(dir, LINK_FILE_NAME),
-        JSON.stringify({
-          method_id: "mt_one",
-          name: "Summarize PDF",
-          api_host: "api-dev.pipelex.com",
-          synced_updated_at: "2026-09-20T12:00:00Z",
-          synced_version: value,
-        }),
-        "utf8",
-      );
-      const link = await readMethodLink(dir);
+      const link = await readMethodLink(await linkHolding(value));
       expect(link.kind).toBe("link");
       expect(link.kind === "link" ? link.link.synced_version : "unread").toBe(expected);
+    }
+  });
+
+  it("makes the link unreadable when it is present but not a version number", async () => {
+    // Dropped, it would read as a directory holding the draft, and a save from
+    // it would replace the draft with a version's files without the token a
+    // restore needs.
+    for (const value of [0, 1.5, "3", true]) {
+      expect(await readMethodLink(await linkHolding(value))).toMatchObject({
+        kind: "unreadable",
+        reason: expect.stringContaining("synced_version"),
+      });
     }
   });
 });

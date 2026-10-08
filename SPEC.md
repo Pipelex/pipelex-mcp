@@ -976,7 +976,7 @@ The save and the pull write it; no skill does, and nobody edits it by hand. It s
 }
 ```
 
-`synced_version` is present only after a pull of a published version, and records which one the directory holds; a save or a pull of the draft drops it, since the directory then holds the draft. The pull reads it to recognise local files as a stored version's rather than as unsaved work, and the save reads it to refuse replacing the draft with a version unless the caller passed `expected_updated_at`.
+`synced_version` is present only after a pull of a published version, and records which one the directory holds; a save or a pull of the draft drops it, since the directory then holds the draft. The pull reads it to recognise local files as a stored version's rather than as unsaved work, and the save reads it to refuse replacing the draft with a version unless the caller passed `expected_updated_at`. A value that is present but not a version number makes the whole link unreadable, as any other malformed field does: dropped, it would read as a directory holding the draft and switch that refusal off.
 
 **The workshop writes it because the workshop is the only party that knows which API host it talks to.** `api_host` is the host of the configured base URL, and it is what makes an unknown id on a later update diagnosable: a link made against one plane, or with another organization's key, reports the host it records rather than reading as a vanished method.
 

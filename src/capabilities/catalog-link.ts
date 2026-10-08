@@ -218,6 +218,18 @@ export async function readMethodLink(dir: string): Promise<LinkRead> {
       return { kind: "unreadable", reason: `it has no string \`${field}\`` };
     }
   }
+  // A version marker that is present but not a version number is refused with
+  // the rest of a malformed link, never dropped: dropped, it would read as a
+  // directory holding the draft, and a save from it would replace the draft
+  // with a pulled version's files without the explicit token a restore needs.
+  // Absent or null still means the directory holds the draft.
+  if (
+    row.synced_version !== undefined &&
+    row.synced_version !== null &&
+    !isVersionNumber(row.synced_version)
+  ) {
+    return { kind: "unreadable", reason: "its `synced_version` is not a version number" };
+  }
 
   return {
     kind: "link",
@@ -228,8 +240,6 @@ export async function readMethodLink(dir: string): Promise<LinkRead> {
       method_id: row.method_id as string,
       name: row.name as string,
       synced_updated_at: row.synced_updated_at as string,
-      // A value that is not a version number is read as absent, which only
-      // makes a later pull refuse more: it is then believed to hold the draft.
       ...(isVersionNumber(row.synced_version) ? { synced_version: row.synced_version } : {}),
       ...(row.partial_pull === true ? { partial_pull: true } : {}),
     },
