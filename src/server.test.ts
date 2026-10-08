@@ -98,6 +98,23 @@ describe("the workshop's tool table", () => {
     expect(Object.keys(schema.properties ?? {}).sort()).toEqual(["dir", "run_id"]);
   });
 
+  it("registers mthds_publish_method as a catalog write that takes the draft token", async () => {
+    const tools = await listTools(createLocalServer());
+    const tool = tools.find((candidate) => candidate.name === "mthds_publish_method");
+
+    // It changes what every caller of the method's bare id runs, which cannot
+    // be taken back (a version is never removed), so it is destructive; it only
+    // talks to the configured API.
+    expect(tool?.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+    });
+    const schema = tool?.inputSchema as { required?: string[]; properties?: object };
+    expect(schema.required?.sort()).toEqual(["expected_draft_updated_at", "method_id"]);
+    expect(tool?.description).toMatch(/only when the user asks/i);
+  });
+
   it("registers mthds_show_images as a read that writes nothing", async () => {
     const tools = await listTools(createLocalServer());
 

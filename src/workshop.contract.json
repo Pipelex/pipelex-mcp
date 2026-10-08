@@ -9,7 +9,7 @@
         "listChanged": true
       }
     },
-    "instructions": "This is the Pipelex plugin's local workshop for executable AI methods written in MTHDS (.mthds). The usual flow: `mthds_list_methods` to find a saved method, `mthds_validate`, `mthds_inputs_template` and fill it, `mthds_prepare_inputs`, `mthds_run`, then `mthds_run_status` and `mthds_run_results` with the run id, and `mthds_show_images` to see a picture it produced or `mthds_download_artifacts` to save its output and files. A method only turns the inputs it is given into results; fetching from mail, drives or business systems, running on a schedule and writing back are up to whatever calls it. When the Pipelex connector's `pipelex_*` tools are also present, use these `mthds_*` tools for all method work and never mix the two servers: each can be signed in to a different organization. `mthds_codegen` turns a method into typed code, `mthds_models` lists and checks model references, and `mthds_save_method` and `mthds_get_method` push a bundle to the catalog and pull one back. Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`, `mthds_run`) takes its method as files, a published address as method_ref, or a catalog id (mt_…) as method_id, the last two resolved server-side. Prefer `{ path: string }` files to inline content: a path resolves against this server's working directory, and diagnostics name it. Call `mthds_list_methods` when the user asks what saved methods exist or names one without its mt_ id; choose by name and description, then pass the id on. `mthds_run` spends inference credit. A picture from `mthds_show_images` stays in the conversation for every turn that follows, so show one when it is asked for, not by reflex. This workshop has no views, so report each result to the user yourself."
+    "instructions": "This is the Pipelex plugin's local workshop for executable AI methods written in MTHDS (.mthds). The usual flow: `mthds_list_methods` to find a saved method, `mthds_validate`, `mthds_inputs_template` and fill it, `mthds_prepare_inputs`, `mthds_run`, then `mthds_run_status` and `mthds_run_results` with the run id, and `mthds_show_images` to see a picture it produced or `mthds_download_artifacts` to save its output and files. A method only turns the inputs it is given into results; fetching from mail, drives or business systems, running on a schedule and writing back are up to whatever calls it. When the Pipelex connector's `pipelex_*` tools are also present, use these `mthds_*` tools for all method work and never mix the two, which can be signed in to different organizations. `mthds_codegen` turns a method into typed code, `mthds_models` lists and checks model references, `mthds_save_method` saves a bundle as a draft, `mthds_get_method` pulls one back, and `mthds_publish_method` publishes it, only when the user asks. Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`, `mthds_run`) takes its method as files, a published address as method_ref, or a catalog id (mt_…) as method_id; a bare id names the latest published version, mt_…@draft the draft. Prefer `{ path: string }` files to inline content; a path resolves against the working directory. Call `mthds_list_methods` when the user asks what saved methods exist or names one without its mt_ id; choose by name and description and pass its id. `mthds_run` spends inference credit. A picture from `mthds_show_images` stays in the conversation from then on, so show one when asked, never by reflex. This workshop has no views, so report each result to the user yourself."
   },
   "tools": [
     {
@@ -393,7 +393,7 @@
     },
     {
       "name": "mthds_validate",
-      "description": "Validate an MTHDS method with the Pipelex API — from submitted file contents, from a published method's address passed as method_ref, or from a registered method's catalog id (mt_…) passed as method_id. Supply exactly ONE of files / method_ref / method_id — never several. Addresses and ids are resolved server-side, so no bundle enters the conversation; a by-id call validates the method's CURRENT stored content. A valid verdict carries the main pipe's typed signature (main_pipe): its ref, each declared input with the concept it expects and how many items, and the concept it produces — type a call site from that instead of guessing the shapes of a method you cannot read. Files given as { path } also get the method's flowchart written beside them as method-graph.html, a standalone page the user can open in a browser (graph_page: false skips it); the result says where.",
+      "description": "Validate an MTHDS method with the Pipelex API — from submitted file contents, from a published method's address passed as method_ref, or from a registered method's catalog id (mt_…) passed as method_id. Supply exactly ONE of files / method_ref / method_id — never several. Addresses and ids are resolved server-side, so no bundle enters the conversation. A bare id validates the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which. A valid verdict carries the main pipe's typed signature (main_pipe): its ref, each declared input with the concept it expects and how many items, and the concept it produces — type a call site from that instead of guessing the shapes of a method you cannot read. Files given as { path } also get the method's flowchart written beside them as method-graph.html, a standalone page the user can open in a browser (graph_page: false skips it); the result says where.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -441,7 +441,7 @@
             "type": "string"
           },
           "method_id": {
-            "description": "Catalog id (mt_…) of a registered method. Validates the method's CURRENT stored content server-side — requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_ref / method_id.",
+            "description": "Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). A bare id names the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which content was read. Supply exactly ONE of files / method_ref / method_id.",
             "type": "string"
           },
           "graph_page": {
@@ -640,6 +640,23 @@
             ],
             "additionalProperties": false
           },
+          "method_version": {
+            "description": "By-id calls only: the content read — a version number, \"draft\", or \"latest\" for a bare id the platform resolved to its latest published version without saying which number. Absent when this server could not tell; the summary then says so.",
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "draft",
+                  "latest"
+                ]
+              }
+            ]
+          },
           "validation_errors": {
             "type": "array",
             "items": {}
@@ -709,7 +726,7 @@
     },
     {
       "name": "mthds_inputs_template",
-      "description": "Project a pipe's declared inputs as a fill-in template — from submitted MTHDS file contents, from a published method's address passed as method_ref, or from a registered method's catalog id (mt_…) passed as method_id. Supply exactly ONE of files / method_ref / method_id — never several. A by-id call projects from the method's CURRENT stored content.",
+      "description": "Project a pipe's declared inputs as a fill-in template — from submitted MTHDS file contents, from a published method's address passed as method_ref, or from a registered method's catalog id (mt_…) passed as method_id. Supply exactly ONE of files / method_ref / method_id — never several. A bare id projects from the method's latest published version, mt_…@draft from its draft and mt_…@<n> from version n; the result says which.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -757,7 +774,7 @@
             "type": "string"
           },
           "method_id": {
-            "description": "Catalog id (mt_…) of a registered method. Projects the template from the method's CURRENT stored content — requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_ref / method_id.",
+            "description": "Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). A bare id names the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which content was read. Supply exactly ONE of files / method_ref / method_id.",
             "type": "string"
           },
           "pipe_ref": {
@@ -817,6 +834,23 @@
           "inputs_toml": {
             "description": "The fill-in inputs template, as raw TOML text (format \"toml\").",
             "type": "string"
+          },
+          "method_version": {
+            "description": "By-id calls only: the content read — a version number, \"draft\", or \"latest\" for a bare id the platform resolved to its latest published version without saying which number. Absent when this server could not tell; the summary then says so.",
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "draft",
+                  "latest"
+                ]
+              }
+            ]
           },
           "validation_errors": {
             "type": "array",
@@ -932,7 +966,7 @@
             "type": "string"
           },
           "method_id": {
-            "description": "Catalog id (mt_…) of a registered method. Generates from the method's CURRENT stored content, resolved server-side by the hosted platform — requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_ref / method_id.",
+            "description": "Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). A bare id names the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which content was read. Supply exactly ONE of files / method_ref / method_id.",
             "type": "string"
           },
           "target": {
@@ -1074,6 +1108,23 @@
             "type": "array",
             "items": {}
           },
+          "method_version": {
+            "description": "By-id calls only: the content read — a version number, \"draft\", or \"latest\" for a bare id the platform resolved to its latest published version without saying which number. Absent when this server could not tell; the summary then says so.",
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "draft",
+                  "latest"
+                ]
+              }
+            ]
+          },
           "validation_errors": {
             "type": "array",
             "items": {}
@@ -1188,7 +1239,7 @@
             "type": "string"
           },
           "method_id": {
-            "description": "Catalog id (mt_…) of a registered method — the signature source. Uses the method's CURRENT stored content and requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_ref / method_id.",
+            "description": "Catalog id (mt_…) of a registered method — the signature source, resolved server-side and requiring an API key (the catalog is org-scoped). A bare id names the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which content was read. Supply exactly ONE of files / method_ref / method_id.",
             "type": "string"
           },
           "pipe_ref": {
@@ -1240,6 +1291,23 @@
             "items": {
               "type": "string"
             }
+          },
+          "method_version": {
+            "description": "By-id calls only: the content read — a version number, \"draft\", or \"latest\" for a bare id the platform resolved to its latest published version without saying which number. Absent when this server could not tell; the summary then says so.",
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "draft",
+                  "latest"
+                ]
+              }
+            ]
           },
           "errors": {
             "type": "array",
@@ -1303,7 +1371,7 @@
     },
     {
       "name": "mthds_run",
-      "description": "Start a durable run of a MTHDS method — from submitted file contents, from a published method's address passed as method_ref (resolved server-side at the tag, with the fetched commit returned as provenance), or from a registered method's catalog id (mt_…) passed as method_id. method_ref is a complete run source and pairs with NOTHING (not files, not method_id); files + method_id together is legal — the files run and method_id is recorded as run-history linkage. A by-id run executes the method's CURRENT stored content (methods are not versioned — it does not pin what you previously validated). Executes the method on the hosted Pipelex API and spends inference credit. When running from files, validate the bundle with mthds_validate and fill the inputs template from mthds_inputs_template first — validation gives a structured, repairable verdict, where a start-time rejection only reports the failure. Returns the durable run id immediately (never blocks); follow up with mthds_run_status and mthds_run_results.",
+      "description": "Start a durable run of a MTHDS method — from submitted file contents, from a published method's address passed as method_ref (resolved server-side at the tag, with the fetched commit returned as provenance), or from a registered method's catalog id (mt_…) passed as method_id. method_ref is a complete run source and pairs with NOTHING (not files, not method_id); files + method_id together is legal — the files run and method_id is recorded as run-history linkage. A bare id runs the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n, and the result says which ran: to run what you just saved, pass mt_…@draft. Executes the method on the hosted Pipelex API and spends inference credit. When running from files, validate the bundle with mthds_validate and fill the inputs template from mthds_inputs_template first — validation gives a structured, repairable verdict, where a start-time rejection only reports the failure. Returns the durable run id immediately (never blocks); follow up with mthds_run_status and mthds_run_results.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1351,7 +1419,7 @@
             "type": "string"
           },
           "method_id": {
-            "description": "Catalog id (mt_…) of a registered method. Runs the method's CURRENT stored content — requires an API key (the catalog is org-scoped). With files also present, the files run and method_id is recorded as run-history linkage. Provide files, method_ref, or method_id (files + method_id together is also legal).",
+            "description": "Catalog id (mt_…) of a registered method, resolved server-side and requiring an API key (the catalog is org-scoped). A bare id runs the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which ran. With files also present, the files run and method_id, which must then be bare, only files the run under its method. Provide files, method_ref, or method_id (files + method_id together is also legal).",
             "type": "string"
           },
           "pipe_code": {
@@ -1426,6 +1494,20 @@
               "commit_sha"
             ],
             "additionalProperties": false
+          },
+          "method_version": {
+            "description": "By-id runs only: what the run executes — the version number, or \"draft\". A bare id runs the latest published version on a platform that resolves versions, and the draft on one that does not yet.",
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "string",
+                "const": "draft"
+              }
+            ]
           },
           "available_view_specs": {
             "type": "array",
@@ -1562,6 +1644,20 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "method_version": {
+            "description": "Runs of a saved method by its id: the version that ran, or \"draft\". Absent for a run of files or of an address, and on a platform that does not record it.",
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "string",
+                "const": "draft"
+              }
             ]
           },
           "failure": {
@@ -2544,7 +2640,7 @@
     },
     {
       "name": "mthds_save_method",
-      "description": "Save an MTHDS bundle from disk to the organization's method catalog — one call validates the files and saves those same bytes. files is the bundle's .mthds files with the ROOT FILE FIRST (the one carrying the bundle's `domain`): the platform derives the method's listed description from the first file, and this tool neither reorders them nor guesses which is the root. method_id is the discriminator: absent CREATES a new method, present UPDATES that one. There is no create/update flag. Read it from pipelex-method.json in the bundle's directory when that file is there — it is what makes a second save an update instead of a duplicate. name is required either way, because the save rewrites the whole catalog row; on an update a name different from the stored one IS the rename. python replaces the bundle's custom-PipeFunc .py files as a SET — omit it to preserve what is stored, send [] to clear it. It is never merged. Pass expected_updated_at (from pipelex-method.json's synced_updated_at) to refuse the save if somebody else has changed the method since this directory synced; without it you are knowingly overwriting. An invalid bundle is a verdict, not an error: nothing is saved and the validation errors come back to fix. A valid bundle with pending signatures IS saved.",
+      "description": "Save an MTHDS bundle from disk as a saved method's DRAFT in the organization's catalog — one call validates the files and saves those same bytes, valid or not. files is the bundle's .mthds files with the ROOT FILE FIRST (the one carrying the bundle's `domain`): the platform derives the method's listed description from the first file, and this tool neither reorders them nor guesses which is the root. method_id is the discriminator: absent CREATES a new method, present writes THAT method's draft. There is no create/update flag. Read it from pipelex-method.json in the bundle's directory when that file is there — it is what makes a second save an update instead of a duplicate. name is required on a create; on an update omit it to keep the name, and a different one renames the method. python replaces the bundle's custom-PipeFunc .py files as a SET — omit it to preserve what is stored, send [] to clear it. It is never merged. From a linked directory the save sends pipelex-method.json's synced_updated_at as its token, so the platform refuses it if the draft changed since this directory synced; pass expected_updated_at with the draft's current updated_at only to replace it knowingly, after asking the user. A save never publishes; the validation verdict comes back beside it, and an invalid draft is saved all the same.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2588,12 +2684,12 @@
             "description": "The bundle's .mthds files, ROOT FILE FIRST — the one carrying the bundle's `domain`. The platform derives the method's listed description from the first file, so the order is load-bearing and this tool does not reorder or guess."
           },
           "name": {
+            "description": "The catalog name. Required on a create. On an update, omit it to keep the method's name; a name different from the stored one renames the method, which changes the name alone.",
             "type": "string",
-            "minLength": 1,
-            "description": "The catalog name. Required on a create AND on an update, because the platform's write rewrites the whole row; on an update a name different from the stored one IS the rename gesture."
+            "minLength": 1
           },
           "method_id": {
-            "description": "Absent creates a new method; present updates THAT method. There is no create/update flag — the difference is the presence of this one argument.",
+            "description": "Absent creates a new method; present writes THAT method's draft. The bare id (mt_…); mt_…@draft is the same thing, and a version (mt_…@<n>) is refused, since a published version never changes.",
             "type": "string",
             "minLength": 1
           },
@@ -2637,7 +2733,7 @@
             "description": "The bundle's custom-PipeFunc .py files, REPLACED as a set. Omit to preserve whatever Python is stored; send [] to clear it."
           },
           "expected_updated_at": {
-            "description": "The stored updated_at this save believes it is overwriting. Given, the tool reads the method first and refuses the save when it has moved, writing nothing. The check is best-effort, not atomic: the platform offers no compare-and-swap, so a save landing between that read and the write is still overwritten. Ignored on a create.",
+            "description": "The draft token this save believes it is replacing; the platform refuses the save when the draft has moved since, atomically, and nothing is written. Omitted, the linked directory's pipelex-method.json synced_updated_at is used, and only a save from an unlinked directory replaces whatever the draft holds. Pass the draft's current updated_at only to replace a draft that moved, after the user said to. Ignored on a create.",
             "type": "string",
             "minLength": 1
           },
@@ -2648,8 +2744,7 @@
           }
         },
         "required": [
-          "files",
-          "name"
+          "files"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
@@ -2690,7 +2785,30 @@
             ]
           },
           "updated_at": {
+            "description": "The draft's new token — what pipelex-method.json now records, and what the next save sends as expected_updated_at and a publish as expected_draft_updated_at.",
             "type": "string"
+          },
+          "latest_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The number of the method's latest published version; null when it was never published."
+          },
+          "publish_state": {
+            "type": "string",
+            "enum": [
+              "never_published",
+              "draft_unchanged",
+              "draft_ahead"
+            ],
+            "description": "never_published: the method has no published version. draft_unchanged: the draft is identical to the latest published version. draft_ahead: the draft differs from it, so a publish would add a version."
           },
           "api_host": {
             "type": "string"
@@ -2711,6 +2829,46 @@
             "required": [
               "path",
               "written"
+            ],
+            "additionalProperties": false
+          },
+          "rename_error": {
+            "description": "Present when the draft was saved but the requested rename failed: the name is unchanged.",
+            "type": "object",
+            "properties": {
+              "class": {
+                "type": "string",
+                "enum": [
+                  "input_domain",
+                  "config",
+                  "runtime"
+                ]
+              },
+              "kind": {
+                "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call.",
+                "type": "string",
+                "enum": [
+                  "paywall"
+                ]
+              },
+              "location": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "hint": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean",
+                "description": "True when retrying the same call may succeed; false for permanent conditions."
+              }
+            },
+            "required": [
+              "class",
+              "message",
+              "retryable"
             ],
             "additionalProperties": false
           },
@@ -2779,14 +2937,14 @@
     },
     {
       "name": "mthds_get_method",
-      "description": "Bring a saved method's source files back from the organization's catalog. Pass output_dir (a directory of its own, relative to the working directory) to write the .mthds and .py files to disk with pipelex-method.json beside them — no source passes through the conversation, and the directory is then linked, so a later mthds_save_method from it updates this same method. Without output_dir the sources come back inline. Use that arm only to READ a method you cannot see on disk; to work on one, write it out. It refuses rather than overwrite: a directory holding .mthds files that is not linked to this method is somebody else's bundle, and a linked directory whose files differ is only overwritten after you have asked the user and passed overwrite: true. Every refusal writes nothing at all. A method that exists but has no MTHDS source yet is reported as such — a different answer from an unknown id.",
+      "description": "Bring a saved method's source files back from the organization's catalog: its draft (what the last save holds) for a bare mt_… id, or published version n for mt_…@<n>. Pass output_dir (a directory of its own, relative to the working directory) to write the .mthds and .py files to disk with pipelex-method.json beside them — no source passes through the conversation, and the directory is then linked, so a later mthds_save_method from it writes this same method's draft. Without output_dir the sources come back inline. Use that arm only to READ a method you cannot see on disk; to work on one, write it out. It refuses rather than overwrite: a directory holding .mthds files that is not linked to this method is somebody else's bundle, and a linked directory whose files differ is only overwritten after you have asked the user and passed overwrite: true. Every refusal writes nothing at all. Pulling a version into the method's linked directory, then saving from there, is how a version is restored as the draft. A method that exists but has no MTHDS source yet is reported as such — a different answer from an unknown id.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "method_id": {
             "type": "string",
             "minLength": 1,
-            "description": "The registered method's catalog id (mt_…)."
+            "description": "The registered method's catalog id. A bare mt_… (or mt_…@draft) reads its draft, what the last save holds; mt_…@<n> reads published version n."
           },
           "output_dir": {
             "description": "Write the method's sources here, relative to the working directory, with the link file beside them — no source passes through the conversation. Omitted, the sources come back inline.",
@@ -2819,8 +2977,45 @@
           "name": {
             "type": "string"
           },
+          "version": {
+            "description": "Which content was read: \"draft\", or the published version's number.",
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "string",
+                "const": "draft"
+              }
+            ]
+          },
           "updated_at": {
+            "description": "The draft's token as of this read, whichever content was read — what pipelex-method.json records and what a later save or publish sends.",
             "type": "string"
+          },
+          "latest_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The number of the method's latest published version; null when it was never published."
+          },
+          "publish_state": {
+            "type": "string",
+            "enum": [
+              "never_published",
+              "draft_unchanged",
+              "draft_ahead"
+            ],
+            "description": "never_published: the method has no published version. draft_unchanged: the draft is identical to the latest published version. draft_ahead: the draft differs from it, so a publish would add a version."
           },
           "api_host": {
             "type": "string"
@@ -2964,6 +3159,184 @@
       },
       "annotations": {
         "title": "Fetch a saved MTHDS method",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "mthds_publish_method",
+      "description": "Publish a saved method's draft as its next immutable version. Callers of the method's bare id (mt_…) run its latest published version, so this is the deployment gesture; mt_…@<n> pins one version. Call it ONLY when the user asks for a publish. Saving a draft with mthds_save_method is never a reason to publish. Pass expected_draft_updated_at, the draft token you last saw (the updated_at of your last save or pull of this method, or pipelex-method.json's synced_updated_at): a draft that changed since is refused, so you never publish one you have not seen. The answer is a verdict on outcome: published with the new version number, unchanged when the draft already equals the latest version, or refused with the validation errors when the draft does not validate or does not run yet.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "method_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The method to publish, by its catalog id (mt_…); mt_…@draft is the same thing. A publish always publishes the draft, so a version suffix (mt_…@<n>) is refused."
+          },
+          "expected_draft_updated_at": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The draft token you last saw: the updated_at your last mthds_save_method or mthds_get_method of this method reported, or pipelex-method.json's synced_updated_at. A draft that moved since is refused and nothing is published."
+          }
+        },
+        "required": [
+          "method_id",
+          "expected_draft_updated_at"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "error"
+            ]
+          },
+          "outcome": {
+            "description": "published: the draft became a new version. unchanged: the draft equals the latest version, so nothing was added. refused: the draft does not validate, or does not run yet, so nothing was published.",
+            "type": "string",
+            "enum": [
+              "published",
+              "unchanged",
+              "refused"
+            ]
+          },
+          "method_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "description": "published: the new version's number. unchanged: the latest version's, which the draft equals.",
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "published_at": {
+            "type": "string"
+          },
+          "crate_fingerprint": {
+            "description": "The version's crate fingerprint, what generated client code is checked against; null when the runner could not compute one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "refused only: the draft does not validate, or validates with pending signatures and does not run yet.",
+            "type": "string",
+            "enum": [
+              "invalid",
+              "not_runnable"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "is_valid": {
+            "type": "boolean"
+          },
+          "is_runnable": {
+            "type": "boolean"
+          },
+          "pending_signatures": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "validation_errors": {
+            "type": "array",
+            "items": {}
+          },
+          "updated_at": {
+            "description": "The draft's token, which a publish never moves.",
+            "type": "string"
+          },
+          "latest_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "publish_state": {
+            "type": "string",
+            "enum": [
+              "never_published",
+              "draft_unchanged",
+              "draft_ahead"
+            ],
+            "description": "never_published: the method has no published version. draft_unchanged: the draft is identical to the latest published version. draft_ahead: the draft differs from it, so a publish would add a version."
+          },
+          "api_host": {
+            "type": "string"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "class": {
+                  "type": "string",
+                  "enum": [
+                    "input_domain",
+                    "config",
+                    "runtime"
+                  ]
+                },
+                "kind": {
+                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call.",
+                  "type": "string",
+                  "enum": [
+                    "paywall"
+                  ]
+                },
+                "location": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "hint": {
+                  "type": "string"
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "description": "True when retrying the same call may succeed; false for permanent conditions."
+                }
+              },
+              "required": [
+                "class",
+                "message",
+                "retryable"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "Publish a saved MTHDS method",
         "readOnlyHint": false,
         "destructiveHint": true,
         "openWorldHint": false
