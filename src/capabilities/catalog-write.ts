@@ -1460,7 +1460,7 @@ function saveSummary(
     result.link_file.written
       ? `Linked by \`${result.link_file.path}\` — commit it, so a teammate saves this same method instead of creating a second one.`
       : notes.linkChanged
-        ? `\`${result.link_file.path}\` was not refreshed: ${result.link_file.reason}. It describes what that call left in the directory, not the files this save sent, so look at what the directory holds before saving from it again — a save from it is held to that link.`
+        ? `\`${result.link_file.path}\` was not refreshed: ${result.link_file.reason}. It no longer holds what this save read, so it does not describe the files this save sent: look at what the directory holds before saving from it again — a save from it is held to that link.`
         : notes.linkedAnyway
           ? `The directory IS linked to this method, but \`${result.link_file.path}\` could not be refreshed (${result.link_file.reason}), so it still records an out-of-date synced_updated_at, and the next save from here will be refused as stale. Fix that and pull this method into the directory, which refreshes the link alone while the files match.`
           : notes.claimUnreadable
@@ -2006,13 +2006,13 @@ async function landPull(landing: {
     apiHost,
   } = landing;
   const linkFields = { apiHost, methodId: stored.method_id, name: stored.name };
-  const moved = (linkPath: string): PullLanding => ({
+  const moved = (report: LinkFileReport): PullLanding => ({
     ok: false,
     result: getError("The method was not written: its directory changed while this pull ran.", [
       {
         class: "runtime",
         location: "output_dir",
-        message: `\`${linkPath}\` was rewritten by another save or pull after this pull read it, so what this pull planned to write is about a directory that is gone. Nothing was written.`,
+        message: `\`${report.path}\` changed after this pull read it — ${report.reason ?? "another save or pull rewrote it"} — so what this pull planned to write is about a directory that is gone. Nothing was written.`,
         hint: "Pull again: the next pull plans against the directory as it stands now.",
         retryable: true,
       },
@@ -2094,7 +2094,7 @@ async function landPull(landing: {
       }),
     );
     if (provisional.changed) {
-      return moved(provisional.report.path);
+      return moved(provisional.report);
     }
     // A version's files land only under a link that says so. Without the
     // marker, the link left in place records the draft's current token and no
@@ -2176,7 +2176,7 @@ async function landPull(landing: {
   // A refresh alone writes no file, so a link that moved under it leaves
   // nothing half done: the pull is refused as one that never ran.
   if (final.changed && plan.kind === "link-only") {
-    return moved(final.report.path);
+    return moved(final.report);
   }
   return { ok: true, ...(provisional === undefined ? {} : { provisional }), final };
 }

@@ -322,7 +322,7 @@ describe("runContentReport", () => {
   it("reports the draft, and says why, when the acknowledgement names no version", async () => {
     const { plan } = await planned("mt_a", "unknown", false);
     const report = runContentReport(plan as SelectorPlan, undefined);
-    expect(report).toMatchObject({ ran: "draft", proved: false });
+    expect(report).toMatchObject({ ran: "draft", proved: false, disproved: true });
     expect(report.sentence).toContain("names no version");
   });
 
@@ -331,9 +331,11 @@ describe("runContentReport", () => {
     // exists, so an accepted one ran what it named.
     const draft = runContentReport((await planned("mt_a@draft", "unknown")).plan, undefined);
     expect(draft).toMatchObject({ ran: "draft", proved: false });
+    expect(draft.disproved).toBeUndefined();
     expect(draft.sentence).toBe("It runs the draft of `mt_a`.");
     const third = runContentReport((await planned("mt_a@3", "unknown")).plan, undefined);
     expect(third).toMatchObject({ ran: 3, proved: false });
+    expect(third.disproved).toBeUndefined();
   });
 
   it("ignores an acknowledgement version it cannot read", async () => {

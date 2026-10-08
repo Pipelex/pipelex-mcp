@@ -814,6 +814,38 @@ describe("saveMthdsMethod", () => {
     expect(await fs.readFile(path.join(root, "work", LINK_FILE_NAME), "utf8")).toBe(theirs);
   });
 
+  it("reports a link that became unreadable while the save waited as changed", async () => {
+    // Round 2: a link turned into a merge conflict mid-save was reported as one
+    // that was always unreadable, not as a change this save did not make.
+    const { client } = platformDraft(storedMethod().mthds);
+    await writeBundle("work", {
+      "bundle.mthds": 'domain = "demo"',
+      [LINK_FILE_NAME]: JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: "T0",
+      }),
+    });
+    const { validation, counts, release } = gatedValidation();
+    const saving = saveMthdsMethod(
+      { files: [{ path: "work/bundle.mthds" }], method_id: "mt_one" },
+      contextFor(client, validation),
+    );
+    await vi.waitFor(() => expect(counts.validations).toBe(1));
+    const conflicted = "<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> theirs\n";
+    await fs.writeFile(path.join(root, "work", LINK_FILE_NAME), conflicted, "utf8");
+    release();
+
+    const saved = await saving;
+    expect(saved.structuredContent).toMatchObject({ status: "ok" });
+    expect(linkFileOf(saved.structuredContent)?.reason).toContain(
+      "it became unreadable while this call ran",
+    );
+    expect(saved.summary).toContain("It no longer holds what this save read");
+    expect(await fs.readFile(path.join(root, "work", LINK_FILE_NAME), "utf8")).toBe(conflicted);
+  });
+
   it("reads mt_…@draft as the bare id, and refuses a version", async () => {
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
 
@@ -2449,7 +2481,9 @@ describe("a pull lands only on the link it planned against", () => {
 
     const [error] = errorsOf(result.structuredContent);
     expect(error).toMatchObject({ class: "runtime", location: "output_dir", retryable: true });
-    expect(error.message).toContain("rewritten by another save or pull after this pull read it");
+    expect(error.message).toContain(
+      "changed after this pull read it — another save or pull rewrote it",
+    );
     expect(await fs.readFile(path.join(root, "work", "bundle.mthds"), "utf8")).toBe(
       'domain = "version_two"',
     );
@@ -2485,15 +2519,22 @@ describe("round 1 of the convergence review", () => {
         contextFor(client, validationAnswering(validReport)),
       );
 
-    const [first, second] = await Promise.all([save(), save()]);
+    // Each save reads its arguments' paths before it queues, so either can
+    // take the turn first: one creates, the other is refused, in either order.
+    const results = await Promise.all([save(), save()]);
+    const isCreated = (result: (typeof results)[number]) =>
+      (result.structuredContent as { status: string }).status === "ok";
+    const winner = results.find(isCreated);
+    const loser = results.find((result) => !isCreated(result));
 
     expect(created).toBe(1);
-    expect(first.structuredContent).toMatchObject({ status: "ok", saved: "created" });
-    expect(errorsOf(second.structuredContent)[0]).toMatchObject({
+    expect(winner?.structuredContent).toMatchObject({ status: "ok", saved: "created" });
+    if (loser === undefined) throw new Error("expected one of the two creates to be refused");
+    expect(errorsOf(loser.structuredContent)[0]).toMatchObject({
       class: "input_domain",
       location: "method_id",
     });
-    expect(errorsOf(second.structuredContent)[0]?.message).toContain("mt_new1");
+    expect(errorsOf(loser.structuredContent)[0]?.message).toContain("mt_new1");
   });
 
   it("refuses a pull whose file was edited while it read a version, keeping the edit", async () => {
@@ -2555,9 +2596,37 @@ describe("round 1 of the convergence review", () => {
     );
 
     expect(errorsOf(result.structuredContent)[0]?.message).toContain(
-      "rewritten by another save or pull after this pull read it",
+      "changed after this pull read it — another save or pull rewrote it",
     );
     expect(await fs.readFile(path.join(root, "work", LINK_FILE_NAME), "utf8")).toBe(refreshed);
+    await expect(fs.access(path.join(root, "work", "bundle.mthds"))).rejects.toThrow();
+  });
+
+  it("refuses a pull whose link became unreadable while the method was read", async () => {
+    // Round 2: a link turned into a merge conflict after the pull read it was
+    // taken for a failed link write, not a change, and the pull wrote its files
+    // under a link it no longer knew anything about.
+    await writeBundle("work", { [LINK_FILE_NAME]: JSON.stringify(link) });
+    const conflicted = `<<<<<<< HEAD\n${JSON.stringify(link)}\n=======\n{}\n>>>>>>> theirs\n`;
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "work", overwrite: true },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async getMethod() {
+            await fs.writeFile(path.join(root, "work", LINK_FILE_NAME), conflicted, "utf8");
+            return storedMethod();
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "runtime", location: "output_dir", retryable: true });
+    expect(error.message).toContain("changed after this pull read it — it became unreadable");
+    expect(await fs.readFile(path.join(root, "work", LINK_FILE_NAME), "utf8")).toBe(conflicted);
     await expect(fs.access(path.join(root, "work", "bundle.mthds"))).rejects.toThrow();
   });
 

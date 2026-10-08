@@ -25,6 +25,7 @@ import { z } from "zod";
 
 import {
   RUN_METHOD_ID_SELECTOR_SENTENCE,
+  forgetMethodVersionsSupported,
   linkageSuffixError,
   noteMethodVersionsSupported,
   planById,
@@ -1306,8 +1307,11 @@ export async function startMthdsRun(
     if (plan === undefined) return startResult(ack);
     const content = runContentReport(plan, ack.method_version);
     // An acknowledgement naming the version that runs is the platform's own
-    // word that it resolves selectors, worth more than any cached answer.
+    // word that it resolves selectors, worth more than any cached answer; one
+    // naming none for a bare id is its word that it does not, so a cached
+    // `supported` is dropped before another tool reads a bare id as `latest`.
     if (content.proved) noteMethodVersionsSupported(context.methodVersions);
+    else if (content.disproved) forgetMethodVersionsSupported(context.methodVersions);
     return startResult(ack, content);
   } catch (err) {
     const classified = classifyStartError(err, { ...classifyOptions, auth: context.authError });

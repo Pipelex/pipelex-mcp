@@ -172,7 +172,8 @@ export interface LinkReplacement {
   /**
    * The write was refused because the file no longer held what the caller
    * read: another save or pull wrote it meanwhile, so it describes what that
-   * call put in the directory, and it was left as it is.
+   * call put in the directory, or it was removed or became unreadable. It was
+   * left as it is.
    */
   changed: boolean;
   /** What the file holds after a write this call made; absent when it made none. */
@@ -193,7 +194,10 @@ export interface LinkReplacement {
  * caller reports it.
  *
  * A link that cannot be read is never written over, whatever was expected:
- * something claims the directory, and following it would be guesswork.
+ * something claims the directory, and following it would be guesswork. One
+ * that BECAME unreadable after the caller read it is a change like any other,
+ * reported as such — a merge conflict landing in the file mid-call is the
+ * usual cause — so a caller that refuses on a change refuses on it too.
  *
  * Call it inside {@link inLinkTurn}, which makes the compare and the write one
  * step for every call in this process.
@@ -206,16 +210,6 @@ export async function replaceMethodLink(
 ): Promise<LinkReplacement> {
   const relative = path.relative(root, path.join(dir, LINK_FILE_NAME));
   const current = await readMethodLink(dir);
-  if (current.kind === "unreadable") {
-    return {
-      report: {
-        path: relative,
-        written: false,
-        reason: `it is there but cannot be read (${current.reason}), and overwriting it would destroy whatever it holds`,
-      },
-      changed: false,
-    };
-  }
   if (!sameLinkRead(expected, current)) {
     return {
       report: {
@@ -224,9 +218,21 @@ export async function replaceMethodLink(
         reason:
           current.kind === "none"
             ? "it was removed while this call ran, so it was not recreated"
-            : "another save or pull rewrote it while this call ran, so it was left as that one wrote it",
+            : current.kind === "unreadable"
+              ? `it became unreadable while this call ran (${current.reason}), and overwriting it would destroy whatever it holds`
+              : "another save or pull rewrote it while this call ran, so it was left as that one wrote it",
       },
       changed: true,
+    };
+  }
+  if (current.kind === "unreadable") {
+    return {
+      report: {
+        path: relative,
+        written: false,
+        reason: `it is there but cannot be read (${current.reason}), and overwriting it would destroy whatever it holds`,
+      },
+      changed: false,
     };
   }
   const report = await writeMethodLink(root, dir, link);

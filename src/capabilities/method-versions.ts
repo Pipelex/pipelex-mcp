@@ -574,6 +574,12 @@ export interface RunContentReport {
   sentence?: string;
   /** The acknowledgement carried `method_version`, which proves the platform resolves selectors. */
   proved: boolean;
+  /**
+   * A run by bare id was acknowledged with no `method_version`, which only a
+   * platform that does not resolve selectors sends: it contradicts a cached
+   * `supported`, which the memory then forgets.
+   */
+  disproved?: true;
 }
 
 /**
@@ -609,12 +615,13 @@ export function runContentReport(plan: SelectorPlan, ackVersion: unknown): RunCo
       sentence: `It runs ${methodContentPhrase(id, plan.selector.version)}.`,
     };
   }
-  return {
-    ran: "draft",
-    proved,
-    sentence:
-      plan.selector.form === "bare"
-        ? `It runs the draft of \`${id}\`: the acknowledgement names no version, which is how a platform that does not resolve versions yet answers, and there a bare id runs the draft. Once it does, a bare id runs the latest published version, and \`${id}@draft\` the draft.`
-        : `It runs the draft of \`${id}\`.`,
-  };
+  if (plan.selector.form === "bare") {
+    return {
+      ran: "draft",
+      proved,
+      disproved: true,
+      sentence: `It runs the draft of \`${id}\`: the acknowledgement names no version, which is how a platform that does not resolve versions yet answers, and there a bare id runs the draft. Once it does, a bare id runs the latest published version, and \`${id}@draft\` the draft.`,
+    };
+  }
+  return { ran: "draft", proved, sentence: `It runs the draft of \`${id}\`.` };
 }
