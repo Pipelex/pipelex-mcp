@@ -198,7 +198,7 @@ export async function publishMthdsMethod(
   const methodId = routeId.methodId;
   const expected = parsed.data.expected_draft_updated_at;
 
-  let client: CatalogWriteClient;
+  let client: CatalogWriteClient | undefined;
   let result: MethodPublishResult;
   try {
     client = catalogWriteClient(context);
@@ -206,8 +206,8 @@ export async function publishMthdsMethod(
   } catch (err) {
     const error = classifyError(err, { ...PUBLISH_ERROR_OPTIONS, auth: context.authError });
     const reported =
-      error.location === "expected_draft_updated_at"
-        ? await staleTokenError(error, context, methodId, expected)
+      error.location === "expected_draft_updated_at" && client
+        ? await staleTokenError(error, client, methodId, expected)
         : error;
     return publishError(summaryForToolError(reported, PUBLISH_ERROR_SUMMARIES), [reported]);
   }
@@ -226,13 +226,13 @@ export async function publishMthdsMethod(
  */
 async function staleTokenError(
   error: ToolError,
-  context: CatalogWriteContext,
+  client: CatalogWriteClient,
   methodId: string,
   expected: string,
 ): Promise<ToolError> {
   let current: MethodData;
   try {
-    current = await catalogWriteClient(context).getMethod(methodId);
+    current = await client.getMethod(methodId);
   } catch {
     return error;
   }
