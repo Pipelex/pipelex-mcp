@@ -4,10 +4,6 @@ This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the
 
 ## [Unreleased]
 
-### Added
-
-- **`mthds_run` and `mthds_prepare_inputs` read their inputs from a file**: Both tools take `inputs_path`, the path of a `.json` file holding the inputs object, as the alternative to inline `inputs`, so an agent whose inputs a script computes, or that run to tens of kilobytes, never retypes them into the conversation. The two are mutually exclusive, and supplying both is refused at `inputs_path`; `mthds_prepare_inputs` still requires one of them, so its `inputs` is now optional in the schema. The file is read under the same bounds as a `{ path }` method file: only `.json`, checked before the disk is touched, only inside the server's working directory with symlinks followed, only a regular file of at most 1 MiB, and only a JSON object, a leading UTF-8 byte-order mark being skipped; each refusal is an `input_domain` error at `inputs_path`. Once read, the object is used exactly as the same object inline. The pinned contract changes accordingly: both tools gain the field and a sentence in their descriptions saying when to use it.
-
 ### Changed
 
 - **`mthds_models` lists and filters judgment models, and keeps a category it does not know (Breaking)**: `category` takes `judgment`, for a PipeJudge, beside `llm`, `extract`, `img_gen` and `search`, and a listing shows the judgment presets, aliases and waterfalls, which it used to drop. A category of the deck the tool does not know, which a runner of a later MTHDS protocol may report, is now listed after the protocol's under the runner's own name and resolves in a check instead of being dropped, so the result's `deck[].category`, `matches[].category` and `other_categories` are any string rather than the category enum, and a summary says the tool does not know which pipe type names it. A runner that implements a protocol older than 0.7.0 refuses `category: "judgment"`, and the error's hint now says the runner predates the category instead of offering the refused value back.
