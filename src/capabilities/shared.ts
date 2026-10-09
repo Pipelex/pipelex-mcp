@@ -169,6 +169,122 @@ export async function resolveSubmittedFiles(
   return { files: resolved, errors };
 }
 
+/**
+ * The largest inputs file `inputs_path` reads: 1 MiB. Inputs ride the JSON
+ * body of `POST /v1/start` or `POST /v1/pipe-io`; a set past this size is an
+ * asset in disguise and belongs in a file input, uploaded by
+ * `mthds_prepare_inputs`, rather than in the run's inputs.
+ */
+export const MAX_INPUTS_FILE_BYTES = 1024 * 1024;
+
+/**
+ * `inputs_path`, the file arm of a run's inputs: the same schema on
+ * `mthds_run` and `mthds_prepare_inputs`. A separate argument rather than a
+ * `{ path }` shape inside `inputs`, because an inputs map may legitimately
+ * declare an input named `path`.
+ */
+export const inputsPathSchema = z
+  .string()
+  .optional()
+  .describe(
+    "Path to a .json file holding the inputs as one JSON object, resolved relative to this server's working directory and read only inside it. Use it instead of inputs for a large or machine-produced inputs set, so it never passes through the conversation. Mutually exclusive with inputs. The loaded object is used exactly as inline inputs would be.",
+  );
+
+/** The two ways a caller supplies a run's inputs, before the file arm is read. */
+export interface InputsSource {
+  inputs?: Record<string, unknown>;
+  inputs_path?: string;
+}
+
+export interface ResolvedInputs {
+  /** The inputs to send: the inline object, the loaded file, or absent when neither was supplied. */
+  inputs?: Record<string, unknown>;
+  errors: ToolError[];
+}
+
+/**
+ * Settle `inputs` / `inputs_path` into the one inputs object the capability
+ * sends, ahead of the request-shape checks, as {@link resolveSubmittedFiles}
+ * does for `files`. Both supplied is refused at `inputs_path`; `required`
+ * refuses neither at `inputs`. The file arm reads through the context's
+ * `.json` resolver — the workshop's `localFileResolver`, under the same
+ * extension and working-directory gates as a `{ path }` item — and a context
+ * without one, as the core's own `build…Context` builds, refuses it, as it
+ * refuses a `{ path }` item. The file must hold one JSON object.
+ */
+export async function resolveInputsSource(
+  source: InputsSource,
+  resolver: FileResolver | undefined,
+  options: { required: boolean },
+): Promise<ResolvedInputs> {
+  const refuse = (location: string, message: string, hint: string): ResolvedInputs => ({
+    errors: [{ class: "input_domain", location, message, hint, retryable: false }],
+  });
+
+  if (source.inputs_path === undefined) {
+    if (source.inputs === undefined && options.required) {
+      return refuse(
+        "inputs",
+        "Supply the filled inputs, as inputs or as inputs_path.",
+        "Pass the filled template as inputs, or the path of a .json file holding it as inputs_path. An empty object {} is accepted.",
+      );
+    }
+    return { ...(source.inputs === undefined ? {} : { inputs: source.inputs }), errors: [] };
+  }
+
+  if (source.inputs !== undefined) {
+    return refuse(
+      "inputs_path",
+      "Supply inputs or inputs_path, not both.",
+      "Drop inputs to read the inputs from the file, or drop inputs_path to send the inline object.",
+    );
+  }
+
+  if (source.inputs_path.trim() === "") {
+    return refuse(
+      "inputs_path",
+      "inputs_path must not be empty when supplied.",
+      "Pass the path of a .json file, or pass the inputs inline as inputs.",
+    );
+  }
+
+  if (resolver === undefined) {
+    return refuse(
+      "inputs_path",
+      "This deployment cannot read files from disk; pass the inputs inline.",
+      "Pass the inputs inline as inputs, or use the local workshop server (npx @pipelex/mcp), which reads inputs_path.",
+    );
+  }
+
+  const resolution = await resolver.resolve(source.inputs_path);
+  if (!resolution.ok) {
+    return refuse("inputs_path", resolution.message, resolution.hint);
+  }
+
+  let parsed: unknown;
+  try {
+    // Some Windows editors and PowerShell write UTF-8 with a byte-order mark, which JSON.parse refuses.
+    parsed = JSON.parse(resolution.content.replace(/^\uFEFF/, ""));
+  } catch (err) {
+    return refuse(
+      "inputs_path",
+      `File is not valid JSON: ${source.inputs_path} (${err instanceof Error ? err.message : String(err)}).`,
+      "Fix the file so it holds one JSON object, the filled inputs template, or pass the inputs inline as inputs.",
+    );
+  }
+
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    const found = parsed === null ? "null" : Array.isArray(parsed) ? "an array" : typeof parsed;
+    return refuse(
+      "inputs_path",
+      `File does not hold a JSON object: ${source.inputs_path} holds ${found}.`,
+      "The file must hold one JSON object mapping each input name to its value, as the filled inputs template does.",
+    );
+  }
+
+  return { inputs: parsed as Record<string, unknown>, errors: [] };
+}
+
 export const errorClassSchema = z.enum(["input_domain", "config", "runtime"]);
 
 export type ErrorClass = z.infer<typeof errorClassSchema>;
@@ -649,6 +765,18 @@ export interface ClassifyErrorOptions {
    * `RunLifecycleUnavailableError` for it up front.
    */
   notFound?: {
+    location?: string;
+    hint: string;
+  };
+  /**
+   * Per-route texture for `409 method_update_conflict`: the method's draft
+   * moved since the token the call sent, so nothing was written or published.
+   * The locator is the field that carried the token, which differs per route
+   * (`expected_updated_at` on the save, `expected_draft_updated_at` on the
+   * publish). Unset, the arm locates at `expected_updated_at` with a generic
+   * hint.
+   */
+  conflict?: {
     location?: string;
     hint: string;
   };
@@ -1205,6 +1333,19 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     );
   }
 
+  // A saved method's versions and draft, refused for a reason the platform
+  // names in its `code`. Each is about the method the caller named, and each
+  // would otherwise fall through to the generic arm as "HTTP 409", which says
+  // nothing a caller can act on. The class is pinned to `input_domain`, which
+  // is also the SDK's fallback for every one of them: the caller changes the
+  // selector, the token or the timing, never the environment.
+  if (err.status === 409) {
+    const arm = methodConflictTexture(err.code, options);
+    if (arm !== undefined) {
+      return toolError({ ...verdict, class: "input_domain" }, { ...arm, message });
+    }
+  }
+
   // Paywall: the platform reports a plan limit as 402 SubscriptionRequiredError.
   // Branch on the HTTP status only — its problem `code` is "forbidden" and must
   // never be sniffed. The class stays the SDK's `config` (the call cannot be
@@ -1219,6 +1360,19 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
   }
 
   if (err.status === 404) {
+    // `mt_…@<n>`, or a version read, naming a version the method never
+    // published. Ahead of the route's `notFound`, whose hint says the METHOD is
+    // unknown, which is the one thing this answer rules out.
+    if (err.code === "method_version_not_found") {
+      return toolError(
+        { ...verdict, class: "input_domain" },
+        {
+          location: "method_id",
+          message,
+          hint: `The method exists but has no published version with this number. ${WORKSHOP_TOOL_NAMES.getMethod} with its bare id reports its latest published version; address the draft as mt_…@draft.`,
+        },
+      );
+    }
     if (options.notFound !== undefined && verdict.class === "input_domain") {
       return toolError(verdict, {
         location: options.notFound.location,
@@ -1295,6 +1449,45 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
   }
 
   return toolError(verdict, { message, hint: `The Pipelex API returned HTTP ${err.status}.` });
+}
+
+/**
+ * The texture of a `409` about a saved method, by the platform's `code`, or
+ * `undefined` for a `409` this server has no wording of its own for.
+ *
+ * - `method_not_published`: a bare id names the latest published version, and
+ *   the method has none yet. The way forward is its draft, `mt_…@draft`, or a
+ *   publish, which only the user asks for.
+ * - `method_update_conflict`: the draft moved since the token the call sent,
+ *   so nothing was written or published. The route says which field carried
+ *   the token ({@link ClassifyErrorOptions.conflict}).
+ * - `method_being_deleted`: the method's erasure has started.
+ */
+function methodConflictTexture(
+  code: string | undefined,
+  options: ClassifyErrorOptions,
+): Omit<ToolTexture, "message"> | undefined {
+  switch (code) {
+    case "method_not_published":
+      return {
+        location: "method_id",
+        hint: `The method has a draft and no published version yet, and a bare id names the latest published version. Address its draft as mt_…@draft, or publish it with ${WORKSHOP_TOOL_NAMES.publishMethod} — only when the user asks for a publish.`,
+      };
+    case "method_update_conflict":
+      return {
+        location: options.conflict?.location ?? "expected_updated_at",
+        hint:
+          options.conflict?.hint ??
+          `The method's draft changed since the token this call sent — somebody saved it, and the webapp saves as it edits. Read it with ${WORKSHOP_TOOL_NAMES.getMethod}, then decide with the user what to keep.`,
+      };
+    case "method_being_deleted":
+      return {
+        location: "method_id",
+        hint: "The method is being deleted, so nothing was read or written. Its id stops resolving once the erasure finishes.",
+      };
+    default:
+      return undefined;
+  }
 }
 
 // ── the artifact fetch boundary, shared by the two tools that cross it ──

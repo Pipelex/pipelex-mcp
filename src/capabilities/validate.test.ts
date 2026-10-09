@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
 import type {
@@ -1818,5 +1818,122 @@ describe("the method graph page", () => {
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.graph_page).toBeUndefined();
     expect(await pageExists(root)).toBe(false);
+  });
+});
+
+describe("validateMthds by method_id, on both platforms", () => {
+  function onPlatform(
+    extensions: string[] | Error,
+    sent: ValidateMethodSelector[],
+    answer: PipelexValidationResult | Error = validReport,
+  ): ValidationContext {
+    return {
+      baseUrl: DEFAULT_API_URL,
+      client: {
+        ...validateFilesNotCalled,
+        async validate(source) {
+          sent.push(source);
+          if (answer instanceof Error) throw answer;
+          return answer;
+        },
+        async version() {
+          if (extensions instanceof Error) throw extensions;
+          return { version: "1.0.0", extensions };
+        },
+      },
+    };
+  }
+
+  it("sends each selector as given where versions resolve, and says what it validated", async () => {
+    const sent: ValidateMethodSelector[] = [];
+    const supported = ["runs", "method_versions"];
+
+    const bare = await validateMthds({ method_id: "mt_123" }, onPlatform(supported, sent));
+    const drafted = await validateMthds({ method_id: "mt_123@draft" }, onPlatform(supported, sent));
+    const pinned = await validateMthds({ method_id: "mt_123@2" }, onPlatform(supported, sent));
+
+    expect(sent).toEqual([
+      { method_id: "mt_123" },
+      { method_id: "mt_123@draft" },
+      { method_id: "mt_123@2" },
+    ]);
+    expect(bare.structuredContent.method_version).toBe("latest");
+    expect(drafted.structuredContent.method_version).toBe("draft");
+    expect(pinned.structuredContent.method_version).toBe(2);
+    expect(pinned.summary).toContain("This validated version 2 of `mt_123`.");
+  });
+
+  it("sends a bare id without waiting on the handshake, and still says what it validated", async () => {
+    // Nothing sent depends on the platform's answer. Awaited first, it cost
+    // every bare-id call a handshake, up to its deadline where the platform
+    // does not resolve versions and so never caches its answer.
+    const sent: ValidateMethodSelector[] = [];
+    let answer: (info: unknown) => void = () => undefined;
+    const context: ValidationContext = {
+      baseUrl: DEFAULT_API_URL,
+      client: {
+        ...validateFilesNotCalled,
+        async validate(source) {
+          sent.push(source);
+          return validReport;
+        },
+        version() {
+          return new Promise((resolve) => {
+            answer = resolve;
+          });
+        },
+      },
+    };
+
+    const result = validateMthds({ method_id: "mt_123" }, context);
+    await vi.waitFor(() => expect(sent).toEqual([{ method_id: "mt_123" }]));
+    answer({ version: "1.0.0", extensions: ["runs"] });
+
+    expect((await result).structuredContent.method_version).toBe("draft");
+  });
+
+  it("reads the draft for a bare id where they do not, and sends every suffix as given", async () => {
+    const sent: ValidateMethodSelector[] = [];
+
+    const bare = await validateMthds({ method_id: "mt_123" }, onPlatform(["runs"], sent));
+    const drafted = await validateMthds({ method_id: "mt_123@draft" }, onPlatform(["runs"], sent));
+    const pinned = await validateMthds({ method_id: "mt_123@2" }, onPlatform(["runs"], sent));
+
+    // A platform that cannot read a suffix refuses it; rewritten on a stale
+    // answer, @draft sent bare would read the latest published version.
+    expect(sent).toEqual([
+      { method_id: "mt_123" },
+      { method_id: "mt_123@draft" },
+      { method_id: "mt_123@2" },
+    ]);
+    expect(bare.structuredContent.method_version).toBe("draft");
+    expect(drafted.structuredContent.method_version).toBe("draft");
+    expect(pinned.structuredContent.method_version).toBe(2);
+  });
+
+  it("sends a suffix as given when it cannot ask, and reads a refusal of it as a platform that may not resolve it", async () => {
+    const sent: ValidateMethodSelector[] = [];
+    const notFound = new ApiResponseError(
+      "HTTP 404",
+      `${DEFAULT_API_URL}/v1/validate`,
+      404,
+      "Not Found",
+      "{}",
+      undefined,
+      "Method not found",
+      undefined,
+      "not_found",
+    );
+
+    const result = await validateMthds(
+      { method_id: "mt_123@draft" },
+      onPlatform(new Error("down"), sent, notFound),
+    );
+
+    expect(sent).toEqual([{ method_id: "mt_123@draft" }]);
+    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
+    expect(result.structuredContent.errors?.[0]?.hint).toContain(
+      "may not resolve version suffixes yet",
+    );
   });
 });

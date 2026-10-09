@@ -1,24 +1,27 @@
 /**
- * Live e2e — `mthds_save_method` and `mthds_get_method` against a real Pipelex API.
+ * Live e2e — `mthds_save_method`, `mthds_publish_method` and `mthds_get_method`
+ * against a real Pipelex API.
  *
- * `catalog-write.test.ts` proves both tools against a fake `CatalogWriteClient`,
- * so nothing hermetic has ever sent a byte to `PUT /v1/methods/{id}` or read
- * one back from `GET /v1/methods/{id}`. These two tools shipped with no live
- * coverage at all, which is the exact blind spot that let `mthds_list_methods`
- * fail every real call while the suite stayed green.
+ * `catalog-write.test.ts` proves the three tools against a fake
+ * `CatalogWriteClient`, so nothing hermetic has ever sent a byte to
+ * `PUT /v1/methods/{id}/draft` or `POST /v1/methods/{id}/publish`, or read one
+ * back from `GET /v1/methods/{id}` or a version. The first two tools shipped
+ * with no live coverage at all, which is the exact blind spot that let
+ * `mthds_list_methods` fail every real call while the suite stayed green.
  *
  * The contexts come from `buildLocalToolContexts`, not hand-assembled, so what
  * runs here is the wiring a host actually gets — both resolvers, the save root,
  * and the validation context the save runs its bundle through.
  *
- * **This suite writes to the catalog, and only ever UPDATES.** It requires the
- * durable row `make seed-e2e-fixture` creates and fails loudly naming that
- * command when it is absent. It deliberately does not create the row itself:
- * a create is check-then-act across two round trips with no compare-and-swap,
- * so two concurrent first runs in one organization would each read no row and
- * each create one, leaving a duplicate the platform's admin-only delete cannot
- * undo and after which every later run updates whichever row is listed first.
- * The reasoning is written once on `CATALOG_WRITE_FIXTURE_NAME`.
+ * **This suite writes to the catalog, and never creates.** It writes the draft
+ * of the durable row `make seed-e2e-fixture` creates, and publishes it, and
+ * fails loudly naming that command when the row is absent. It deliberately
+ * does not create the row itself: a create is check-then-act across two round
+ * trips with nothing unique to collide on, so two concurrent first runs in one
+ * organization would each read no row and each create one, leaving a
+ * duplicate the platform's admin-only delete cannot undo and after which every
+ * later run writes whichever row is listed first. The reasoning is written
+ * once on `CATALOG_WRITE_FIXTURE_NAME`.
  *
  * Both halves of that are enforced in `beforeAll` rather than trusted: it
  * resolves the fixture, so an unseeded organization aborts the file instead of
@@ -41,6 +44,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildLocalToolContexts } from "./tools.js";
 import { LINK_FILE_NAME } from "./capabilities/catalog-link.js";
+import { publishMthdsMethod } from "./capabilities/catalog-publish.js";
+import type { PublishMethodSuccess } from "./capabilities/catalog-publish.js";
 import { getMthdsMethod, saveMthdsMethod } from "./capabilities/catalog-write.js";
 import type {
   CatalogWriteContext,
@@ -57,9 +62,6 @@ import {
   catalogWriteFixtureMethodId,
   liveApiConfig,
 } from "./capabilities/e2e-support.js";
-
-/** A name this suite must never bring into existence. */
-const NEVER_CREATED_NAME = `${CATALOG_WRITE_FIXTURE_NAME}_never_created`;
 
 let workRoot: string;
 let context: CatalogWriteContext;
@@ -88,12 +90,17 @@ function contextsFor(root: string): CatalogWriteContext {
   ).catalogWrite;
 }
 
+/** The link file the work root holds. */
+async function workRootLink(): Promise<{ method_id: string; synced_updated_at: string }> {
+  return JSON.parse(await readFile(join(workRoot, LINK_FILE_NAME), "utf8")) as {
+    method_id: string;
+    synced_updated_at: string;
+  };
+}
+
 /** The method id the link file in the work root records. */
 async function linkedMethodId(): Promise<string> {
-  const link = JSON.parse(await readFile(join(workRoot, LINK_FILE_NAME), "utf8")) as {
-    method_id: string;
-  };
-  return link.method_id;
+  return (await workRootLink()).method_id;
 }
 
 function asSaved(result: { structuredContent: unknown }): SaveMethodSuccess {
@@ -201,26 +208,30 @@ describe("mthds_save_method (live)", () => {
     expect(typeof link.api_host).toBe("string");
   });
 
-  it("updates the method it just saved, through PUT", async () => {
-    // The id comes from the link file rather than from `fixtureId`, which is
-    // how a real caller gets it — a save links the directory, and the next one
-    // reads that link back. Omitting it is refused as a would-be duplicate,
-    // and that refusal has a case of its own below.
-    const methodId = await linkedMethodId();
+  it("writes the draft again under the link file's token, once a pull refreshed it", async () => {
+    // The save above moved the draft from another directory, so this one's
+    // link is a token behind, and a save from it would be refused as stale.
+    // A pull of identical files writes nothing and refreshes the link alone,
+    // which is how a real caller catches up; the save then sends the link's
+    // token on its own, as a compare-and-swap on the draft.
+    const pulled = await getMthdsMethod({ method_id: fixtureId, output_dir: "." }, context);
+    expect(pulled.structuredContent.status).toBe("ok");
+    const link = await workRootLink();
 
     const result = await saveMthdsMethod(
-      {
-        files: [{ path: CATALOG_WRITE_BUNDLE_FILE }],
-        name: CATALOG_WRITE_FIXTURE_NAME,
-        method_id: methodId,
-      },
+      { files: [{ path: CATALOG_WRITE_BUNDLE_FILE }], method_id: link.method_id },
       context,
     );
 
     const saved = asSaved(result);
     expect(saved.is_valid).toBe(true);
     expect(saved.saved).toBe("updated");
-    expect(saved.method_id).toBe(methodId);
+    expect(saved.method_id).toBe(link.method_id);
+    // The name is the method's, untouched by a save that sent none.
+    expect(saved.name).toBe(CATALOG_WRITE_FIXTURE_NAME);
+    expect(saved.publish_state).toBeDefined();
+    // The link carries the draft's new token, for the next write.
+    expect((await workRootLink()).synced_updated_at).toBe(saved.updated_at);
   });
 
   /**
@@ -244,11 +255,10 @@ describe("mthds_save_method (live)", () => {
   });
 
   /**
-   * The `expected_updated_at` precondition. Best-effort and check-then-act —
-   * the platform offers no compare-and-swap — so what is proven here is that a
-   * stale stamp is REFUSED, not that the refusal is atomic.
+   * The `expected_updated_at` compare-and-swap: the platform refuses a stale
+   * token with a 409 `method_update_conflict`, and nothing is written.
    */
-  it("refuses an update whose expected_updated_at is stale", async () => {
+  it("refuses a draft write whose expected_updated_at is stale", async () => {
     const result = await saveMthdsMethod(
       {
         files: [{ path: CATALOG_WRITE_BUNDLE_FILE }],
@@ -264,62 +274,107 @@ describe("mthds_save_method (live)", () => {
     const failure = sc as SaveMethodFailure;
     expect(failure.errors.length).toBeGreaterThan(0);
     expect(failure.errors[0].class).toBe("input_domain");
-    expect(failure.errors[0].location).toContain("expected_updated_at");
+    expect(failure.errors[0].location).toBe("expected_updated_at");
     expect(failure.errors[0].retryable).toBe(false);
+    expect(failure.errors[0].message).toContain("Nothing was written");
   });
 
   /**
-   * An invalid bundle is a VERDICT, not an error — and nothing is written
-   * anywhere, which is the half a mocked client cannot prove about the catalog.
+   * An invalid bundle is saved as the draft — a draft is work in progress, and
+   * is never validated on write — and the verdict comes back beside the save,
+   * which is the half a mocked client cannot prove about the catalog.
    *
-   * This is the SECOND of the two cases that submit no `method_id`, and it is
-   * safe on two counts rather than one, because one is not enough.
-   *
-   * The bundle cannot validate, so the refusal lands before the catalog is
-   * reached — `saveMthdsMethod` validates first and returns the invalid verdict
-   * before it ever reads the link claim. But that barrier is the LIVE API's
-   * judgement, and a deployment that started accepting a bundle naming a pipe
-   * type that does not exist is exactly the drift this suite exists to detect,
-   * so it is the one barrier that cannot be trusted to hold in the failure this
-   * file is written for. Left alone, such a run would mint a permanent row
-   * under `NEVER_CREATED_NAME`.
-   *
-   * So the directory is LINKED first, which arms the tool's own duplicate
-   * guard: if validation ever stops refusing, the save is refused locally as a
-   * would-be duplicate instead of creating. The server verdict stays the
-   * assertion; the local guard is what makes the test safe to run.
+   * It names `method_id`, so it can only write the fixture's draft, never
+   * create; and the directory is LINKED first by copying the shared root's
+   * link, so the tool's own duplicate guard would refuse it too. The draft is
+   * put back in `finally`, before the pull tests below compare it with
+   * {@link CATALOG_WRITE_BUNDLE}; a run that dies in between leaves it broken
+   * only until the next run's `beforeAll` saves the bundle again.
    */
-  it("reports an invalid bundle as a verdict and writes nothing to the catalog", async () => {
+  it("saves an invalid bundle as the draft, with its verdict", async () => {
     const brokenRoot = await makeTempDir("pipelex-mcp-catalog-write-broken-");
     const brokenContext = contextsFor(brokenRoot);
     await writeFile(join(brokenRoot, "broken.mthds"), INVALID_BUNDLE, "utf8");
-    // Arm the local guard by copying the shared root's link, so this directory
-    // is already claimed. Copying rather than saving keeps the arming free of a
-    // catalog write, which is what this suite is trying to stay sparing with.
     await copyFile(join(workRoot, LINK_FILE_NAME), join(brokenRoot, LINK_FILE_NAME));
 
     const before = await catalogRowNamed(CATALOG_WRITE_FIXTURE_NAME);
 
-    const result = await saveMthdsMethod(
-      { files: [{ path: "broken.mthds" }], name: NEVER_CREATED_NAME },
-      brokenContext,
+    let invalidToken: string | undefined;
+    try {
+      const result = await saveMthdsMethod(
+        { files: [{ path: "broken.mthds" }], method_id: fixtureId },
+        brokenContext,
+      );
+
+      const saved = asSaved(result);
+      invalidToken = saved.updated_at;
+      expect(saved.is_valid).toBe(false);
+      expect(saved.saved).toBe("updated");
+      expect(saved.method_id).toBe(fixtureId);
+      expect(Array.isArray(saved.validation_errors)).toBe(true);
+      expect((saved.validation_errors ?? []).length).toBeGreaterThan(0);
+      // An invalid draft cannot equal a published version, every one of
+      // which the platform validated before publishing it.
+      expect(saved.publish_state).not.toBe("draft_unchanged");
+      // The same row, written: no row was minted.
+      expect(await catalogRowNamed(CATALOG_WRITE_FIXTURE_NAME)).toBe(before);
+    } finally {
+      // The shared root's link is now a token behind the invalid draft, so the
+      // restore names the token that draft was saved under.
+      asSaved(
+        await saveMthdsMethod(
+          {
+            files: [{ path: CATALOG_WRITE_BUNDLE_FILE }],
+            method_id: fixtureId,
+            ...(invalidToken === undefined ? {} : { expected_updated_at: invalidToken }),
+          },
+          context,
+        ),
+      );
+    }
+  });
+});
+
+describe("mthds_publish_method (live)", () => {
+  /**
+   * The draft the suite saved is the seeded bundle, which the seed published,
+   * so a publish under its token answers `unchanged` — or `published`, the
+   * first time after the bundle was edited — and a second publish of the same
+   * draft is `unchanged` with the same version: publishing is idempotent on
+   * the draft's content.
+   */
+  it("publishes the draft under its token, and a republish changes nothing", async () => {
+    const token = (await workRootLink()).synced_updated_at;
+
+    const first = await publishMthdsMethod(
+      { method_id: fixtureId, expected_draft_updated_at: token },
+      context,
+    );
+    const firstSc = first.structuredContent as PublishMethodSuccess;
+    expect(firstSc.status).toBe("ok");
+    expect(["published", "unchanged"]).toContain(firstSc.outcome);
+    expect(typeof firstSc.version).toBe("number");
+    expect(firstSc.publish_state).toBe("draft_unchanged");
+
+    const again = await publishMthdsMethod(
+      { method_id: fixtureId, expected_draft_updated_at: token },
+      context,
+    );
+    const againSc = again.structuredContent as PublishMethodSuccess;
+    expect(againSc.status).toBe("ok");
+    expect(againSc.outcome).toBe("unchanged");
+    expect(againSc.version).toBe(firstSc.version);
+  });
+
+  it("refuses a publish whose token is stale, and publishes nothing", async () => {
+    const result = await publishMthdsMethod(
+      { method_id: fixtureId, expected_draft_updated_at: "2020-01-01T00:00:00Z" },
+      context,
     );
 
-    const saved = asSaved(result);
-    expect(saved.is_valid).toBe(false);
-    expect(saved.method_id).toBeUndefined();
-    expect(Array.isArray(saved.validation_errors)).toBe(true);
-
-    // The link this test armed is untouched — an invalid bundle re-points
-    // nothing, so the directory still claims the fixture and not a new row...
-    const brokenLink = JSON.parse(await readFile(join(brokenRoot, LINK_FILE_NAME), "utf8")) as {
-      method_id: string;
-    };
-    expect(brokenLink.method_id).toBe(fixtureId);
-    // ...the fixture row is exactly where it was...
-    expect(await catalogRowNamed(CATALOG_WRITE_FIXTURE_NAME)).toBe(before);
-    // ...and no row was minted under the name it tried to save.
-    expect(await catalogRowNamed(NEVER_CREATED_NAME)).toBeUndefined();
+    const sc = result.structuredContent as { status: string; errors?: { location?: string }[] };
+    expect(sc.status).toBe("error");
+    expect(sc.errors?.[0]?.location).toBe("expected_draft_updated_at");
   });
 });
 
@@ -336,6 +391,7 @@ describe("mthds_get_method (live)", () => {
     expect(sc.status).toBe("ok");
     expect(sc.method_id).toBe(methodId);
     expect(sc.name).toBe(CATALOG_WRITE_FIXTURE_NAME);
+    expect(sc.version).toBe("draft");
     expect(sc.files.length).toBeGreaterThan(0);
 
     // The written arm withholds content from the streams and says where it landed.
@@ -375,5 +431,29 @@ describe("mthds_get_method (live)", () => {
 
     // The inline arm is read-only: it must not have written into the directory.
     expect(await readdir(inlineRoot)).toEqual([]);
+  });
+
+  it("reads a published version by its number", async () => {
+    const methodId = await catalogWriteFixtureMethodId();
+    const draft = (await getMthdsMethod({ method_id: methodId }, contextsFor(workRoot)))
+      .structuredContent as GetMethodSuccess;
+    expect(typeof draft.latest_version).toBe("number");
+    const version = draft.latest_version as number;
+
+    const result = await getMthdsMethod(
+      { method_id: `${methodId}@${version}` },
+      contextsFor(await makeTempDir("pipelex-mcp-catalog-version-")),
+    );
+
+    const sc = result.structuredContent as GetMethodSuccess;
+    expect(sc.status).toBe("ok");
+    expect(sc.method_id).toBe(methodId);
+    expect(sc.version).toBe(version);
+    expect(
+      sc.files
+        .map((f) => f.content)
+        .join("")
+        .trim(),
+    ).toBe(CATALOG_WRITE_BUNDLE.trim());
   });
 });

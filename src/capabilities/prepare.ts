@@ -3,11 +3,21 @@ import type { MthdsFileItem, PrepareInputsRequest, PreparedInputs } from "@pipel
 import { z } from "zod";
 
 import {
+  METHOD_ID_SELECTOR_SENTENCE,
+  methodVersionReportSchema,
+  planById,
+  selectorFailure,
+  withMethodContent,
+} from "./method-versions.js";
+import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
+import {
   METHOD_REF_GRAMMAR,
   buildApiConfig,
   classifyError,
   createPipelexApiClient,
   filesInputSchema,
+  inputsPathSchema,
+  resolveInputsSource,
   resolveSubmittedFiles,
   summaryForToolError,
   toolErrorSchema,
@@ -38,7 +48,7 @@ export const mthdsPrepareInputsInputSchema = {
     .string()
     .optional()
     .describe(
-      "Catalog id (mt_…) of a registered method — the signature source. Uses the method's CURRENT stored content and requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_ref / method_id.",
+      `Catalog id (mt_…) of a registered method — the signature source, resolved server-side and requiring an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of files / method_ref / method_id.`,
     ),
   pipe_ref: z
     .string()
@@ -48,9 +58,11 @@ export const mthdsPrepareInputsInputSchema = {
     ),
   inputs: z
     .record(z.string(), z.unknown())
+    .optional()
     .describe(
-      "The caller's FILLED inputs (the mthds_inputs_template output, populated). File-bearing values are uploaded to Pipelex storage and rewritten to pipelex-storage://; http(s) URLs and existing pipelex-storage:// URIs pass through. An empty object uploads nothing.",
+      "The caller's FILLED inputs (the mthds_inputs_template output, populated). File-bearing values are uploaded to Pipelex storage and rewritten to pipelex-storage://; http(s) URLs and existing pipelex-storage:// URIs pass through. An empty object uploads nothing. Supply exactly ONE of inputs / inputs_path.",
     ),
+  inputs_path: inputsPathSchema,
 };
 
 const prepareStructuredContentSchema = z.object({
@@ -72,6 +84,7 @@ const prepareStructuredContentSchema = z.object({
     .describe(
       "The pipelex-storage:// uris of the assets uploaded this call; [] when all inputs pass through.",
     ),
+  method_version: methodVersionReportSchema,
   errors: z.array(toolErrorSchema).optional(),
 });
 
@@ -82,10 +95,11 @@ export interface MthdsPrepareInputsInput {
   method_ref?: string;
   method_id?: string;
   pipe_ref?: string;
-  inputs: Record<string, unknown>;
+  inputs?: Record<string, unknown>;
+  inputs_path?: string;
 }
 
-/** The prepare request after `{ path }` resolution — what the checks and the prepare step consume. */
+/** The prepare request after `{ path }` and `inputs_path` resolution — what the checks and the prepare step consume. */
 interface ResolvedPrepareRequest {
   files: SubmittedFile[];
   method_ref?: string;
@@ -100,6 +114,8 @@ export interface PrepareStructuredContent {
   pipe_ref?: string;
   inputs?: Record<string, unknown>;
   uploads?: string[];
+  /** By-id calls only: the content whose signature the inputs were prepared against, when this server can tell. */
+  method_version?: MethodVersionReport;
   errors?: ToolError[];
 }
 
@@ -117,16 +133,20 @@ export interface PrepareResult {
  */
 interface PrepareClient {
   prepareInputs(request: PrepareInputsRequest): Promise<PreparedInputs>;
+  /** `GET /v1/version`, read to learn whether a bare id names the draft or a version; optional on a test seam. */
+  version?(): Promise<unknown>;
 }
 
 /**
  * `mthds_prepare_inputs` always uploads: the workshop is co-located with the
  * user's files.
  */
-export interface PrepareContext extends ApiConfig {
+export interface PrepareContext extends ApiConfig, MethodVersionsAware {
   client?: PrepareClient;
   /** Fills `{ path }` closure items from disk (local workshop). */
   resolver?: FileResolver;
+  /** Reads `inputs_path` from disk (local workshop, `.json` only); without one `inputs_path` is refused. */
+  inputsResolver?: FileResolver;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
@@ -247,11 +267,22 @@ export async function prepareMthdsInputs(
   context: PrepareContext = buildPrepareContext(),
 ): Promise<PrepareResult> {
   const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
-  if (resolution.errors.length > 0) {
-    return errorResult("Inputs were not prepared: request input is invalid.", resolution.errors);
+  const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
+    required: true,
+  });
+  const resolutionErrors = [...resolution.errors, ...inputsResolution.errors];
+  if (resolutionErrors.length > 0) {
+    return errorResult("Inputs were not prepared: request input is invalid.", resolutionErrors);
   }
 
-  const request: ResolvedPrepareRequest = { ...input, files: resolution.files };
+  // `inputs_path` is settled into `inputs` here and goes no further: the rest
+  // of the flow cannot tell a loaded file from an inline object.
+  const { inputs_path: _inputsPath, ...selection } = input;
+  const request: ResolvedPrepareRequest = {
+    ...selection,
+    files: resolution.files,
+    inputs: inputsResolution.inputs ?? {},
+  };
   const inputErrors = validatePrepareInputsRequest(request);
   if (inputErrors.length > 0) {
     return errorResult("Inputs were not prepared: request input is invalid.", inputErrors);
@@ -268,22 +299,41 @@ export async function prepareMthdsInputs(
         : PREPARE_BY_ID_ERROR_OPTIONS;
 
   let prepared: PreparedInputs;
+  let plan: SelectorPlan | undefined;
   try {
+    const client = prepareClient(context);
+    let sent = request;
+    if (request.method_id !== undefined) {
+      // A bare id reads the draft on a platform that does not resolve version
+      // selectors yet, and the latest published version on one that does: the
+      // platform is asked beside the request, which never waits on it, and the
+      // result says whose signature the inputs were prepared against
+      // (`method-versions.ts`).
+      plan = planById(request.method_id, context.methodVersions, client, {
+        needBareReport: true,
+      });
+      sent = { ...request, method_id: plan.send };
+    }
     // Built inside the try for the same reason the client is: the selector
     // narrowing throws on its own unreachable arm, and that must classify as a
     // ToolError rather than reject the MCP handler.
     const envelope: PrepareEnvelope = {
-      selector: prepareSelectorOf(request),
+      selector: prepareSelectorOf(sent),
       ...(request.pipe_ref === undefined ? {} : { pipe_ref: request.pipe_ref }),
       inputs: request.inputs,
     };
-    prepared = await prepareWithUpload(prepareClient(context), envelope);
+    prepared = await prepareWithUpload(client, envelope);
   } catch (err) {
-    const error = classifyError(err, { ...classifyOptions, auth: context.authError });
+    const classified = classifyError(err, { ...classifyOptions, auth: context.authError });
+    const error = await selectorFailure(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);
   }
 
-  return prepareInputsResult(prepared, request.pipe_ref);
+  return await withMethodContent(
+    prepareInputsResult(prepared, request.pipe_ref),
+    plan,
+    "prepared the inputs against the signature of",
+  );
 }
 
 /**

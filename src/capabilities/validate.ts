@@ -13,6 +13,14 @@ import type {
 import { z } from "zod";
 
 import { GRAPH_PAGE_FILENAME, graphPageSection, writeGraphPage } from "./graph-page.js";
+import {
+  METHOD_ID_SELECTOR_SENTENCE,
+  methodVersionReportSchema,
+  planById,
+  selectorFailure,
+  withMethodContent,
+} from "./method-versions.js";
+import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
 import type { GraphPageFile, GraphPageOutcome } from "./graph-page.js";
 import {
   METHOD_REF_GRAMMAR,
@@ -51,7 +59,7 @@ export const mthdsValidateInputSchema = {
     .string()
     .optional()
     .describe(
-      "Catalog id (mt_…) of a registered method. Validates the method's CURRENT stored content server-side — requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_ref / method_id.",
+      `Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of files / method_ref / method_id.`,
     ),
   graph_page: z
     .boolean()
@@ -225,6 +233,7 @@ const validationStructuredContentSchema = z.object({
     .describe(
       `The method's flowchart as a standalone HTML page (${GRAPH_PAGE_FILENAME}) beside the validated files, which the user can open in a browser. Present when every file was given as { path } and graph_page was not false, whatever the verdict; absent otherwise.`,
     ),
+  method_version: methodVersionReportSchema,
   validation_errors: z.array(z.unknown()).optional(),
   errors: z.array(toolErrorSchema).optional(),
 });
@@ -289,6 +298,8 @@ export interface ValidationStructuredContent {
   available_view_specs: ViewSpec[];
   main_pipe?: MainPipeSignature;
   graph_page?: GraphPageStructuredContent;
+  /** By-id validations only: the content validated, when this server can tell. */
+  method_version?: MethodVersionReport;
   validation_errors?: unknown[];
   errors?: ToolError[];
 }
@@ -323,6 +334,8 @@ export interface ValidationResult {
 }
 
 export interface ValidationClient {
+  /** `GET /v1/version`, read to learn whether a bare id names the draft or a version; optional on a test seam. */
+  version?(): Promise<unknown>;
   validateFiles(
     files: MthdsFile[],
     options?: ValidateFilesOptions,
@@ -342,7 +355,7 @@ export interface ValidationClient {
   ): Promise<PipelexValidationResult>;
 }
 
-export interface ValidationContext extends ApiConfig {
+export interface ValidationContext extends ApiConfig, MethodVersionsAware {
   client?: ValidationClient;
   /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
@@ -506,6 +519,7 @@ async function validateRequest(
         : VALIDATE_BY_ID_ERROR_OPTIONS;
 
   let report: PipelexValidationResult;
+  let plan: SelectorPlan | undefined;
   try {
     // `views` is the structured-view opt-in (the `render` sibling): the
     // descriptor spec keeps `input_form` off the report unless a caller asks.
@@ -532,7 +546,14 @@ async function validateRequest(
         [...VALIDATE_VIEW_TOKENS],
       );
     } else if (request.method_id !== undefined) {
-      report = await client.validate({ method_id: request.method_id }, true, undefined, undefined, [
+      // What a bare id reads differs between a platform that resolves version
+      // selectors and one that does not yet, so the platform is asked beside
+      // the request, which never waits on it (`method-versions.ts`), and the
+      // result says which content was validated.
+      plan = planById(request.method_id, context.methodVersions, client, {
+        needBareReport: true,
+      });
+      report = await client.validate({ method_id: plan.send }, true, undefined, undefined, [
         ...VALIDATE_VIEW_TOKENS,
       ]);
     } else {
@@ -540,7 +561,8 @@ async function validateRequest(
       throw new Error("No method selector survived request validation.");
     }
   } catch (err) {
-    const error = classifyError(err, { ...classifyOptions, auth: context.authError });
+    const classified = classifyError(err, { ...classifyOptions, auth: context.authError });
+    const error = await selectorFailure(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);
   }
 
@@ -548,7 +570,8 @@ async function validateRequest(
   // API. A malformed report (e.g. missing rendered_markdown) is a reachable
   // contract violation, surfaced as a runtime no-verdict error.
   try {
-    return validationResult(report);
+    const result = validationResult(report);
+    return await withMethodContent(result, plan, "validated");
   } catch (err) {
     return errorResult(
       "Validation produced no verdict: the Pipelex API returned a malformed report.",

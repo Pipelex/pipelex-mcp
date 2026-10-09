@@ -24,6 +24,17 @@ import type {
 import { z } from "zod";
 
 import {
+  RUN_METHOD_ID_SELECTOR_SENTENCE,
+  forgetMethodVersionsSupported,
+  linkageSuffixError,
+  noteMethodVersionsSupported,
+  planById,
+  runContentReport,
+  runMethodVersionSchema,
+  selectorFailure,
+} from "./method-versions.js";
+import type { MethodVersionsAware, RunContentReport, SelectorPlan } from "./method-versions.js";
+import {
   MAX_IMAGE_CANDIDATE_ENTRIES,
   METHOD_REF_GRAMMAR,
   buildApiConfig,
@@ -31,6 +42,8 @@ import {
   createPipelexApiClient,
   filesInputSchema,
   imageCandidatesOf,
+  inputsPathSchema,
+  resolveInputsSource,
   resolveSubmittedFiles,
   summaryForToolError,
   toolErrorSchema,
@@ -92,7 +105,7 @@ export const mthdsRunInputSchema = {
     .string()
     .optional()
     .describe(
-      "Catalog id (mt_…) of a registered method. Runs the method's CURRENT stored content — requires an API key (the catalog is org-scoped). With files also present, the files run and method_id is recorded as run-history linkage. Provide files, method_ref, or method_id (files + method_id together is also legal).",
+      `Catalog id (mt_…) of a registered method, resolved server-side and requiring an API key (the catalog is org-scoped). ${RUN_METHOD_ID_SELECTOR_SENTENCE} With files also present, the files run and method_id, which must then be bare, only files the run under its method. Provide files, method_ref, or method_id (files + method_id together is also legal).`,
     ),
   pipe_code: z
     .string()
@@ -104,8 +117,9 @@ export const mthdsRunInputSchema = {
     .record(z.string(), z.unknown())
     .optional()
     .describe(
-      "Method inputs — fill the template returned by mthds_inputs_template. Binary inputs ride reachable https URLs.",
+      "Method inputs — fill the template returned by mthds_inputs_template. Binary inputs ride reachable https URLs. Supply at most ONE of inputs / inputs_path.",
     ),
+  inputs_path: inputsPathSchema,
 };
 
 /** The input schema of the status and results tools alike, built afresh for each. */
@@ -161,6 +175,7 @@ export const mthdsRunOutputSchema = z.object({
   method_provenance: methodProvenanceSchema
     .optional()
     .describe("method_ref runs only — the address, tag, and resolved commit SHA that was fetched."),
+  method_version: runMethodVersionSchema,
   available_view_specs: z
     .array(runViewSpecSchema)
     .describe(
@@ -246,6 +261,12 @@ const runStatusStructuredContentSchema = z.object({
     .describe("Server backoff hint — check again after this many seconds."),
   created_at: z.string().optional(),
   finished_at: z.string().nullable().optional(),
+  method_version: z
+    .union([z.number().int(), z.literal("draft")])
+    .optional()
+    .describe(
+      'Runs of a saved method by its id: the version that ran, or "draft". Absent for a run of files or of an address, and on a platform that does not record it.',
+    ),
   failure: runFailureSchema
     .optional()
     .describe(`Terminal statuses other than COMPLETED only. ${FAILURE_FIELD_DESCRIPTION}`),
@@ -356,9 +377,10 @@ export interface MthdsRunInput {
   method_id?: string;
   pipe_code?: string;
   inputs?: Record<string, unknown>;
+  inputs_path?: string;
 }
 
-/** The run request after `{ path }` resolution — what the checks and the API call consume. */
+/** The run request after `{ path }` and `inputs_path` resolution — what the checks and the API call consume. */
 interface ResolvedRunRequest {
   files: SubmittedFile[];
   method_ref?: string;
@@ -381,6 +403,8 @@ export interface RunStartStructuredContent {
   created_at?: string;
   /** `method_ref` runs only — the address, tag, and resolved commit SHA that was fetched. */
   method_provenance?: MethodProvenance;
+  /** Runs by `method_id` alone: the version that runs, or `"draft"`. */
+  method_version?: number | "draft";
   available_view_specs: RunViewSpec[];
   errors?: ToolError[];
 }
@@ -394,6 +418,8 @@ export interface RunStatusStructuredContent {
   retry_after_seconds?: number | null;
   created_at?: string;
   finished_at?: string | null;
+  /** Runs of a saved method by id: the version that ran, or `"draft"`, when the platform records it. */
+  method_version?: number | "draft";
   /** Terminal statuses other than COMPLETED, when the run stored an error report. */
   failure?: RunFailure;
   errors?: ToolError[];
@@ -479,12 +505,16 @@ interface RunClient {
   start(options: PipelexStartOptions): Promise<PipelexRunResultStart>;
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
+  /** `GET /v1/version`, read only to word the hint of a refused suffix — a selector is always sent as given; optional on a test seam. */
+  version?(): Promise<unknown>;
 }
 
-export interface RunContext extends ApiConfig {
+export interface RunContext extends ApiConfig, MethodVersionsAware {
   client?: RunClient;
   /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
+  /** Reads `inputs_path` from disk (local workshop, `.json` only); without one `inputs_path` is refused. */
+  inputsResolver?: FileResolver;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
 }
@@ -824,7 +854,10 @@ function narrowMethodProvenance(value: unknown): MethodProvenance | undefined {
  * the run explainable when a tag moves, so it is surfaced to the model and
  * echoed in the summary). The workshop renders no views, so it advertises none.
  */
-export function startResult(ack: PipelexRunResultStart): RunStartResult {
+export function startResult(
+  ack: PipelexRunResultStart,
+  content?: RunContentReport,
+): RunStartResult {
   const runStatus = narrowRunStatus(ack.state);
   const createdAt = narrowString(ack.created_at);
   const provenance = narrowMethodProvenance(ack.method_provenance);
@@ -835,6 +868,7 @@ export function startResult(ack: PipelexRunResultStart): RunStartResult {
     ...(runStatus === undefined ? {} : { run_status: runStatus }),
     ...(createdAt === undefined ? {} : { created_at: createdAt }),
     ...(provenance === undefined ? {} : { method_provenance: provenance }),
+    ...(content?.ran === undefined ? {} : { method_version: content.ran }),
     available_view_specs: [],
   };
 
@@ -842,6 +876,9 @@ export function startResult(ack: PipelexRunResultStart): RunStartResult {
     "# Run started",
     `The run was accepted; its durable id is \`${ack.pipeline_run_id}\`.`,
   ];
+  if (content?.sentence !== undefined) {
+    summaryParts.push(content.sentence);
+  }
   if (provenance !== undefined) {
     summaryParts.push(
       `Resolved \`${provenance.address}\`${provenance.tag === null ? "" : ` at tag \`${provenance.tag}\``} to commit \`${provenance.commit_sha}\` — the run executes exactly that snapshot.`,
@@ -867,6 +904,14 @@ export function statusResult(read: RunRead): RunStatusResult {
   const failure = ended
     ? runFailureOf(read.pipeline_run_id, read.error, read.finished_at)
     : undefined;
+  // A hosted extension, narrowed rather than trusted like the ack's.
+  const methodVersion =
+    read.method_version === "draft" ||
+    (typeof read.method_version === "number" &&
+      Number.isSafeInteger(read.method_version) &&
+      read.method_version >= 1)
+      ? read.method_version
+      : undefined;
 
   const structuredContent: RunStatusStructuredContent = {
     status: "ok",
@@ -879,6 +924,7 @@ export function statusResult(read: RunRead): RunStatusResult {
       : { retry_after_seconds: read.retry_after_seconds }),
     created_at: read.created_at,
     ...(read.finished_at === undefined ? {} : { finished_at: read.finished_at }),
+    ...(methodVersion === undefined ? {} : { method_version: methodVersion }),
     ...(failure === undefined ? {} : { failure }),
   };
 
@@ -1220,11 +1266,22 @@ export async function startMthdsRun(
   context: RunContext = buildRunContext(),
 ): Promise<RunStartResult> {
   const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
-  if (resolution.errors.length > 0) {
-    return startErrorResult("Run was not started: request input is invalid.", resolution.errors);
+  const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
+    required: false,
+  });
+  const resolutionErrors = [...resolution.errors, ...inputsResolution.errors];
+  if (resolutionErrors.length > 0) {
+    return startErrorResult("Run was not started: request input is invalid.", resolutionErrors);
   }
 
-  const request: ResolvedRunRequest = { ...input, files: resolution.files };
+  // `inputs_path` is settled into `inputs` here and goes no further: the start
+  // request cannot tell a loaded file from an inline object.
+  const { inputs_path: _inputsPath, inputs: _inlineInputs, ...selection } = input;
+  const request: ResolvedRunRequest = {
+    ...selection,
+    files: resolution.files,
+    ...(inputsResolution.inputs === undefined ? {} : { inputs: inputsResolution.inputs }),
+  };
   const inputErrors = validateRunRequest(request);
   if (inputErrors.length > 0) {
     return startErrorResult("Run was not started: request input is invalid.", inputErrors);
@@ -1243,11 +1300,39 @@ export async function startMthdsRun(
           ? RUN_START_BY_ID_ERROR_OPTIONS
           : RUN_START_MIXED_ERROR_OPTIONS;
 
+  // Beside files, method_id is linkage only and must be bare; alone, it names
+  // what runs, and its selector is planned against the platform's answer
+  // (`method-versions.ts`).
+  if (request.method_id !== undefined && request.files.length > 0) {
+    const linkageError = linkageSuffixError(request.method_id);
+    if (linkageError !== undefined) {
+      return startErrorResult("Run was not started: request input is invalid.", [linkageError]);
+    }
+  }
+
+  let plan: SelectorPlan | undefined;
   try {
-    const ack = await runClient(context).start(toStartOptions(request));
-    return startResult(ack);
+    const client = runClient(context);
+    let sent = request;
+    if (request.method_id !== undefined && request.files.length === 0) {
+      plan = planById(request.method_id, context.methodVersions, client, {
+        needBareReport: false,
+      });
+      sent = { ...request, method_id: plan.send };
+    }
+    const ack = await client.start(toStartOptions(sent));
+    if (plan === undefined) return startResult(ack);
+    const content = runContentReport(plan, ack.method_version);
+    // An acknowledgement naming the version that runs is the platform's own
+    // word that it resolves selectors, worth more than any cached answer; one
+    // naming none for a bare id is its word that it does not, so a cached
+    // `supported` is dropped before another tool reads a bare id as `latest`.
+    if (content.proved) noteMethodVersionsSupported(context.methodVersions);
+    else if (content.disproved) forgetMethodVersionsSupported(context.methodVersions);
+    return startResult(ack, content);
   } catch (err) {
-    const error = classifyStartError(err, { ...classifyOptions, auth: context.authError });
+    const classified = classifyStartError(err, { ...classifyOptions, auth: context.authError });
+    const error = await selectorFailure(err, classified, plan, context.methodVersions);
     return startErrorResult(startSummaryForError(error), [error]);
   }
 }

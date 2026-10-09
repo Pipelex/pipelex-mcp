@@ -10,6 +10,14 @@ import { z } from "zod";
 import { inputsTemplateFor } from "./inputs-template.js";
 import type { ProjectedInputsTemplate } from "./inputs-template.js";
 import {
+  METHOD_ID_SELECTOR_SENTENCE,
+  methodVersionReportSchema,
+  planById,
+  selectorFailure,
+  withMethodContent,
+} from "./method-versions.js";
+import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
+import {
   METHOD_REF_GRAMMAR,
   buildApiConfig,
   classifyError,
@@ -61,7 +69,7 @@ export const mthdsInputsInputSchema = {
     .string()
     .optional()
     .describe(
-      "Catalog id (mt_…) of a registered method. Projects the template from the method's CURRENT stored content — requires an API key (the catalog is org-scoped). Supply exactly ONE of files / method_ref / method_id.",
+      `Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of files / method_ref / method_id.`,
     ),
   pipe_ref: z
     .string()
@@ -99,6 +107,7 @@ const inputsStructuredContentSchema = z.object({
     .string()
     .optional()
     .describe('The fill-in inputs template, as raw TOML text (format "toml").'),
+  method_version: methodVersionReportSchema,
   validation_errors: z.array(z.unknown()).optional(),
   errors: z.array(toolErrorSchema).optional(),
 });
@@ -132,6 +141,8 @@ export interface InputsStructuredContent {
   explicit?: boolean;
   inputs?: Record<string, unknown>;
   inputs_toml?: string;
+  /** By-id calls only: the content the template was projected from, when this server can tell. */
+  method_version?: MethodVersionReport;
   validation_errors?: unknown[];
   errors?: ToolError[];
 }
@@ -150,9 +161,11 @@ export interface InputsTemplateChoice {
 /** The slice of `PipelexApiClient` the inputs capability calls (test seam): one `POST /v1/pipe-io`. */
 interface InputsClient {
   pipeIo(request: PipeIORequest): Promise<PipeIOResponse>;
+  /** `GET /v1/version`, read to learn whether a bare id names the draft or a version; optional on a test seam. */
+  version?(): Promise<unknown>;
 }
 
-export interface InputsContext extends ApiConfig {
+export interface InputsContext extends ApiConfig, MethodVersionsAware {
   client?: InputsClient;
   /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
@@ -271,10 +284,27 @@ export async function buildMthdsInputs(
   }
 
   let report: PipeIOResponse;
+  let plan: SelectorPlan | undefined;
   try {
-    report = await inputsClient(context).pipeIo(toPipeIoRequest(request));
+    const client = inputsClient(context);
+    let sent = request;
+    if (request.method_id !== undefined) {
+      // A bare id reads the draft on a platform that does not resolve version
+      // selectors yet, and the latest published version on one that does: the
+      // platform is asked beside the request, which never waits on it, and the
+      // result says which content the template came from (`method-versions.ts`).
+      plan = planById(request.method_id, context.methodVersions, client, {
+        needBareReport: true,
+      });
+      sent = { ...request, method_id: plan.send };
+    }
+    report = await client.pipeIo(toPipeIoRequest(sent));
   } catch (err) {
-    const error = classifyError(err, { ...inputsErrorOptions(request), auth: context.authError });
+    const classified = classifyError(err, {
+      ...inputsErrorOptions(request),
+      auth: context.authError,
+    });
+    const error = await selectorFailure(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);
   }
 
@@ -283,10 +313,11 @@ export async function buildMthdsInputs(
   // descriptor the projection can walk for it) is a reachable contract
   // violation, surfaced as a runtime no-verdict error.
   try {
-    return inputsResult(report, {
+    const result = inputsResult(report, {
       explicit: request.explicit ?? true,
       format: request.format ?? "json",
     });
+    return await withMethodContent(result, plan, "projected the template from");
   } catch (err) {
     return errorResult(
       "Inputs template produced no verdict: the Pipelex API returned a malformed report.",
