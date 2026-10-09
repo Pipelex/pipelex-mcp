@@ -31,7 +31,7 @@ make dev-local       # run the stdio server from TypeScript (tsx)
 make inspect-local   # open MCP Inspector against it
 ```
 
-Neither target reads `.env`: the server takes `PIPELEX_BASE_URL` and `PIPELEX_API_KEY` from the environment it is started in, so export them in your shell or set them on the command line. To develop against a local runner, start `pipelex-api` with `make run` in its checkout, which serves `http://localhost:8081`, and point the workshop at it with `PIPELEX_BASE_URL=http://localhost:8081`. A local runner checks no key, so `PIPELEX_API_KEY` can stay unset there, but it has neither the catalog nor the durable run lifecycle: a catalog id and the run family need the hosted API.
+Neither target reads `.env`: the server takes `PIPELEX_BASE_URL` and `PIPELEX_API_KEY` from the environment it is started in, so export them in your shell or set them on the command line. To develop against a local runner, start the Pipelex API server with `make -C api run` in a checkout of [`Pipelex/pipelex`](https://github.com/Pipelex/pipelex), whose `api/` member it is; it serves `http://localhost:8081`, and you point the workshop at it with `PIPELEX_BASE_URL=http://localhost:8081`. A local runner checks no key, so `PIPELEX_API_KEY` can stay unset there, but it has neither the catalog nor the durable run lifecycle: a catalog id and the run family need the hosted API.
 
 ## Build
 

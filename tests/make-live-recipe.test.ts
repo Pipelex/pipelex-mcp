@@ -170,5 +170,8 @@ describe("the live targets' preflight", () => {
       "PIPELEX_BASE_URL / PIPELEX_API_KEY in the environment are ignored here",
     );
     expect(output).toContain("ERROR: no Pipelex API reachable at http://127.0.0.1:1");
+    expect(output).toContain(
+      "start the OSS runner with 'make -C api run' in a checkout of Pipelex/pipelex",
+    );
   });
 });
