@@ -1,22 +1,21 @@
 import { describe, expect, it } from "vitest";
 
 import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
+import type { ModelCheckCategory, ModelReferenceVerdict } from "@pipelex/sdk";
 import { MODEL_CATEGORIES } from "mthds/protocol";
 import type { ModelCategory, ModelDeck } from "mthds/protocol";
 
 import {
-  MAX_REFERENCE_LENGTH,
   PIPE_TYPE_OF,
-  closeMatches,
   mthdsModelsInputSchema,
+  mthdsModelsOutputSchema,
   modelsToolResult,
-  parseModelReference,
   readMthdsModels,
-  similarity,
 } from "./models.js";
 import type {
   ModelDeckListing,
   ModelReferenceCheck,
+  ModelsClient,
   ModelsContext,
   ModelsResult,
   MthdsModelsInput,
@@ -63,57 +62,61 @@ const DECK = {
   },
 };
 
+/** What a `not_found` verdict carries beside its own lists, so a test states only those. */
+const NOTHING_ELSE = { suggestions: [], other_kinds: [], other_categories: [] };
+
+/** A verdict shaped as `GET /v1/models/check` answers it (conformance's `pipelex-models-api` spec). */
+function verdict(fields: Record<string, unknown>): ModelReferenceVerdict {
+  return { category: null, resolution: "resolved", ...NOTHING_ELSE, ...fields } as never;
+}
+
 interface Recorded {
-  calls: Array<ModelCategory | undefined>;
+  listings: Array<ModelCategory | undefined>;
+  checks: Array<{ reference: string; category: ModelCheckCategory | undefined }>;
   context: ModelsContext;
 }
 
-function contextAnswering(deck: unknown = DECK): Recorded {
-  const calls: Array<ModelCategory | undefined> = [];
-  return {
-    calls,
-    context: {
-      baseUrl: DEFAULT_API_URL,
-      client: {
-        async models(category?: ModelCategory) {
-          calls.push(category);
-          return deck as ModelDeck;
-        },
-      },
+/** A client that answers the listing with `deck` and the check with `answer`, recording each call. */
+function contextAnswering(
+  options: { deck?: unknown; answer?: unknown } = {},
+  overrides: Partial<ModelsContext> = {},
+): Recorded {
+  const listings: Recorded["listings"] = [];
+  const checks: Recorded["checks"] = [];
+  const client: ModelsClient = {
+    async models(category) {
+      listings.push(category);
+      return (options.deck ?? DECK) as ModelDeck;
+    },
+    async checkModelReference(reference, category) {
+      checks.push({ reference, category });
+      if (options.answer === undefined) throw new Error("the check was not expected");
+      return options.answer as ModelReferenceVerdict;
     },
   };
+  return { listings, checks, context: { baseUrl: DEFAULT_API_URL, client, ...overrides } };
 }
 
 function contextFailing(error: unknown, overrides: Partial<ModelsContext> = {}): ModelsContext {
+  const fail = async (): Promise<never> => {
+    throw error;
+  };
   return {
     baseUrl: DEFAULT_API_URL,
-    client: {
-      async models() {
-        throw error;
-      },
-    },
+    client: { models: fail, checkModelReference: fail },
     ...overrides,
   };
 }
 
 async function listing(input: MthdsModelsInput = {}, deck: unknown = DECK) {
-  const recorded = contextAnswering(deck);
+  const recorded = contextAnswering({ deck });
   const result = await readMthdsModels(input, recorded.context);
   return { result, structured: result.structuredContent as ModelDeckListing, recorded };
 }
 
-async function checkAgainst(input: MthdsModelsInput, deck: unknown) {
-  const recorded = contextAnswering(deck);
+async function check(input: MthdsModelsInput, answer: unknown) {
+  const recorded = contextAnswering({ answer });
   const result = await readMthdsModels(input, recorded.context);
-  return { result, structured: result.structuredContent as ModelReferenceCheck };
-}
-
-async function check(reference: string, category?: ModelCategory) {
-  const recorded = contextAnswering();
-  const result = await readMthdsModels(
-    { reference, ...(category === undefined ? {} : { category }) },
-    recorded.context,
-  );
   return { result, structured: result.structuredContent as ModelReferenceCheck, recorded };
 }
 
@@ -123,14 +126,19 @@ function firstError(result: ModelsResult) {
     : undefined;
 }
 
-function apiError(status: number, message: string): ApiResponseError {
+function apiError(
+  status: number,
+  message: string,
+  errorType: string = status === 402 ? "subscription_required" : "request_error",
+  route = "/v1/models",
+): ApiResponseError {
   return new ApiResponseError(
     `HTTP ${status}`,
-    `${DEFAULT_API_URL}/v1/models`,
+    `${DEFAULT_API_URL}${route}`,
     status,
     message,
     "{}",
-    status === 402 ? "subscription_required" : "request_error",
+    errorType,
     message,
     undefined,
     undefined,
@@ -138,15 +146,18 @@ function apiError(status: number, message: string): ApiResponseError {
 }
 
 describe("the categories", () => {
-  it("are the protocol's, in the protocol's order, each with the pipe type that names it", () => {
-    expect(mthdsModelsInputSchema.category.unwrap().options).toEqual([...MODEL_CATEGORIES]);
+  it("are the protocol's, in the protocol's order, then doc_gen, each with the pipe type that names it", () => {
+    expect(mthdsModelsInputSchema.category.unwrap().options).toEqual([
+      ...MODEL_CATEGORIES,
+      "doc_gen",
+    ]);
     expect(Object.keys(PIPE_TYPE_OF)).toEqual([...MODEL_CATEGORIES]);
     expect(PIPE_TYPE_OF.judgment).toBe("PipeJudge");
   });
 
   it("names every category and its pipe type in the category's description", () => {
     expect(mthdsModelsInputSchema.category.description).toBe(
-      "Only this category: llm for a PipeLLM, extract for a PipeExtract, img_gen for a PipeImgGen, search for a PipeSearch, judgment for a PipeJudge. Omit it for every category.",
+      "Only this category: llm for a PipeLLM, extract for a PipeExtract, img_gen for a PipeImgGen, search for a PipeSearch, judgment for a PipeJudge, or, when checking a reference, doc_gen for a PipeDocGen, which the deck does not list. Omit it for every category; a check then covers doc_gen as well.",
     );
   });
 });
@@ -155,7 +166,8 @@ describe("listing the deck", () => {
   it("lists every category, in order, each reference written as it is typed", async () => {
     const { structured, recorded } = await listing();
 
-    expect(recorded.calls).toEqual([undefined]);
+    expect(recorded.listings).toEqual([undefined]);
+    expect(recorded.checks).toEqual([]);
     expect(structured.status).toBe("ok");
     expect(structured).not.toHaveProperty("category");
     expect(structured.deck.map((each) => each.category)).toEqual([
@@ -191,7 +203,7 @@ describe("listing the deck", () => {
     };
     const { structured, recorded } = await listing({ category: "llm" }, onlyLlm);
 
-    expect(recorded.calls).toEqual(["llm"]);
+    expect(recorded.listings).toEqual(["llm"]);
     expect(structured.category).toBe("llm");
     expect(structured.deck.map((each) => each.category)).toEqual(["llm"]);
   });
@@ -301,231 +313,418 @@ describe("listing the deck", () => {
 });
 
 describe("checking a reference", () => {
-  it("resolves a preset, reading the whole deck even when a category is named", async () => {
-    const { structured, recorded, result } = await check("$writing-factual", "llm");
+  it("asks the runner, with the reference as written and the category asked, and never reads the deck", async () => {
+    const { structured, recorded, result } = await check(
+      { reference: "  $writing-factual  ", category: "llm" },
+      verdict({
+        reference: "$writing-factual",
+        kind: "preset",
+        name: "writing-factual",
+        category: "llm",
+        matches: [
+          {
+            category: "llm",
+            resolves_to: "claude-4.6-sonnet",
+            target: "@best-claude",
+            description: "Factual writing,\nplain and sourced.",
+          },
+        ],
+      }),
+    );
 
-    // The whole deck, so that a miss can still be placed in another category.
-    expect(recorded.calls).toEqual([undefined]);
+    expect(recorded.checks).toEqual([{ reference: "  $writing-factual  ", category: "llm" }]);
+    expect(recorded.listings).toEqual([]);
     expect(structured).toEqual({
       status: "ok",
       category: "llm",
       reference: "$writing-factual",
       kind: "preset",
+      name: "writing-factual",
       resolution: "resolved",
-      matches: [{ category: "llm" }],
+      matches: [
+        {
+          category: "llm",
+          resolves_to: "claude-4.6-sonnet",
+          target: "@best-claude",
+          description: "Factual writing,\nplain and sourced.",
+        },
+      ],
       suggestions: [],
       other_kinds: [],
       other_categories: [],
     });
+    expect(mthdsModelsOutputSchema.safeParse(structured).success).toBe(true);
     expect(result.summary).toContain("`$writing-factual` resolves: it is a preset.");
+    expect(result.summary).toContain(
+      "- llm (PipeLLM) → `@best-claude`, which runs `claude-4.6-sonnet` now: Factual writing, plain and sourced.",
+    );
     expect(result.summary).toContain("not what this account may use");
   });
 
-  it("resolves an alias in every category that holds it, with its model there", async () => {
-    const { structured, result } = await check("@default-small");
+  it("sends no category when none was asked, and leaves it out of the result", async () => {
+    const { structured, recorded } = await check(
+      { reference: "$vision" },
+      verdict({
+        reference: "$vision",
+        kind: "preset",
+        name: "vision",
+        matches: [
+          { category: "llm", resolves_to: "gpt-5.6-sol", target: "gpt-5.6-sol", description: null },
+        ],
+      }),
+    );
+
+    expect(recorded.checks).toEqual([{ reference: "$vision", category: undefined }]);
+    expect(structured).not.toHaveProperty("category");
+    expect(structured.matches).toEqual([
+      { category: "llm", resolves_to: "gpt-5.6-sol", target: "gpt-5.6-sol", description: null },
+    ]);
+  });
+
+  it("relays an alias in every category that holds it, and warns where it reaches no model", async () => {
+    const { structured, result } = await check(
+      { reference: "@default-small" },
+      verdict({
+        reference: "@default-small",
+        kind: "alias",
+        name: "default-small",
+        matches: [
+          { category: "llm", resolves_to: "gpt-5.6-luna", target: "gpt-5.6-luna" },
+          { category: "img_gen", resolves_to: null, target: "gpt-image-1-mini" },
+        ],
+      }),
+    );
 
     expect(structured.resolution).toBe("resolved");
     expect(structured.matches).toEqual([
-      { category: "llm", target: "gpt-5.6-luna" },
-      { category: "img_gen", target: "gpt-image-1-mini" },
+      { category: "llm", resolves_to: "gpt-5.6-luna", target: "gpt-5.6-luna" },
+      { category: "img_gen", resolves_to: null, target: "gpt-image-1-mini" },
     ]);
     expect(result.summary).toContain("it is an alias");
-    expect(result.summary).toContain("- img_gen (PipeImgGen) → `gpt-image-1-mini`");
+    expect(result.summary).toContain("- llm (PipeLLM) → `gpt-5.6-luna`\n");
+    expect(result.summary).toContain(
+      "- img_gen (PipeImgGen) → `gpt-image-1-mini`, which reaches no model this runner can call now",
+    );
+    expect(result.summary).toContain("a validation accepts it but a run through it fails");
   });
 
-  it("resolves a waterfall with its steps in order", async () => {
-    const { structured } = await check("~robust-llm");
+  it("relays a waterfall with its steps in order and the step a run calls now", async () => {
+    const { structured, result } = await check(
+      { reference: "~robust-llm" },
+      verdict({
+        reference: "~robust-llm",
+        kind: "waterfall",
+        name: "robust-llm",
+        matches: [
+          {
+            category: "llm",
+            resolves_to: "gpt-5.6-sol",
+            fallbacks: ["claude-4.6-sonnet", "gpt-5.6-sol"],
+          },
+        ],
+      }),
+    );
 
     expect(structured.matches).toEqual([
-      { category: "llm", fallbacks: ["claude-4.6-sonnet", "gpt-5.6-sol"] },
+      {
+        category: "llm",
+        resolves_to: "gpt-5.6-sol",
+        fallbacks: ["claude-4.6-sonnet", "gpt-5.6-sol"],
+      },
     ]);
+    expect(result.summary).toContain(
+      "- llm (PipeLLM) → `claude-4.6-sonnet`, `gpt-5.6-sol`, which runs `gpt-5.6-sol` now",
+    );
   });
 
-  it("resolves a bare handle an alias or a waterfall names, and says which", async () => {
-    const { structured, result } = await check("gpt-5.6-sol");
+  it("relays a bare handle with who names it, and one nothing names", async () => {
+    const named = await check(
+      { reference: "gpt-5.6-sol" },
+      verdict({
+        reference: "gpt-5.6-sol",
+        kind: "handle",
+        name: "gpt-5.6-sol",
+        matches: [
+          { category: "llm", resolves_to: "gpt-5.6-sol", via: ["@best-gpt", "~robust-llm"] },
+        ],
+      }),
+    );
+    expect(named.structured.kind).toBe("handle");
+    expect(named.structured.matches).toEqual([
+      { category: "llm", resolves_to: "gpt-5.6-sol", via: ["@best-gpt", "~robust-llm"] },
+    ]);
+    expect(named.result.summary).toContain(
+      "- llm (PipeLLM), named by `@best-gpt`, `~robust-llm`\n",
+    );
 
-    expect(structured.kind).toBe("handle");
-    expect(structured.resolution).toBe("resolved");
-    expect(structured.matches).toEqual([{ category: "llm", via: ["@best-gpt", "~robust-llm"] }]);
-    expect(result.summary).toContain("named by `@best-gpt`, `~robust-llm`");
+    // A model the runner calls that no deck entry names resolves all the same:
+    // the runner knows every model it can call, which the deck never listed.
+    const unnamed = await check(
+      { reference: "claude-4.5-sonnet", category: "llm" },
+      verdict({
+        reference: "claude-4.5-sonnet",
+        kind: "handle",
+        name: "claude-4.5-sonnet",
+        category: "llm",
+        matches: [{ category: "llm", resolves_to: "claude-4.5-sonnet", via: [] }],
+      }),
+    );
+    expect(unnamed.structured.resolution).toBe("resolved");
+    expect(unnamed.result.summary).toContain("- llm (PipeLLM)\n");
   });
 
-  it("calls a handle nothing names unconfirmed, never not found, and sends it to validation", async () => {
-    const { structured, result } = await check("claude-4.5-sonnet");
-
-    expect(structured.resolution).toBe("unconfirmed");
-    expect(structured.suggestions).toEqual(["claude-4.6-sonnet"]);
-    expect(result.summary).toContain("mthds_validate");
-    expect(result.summary).toContain("prefer a preset");
-  });
-
-  it("says a preset it does not hold does not resolve, with the nearest names in the runner's order", async () => {
-    const { structured, result } = await check("$writing-factul");
+  it("says a reference it does not hold does not resolve, with the runner's nearest names", async () => {
+    const { structured, result } = await check(
+      { reference: "$writing-factul" },
+      verdict({
+        reference: "$writing-factul",
+        kind: "preset",
+        name: "writing-factul",
+        resolution: "not_found",
+        matches: [],
+        suggestions: ["$writing-factual", "$writing-factual-cheap", "$writing-creative"],
+      }),
+    );
 
     expect(structured.resolution).toBe("not_found");
     expect(structured.matches).toEqual([]);
-    // Python's difflib.get_close_matches over the same names, cutoff 0.5.
     expect(structured.suggestions).toEqual([
       "$writing-factual",
       "$writing-factual-cheap",
       "$writing-creative",
     ]);
-    expect(result.summary).toContain("no preset in any category has that name");
-    expect(result.summary).toContain("Nearest names: `$writing-factual`");
+    expect(result.summary).toContain(
+      "`$writing-factul` does not resolve: no preset in any category has that name, so a validation refuses it too.",
+    );
+    expect(result.summary).toContain(
+      "Nearest names: `$writing-factual`, `$writing-factual-cheap`, `$writing-creative`.",
+    );
   });
 
-  it("names the right sigil for a name that exists as another kind", async () => {
-    const bare = await check("best-claude");
-    expect(bare.structured.resolution).toBe("unconfirmed");
+  it("says a handle that does not resolve is no model the runner can call", async () => {
+    const { result } = await check(
+      { reference: "gpt-9", category: "llm" },
+      verdict({
+        reference: "gpt-9",
+        kind: "handle",
+        name: "gpt-9",
+        category: "llm",
+        resolution: "not_found",
+        matches: [],
+      }),
+    );
+
+    expect(result.summary).toContain(
+      "no model this runner can call in llm (PipeLLM), and no alias or waterfall there, has that name",
+    );
+  });
+
+  it("names the right sigil for a name that exists as another kind, first", async () => {
+    const bare = await check(
+      { reference: "best-claude" },
+      verdict({
+        reference: "best-claude",
+        kind: "handle",
+        name: "best-claude",
+        resolution: "not_found",
+        matches: [],
+        other_kinds: ["@best-claude"],
+        suggestions: ["claude-4.6-sonnet"],
+      }),
+    );
     expect(bare.structured.other_kinds).toEqual(["@best-claude"]);
-    expect(bare.result.summary).toContain(
+    const lines = bare.result.summary.split("\n");
+    expect(lines[1]).toBe(
       "The same name exists as `@best-claude`, an alias: write it with that sigil.",
     );
-    // A missing sigil is the fault, so the summary does not send the caller to
-    // validate a handle it never meant to write.
-    expect(bare.result.summary).not.toContain("mthds_validate");
 
-    const asPreset = await check("$best-gpt");
-    expect(asPreset.structured.resolution).toBe("not_found");
-    expect(asPreset.structured.other_kinds).toEqual(["@best-gpt"]);
-
-    const asAlias = await check("@gpt-5.6-sol");
+    const asAlias = await check(
+      { reference: "@gpt-5.6-sol" },
+      verdict({
+        reference: "@gpt-5.6-sol",
+        kind: "alias",
+        name: "gpt-5.6-sol",
+        resolution: "not_found",
+        matches: [],
+        other_kinds: ["gpt-5.6-sol"],
+      }),
+    );
     expect(asAlias.structured.other_kinds).toEqual(["gpt-5.6-sol"]);
     expect(asAlias.result.summary).toContain("write it bare, without a sigil");
   });
 
   it("places a reference of the wrong category in the category that holds it", async () => {
-    const { structured, result } = await check("$gen-image", "llm");
+    const { structured, result } = await check(
+      { reference: "$gen-image", category: "llm" },
+      verdict({
+        reference: "$gen-image",
+        kind: "preset",
+        name: "gen-image",
+        category: "llm",
+        resolution: "not_found",
+        matches: [],
+        other_categories: ["img_gen"],
+      }),
+    );
 
     expect(structured.resolution).toBe("not_found");
     expect(structured.other_categories).toEqual(["img_gen"]);
     expect(result.summary).toContain("It resolves in img_gen (PipeImgGen), not in llm (PipeLLM)");
   });
 
-  it("resolves a reference in a category it does not know, and places it there", async () => {
-    const unknown = {
-      models: [
-        { name: "writing-factual", type: "llm" },
-        { name: "voice-clear", type: "tts" },
-      ],
-      aliases: { tts: { "default-voice": "some-voice" } },
-    };
-    const anywhere = await checkAgainst({ reference: "@default-voice" }, unknown);
-    expect(anywhere.structured).toMatchObject({
-      resolution: "resolved",
-      matches: [{ category: "tts", target: "some-voice" }],
-    });
-    expect(anywhere.result.summary).toContain(
-      "- tts (a category this tool does not know) → `some-voice`",
+  it("labels doc_gen with its pipe type and a category it does not know as such", async () => {
+    const { structured, result } = await check(
+      { reference: "@default-docs" },
+      verdict({
+        reference: "@default-docs",
+        kind: "alias",
+        name: "default-docs",
+        matches: [
+          { category: "doc_gen", resolves_to: "docgen-pdf", target: "docgen-pdf" },
+          { category: "tts", resolves_to: "some-voice", target: "some-voice" },
+        ],
+      }),
     );
 
-    const misplaced = await checkAgainst({ reference: "$voice-clear", category: "llm" }, unknown);
-    expect(misplaced.structured).toMatchObject({
-      resolution: "not_found",
-      other_categories: ["tts"],
-    });
-    expect(misplaced.result.summary).toContain(
-      "It resolves in tts (a category this tool does not know), not in llm (PipeLLM)",
+    expect(structured.matches.map((match) => match.category)).toEqual(["doc_gen", "tts"]);
+    expect(result.summary).toContain("- doc_gen (PipeDocGen) → `docgen-pdf`");
+    expect(result.summary).toContain("- tts (a category this tool does not know) → `some-voice`");
+  });
+
+  it("reads a resolution it does not know as not resolved, and drops its matches", async () => {
+    const { structured, result } = await check(
+      { reference: "$vision" },
+      verdict({
+        reference: "$vision",
+        kind: "preset",
+        name: "vision",
+        resolution: "retired",
+        matches: [{ category: "llm", resolves_to: null, target: "gpt-4o", description: null }],
+      }),
     );
+
+    expect(structured.resolution).toBe("not_found");
+    expect(structured.matches).toEqual([]);
+    expect(result.summary).toContain("`$vision` does not resolve");
   });
 
-  it("reports no other category when none was named", async () => {
-    const { structured } = await check("$nowhere");
+  it("checks a reference in doc_gen when asked, which the listing does not take", async () => {
+    const { structured, recorded, result } = await check(
+      { reference: "$docs-letter", category: "doc_gen" },
+      verdict({
+        reference: "$docs-letter",
+        kind: "preset",
+        name: "docs-letter",
+        category: "doc_gen",
+        resolution: "not_found",
+        matches: [],
+        other_categories: ["llm"],
+      }),
+    );
 
-    expect(structured.other_categories).toEqual([]);
+    expect(recorded.checks).toEqual([{ reference: "$docs-letter", category: "doc_gen" }]);
+    expect(structured.category).toBe("doc_gen");
+    expect(mthdsModelsOutputSchema.safeParse(structured).success).toBe(true);
+    expect(result.summary).toContain("It resolves in llm (PipeLLM), not in doc_gen (PipeDocGen)");
   });
 
-  it("accepts the spelled-out namespaces the runner accepts", async () => {
-    expect((await check("alias:best-gpt", "llm")).structured).toMatchObject({
-      kind: "alias",
-      resolution: "resolved",
-      matches: [{ category: "llm", target: "gpt-5.6-sol" }],
-    });
-    expect((await check("handle:gpt-image-2")).structured).toMatchObject({
-      kind: "handle",
-      resolution: "resolved",
-      matches: [{ category: "img_gen", via: ["@best-gpt"] }],
-    });
-    expect((await check("  preset:vision  ")).structured).toMatchObject({
-      reference: "preset:vision",
-      kind: "preset",
-      resolution: "resolved",
-    });
+  it("keeps only the fields the contract declares", async () => {
+    const { structured } = await check(
+      { reference: "@best-gpt" },
+      verdict({
+        reference: "@best-gpt",
+        kind: "alias",
+        name: "best-gpt",
+        category: null,
+        extension: "a field a later runner adds",
+        matches: [
+          { category: "llm", resolves_to: "gpt-5.6-sol", target: "gpt-5.6-sol", weight: 3 },
+        ],
+      }),
+    );
+
+    expect(structured).not.toHaveProperty("extension");
+    expect(structured.matches).toEqual([
+      { category: "llm", resolves_to: "gpt-5.6-sol", target: "gpt-5.6-sol" },
+    ]);
   });
 
   it.each([
-    ["", "it is empty"],
-    ["   ", "it is empty"],
-    ["$", "it has no name after its prefix"],
-    ["@", "it has no name after its prefix"],
-    ["~", "it has no name after its prefix"],
-    ["preset:", "it has no name after its prefix"],
-    ["handle:", "it has no name after its prefix"],
-  ])("refuses %j without calling the API, saying %s", async (reference, fault) => {
-    const { result, recorded } = await check(reference);
+    ["a verdict that is not an object", "nope"],
+    [
+      "a kind the spec does not define",
+      verdict({ reference: "x", kind: "family", name: "x", matches: [] }),
+    ],
+    [
+      "a preset match without its target",
+      verdict({
+        reference: "$a",
+        kind: "preset",
+        name: "a",
+        matches: [{ category: "llm", resolves_to: null, description: null }],
+      }),
+    ],
+    [
+      "a match without resolves_to",
+      verdict({
+        reference: "@a",
+        kind: "alias",
+        name: "a",
+        matches: [{ category: "llm", target: "m" }],
+      }),
+    ],
+    [
+      "a handle match without via",
+      verdict({
+        reference: "m",
+        kind: "handle",
+        name: "m",
+        matches: [{ category: "llm", resolves_to: "m" }],
+      }),
+    ],
+    [
+      "suggestions that are not a list",
+      verdict({ reference: "$a", kind: "preset", name: "a", matches: [], suggestions: "$b" }),
+    ],
+  ])("refuses %s as a malformed verdict", async (_label, answer) => {
+    const { result } = await check({ reference: "$a" }, answer);
 
-    expect(recorded.calls).toEqual([]);
-    expect(result.summary).toBe(`Model reference was not checked: ${fault}.`);
-    expect(firstError(result)).toMatchObject({
-      class: "input_domain",
-      location: "reference",
-      retryable: false,
-    });
-  });
-
-  it("refuses a reference longer than the bound without calling the API", async () => {
-    const atBound = await check(`$${"a".repeat(MAX_REFERENCE_LENGTH - 1)}`);
-    expect(atBound.structured).toMatchObject({ status: "ok", resolution: "not_found" });
-
-    const { result, recorded } = await check(`$${"a".repeat(MAX_REFERENCE_LENGTH)}`);
-    expect(recorded.calls).toEqual([]);
-    expect(firstError(result)).toMatchObject({
-      class: "input_domain",
-      location: "reference",
-      retryable: false,
-    });
-    expect(firstError(result)?.hint).toContain(`at most ${MAX_REFERENCE_LENGTH} characters`);
-  });
-});
-
-describe("parseModelReference", () => {
-  it.each([
-    ["$writing-factual", "preset", "writing-factual"],
-    ["@best-gpt", "alias", "best-gpt"],
-    ["~robust-llm", "waterfall", "robust-llm"],
-    ["gpt-4o", "handle", "gpt-4o"],
-    ["waterfall:robust-llm", "waterfall", "robust-llm"],
-    ["@alias:odd", "alias", "alias:odd"],
-  ])("parses %j as a %s named %j", (value, kind, name) => {
-    expect(parseModelReference(value)).toEqual({
-      ok: true,
-      reference: { raw: value, kind, name },
-    });
-  });
-});
-
-describe("the nearest-name match", () => {
-  it("computes difflib's ratio", () => {
-    // Values printed by Python's difflib.SequenceMatcher(None, a, b).ratio().
-    expect(similarity("writing-factual", "writing-factul")).toBeCloseTo(0.9655172413793104, 12);
-    expect(similarity("abcd", "bcda")).toBe(0.75);
-    expect(similarity("", "")).toBe(1);
-    expect(similarity("abc", "")).toBe(0);
-  });
-
-  it("breaks a tie the way difflib does, the greater name first", () => {
-    // difflib.get_close_matches("ab", ["ab-x", "ab-y", "xab"], 3, 0.0).
-    expect(closeMatches("ab", ["ab-x", "ab-y", "xab"], 3, 0)).toEqual(["xab", "ab-y", "ab-x"]);
+    expect(result.structuredContent.status).toBe("error");
+    expect(firstError(result)).toMatchObject({ class: "runtime", retryable: false });
+    expect(result.summary).toBe(
+      "Model reference check produced no answer: the API returned a malformed verdict.",
+    );
   });
 });
 
 describe("failures", () => {
   it("refuses a category it does not know before calling the API", async () => {
     const recorded = contextAnswering();
-    const result = await readMthdsModels({ category: "tts" as ModelCategory }, recorded.context);
+    const result = await readMthdsModels(
+      { category: "tts" as ModelCategory, reference: "$vision" },
+      recorded.context,
+    );
 
-    expect(recorded.calls).toEqual([]);
+    expect(recorded.listings).toEqual([]);
+    expect(recorded.checks).toEqual([]);
     expect(firstError(result)).toMatchObject({ class: "input_domain", location: "category" });
+  });
+
+  it("refuses doc_gen without a reference before calling the API, since the deck lists none", async () => {
+    const recorded = contextAnswering();
+    const result = await readMthdsModels({ category: "doc_gen" }, recorded.context);
+
+    expect(recorded.listings).toEqual([]);
+    expect(firstError(result)).toMatchObject({ class: "input_domain", location: "category" });
+    expect(firstError(result)?.hint).toContain("Pass reference to check a doc_gen reference");
+  });
+
+  it("refuses a reference that is not text before calling the API", async () => {
+    const recorded = contextAnswering();
+    const result = await readMthdsModels({ reference: 3 as unknown as string }, recorded.context);
+
+    expect(recorded.checks).toEqual([]);
+    expect(firstError(result)).toMatchObject({ class: "input_domain", location: "reference" });
   });
 
   it("maps an unreachable API to a retryable config error", async () => {
@@ -542,20 +741,22 @@ describe("failures", () => {
   });
 
   it("maps an auth failure through the deployment's texture", async () => {
-    for (const error of [apiError(401, "Unauthorized"), apiError(403, "no")]) {
-      const result = await readMthdsModels(
-        {},
-        contextFailing(error, { authError: { location: "api_key", hint: "Use your key." } }),
-      );
-      expect(firstError(result)).toMatchObject({
-        class: "config",
-        location: "api_key",
-        hint: "Use your key.",
-      });
+    for (const input of [{}, { reference: "$vision" }]) {
+      for (const error of [apiError(401, "Unauthorized"), apiError(403, "no")]) {
+        const result = await readMthdsModels(
+          input,
+          contextFailing(error, { authError: { location: "api_key", hint: "Use your key." } }),
+        );
+        expect(firstError(result)).toMatchObject({
+          class: "config",
+          location: "api_key",
+          hint: "Use your key.",
+        });
+      }
     }
   });
 
-  it("blames the category for the runner's 422, and the credential for the platform's 400", async () => {
+  it("blames the category for the listing's 422, and the credential for the platform's 400", async () => {
     const refusedCategory = await readMthdsModels(
       { category: "llm" },
       contextFailing(apiError(422, "Invalid model category")),
@@ -568,8 +769,8 @@ describe("failures", () => {
     // than offering the refused value back among the valid ones.
     expect(firstError(refusedCategory)?.hint).toContain("older MTHDS protocol");
 
-    // A missing organization is the credential's fault, with a valid category
-    // on the wire or none: a check sends no category, whatever the caller named.
+    // A missing organization is the credential's fault, on the listing and on
+    // the check alike, whatever category was sent.
     for (const input of [
       { category: "llm" as const },
       { category: "llm" as const, reference: "$vision" },
@@ -598,6 +799,84 @@ describe("failures", () => {
   });
 });
 
+describe("the check's refusals", () => {
+  const refused = (error: ApiResponseError, input: MthdsModelsInput = { reference: "$" }) =>
+    readMthdsModels(input, contextFailing(error));
+
+  it("points an unreadable reference at reference, with the runner's own reason", async () => {
+    const result = await refused(
+      apiError(
+        422,
+        "The model reference '$' has no name after its sigil.",
+        "InvalidModelReference",
+        "/v1/models/check",
+      ),
+    );
+
+    expect(result.summary).toBe(
+      "Model reference was not checked: the runner cannot read it as a reference.",
+    );
+    expect(firstError(result)).toMatchObject({
+      class: "input_domain",
+      location: "reference",
+      message: "The model reference '$' has no name after its sigil.",
+      retryable: false,
+    });
+    expect(firstError(result)?.hint).toContain("$preset, @alias, ~waterfall or a bare handle");
+  });
+
+  it("points a category the runner does not know at category, as a runner older than it", async () => {
+    const result = await refused(
+      apiError(
+        422,
+        "Unknown model category 'judgment'.",
+        "InvalidModelCategory",
+        "/v1/models/check",
+      ),
+      { reference: "$judgment-strict", category: "judgment" },
+    );
+
+    expect(result.summary).toBe(
+      "Model reference was not checked: the runner does not know the category.",
+    );
+    expect(firstError(result)).toMatchObject({ class: "input_domain", location: "category" });
+    expect(firstError(result)?.hint).toContain("older MTHDS protocol");
+  });
+
+  it("reads a request-shape refusal as the deployment's, since this tool built the request", async () => {
+    const result = await refused(
+      apiError(422, "Field required: reference", "ValidationError", "/v1/models/check"),
+    );
+
+    expect(result.summary).toBe(
+      "Model reference could not be checked: the Pipelex API or its access is misconfigured.",
+    );
+    expect(firstError(result)).toMatchObject({ class: "config" });
+    expect(firstError(result)).not.toHaveProperty("location");
+    expect(firstError(result)?.hint).toContain("/v1/models/check");
+  });
+
+  it("names the check route on a runner that does not serve it", async () => {
+    const result = await refused(apiError(404, "Not Found", "request_error", "/v1/models/check"));
+
+    expect(firstError(result)).toMatchObject({ class: "config", location: "PIPELEX_BASE_URL" });
+    expect(firstError(result)?.hint).toContain("/v1/models/check");
+  });
+
+  it("words a paywall and a server fault as a check", async () => {
+    const paywall = await refused(apiError(402, "Pay"));
+    expect(paywall.summary).toBe(
+      "Model reference could not be checked: the organization's Pipelex plan does not cover this call.",
+    );
+
+    const fault = await refused(apiError(500, "boom"));
+    expect(fault.summary).toBe(
+      "Model reference could not be checked: the Pipelex API returned an error.",
+    );
+    expect(firstError(fault)).toMatchObject({ class: "runtime", retryable: true });
+  });
+});
+
 describe("modelsToolResult", () => {
   it("marks a failure as an error and carries its details into the text", async () => {
     const result = modelsToolResult(
@@ -609,10 +888,27 @@ describe("modelsToolResult", () => {
     expect(result.content[0].text).toContain("- boom");
   });
 
-  it("returns a listing as a plain result", async () => {
-    const result = modelsToolResult((await listing()).result);
+  it("returns a listing and a check as plain results", async () => {
+    const listed = modelsToolResult((await listing()).result);
+    expect(listed.isError).toBe(false);
+    expect(listed.structuredContent.status).toBe("ok");
 
-    expect(result.isError).toBe(false);
-    expect(result.structuredContent.status).toBe("ok");
+    const checked = modelsToolResult(
+      (
+        await check(
+          { reference: "$nowhere" },
+          verdict({
+            reference: "$nowhere",
+            kind: "preset",
+            name: "nowhere",
+            resolution: "not_found",
+            matches: [],
+          }),
+        )
+      ).result,
+    );
+    // A reference that resolves nowhere is a produced verdict, not an error.
+    expect(checked.isError).toBe(false);
+    expect(checked.structuredContent).toMatchObject({ status: "ok", resolution: "not_found" });
   });
 });

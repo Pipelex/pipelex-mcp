@@ -5,7 +5,9 @@ import {
   ArtifactOperationError,
   EmptyMethodSourceError,
   InputPreparationError,
+  InvalidInputValueError,
   InvalidLocalSourceError,
+  MethodLoadError,
   MissingMainStuffError,
   PIPELEX_STORAGE_SCHEME,
   PipelexApiClient,
@@ -863,9 +865,10 @@ export interface ClassifyErrorOptions {
   };
   /**
    * Per-route texture for the **input-preparation family's base error** — the
-   * SDK's `InputPreparationError` raised client-side, before any request, when
-   * the signature does not resolve, `pipe_ref` is unqualified or unknown, or the
-   * closure settles no single default pipe. Defaults to {@link badRequest}, but
+   * SDK's `InputPreparationError` raised client-side when `pipe_ref` is
+   * unqualified or unknown, or the closure settles no single default pipe; a
+   * method that does not load (`MethodLoadError`) locates at
+   * {@link methodLocation} instead. Defaults to {@link badRequest}, but
    * the two are not the same question and `mthds_prepare_inputs` separates them:
    * its `badRequest` follows the request's SELECTOR shape, because a real 400/422
    * from the route is about the selector the caller typed, while a client-side
@@ -1102,6 +1105,28 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
     };
   }
 
+  // A value at a file input that cannot become a file to upload: a `data:` URL
+  // that does not decode, or a value of a type no file input takes. The inputs
+  // must change, so it locates where the asset arms do.
+  if (err instanceof InvalidInputValueError) {
+    return {
+      location: options.asset?.location ?? "inputs",
+      message,
+      hint: "Give each file input a readable path, an http(s) URL, a pipelex-storage:// URI or a data: URL that decodes.",
+    };
+  }
+
+  // The pipe I/O answer said the method does not load (`is_valid: false`), so
+  // no signature can be read: the method must change, not the pipe or the
+  // inputs, so it locates at the selector that named the method.
+  if (err instanceof MethodLoadError) {
+    return {
+      ...(options.methodLocation === undefined ? {} : { location: options.methodLocation }),
+      message,
+      hint: "The method does not load, so its inputs cannot be prepared. Validate it with mthds_validate, fix what the report names, then prepare the inputs again.",
+    };
+  }
+
   // The configured deployment has no upload route (a bare pipelex-api runner).
   if (err instanceof UnsupportedUploadCapabilityError) {
     return {
@@ -1119,9 +1144,8 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
     };
   }
 
-  // The base class: an unqualified or unknown pipe_ref, no single default pipe,
-  // or a caller value at a file position that was malformed/unsupported, all
-  // raised CLIENT-SIDE — so they locate at `preparation`, which a route
+  // The base class: an unqualified or unknown pipe_ref or no single default
+  // pipe, raised CLIENT-SIDE — so they locate at `preparation`, which a route
   // separates from `badRequest` when its 400/422 is about a different field.
   // The one the SDK reads as anything but the caller's, an input walk whose
   // answer it could not read, gets no such locator.

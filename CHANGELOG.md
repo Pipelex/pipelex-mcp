@@ -2,6 +2,16 @@
 
 This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the Pipelex plugin runs. Up to and including 0.20.0 every release also deployed the hosted console at the same version, so those entries describe both servers. After 0.20.0 the console has its own release track and changelog, kept with the Pipelex connector rather than here, and the `console-vX.Y.Z` tags in this repository's history are its releases from that time; this file and the `vX.Y.Z` tags cover the workshop alone.
 
+## [Unreleased]
+
+### Changed
+
+- **`mthds_models` has the runner check a reference (Breaking)**: a check now asks the runner through `GET /v1/models/check` and relays its verdict, where the tool checked the reference against the deck with a copy of the runner's parser and suggestion rule, so its answer is the one a validation of the same reference gives. `resolution` is `resolved` or `not_found` and no longer `unconfirmed`, since the runner knows every model it can call, and the nearest names are the runner's; the result gains `name`, and each match `resolves_to`, the model a run through the reference calls now or `null` when it reaches none, which the summary flags as a warning, beside a preset's `target` and `description` and a handle's `via`, always present. A reference the runner cannot read is refused at `reference` with the runner's reason, `reference` keeps no length limit of its own, and the deployment must serve the route (pipelex-api 0.78.0 or later), an older runner's `404` reading as a `config` error that names it. `category` takes `doc_gen` in a check, for a PipeDocGen, which the deck does not list, so `doc_gen` without `reference` is refused at `category`.
+
+### Fixed
+
+- **`mthds_prepare_inputs` locates a method that does not load at the method**: a closure whose pipe I/O answer says it does not load is now an `input_domain` error at whatever named the method, `files`, `method_ref` or `method_id`, with the hint to validate it, and a file input value that cannot be read as a file is one at `inputs`. Both were reported at `pipe_ref` with the hint to qualify the pipe, which neither fixes; `@pipelex/sdk` raises them as `MethodLoadError` and `InvalidInputValueError`.
+
 ## [0.23.1] - 2026-10-08
 
 ### Added

@@ -358,13 +358,28 @@ describe("the workshop's contexts and dispatch", () => {
     }
   });
 
-  it("registers mthds_models as a read with two optional arguments and dispatches a check", async () => {
+  it("registers mthds_models as a read with two optional arguments and dispatches a check to the runner", async () => {
     const contexts = buildLocalToolContexts({ PIPELEX_API_KEY: "plx_sk_test" });
-    const asked: Array<string | undefined> = [];
+    const listed: Array<string | undefined> = [];
+    const checked: Array<{ reference: string; category: string | undefined }> = [];
     contexts.models.client = {
       async models(category) {
-        asked.push(category);
+        listed.push(category);
         return { models: [{ name: "writing-factual", type: "llm" }], aliases: {}, waterfalls: {} };
+      },
+      async checkModelReference(reference, category) {
+        checked.push({ reference, category });
+        return {
+          reference: "$writing-factul",
+          kind: "preset",
+          name: "writing-factul",
+          category: "llm",
+          resolution: "not_found",
+          matches: [],
+          suggestions: ["$writing-factual"],
+          other_kinds: [],
+          other_categories: [],
+        };
       },
     };
 
@@ -375,7 +390,7 @@ describe("the workshop's contexts and dispatch", () => {
       );
       const schema = tool?.inputSchema as { required?: string[]; properties?: object };
 
-      // It reads the deck and nothing else, and only from the configured API.
+      // It reads the deck or asks the runner, and only the configured API.
       expect(tool?.annotations).toMatchObject({
         readOnlyHint: true,
         destructiveHint: false,
@@ -392,13 +407,18 @@ describe("the workshop's contexts and dispatch", () => {
         arguments: { reference: "$writing-factul", category: "llm" },
       });
 
-      expect(asked).toEqual([undefined]);
+      expect(checked).toEqual([{ reference: "$writing-factul", category: "llm" }]);
+      expect(listed).toEqual([]);
       expect(result.structuredContent).toMatchObject({
         status: "ok",
+        category: "llm",
         reference: "$writing-factul",
+        kind: "preset",
+        name: "writing-factul",
         resolution: "not_found",
         suggestions: ["$writing-factual"],
       });
+      expect(result.isError).toBeFalsy();
       expect(result._meta).toBeUndefined();
     } finally {
       await close();

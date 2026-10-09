@@ -71,16 +71,16 @@ No method source crosses the conversation in this flow.
 
 ### `mthds_models`
 
-Lists the model deck, the references a pipe's `model` field can name, or checks one reference before it is written into a method. It reads `GET /v1/models`, writes nothing and spends no inference credit.
+Lists the model deck, the references a pipe's `model` field can name, or has the runner check one reference before it is written into a method. A listing reads `GET /v1/models` and a check `GET /v1/models/check`; the tool writes nothing and spends no inference credit.
 
 ```ts
 {
-  category?: "llm" | "extract" | "img_gen" | "search" | "judgment";
-  reference?: string; // at most 199 characters
+  category?: "llm" | "extract" | "img_gen" | "search" | "judgment" | "doc_gen"; // doc_gen only with reference
+  reference?: string;
 }
 ```
 
-`category` narrows either use to the references of one pipe type: `llm` for a PipeLLM, `extract` for a PipeExtract, `img_gen` for a PipeImgGen, `search` for a PipeSearch and `judgment` for a PipeJudge. These are the MTHDS protocol's categories, and a runner that implements an older protocol than the one that defined a category refuses it as a filter, as a runner before protocol 0.7.0 refuses `judgment`; omit `category` to list what that runner serves. Without `reference`, the tool lists the deck:
+`category` narrows either use to the references of one pipe type: `llm` for a PipeLLM, `extract` for a PipeExtract, `img_gen` for a PipeImgGen, `search` for a PipeSearch and `judgment` for a PipeJudge. These are the MTHDS protocol's categories, and a runner that implements an older protocol than the one that defined a category refuses it as a filter, as a runner before protocol 0.7.0 refuses `judgment`; omit `category` to list what that runner serves. A check also takes `doc_gen` for a PipeDocGen, and a check without `category` covers every category the runner checks in, `doc_gen` included. The protocol does not define `doc_gen`, so the deck lists no such category, and `doc_gen` without `reference` is refused at `category`. Without `reference`, the tool lists the deck:
 
 ```ts
 {
@@ -97,7 +97,7 @@ Lists the model deck, the references a pipe's `model` field can name, or checks 
 
 Every reference is written the way a method writes it, and every category in scope is present, empty or not. A category the tool does not know, which a runner of a later protocol may report, is not dropped: a listing of every category shows it after the protocol's under the runner's own name, a check resolves in it, and the summary says the tool does not know which pipe type names it. Presets pair a model with settings for a kind of task and are the ones to prefer. The deck names no model handle on its own: a handle appears only as an alias's target or a waterfall's step.
 
-With `reference`, the tool checks that reference, which may be a preset (`$`), an alias (`@`), a waterfall (`~`), a bare model handle, or any of them with the `preset:`, `alias:`, `waterfall:` or `handle:` prefix the runner also accepts. A check reads the whole deck, so it can tell a reference written into the wrong pipe type from one that does not exist:
+With `reference`, the runner checks that reference, which may be a preset (`$`), an alias (`@`), a waterfall (`~`), a bare model handle, or any of them with the `preset:`, `alias:`, `waterfall:` or `handle:` prefix. The runner applies the rule a validation applies, so a reference it finds `resolved` in a category is one a validation accepts there and one it finds `not_found` is one a validation refuses; the tool relays its answer:
 
 ```ts
 {
@@ -105,15 +105,23 @@ With `reference`, the tool checks that reference, which may be a preset (`$`), a
   category?: string;
   reference: string;
   kind: "preset" | "alias" | "waterfall" | "handle";
-  resolution: "resolved" | "not_found" | "unconfirmed";
-  matches: Array<{ category: string; target?: string; fallbacks?: string[]; via?: string[] }>;
+  name: string;               // the reference without its sigil or prefix
+  resolution: "resolved" | "not_found";
+  matches: Array<{
+    category: string;
+    resolves_to: string | null;  // the model a run calls now; null when it reaches none
+    target?: string;             // a preset's or an alias's binding
+    description?: string | null; // a preset's description
+    fallbacks?: string[];        // a waterfall's steps, in order
+    via?: string[];              // for a handle: the presets, aliases and waterfalls that name it
+  }>;
   suggestions: string[];      // the nearest names, e.g. "$writing-factual" for "$writing-factul"
   other_kinds: string[];      // the same name under another sigil, e.g. "@best-gpt" for "best-gpt"
   other_categories: string[]; // with a category: where the reference resolves instead
 }
 ```
 
-`resolved` says where the reference resolves and what it resolves to. `not_found` is a preset, alias or waterfall the deck does not hold. `unconfirmed` is a bare handle that no alias or waterfall names: the deck cannot say whether the runner serves it, but `mthds_validate` checks a handle against the runner's full model list. For a preset, alias or waterfall checked with a category, the nearest names are the ones the runner itself suggests when a validation fails on the same reference. A handle's nearest names come only from the handles the deck names, and a check without a category draws on every category, so there they can differ from validation's.
+`resolved` says in which categories the reference resolves, what the deck binds it to there and which model a run through it calls now. A match whose `resolves_to` is `null` names something the runner holds that reaches no model it can call, such as an alias whose target sits on a backend it has not enabled: a validation accepts it, but a run through it fails, and the summary says so. `not_found` is definitive for every kind, a bare model handle included, since the runner knows every model it can call; the lists then say what was probably meant, the wrong sigil first. A reference the runner cannot read at all, such as a blank one or a sigil with no name after it, is an error at `reference` carrying the runner's reason.
 
 **The deck is what the runner can serve, not what your account may use.** A gateway can refuse a listed model when a run starts, after the method validated. The tool's description and every summary say so.
 
@@ -263,7 +271,7 @@ Projects the method's concept set into typed models through the Pipelex codegen 
 }
 ```
 
-Sits between `mthds_inputs_template` (produces the empty template) and `mthds_run` (executes the filled inputs): it makes file-bearing inputs run-ready. The pipe's declared signature identifies which values are assets — read from the MTHDS standard's **input-form descriptor**, which states the kind of every input at every depth, so an optional nested file field prepares like a required one and a text field merely *named* `url` stays untouched. Each asset is uploaded to Pipelex storage and rewritten to `pipelex-storage://`. `http(s)` URLs and existing `pipelex-storage://` references pass through unchanged, so an inputs set that is already all pass-through can skip this step. All three selectors are resolved server-side, by the one `POST /v1/pipe-io` the signature comes from, which runs no dry run and, for an address, fetches only the package's `.mthds` files, so a published package that ships Python prepares on any deployment. Omitting `pipe_ref` prepares the method's entry pipe; a method with no single entry pipe, or a `pipe_ref` it does not declare, is refused at `pipe_ref` with the route's reason. Local paths, `data:` URLs and inline bytes are uploaded with your API key. The prepared inputs are small structured data the model reads directly, repeated in the `content` summary. Unlike the other tools this has **no produced-invalid arm**: an unresolvable closure is a no-verdict `status: "error"` (recover via `mthds_validate` / `mthds_inputs_template`). See `SPEC.md` → "Prepare Inputs Scope" for the full contract.
+Sits between `mthds_inputs_template` (produces the empty template) and `mthds_run` (executes the filled inputs): it makes file-bearing inputs run-ready. The pipe's declared signature identifies which values are assets — read from the MTHDS standard's **input-form descriptor**, which states the kind of every input at every depth, so an optional nested file field prepares like a required one and a text field merely *named* `url` stays untouched. Each asset is uploaded to Pipelex storage and rewritten to `pipelex-storage://`. `http(s)` URLs and existing `pipelex-storage://` references pass through unchanged, so an inputs set that is already all pass-through can skip this step. All three selectors are resolved server-side, by the one `POST /v1/pipe-io` the signature comes from, which runs no dry run and, for an address, fetches only the package's `.mthds` files, so a published package that ships Python prepares on any deployment. Omitting `pipe_ref` prepares the method's entry pipe; a method with no single entry pipe, or a `pipe_ref` it does not declare, is refused at `pipe_ref` with the route's reason. Local paths, `data:` URLs and inline bytes are uploaded with your API key. The prepared inputs are small structured data the model reads directly, repeated in the `content` summary. Unlike the other tools this has **no produced-invalid arm**: a closure that does not load is a no-verdict `status: "error"` located at whatever named the method (recover via `mthds_validate` / `mthds_inputs_template`), and a value at a file input that cannot be read as a file is one located at `inputs`. See `SPEC.md` → "Prepare Inputs Scope" for the full contract.
 
 #### Inputs from a file (`inputs_path`)
 
