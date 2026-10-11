@@ -381,11 +381,11 @@ describe("statusResult", () => {
     const { statusRead } = RECORDED_FAILED_RUNS.llmCompletion;
     const result = statusResult(statusRead);
 
+    // The recorded report is not flagged caller-facing, so its message is left out.
     expect(result.structuredContent.failure).toEqual({
       run_id: statusRead.pipeline_run_id,
       error_type: "LLMCompletionError",
       title: "LLM completion",
-      message: statusRead.error?.message,
       error_domain: "config",
       error_category: "configuration",
       retryable: false,
@@ -397,7 +397,8 @@ describe("statusResult", () => {
     });
     expect(result.structuredContent.failure).not.toHaveProperty("provider_metadata");
     // The reason, the next step, the retry advice and the support line, in the summary.
-    expect(result.summary).toContain(`Why: LLM completion — ${statusRead.error?.message ?? ""}`);
+    expect(result.summary).toContain("Why: LLM completion\n");
+    expect(result.summary).not.toContain(statusRead.error?.message ?? "");
     expect(result.summary).toContain(
       "What to do: The provider rejected the request — review the prompt, parameters, and inputs.",
     );
@@ -415,9 +416,8 @@ describe("statusResult", () => {
     const result = statusResult(RECORDED_FAILED_RUNS.sandboxProvisioning.statusRead);
 
     expect(result.structuredContent.failure).not.toHaveProperty("retryable");
-    expect(result.summary).toContain(
-      "Why: Sandbox provisioning — Could not provision a Daytona box",
-    );
+    expect(result.summary).toContain("Why: Sandbox provisioning\n");
+    expect(result.summary).not.toContain("Could not provision a Daytona box");
     expect(result.summary).not.toMatch(/Retry:|run it again|can succeed/);
   });
 
@@ -849,7 +849,11 @@ describe("resultsResult", () => {
       pipeline_run_id: RUN_ID,
       status: "FAILED",
       message: `Run finished with status FAILED: ${"y".repeat(100_000)}`,
-      error: { error_type: "LLMCompletionError", message: "y".repeat(100_000) },
+      error: {
+        error_type: "LLMCompletionError",
+        message: "y".repeat(100_000),
+        caller_facing_message: true,
+      },
     });
 
     expect(result.structuredContent.failure_message?.length).toBeLessThan(2_100);
@@ -884,8 +888,9 @@ describe("resultsResult", () => {
       finished_at: statusRead.finished_at,
     });
     expect(result.structuredContent.failure).not.toHaveProperty("provider_metadata");
+    expect(result.structuredContent.failure).not.toHaveProperty("message");
     expect(result.summary).toContain("# Run failed");
-    expect(result.summary).toContain("Why: LLM completion — ");
+    expect(result.summary).toContain("Why: LLM completion\n");
     expect(result.summary).toContain("What to do: The provider rejected the request");
     expect(result.summary).toContain(
       "Retry: The report does not expect running it again unchanged to help.",
@@ -903,7 +908,6 @@ describe("resultsResult", () => {
       run_id: statusRead.pipeline_run_id,
       error_type: "SandboxProvisioningError",
       title: "Sandbox provisioning",
-      message: statusRead.error?.message,
       finished_at: statusRead.finished_at,
     });
     expect(result.summary).toContain("What to do: the report names no next step.");

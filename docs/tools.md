@@ -293,7 +293,7 @@ A completed `mthds_run_results` also reports, for free, what the run **stored**:
   run_id: string;
   error_type?: string;        // the runner's exception class name, for the support line
   title?: string;             // the stable label of the error class ("LLM completion")
-  message?: string;           // what went wrong, as the runner wrote it; it can quote the provider's raw text
+  message?: string;           // what went wrong, as copy written for the caller; only when the report is flagged caller-facing
   error_domain?: string;      // "input", "config" or "runtime"
   error_category?: string;    // "transient", "configuration", "content", …
   retryable?: boolean;        // absent: the report does not say
@@ -302,7 +302,9 @@ A completed `mthds_run_results` also reports, for free, what the run **stored**:
 }
 ```
 
-The summary says it in sentences: why the run failed (the report's title and message), what to do (the report's advice, or a sentence chosen by its `kind`, and never the runner's "the system will retry automatically", which is untrue of a run that has ended), whether running it again can help (only when the report says, never a retry when it says no, and a no worded as the report's expectation rather than a certainty), and a line for support with the run id, the error type and the time the run ended. The provider's raw metadata is never carried, the message is cut at 2,000 code points and every other text at 300, and a `wait_and_retry` action carries this server's own advice in `structuredContent` too. A run with no stored report, such as one the platform timed out itself, carries its status alone and says so. The results, image and download tools read the report from the results route's failed arm when it relays one, and otherwise from one status read of the same run, bounded at five seconds, which is also where the time comes from; when that read fails and the arm carried nothing, the summary says the reason is unknown for now rather than that the run stored none.
+The platform serves the report through the runner's strict disclosure, which keeps a report's message and next step only when the report is flagged as written for the caller (`caller_facing_message: true`) and otherwise serves the placeholder "An internal error occurred.". So `message` is present only on a flagged report, and on any other the title, the next step and the support line are what there is to tell the user; Pipelex support finds the full report by the run id.
+
+The summary says it in sentences: why the run failed (the report's title, and its message when the report is flagged caller-facing), what to do (the report's advice, or a sentence chosen by its `kind`, and never the runner's "the system will retry automatically", which is untrue of a run that has ended), whether running it again can help (only when the report says, never a retry when it says no, and a no worded as the report's expectation rather than a certainty), and a line for support with the run id, the error type and the time the run ended. The provider's raw metadata is never carried, the message is cut at 2,000 code points and every other text at 300, and a `wait_and_retry` action carries this server's own advice in `structuredContent` too. A run with no stored report, such as a cancelled one, carries its status alone and says so. The results, image and download tools read the report from the results route's failed arm when it relays one, and otherwise from one status read of the same run, bounded at five seconds, which is also where the time comes from; when that read fails and the arm carried nothing, the summary says the reason is unknown for now rather than that the run stored none.
 
 ### `mthds_show_images`
 

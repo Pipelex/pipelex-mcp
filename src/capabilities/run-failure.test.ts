@@ -1,3 +1,4 @@
+import type { RunErrorReport } from "@pipelex/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { RECORDED_FAILED_RUNS } from "./failed-run-fixtures.js";
@@ -22,13 +23,46 @@ function failureOf(recorded: typeof llmCompletion): RunFailure {
   return failure;
 }
 
+/**
+ * The `llmCompletion` recording's report as the platform serves it now, through
+ * the runner's STRICT disclosure: not flagged caller-facing, so its message is
+ * the placeholder, its user action is dropped and its provider metadata keeps
+ * the status code alone.
+ */
+const STRICT_LLM_COMPLETION: RunErrorReport = {
+  error_type: "LLMCompletionError",
+  title: "LLM completion",
+  type_uri: "https://docs.pipelex.com/latest/errors/llm-completion-error/",
+  error_domain: "config",
+  error_category: "configuration",
+  retryable: false,
+  message: "An internal error occurred.",
+  provider_metadata: { status_code: "412" },
+};
+
+/**
+ * A report the platform writes itself, here for a run Temporal timed out:
+ * caller-facing copy, so the STRICT disclosure keeps its message, its next step
+ * and its flag.
+ */
+const CALLER_FACING_TIMEOUT: RunErrorReport = {
+  error_type: "RunTimedOutError",
+  title: "Run timed out",
+  type_uri: "https://docs.pipelex.com/latest/errors/run_timed_out",
+  message:
+    "The run did not finish within its time limit of 1 hour, so the workflow engine stopped it. A method that does more work than fits in that limit ends this way. If this one should fit, contact Pipelex support and give them the run id run_x.",
+  error_domain: "runtime",
+  retryable: false,
+  user_action: { kind: "contact_support", detail: "Give support the run id run_x." },
+  caller_facing_message: true,
+};
+
 describe("runFailureOf", () => {
   it("carries the report's fields a reader acts on, the run id and when it ended", () => {
     expect(failureOf(llmCompletion)).toEqual({
       run_id: "run_aa422fd5-59ef-4801-a585-09e6a961e80f",
       error_type: "LLMCompletionError",
       title: "LLM completion",
-      message: llmCompletion.statusRead.error?.message,
       error_domain: "config",
       error_category: "configuration",
       retryable: false,
@@ -47,8 +81,6 @@ describe("runFailureOf", () => {
       run_id: "run_a23eccb6-fc93-4c30-8ba5-e6d785e1c96f",
       error_type: "SandboxProvisioningError",
       title: "Sandbox provisioning",
-      message:
-        "Could not provision a Daytona box for pipe: Failed to create sandbox: Snapshot pipelex-base-dev is building",
       finished_at: "2026-09-24T10:38:04.285649+00:00",
     });
     expect(failureOf(llmCompletion)).not.toHaveProperty("provider_metadata");
@@ -56,7 +88,16 @@ describe("runFailureOf", () => {
   });
 
   it("reads no report, and one that says nothing, as none", () => {
-    const silent = [null, undefined, {}, { retryable: true }, { error_type: "  ", title: "" }];
+    const silent = [
+      null,
+      undefined,
+      {},
+      { retryable: true },
+      { error_type: "  ", title: "" },
+      // A message alone, not written for the caller, says nothing to the caller either.
+      { message: "An internal error occurred." },
+      { message: "Traceback (most recent call last): …", caller_facing_message: false },
+    ];
     for (const report of silent) {
       expect(runFailureOf("run_x", report, "2026-09-23T15:16:37Z")).toBeUndefined();
     }
@@ -98,12 +139,90 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("the message, carried only from a report written for the caller", () => {
+  it("leaves out the placeholder the strict disclosure serves for any other report", () => {
+    const failure = runFailureOf("run_x", STRICT_LLM_COMPLETION, "2026-09-23T15:16:37Z");
+
+    expect(failure).toEqual({
+      run_id: "run_x",
+      error_type: "LLMCompletionError",
+      title: "LLM completion",
+      error_domain: "config",
+      error_category: "configuration",
+      retryable: false,
+      finished_at: "2026-09-23T15:16:37Z",
+    });
+    // The model reads the title, the next step and the support line instead.
+    expect(failureSummaryLines("run_x", "FAILED", failure)).toEqual([
+      "Run `run_x` ended FAILED.",
+      "Why: LLM completion",
+      "What to do: the report names no next step.",
+      "Retry: The report does not expect running it again unchanged to help.",
+      "For support: Run run_x · LLMCompletionError · ended 2026-09-23T15:16:37Z",
+    ]);
+  });
+
+  it("leaves out a verbose report's message too when the report does not flag it", () => {
+    // The recordings are verbose reports none of which is flagged: their raw text
+    // is written for engineers, so it never reaches the model, served whole or not.
+    for (const recorded of [llmCompletion, sandboxProvisioning, extractJobFailure]) {
+      const failure = failureOf(recorded);
+      const rawMessage = recorded.statusRead.error?.message ?? "";
+
+      expect(rawMessage).not.toBe("");
+      expect(failure).not.toHaveProperty("message");
+      expect(failureSummaryLines(failure.run_id, "FAILED", failure).join("\n")).not.toContain(
+        rawMessage,
+      );
+    }
+    expect(
+      runFailureOf("run_x", { ...STRICT_LLM_COMPLETION, caller_facing_message: null }),
+    ).not.toHaveProperty("message");
+  });
+
+  it("keeps the message and the next step of a report flagged caller-facing", () => {
+    const failure = runFailureOf("run_x", CALLER_FACING_TIMEOUT, "2026-09-24T10:38:04Z");
+
+    expect(failure).toEqual({
+      run_id: "run_x",
+      error_type: "RunTimedOutError",
+      title: "Run timed out",
+      message: CALLER_FACING_TIMEOUT.message,
+      error_domain: "runtime",
+      retryable: false,
+      user_action: { kind: "contact_support", detail: "Give support the run id run_x." },
+      finished_at: "2026-09-24T10:38:04Z",
+    });
+    expect(failureSummaryLines("run_x", "FAILED", failure)).toEqual([
+      "Run `run_x` ended FAILED.",
+      `Why: Run timed out — ${CALLER_FACING_TIMEOUT.message ?? ""}`,
+      "What to do: Give support the run id run_x.",
+      "Retry: The report does not expect running it again unchanged to help.",
+      "For support: Run run_x · RunTimedOutError · ended 2026-09-24T10:38:04Z",
+    ]);
+  });
+
+  it("says a report with no title gives no message for the caller, rather than show the placeholder", () => {
+    const failure = runFailureOf("run_x", { ...STRICT_LLM_COMPLETION, title: null });
+    const lines = failureSummaryLines("run_x", "FAILED", failure);
+
+    expect(lines).toContain(
+      "Why: the report names the error type `LLMCompletionError` and carries no message written for the caller.",
+    );
+    expect(lines.join("\n")).not.toContain("An internal error occurred.");
+  });
+});
+
 describe("runFailureOf's bounds", () => {
   it("cuts an unbounded message to its cap, saying how much it left out", () => {
     // A structured output that failed after its re-asks quotes every validation
     // error; one such report measured over 400,000 characters.
     const message = `Structured output failed: ${"x".repeat(200_000)}`;
-    const failure = runFailureOf("run_x", { error_type: "LLMCompletionError", message });
+    const failure = runFailureOf("run_x", {
+      error_type: "LLMCompletionError",
+      message,
+      caller_facing_message: true,
+    });
 
     expect(Array.from(failure?.message ?? "").length).toBeLessThan(
       FAILURE_MESSAGE_MAX_CODE_POINTS + 60,
@@ -140,7 +259,9 @@ describe("runFailureOf's bounds", () => {
   });
 
   it("carries a message that fits whole", () => {
-    expect(failureOf(llmCompletion).message).toBe(llmCompletion.statusRead.error?.message);
+    expect(runFailureOf("run_x", CALLER_FACING_TIMEOUT)?.message).toBe(
+      CALLER_FACING_TIMEOUT.message,
+    );
   });
 });
 
@@ -255,7 +376,7 @@ describe("failureSummaryLines", () => {
 
     expect(failureSummaryLines(failure.run_id, "FAILED", failure)).toEqual([
       "Run `run_aa422fd5-59ef-4801-a585-09e6a961e80f` ended FAILED.",
-      `Why: LLM completion — ${failure.message ?? ""}`,
+      "Why: LLM completion",
       "What to do: The provider rejected the request — review the prompt, parameters, and inputs.",
       "Retry: The report does not expect running it again unchanged to help.",
       "For support: Run run_aa422fd5-59ef-4801-a585-09e6a961e80f · LLMCompletionError · ended 2026-09-23T15:16:37.856067+00:00",
@@ -267,7 +388,7 @@ describe("failureSummaryLines", () => {
     const lines = failureSummaryLines(failure.run_id, "FAILED", failure);
 
     expect(lines).toContain("What to do: the report names no next step.");
-    expect(lines.join("\n")).toContain("Snapshot pipelex-base-dev is building");
+    expect(lines).toContain("Why: Sandbox provisioning");
   });
 
   it("says a run with no report has only its status, and still gives the support line", () => {

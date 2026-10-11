@@ -268,11 +268,11 @@ describe("downloadMthdsArtifacts", () => {
         run_id: statusRead.pipeline_run_id,
         error_type: "SandboxProvisioningError",
         title: "Sandbox provisioning",
-        message: statusRead.error?.message,
         finished_at: statusRead.finished_at,
       },
     });
-    expect(result.summary).toContain("Why: Sandbox provisioning — Could not provision");
+    expect(result.summary).toContain("Why: Sandbox provisioning\n");
+    expect(result.summary).not.toContain("Could not provision");
     expect(result.summary).toContain("What to do: the report names no next step.");
     expect(result.summary).not.toMatch(/Retry:/);
     expect(result.summary).toContain(

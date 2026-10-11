@@ -807,7 +807,8 @@ describe("showMthdsRunImages", () => {
       },
     });
     expect(result.structuredContent.failure).not.toHaveProperty("provider_metadata");
-    expect(result.summary).toContain("Why: LLM completion — ");
+    expect(result.structuredContent.failure).not.toHaveProperty("message");
+    expect(result.summary).toContain("Why: LLM completion\n");
     expect(result.summary).toContain("What to do: The provider rejected the request");
     expect(result.summary).toContain(
       "Retry: The report does not expect running it again unchanged to help.",
@@ -835,7 +836,6 @@ describe("showMthdsRunImages", () => {
       run_id: relayedArm.pipeline_run_id,
       error_type: "SandboxProvisioningError",
       title: "Sandbox provisioning",
-      message: relayedArm.error?.message,
     });
     expect(result.summary).not.toMatch(/Retry:/);
   });

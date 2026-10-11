@@ -1698,7 +1698,7 @@
                 "type": "string"
               },
               "message": {
-                "description": "What went wrong, as the runner wrote it. It can quote the provider's raw text, so tell the user the title and the next step rather than this verbatim.",
+                "description": "What went wrong, worded for the caller. Present only when the report wrote it as caller-facing copy; without it, tell the user the title and the next step, and give Pipelex support the run id.",
                 "type": "string"
               },
               "error_domain": {
@@ -1880,7 +1880,7 @@
                 "type": "string"
               },
               "message": {
-                "description": "What went wrong, as the runner wrote it. It can quote the provider's raw text, so tell the user the title and the next step rather than this verbatim.",
+                "description": "What went wrong, worded for the caller. Present only when the report wrote it as caller-facing copy; without it, tell the user the title and the next step, and give Pipelex support the run id.",
                 "type": "string"
               },
               "error_domain": {
@@ -2159,7 +2159,7 @@
                 "type": "string"
               },
               "message": {
-                "description": "What went wrong, as the runner wrote it. It can quote the provider's raw text, so tell the user the title and the next step rather than this verbatim.",
+                "description": "What went wrong, worded for the caller. Present only when the report wrote it as caller-facing copy; without it, tell the user the title and the next step, and give Pipelex support the run id.",
                 "type": "string"
               },
               "error_domain": {
@@ -2435,7 +2435,7 @@
                 "type": "string"
               },
               "message": {
-                "description": "What went wrong, as the runner wrote it. It can quote the provider's raw text, so tell the user the title and the next step rather than this verbatim.",
+                "description": "What went wrong, worded for the caller. Present only when the report wrote it as caller-facing copy; without it, tell the user the title and the next step, and give Pipelex support the run id.",
                 "type": "string"
               },
               "error_domain": {

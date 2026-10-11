@@ -18,6 +18,12 @@ import type { FailedRunState } from "./run.js";
  * `message` and `provider_metadata` included, since the tests check which of
  * it reaches the model and which is left out.
  *
+ * The platform served the runner's VERBOSE report then, the shape a local loop
+ * with a verbose disclosure still serves. None of these reports is flagged
+ * `caller_facing_message`, so none of their messages reaches the `failure`
+ * object; the shape the platform serves now, through the runner's STRICT
+ * disclosure, is written inline in `run-failure.test.ts`.
+ *
  * - `llmCompletion` — a model the inference gateway refused (HTTP 412), not
  *   retryable, with a `change_input` user action.
  * - `sandboxProvisioning` — a sandbox that could not be provisioned while its

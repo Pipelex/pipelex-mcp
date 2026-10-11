@@ -189,7 +189,8 @@ export const mthdsRunOutputSchema = z.object({
  * `failure` member of every failed arm in the run family (the status tool on a
  * terminal status other than COMPLETED, and the results, image and download
  * tools' `failed` state). Present only when the run stored a report; its fields
- * are each present only when the report carried them. The provider's raw
+ * are each present only when the report carried them, and `message` only when
+ * the report flags it caller-facing (see `run-failure.ts`). The provider's
  * metadata is left out.
  */
 export const runFailureSchema = z.object({
@@ -203,7 +204,7 @@ export const runFailureSchema = z.object({
     .string()
     .optional()
     .describe(
-      "What went wrong, as the runner wrote it. It can quote the provider's raw text, so tell the user the title and the next step rather than this verbatim.",
+      "What went wrong, worded for the caller. Present only when the report wrote it as caller-facing copy; without it, tell the user the title and the next step, and give Pipelex support the run id.",
     ),
   error_domain: z
     .string()
