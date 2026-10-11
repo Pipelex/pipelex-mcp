@@ -27,7 +27,11 @@ import {
   validateArtifactsRequest,
 } from "./artifacts.js";
 import type { ArtifactClient, ArtifactsContext } from "./artifacts.js";
-import { RECORDED_FAILED_RUNS } from "./failed-run-fixtures.js";
+import {
+  CALLER_FACING_TIMEOUT_REPORT,
+  RECORDED_FAILED_RUNS,
+  relayingArmOf,
+} from "./failed-run-fixtures.js";
 import { DEFAULT_API_URL } from "./shared.js";
 
 const RUN_ID = "01JRUN0000000000000000TEST";
@@ -268,11 +272,11 @@ describe("downloadMthdsArtifacts", () => {
         run_id: statusRead.pipeline_run_id,
         error_type: "SandboxProvisioningError",
         title: "Sandbox provisioning",
-        message: statusRead.error?.message,
         finished_at: statusRead.finished_at,
       },
     });
-    expect(result.summary).toContain("Why: Sandbox provisioning — Could not provision");
+    expect(result.summary).toContain("Why: Sandbox provisioning\n");
+    expect(result.summary).not.toContain("Could not provision");
     expect(result.summary).toContain("What to do: the report names no next step.");
     expect(result.summary).not.toMatch(/Retry:/);
     expect(result.summary).toContain(
@@ -293,13 +297,53 @@ describe("downloadMthdsArtifacts", () => {
       contextIn(root, client),
     );
 
-    expect(result.structuredContent.failure).toMatchObject({
-      error_type: "ExtractJobFailureError",
-      retryable: true,
-      user_action: { kind: "wait_and_retry" },
-      finished_at: statusRead.finished_at,
+    // The verbose report is not flagged caller-facing, so neither the failure
+    // nor the arm's account, which quotes the report's message, carries it.
+    expect(relayedArm.message).toContain(statusRead.error?.message ?? "");
+    expect(result.structuredContent).toEqual({
+      status: "ok",
+      run_id: relayedArm.pipeline_run_id,
+      state: "failed",
+      run_status: "FAILED",
+      failure_message: "Run finished with status FAILED; no result available",
+      failure: {
+        run_id: relayedArm.pipeline_run_id,
+        error_type: "ExtractJobFailureError",
+        title: "Extract job failure",
+        error_domain: "runtime",
+        error_category: "transient",
+        retryable: true,
+        user_action: { kind: "wait_and_retry", detail: "Wait a moment, then run it again." },
+        finished_at: statusRead.finished_at,
+      },
     });
     expect(result.summary).toContain("Retry: Running it again can succeed.");
+  });
+
+  it("keeps the arm's account and the message of a report flagged caller-facing", async () => {
+    const root = await makeTempDir();
+    const arm = relayingArmOf(RUN_ID, CALLER_FACING_TIMEOUT_REPORT);
+    const { client, requests } = fakeClient(arm);
+
+    const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
+
+    expect(result.structuredContent).toEqual({
+      status: "ok",
+      run_id: RUN_ID,
+      state: "failed",
+      run_status: "FAILED",
+      failure_message: `Run finished with status FAILED: ${CALLER_FACING_TIMEOUT_REPORT.message ?? ""}`,
+      failure: {
+        run_id: RUN_ID,
+        error_type: "RunTimedOutError",
+        title: "Run timed out",
+        message: CALLER_FACING_TIMEOUT_REPORT.message,
+        error_domain: "runtime",
+        retryable: false,
+        user_action: { kind: "contact_support", detail: "Give support the run id run_x." },
+      },
+    });
+    expect(requests).toEqual([]);
   });
 
   it("saves the output of a completed run that references no stored file, and downloads nothing", async () => {

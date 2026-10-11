@@ -3,16 +3,34 @@
  * for the model.
  *
  * When a run fails, the runner writes an error report and the platform stores it
- * on the run whole: the status read serves it as `RunRead.error`, and the results
- * read's `409` carries it too once the platform relays it there. This module
- * narrows that report into the `failure` object every failed arm of the run
- * family carries, and words it in the result summary.
+ * on the run whole; for an ending no runner reported (a workflow that kept
+ * failing, a timeout, a workflow that vanished) the platform writes the report
+ * itself. The status read serves it as `RunRead.error`, and the results read's
+ * `409` carries it too once the platform relays it there. This module narrows
+ * that report into the `failure` object every failed arm of the run family
+ * carries, and words it in the result summary.
  *
- * The platform serves the runner's VERBOSE report, so its `message` can hold a
- * provider's raw text. The model reads that message, through `failure.message`
- * and the summary, because it is what lets an assistant diagnose the fault; the
- * summary adds what to do from the report's `user_action`, and a short support
- * line with the run id, the error type and the time the run ended.
+ * The platform serves every stored report through the runner's STRICT
+ * disclosure. It keeps the fields that classify the failure (`error_type`,
+ * `title`, `type_uri`, `error_domain`, `error_category`, `retryable`,
+ * `validation_errors`), reduces `provider_metadata` to a status code and a
+ * retry delay, and keeps `message` and `user_action` only on a report flagged
+ * `caller_facing_message: true`: the runner sets that flag on a message it
+ * wrote as copy about the caller's own method or inputs, and the platform on
+ * every report it writes itself. Any other report's `message` is the
+ * placeholder "An internal error occurred.", which tells an assistant nothing,
+ * so this module carries `message` only from a report flagged caller-facing,
+ * and the failed arm's account of the ending, which quotes that message, follows
+ * the same rule (`failureMessageOf` in `run.ts`, with {@link isCallerFacing},
+ * {@link quotesReportMessage} and {@link statusOnlyFailureMessage} from here).
+ * The model reads the title, the
+ * next step and the support line instead, the support line giving the run id,
+ * the error type and the time the run ended, by which the people who run the
+ * platform find the whole report the run row keeps. A local loop serving the
+ * VERBOSE report gets the same treatment, so a message written for engineers
+ * never reaches the model there either; an unflagged report's `user_action`,
+ * the runner's advice rather than its account of the fault, still comes through
+ * there, since dropping it is the disclosure's doing.
  *
  * Nothing here is inferred. Whether running it again can help comes from the
  * report's `retryable` alone, and a report without one gets no retry sentence
@@ -34,8 +52,9 @@ export interface RunFailureUserAction {
 /**
  * The `failure` object a failed arm carries: the report's fields a reader acts
  * on, with the run id and the time the run ended. It leaves out
- * `provider_metadata`, which holds the provider's raw body, and every field the
- * report did not carry.
+ * `provider_metadata` (a status code and a retry delay once disclosed, the
+ * provider's raw body on a verbose report), a `message` not flagged
+ * caller-facing, and every field the report did not carry.
  */
 export interface RunFailure {
   run_id: string;
@@ -43,7 +62,12 @@ export interface RunFailure {
   error_type?: string;
   /** The stable human label of the error class (`LLM completion`). */
   title?: string;
-  /** What went wrong, as the runner wrote it. It can hold a provider's raw text. */
+  /**
+   * What went wrong, as copy written for the caller: present only when the
+   * report is flagged `caller_facing_message: true`. Any other report's message
+   * is the disclosure's placeholder, or on a verbose report text written for
+   * engineers, and is left out.
+   */
   message?: string;
   /** Who can fix it: `input`, `config` or `runtime`. */
   error_domain?: string;
@@ -57,18 +81,57 @@ export interface RunFailure {
 }
 
 /**
- * The most of a report's `message` a result carries, in Unicode code points.
- * The runner embeds whatever its exception said, unbounded: a structured output
- * that still failed after its re-asks quotes every validation error, and a
- * provider SDK's error quotes the whole response body, so one report can run to
- * hundreds of kilobytes, and the message reaches the model in the summary and in
- * `structuredContent` both. The head says what went wrong; the rest is a
- * provider's detail the model cannot act on.
+ * The most of a report's `message` a result carries, in Unicode code points,
+ * and of the failed arm's account of the ending, which quotes that message once
+ * the platform relays it. The runner bounds no message it writes: a
+ * caller-facing one about a bundle that failed validation can name every error
+ * in it, and on a verbose report a provider SDK's error quotes the whole
+ * response body, so one report can run to hundreds of kilobytes, and the message
+ * reaches the model in the summary and in `structuredContent` both. The head
+ * says what went wrong.
  */
 export const FAILURE_MESSAGE_MAX_CODE_POINTS = 2_000;
 
 /** The most of any other text field of a report a result carries, in Unicode code points. */
 export const FAILURE_FIELD_MAX_CODE_POINTS = 300;
+
+/**
+ * Whether a report's `message` was written as copy for the caller: its
+ * `caller_facing_message` is exactly `true`. Only such a message reaches the
+ * model, in `failure.message` and in the failed arm's `failure_message` both;
+ * any other is the strict disclosure's placeholder, or on a verbose report text
+ * written for engineers.
+ */
+export function isCallerFacing(report: RunErrorReport | null | undefined): boolean {
+  return report?.caller_facing_message === true;
+}
+
+/**
+ * The account of the ending the platform's `409` gives when the report it
+ * serves has no message, word for word: what the failed arm's `failure_message`
+ * says in place of an account that would quote a message not written for the
+ * caller.
+ */
+export function statusOnlyFailureMessage(status: RunStatus): string {
+  return `Run finished with status ${status}; no result available`;
+}
+
+/**
+ * The wording of the platform's `409` when it quotes the served report's
+ * message: the status word, a colon, then the message. Its other wordings, the
+ * status-only sentence and the copy it writes for a stored result it refuses to
+ * read, quote nothing.
+ */
+const QUOTED_REPORT_ACCOUNT = /^Run finished with status [A-Z_]+: /;
+
+/**
+ * Whether a failed arm's account of the ending quotes a report's message, by the
+ * platform's wording alone: what decides it for an arm that carries no report,
+ * whose account may still quote one the SDK's check dropped.
+ */
+export function quotesReportMessage(account: string): boolean {
+  return QUOTED_REPORT_ACCOUNT.test(account);
+}
 
 /**
  * `value` cut to `max` Unicode code points, with a note saying how much was
@@ -83,10 +146,12 @@ export function boundedFailureText(value: string, max: number): string {
 
 /**
  * The `failure` object for a run, from its stored report, or `undefined` when
- * there is none to carry: a `null` report (a run the platform finalized itself),
- * and one carrying none of the fields that say what happened (`error_type`,
- * `title`, `message`, `user_action`), a blank one saying nothing. Every text field
- * is bounded (`FAILURE_MESSAGE_MAX_CODE_POINTS` for the message,
+ * there is none to carry: a `null` report (a run that ended with none, such as
+ * a cancelled one), and one carrying none of the fields that say what happened
+ * (`error_type`, `title`, a caller-facing `message`, `user_action`), a blank one
+ * saying nothing. The message is carried only from a report flagged
+ * `caller_facing_message: true`, for the reason the module comment gives. Every
+ * text field is bounded (`FAILURE_MESSAGE_MAX_CODE_POINTS` for the message,
  * `FAILURE_FIELD_MAX_CODE_POINTS` for the rest), and a `wait_and_retry` action
  * carries this module's own advice rather than the runner's, for the reason
  * {@link nextStepOf} gives.
@@ -99,7 +164,7 @@ export function runFailureOf(
   if (report === null || report === undefined) return undefined;
   const errorType = field(report.error_type);
   const title = field(report.title);
-  const rawMessage = text(report.message);
+  const rawMessage = isCallerFacing(report) ? text(report.message) : undefined;
   const message =
     rawMessage === undefined
       ? undefined
@@ -201,11 +266,12 @@ export function supportLineOf(
 
 /**
  * The failure as the model reads it in a result summary, one labelled sentence
- * per line: that the run ended and how, why (the report's title and message),
- * what to do, whether running it again can help, and what to give support. A run
- * with no report says so, and still gives the support line. `reportRead` is
- * `false` when the read that would have carried the report failed, so that an
- * absent report is said to be unknown rather than missing.
+ * per line: that the run ended and how, why (the report's title, and its message
+ * when the report flags it caller-facing), what to do, whether running it again
+ * can help, and what to give support. A run with no report says so, and still
+ * gives the support line. `reportRead` is `false` when the read that would have
+ * carried the report failed, so that an absent report is said to be unknown
+ * rather than missing.
  */
 export function failureSummaryLines(
   runId: string,
@@ -227,7 +293,7 @@ export function failureSummaryLines(
     );
     lines.push(
       why.length === 0
-        ? `Why: the report names the error type \`${failure.error_type ?? "unknown"}\` and gives no message.`
+        ? `Why: the report names the error type \`${failure.error_type ?? "unknown"}\` and carries no message written for the caller.`
         : `Why: ${why.join(" — ")}`,
     );
     lines.push(`What to do: ${nextStepOf(failure) ?? "the report names no next step."}`);
