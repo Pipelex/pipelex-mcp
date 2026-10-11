@@ -17,7 +17,11 @@ import {
   validateShowImagesRequest,
 } from "./images.js";
 import type { ImagesClient, ImagesContext } from "./images.js";
-import { RECORDED_FAILED_RUNS } from "./failed-run-fixtures.js";
+import {
+  CALLER_FACING_TIMEOUT_REPORT,
+  RECORDED_FAILED_RUNS,
+  relayingArmOf,
+} from "./failed-run-fixtures.js";
 import {
   DEFAULT_API_URL,
   INLINE_IMAGES_BUDGET,
@@ -819,8 +823,8 @@ describe("showMthdsRunImages", () => {
     expect(result.imageBlocks).toEqual([]);
   });
 
-  it("takes the report from the failed arm when it relays one", async () => {
-    const { relayedArm } = RECORDED_FAILED_RUNS.sandboxProvisioning;
+  it("takes the report from the failed arm when it relays one, quoting no message not flagged caller-facing", async () => {
+    const { relayedArm, statusRead } = RECORDED_FAILED_RUNS.sandboxProvisioning;
     const client: ImagesClient = {
       getRunStatus: () => Promise.reject(new Error("status unavailable")),
       getRunResult: () => Promise.resolve(relayedArm),
@@ -832,12 +836,52 @@ describe("showMthdsRunImages", () => {
       context(client),
     );
 
-    expect(result.structuredContent.failure).toEqual({
+    expect(relayedArm.message).toContain(statusRead.error?.message ?? "");
+    expect(result.structuredContent).toEqual({
+      status: "ok",
       run_id: relayedArm.pipeline_run_id,
-      error_type: "SandboxProvisioningError",
-      title: "Sandbox provisioning",
+      state: "failed",
+      run_status: "FAILED",
+      failure_message: "Run finished with status FAILED; no result available",
+      failure: {
+        run_id: relayedArm.pipeline_run_id,
+        error_type: "SandboxProvisioningError",
+        title: "Sandbox provisioning",
+      },
     });
     expect(result.summary).not.toMatch(/Retry:/);
+    expect(result.summary).not.toContain("Could not provision");
+  });
+
+  it("keeps the arm's account and the message of a report flagged caller-facing", async () => {
+    const arm = relayingArmOf(RUN_ID, CALLER_FACING_TIMEOUT_REPORT);
+    const client: ImagesClient = {
+      getRunStatus: () => Promise.reject(new Error("status unavailable")),
+      getRunResult: () => Promise.resolve(arm),
+      fetchArtifact: () => Promise.reject(new Error("must not fetch")),
+    };
+
+    const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
+
+    expect(result.structuredContent).toEqual({
+      status: "ok",
+      run_id: RUN_ID,
+      state: "failed",
+      run_status: "FAILED",
+      failure_message: arm.message,
+      failure: {
+        run_id: RUN_ID,
+        error_type: "RunTimedOutError",
+        title: "Run timed out",
+        message: CALLER_FACING_TIMEOUT_REPORT.message,
+        error_domain: "runtime",
+        retryable: false,
+        user_action: { kind: "contact_support", detail: "Give support the run id run_x." },
+      },
+    });
+    expect(arm.message).toBe(
+      `Run finished with status FAILED: ${CALLER_FACING_TIMEOUT_REPORT.message ?? ""}`,
+    );
   });
 
   it("produces an empty verdict, and fetches nothing, for a run with no candidate", async () => {

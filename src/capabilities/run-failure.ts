@@ -13,19 +13,23 @@
  * The platform serves every stored report through the runner's STRICT
  * disclosure. It keeps the fields that classify the failure (`error_type`,
  * `title`, `type_uri`, `error_domain`, `error_category`, `retryable`,
- * `validation_errors`), reduces
- * `provider_metadata` to a status code and a retry delay, and keeps `message`
- * and `user_action` only on a report flagged `caller_facing_message: true`: the
- * runner sets that flag on a message it wrote as copy about the caller's own
- * method or inputs, and the platform on every report it writes itself. Any other
- * report's `message` is the placeholder "An internal error occurred.", which
- * tells an assistant nothing, so this module carries `message` only from a
- * report flagged caller-facing. The model reads the title, the next step and the
- * support line instead, the support line giving the run id, the error type and
- * the time the run ended, by which the people who run the platform find the
- * whole report the run row keeps. A local loop serving the VERBOSE report gets
- * the same treatment, so text written for engineers never reaches the model
- * either.
+ * `validation_errors`), reduces `provider_metadata` to a status code and a
+ * retry delay, and keeps `message` and `user_action` only on a report flagged
+ * `caller_facing_message: true`: the runner sets that flag on a message it
+ * wrote as copy about the caller's own method or inputs, and the platform on
+ * every report it writes itself. Any other report's `message` is the
+ * placeholder "An internal error occurred.", which tells an assistant nothing,
+ * so this module carries `message` only from a report flagged caller-facing,
+ * and the failed arm's account of the ending, which quotes that message, follows
+ * the same rule (`failureMessageOf` in `run.ts`, with {@link isCallerFacing} and
+ * {@link statusOnlyFailureMessage} from here). The model reads the title, the
+ * next step and the support line instead, the support line giving the run id,
+ * the error type and the time the run ended, by which the people who run the
+ * platform find the whole report the run row keeps. A local loop serving the
+ * VERBOSE report gets the same treatment, so a message written for engineers
+ * never reaches the model there either; an unflagged report's `user_action`,
+ * the runner's advice rather than its account of the fault, still comes through
+ * there, since dropping it is the disclosure's doing.
  *
  * Nothing here is inferred. Whether running it again can help comes from the
  * report's `retryable` alone, and a report without one gets no retry sentence
@@ -91,6 +95,27 @@ export const FAILURE_MESSAGE_MAX_CODE_POINTS = 2_000;
 export const FAILURE_FIELD_MAX_CODE_POINTS = 300;
 
 /**
+ * Whether a report's `message` was written as copy for the caller: its
+ * `caller_facing_message` is exactly `true`. Only such a message reaches the
+ * model, in `failure.message` and in the failed arm's `failure_message` both;
+ * any other is the strict disclosure's placeholder, or on a verbose report text
+ * written for engineers.
+ */
+export function isCallerFacing(report: RunErrorReport | null | undefined): boolean {
+  return report?.caller_facing_message === true;
+}
+
+/**
+ * The account of the ending the platform's `409` gives when the report it
+ * serves has no message, word for word: what the failed arm's `failure_message`
+ * says in place of an account that would quote a message not written for the
+ * caller.
+ */
+export function statusOnlyFailureMessage(status: RunStatus): string {
+  return `Run finished with status ${status}; no result available`;
+}
+
+/**
  * `value` cut to `max` Unicode code points, with a note saying how much was
  * left out, or `value` itself when it fits. Code points, so a cut never splits
  * a character.
@@ -121,7 +146,7 @@ export function runFailureOf(
   if (report === null || report === undefined) return undefined;
   const errorType = field(report.error_type);
   const title = field(report.title);
-  const rawMessage = report.caller_facing_message === true ? text(report.message) : undefined;
+  const rawMessage = isCallerFacing(report) ? text(report.message) : undefined;
   const message =
     rawMessage === undefined
       ? undefined

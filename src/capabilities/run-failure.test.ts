@@ -1,7 +1,10 @@
-import type { RunErrorReport } from "@pipelex/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { RECORDED_FAILED_RUNS } from "./failed-run-fixtures.js";
+import {
+  CALLER_FACING_TIMEOUT_REPORT,
+  RECORDED_FAILED_RUNS,
+  STRICT_LLM_COMPLETION_REPORT,
+} from "./failed-run-fixtures.js";
 import {
   FAILURE_FIELD_MAX_CODE_POINTS,
   FAILURE_MESSAGE_MAX_CODE_POINTS,
@@ -22,40 +25,6 @@ function failureOf(recorded: typeof llmCompletion): RunFailure {
   if (failure === undefined) throw new Error("the recorded report did not narrow");
   return failure;
 }
-
-/**
- * The `llmCompletion` recording's report as the platform serves it now, through
- * the runner's STRICT disclosure: not flagged caller-facing, so its message is
- * the placeholder, its user action is dropped and its provider metadata keeps
- * the status code alone.
- */
-const STRICT_LLM_COMPLETION: RunErrorReport = {
-  error_type: "LLMCompletionError",
-  title: "LLM completion",
-  type_uri: "https://docs.pipelex.com/latest/errors/llm-completion-error/",
-  error_domain: "config",
-  error_category: "configuration",
-  retryable: false,
-  message: "An internal error occurred.",
-  provider_metadata: { status_code: "412" },
-};
-
-/**
- * A report the platform writes itself, here for a run Temporal timed out:
- * caller-facing copy, so the STRICT disclosure keeps its message, its next step
- * and its flag.
- */
-const CALLER_FACING_TIMEOUT: RunErrorReport = {
-  error_type: "RunTimedOutError",
-  title: "Run timed out",
-  type_uri: "https://docs.pipelex.com/latest/errors/run_timed_out",
-  message:
-    "The run did not finish within its time limit of 1 hour, so the workflow engine stopped it. A method that does more work than fits in that limit ends this way. If this one should fit, contact Pipelex support and give them the run id run_x.",
-  error_domain: "runtime",
-  retryable: false,
-  user_action: { kind: "contact_support", detail: "Give support the run id run_x." },
-  caller_facing_message: true,
-};
 
 describe("runFailureOf", () => {
   it("carries the report's fields a reader acts on, the run id and when it ended", () => {
@@ -141,7 +110,7 @@ afterEach(() => {
 
 describe("the message, carried only from a report written for the caller", () => {
   it("leaves out the placeholder the strict disclosure serves for any other report", () => {
-    const failure = runFailureOf("run_x", STRICT_LLM_COMPLETION, "2026-09-23T15:16:37Z");
+    const failure = runFailureOf("run_x", STRICT_LLM_COMPLETION_REPORT, "2026-09-23T15:16:37Z");
 
     expect(failure).toEqual({
       run_id: "run_x",
@@ -176,18 +145,18 @@ describe("the message, carried only from a report written for the caller", () =>
       );
     }
     expect(
-      runFailureOf("run_x", { ...STRICT_LLM_COMPLETION, caller_facing_message: null }),
+      runFailureOf("run_x", { ...STRICT_LLM_COMPLETION_REPORT, caller_facing_message: null }),
     ).not.toHaveProperty("message");
   });
 
   it("keeps the message and the next step of a report flagged caller-facing", () => {
-    const failure = runFailureOf("run_x", CALLER_FACING_TIMEOUT, "2026-09-24T10:38:04Z");
+    const failure = runFailureOf("run_x", CALLER_FACING_TIMEOUT_REPORT, "2026-09-24T10:38:04Z");
 
     expect(failure).toEqual({
       run_id: "run_x",
       error_type: "RunTimedOutError",
       title: "Run timed out",
-      message: CALLER_FACING_TIMEOUT.message,
+      message: CALLER_FACING_TIMEOUT_REPORT.message,
       error_domain: "runtime",
       retryable: false,
       user_action: { kind: "contact_support", detail: "Give support the run id run_x." },
@@ -195,7 +164,7 @@ describe("the message, carried only from a report written for the caller", () =>
     });
     expect(failureSummaryLines("run_x", "FAILED", failure)).toEqual([
       "Run `run_x` ended FAILED.",
-      `Why: Run timed out — ${CALLER_FACING_TIMEOUT.message ?? ""}`,
+      `Why: Run timed out — ${CALLER_FACING_TIMEOUT_REPORT.message ?? ""}`,
       "What to do: Give support the run id run_x.",
       "Retry: The report does not expect running it again unchanged to help.",
       "For support: Run run_x · RunTimedOutError · ended 2026-09-24T10:38:04Z",
@@ -203,7 +172,7 @@ describe("the message, carried only from a report written for the caller", () =>
   });
 
   it("says a report with no title gives no message for the caller, rather than show the placeholder", () => {
-    const failure = runFailureOf("run_x", { ...STRICT_LLM_COMPLETION, title: null });
+    const failure = runFailureOf("run_x", { ...STRICT_LLM_COMPLETION_REPORT, title: null });
     const lines = failureSummaryLines("run_x", "FAILED", failure);
 
     expect(lines).toContain(
@@ -259,8 +228,8 @@ describe("runFailureOf's bounds", () => {
   });
 
   it("carries a message that fits whole", () => {
-    expect(runFailureOf("run_x", CALLER_FACING_TIMEOUT)?.message).toBe(
-      CALLER_FACING_TIMEOUT.message,
+    expect(runFailureOf("run_x", CALLER_FACING_TIMEOUT_REPORT)?.message).toBe(
+      CALLER_FACING_TIMEOUT_REPORT.message,
     );
   });
 });

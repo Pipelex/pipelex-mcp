@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import type { RunRead, RunResultState } from "@pipelex/sdk";
+import type { RunErrorReport, RunRead, RunResultState } from "@pipelex/sdk";
 
 import type { FailedRunState } from "./run.js";
 
@@ -20,9 +20,12 @@ import type { FailedRunState } from "./run.js";
  *
  * The platform served the runner's VERBOSE report then, the shape a local loop
  * with a verbose disclosure still serves. None of these reports is flagged
- * `caller_facing_message`, so none of their messages reaches the `failure`
- * object; the shape the platform serves now, through the runner's STRICT
- * disclosure, is written inline in `run-failure.test.ts`.
+ * `caller_facing_message`, so none of their messages reaches the model, in the
+ * `failure` object or in the failed arm's `failure_message`. The shapes the
+ * platform serves now, through the runner's STRICT disclosure, are written by
+ * hand below them: {@link STRICT_LLM_COMPLETION_REPORT} and
+ * {@link CALLER_FACING_TIMEOUT_REPORT}, with {@link relayingArmOf} for the
+ * failed arm that relays one.
  *
  * - `llmCompletion` — a model the inference gateway refused (HTTP 412), not
  *   retryable, with a `change_input` user action.
@@ -59,6 +62,60 @@ function load(name: string): RecordedFailedRun {
       message: `Run finished with status ${resultsArm.status}: ${report?.message ?? ""}`,
       error: report,
     },
+  };
+}
+
+/**
+ * The `llmCompletion` recording's report as the platform serves it now, through
+ * the runner's STRICT disclosure: not flagged caller-facing, so its message is
+ * the placeholder, its user action is dropped and its provider metadata keeps
+ * the status code alone.
+ */
+export const STRICT_LLM_COMPLETION_REPORT: RunErrorReport = {
+  error_type: "LLMCompletionError",
+  title: "LLM completion",
+  type_uri: "https://docs.pipelex.com/latest/errors/llm-completion-error/",
+  error_domain: "config",
+  error_category: "configuration",
+  retryable: false,
+  message: "An internal error occurred.",
+  provider_metadata: { status_code: "412" },
+};
+
+/**
+ * A report the platform writes itself, here for a run Temporal timed out:
+ * caller-facing copy, so the STRICT disclosure keeps its message, its next step
+ * and its flag.
+ */
+export const CALLER_FACING_TIMEOUT_REPORT: RunErrorReport = {
+  error_type: "RunTimedOutError",
+  title: "Run timed out",
+  type_uri: "https://docs.pipelex.com/latest/errors/run_timed_out",
+  message:
+    "The run did not finish within its time limit of 1 hour, so the workflow engine stopped it. A method that does more work than fits in that limit ends this way. If this one should fit, contact Pipelex support and give them the run id run_x.",
+  error_domain: "runtime",
+  retryable: false,
+  user_action: { kind: "contact_support", detail: "Give support the run id run_x." },
+  caller_facing_message: true,
+};
+
+/**
+ * The failed arm of a FAILED run whose results read relays `report`, worded as
+ * the platform's `409` words it: the status, then the served report's message
+ * when it has one.
+ */
+export function relayingArmOf(pipelineRunId: string, report: RunErrorReport): FailedRunState {
+  const message =
+    typeof report.message === "string" && report.message.trim() !== "" ? report.message : undefined;
+  return {
+    state: "failed",
+    pipeline_run_id: pipelineRunId,
+    status: "FAILED",
+    message:
+      message === undefined
+        ? "Run finished with status FAILED; no result available"
+        : `Run finished with status FAILED: ${message}`,
+    error: report,
   };
 }
 

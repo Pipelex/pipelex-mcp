@@ -70,7 +70,9 @@ import {
   boundedFailureText,
   FAILURE_MESSAGE_MAX_CODE_POINTS,
   failureSummaryLines,
+  isCallerFacing,
   runFailureOf,
+  statusOnlyFailureMessage,
 } from "./run-failure.js";
 import type { RunFailure } from "./run-failure.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
@@ -1165,11 +1167,19 @@ function failedResult(state: FailedRunState, failedRead: RunRead | undefined): R
 export type FailedRunState = Extract<RunResultState, { state: "failed" }>;
 
 /**
- * The failed arm's `message`, the platform's account of the ending, bounded like
- * the report's own message: once the platform relays the report on the `409`,
- * the account quotes that message whole.
+ * The failed arm's `message`, the platform's account of the ending, as the model
+ * may read it. Once the platform relays the report on the `409`, the account
+ * quotes the served report's message after the status (`Run finished with
+ * status FAILED: …`), so it is kept, bounded like the report's own message, only
+ * when the report the arm carries is flagged caller-facing. Otherwise it is the
+ * sentence the platform gives for a report with no message, since what it would
+ * quote is the strict disclosure's placeholder or, on a verbose deployment, text
+ * written for engineers. An arm with no report, from a platform that does not
+ * relay it or one whose report the SDK's check dropped, takes that sentence too:
+ * nothing then vouches for what its account quotes.
  */
 export function failureMessageOf(state: FailedRunState): string {
+  if (!isCallerFacing(state.error)) return statusOnlyFailureMessage(state.status);
   return boundedFailureText(state.message, FAILURE_MESSAGE_MAX_CODE_POINTS);
 }
 

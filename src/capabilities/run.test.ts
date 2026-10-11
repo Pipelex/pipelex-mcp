@@ -23,6 +23,7 @@ import {
   classifyStartError,
   ELLIPSIS_MARKER,
   FAILED_RUN_READ_TIMEOUT_MS,
+  failureMessageOf,
   getMthdsRunResults,
   getMthdsRunStatus,
   MAIN_STUFF_CAP,
@@ -40,8 +41,13 @@ import {
   statusResult,
   validateRunRequest,
 } from "./run.js";
-import type { RunContext } from "./run.js";
-import { RECORDED_FAILED_RUNS } from "./failed-run-fixtures.js";
+import type { FailedRunState, RunContext } from "./run.js";
+import {
+  CALLER_FACING_TIMEOUT_REPORT,
+  RECORDED_FAILED_RUNS,
+  STRICT_LLM_COMPLETION_REPORT,
+  relayingArmOf,
+} from "./failed-run-fixtures.js";
 import { createMethodVersionsMemory, noteMethodVersionsSupported } from "./method-versions.js";
 import {
   classifyError,
@@ -875,20 +881,50 @@ describe("resultsResult", () => {
     expect(result.summary).not.toContain("stored no error report");
   });
 
+  it("gives the status-only account for an arm with no report, whatever its sentence quotes", () => {
+    // A report the SDK's check dropped leaves nothing to vouch for the sentence.
+    const arm: FailedRunState = {
+      state: "failed",
+      pipeline_run_id: RUN_ID,
+      status: "TIMED_OUT",
+      message: "Run finished with status TIMED_OUT: Traceback (most recent call last): …",
+      error: null,
+    };
+
+    expect(failureMessageOf(arm)).toBe("Run finished with status TIMED_OUT; no result available");
+    expect(resultsResult(arm).structuredContent.failure_message).toBe(
+      "Run finished with status TIMED_OUT; no result available",
+    );
+  });
+
   it("carries the report the failed arm relays, with when the run ended from the status read", () => {
     const { relayedArm, statusRead } = RECORDED_FAILED_RUNS.llmCompletion;
     const result = resultsResult(relayedArm, { ...statusRead, error: null });
 
-    expect(result.structuredContent.failure_message).toBe(relayedArm.message);
-    expect(result.structuredContent.failure).toMatchObject({
+    // The verbose report is not flagged caller-facing, so neither the failure
+    // nor the arm's account, which quotes the report's message, carries it.
+    expect(relayedArm.message).toContain(statusRead.error?.message ?? "");
+    expect(result.structuredContent).toEqual({
+      status: "ok",
       run_id: statusRead.pipeline_run_id,
-      error_type: "LLMCompletionError",
-      title: "LLM completion",
-      retryable: false,
-      finished_at: statusRead.finished_at,
+      state: "failed",
+      run_status: "FAILED",
+      failure_message: "Run finished with status FAILED; no result available",
+      failure: {
+        run_id: statusRead.pipeline_run_id,
+        error_type: "LLMCompletionError",
+        title: "LLM completion",
+        error_domain: "config",
+        error_category: "configuration",
+        retryable: false,
+        user_action: {
+          kind: "change_input",
+          detail: "The provider rejected the request — review the prompt, parameters, and inputs.",
+        },
+        finished_at: statusRead.finished_at,
+      },
+      available_view_specs: [],
     });
-    expect(result.structuredContent.failure).not.toHaveProperty("provider_metadata");
-    expect(result.structuredContent.failure).not.toHaveProperty("message");
     expect(result.summary).toContain("# Run failed");
     expect(result.summary).toContain("Why: LLM completion\n");
     expect(result.summary).toContain("What to do: The provider rejected the request");
@@ -897,6 +933,64 @@ describe("resultsResult", () => {
     );
     expect(result.summary).toContain(
       `For support: Run ${statusRead.pipeline_run_id} · LLMCompletionError · ended ${statusRead.finished_at ?? ""}`,
+    );
+  });
+
+  it("gives the status-only account, never the placeholder, for a strict report not flagged caller-facing", () => {
+    const arm = relayingArmOf(RUN_ID, STRICT_LLM_COMPLETION_REPORT);
+    const result = resultsResult(
+      arm,
+      runRead({ status: "FAILED", finished_at: "2026-07-15T10:05:00Z", error: null }),
+    );
+
+    expect(arm.message).toBe("Run finished with status FAILED: An internal error occurred.");
+    expect(result.structuredContent).toEqual({
+      status: "ok",
+      run_id: RUN_ID,
+      state: "failed",
+      run_status: "FAILED",
+      failure_message: "Run finished with status FAILED; no result available",
+      failure: {
+        run_id: RUN_ID,
+        error_type: "LLMCompletionError",
+        title: "LLM completion",
+        error_domain: "config",
+        error_category: "configuration",
+        retryable: false,
+        finished_at: "2026-07-15T10:05:00Z",
+      },
+      available_view_specs: [],
+    });
+    expect(JSON.stringify(result)).not.toContain("An internal error occurred.");
+  });
+
+  it("keeps the arm's account and the message of a report flagged caller-facing", () => {
+    const arm = relayingArmOf(RUN_ID, CALLER_FACING_TIMEOUT_REPORT);
+    const result = resultsResult(
+      arm,
+      runRead({ status: "FAILED", finished_at: "2026-07-15T10:05:00Z", error: null }),
+    );
+
+    expect(result.structuredContent).toEqual({
+      status: "ok",
+      run_id: RUN_ID,
+      state: "failed",
+      run_status: "FAILED",
+      failure_message: `Run finished with status FAILED: ${CALLER_FACING_TIMEOUT_REPORT.message ?? ""}`,
+      failure: {
+        run_id: RUN_ID,
+        error_type: "RunTimedOutError",
+        title: "Run timed out",
+        message: CALLER_FACING_TIMEOUT_REPORT.message,
+        error_domain: "runtime",
+        retryable: false,
+        user_action: { kind: "contact_support", detail: "Give support the run id run_x." },
+        finished_at: "2026-07-15T10:05:00Z",
+      },
+      available_view_specs: [],
+    });
+    expect(result.summary).toContain(
+      `Why: Run timed out — ${CALLER_FACING_TIMEOUT_REPORT.message ?? ""}`,
     );
   });
 
