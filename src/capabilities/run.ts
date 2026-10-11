@@ -71,6 +71,7 @@ import {
   FAILURE_MESSAGE_MAX_CODE_POINTS,
   failureSummaryLines,
   isCallerFacing,
+  quotesReportMessage,
   runFailureOf,
   statusOnlyFailureMessage,
 } from "./run-failure.js";
@@ -1170,16 +1171,25 @@ export type FailedRunState = Extract<RunResultState, { state: "failed" }>;
  * The failed arm's `message`, the platform's account of the ending, as the model
  * may read it. Once the platform relays the report on the `409`, the account
  * quotes the served report's message after the status (`Run finished with
- * status FAILED: …`), so it is kept, bounded like the report's own message, only
- * when the report the arm carries is flagged caller-facing. Otherwise it is the
+ * status FAILED: …`), so with a report it is kept, bounded like the report's own
+ * message, only when that report is flagged caller-facing. Otherwise it is the
  * sentence the platform gives for a report with no message, since what it would
  * quote is the strict disclosure's placeholder or, on a verbose deployment, text
- * written for engineers. An arm with no report, from a platform that does not
- * relay it or one whose report the SDK's check dropped, takes that sentence too:
- * nothing then vouches for what its account quotes.
+ * written for engineers.
+ *
+ * An arm with no report is decided by its wording. In the quoting form it takes
+ * the status-only sentence too, since the report it quotes did not arrive with
+ * it, dropped by the SDK's check or never sent, and nothing vouches for the
+ * message. In any other it is kept: it
+ * is the platform's own copy, the status-only sentence or the account the route
+ * gives for a stored result it refuses to read, which the SDK reads as `FAILED`
+ * though the run may have completed, so the status-only sentence would misstate
+ * it.
  */
 export function failureMessageOf(state: FailedRunState): string {
-  if (!isCallerFacing(state.error)) return statusOnlyFailureMessage(state.status);
+  const quotesUnvouched =
+    state.error === null ? quotesReportMessage(state.message) : !isCallerFacing(state.error);
+  if (quotesUnvouched) return statusOnlyFailureMessage(state.status);
   return boundedFailureText(state.message, FAILURE_MESSAGE_MAX_CODE_POINTS);
 }
 

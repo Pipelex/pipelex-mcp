@@ -881,8 +881,9 @@ describe("resultsResult", () => {
     expect(result.summary).not.toContain("stored no error report");
   });
 
-  it("gives the status-only account for an arm with no report, whatever its sentence quotes", () => {
-    // A report the SDK's check dropped leaves nothing to vouch for the sentence.
+  it("gives the status-only account for an arm with no report whose account quotes one", () => {
+    // The quoting form with no report beside it: a report the SDK's check
+    // dropped, or one never sent, leaves nothing to vouch for the message.
     const arm: FailedRunState = {
       state: "failed",
       pipeline_run_id: RUN_ID,
@@ -892,9 +893,68 @@ describe("resultsResult", () => {
     };
 
     expect(failureMessageOf(arm)).toBe("Run finished with status TIMED_OUT; no result available");
-    expect(resultsResult(arm).structuredContent.failure_message).toBe(
-      "Run finished with status TIMED_OUT; no result available",
+    expect(resultsResult(arm).structuredContent).toEqual({
+      status: "ok",
+      run_id: RUN_ID,
+      state: "failed",
+      run_status: "TIMED_OUT",
+      failure_message: "Run finished with status TIMED_OUT; no result available",
+      available_view_specs: [],
+    });
+  });
+
+  it("keeps the platform's own account of an arm with no report that quotes none", async () => {
+    // The 409 the results route answers for a stored result it refuses to read
+    // names no run status, so the SDK reads it as FAILED, though the run may have
+    // completed: the platform's sentence is the account, and the status-only
+    // one would misstate it.
+    const detail =
+      "The run's recorded result location does not belong to this run; its results cannot be served.";
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(
+        Response.json(
+          { type: "about:blank", title: "Conflict", status: 409, detail },
+          { status: 409, headers: { "content-type": "application/problem+json" } },
+        ),
+      ),
     );
+    try {
+      const arm = await createPipelexApiClient({ baseUrl: DEFAULT_API_URL }).getRunResult(RUN_ID);
+      if (arm.state !== "failed") throw new Error("the SDK did not read the 409 as a failed arm");
+
+      expect(arm).toEqual({
+        state: "failed",
+        pipeline_run_id: RUN_ID,
+        status: "FAILED",
+        message: detail,
+        error: null,
+      });
+      expect(resultsResult(arm).structuredContent).toEqual({
+        status: "ok",
+        run_id: RUN_ID,
+        state: "failed",
+        run_status: "FAILED",
+        failure_message: detail,
+        available_view_specs: [],
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    // The platform's status-only sentence, and the SDK's own when no detail came, are kept as written.
+    for (const message of [
+      "Run finished with status CANCELLED; no result available",
+      "Run finished without a result.",
+    ]) {
+      expect(
+        failureMessageOf({
+          state: "failed",
+          pipeline_run_id: RUN_ID,
+          status: "CANCELLED",
+          message,
+          error: null,
+        }),
+      ).toBe(message);
+    }
   });
 
   it("carries the report the failed arm relays, with when the run ended from the status read", () => {

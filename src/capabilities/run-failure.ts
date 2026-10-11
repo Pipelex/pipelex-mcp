@@ -21,8 +21,9 @@
  * placeholder "An internal error occurred.", which tells an assistant nothing,
  * so this module carries `message` only from a report flagged caller-facing,
  * and the failed arm's account of the ending, which quotes that message, follows
- * the same rule (`failureMessageOf` in `run.ts`, with {@link isCallerFacing} and
- * {@link statusOnlyFailureMessage} from here). The model reads the title, the
+ * the same rule (`failureMessageOf` in `run.ts`, with {@link isCallerFacing},
+ * {@link quotesReportMessage} and {@link statusOnlyFailureMessage} from here).
+ * The model reads the title, the
  * next step and the support line instead, the support line giving the run id,
  * the error type and the time the run ended, by which the people who run the
  * platform find the whole report the run row keeps. A local loop serving the
@@ -113,6 +114,23 @@ export function isCallerFacing(report: RunErrorReport | null | undefined): boole
  */
 export function statusOnlyFailureMessage(status: RunStatus): string {
   return `Run finished with status ${status}; no result available`;
+}
+
+/**
+ * The wording of the platform's `409` when it quotes the served report's
+ * message: the status word, a colon, then the message. Its other wordings, the
+ * status-only sentence and the copy it writes for a stored result it refuses to
+ * read, quote nothing.
+ */
+const QUOTED_REPORT_ACCOUNT = /^Run finished with status [A-Z_]+: /;
+
+/**
+ * Whether a failed arm's account of the ending quotes a report's message, by the
+ * platform's wording alone: what decides it for an arm that carries no report,
+ * whose account may still quote one the SDK's check dropped.
+ */
+export function quotesReportMessage(account: string): boolean {
+  return QUOTED_REPORT_ACCOUNT.test(account);
 }
 
 /**
