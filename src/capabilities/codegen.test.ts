@@ -108,7 +108,7 @@ const bytesOf = (text: string): number => new TextEncoder().encode(text).length;
 const CODEGEN_AUTH_HEADLINE =
   "Code generation could not start: the Pipelex API key is missing or was refused, or code generation is not enabled for its organization.";
 
-/** What codegen's 403 adds after the key's own hint, whichever of the three it is. */
+/** What codegen's 403 adds after the key's own hint, whichever one it is. */
 const CODEGEN_GATE_SENTENCE =
   "Code generation can refuse even a key every other tool accepts, since the hosted Pipelex API enables /v1/codegen per organization, by its plan or feature flags: if other tools work with the key, ask for code generation to be enabled for its organization.";
 
@@ -607,7 +607,7 @@ describe("generateMthdsCode error classification", () => {
     expect(summary).toBe(CODEGEN_AUTH_HEADLINE);
   });
 
-  it("follows each of the workshop's three key hints with the gate, and reads well after each", async () => {
+  it("follows each of the workshop's key hints with the gate, and reads well after each", async () => {
     const home = await makeTempDir();
     const noKey = await resolveWorkshopCredentials({ PIPELEX_HOME: home });
     const hostKey = await resolveWorkshopCredentials({ PIPELEX_API_KEY: "plx_sk_host" });
