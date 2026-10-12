@@ -1208,7 +1208,10 @@ function toolError(verdict: ToolVerdict, texture: ToolTexture): ToolError {
  *
  * Whatever the arm, a failure located at `PIPELEX_BASE_URL` then takes the
  * call's {@link ClassifyErrorOptions.baseUrlSource} sentence, applied here
- * once rather than in each arm, so an arm added later cannot miss it.
+ * once rather than in each arm, so an arm added later cannot miss it. A
+ * caller that replaces the hint afterwards drops it, and `classifyStartError`
+ * does so on purpose: its may-have-run hint replaces whatever this function
+ * wrote, since it must stay the exact marker the run's headline reads.
  */
 export function classifyError(err: unknown, options: ClassifyErrorOptions = {}): ToolError {
   return withBaseUrlSource(classifyFailure(err, options), options.baseUrlSource);
@@ -1554,6 +1557,23 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
         hint: "This deployment is not sandbox-hosted, so it refuses a method that ships custom Python (.py) — the credential is not the problem. Run the method on a sandbox-hosted deployment, or name one whose pipes are all MTHDS.",
       },
     );
+  }
+
+  // The platform's refusal of a run whose inputs reference a file another
+  // organization stored (`CrossOrgStorageAccessError`, on `/v1/start` and
+  // `/v1/execute`): a 403 coded `forbidden` whose domain the platform sets to
+  // `input`, the one `forbidden` that carries it, while the runner's own 401
+  // and 403, tagged `input` too, carry no `code` at all. A login is how it
+  // usually happens: the new key acts for another organization than the one
+  // the inputs were uploaded under. It is caught ahead of the generic 401/403
+  // arm, which would send a caller whose key is fine to go and mint another;
+  // its class and `retryable` stay the SDK's, read from the platform's members.
+  if (err.status === 403 && err.code === "forbidden" && err.errorDomain === "input") {
+    return toolError(verdict, {
+      location: "inputs",
+      message,
+      hint: `The inputs reference a file stored by another organization than the one the API key acts for, as when the key changed since the inputs were prepared, after a login for instance. Prepare the inputs again with ${WORKSHOP_TOOL_NAMES.prepareInputs} under the current key, then run again.`,
+    });
   }
 
   if (err.status === 401 || err.status === 403) {

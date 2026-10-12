@@ -235,6 +235,66 @@ describe("run-route error classification", () => {
     expect(error.hint).toMatch(/mthds_validate/);
   });
 
+  it("reads the platform's refusal of another organization's stored file as the inputs', not the key's", () => {
+    // The platform's `CrossOrgStorageAccessError`: a 403 coded `forbidden`,
+    // whose problem document sets the domain to `input` and `retryable` false.
+    const crossOrg = (): ApiResponseError =>
+      new ApiResponseError(
+        "HTTP 403",
+        `${DEFAULT_API_URL}/v1/start`,
+        403,
+        "Forbidden",
+        "{}",
+        undefined, // errorType
+        "Storage URI belongs to another organization.",
+        undefined, // validationErrors
+        "forbidden",
+        {
+          problem: {
+            errorDomain: "input",
+            retryable: false,
+            title: "File belongs to another organization",
+          },
+          mayStartRun: true,
+        },
+      );
+
+    for (const error of [
+      classifyError(crossOrg(), RUN_START_ERROR_OPTIONS),
+      classifyStartError(crossOrg(), RUN_START_ERROR_OPTIONS),
+    ]) {
+      expect(error.class).toBe("input_domain");
+      expect(error).not.toHaveProperty("kind");
+      expect(error.location).toBe("inputs");
+      expect(error.retryable).toBe(false);
+      expect(error.hint).toContain("mthds_prepare_inputs");
+      // Not an auth hint, which sends the user to check or replace the key.
+      expect(error.hint).not.toContain("PIPELEX_API_KEY");
+    }
+
+    // Any other `forbidden` is the platform's credential refusal, `config`
+    // in the SDK's reading, and keeps the auth arm.
+    const refusedKey = classifyError(
+      new ApiResponseError(
+        "HTTP 403",
+        `${DEFAULT_API_URL}/v1/start`,
+        403,
+        "Forbidden",
+        "{}",
+        undefined,
+        "Forbidden",
+        undefined,
+        "forbidden",
+      ),
+      RUN_START_ERROR_OPTIONS,
+    );
+    expect(refusedKey).toMatchObject({
+      class: "config",
+      kind: "auth",
+      location: "PIPELEX_API_KEY",
+    });
+  });
+
   it("points a start-route 422 at the run request fields", () => {
     const error = classifyError(
       new ApiResponseError(

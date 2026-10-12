@@ -1395,6 +1395,11 @@ export async function startMthdsRun(
 export function classifyStartError(err: unknown, options: ClassifyErrorOptions): ToolError {
   const error = classifyError(err, options);
   if (!runMayHaveStartedOf(err)) return error;
+  // The hint is replaced whole, on purpose, dropping whatever `classifyError`
+  // wrote, the base URL's source sentence of an unreachable start included:
+  // `startMayHaveRunError` recognises this case by the hint's exact text, so
+  // nothing may be appended to it, and checking for a second run matters
+  // more here than where the base URL was set.
   return { ...error, retryable: false, hint: START_MAY_HAVE_RUN_HINT };
 }
 
