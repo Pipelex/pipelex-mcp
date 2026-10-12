@@ -90,10 +90,10 @@ The workshop resolves `{ path }` items from disk before invoking the capability 
 
 ## Local workshop: start it
 
-The workshop is published on npm as [`@pipelex/mcp`](https://www.npmjs.com/package/@pipelex/mcp). You do not install it: a host spawns it on demand in your project with the command below, and on Claude Code and Codex the [Pipelex plugin](https://github.com/Pipelex/pipelex-plugins) does that for you. Run by hand, it prints nothing and waits for a host on its standard input.
+The workshop is published on npm as [`@pipelex/mcp`](https://www.npmjs.com/package/@pipelex/mcp). You do not install it: a host spawns it on demand in your project with the command below, and on Claude Code and Codex the [Pipelex plugin](https://github.com/Pipelex/pipelex-plugins) does that for you. The `@latest` makes `npx` start the newest release rather than a copy it cached earlier. Run by hand, it prints nothing and waits for a host on its standard input.
 
 ```bash
-npx -y @pipelex/mcp
+npx -y @pipelex/mcp@latest
 ```
 
 It needs Node.js 24.14.1 or later, and a `plx_sk_` Pipelex API key, since every tool calls the hosted Pipelex API. Log in once in a terminal with `npx -y @pipelex/mcp@latest login`: it signs you in at [app.pipelex.com](https://app.pipelex.com) in your browser, checks the key the app creates and saves it in `~/.pipelex/.env`, which the workshop reads whenever its host passes no `PIPELEX_API_KEY`, from its next tool call. On a machine whose browser cannot reach the command, such as over SSH, `npx -y @pipelex/mcp@latest login --paste` takes a key you paste instead. Or create a key on the Developer page of [app.pipelex.com](https://app.pipelex.com) and set it as `PIPELEX_API_KEY` in the host's configuration, which wins over the saved one. The directory the host starts it in is the boundary for everything it reads and writes on disk. [Registering the workshop in a host](https://github.com/Pipelex/pipelex-mcp/blob/main/docs/hosts.md) gives the login's details, the configuration for each host, every environment variable the workshop reads, and the rules of that boundary.

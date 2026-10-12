@@ -2,7 +2,7 @@
 
 The workshop is this repository's stdio server. This page gives its registration in each host that spawns it, the environment variables it reads, and the working directory it is bound to. On Claude Code and Codex, the [Pipelex plugin](https://github.com/Pipelex/pipelex-plugins) runs this server for you, beside the skills that build methods, so register it by hand only where you do not use the plugin, and never beside it. A chatbot adds the hosted Pipelex connector by its address instead: see [Chat hosts use the Pipelex connector](../README.md#chat-hosts-use-the-pipelex-connector). The connector's tools are `pipelex_*` and the workshop's are `mthds_*`, so a host that ends up with both, as Claude Code does when a claude.ai connector syncs into it, can tell them apart, and the workshop's instructions tell the model to use its `mthds_*` tools for all method work there.
 
-The workshop is published as [`@pipelex/mcp`](https://www.npmjs.com/package/@pipelex/mcp). Hosts spawn it on demand with `npx -y @pipelex/mcp` (bin `pipelex-mcp`); you do not install it globally. It needs **Node.js 24.14.1 or later** and a `plx_sk_` platform key, saved by the login or passed in the host's registration as `PIPELEX_API_KEY` (see [Your API key](#your-api-key)): against the hosted Pipelex API every tool needs one, and only a local `pipelex-api` runner started without authentication answers `mthds_validate`, `mthds_inputs_template` and `mthds_codegen` without a key.
+The workshop is published as [`@pipelex/mcp`](https://www.npmjs.com/package/@pipelex/mcp). Hosts spawn it on demand with `npx -y @pipelex/mcp@latest` (bin `pipelex-mcp`); you do not install it globally. Every registration below spells it with `@latest`, which has `npx` look up the newest release at each start: with the bare package name, `npx` keeps starting whatever copy it cached first, an old server that ignores what was added since, the `login` argument included. It needs **Node.js 24.14.1 or later** and a `plx_sk_` platform key, saved by the login or passed in the host's registration as `PIPELEX_API_KEY` (see [Your API key](#your-api-key)): against the hosted Pipelex API every tool needs one, and only a local `pipelex-api` runner started without authentication answers `mthds_validate`, `mthds_inputs_template` and `mthds_codegen` without a key.
 
 The registration name is yours to choose; these snippets use `pipelex` (which yields `mcp__pipelex__mthds_validate`-style tool names). Whatever you call it, the server reports itself as `pipelex-plugin` in its MCP handshake.
 
@@ -25,7 +25,7 @@ The alternative is to set the key in the host's own configuration, as each regis
 ## Claude Code
 
 ```bash
-claude mcp add pipelex --env PIPELEX_API_KEY=plx_sk_... -- npx -y @pipelex/mcp
+claude mcp add pipelex --env PIPELEX_API_KEY=plx_sk_... -- npx -y @pipelex/mcp@latest
 ```
 
 ## Codex
@@ -35,7 +35,7 @@ In `~/.codex/config.toml`:
 ```toml
 [mcp_servers.pipelex]
 command = "npx"
-args = ["-y", "@pipelex/mcp"]
+args = ["-y", "@pipelex/mcp@latest"]
 env = { PIPELEX_API_KEY = "plx_sk_..." }
 ```
 
@@ -48,7 +48,7 @@ In `~/.cursor/mcp.json`:
   "mcpServers": {
     "pipelex": {
       "command": "npx",
-      "args": ["-y", "@pipelex/mcp"],
+      "args": ["-y", "@pipelex/mcp@latest"],
       "env": { "PIPELEX_API_KEY": "plx_sk_..." }
     }
   }
@@ -64,7 +64,7 @@ In `claude_desktop_config.json`:
   "mcpServers": {
     "pipelex": {
       "command": "npx",
-      "args": ["-y", "@pipelex/mcp"],
+      "args": ["-y", "@pipelex/mcp@latest"],
       "env": { "PIPELEX_API_KEY": "plx_sk_..." }
     }
   }

@@ -33,6 +33,7 @@ import {
   classifyError,
   createPipelexApiClient,
   DEFAULT_API_URL,
+  DEFAULT_AUTH_HINT,
   filesInputSchema,
   imageCandidatesOf,
   itemToolError,
@@ -1293,6 +1294,28 @@ describe("classifyError", () => {
           kind: "auth",
           location: "PIPELEX_API_KEY",
           hint: "No Pipelex API key is set.",
+        });
+      }
+    });
+
+    it("gives every credential arm the same default hint when no texture is set", async () => {
+      const verdict = {
+        scope: "main_stuff" as const,
+        artifacts: [],
+        saved_paths: [],
+        all_saved: true,
+      };
+      const errors = {
+        generic: await refused(401, { detail: "Missing API key" }),
+        upload: new UploadAuthenticationError("refused", 401),
+        artifact: new ArtifactAuthenticationError("refused", 403, verdict),
+      };
+      for (const [arm, err] of Object.entries(errors)) {
+        expect(classifyError(err), arm).toMatchObject({
+          class: "config",
+          kind: "auth",
+          location: "PIPELEX_API_KEY",
+          hint: DEFAULT_AUTH_HINT,
         });
       }
     });

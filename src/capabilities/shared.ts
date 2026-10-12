@@ -1365,7 +1365,7 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
       kind: "auth",
       location: options.auth?.location ?? "PIPELEX_API_KEY",
       message,
-      hint: options.auth?.hint ?? "Check the API key for the configured Pipelex API.",
+      hint: options.auth?.hint ?? DEFAULT_AUTH_HINT,
     };
   }
 
