@@ -709,6 +709,44 @@ describe("generateMthdsCode path submissions", () => {
     expect(result.structuredContent.status).toBe("ok");
   });
 
+  it("sends a bundle's template files as resources beside the files", async () => {
+    const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    let captured: CodegenRequest | undefined;
+
+    const result = await generateMthdsCode(
+      {
+        files: [{ path: "methods/invoice.mthds" }, { path: "methods/templates/invoice.xlsx" }],
+        target: "ts-zod",
+      },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: {
+          async resolve() {
+            return { ok: true, content: 'domain = "invoice"' };
+          },
+          async resolveTemplates(templates, bundle, requestBytes) {
+            expect(templates).toEqual([{ index: 1, path: "methods/templates/invoice.xlsx" }]);
+            expect(bundle).toEqual([{ path: "methods/invoice.mthds", named: [] }]);
+            expect(requestBytes).toBe('domain = "invoice"'.length);
+            return { ok: true, resources: { "templates/invoice.xlsx": XLSX } };
+          },
+        },
+        client: {
+          async codegen(request) {
+            captured = request;
+            return recordedReport;
+          },
+        },
+      },
+    );
+
+    expect(captured?.files).toEqual([
+      { content: 'domain = "invoice"', source: "methods/invoice.mthds" },
+    ]);
+    expect(captured?.resources).toEqual({ "templates/invoice.xlsx": XLSX });
+    expect(result.structuredContent.status).toBe("ok");
+  });
+
   it("rejects { path } items instructively without a resolver (hosted)", async () => {
     const result = await generateMthdsCode(
       { files: [{ path: "bundle.mthds" }], target: "ts-zod" },

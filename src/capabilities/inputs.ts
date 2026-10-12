@@ -20,10 +20,12 @@ import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./m
 import {
   METHOD_REF_GRAMMAR,
   buildApiConfig,
+  bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
-  filesInputSchema,
+  hasTemplateFiles,
   resolveSubmittedFiles,
+  resourcesOption,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
@@ -39,6 +41,7 @@ import type {
   SubmittedFileInput,
   ToolError,
 } from "./shared.js";
+import type { TemplateFiles } from "./template-files.js";
 
 /**
  * `mthds_inputs_template` — the workshop's fill-in template for one pipe's
@@ -58,7 +61,7 @@ const inputsTemplateFormatSchema = z.enum(["json", "toml"]);
 export type InputsTemplateFormat = z.infer<typeof inputsTemplateFormatSchema>;
 
 export const mthdsInputsInputSchema = {
-  files: filesInputSchema.optional(),
+  files: bundleFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
@@ -126,6 +129,8 @@ export interface MthdsInputsInput {
 /** The inputs request after `{ path }` resolution — what the checks and the API call consume. */
 interface ResolvedInputsRequest {
   files: SubmittedFile[];
+  /** The bundle's template files, keyed by the path a step names; sent beside `files` only. */
+  resources?: TemplateFiles;
   method_ref?: string;
   method_id?: string;
   pipe_ref?: string;
@@ -277,7 +282,11 @@ export async function buildMthdsInputs(
     return errorResult("Inputs template was not run: request input is invalid.", resolution.errors);
   }
 
-  const request: ResolvedInputsRequest = { ...input, files: resolution.files };
+  const request: ResolvedInputsRequest = {
+    ...input,
+    files: resolution.files,
+    resources: resolution.resources,
+  };
   const inputErrors = validateInputsRequest(request);
   if (inputErrors.length > 0) {
     return errorResult("Inputs template was not run: request input is invalid.", inputErrors);
@@ -303,6 +312,7 @@ export async function buildMthdsInputs(
     const classified = classifyError(err, {
       ...inputsErrorOptions(request),
       auth: context.authError,
+      bundleResources: hasTemplateFiles(request.resources),
     });
     const error = await selectorFailure(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);
@@ -476,7 +486,7 @@ function toPipeIoRequest(input: ResolvedInputsRequest): PipeIORequest {
       ? { method_ref: input.method_ref }
       : input.method_id !== undefined
         ? { method_id: input.method_id }
-        : { files: toMthdsFileItems(input.files) };
+        : { files: toMthdsFileItems(input.files), ...resourcesOption(input.resources) };
   return input.pipe_ref === undefined ? selector : { ...selector, pipe_ref: input.pipe_ref };
 }
 

@@ -4,7 +4,9 @@ import {
   ApiResponseError,
   ApiUnreachableError,
   InputPreparationError,
+  InvalidInputValueError,
   InvalidLocalSourceError,
+  MethodLoadError,
   RejectedAssetError,
   UnsupportedUploadCapabilityError,
   UploadAuthenticationError,
@@ -342,13 +344,15 @@ describe("prepareMthdsInputs — the SDK upload walk", () => {
     expect(result.structuredContent.errors?.[0]?.retryable).toBe(true);
   });
 
-  it("surfaces an unresolvable closure thrown by the SDK as a no-verdict input_domain at pipe_ref", async () => {
+  it("surfaces a pipe refusal thrown by the SDK as a no-verdict input_domain at pipe_ref", async () => {
     const result = await prepareMthdsInputs(
       { files, inputs: {} },
       {
         baseUrl: DEFAULT_API_URL,
         client: uploadWith(async () => {
-          throw new InputPreparationError("the method signature did not resolve — boom");
+          throw new InputPreparationError(
+            'Cannot prepare inputs: pipe_ref "summarize" is not qualified',
+          );
         }),
       },
     );
@@ -358,6 +362,52 @@ describe("prepareMthdsInputs — the SDK upload walk", () => {
     expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
     expect(result.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
     expect(result.structuredContent).not.toHaveProperty("validation_errors");
+  });
+
+  it.each([
+    ["files", { files }],
+    ["method_ref", { method_ref: PUBLISHED_REF }],
+    ["method_id", { method_id: "mt_123" }],
+  ] as const)(
+    "locates a method that does not load at %s, the selector that named it",
+    async (location, selector) => {
+      const result = await prepareMthdsInputs(
+        { ...selector, inputs: {} },
+        {
+          baseUrl: DEFAULT_API_URL,
+          client: uploadWith(async () => {
+            throw new MethodLoadError(
+              "Cannot prepare inputs: the method signature did not resolve — boom",
+              { validationErrors: [], serverMessage: "boom" },
+            );
+          }),
+        },
+      );
+
+      expect(result.structuredContent.status).toBe("error");
+      expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+      expect(result.structuredContent.errors?.[0]?.location).toBe(location);
+      expect(result.structuredContent.errors?.[0]?.hint).toContain("mthds_validate");
+    },
+  );
+
+  it("locates a file input value that cannot be read as a file at inputs", async () => {
+    const result = await prepareMthdsInputs(
+      { files, inputs: { document: "data:application/pdf;base64" } },
+      {
+        baseUrl: DEFAULT_API_URL,
+        client: uploadWith(async () => {
+          throw new InvalidInputValueError(
+            "Cannot prepare inputs: the data: URL at document has no comma",
+            { inputName: "document", inputPath: "document" },
+          );
+        }),
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.errors?.[0]?.location).toBe("inputs");
   });
 });
 describe("prepareMthdsInputs — selector-shaped classification", () => {
@@ -590,6 +640,42 @@ describe("prepareMthdsInputs — request shape and transport", () => {
 
     expect(captured).toMatchObject({
       files: [{ content: 'domain = "demo"', source: "methods/bundle.mthds" }],
+    });
+    expect(result.structuredContent.status).toBe("ok");
+  });
+
+  it("sends a bundle's template files as resources on the files arm", async () => {
+    const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    let captured: PrepareInputsRequest | undefined;
+
+    const result = await prepareMthdsInputs(
+      {
+        files: [{ path: "methods/invoice.mthds" }, { path: "methods/templates/invoice.xlsx" }],
+        inputs: {},
+      },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: {
+          async resolve() {
+            return { ok: true, content: 'domain = "invoice"' };
+          },
+          async resolveTemplates(templates, bundle, requestBytes) {
+            expect(templates).toEqual([{ index: 1, path: "methods/templates/invoice.xlsx" }]);
+            expect(bundle).toEqual([{ path: "methods/invoice.mthds", named: [] }]);
+            expect(requestBytes).toBe('domain = "invoice"'.length);
+            return { ok: true, resources: { "templates/invoice.xlsx": XLSX } };
+          },
+        },
+        client: uploadWith(async (request) => {
+          captured = request;
+          return { inputs: {}, uploads: [] };
+        }),
+      },
+    );
+
+    expect(captured).toMatchObject({
+      files: [{ content: 'domain = "invoice"', source: "methods/invoice.mthds" }],
+      resources: { "templates/invoice.xlsx": XLSX },
     });
     expect(result.structuredContent.status).toBe("ok");
   });

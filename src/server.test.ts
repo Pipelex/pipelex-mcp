@@ -358,13 +358,28 @@ describe("the workshop's contexts and dispatch", () => {
     }
   });
 
-  it("registers mthds_models as a read with two optional arguments and dispatches a check", async () => {
+  it("registers mthds_models as a read with two optional arguments and dispatches a check to the runner", async () => {
     const contexts = buildLocalToolContexts({ PIPELEX_API_KEY: "plx_sk_test" });
-    const asked: Array<string | undefined> = [];
+    const listed: Array<string | undefined> = [];
+    const checked: Array<{ reference: string; category: string | undefined }> = [];
     contexts.models.client = {
       async models(category) {
-        asked.push(category);
+        listed.push(category);
         return { models: [{ name: "writing-factual", type: "llm" }], aliases: {}, waterfalls: {} };
+      },
+      async checkModelReference(reference, category) {
+        checked.push({ reference, category });
+        return {
+          reference: "$writing-factul",
+          kind: "preset",
+          name: "writing-factul",
+          category: "llm",
+          resolution: "not_found",
+          matches: [],
+          suggestions: ["$writing-factual"],
+          other_kinds: [],
+          other_categories: [],
+        };
       },
     };
 
@@ -375,7 +390,7 @@ describe("the workshop's contexts and dispatch", () => {
       );
       const schema = tool?.inputSchema as { required?: string[]; properties?: object };
 
-      // It reads the deck and nothing else, and only from the configured API.
+      // It reads the deck or asks the runner, and only the configured API.
       expect(tool?.annotations).toMatchObject({
         readOnlyHint: true,
         destructiveHint: false,
@@ -392,13 +407,18 @@ describe("the workshop's contexts and dispatch", () => {
         arguments: { reference: "$writing-factul", category: "llm" },
       });
 
-      expect(asked).toEqual([undefined]);
+      expect(checked).toEqual([{ reference: "$writing-factul", category: "llm" }]);
+      expect(listed).toEqual([]);
       expect(result.structuredContent).toMatchObject({
         status: "ok",
+        category: "llm",
         reference: "$writing-factul",
+        kind: "preset",
+        name: "writing-factul",
         resolution: "not_found",
         suggestions: ["$writing-factual"],
       });
+      expect(result.isError).toBeFalsy();
       expect(result._meta).toBeUndefined();
     } finally {
       await close();
@@ -446,11 +466,30 @@ describe("the workshop's contexts and dispatch", () => {
 
     const contexts = buildLocalToolContexts({ PIPELEX_BASE_URL: "http://127.0.0.1:8081" }, rootDir);
 
-    expect(contexts.validation.resolver).toBe(contexts.inputs.resolver);
-    expect(contexts.validation.resolver).toBe(contexts.run.resolver);
+    // Every method-taking tool reads the bundle's template files through one
+    // resolver; the save reads `.mthds` alone, since the catalog stores no
+    // template file.
+    for (const resolver of [
+      contexts.inputs.resolver,
+      contexts.codegen.resolver,
+      contexts.prepare.resolver,
+      contexts.run.resolver,
+    ]) {
+      expect(resolver).toBe(contexts.validation.resolver);
+    }
+    expect(contexts.validation.resolver?.resolveTemplates).toBeDefined();
+    expect(contexts.catalogWrite.resolver?.resolveTemplates).toBeUndefined();
     await expect(contexts.validation.resolver?.resolve("bundle.mthds")).resolves.toEqual({
       ok: true,
       content: 'domain = "demo"',
+    });
+    await expect(contexts.catalogWrite.resolver?.resolve("bundle.mthds")).resolves.toEqual({
+      ok: true,
+      content: 'domain = "demo"',
+    });
+    await expect(contexts.catalogWrite.resolver?.resolve("invoice.xlsx")).resolves.toMatchObject({
+      ok: false,
+      message: "Path is not a .mthds file: invoice.xlsx",
     });
 
     const { client, close } = await connectClient(createLocalServer({ contexts }));

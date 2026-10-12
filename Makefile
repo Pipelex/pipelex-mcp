@@ -206,7 +206,7 @@ live-preflight:
 	fi
 	@target="$(LIVE_API)"; curl -fs --max-time 5 -o /dev/null "$$target/v1/version" || { \
 		echo "ERROR: no Pipelex API reachable at $$target"; \
-		echo "  Set PIPELEX_E2E_BASE_URL (in .env, or on the command line) to a running instance, or start the OSS runner: cd ../pipelex-api && make run"; \
+		echo "  Set PIPELEX_E2E_BASE_URL (in .env, or on the command line) to a running instance, or start the OSS runner with 'make -C api run' in a checkout of Pipelex/pipelex, which serves http://localhost:8081"; \
 		exit 1; \
 	}
 	@if [ -z "$$PIPELEX_E2E_API_KEY" ]; then \

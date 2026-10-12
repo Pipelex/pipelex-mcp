@@ -21,7 +21,7 @@ The workshop is a stdio server: a host spawns it and talks to it over its standa
 Prerequisites:
 
 - Node.js 24.14.1 or later
-- A Pipelex API. The workshop calls the hosted Pipelex API at `https://api.pipelex.com` unless `PIPELEX_BASE_URL` names another, with the `plx_sk_` key in `PIPELEX_API_KEY`; [the environment section of the hosts page](hosts.md#environment) lists every variable it reads. `mthds_inputs_template` and `mthds_prepare_inputs` read a method's signature from `POST /v1/pipe-io`, which needs pipelex-api 0.33.1 or later.
+- A Pipelex API. The workshop calls the hosted Pipelex API at `https://api.pipelex.com` unless `PIPELEX_BASE_URL` names another, with the `plx_sk_` key in `PIPELEX_API_KEY`; [the environment section of the hosts page](hosts.md#environment) lists every variable it reads. `mthds_inputs_template` and `mthds_prepare_inputs` read a method's signature from `POST /v1/pipe-io`, which needs pipelex-api 0.33.1 or later. `mthds_models` checks a reference through `GET /v1/models/check`, which needs pipelex-api 0.78.0 or later; an older runner answers a check with a `404`, which the tool reports as a `config` error naming the route.
 
 Install the dependencies, then start the server:
 
@@ -31,7 +31,7 @@ make dev-local       # run the stdio server from TypeScript (tsx)
 make inspect-local   # open MCP Inspector against it
 ```
 
-Neither target reads `.env`: the server takes `PIPELEX_BASE_URL` and `PIPELEX_API_KEY` from the environment it is started in, so export them in your shell or set them on the command line. To develop against a local runner, start `pipelex-api` with `make run` in its checkout, which serves `http://localhost:8081`, and point the workshop at it with `PIPELEX_BASE_URL=http://localhost:8081`. A local runner checks no key, so `PIPELEX_API_KEY` can stay unset there, but it has neither the catalog nor the durable run lifecycle: a catalog id and the run family need the hosted API.
+Neither target reads `.env`: the server takes `PIPELEX_BASE_URL` and `PIPELEX_API_KEY` from the environment it is started in, so export them in your shell or set them on the command line. To develop against a local runner, start the Pipelex API server with `make -C api run` in a checkout of [`Pipelex/pipelex`](https://github.com/Pipelex/pipelex), whose `api/` member it is; it serves `http://localhost:8081`, and you point the workshop at it with `PIPELEX_BASE_URL=http://localhost:8081`. A local runner checks no key, so `PIPELEX_API_KEY` can stay unset there, but it has neither the catalog nor the durable run lifecycle: a catalog id and the run family need the hosted API.
 
 ## Build
 

@@ -4,7 +4,10 @@ import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { localFileResolver } from "./files.js";
+import { GRAPH_PAGE_FILENAME } from "./capabilities/graph-page.js";
+import { resolveSubmittedFiles } from "./capabilities/shared.js";
+import { MAX_TEMPLATE_FILE_BYTES, MAX_TEMPLATE_FILES } from "./capabilities/template-files.js";
+import { localBundleFileResolver, localFileResolver } from "./files.js";
 
 const BUNDLE = 'domain = "demo"\nmain_pipe = "main"\n';
 
@@ -149,5 +152,413 @@ describe("localFileResolver", () => {
     if (!resolution.ok) {
       expect(resolution.message).toMatch(/working directory/);
     }
+  });
+});
+
+describe("localBundleFileResolver", () => {
+  let rootDir: string;
+  let outsideDir: string;
+  // Bytes no UTF-8 decode survives: a NUL, a lone continuation byte, a high byte.
+  const TEMPLATE_BYTES = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00, 0x80, 0xff, 0x0a]);
+  const MIB = 1024 * 1024;
+
+  beforeEach(async () => {
+    rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "pipelex-mcp-root-"));
+    outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), "pipelex-mcp-outside-"));
+    await placeBundle("methods/invoice/invoice.mthds", ["templates/invoice.xlsx"]);
+  });
+
+  afterEach(async () => {
+    await fs.rm(rootDir, { recursive: true, force: true });
+    await fs.rm(outsideDir, { recursive: true, force: true });
+  });
+
+  /** A `.mthds` file whose `PipeDocGen` steps fill `templateFiles`, one step each. */
+  function docGenBundle(templateFiles: readonly string[]): string {
+    const steps = templateFiles.map((templateFile, index) =>
+      [
+        `[pipe.render_${index}]`,
+        'type = "PipeDocGen"',
+        'description = "Fill the template"',
+        'inputs = { invoice = "Invoice" }',
+        'output = "Document"',
+        `template_file = "${templateFile}"`,
+      ].join("\n"),
+    );
+    return ['domain = "invoice"', ...steps].join("\n\n") + "\n";
+  }
+
+  async function placeBundle(relative: string, templateFiles: readonly string[]) {
+    const target = path.join(rootDir, relative);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, docGenBundle(templateFiles));
+  }
+
+  async function placeTemplate(relative: string, bytes: Uint8Array = TEMPLATE_BYTES) {
+    const target = path.join(rootDir, relative);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, bytes);
+  }
+
+  /** A template file of `size` zero bytes, sparse on disk. */
+  async function placeSparseTemplate(relative: string, size: number) {
+    const target = path.join(rootDir, relative);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, "");
+    await fs.truncate(target, size);
+  }
+
+  function submit(paths: readonly string[]) {
+    return resolveSubmittedFiles(
+      paths.map((submitted) => ({ path: submitted })),
+      localBundleFileResolver(rootDir),
+    );
+  }
+
+  it("reads .mthds files as text, as the plain resolver does", async () => {
+    const resolution = await localBundleFileResolver(rootDir).resolve(
+      "methods/invoice/invoice.mthds",
+    );
+
+    expect(resolution).toEqual({
+      ok: true,
+      content: docGenBundle(["templates/invoice.xlsx"]),
+    });
+  });
+
+  it("names the template suffixes when its text arm refuses an extension", async () => {
+    const resolution = await localBundleFileResolver(rootDir).resolve("notes.txt");
+
+    expect(resolution.ok).toBe(false);
+    if (!resolution.ok) {
+      expect(resolution.message).toBe("Path is not a .mthds file: notes.txt");
+      expect(resolution.hint).toContain(".html, .xlsx, .docx, .pptx");
+    }
+  });
+
+  it("sends a template file's exact bytes under the template_file of the step naming it", async () => {
+    await placeTemplate("methods/invoice/templates/invoice.xlsx");
+
+    const resolution = await submit([
+      "methods/invoice/templates/invoice.xlsx",
+      "methods/invoice/invoice.mthds",
+    ]);
+
+    expect(resolution.errors).toEqual([]);
+    expect(Object.keys(resolution.resources)).toEqual(["templates/invoice.xlsx"]);
+    expect([...resolution.resources["templates/invoice.xlsx"]!]).toEqual([...TEMPLATE_BYTES]);
+  });
+
+  it("keys each template by its own step in a bundle spread over several directories", async () => {
+    // The .mthds files share no directory but methods/: each template is
+    // keyed from the directory of the file whose step names it.
+    await placeBundle("methods/shared/concepts.mthds", []);
+    await placeBundle("methods/invoice/steps/render.mthds", ["report.html"]);
+    await placeTemplate("methods/invoice/templates/invoice.xlsx");
+    await placeTemplate("methods/invoice/steps/report.html");
+
+    const resolution = await submit([
+      "methods/invoice/invoice.mthds",
+      "methods/shared/concepts.mthds",
+      "methods/invoice/steps/render.mthds",
+      "methods/invoice/templates/invoice.xlsx",
+      "./methods/invoice/steps/report.html",
+    ]);
+
+    expect(resolution.errors).toEqual([]);
+    expect(Object.keys(resolution.resources).sort()).toEqual([
+      "report.html",
+      "templates/invoice.xlsx",
+    ]);
+  });
+
+  it("sends a template under the canonical form of the step's template_file", async () => {
+    await placeBundle("methods/invoice/invoice.mthds", ["./templates//invoice.xlsx"]);
+    await placeTemplate("methods/invoice/templates/invoice.xlsx");
+
+    const resolution = await submit([
+      "methods/invoice/invoice.mthds",
+      path.join(rootDir, "methods", "invoice", "templates", "invoice.xlsx"),
+    ]);
+
+    expect(resolution.errors).toEqual([]);
+    expect(Object.keys(resolution.resources)).toEqual(["templates/invoice.xlsx"]);
+  });
+
+  it("refuses a template file no step names, saying where the steps look", async () => {
+    await placeTemplate("methods/invoice/templates/invoice.xlsx");
+    await placeTemplate("methods/invoice/invoice.xlsx");
+
+    const resolution = await submit([
+      "methods/invoice/invoice.mthds",
+      "methods/invoice/invoice.xlsx",
+    ]);
+
+    expect(resolution.resources).toEqual({});
+    expect(resolution.errors).toHaveLength(1);
+    expect(resolution.errors[0]).toMatchObject({
+      class: "input_domain",
+      location: "files[1].path",
+      retryable: false,
+    });
+    expect(resolution.errors[0]?.message).toContain("named by no PipeDocGen step");
+    expect(resolution.errors[0]?.message).toContain("methods/invoice/templates/invoice.xlsx");
+  });
+
+  it("refuses the flowchart page mthds_validate writes, which no step names", async () => {
+    await fs.writeFile(
+      path.join(rootDir, "methods", "invoice", GRAPH_PAGE_FILENAME),
+      "<html></html>",
+    );
+    await placeTemplate("methods/invoice/templates/invoice.xlsx");
+
+    const resolution = await submit([
+      "methods/invoice/invoice.mthds",
+      "methods/invoice/templates/invoice.xlsx",
+      `methods/invoice/${GRAPH_PAGE_FILENAME}`,
+    ]);
+
+    expect(resolution.errors.map((error) => error.location)).toEqual(["files[2].path"]);
+    expect(resolution.errors[0]?.message).toContain("named by no PipeDocGen step");
+  });
+
+  it("names nothing from a .mthds file that does not parse, or from a template_file leaving the bundle", async () => {
+    await fs.writeFile(
+      path.join(rootDir, "methods", "invoice", "broken.mthds"),
+      '[pipe.render\ntype = "PipeDocGen"\ntemplate_file = "templates/invoice.xlsx"\n',
+    );
+    await placeBundle("methods/invoice/invoice.mthds", ["../invoice.xlsx"]);
+    await placeTemplate("methods/invoice.xlsx");
+    await placeTemplate("methods/invoice/templates/invoice.xlsx");
+
+    const resolution = await submit([
+      "methods/invoice/broken.mthds",
+      "methods/invoice/invoice.mthds",
+      "methods/invoice.xlsx",
+      "methods/invoice/templates/invoice.xlsx",
+    ]);
+
+    expect(resolution.errors.map((error) => error.location)).toEqual([
+      "files[2].path",
+      "files[3].path",
+    ]);
+  });
+
+  it("refuses one template_file naming a different file beside each of two .mthds files", async () => {
+    await placeBundle("methods/a/a.mthds", ["letter.docx"]);
+    await placeBundle("methods/b/b.mthds", ["letter.docx"]);
+    await placeTemplate("methods/a/letter.docx");
+    await placeTemplate("methods/b/letter.docx", new Uint8Array([0x01]));
+
+    const resolution = await submit([
+      "methods/a/a.mthds",
+      "methods/b/b.mthds",
+      "methods/a/letter.docx",
+      "methods/b/letter.docx",
+    ]);
+
+    expect(resolution.resources).toEqual({});
+    expect(resolution.errors.map((error) => error.location)).toEqual([
+      "files[2].path",
+      "files[3].path",
+    ]);
+    expect(resolution.errors[0]?.message).toContain('"letter.docx"');
+  });
+
+  it("sends a file submitted twice once, under any spelling of its path", async () => {
+    await placeTemplate("methods/invoice/templates/invoice.xlsx");
+    const spellings = [
+      "methods/invoice/templates/invoice.xlsx",
+      "./methods/invoice/../invoice/templates/invoice.xlsx",
+      path.join(rootDir, "methods", "invoice", "templates", "invoice.xlsx"),
+    ];
+    // On a filesystem that ignores case, another spelling of the same file.
+    const upper = path.join(rootDir, "methods", "invoice", "Templates", "Invoice.xlsx");
+    const ignoresCase = await fs.stat(upper).then(
+      () => true,
+      () => false,
+    );
+    if (ignoresCase) spellings.push("methods/invoice/Templates/Invoice.xlsx");
+
+    const resolution = await submit(["methods/invoice/invoice.mthds", ...spellings]);
+
+    expect(resolution.errors).toEqual([]);
+    expect(Object.keys(resolution.resources)).toEqual(["templates/invoice.xlsx"]);
+  });
+
+  it("counts the files sent, after a file submitted twice is counted once", async () => {
+    const names = Array.from({ length: 20 }, (_, index) => `templates/t${index}.docx`);
+    await placeBundle("methods/invoice/invoice.mthds", names);
+    for (const name of names) await placeTemplate(`methods/invoice/${name}`);
+    const submitted = names.map((name) => `methods/invoice/${name}`);
+
+    const twice = await submit(["methods/invoice/invoice.mthds", ...submitted, ...submitted]);
+
+    expect(twice.errors).toEqual([]);
+    expect(Object.keys(twice.resources)).toHaveLength(names.length);
+  });
+
+  it("refuses more template files than the runner takes, at files", async () => {
+    const names = Array.from(
+      { length: MAX_TEMPLATE_FILES + 1 },
+      (_, index) => `templates/t${index}.docx`,
+    );
+    await placeBundle("methods/invoice/invoice.mthds", names);
+    for (const name of names) await placeTemplate(`methods/invoice/${name}`);
+
+    const resolution = await submit([
+      "methods/invoice/invoice.mthds",
+      ...names.map((name) => `methods/invoice/${name}`),
+    ]);
+
+    expect(resolution.errors).toHaveLength(1);
+    expect(resolution.errors[0]?.location).toBe("files");
+    expect(resolution.errors[0]?.message).toContain(String(MAX_TEMPLATE_FILES));
+  });
+
+  it("holds the template files to the gateway's quota with each one base64-encoded", async () => {
+    // Under the runner's 10 MiB of raw bytes, over the gateway's 10 MiB once
+    // encoded: refused at the file that crosses it.
+    const names = ["templates/a.docx", "templates/b.docx", "templates/c.docx"];
+    await placeBundle("methods/invoice/invoice.mthds", names);
+    for (const name of names)
+      await placeSparseTemplate(`methods/invoice/${name}`, Math.round(2.8 * MIB));
+    const submitted = names.map((name) => `methods/invoice/${name}`);
+
+    const over = await submit(["methods/invoice/invoice.mthds", ...submitted]);
+
+    expect(over.errors.map((error) => error.location)).toEqual(["files[3].path"]);
+    expect(over.errors[0]?.message).toContain("base64-encoded");
+
+    const under = await submit(["methods/invoice/invoice.mthds", ...submitted.slice(0, 2)]);
+    expect(under.errors).toEqual([]);
+    expect(Object.keys(under.resources)).toEqual(names.slice(0, 2));
+  });
+
+  it("decides everything before reading a template file", async () => {
+    // A file the steps name but no one may read, beside a file no step names:
+    // the refusal is the unnamed file alone, so the unreadable one was never opened.
+    await placeTemplate("methods/invoice/templates/invoice.xlsx");
+    await fs.chmod(path.join(rootDir, "methods", "invoice", "templates", "invoice.xlsx"), 0o000);
+    await placeTemplate("methods/invoice/stray.docx");
+
+    const resolution = await submit([
+      "methods/invoice/invoice.mthds",
+      "methods/invoice/templates/invoice.xlsx",
+      "methods/invoice/stray.docx",
+    ]);
+
+    expect(resolution.errors.map((error) => error.location)).toEqual(["files[2].path"]);
+    expect(resolution.errors[0]?.message).toContain("named by no PipeDocGen step");
+  });
+
+  it("refuses a suffix outside the template list without touching the file", async () => {
+    await fs.writeFile(path.join(rootDir, "methods", "invoice", ".env"), "SECRET=shh\n");
+
+    const resolution = await localBundleFileResolver(rootDir).resolveTemplates!(
+      [{ index: 1, path: "methods/invoice/.env" }],
+      [{ path: "methods/invoice/invoice.mthds", named: [".env"] }],
+      0,
+    );
+
+    expect(resolution.ok).toBe(false);
+    if (!resolution.ok) {
+      expect(resolution.refusals).toHaveLength(1);
+      expect(resolution.refusals[0]?.index).toBe(1);
+      expect(resolution.refusals[0]?.message).toBe(
+        "Path is not a template file: methods/invoice/.env",
+      );
+      expect(JSON.stringify(resolution)).not.toContain("SECRET");
+    }
+  });
+
+  it("refuses a template a step reaches only through a symlink out of its directory", async () => {
+    // pipelex's loader refuses such a file, so it is not sent.
+    await placeTemplate("shared/invoice.xlsx");
+    await fs.mkdir(path.join(rootDir, "methods", "invoice", "templates"), { recursive: true });
+    await fs.symlink(
+      path.join(rootDir, "shared", "invoice.xlsx"),
+      path.join(rootDir, "methods", "invoice", "templates", "invoice.xlsx"),
+    );
+
+    for (const submitted of ["methods/invoice/templates/invoice.xlsx", "shared/invoice.xlsx"]) {
+      const resolution = await submit(["methods/invoice/invoice.mthds", submitted]);
+
+      expect(resolution.errors.map((error) => error.location)).toEqual(["files[1].path"]);
+      expect(resolution.errors[0]?.message).toContain(
+        "A symlink does not make a file part of the method",
+      );
+    }
+  });
+
+  it("refuses a symlink whose target leaves the workspace", async () => {
+    await placeBundle("methods/invoice/invoice.mthds", ["letter.docx"]);
+    await fs.writeFile(path.join(outsideDir, "secret.docx"), TEMPLATE_BYTES);
+    await fs.symlink(
+      path.join(outsideDir, "secret.docx"),
+      path.join(rootDir, "methods", "invoice", "letter.docx"),
+    );
+
+    const resolution = await submit([
+      "methods/invoice/invoice.mthds",
+      "methods/invoice/letter.docx",
+    ]);
+
+    expect(resolution.errors.map((error) => error.location)).toEqual(["files[1].path"]);
+    expect(resolution.errors[0]?.message).toMatch(/outside the server's working directory/);
+  });
+
+  it("follows a symlink that stays in the step's directory, keyed by the step", async () => {
+    await placeBundle("methods/invoice/invoice.mthds", ["report.html"]);
+    await placeTemplate("methods/invoice/templates/v2.html");
+    await fs.symlink(
+      path.join(rootDir, "methods", "invoice", "templates", "v2.html"),
+      path.join(rootDir, "methods", "invoice", "report.html"),
+    );
+
+    const resolution = await submit([
+      "methods/invoice/invoice.mthds",
+      "methods/invoice/report.html",
+    ]);
+
+    expect(resolution.errors).toEqual([]);
+    expect(Object.keys(resolution.resources)).toEqual(["report.html"]);
+  });
+
+  it("refuses a template file over the per-file limit on its size, before reading it", async () => {
+    await placeSparseTemplate(
+      "methods/invoice/templates/invoice.xlsx",
+      MAX_TEMPLATE_FILE_BYTES + 1,
+    );
+
+    const resolution = await submit([
+      "methods/invoice/invoice.mthds",
+      "methods/invoice/templates/invoice.xlsx",
+    ]);
+
+    expect(resolution.errors.map((error) => error.location)).toEqual(["files[1].path"]);
+    expect(resolution.errors[0]?.message).toMatch(/too large/);
+    expect(resolution.errors[0]?.message).toContain(String(MAX_TEMPLATE_FILE_BYTES));
+  });
+
+  it("reports a missing template and a directory carrying a template suffix", async () => {
+    await fs.mkdir(path.join(rootDir, "methods", "invoice", "folder.html"));
+
+    const resolution = await submit([
+      "methods/invoice/invoice.mthds",
+      "methods/invoice/gone.xlsx",
+      "methods/invoice/folder.html",
+    ]);
+
+    expect(resolution.errors.map((error) => error.location)).toEqual([
+      "files[1].path",
+      "files[2].path",
+    ]);
+    expect(resolution.errors[0]?.message).toBe("File not found: methods/invoice/gone.xlsx");
+    expect(resolution.errors[1]?.message).toMatch(/not a regular file/);
+  });
+
+  it("is not how the plain resolver reads: it has no template arm", () => {
+    expect(localFileResolver(rootDir).resolveTemplates).toBeUndefined();
   });
 });

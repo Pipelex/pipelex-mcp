@@ -11,7 +11,6 @@ import {
   GRAPH_PAGE_FILENAME,
   GRAPH_PAGE_MARK,
   GRAPH_VIEWER_VERSION,
-  deepestCommonDirectory,
   graphPageSection,
   renderGraphPage,
   writeGraphPage,
@@ -146,15 +145,6 @@ describe("renderGraphPage", () => {
 
   it("escapes the title as HTML", () => {
     expect(page).toContain("<title>demo &amp; &lt;co&gt; — method graph</title>");
-  });
-});
-
-describe("deepestCommonDirectory", () => {
-  it("is the directory itself when there is one, and the shared ancestor otherwise", () => {
-    const base = path.join(path.sep, "work", "methods");
-    expect(deepestCommonDirectory([base, base])).toBe(base);
-    expect(deepestCommonDirectory([base, path.join(base, "sub")])).toBe(base);
-    expect(deepestCommonDirectory([path.join(base, "a"), path.join(base, "ab")])).toBe(base);
   });
 });
 

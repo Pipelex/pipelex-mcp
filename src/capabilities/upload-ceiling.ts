@@ -12,8 +12,12 @@ import type { UploadInput, UploadedFile } from "@pipelex/sdk";
  * limit anywhere.
  */
 
-/** AWS API Gateway's hard HTTP API request quota. */
-const GATEWAY_REQUEST_LIMIT_BYTES = 10 * 1024 * 1024;
+/**
+ * AWS API Gateway's hard HTTP API request quota. Every request to the hosted
+ * API crosses it as JSON, so it bounds a bundle's template files too, which
+ * ride a request base64-encoded (`template-files.ts`).
+ */
+export const GATEWAY_REQUEST_LIMIT_BYTES = 10 * 1024 * 1024;
 
 /** Room for the JSON envelope wrapping the base64 payload (filename, content type, quoting). */
 const UPLOAD_ENVELOPE_ALLOWANCE_BYTES = 4096;
@@ -30,6 +34,11 @@ export const MAX_UPLOAD_BYTES = Math.floor(
 /** Render a byte count as MiB for a limit message the caller can act on. */
 export function formatMib(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+/** The length of `bytes` bytes once encoded in standard padded base64, as the SDK sends them. */
+export function base64EncodedLength(bytes: number): number {
+  return 4 * Math.ceil(bytes / 3);
 }
 
 /**

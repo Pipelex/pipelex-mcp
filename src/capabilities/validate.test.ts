@@ -17,6 +17,7 @@ import type {
   ValidateMethodSelector,
 } from "@pipelex/sdk";
 
+import { localBundleFileResolver } from "../files.js";
 import { GRAPH_PAGE_FILENAME, GRAPH_PAGE_MARK } from "./graph-page.js";
 import { DEFAULT_API_URL } from "./shared.js";
 import type { FileResolver } from "./shared.js";
@@ -1297,6 +1298,187 @@ describe("validateMthds path submissions", () => {
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.errors?.[0]?.location).toBe("files[0].path");
     expect(result.structuredContent.errors?.[0]?.message).toBe("File not found: missing.mthds");
+  });
+});
+
+describe("validateMthds with a bundle's template files", () => {
+  const tempDirs: string[] = [];
+  const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff]);
+  const TEMPLATE_WARNING = {
+    category: "dry_run" as const,
+    error_type: "template_check_warning",
+    message: "The template reads {{ discount }}, which no input of the step provides.",
+    pipe_code: "render_invoice",
+    template_file: "templates/invoice.xlsx",
+    template_location: "sheet Invoice, cell B7",
+  };
+
+  afterEach(async () => {
+    await Promise.all(
+      tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })),
+    );
+  });
+
+  /** A bundle whose PipeDocGen step fills templates/invoice.xlsx. */
+  const INVOICE_BUNDLE = [
+    'domain = "invoice"',
+    "",
+    "[pipe.render_invoice]",
+    'type = "PipeDocGen"',
+    'description = "Fill the invoice workbook"',
+    'inputs = { invoice = "Invoice" }',
+    'output = "Document"',
+    'template_file = "templates/invoice.xlsx"',
+    "",
+  ].join("\n");
+
+  /** A working directory holding a bundle that fills a workbook, read through the real resolver. */
+  async function bundleWithTemplate(): Promise<string> {
+    const root = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), "pipelex-validate-templates-")),
+    );
+    tempDirs.push(root);
+    await fs.mkdir(path.join(root, "methods/invoice/templates"), { recursive: true });
+    await fs.writeFile(path.join(root, "methods/invoice/invoice.mthds"), INVOICE_BUNDLE);
+    await fs.writeFile(path.join(root, "methods/invoice/templates/invoice.xlsx"), XLSX);
+    return root;
+  }
+
+  const BY_PATH = {
+    files: [
+      { path: "methods/invoice/invoice.mthds" },
+      { path: "methods/invoice/templates/invoice.xlsx" },
+    ],
+  };
+
+  it("sends the template files as resources beside the .mthds files, and relays the warnings", async () => {
+    const root = await bundleWithTemplate();
+    let capturedFiles: MthdsFile[] | undefined;
+    let capturedOptions: ValidateFilesOptions | undefined;
+
+    const result = await validateMthds(BY_PATH, {
+      baseUrl: DEFAULT_API_URL,
+      resolver: localBundleFileResolver(root),
+      saveRoot: root,
+      client: {
+        ...selectorValidateNotCalled,
+        async validateFiles(files, options) {
+          capturedFiles = files;
+          capturedOptions = options;
+          return { ...validReport, warnings: [TEMPLATE_WARNING] };
+        },
+      },
+    });
+
+    expect(capturedFiles).toEqual([
+      { content: INVOICE_BUNDLE, uri: "methods/invoice/invoice.mthds" },
+    ]);
+    const resources = capturedOptions?.resources as Record<string, Uint8Array> | undefined;
+    expect(Object.keys(resources ?? {})).toEqual(["templates/invoice.xlsx"]);
+    expect([...(resources?.["templates/invoice.xlsx"] ?? [])]).toEqual([...XLSX]);
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      is_valid: true,
+      warnings: [TEMPLATE_WARNING],
+      graph_page: { written: true },
+    });
+    // The graph page draws the method's text, never the workbook.
+    const page = await fs.readFile(path.join(root, "methods/invoice", GRAPH_PAGE_FILENAME), "utf8");
+    expect(page).toContain('"name":"invoice.mthds"');
+    expect(page).not.toMatch(/"name":"[^"]*invoice\.xlsx"/);
+  });
+
+  it("omits warnings from a valid verdict that has none, and resources from a request with no template", async () => {
+    const root = await bundleWithTemplate();
+    let capturedOptions: ValidateFilesOptions | undefined;
+
+    const result = await validateMthds(
+      { files: [{ path: "methods/invoice/invoice.mthds" }], graph_page: false },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: localBundleFileResolver(root),
+        client: {
+          ...selectorValidateNotCalled,
+          async validateFiles(_files, options) {
+            capturedOptions = options;
+            return validReport;
+          },
+        },
+      },
+    );
+
+    expect(capturedOptions).not.toHaveProperty("resources");
+    expect(result.structuredContent).not.toHaveProperty("warnings");
+  });
+
+  it("refuses the flowchart page it wrote when it comes back among the files", async () => {
+    // A model globbing the bundle's directory picks up method-graph.html,
+    // which carries a template suffix and which no step names.
+    const root = await bundleWithTemplate();
+    const client = {
+      ...selectorValidateNotCalled,
+      async validateFiles() {
+        return validReport;
+      },
+    };
+    const context = {
+      baseUrl: DEFAULT_API_URL,
+      resolver: localBundleFileResolver(root),
+      saveRoot: root,
+      client,
+    };
+    await validateMthds(BY_PATH, context);
+    let called = false;
+
+    const result = await validateMthds(
+      { files: [...BY_PATH.files, { path: `methods/invoice/${GRAPH_PAGE_FILENAME}` }] },
+      {
+        ...context,
+        client: {
+          ...client,
+          async validateFiles() {
+            called = true;
+            return validReport;
+          },
+        },
+      },
+    );
+
+    expect(called).toBe(false);
+    expect(result.structuredContent.errors).toHaveLength(1);
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "files[2].path",
+    });
+    expect(result.structuredContent.errors?.[0]?.message).toContain("named by no PipeDocGen step");
+  });
+
+  it("refuses a template file no step names before calling the API", async () => {
+    const root = await bundleWithTemplate();
+    await fs.mkdir(path.join(root, "shared"));
+    await fs.writeFile(path.join(root, "shared/invoice.xlsx"), XLSX);
+    let called = false;
+
+    const result = await validateMthds(
+      { files: [{ path: "methods/invoice/invoice.mthds" }, { path: "shared/invoice.xlsx" }] },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: localBundleFileResolver(root),
+        client: {
+          ...selectorValidateNotCalled,
+          async validateFiles() {
+            called = true;
+            return validReport;
+          },
+        },
+      },
+    );
+
+    expect(called).toBe(false);
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "files[1].path",
+    });
   });
 });
 
