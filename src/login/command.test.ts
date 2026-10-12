@@ -33,7 +33,13 @@ import {
   resolveAppOrigin,
   runLoginCommand,
 } from "./command.js";
-import type { BrowserOpener, LoginDependencies, LoginEnv, MeClient } from "./command.js";
+import type {
+  BrowserOpener,
+  LoginDependencies,
+  LoginEnv,
+  MeClient,
+  SpawnFunction,
+} from "./command.js";
 import { openLoopbackListener } from "./loopback.js";
 import type { HiddenInput } from "./paste.js";
 
@@ -254,6 +260,50 @@ describe("the browser login", () => {
     expectNoKeyIn(run, KEY, "plx_sk_forged");
   });
 
+  it("reports a sign-in refused before the browser opener returns", async () => {
+    const home = await makeHome();
+    // The forged callback is answered before the opener resolves, and the
+    // real one is sent after it, as a slow opener would let happen.
+    const openBrowser: BrowserOpener = async (url) => {
+      const link = new URL(url);
+      const port = Number(link.searchParams.get("callback_port"));
+      const state = link.searchParams.get("state") ?? "";
+      await redirect(port, new URLSearchParams({ api_key: "plx_sk_forged", state: "nope" }));
+      setImmediate(() => void redirect(port, new URLSearchParams({ api_key: KEY, state })));
+      return true;
+    };
+
+    const run = await login([], {
+      env: { PIPELEX_HOME: home },
+      openBrowser,
+      createClient: fakeClient().createClient,
+    });
+
+    expect(run.code).toBe(EXIT_SAVED);
+    expect(run.stderr).toBe(
+      "Refused a sign-in that did not come from the page this login opened; still waiting.\n",
+    );
+    expect(await savedFile(home)).toBe(`PIPELEX_API_KEY=${KEY}\n`);
+    expectNoKeyIn(run, KEY, "plx_sk_forged");
+  });
+
+  it("takes an opener that throws as no browser, and still waits for the key", async () => {
+    const home = await makeHome();
+    const browser = browserSending(KEY);
+
+    const run = await login([], {
+      env: { PIPELEX_HOME: home },
+      openBrowser: async (url) => {
+        await browser(url);
+        throw new Error("no opener");
+      },
+      createClient: fakeClient().createClient,
+    });
+
+    expect(run.code).toBe(EXIT_SAVED);
+    expect(run.stderr).toContain("No browser could be opened here.");
+  });
+
   it("says no browser could be opened, keeps the printed link, and still takes the key", async () => {
     const home = await makeHome();
     const browser = browserSending(KEY, { opened: false });
@@ -264,7 +314,9 @@ describe("the browser login", () => {
       createClient: fakeClient().createClient,
     });
 
-    expect(run.stdout).toContain(`If it does not open, visit: ${browser.urls[0]}`);
+    expect(run.stdout).toContain(
+      `If it does not open, visit: ${browser.urls[0]} (over SSH or in a container, run \`${PASTE_COMMAND}\` instead)`,
+    );
     expect(run.stderr).toContain(
       `No browser could be opened here. Open the link above in a browser on this machine, or press Ctrl-C and run \`${PASTE_COMMAND}\`.`,
     );
@@ -283,6 +335,10 @@ describe("the browser login", () => {
 
     expect(run.code).toBe(EXIT_NOT_SAVED);
     expect(run.stderr).toContain("No key arrived within 1 seconds. Nothing was saved.");
+    // The page may have minted a key whose redirect never reached the listener.
+    expect(run.stderr).toContain(
+      `If you signed in, the page may have created a key that never reached this login: it went unused, so revoke it on the Developer page of the Pipelex app (${DEFAULT_APP_URL}).`,
+    );
     expect(run.stderr).toContain(`\`${PASTE_COMMAND}\``);
     expect(await savedFile(home)).toBeUndefined();
   });
@@ -393,7 +449,9 @@ describe("the browser login", () => {
       baseUrl: "https://api-dev.pipelex.com",
       apiKey: KEY,
     });
-    expect(run.stdout).toContain("Checking the key with https://api-dev.pipelex.com…");
+    expect(run.stdout).toContain(
+      `Checking the key with https://api-dev.pipelex.com (the PIPELEX_BASE_URL saved in \`${path.join(home, ".env")}\`)…`,
+    );
     expect(run.stderr).toContain(
       "This shell sets PIPELEX_API_KEY, so a workshop started from it uses that value instead of the saved key for as long as it is set.",
     );
@@ -450,8 +508,9 @@ describe("the browser login", () => {
       expect(run.stdout).toContain(
         `Your Pipelex API key is saved in \`${path.join(home, ".env")}\` as PIPELEX_API_KEY, beside PIPELEX_BASE_URL for ${LOCAL}.`,
       );
+      expect(run.stdout).toContain(`Checking the key with ${LOCAL}…`);
       expect(run.stdout).toContain(
-        "This shell sets PIPELEX_BASE_URL, so it is saved with the key: a host that does not pass this shell's environment sends the key to the same API.",
+        `PIPELEX_BASE_URL is saved with the key, so a host that does not pass this shell's environment sends the key to the API that checked it, and the pipelex CLI, which loads that file over its environment, now uses ${LOCAL} in every shell.`,
       );
       // A host such as Claude Desktop passes neither variable, and reads the pair from the file.
       const credentials = await resolveWorkshopCredentials({ PIPELEX_HOME: home });
@@ -474,7 +533,7 @@ describe("the browser login", () => {
       expect(run.stderr).toContain(
         `It is saved anyway, in \`${path.join(home, ".env")}\` as PIPELEX_API_KEY, beside PIPELEX_BASE_URL for ${LOCAL}:`,
       );
-      expect(run.stdout).toContain("This shell sets PIPELEX_BASE_URL, so it is saved with the key");
+      expect(run.stdout).toContain("PIPELEX_BASE_URL is saved with the key");
     });
 
     it("is left alone when this shell sets none, and the file's own line is kept", async () => {
@@ -489,7 +548,7 @@ describe("the browser login", () => {
       expect(run.code).toBe(EXIT_SAVED);
       expect(await savedFile(home)).toBe(`PIPELEX_BASE_URL=${LOCAL}\nPIPELEX_API_KEY=${KEY}\n`);
       expect(run.stdout).not.toContain("beside PIPELEX_BASE_URL");
-      expect(run.stdout).not.toContain("This shell sets PIPELEX_BASE_URL");
+      expect(run.stdout).not.toContain("PIPELEX_BASE_URL is saved with the key");
     });
 
     it("is not written when this shell sets the one the file already yields", async () => {
@@ -512,17 +571,16 @@ describe("the browser login", () => {
       expect(hosted.code).toBe(EXIT_SAVED);
       expect(await savedFile(withNone)).toBe(`PIPELEX_API_KEY=${KEY}\n`);
       for (const run of [same, hosted]) {
-        expect(run.stdout).not.toContain("This shell sets PIPELEX_BASE_URL");
+        expect(run.stdout).not.toContain("PIPELEX_BASE_URL is saved with the key");
       }
     });
 
     it("is refused before any key is minted when a .env file cannot hold it unquoted", async () => {
       const home = await makeHome("A=1\n");
       const openListener = vi.fn(openLoopbackListener);
-      const secret = "https://user:secret@api-dev.pipelex.com#here";
 
       const run = await login([], {
-        env: { PIPELEX_HOME: home, PIPELEX_BASE_URL: secret },
+        env: { PIPELEX_HOME: home, PIPELEX_BASE_URL: "https://api-dev.pipelex.com#" },
         openListener,
       });
 
@@ -532,7 +590,90 @@ describe("the browser login", () => {
       );
       expect(openListener).not.toHaveBeenCalled();
       expect(await savedFile(home)).toBe("A=1\n");
-      expectNoKeyIn(run, secret, "secret");
+    });
+
+    it("is refused before any key is minted when the API client would refuse it", async () => {
+      for (const baseUrl of ["https://api.pipelex.com/v1", "api.pipelex.com"]) {
+        const home = await makeHome();
+        const openListener = vi.fn(openLoopbackListener);
+
+        const run = await login([], {
+          env: { PIPELEX_HOME: home, PIPELEX_BASE_URL: baseUrl },
+          openListener,
+        });
+
+        expect(run.code, baseUrl).toBe(EXIT_NOT_SAVED);
+        expect(run.stderr, baseUrl).toBe(
+          `This shell's PIPELEX_BASE_URL is not a host-only http or https URL, such as ${DEFAULT_API_URL}, with no path, credentials, query or fragment, so the workshop could not use a key saved for it. Nothing was saved.\nFix or unset PIPELEX_BASE_URL in this shell, then run \`${LOGIN_COMMAND}\` again.\n`,
+        );
+        expect(openListener, baseUrl).not.toHaveBeenCalled();
+        expect(await savedFile(home), baseUrl).toBeUndefined();
+      }
+    });
+
+    it("is refused before any key is minted when the file holds one the client refuses, set in this shell too or not", async () => {
+      const secret = "https://user:secret@api-dev.pipelex.com";
+      for (const env of [{ PIPELEX_BASE_URL: secret }, {}]) {
+        const home = await makeHome(`PIPELEX_BASE_URL=${secret}\n`);
+        const openListener = vi.fn(openLoopbackListener);
+
+        const run = await login(["--paste"], {
+          env: { PIPELEX_HOME: home, ...env },
+          stdin: new FakeTerminal(true, [KEY, "\r"]),
+          openListener,
+        });
+
+        expect(run.code).toBe(EXIT_NOT_SAVED);
+        expect(run.stderr).toContain(
+          "PIPELEX_BASE_URL" in env
+            ? "This shell's PIPELEX_BASE_URL is not a host-only http or https URL"
+            : `The PIPELEX_BASE_URL saved in \`${path.join(home, ".env")}\` is not a host-only http or https URL`,
+        );
+        expect(run.stderr).toContain(
+          "PIPELEX_BASE_URL" in env
+            ? `Fix or unset PIPELEX_BASE_URL in this shell, then run \`${PASTE_COMMAND}\` again.`
+            : `Fix or remove PIPELEX_BASE_URL in that file, then run \`${PASTE_COMMAND}\` again.`,
+        );
+        expect(run.stdout).not.toContain("Paste a Pipelex API key");
+        expect(openListener).not.toHaveBeenCalled();
+        expect(await savedFile(home)).toBe(`PIPELEX_BASE_URL=${secret}\n`);
+        expectNoKeyIn(run, KEY, secret, "secret");
+      }
+    });
+
+    it("is the one the key was checked against, even when the file changed during the check", async () => {
+      // No PIPELEX_BASE_URL in this shell: the key is checked against the
+      // file's, or the hosted API, and another program writes the file's
+      // PIPELEX_BASE_URL while the check runs.
+      for (const before of [`PIPELEX_BASE_URL=${LOCAL}\n`, ""]) {
+        const home = await makeHome(before);
+        const configs: ApiConfig[] = [];
+        const createClient = (config: ApiConfig): MeClient => {
+          configs.push(config);
+          return {
+            getMe: async () => {
+              await fs.writeFile(
+                path.join(home, ".env"),
+                "PIPELEX_BASE_URL=https://api-elsewhere.example.com\n",
+              );
+              return PROFILE;
+            },
+          };
+        };
+
+        const run = await login([], {
+          env: { PIPELEX_HOME: home },
+          openBrowser: browserSending(KEY),
+          createClient,
+        });
+
+        expect(run.code, before).toBe(EXIT_SAVED);
+        expect(configs, before).toHaveLength(1);
+        const credentials = await resolveWorkshopCredentials({ PIPELEX_HOME: home });
+        expect(credentials, before).toMatchObject({ apiKey: KEY, baseUrl: configs[0].baseUrl });
+        expect(run.stdout, before).toContain("PIPELEX_BASE_URL is saved with the key");
+        expectNoKeyIn(run, KEY);
+      }
     });
   });
 
@@ -665,6 +806,9 @@ describe("the app's origin", () => {
       "https://user:secret@app.pipelex.com",
       "https://app.pipelex.com?x=1",
       "https://app.pipelex.com#top",
+      // Stricter than a base URL: the parser drops an empty query or fragment.
+      "https://app.pipelex.com?",
+      "https://app.pipelex.com#",
     ]) {
       const resolved = resolveAppOrigin({ PIPELEX_APP_URL: value }, undefined);
 
@@ -898,10 +1042,15 @@ describe("the browser opener", () => {
     expect(browserOpenerCommand(url, "linux")).toEqual({ command: "xdg-open", args: [url] });
   });
 
-  it("launches it detached and unreferenced, and reports it launched", async () => {
+  /** A `spawn` that records each launch and reports it launched, unreferenced. */
+  function recordingSpawn(): {
+    spawn: SpawnFunction;
+    calls: { command: string; args: readonly string[]; options: SpawnOptions }[];
+    unreferenced: () => boolean;
+  } {
     const calls: { command: string; args: readonly string[]; options: SpawnOptions }[] = [];
     let unreferenced = false;
-    const spawn = (command: string, args: readonly string[], options: SpawnOptions) => {
+    const spawn: SpawnFunction = (command, args, options) => {
       calls.push({ command, args, options });
       const child = new EventEmitter() as ChildProcess;
       child.unref = () => {
@@ -910,8 +1059,17 @@ describe("the browser opener", () => {
       setImmediate(() => child.emit("spawn"));
       return child;
     };
+    return { spawn, calls, unreferenced: () => unreferenced };
+  }
 
-    const opened = await platformBrowserOpener({ platform: "linux", spawn })("https://x.test");
+  it("launches it detached and unreferenced, and reports it launched", async () => {
+    const { spawn, calls, unreferenced } = recordingSpawn();
+
+    const opened = await platformBrowserOpener({
+      platform: "linux",
+      env: { DISPLAY: ":0" },
+      spawn,
+    })("https://x.test");
 
     expect(opened).toBe(true);
     expect(calls).toEqual([
@@ -921,20 +1079,53 @@ describe("the browser opener", () => {
         options: { detached: true, stdio: "ignore", windowsHide: true },
       },
     ]);
-    expect(unreferenced).toBe(true);
+    expect(unreferenced()).toBe(true);
+  });
+
+  it("launches xdg-open only in a graphical session, as over SSH there is no browser to open", async () => {
+    const headless = recordingSpawn();
+    for (const env of [{}, { DISPLAY: "", WAYLAND_DISPLAY: "" }]) {
+      const opened = await platformBrowserOpener({ platform: "linux", env, spawn: headless.spawn })(
+        "https://x.test",
+      );
+      expect(opened, JSON.stringify(env)).toBe(false);
+    }
+    expect(headless.calls).toEqual([]);
+
+    for (const env of [{ DISPLAY: ":0" }, { WAYLAND_DISPLAY: "wayland-0" }]) {
+      const graphical = recordingSpawn();
+      const opened = await platformBrowserOpener({
+        platform: "linux",
+        env,
+        spawn: graphical.spawn,
+      })("https://x.test");
+      expect(opened, JSON.stringify(env)).toBe(true);
+      expect(graphical.calls.map((call) => call.command)).toEqual(["xdg-open"]);
+    }
+
+    // macOS and Windows open a browser without either variable.
+    for (const platform of ["darwin", "win32"] as const) {
+      const native = recordingSpawn();
+      const opened = await platformBrowserOpener({ platform, env: {}, spawn: native.spawn })(
+        "https://x.test",
+      );
+      expect(opened, platform).toBe(true);
+      expect(native.calls, platform).toHaveLength(1);
+    }
   });
 
   it("reports a missing opener as no browser, without crashing the login", async () => {
     const spawn = (_command: string, args: readonly string[], options: SpawnOptions) =>
       nodeSpawn("pipelex-mcp-test-no-such-opener", args, options);
 
-    const opened = await platformBrowserOpener({ spawn })("https://x.test");
+    const opened = await platformBrowserOpener({ platform: "darwin", spawn })("https://x.test");
 
     expect(opened).toBe(false);
   });
 
   it("reports a spawn that throws as no browser", async () => {
     const opened = await platformBrowserOpener({
+      platform: "darwin",
       spawn: () => {
         throw new Error("spawn refused");
       },
@@ -950,5 +1141,7 @@ const _env: LoginEnv = {
   PIPELEX_BASE_URL: "",
   PIPELEX_HOME: "",
   PIPELEX_APP_URL: "",
+  DISPLAY: "",
+  WAYLAND_DISPLAY: "",
 };
 void _env;

@@ -6,7 +6,7 @@ import { parseEnv } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { DEFAULT_API_URL } from "./capabilities/shared.js";
+import { DEFAULT_API_URL, createPipelexApiClient } from "./capabilities/shared.js";
 import {
   LOGIN_COMMAND,
   MAX_HOME_ENV_BYTES,
@@ -15,6 +15,7 @@ import {
   checkHomeEnvWritable,
   credentialsResolver,
   displayPath,
+  hostOnlyHttpUrl,
   isWellFormedApiKey,
   readHomeEnv,
   resolvePipelexHome,
@@ -796,10 +797,12 @@ describe("saveApiKeyToHomeEnv", () => {
     });
 
     it("refuses a base URL a .env file cannot hold unquoted, writing nothing and never quoting it", async () => {
+      // Each is one the client takes, since the URL parser trims spaces, drops
+      // line breaks and an empty fragment, and none can be written unquoted.
       for (const baseUrl of [
-        `${DEV}#fragment`,
         `${DEV} `,
-        `"${DEV}"`,
+        ` ${DEV}`,
+        `${DEV}#`,
         `${DEV}\nPIPELEX_API_KEY=plx_sk_injected`,
       ]) {
         const home = await homeWith("A=1\n");
@@ -808,6 +811,7 @@ describe("saveApiKeyToHomeEnv", () => {
           status: "unwritable_value",
           file: path.join(home, ".env"),
           name: "PIPELEX_BASE_URL",
+          from: "environment",
         };
 
         expect(await checkHomeEnvWritable(env), JSON.stringify(baseUrl)).toEqual(refusal);
@@ -816,6 +820,59 @@ describe("saveApiKeyToHomeEnv", () => {
         expect(saved, JSON.stringify(baseUrl)).toEqual(refusal);
         expect(await fs.readFile(path.join(home, ".env"), "utf8")).toBe("A=1\n");
         expect(await leftovers(home, [".env"])).toEqual([]);
+      }
+    });
+
+    it("refuses a base URL the API client refuses, written or not, saying where it was set", async () => {
+      const refused = [
+        `${DEV}/v1`,
+        "api-dev.pipelex.com",
+        "localhost:8081",
+        `${DEV}#fragment`,
+        `${DEV}?region=eu`,
+        `"${DEV}"`,
+        "https://user:secret@api-dev.pipelex.com",
+        "ftp://api-dev.pipelex.com",
+      ];
+      for (const baseUrl of refused) {
+        const label = JSON.stringify(baseUrl);
+        // Set in the environment, whether or not the file already holds it, and
+        // set in the file alone: the key would be checked against it each time.
+        const cases: [string, Record<string, string>, "environment" | "file"][] = [
+          ["A=1\n", { PIPELEX_BASE_URL: baseUrl }, "environment"],
+          [`PIPELEX_BASE_URL='${baseUrl}'\n`, { PIPELEX_BASE_URL: baseUrl }, "environment"],
+          [`PIPELEX_BASE_URL='${baseUrl}'\n`, {}, "file"],
+        ];
+        for (const [before, extra, from] of cases) {
+          const home = await homeWith(before);
+          const env = { PIPELEX_HOME: home, ...extra };
+          const refusal = { status: "invalid_base_url", file: path.join(home, ".env"), from };
+
+          expect(await checkHomeEnvWritable(env), `${label} ${from}`).toEqual(refusal);
+          expect(await saveApiKeyToHomeEnv(env, KEY), `${label} ${from}`).toEqual(refusal);
+          expect(await fs.readFile(path.join(home, ".env"), "utf8")).toBe(before);
+          expect(await leftovers(home, [".env"])).toEqual([]);
+        }
+      }
+    });
+
+    it("writes the base URL the key was checked against when the file changed since the check", async () => {
+      // Another program wrote the file's base URL while the key was checked
+      // against the one it held before, or against the hosted API.
+      const cases: [string, string][] = [
+        [`PIPELEX_BASE_URL=http://127.0.0.1:8081\n`, DEV],
+        [`PIPELEX_BASE_URL=http://127.0.0.1:8081\n`, DEFAULT_API_URL],
+      ];
+      for (const [changed, checkedBaseUrl] of cases) {
+        const home = await homeWith(changed);
+
+        const saved = await saveApiKeyToHomeEnv({ PIPELEX_HOME: home }, KEY, { checkedBaseUrl });
+
+        expect(saved, checkedBaseUrl).toMatchObject({ status: "saved", baseUrl: checkedBaseUrl });
+        expect(await resolveWorkshopCredentials({ PIPELEX_HOME: home })).toMatchObject({
+          apiKey: KEY,
+          baseUrl: checkedBaseUrl,
+        });
       }
     });
   });
@@ -836,6 +893,66 @@ describe("saveApiKeyToHomeEnv", () => {
       expect(JSON.stringify(saved), value).not.toContain(value);
     }
     expect(await fs.readdir(home)).toEqual([]);
+  });
+});
+
+describe("hostOnlyHttpUrl", () => {
+  it("takes an http or https URL with no path, credentials, query or fragment, trailing slashes dropped", () => {
+    for (const [value, origin] of [
+      ["https://api.pipelex.com", "https://api.pipelex.com"],
+      ["https://api.pipelex.com/", "https://api.pipelex.com"],
+      ["https://api.pipelex.com//", "https://api.pipelex.com"],
+      ["http://127.0.0.1:8081", "http://127.0.0.1:8081"],
+      ["HTTPS://API-DEV.pipelex.com:443", "https://api-dev.pipelex.com"],
+    ]) {
+      expect(hostOnlyHttpUrl(value)?.origin, value).toBe(origin);
+    }
+  });
+
+  it("refuses what the SDK's client refuses to be built on", () => {
+    for (const value of [
+      "",
+      "api.pipelex.com",
+      "localhost:8081",
+      "https://api.pipelex.com/v1",
+      "https://api.pipelex.com/v1/",
+      "https://user@api.pipelex.com",
+      "https://user:secret@api.pipelex.com",
+      "https://api.pipelex.com?region=eu",
+      "https://api.pipelex.com#top",
+      "ftp://api.pipelex.com",
+      "file:///etc/passwd",
+      "https://",
+    ]) {
+      expect(hostOnlyHttpUrl(value), JSON.stringify(value)).toBeUndefined();
+    }
+  });
+
+  it("agrees with the client itself, which throws on a base URL it refuses", () => {
+    const sdkTakes = (baseUrl: string): boolean => {
+      try {
+        createPipelexApiClient({ baseUrl, apiKey: "plx_sk_test" });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    for (const value of [
+      "https://api.pipelex.com/",
+      "http://127.0.0.1:8081",
+      "https://api.pipelex.com#",
+      "https://api.pipelex.com?",
+      " https://api.pipelex.com",
+      "https://api.pipelex.com/v1",
+      "api.pipelex.com",
+      "localhost:8081",
+      "https://user:secret@api.pipelex.com",
+      "https://api.pipelex.com?region=eu",
+      "https://api.pipelex.com#top",
+      "ftp://api.pipelex.com",
+    ]) {
+      expect(hostOnlyHttpUrl(value) !== undefined, JSON.stringify(value)).toBe(sdkTakes(value));
+    }
   });
 });
 

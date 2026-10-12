@@ -14,9 +14,10 @@
  * `GET /v1/me` against the base URL the workshop pairs with a saved key, and is
  * saved by `saveApiKeyToHomeEnv` (`../credentials.ts`): refused when the API
  * refuses it, saved with a warning when it could not be checked, and saved
- * with this shell's `PIPELEX_BASE_URL` beside it when the file alone would
+ * with the base URL it was checked against beside it when the file alone would
  * pair it with another API, so a host that does not pass this shell's
- * environment sends the key where it was checked.
+ * environment sends the key where it was checked. A base URL the API client
+ * refuses is refused before any key is minted.
  *
  * Nothing here prints, logs or puts the key in a message. Output goes through
  * the injected writers, `process.stdout` and `process.stderr` by default, and
@@ -44,6 +45,7 @@ import {
   checkHomeEnvWritable,
   displayPath,
   fileBranchBaseUrl,
+  hostOnlyHttpUrl,
   isWellFormedApiKey,
   readHomeEnv,
   saveApiKeyToHomeEnv,
@@ -92,8 +94,14 @@ export const LOGIN_USAGE = [
   "",
 ].join("\n");
 
-/** The environment the login reads: the workshop's credentials, and the app's origin. */
-export interface LoginEnv extends CredentialsEnv {
+/** The variables that say a graphical session is running, which `xdg-open` needs to open a browser. */
+export interface DisplayEnv {
+  DISPLAY?: string;
+  WAYLAND_DISPLAY?: string;
+}
+
+/** The environment the login reads: the workshop's credentials, the app's origin, and the display. */
+export interface LoginEnv extends CredentialsEnv, DisplayEnv {
   PIPELEX_APP_URL?: string;
 }
 
@@ -240,26 +248,42 @@ async function browserKey(
   let key: string | undefined;
   try {
     const url = cliAuthUrl(appOrigin, listener.port, listener.state);
+    // The wait starts before the browser is opened, so a callback refused
+    // while the opener is still running is reported rather than lost.
+    const waiting = listener.waitForApiKey({
+      timeoutMs,
+      onRefusal: (refusal) => context.err(refusalSentence(refusal)),
+    });
     context.out("Opening your browser to sign in to Pipelex…");
     // The link comes first, so a machine where nothing opens still has a way through.
-    context.out(`If it does not open, visit: ${url}`);
-    const opened = await (deps.openBrowser ?? platformBrowserOpener())(url);
+    context.out(
+      `If it does not open, visit: ${url} (over SSH or in a container, run \`${PASTE_COMMAND}\` instead)`,
+    );
+    let opened: boolean;
+    try {
+      opened = await (deps.openBrowser ?? platformBrowserOpener({ env: context.env }))(url);
+    } catch {
+      // An opener that throws opened nothing, and the wait already runs.
+      opened = false;
+    }
     if (!opened) {
       context.err(
         `No browser could be opened here. Open the link above in a browser on this machine, or press Ctrl-C and run \`${PASTE_COMMAND}\`.`,
       );
     }
     context.out(`Waiting up to ${seconds} seconds for the key…`);
-    key = await listener.waitForApiKey({
-      timeoutMs,
-      onRefusal: (refusal) => context.err(refusalSentence(refusal)),
-    });
+    key = await waiting;
   } finally {
     await listener.close();
   }
 
   if (key === undefined) {
     context.err(`No key arrived within ${seconds} seconds. Nothing was saved.`);
+    // The page mints the key before its redirect, which may never reach this
+    // listener, over SSH for instance.
+    context.err(
+      `If you signed in, the page may have created a key that never reached this login: it went unused, so revoke it on the Developer page of the Pipelex app (${appOrigin}).`,
+    );
     context.err(
       `Run \`${LOGIN_COMMAND}\` again, or create a key on the Developer page of the Pipelex app (${appOrigin}) and run \`${PASTE_COMMAND}\`.`,
     );
@@ -391,7 +415,14 @@ async function checkAndSave(
     home.status === "relative_home" ? undefined : displayPath(home.file, context.homedir);
   const baseUrl = fileBranchBaseUrl(context.env, fileValues);
   const api = apiOrigin(baseUrl);
-  context.out(`Checking the key with ${api}…`);
+  // A base URL the file set is named as the file's, since nothing in this
+  // shell says where it came from.
+  const fromFile = !context.env.PIPELEX_BASE_URL && Boolean(fileValues?.PIPELEX_BASE_URL);
+  context.out(
+    fromFile
+      ? `Checking the key with ${api} (the PIPELEX_BASE_URL saved in \`${homeFile ?? "the home .env"}\`)…`
+      : `Checking the key with ${api}…`,
+  );
   const check = await checkApiKey(
     deps.createClient ?? ((config) => createPipelexApiClient(config)),
     baseUrl,
@@ -408,9 +439,13 @@ async function checkAndSave(
     return EXIT_NOT_SAVED;
   }
 
-  // The save writes this shell's PIPELEX_BASE_URL beside the key when the
-  // file alone would pair the key with another API than the one just asked.
-  const saved = await saveApiKeyToHomeEnv(context.env, key, { homedir: context.homedir });
+  // The save writes the base URL just asked beside the key when the file
+  // alone would pair the key with another API, deciding on the file as it
+  // reads it again: one another writer changed during the check included.
+  const saved = await saveApiKeyToHomeEnv(context.env, key, {
+    homedir: context.homedir,
+    checkedBaseUrl: baseUrl,
+  });
   if (saved.status !== "saved") {
     reportFailedSave(context, saved, source, appOrigin);
     return EXIT_NOT_SAVED;
@@ -432,7 +467,7 @@ async function checkAndSave(
   }
   if (saved.baseUrl !== undefined) {
     context.out(
-      "This shell sets PIPELEX_BASE_URL, so it is saved with the key: a host that does not pass this shell's environment sends the key to the same API.",
+      `PIPELEX_BASE_URL is saved with the key, so a host that does not pass this shell's environment sends the key to the API that checked it, and the pipelex CLI, which loads that file over its environment, now uses ${apiOrigin(saved.baseUrl)} in every shell.`,
     );
   }
   context.out(
@@ -476,8 +511,23 @@ function refusalOf(
       return RELATIVE_HOME_SENTENCE;
     case "unreadable":
       return `\`${displayPath(refusal.file, context.homedir)}\` could not be read, so its other lines could not be kept: it must be a regular file you can read, of at most 1 MiB, in UTF-8.`;
-    case "unwritable_value":
-      return `This shell's ${refusal.name} would have to be saved beside the key in \`${displayPath(refusal.file, context.homedir)}\`, and a .env file cannot hold it unquoted: it holds a #, a line break, enclosing quotes or a space at either end.`;
+    case "unwritable_value": {
+      const file = displayPath(refusal.file, context.homedir);
+      // The file's own value is written back only when another program
+      // changed it during the check, so only the save can meet this one.
+      const subject =
+        refusal.from === "environment"
+          ? `This shell's ${refusal.name} would have to be saved beside the key in \`${file}\``
+          : `The ${refusal.name} the key was checked against, which another program changed in \`${file}\` during the check, would have to be saved back beside the key`;
+      return `${subject}, and a .env file cannot hold it unquoted: it holds a #, a line break, enclosing quotes or a space at either end.`;
+    }
+    case "invalid_base_url": {
+      const subject =
+        refusal.from === "environment"
+          ? "This shell's PIPELEX_BASE_URL"
+          : `The PIPELEX_BASE_URL saved in \`${displayPath(refusal.file, context.homedir)}\``;
+      return `${subject} is not a host-only http or https URL, such as ${DEFAULT_API_URL}, with no path, credentials, query or fragment, so the workshop could not use a key saved for it.`;
+    }
     case "failed":
       return `${when === "before" ? "A key cannot be saved" : "The key could not be saved"} in \`${displayPath(refusal.file, context.homedir)}\`: ${refusal.reason}.`;
   }
@@ -489,7 +539,13 @@ function fixOf(refusal: HomeEnvRefusal): string {
     case "relative_home":
       return "fix PIPELEX_HOME";
     case "unwritable_value":
-      return `fix or unset ${refusal.name} in this shell`;
+      return refusal.from === "environment"
+        ? `fix or unset ${refusal.name} in this shell`
+        : `check ${refusal.name} in that file`;
+    case "invalid_base_url":
+      return refusal.from === "environment"
+        ? "fix or unset PIPELEX_BASE_URL in this shell"
+        : "fix or remove PIPELEX_BASE_URL in that file";
     case "unreadable":
     case "failed":
       return "fix that file";
@@ -500,10 +556,9 @@ function fixOf(refusal: HomeEnvRefusal): string {
 function reportUnwritable(context: LoginContext, refusal: HomeEnvRefusal, command: string): void {
   context.err(`${refusalOf(context, refusal, "before")} Nothing was saved.`);
   // The relative home's sentence already says what to do.
-  if (refusal.status === "unwritable_value") {
-    context.err(`Fix or unset ${refusal.name} in this shell, then run \`${command}\` again.`);
-  } else if (refusal.status !== "relative_home") {
-    context.err(`Fix that file, then run \`${command}\` again.`);
+  if (refusal.status !== "relative_home") {
+    const fix = fixOf(refusal);
+    context.err(`${fix[0].toUpperCase()}${fix.slice(1)}, then run \`${command}\` again.`);
   }
 }
 
@@ -562,23 +617,16 @@ export function resolveAppOrigin(
   };
 }
 
+/**
+ * The origin of a host-only http(s) URL, under the client's rule for a base
+ * URL ({@link hostOnlyHttpUrl}) and two refusals of its own: a host the parser
+ * left empty, and a `?` or a `#` with nothing after it, which the parser drops
+ * without a trace.
+ */
 function asOrigin(value: string): string | undefined {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return undefined;
-  }
-  const plain =
-    (url.protocol === "http:" || url.protocol === "https:") &&
-    url.hostname !== "" &&
-    url.username === "" &&
-    url.password === "" &&
-    url.pathname === "/" &&
-    url.search === "" &&
-    url.hash === "" &&
-    !/[?#]/.test(value);
-  return plain ? url.origin : undefined;
+  const url = hostOnlyHttpUrl(value);
+  if (url === undefined || url.hostname === "" || /[?#]/.test(value)) return undefined;
+  return url.origin;
 }
 
 // ── the browser opener ─────────────────────────────────────────────
@@ -613,13 +661,24 @@ export type SpawnFunction = (
  * it succeeds). A missing opener, such as a Linux machine without `xdg-open`,
  * makes `spawn` emit `'error'`, which would end the login mid-wait if nothing
  * listened for it, so the opener listens and resolves `false`.
+ *
+ * Where the opener is `xdg-open`, on Linux and the BSDs, it is not launched at
+ * all unless `DISPLAY` or `WAYLAND_DISPLAY` is set, an empty value counting as
+ * unset, and the opener resolves `false`: over SSH into a server, `xdg-open`
+ * starts and then fails with no browser, which an ignored exit code cannot
+ * see, so the login would never say to use `--paste`. Python's `webbrowser`,
+ * which `pipelex login` uses, registers `xdg-open` under the same condition.
  */
 export function platformBrowserOpener(
-  options: { platform?: NodeJS.Platform; spawn?: SpawnFunction } = {},
+  options: { platform?: NodeJS.Platform; env?: DisplayEnv; spawn?: SpawnFunction } = {},
 ): BrowserOpener {
   const spawn = options.spawn ?? nodeSpawn;
+  const env = options.env ?? process.env;
   return (url) => {
     const { command, args } = browserOpenerCommand(url, options.platform);
+    if (command === "xdg-open" && !env.DISPLAY && !env.WAYLAND_DISPLAY) {
+      return Promise.resolve(false);
+    }
     return new Promise<boolean>((resolve) => {
       let child: ChildProcess;
       try {

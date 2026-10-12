@@ -306,6 +306,26 @@ export function apiOrigin(baseUrl: string): string {
   return httpOrigin(baseUrl) ?? "the configured Pipelex API";
 }
 
+/**
+ * The URL a host-only http(s) URL parses to, or `undefined` for any other
+ * value. The rule is the one the `@pipelex/sdk` client holds its base URL to,
+ * refusing to be built on any other: trailing slashes dropped, then an http or
+ * https URL whose path is `/`, with no credentials, query or fragment, since
+ * endpoints compose as `{base}/v1/{endpoint}` and a path would double the
+ * prefix. The login refuses a `PIPELEX_BASE_URL` that fails it before any key
+ * is minted, since every tool call would fail on it, and holds
+ * `PIPELEX_APP_URL` to it with stricter refusals of its own.
+ */
+export function hostOnlyHttpUrl(value: string): URL | undefined {
+  const url = URL.parse(value.replace(/\/+$/, ""));
+  if (url === null) return undefined;
+  if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+  if (url.pathname !== "/" && url.pathname !== "") return undefined;
+  if (url.username !== "" || url.password !== "") return undefined;
+  if (url.search !== "" || url.hash !== "") return undefined;
+  return url;
+}
+
 /** The origin of an http(s) URL, or `undefined` for any other value. */
 function httpOrigin(baseUrl: string): string | undefined {
   try {
@@ -355,22 +375,42 @@ export function isWellFormedApiKey(value: string): boolean {
 }
 
 /**
+ * Where the base URL a key is checked against was set: this shell's
+ * environment, or the home `.env` itself, which a refusal names so the user
+ * fixes the right one.
+ */
+export type BaseUrlOrigin = "environment" | "file";
+
+/**
  * What saving a key in the home `.env` did. `file` is the home `.env` itself,
  * the path a user knows, even when it is a symlink and the write went to its
- * target. `saved` carries `baseUrl` when the environment's `PIPELEX_BASE_URL`
- * was written beside the key. `unreadable` is a file that exists and could not
- * be read under the reader's rules, whose other lines the writer therefore
- * cannot keep; `unwritable_value` is a variable of the environment's, named,
- * that the save had to write beside the key and that a `.env` file cannot hold
- * unquoted; `failed` carries a reason that never quotes the key, a value or
- * the file's contents.
+ * target. `saved` carries `baseUrl` when the base URL the key was checked
+ * against was written beside it. `unreadable` is a file that exists and could
+ * not be read under the reader's rules, whose other lines the writer therefore
+ * cannot keep; `unwritable_value` is a variable, named, that the save had to
+ * write beside the key and that a `.env` file cannot hold unquoted;
+ * `invalid_base_url` is a checked base URL the API client refuses, so that no
+ * tool call could use a key saved for it; `failed` carries a reason that never
+ * quotes the key, a value or the file's contents.
  */
 export type HomeEnvSave =
   | { status: "saved"; file: string; baseUrl?: string }
   | { status: "relative_home" }
   | { status: "unreadable"; file: string }
-  | { status: "unwritable_value"; file: string; name: string }
+  | { status: "unwritable_value"; file: string; name: string; from: BaseUrlOrigin }
+  | { status: "invalid_base_url"; file: string; from: BaseUrlOrigin }
   | { status: "failed"; file: string; reason: string };
+
+export interface SaveOptions extends HomeOptions {
+  /**
+   * The base URL the key was checked against. Absent, it is the one a check
+   * made now would use, `fileBranchBaseUrl` over the very content being
+   * rewritten, which is what the pre-flight plans with. The login passes the
+   * one it checked, so a file another writer changed during the check cannot
+   * pair the key with an API that never saw it.
+   */
+  checkedBaseUrl?: string;
+}
 
 /**
  * Save `PIPELEX_API_KEY=<key>` in the home `.env`, the file the workshop and
@@ -382,13 +422,19 @@ export type HomeEnvSave =
  * `export` assignment keeps its `export`, so a file a shell sources still
  * exports the key; a missing directory is created at `0700`; and:
  *
- * - **The key keeps the environment's base URL with it.** When the environment
- *   sets a `PIPELEX_BASE_URL` other than the one the file alone yields (its
- *   own, else the hosted API), that value is written beside the key, under the
- *   same rules and in the same write, since the key is checked against the
- *   environment's base URL (`fileBranchBaseUrl`) while a host that does not
- *   pass this environment reads the file alone. With no `PIPELEX_BASE_URL` in
- *   the environment, nothing about the base URL is written.
+ * - **The key keeps the base URL it was checked against.** When that base URL
+ *   (`options.checkedBaseUrl`, `fileBranchBaseUrl` by default) differs from
+ *   the one the file alone yields (its own, else the hosted API), it is
+ *   written beside the key, under the same rules and in the same write, since
+ *   a host that does not pass this shell's environment reads the file alone.
+ *   The comparison is made with the checked base URL, never the environment's,
+ *   so a `PIPELEX_BASE_URL` another writer changed in the file while the key
+ *   was checked is put back to the one that accepted the key. With no
+ *   `PIPELEX_BASE_URL` in the environment and no such change, the file alone
+ *   yields the checked base URL and nothing about it is written.
+ * - **A checked base URL the API client refuses is refused**
+ *   ({@link hostOnlyHttpUrl}), whether or not it would be written: every tool
+ *   call would fail on it, and the pipelex CLI's hosted commands too.
  * - A symlinked `.env` is resolved with `realpath` first, so the link stays a
  *   link and its target is what is rewritten.
  * - The new content goes to a temporary file at mode `0600` in the target's
@@ -406,7 +452,7 @@ export type HomeEnvSave =
 export async function saveApiKeyToHomeEnv(
   env: CredentialsEnv,
   apiKey: string,
-  options: HomeOptions = {},
+  options: SaveOptions = {},
 ): Promise<HomeEnvSave> {
   const plan = await planSave(env, apiKey, options);
   if (plan.status !== "ready") return plan;
@@ -442,18 +488,19 @@ export type HomeEnvRefusal = Exclude<HomeEnvSave, { status: "saved" }>;
 
 /**
  * Whether a key could be saved in the home `.env` now: every check the writer
- * makes before it writes, the base URL it would write beside the key included,
- * and whether the directory it would write in, or the nearest one that exists,
- * is writable. The login runs it before a key is minted, since a key minted
- * for a file it then cannot write is left unused in the user's organization.
- * The save checks everything again, so a file that changes in between is still
- * refused. Never throws.
+ * makes before it writes, planned with the base URL a check made now would
+ * use, the one it would write beside the key included, and whether the
+ * directory it would write in, or the nearest one that exists, is writable.
+ * The login runs it before a key is minted, since a key minted for a file it
+ * then cannot write, or for a base URL no tool call can use, is left unused in
+ * the user's organization. The save checks everything again, so a file that
+ * changes in between is still refused. Never throws.
  */
 export async function checkHomeEnvWritable(
   env: CredentialsEnv,
   options: HomeOptions = {},
 ): Promise<{ status: "writable"; file: string } | HomeEnvRefusal> {
-  const plan = await planSave(env, PLACEHOLDER_KEY, options);
+  const plan = await planSave(env, PLACEHOLDER_KEY, { homedir: options.homedir });
   if (plan.status !== "ready") return plan;
   const refusal = await directoryRefusal(path.dirname(plan.target));
   return refusal === undefined
@@ -472,7 +519,7 @@ type SavePlan =
 async function planSave(
   env: CredentialsEnv,
   apiKey: string,
-  options: HomeOptions,
+  options: SaveOptions,
 ): Promise<SavePlan> {
   let home: PipelexHome;
   try {
@@ -532,11 +579,18 @@ async function planSave(
   } catch {
     return rewriteRefused([API_KEY_NAME]);
   }
-  const baseUrl = baseUrlToSave(env, current);
+  // The login checks the key against the environment's base URL when it sets
+  // one, else the file's; a refusal names whichever that was.
+  const from: BaseUrlOrigin = env.PIPELEX_BASE_URL ? "environment" : "file";
+  const checkedBaseUrl = options.checkedBaseUrl ?? fileBranchBaseUrl(env, current);
+  if (hostOnlyHttpUrl(checkedBaseUrl) === undefined) {
+    return { status: "invalid_base_url", file, from };
+  }
+  const baseUrl = baseUrlToSave(checkedBaseUrl, current);
   const entries = new Map([[API_KEY_NAME, apiKey]]);
   if (baseUrl !== undefined) {
     if (!holdsUnquoted(BASE_URL_NAME, baseUrl)) {
-      return { status: "unwritable_value", file, name: BASE_URL_NAME };
+      return { status: "unwritable_value", file, name: BASE_URL_NAME, from };
     }
     entries.set(BASE_URL_NAME, baseUrl);
   }
@@ -555,17 +609,20 @@ async function planSave(
 
 /**
  * The base URL a save writes beside the key, or `undefined` when it writes
- * none: the environment's `PIPELEX_BASE_URL` when it is set and the file alone
- * would pair the key with another API, its own `PIPELEX_BASE_URL` or else the
- * hosted one. The two are compared as the client reads a base URL, trailing
- * slashes dropped and an http(s) URL normalized, so `https://API.example.com/`
- * matches `https://api.example.com`.
+ * none: the checked base URL when the file alone would pair the key with
+ * another API, its own `PIPELEX_BASE_URL` or else the hosted one. The two are
+ * compared as the client reads a base URL, trailing slashes dropped and an
+ * http(s) URL normalized, so `https://API.example.com/` matches
+ * `https://api.example.com`.
  */
-function baseUrlToSave(env: CredentialsEnv, fileValues: NodeJS.Dict<string>): string | undefined {
-  const fromEnv = env.PIPELEX_BASE_URL || undefined;
-  if (fromEnv === undefined) return undefined;
+function baseUrlToSave(
+  checkedBaseUrl: string,
+  fileValues: NodeJS.Dict<string>,
+): string | undefined {
   const fromFileAlone = fileBranchBaseUrl({}, fileValues);
-  return comparableBaseUrl(fromEnv) === comparableBaseUrl(fromFileAlone) ? undefined : fromEnv;
+  return comparableBaseUrl(checkedBaseUrl) === comparableBaseUrl(fromFileAlone)
+    ? undefined
+    : checkedBaseUrl;
 }
 
 /** A base URL as the client reads it: trailing slashes dropped, an http(s) URL normalized by the URL parser. */
