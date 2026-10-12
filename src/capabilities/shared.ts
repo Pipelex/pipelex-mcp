@@ -591,9 +591,13 @@ export interface ApiConfig {
 /**
  * What the workshop may override on every capability context that talks to
  * the API. Its tool table applies it to the whole context set, since that
- * table is where the list of contexts lives.
+ * table is where the list of contexts lives. The workshop patches `appInfo`
+ * once, when its server is built, and `baseUrl`, `apiKey` and `authError` at
+ * the start of every tool call, from its host's environment and the saved key
+ * in the home `.env` (`src/credentials.ts`).
  */
 export interface ApiContextPatch {
+  baseUrl?: string;
   apiKey?: string;
   authError?: AuthErrorTexture;
   appInfo?: AppInfoSource;
@@ -619,7 +623,11 @@ export function createPipelexApiClient<T extends PipelexApiClient = PipelexApiCl
 ): T {
   const options: PipelexApiClientOptions = {
     baseUrl: config.baseUrl,
-    apiKey: config.apiKey,
+    // The config's key is the whole decision. Handed none, the SDK falls back
+    // to the process's own `PIPELEX_API_KEY`, so a call the workshop resolved as
+    // keyless (`src/credentials.ts`) could still carry an ambient key; an empty
+    // string is the SDK's "no key", which sends no `Authorization` header.
+    apiKey: config.apiKey ?? "",
     appInfo: config.appInfo?.() ?? BARE_APP_INFO,
   };
   const Client =
@@ -997,12 +1005,13 @@ export interface ClassifyErrorOptions {
     hint: string;
   };
   /**
-   * Per-deployment texture for auth failures (HTTP 401/403, and the upload and
-   * artifact families' authentication errors). The default wording points at the `PIPELEX_API_KEY` env
-   * var — right for the workshop, where the caller owns the process env. A
-   * deployment whose callers authenticate some other way overrides it, and
-   * capabilities thread it from their context's `authError` field; the
-   * workshop never sets it.
+   * Per-call texture for auth failures (HTTP 401/403, and the upload and
+   * artifact families' authentication errors). Capabilities thread it from
+   * their context's `authError` field. The workshop sets it on every tool call
+   * from where that call's key came from (`src/credentials.ts`): no key at
+   * all, the host's key, or the key saved in the home `.env`, each with its
+   * own hint. Unset, as in a capability's own tests, the wording is the
+   * generic {@link DEFAULT_AUTH_HINT} at `PIPELEX_API_KEY`.
    */
   auth?: {
     location?: string;
@@ -1067,7 +1076,7 @@ export interface ClassifyErrorOptions {
   };
 }
 
-/** The per-deployment auth-failure texture a capability context can carry. */
+/** The auth-failure texture a capability context can carry. */
 export type AuthErrorTexture = NonNullable<ClassifyErrorOptions["auth"]>;
 
 const DEFAULT_BAD_REQUEST: NonNullable<ClassifyErrorOptions["badRequest"]> = {

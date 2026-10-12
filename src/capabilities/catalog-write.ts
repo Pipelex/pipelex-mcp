@@ -31,10 +31,15 @@ import {
   withLinkLock,
 } from "./catalog-link.js";
 import type { LinkFileReport, LinkRead, LinkReplacement, MethodLink } from "./catalog-link.js";
-import { methodVersionsSupport, readMethodSelector, versionReaderOf } from "./method-versions.js";
+import {
+  methodVersionsOf,
+  methodVersionsSupport,
+  readMethodSelector,
+  versionReaderOf,
+} from "./method-versions.js";
 import type {
   MethodSelector,
-  MethodVersionsMemory,
+  MethodVersionsMemories,
   MethodVersionsSupport,
 } from "./method-versions.js";
 import {
@@ -413,8 +418,8 @@ export interface CatalogWriteClient {
 
 export interface CatalogWriteContext extends ApiConfig {
   client?: CatalogWriteClient;
-  /** The workshop's shared memory of whether the platform resolves version selectors. */
-  methodVersions?: MethodVersionsMemory;
+  /** The workshop's shared memory of whether each platform resolves version selectors. */
+  methodVersions?: MethodVersionsMemories;
   /** Fills `{ path }` items of `files` — `.mthds` only. */
   resolver?: FileResolver;
   /** Fills `{ path }` items of `python` — `.py` only. */
@@ -443,7 +448,7 @@ export function catalogVersionsSupport(
   context: CatalogWriteContext,
   client: CatalogWriteClient,
 ): Promise<MethodVersionsSupport> {
-  return methodVersionsSupport(context.methodVersions, versionReaderOf(client));
+  return methodVersionsSupport(methodVersionsOf(context), versionReaderOf(client));
 }
 
 /**

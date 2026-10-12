@@ -26,6 +26,7 @@ import {
   RUN_METHOD_ID_SELECTOR_SENTENCE,
   forgetMethodVersionsSupported,
   linkageSuffixError,
+  methodVersionsOf,
   noteMethodVersionsSupported,
   planById,
   runContentReport,
@@ -1341,7 +1342,7 @@ export async function startMthdsRun(
     const client = runClient(context);
     let sent = request;
     if (request.method_id !== undefined && request.files.length === 0) {
-      plan = planById(request.method_id, context.methodVersions, client, {
+      plan = planById(request.method_id, methodVersionsOf(context), client, {
         needBareReport: false,
       });
       sent = { ...request, method_id: plan.send };
@@ -1353,8 +1354,8 @@ export async function startMthdsRun(
     // word that it resolves selectors, worth more than any cached answer; one
     // naming none for a bare id is its word that it does not, so a cached
     // `supported` is dropped before another tool reads a bare id as `latest`.
-    if (content.proved) noteMethodVersionsSupported(context.methodVersions);
-    else if (content.disproved) forgetMethodVersionsSupported(context.methodVersions);
+    if (content.proved) noteMethodVersionsSupported(methodVersionsOf(context));
+    else if (content.disproved) forgetMethodVersionsSupported(methodVersionsOf(context));
     return startResult(ack, content);
   } catch (err) {
     const classified = classifyStartError(err, {
@@ -1362,7 +1363,7 @@ export async function startMthdsRun(
       auth: context.authError,
       bundleResources: hasTemplateFiles(request.resources),
     });
-    const error = await selectorFailure(err, classified, plan, context.methodVersions);
+    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     return startErrorResult(startSummaryForError(error), [error]);
   }
 }

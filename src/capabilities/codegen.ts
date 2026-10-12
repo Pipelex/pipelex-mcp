@@ -16,6 +16,7 @@ import type { CodegenWriteSuccess } from "./codegen-writer.js";
 import {
   METHOD_ID_SELECTOR_SENTENCE,
   methodVersionReportSchema,
+  methodVersionsOf,
   planById,
   selectorFailure,
   withMethodContent,
@@ -525,7 +526,7 @@ export async function generateMthdsCode(
       // selectors yet, and the latest published version on one that does: the
       // platform is asked beside the request, which never waits on it, and the
       // result says which content the code came from (`method-versions.ts`).
-      plan = planById(request.method_id, context.methodVersions, client, {
+      plan = planById(request.method_id, methodVersionsOf(context), client, {
         needBareReport: true,
       });
       sent = { ...request, method_id: plan.send };
@@ -538,7 +539,7 @@ export async function generateMthdsCode(
       forbidden: forbiddenTexture(context.authError),
       bundleResources: hasTemplateFiles(request.resources),
     });
-    const error = await selectorFailure(err, classified, plan, context.methodVersions);
+    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     return errorResult(summaryForError(error), [error]);
   }
 

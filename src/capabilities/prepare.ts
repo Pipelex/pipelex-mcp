@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   METHOD_ID_SELECTOR_SENTENCE,
   methodVersionReportSchema,
+  methodVersionsOf,
   planById,
   selectorFailure,
   withMethodContent,
@@ -315,7 +316,7 @@ export async function prepareMthdsInputs(
       // platform is asked beside the request, which never waits on it, and the
       // result says whose signature the inputs were prepared against
       // (`method-versions.ts`).
-      plan = planById(request.method_id, context.methodVersions, client, {
+      plan = planById(request.method_id, methodVersionsOf(context), client, {
         needBareReport: true,
       });
       sent = { ...request, method_id: plan.send };
@@ -338,7 +339,7 @@ export async function prepareMthdsInputs(
       auth: context.authError,
       bundleResources: hasTemplateFiles(request.resources),
     });
-    const error = await selectorFailure(err, classified, plan, context.methodVersions);
+    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     return errorResult(summaryForError(error), [error]);
   }
 

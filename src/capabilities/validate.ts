@@ -16,6 +16,7 @@ import { GRAPH_PAGE_FILENAME, graphPageSection, writeGraphPage } from "./graph-p
 import {
   METHOD_ID_SELECTOR_SENTENCE,
   methodVersionReportSchema,
+  methodVersionsOf,
   planById,
   selectorFailure,
   withMethodContent,
@@ -576,7 +577,7 @@ async function validateRequest(
       // selectors and one that does not yet, so the platform is asked beside
       // the request, which never waits on it (`method-versions.ts`), and the
       // result says which content was validated.
-      plan = planById(request.method_id, context.methodVersions, client, {
+      plan = planById(request.method_id, methodVersionsOf(context), client, {
         needBareReport: true,
       });
       report = await client.validate({ method_id: plan.send }, true, undefined, undefined, [
@@ -592,7 +593,7 @@ async function validateRequest(
       auth: context.authError,
       bundleResources: hasTemplateFiles(request.resources),
     });
-    const error = await selectorFailure(err, classified, plan, context.methodVersions);
+    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     return errorResult(summaryForError(error), [error]);
   }
 

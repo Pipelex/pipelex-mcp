@@ -1757,3 +1757,30 @@ describe("blueprintMainPipeRefOf", () => {
     }
   });
 });
+
+describe("createPipelexApiClient", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  /** The `Authorization` header a client built by the factory sends. */
+  async function sentAuthorization(apiKey: string | undefined): Promise<string | null> {
+    let seen: string | null = null;
+    vi.stubGlobal("fetch", (_url: string, init?: { headers?: HeadersInit }) => {
+      seen = new Headers(init?.headers).get("authorization");
+      return Promise.resolve(Response.json({}));
+    });
+    await createPipelexApiClient({ baseUrl: "https://api.test", apiKey }).health();
+    return seen;
+  }
+
+  it("sends the config's key, and no key at all when the config has none", async () => {
+    // The SDK falls back to the process's own PIPELEX_API_KEY when it is handed
+    // no key, which would put an ambient key on a call the workshop resolved as
+    // keyless; the config's key is the whole decision.
+    vi.stubEnv("PIPELEX_API_KEY", "plx_sk_ambient");
+
+    expect(await sentAuthorization("plx_sk_config")).toBe("Bearer plx_sk_config");
+    expect(await sentAuthorization(undefined)).toBeNull();
+  });
+});

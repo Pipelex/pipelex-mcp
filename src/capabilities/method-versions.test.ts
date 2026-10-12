@@ -4,10 +4,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   METHOD_VERSIONS_HANDSHAKE_MS,
   METHOD_VERSIONS_TTL_MS,
+  createMethodVersionsMemories,
   createMethodVersionsMemory,
   forgetMethodVersionsSupported,
   linkageSuffixError,
   methodContentSentence,
+  methodVersionsMemoryFor,
+  methodVersionsOf,
   methodVersionsSupport,
   noteMethodVersionsSupported,
   noteSelectorRefusal,
@@ -215,6 +218,43 @@ describe("methodVersionsSupport", () => {
 
     expect(await pending).toBe("unknown");
     expect(memory.cached).toBeUndefined();
+  });
+});
+
+describe("the workshop's memory, one per base URL", () => {
+  it("keeps one memory per base URL and none without a shared memory", () => {
+    const memories = createMethodVersionsMemories();
+    const one = methodVersionsMemoryFor(memories, "https://one.pipelex.test");
+
+    expect(methodVersionsMemoryFor(memories, "https://one.pipelex.test")).toBe(one);
+    expect(methodVersionsMemoryFor(memories, "https://two.pipelex.test")).not.toBe(one);
+    expect(methodVersionsMemoryFor(undefined, "https://one.pipelex.test")).toBeUndefined();
+    expect(
+      methodVersionsOf({ baseUrl: "https://one.pipelex.test", methodVersions: memories }),
+    ).toBe(one);
+  });
+
+  it("never answers for one platform with another's cached supported", async () => {
+    // A session whose base URL moves, because the key saved in the home `.env`
+    // came with another one, must ask the new platform rather than believe
+    // the old one's ten-minute answer.
+    const memories = createMethodVersionsMemories();
+    const one = counting(SUPPORTED);
+    const two = counting(UNSUPPORTED);
+
+    expect(
+      await methodVersionsSupport(methodVersionsMemoryFor(memories, "https://one.test"), one.read),
+    ).toBe("supported");
+    expect(
+      await methodVersionsSupport(methodVersionsMemoryFor(memories, "https://two.test"), two.read),
+    ).toBe("unsupported");
+    expect(two.calls()).toBe(1);
+
+    // The first platform's answer is still its own.
+    expect(
+      await methodVersionsSupport(methodVersionsMemoryFor(memories, "https://one.test"), one.read),
+    ).toBe("supported");
+    expect(one.calls()).toBe(1);
   });
 });
 

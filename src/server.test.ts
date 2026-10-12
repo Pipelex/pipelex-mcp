@@ -727,6 +727,185 @@ describe("the workshop's User-Agent", () => {
   });
 });
 
+describe("the workshop's key, read on every call", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  /** One request as the stubbed API saw it. */
+  interface SeenRequest {
+    host: string;
+    path: string;
+    authorization: string | null;
+  }
+
+  /**
+   * Stub the API: `/v1/version` answers per host from `versions`, any other
+   * route answers `body`, and a request carrying no key is refused with a 401,
+   * as the hosted API refuses it.
+   */
+  function stubApi(body: unknown, versions: Record<string, string[]> = {}): SeenRequest[] {
+    const seen: SeenRequest[] = [];
+    vi.stubGlobal("fetch", (input: string, init?: { headers?: HeadersInit }) => {
+      const url = new URL(input);
+      const authorization = new Headers(init?.headers).get("authorization");
+      seen.push({ host: url.host, path: url.pathname, authorization });
+      if (url.pathname === "/v1/version") {
+        const extensions = versions[url.host] ?? [];
+        return Promise.resolve(Response.json({ version: "1.0.0", extensions }));
+      }
+      if (authorization === null) {
+        return Promise.resolve(
+          Response.json(
+            { type: "about:blank", title: "Unauthorized", status: 401, detail: "Missing API key" },
+            { status: 401, headers: { "content-type": "application/problem+json" } },
+          ),
+        );
+      }
+      return Promise.resolve(Response.json(body));
+    });
+    return seen;
+  }
+
+  const emptyPage = { items: [], next_cursor: null };
+
+  it("reads the suite's pinned, empty PIPELEX_HOME when built from the real environment", async () => {
+    // `vitest.config.ts` pins PIPELEX_HOME to an empty temporary directory, so
+    // no test sends the developer's own saved key anywhere.
+    const pinned = process.env.PIPELEX_HOME ?? "";
+    expect(path.isAbsolute(pinned)).toBe(true);
+    expect(pinned).not.toBe(path.join(os.homedir(), ".pipelex"));
+    await expect(fs.access(path.join(pinned, ".env"))).rejects.toThrow();
+
+    // An empty value is no value, so the host's key here counts as unset.
+    vi.stubEnv("PIPELEX_API_KEY", "");
+    vi.stubEnv("PIPELEX_BASE_URL", "https://api.pipelex.test");
+    const seen = stubApi(emptyPage);
+    const { client, close } = await connectClient(createLocalServer());
+    let result;
+    try {
+      result = await client.callTool({ name: "mthds_list_methods", arguments: {} });
+    } finally {
+      await close();
+    }
+
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((request) => request.authorization === null)).toBe(true);
+    const [error] = (result.structuredContent as { errors: { hint: string }[] }).errors;
+    expect(error?.hint).toContain(`\`${path.join(pinned, ".env")}\``);
+  });
+
+  it("succeeds on the next call once a key is saved, with no restart", async () => {
+    const home = await makeTempDir();
+    const seen = stubApi(emptyPage);
+    const server = createLocalServer({
+      env: { PIPELEX_HOME: home, PIPELEX_BASE_URL: "https://api.pipelex.test" },
+      rootDir: await makeTempDir(),
+    });
+    const { client, close } = await connectClient(server);
+
+    try {
+      const keyless = await client.callTool({ name: "mthds_list_methods", arguments: {} });
+
+      // No key anywhere: the call went out without one, and its error names
+      // the login rather than calling the API unreachable.
+      expect(keyless.isError).toBe(true);
+      expect(seen.map((request) => request.authorization)).toEqual([null]);
+      expect(keyless.structuredContent).toMatchObject({
+        status: "error",
+        errors: [{ class: "config", location: "PIPELEX_API_KEY" }],
+      });
+      const [text] = keyless.content as { type: string; text: string }[];
+      expect(text?.text).toContain("`npx -y @pipelex/mcp@latest login`");
+
+      await fs.writeFile(path.join(home, ".env"), "PIPELEX_API_KEY=plx_sk_saved\n");
+      const keyed = await client.callTool({ name: "mthds_list_methods", arguments: {} });
+
+      expect(keyed.isError).toBeFalsy();
+      expect(keyed.structuredContent).toMatchObject({ status: "ok", returned_count: 0 });
+      expect(seen.at(-1)).toMatchObject({
+        host: "api.pipelex.test",
+        authorization: "Bearer plx_sk_saved",
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  it("keeps the host's key when the host passes one, whatever the file holds", async () => {
+    const home = await makeTempDir();
+    await fs.writeFile(
+      path.join(home, ".env"),
+      "PIPELEX_API_KEY=plx_sk_saved\nPIPELEX_BASE_URL=https://saved.pipelex.test\n",
+    );
+    const seen = stubApi(emptyPage);
+    const server = createLocalServer({
+      env: {
+        PIPELEX_HOME: home,
+        PIPELEX_API_KEY: "plx_sk_host",
+        PIPELEX_BASE_URL: "https://api.pipelex.test",
+      },
+    });
+    const { client, close } = await connectClient(server);
+
+    try {
+      await client.callTool({ name: "mthds_list_methods", arguments: {} });
+    } finally {
+      await close();
+    }
+
+    expect(seen).toEqual([
+      { host: "api.pipelex.test", path: "/v1/methods", authorization: "Bearer plx_sk_host" },
+    ]);
+  });
+
+  it("asks a new API afresh whether it resolves versions when the saved base URL moves", async () => {
+    // The memory of the platform's answer is keyed by base URL: `supported`
+    // remembered for the first API must not label the second's bare id read,
+    // since the second does not resolve versions and reads the draft.
+    const home = await makeTempDir();
+    const saveBaseUrl = (baseUrl: string) =>
+      fs.writeFile(
+        path.join(home, ".env"),
+        `PIPELEX_API_KEY=plx_sk_saved\nPIPELEX_BASE_URL=${baseUrl}\n`,
+      );
+    const seen = stubApi(validReport, {
+      "one.pipelex.test": ["runs", "method_versions"],
+      "two.pipelex.test": ["runs"],
+    });
+    const server = createLocalServer({ env: { PIPELEX_HOME: home }, rootDir: await makeTempDir() });
+    const { client, close } = await connectClient(server);
+    const versionAsks = (host: string) =>
+      seen.filter((request) => request.host === host && request.path === "/v1/version").length;
+
+    try {
+      await saveBaseUrl("https://one.pipelex.test");
+      const first = await client.callTool({
+        name: "mthds_validate",
+        arguments: { method_id: "mt_demo" },
+      });
+      expect(first.structuredContent).toMatchObject({ status: "ok", method_version: "latest" });
+      expect(versionAsks("one.pipelex.test")).toBe(1);
+
+      await saveBaseUrl("https://two.pipelex.test");
+      const sentBefore = seen.length;
+      const second = await client.callTool({
+        name: "mthds_validate",
+        arguments: { method_id: "mt_demo" },
+      });
+
+      expect(seen.slice(sentBefore).every((request) => request.host === "two.pipelex.test")).toBe(
+        true,
+      );
+      expect(versionAsks("two.pipelex.test")).toBe(1);
+      expect(second.structuredContent).toMatchObject({ status: "ok", method_version: "draft" });
+    } finally {
+      await close();
+    }
+  });
+});
+
 function isToolDefinition(value: unknown): value is { name: string } {
   return (
     typeof value === "object" &&

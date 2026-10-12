@@ -2,6 +2,12 @@
 
 This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the Pipelex plugin runs. Up to and including 0.20.0 every release also deployed the hosted console at the same version, so those entries describe both servers. After 0.20.0 the console has its own release track and changelog, kept with the Pipelex connector rather than here, and the `console-vX.Y.Z` tags in this repository's history are its releases from that time; this file and the `vX.Y.Z` tags cover the workshop alone.
 
+## [Unreleased]
+
+### Added
+
+- **The workshop reads the key saved in `~/.pipelex/.env` when its host passes none**: when the host passes no `PIPELEX_API_KEY`, or passes it empty, every tool call uses the key saved in `~/.pipelex/.env`, or in the `.env` of `PIPELEX_HOME` when that is set, the file `pipelex login` writes, together with that file's `PIPELEX_BASE_URL` when the environment sets none. The file is read afresh on every call, so a key saved while a session runs is used from its next call with no restart; a key the host passes still wins and the file is then not read, a relative `PIPELEX_HOME` is refused, and the working directory's `.env` is never read. A refused or missing key's hint now says which key it was, the host's, the saved one or none, and names the API by its origin alone.
+
 ## [0.24.0] - 2026-10-12
 
 ### Added

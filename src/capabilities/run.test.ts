@@ -53,7 +53,11 @@ import {
   STRICT_LLM_COMPLETION_REPORT,
   relayingArmOf,
 } from "./failed-run-fixtures.js";
-import { createMethodVersionsMemory, noteMethodVersionsSupported } from "./method-versions.js";
+import {
+  createMethodVersionsMemories,
+  methodVersionsOf,
+  noteMethodVersionsSupported,
+} from "./method-versions.js";
 import {
   classifyError,
   createPipelexApiClient,
@@ -2493,28 +2497,34 @@ describe("startMthdsRun by method_id, on both platforms", () => {
   it("forgets a cached supported when a bare id's acknowledgement names no version", async () => {
     // Round 2: the run reported the draft while the memory kept `supported`,
     // so for its lifetime every tooling tool read the same bare id as `latest`.
-    const memory = createMethodVersionsMemory();
-    noteMethodVersionsSupported(memory);
     const seen = { versionCalls: 0 } as { options?: PipelexStartOptions; versionCalls: number };
-    const context = { ...starting({}, versionsUnsupported, seen), methodVersions: memory };
+    const context = {
+      ...starting({}, versionsUnsupported, seen),
+      methodVersions: createMethodVersionsMemories(),
+    };
+    const memory = methodVersionsOf(context);
+    noteMethodVersionsSupported(memory);
 
     const result = await startMthdsRun({ method_id: "mt_abc123" }, context);
 
     expect(result.structuredContent).toMatchObject({ method_version: "draft" });
-    expect(memory.cached).toBeUndefined();
+    expect(memory?.cached).toBeUndefined();
   });
 
   it("keeps a cached supported when an accepted suffix's acknowledgement names no version", async () => {
     // Only a platform that resolves suffixes accepts one, so the acknowledgement
     // naming no version contradicts nothing.
-    const memory = createMethodVersionsMemory();
-    noteMethodVersionsSupported(memory);
     const seen = { versionCalls: 0 } as { options?: PipelexStartOptions; versionCalls: number };
-    const context = { ...starting({}, versionsSupported, seen), methodVersions: memory };
+    const context = {
+      ...starting({}, versionsSupported, seen),
+      methodVersions: createMethodVersionsMemories(),
+    };
+    const memory = methodVersionsOf(context);
+    noteMethodVersionsSupported(memory);
 
     await startMthdsRun({ method_id: "mt_abc123@draft" }, context);
 
-    expect(memory.cached?.support).toBe("supported");
+    expect(memory?.cached?.support).toBe("supported");
   });
 
   it("sends @draft and @n as given on every platform, without asking", async () => {
