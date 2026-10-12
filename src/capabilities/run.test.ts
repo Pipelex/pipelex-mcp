@@ -2297,6 +2297,39 @@ describe("startMthdsRun path submissions", () => {
     expect(result.structuredContent.run_id).toBe(RUN_ID);
   });
 
+  it("sends a bundle's template files as resources beside the contents", async () => {
+    const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    let seen: PipelexStartOptions | undefined;
+    const context: RunContext = {
+      ...contextWith({
+        start: (options: PipelexStartOptions) => {
+          seen = options;
+          return Promise.resolve({ pipeline_run_id: RUN_ID });
+        },
+      }),
+      resolver: {
+        async resolve() {
+          return { ok: true, content: 'domain = "invoice"' };
+        },
+        async resolveTemplate(path, bundlePaths) {
+          expect(bundlePaths).toEqual(["methods/invoice.mthds"]);
+          return { ok: true, key: path.slice("methods/".length), bytes: XLSX };
+        },
+      },
+    };
+
+    const result = await startMthdsRun(
+      { files: [{ path: "methods/invoice.mthds" }, { path: "methods/templates/invoice.xlsx" }] },
+      context,
+    );
+
+    expect(seen).toEqual({
+      mthds_contents: ['domain = "invoice"'],
+      resources: { "templates/invoice.xlsx": XLSX },
+    });
+    expect(result.structuredContent.status).toBe("ok");
+  });
+
   it("rejects { path } items instructively without a resolver (hosted)", async () => {
     const result = await startMthdsRun(
       { files: [{ path: "methods/bundle.mthds" }] },

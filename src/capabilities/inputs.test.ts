@@ -480,6 +480,33 @@ describe("buildMthdsInputs path submissions", () => {
     expect(result.structuredContent.status).toBe("ok");
   });
 
+  it("sends a bundle's template files as resources beside the files", async () => {
+    const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    const requests: PipeIORequest[] = [];
+
+    const result = await buildMthdsInputs(
+      { files: [{ path: "methods/invoice.mthds" }, { path: "methods/templates/invoice.xlsx" }] },
+      {
+        ...contextWith(validReport, requests),
+        resolver: {
+          async resolve() {
+            return { ok: true, content: 'domain = "invoice"' };
+          },
+          async resolveTemplate(path, bundlePaths) {
+            expect(bundlePaths).toEqual(["methods/invoice.mthds"]);
+            return { ok: true, key: path.slice("methods/".length), bytes: XLSX };
+          },
+        },
+      },
+    );
+
+    expect(requests[0]?.files).toEqual([
+      { content: 'domain = "invoice"', source: "methods/invoice.mthds" },
+    ]);
+    expect(requests[0]?.resources).toEqual({ "templates/invoice.xlsx": XLSX });
+    expect(result.structuredContent.status).toBe("ok");
+  });
+
   it("rejects { path } items instructively without a resolver (hosted)", async () => {
     const result = await buildMthdsInputs(
       { files: [{ path: "methods/bundle.mthds" }] },

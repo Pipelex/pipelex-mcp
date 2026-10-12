@@ -4,7 +4,12 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { escapedDirectoryError, isInsideRoot, resolveSaveDir } from "./workspace-boundary.js";
+import {
+  deepestCommonDirectory,
+  escapedDirectoryError,
+  isInsideRoot,
+  resolveSaveDir,
+} from "./workspace-boundary.js";
 
 const tempDirs: string[] = [];
 
@@ -130,5 +135,14 @@ describe("escapedDirectoryError", () => {
       });
     }
     await expect(fs.access(path.join(outside, "not-yet"))).rejects.toThrow();
+  });
+});
+
+describe("deepestCommonDirectory", () => {
+  it("is the directory itself when there is one, and the shared ancestor otherwise", () => {
+    const base = path.join(path.sep, "work", "methods");
+    expect(deepestCommonDirectory([base, base])).toBe(base);
+    expect(deepestCommonDirectory([base, path.join(base, "sub")])).toBe(base);
+    expect(deepestCommonDirectory([path.join(base, "a"), path.join(base, "ab")])).toBe(base);
   });
 });

@@ -399,6 +399,7 @@ describe("prepareMthdsInputs — the SDK upload walk", () => {
         client: uploadWith(async () => {
           throw new InvalidInputValueError(
             "Cannot prepare inputs: the data: URL at document has no comma",
+            { inputName: "document", inputPath: "document" },
           );
         }),
       },
@@ -639,6 +640,40 @@ describe("prepareMthdsInputs — request shape and transport", () => {
 
     expect(captured).toMatchObject({
       files: [{ content: 'domain = "demo"', source: "methods/bundle.mthds" }],
+    });
+    expect(result.structuredContent.status).toBe("ok");
+  });
+
+  it("sends a bundle's template files as resources on the files arm", async () => {
+    const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    let captured: PrepareInputsRequest | undefined;
+
+    const result = await prepareMthdsInputs(
+      {
+        files: [{ path: "methods/invoice.mthds" }, { path: "methods/templates/invoice.xlsx" }],
+        inputs: {},
+      },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: {
+          async resolve() {
+            return { ok: true, content: 'domain = "invoice"' };
+          },
+          async resolveTemplate(path, bundlePaths) {
+            expect(bundlePaths).toEqual(["methods/invoice.mthds"]);
+            return { ok: true, key: path.slice("methods/".length), bytes: XLSX };
+          },
+        },
+        client: uploadWith(async (request) => {
+          captured = request;
+          return { inputs: {}, uploads: [] };
+        }),
+      },
+    );
+
+    expect(captured).toMatchObject({
+      files: [{ content: 'domain = "invoice"', source: "methods/invoice.mthds" }],
+      resources: { "templates/invoice.xlsx": XLSX },
     });
     expect(result.structuredContent.status).toBe("ok");
   });

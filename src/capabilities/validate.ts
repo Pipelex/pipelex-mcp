@@ -23,14 +23,17 @@ import {
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
 import type { GraphPageFile, GraphPageOutcome } from "./graph-page.js";
 import {
+  FILES_TOO_LARGE,
   METHOD_REF_GRAMMAR,
   asRecord,
   blueprintMainPipeRefOf,
   buildApiConfig,
+  bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
-  filesInputSchema,
+  isTemplateFilePath,
   resolveSubmittedFiles,
+  resourcesOption,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
@@ -44,11 +47,12 @@ import type {
   FileResolver,
   SubmittedFile,
   SubmittedFileInput,
+  TemplateFiles,
   ToolError,
 } from "./shared.js";
 
 export const mthdsValidateInputSchema = {
-  files: filesInputSchema.optional(),
+  files: bundleFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
@@ -234,6 +238,12 @@ const validationStructuredContentSchema = z.object({
       `The method's flowchart as a standalone HTML page (${GRAPH_PAGE_FILENAME}) beside the validated files, which the user can open in a browser. Present when every file was given as { path } and graph_page was not false, whatever the verdict; absent otherwise.`,
     ),
   method_version: methodVersionReportSchema,
+  warnings: z
+    .array(z.unknown())
+    .optional()
+    .describe(
+      "A valid verdict's advisory findings, which never change is_valid; absent when there are none. A template_check_warning item is a finding of a PipeDocGen step's template check in the template file it was sent, such as a field that matches no input: it carries pipe_code, template_file (the file as the step names it) and template_location (the place in the file, in the engine's words), each null when unknown.",
+    ),
   validation_errors: z.array(z.unknown()).optional(),
   errors: z.array(toolErrorSchema).optional(),
 });
@@ -251,6 +261,8 @@ export interface MthdsValidateInput {
 /** The validate request after `{ path }` resolution — what the checks and the API call consume. */
 interface ResolvedValidateRequest {
   files: SubmittedFile[];
+  /** The bundle's template files, keyed by the path a step names; sent beside `files` only. */
+  resources?: TemplateFiles;
   method_ref?: string;
   method_id?: string;
 }
@@ -300,6 +312,8 @@ export interface ValidationStructuredContent {
   graph_page?: GraphPageStructuredContent;
   /** By-id validations only: the content validated, when this server can tell. */
   method_version?: MethodVersionReport;
+  /** A valid verdict's advisory findings, relayed as the API sent them; absent when empty. */
+  warnings?: unknown[];
   validation_errors?: unknown[];
   errors?: ToolError[];
 }
@@ -379,6 +393,7 @@ export function buildValidationContext(env = process.env): ValidationContext {
 const VALIDATE_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/validate",
   methodLocation: "files",
+  tooLarge: FILES_TOO_LARGE,
 };
 
 /**
@@ -446,7 +461,11 @@ export async function validateMthds(
     return errorResult("Validation was not run: request input is invalid.", resolution.errors);
   }
 
-  const request: ResolvedValidateRequest = { ...input, files: resolution.files };
+  const request: ResolvedValidateRequest = {
+    ...input,
+    files: resolution.files,
+    resources: resolution.resources,
+  };
   const inputErrors = validateMethodSelectorRequest(request.files, request, {
     rule: "one_selector",
   });
@@ -473,10 +492,12 @@ export async function validateMthds(
 
 /**
  * The files the graph page embeds, with the paths they were given at: only
- * when the caller did not opt out and EVERY item came as `{ path }`. An inline
- * item has no directory to write beside, and a page embedding some of the
- * method's files but not others would draw a different method from the one
- * validated.
+ * when the caller did not opt out and EVERY `.mthds` item came as `{ path }`.
+ * An inline item has no directory to write beside, and a page embedding some
+ * of the method's files but not others would draw a different method from the
+ * one validated. The template files are not the method's text, so they are
+ * left out: the resolution put them in `resources`, never among `resolved`,
+ * and only a request that resolved without an error reaches here.
  */
 function graphPageFilesOf(
   input: MthdsValidateInput,
@@ -485,7 +506,9 @@ function graphPageFilesOf(
   if (input.graph_page === false) {
     return undefined;
   }
-  const submitted = input.files ?? [];
+  const submitted = (input.files ?? []).filter(
+    (file) => "content" in file || !isTemplateFilePath(file.path),
+  );
   const pageFiles: GraphPageFile[] = [];
   for (const [index, file] of submitted.entries()) {
     const content = resolved[index]?.content;
@@ -536,6 +559,10 @@ async function validateRequest(
         allowSignatures: true,
         render: ["markdown"],
         views: [...VALIDATE_VIEW_TOKENS],
+        // The template files the bundle's steps name, which the dry run
+        // loads and checks; a valid verdict carries the check's findings in
+        // `warnings`.
+        ...resourcesOption(request.resources),
       });
     } else if (request.method_ref !== undefined) {
       report = await client.validate(
@@ -644,6 +671,14 @@ function projectValidationReport(
   let mainPipeRef: string | undefined;
   if (report.is_valid) {
     const validReport = report as PipelexValidationReport;
+    // Advisory findings, the template check's among them, relayed as the API
+    // sent them: they are the verdict's, and a consumer such as a template
+    // authoring skill branches on their locators. The summary lists them too,
+    // under the rendered report's `## Warnings`.
+    const warnings: unknown = validReport.warnings;
+    if (Array.isArray(warnings) && warnings.length > 0) {
+      structuredContent.warnings = warnings;
+    }
     // The signature needs the main pipe ref on EVERY valid verdict, so
     // `_meta.main_pipe_ref` rides a valid non-runnable verdict too.
     mainPipeRef = defaultPipeRefOf(validReport);

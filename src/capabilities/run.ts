@@ -35,16 +35,18 @@ import {
 } from "./method-versions.js";
 import type { MethodVersionsAware, RunContentReport, SelectorPlan } from "./method-versions.js";
 import {
+  FILES_TOO_LARGE,
   MAX_IMAGE_CANDIDATE_ENTRIES,
   METHOD_REF_GRAMMAR,
   buildApiConfig,
+  bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
-  filesInputSchema,
   imageCandidatesOf,
   inputsPathSchema,
   resolveInputsSource,
   resolveSubmittedFiles,
+  resourcesOption,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
@@ -59,6 +61,7 @@ import type {
   FileResolver,
   SubmittedFile,
   SubmittedFileInput,
+  TemplateFiles,
   ToolError,
 } from "./shared.js";
 import {
@@ -97,7 +100,7 @@ const RUN_STATUS_SET: Record<RunStatus, true> = {
 export const runStatusSchema = z.enum(Object.keys(RUN_STATUS_SET) as [RunStatus, ...RunStatus[]]);
 
 export const mthdsRunInputSchema = {
-  files: filesInputSchema.optional(),
+  files: bundleFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
@@ -387,6 +390,8 @@ export interface MthdsRunInput {
 /** The run request after `{ path }` and `inputs_path` resolution — what the checks and the API call consume. */
 interface ResolvedRunRequest {
   files: SubmittedFile[];
+  /** The bundle's template files, keyed by the path a step names; sent beside `files` only. */
+  resources?: TemplateFiles;
   method_ref?: string;
   method_id?: string;
   pipe_code?: string;
@@ -542,6 +547,9 @@ export const RUN_START_ERROR_OPTIONS: ClassifyErrorOptions = {
     location: "files",
     hint: "Check files, pipe_code, and inputs; validate the bundle with mthds_validate and fill the template from mthds_inputs_template first.",
   },
+  // Refused before anything runs: a `413` is the submission, the bundle's
+  // template files above all, so no run exists and the texture says so.
+  tooLarge: FILES_TOO_LARGE,
   serverError: START_SERVER_ERROR,
 };
 
@@ -579,6 +587,7 @@ export const RUN_START_MIXED_ERROR_OPTIONS: ClassifyErrorOptions = {
   // them and not the linkage id — the same split `badRequest` makes.
   methodLocation: "files",
   badRequest: RUN_START_ERROR_OPTIONS.badRequest,
+  tooLarge: RUN_START_ERROR_OPTIONS.tooLarge,
   notFound: RUN_START_BY_ID_ERROR_OPTIONS.notFound,
   serverError: START_SERVER_ERROR,
 };
@@ -1301,6 +1310,7 @@ export async function startMthdsRun(
   const request: ResolvedRunRequest = {
     ...selection,
     files: resolution.files,
+    resources: resolution.resources,
     ...(inputsResolution.inputs === undefined ? {} : { inputs: inputsResolution.inputs }),
   };
   const inputErrors = validateRunRequest(request);
@@ -1506,7 +1516,12 @@ function toStartOptions(input: ResolvedRunRequest): PipelexStartOptions {
   return {
     ...(input.files.length === 0
       ? {}
-      : { mthds_contents: input.files.map((file) => file.content) }),
+      : {
+          mthds_contents: input.files.map((file) => file.content),
+          // The template files the bundle's steps read, which the runner
+          // loads with the contents; they never travel without them.
+          ...resourcesOption(input.resources),
+        }),
     ...(input.pipe_code === undefined ? {} : { pipe_code: input.pipe_code }),
     ...(input.inputs === undefined ? {} : { inputs: input.inputs }),
     // `method_ref` is the SDK's named Pipelex-API run-source extension

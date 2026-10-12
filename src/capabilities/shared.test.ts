@@ -24,6 +24,10 @@ import {
 import {
   ALLOW_HTTP_ENV,
   BULK_RESOLVE_ERROR_OPTIONS,
+  FILES_TOO_LARGE,
+  MAX_TEMPLATE_FILES,
+  MAX_TEMPLATE_FILES_TOTAL_BYTES,
+  bundleFilesInputSchema,
   allowsPlainHttp,
   blueprintMainPipeRefOf,
   buildApiConfig,
@@ -43,7 +47,7 @@ import {
   validateMethodSelectorRequest,
   validateRunIdRequest,
 } from "./shared.js";
-import type { ErrorSummaries, FileResolver, ToolError } from "./shared.js";
+import type { ErrorSummaries, FileResolver, TemplateFileResolution, ToolError } from "./shared.js";
 
 describe("buildApiConfig", () => {
   it("defaults to the hosted API with no key", () => {
@@ -193,6 +197,207 @@ describe("resolveSubmittedFiles", () => {
     expect(resolution.errors[0]?.message).toBe("File not found: missing.mthds");
     expect(resolution.errors[0]?.hint).toBe("Check the path.");
     expect(resolution.errors[0]?.retryable).toBe(false);
+  });
+});
+
+/**
+ * A resolver with the template arm, over in-memory files: `.mthds` contents by
+ * path, template bytes by path, each template keyed by its path with the
+ * first bundle path's directory stripped, the way the real one keys a flat
+ * bundle. It records every template read, so a test can say none happened.
+ */
+function fakeBundleResolver(
+  contents: Record<string, string>,
+  templates: Record<string, Uint8Array>,
+): FileResolver & { templateReads: string[] } {
+  const templateReads: string[] = [];
+  return {
+    ...fakeResolver(contents),
+    templateReads,
+    async resolveTemplate(path, bundlePaths): Promise<TemplateFileResolution> {
+      templateReads.push(path);
+      const bytes = templates[path];
+      if (bytes === undefined) {
+        return { ok: false, message: `File not found: ${path}`, hint: "Check the path." };
+      }
+      const dir = (bundlePaths[0] ?? "").split("/").slice(0, -1).join("/");
+      const key = dir === "" ? path : path.slice(dir.length + 1);
+      return { ok: true, key, bytes };
+    },
+  };
+}
+
+describe("bundleFilesInputSchema", () => {
+  it("takes the shape of the plain files schema, a template path being a path item", () => {
+    const parsed = bundleFilesInputSchema.parse([
+      { content: 'domain = "demo"', uri: "bundle.mthds" },
+      { path: "methods/bundle.mthds" },
+      { path: "methods/templates/invoice.xlsx" },
+    ]);
+
+    expect(parsed).toEqual([
+      { content: 'domain = "demo"', uri: "bundle.mthds" },
+      { path: "methods/bundle.mthds" },
+      { path: "methods/templates/invoice.xlsx" },
+    ]);
+  });
+});
+
+describe("resolveSubmittedFiles with template files", () => {
+  const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+  const HTML = new TextEncoder().encode("<p>{{ total }}</p>");
+
+  it("sends each template file as bytes under its key, apart from the .mthds files", async () => {
+    const resolver = fakeBundleResolver(
+      { "methods/invoice.mthds": 'domain = "invoice"' },
+      { "methods/templates/invoice.xlsx": XLSX, "methods/report.html": HTML },
+    );
+
+    const resolution = await resolveSubmittedFiles(
+      [
+        { path: "methods/templates/invoice.xlsx" },
+        { path: "methods/invoice.mthds" },
+        { path: "methods/report.html" },
+      ],
+      resolver,
+    );
+
+    expect(resolution.errors).toEqual([]);
+    expect(resolution.files).toEqual([
+      { content: 'domain = "invoice"', uri: "methods/invoice.mthds" },
+    ]);
+    expect(resolution.resources).toEqual({
+      "templates/invoice.xlsx": XLSX,
+      "report.html": HTML,
+    });
+  });
+
+  it("sends no template files when none was submitted", async () => {
+    const resolution = await resolveSubmittedFiles(
+      [{ path: "methods/invoice.mthds" }],
+      fakeBundleResolver({ "methods/invoice.mthds": 'domain = "invoice"' }, {}),
+    );
+
+    expect(resolution.errors).toEqual([]);
+    expect(resolution.resources).toEqual({});
+  });
+
+  it("refuses a template file with no .mthds path to sit beside, without reading it", async () => {
+    const resolver = fakeBundleResolver({}, { "invoice.xlsx": XLSX });
+
+    const resolution = await resolveSubmittedFiles(
+      [{ content: 'domain = "invoice"' }, { path: "invoice.xlsx" }],
+      resolver,
+    );
+
+    expect(resolution.errors).toHaveLength(1);
+    expect(resolution.errors[0]).toMatchObject({
+      class: "input_domain",
+      location: "files[1].path",
+      retryable: false,
+    });
+    expect(resolution.errors[0]?.hint).toContain("{ path }");
+    expect(resolver.templateReads).toEqual([]);
+  });
+
+  it("refuses an inline item labelled as a template file", async () => {
+    const resolution = await resolveSubmittedFiles(
+      [{ content: "<p>x</p>", uri: "templates/Report.HTML" }],
+      fakeBundleResolver({}, {}),
+    );
+
+    expect(resolution.errors).toHaveLength(1);
+    expect(resolution.errors[0]).toMatchObject({
+      class: "input_domain",
+      location: "files[0].uri",
+    });
+    expect(resolution.errors[0]?.hint).toContain("{ path }");
+  });
+
+  it("refuses more template files than a request takes, as a whole and before reading any", async () => {
+    const templates: Record<string, Uint8Array> = {};
+    const files: { path: string }[] = [{ path: "m/bundle.mthds" }];
+    for (let index = 0; index <= MAX_TEMPLATE_FILES; index += 1) {
+      templates[`m/t${index}.html`] = HTML;
+      files.push({ path: `m/t${index}.html` });
+    }
+    const resolver = fakeBundleResolver({ "m/bundle.mthds": 'domain = "m"' }, templates);
+
+    const resolution = await resolveSubmittedFiles(files, resolver);
+
+    expect(resolution.errors).toHaveLength(1);
+    expect(resolution.errors[0]).toMatchObject({ class: "input_domain", location: "files" });
+    expect(resolution.errors[0]?.message).toContain(String(MAX_TEMPLATE_FILES + 1));
+    expect(resolver.templateReads).toEqual([]);
+  });
+
+  it("refuses the template file that takes the total past the limit, and reads none after it", async () => {
+    const third = new Uint8Array(Math.floor(MAX_TEMPLATE_FILES_TOTAL_BYTES / 3) + 1);
+    const resolver = fakeBundleResolver(
+      { "m/bundle.mthds": 'domain = "m"' },
+      { "m/a.docx": third, "m/b.docx": third, "m/c.docx": third, "m/d.docx": HTML },
+    );
+
+    const resolution = await resolveSubmittedFiles(
+      [
+        { path: "m/bundle.mthds" },
+        { path: "m/a.docx" },
+        { path: "m/b.docx" },
+        { path: "m/c.docx" },
+        { path: "m/d.docx" },
+      ],
+      resolver,
+    );
+
+    expect(resolution.errors).toHaveLength(1);
+    expect(resolution.errors[0]).toMatchObject({
+      class: "input_domain",
+      location: "files[3].path",
+    });
+    expect(resolver.templateReads).toEqual(["m/a.docx", "m/b.docx", "m/c.docx"]);
+  });
+
+  it("sends and counts a template submitted twice once", async () => {
+    const resolver = fakeBundleResolver({ "m/bundle.mthds": 'domain = "m"' }, { "m/a.docx": XLSX });
+
+    const resolution = await resolveSubmittedFiles(
+      [{ path: "m/bundle.mthds" }, { path: "m/a.docx" }, { path: "m/a.docx" }],
+      resolver,
+    );
+
+    expect(resolution.errors).toEqual([]);
+    expect(resolution.resources).toEqual({ "a.docx": XLSX });
+  });
+
+  it("maps a template read failure to an input_domain error at the item's path", async () => {
+    const resolution = await resolveSubmittedFiles(
+      [{ path: "m/bundle.mthds" }, { path: "m/gone.pptx" }],
+      fakeBundleResolver({ "m/bundle.mthds": 'domain = "m"' }, {}),
+    );
+
+    expect(resolution.errors).toEqual([
+      {
+        class: "input_domain",
+        location: "files[1].path",
+        message: "File not found: m/gone.pptx",
+        hint: "Check the path.",
+        retryable: false,
+      },
+    ]);
+  });
+
+  it("leaves a template path to the text arm on a resolver without the template arm", async () => {
+    // mthds_save_method's `files`: the catalog stores no template file, so
+    // its resolver's own extension gate refuses one, and an inline item
+    // labelled with a template suffix is only a label.
+    const resolution = await resolveSubmittedFiles(
+      [{ content: 'domain = "m"', uri: "m/bundle.html" }, { path: "m/invoice.xlsx" }],
+      fakeResolver({}),
+    );
+
+    expect(resolution.files).toEqual([{ content: 'domain = "m"', uri: "m/bundle.html" }]);
+    expect(resolution.resources).toEqual({});
+    expect(resolution.errors.map((error) => error.location)).toEqual(["files[1].path"]);
   });
 });
 
@@ -1195,6 +1400,58 @@ describe("classifyError on the method-version codes", () => {
     });
     expect(error.hint).not.toContain("No registered method");
     expect(error.hint).toContain("no published version with this number");
+  });
+});
+
+describe("classifyError on the refusals of a bundle's template files", () => {
+  // Codegen's files shape points a bare 400/422 at `target`: a refusal of the
+  // template files must not follow it there.
+  const FILES_SHAPE = {
+    route: "/v1/codegen",
+    badRequest: { location: "target", hint: "Pass a known target." },
+    tooLarge: FILES_TOO_LARGE,
+  };
+
+  it("locates a key the runner refuses, or a file no step names, at files", async () => {
+    for (const errorType of ["InvalidResourcePath", "BundleResourceNotNamedError"]) {
+      const error = classifyError(
+        await refused(422, runnerProblem(errorType, "The bundle never names: x.docx", "input")),
+        FILES_SHAPE,
+      );
+
+      expect(error).toMatchObject({
+        class: "input_domain",
+        location: "files",
+        message: "The bundle never names: x.docx",
+        retryable: false,
+      });
+      expect(error.hint).toContain("template_file");
+    }
+  });
+
+  it("reads an undecodable value as this server's fault, since it encoded every value", async () => {
+    const error = classifyError(
+      await refused(400, runnerProblem("InvalidBase64", "resources['a.docx'] is not base64")),
+      FILES_SHAPE,
+    );
+
+    expect(error).toMatchObject({ class: "runtime", retryable: false });
+    // No argument fixes it, so it names none.
+    expect(error.location).toBeUndefined();
+  });
+
+  it("locates a 413 at files with the limits, typed by the runner or bare from the gateway", async () => {
+    for (const problem of [
+      runnerProblem("PayloadTooLarge", "Too many bytes in resources", "input"),
+      runnerProblem("BundleResourcesTooLargeError", "The .html files exceed 512 KiB", "input"),
+      {},
+    ]) {
+      const error = classifyError(await refused(413, problem), FILES_SHAPE);
+
+      expect(error).toMatchObject({ class: "input_domain", location: "files", retryable: false });
+      expect(error.hint).toContain("10 MiB");
+      expect(error.hint).toContain("512 KiB");
+    }
   });
 });
 

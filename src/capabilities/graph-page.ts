@@ -7,7 +7,12 @@ import type { MthdsSource } from "@pipelex/mthds-ui/static-graph";
 
 import { asOneLine } from "./shared.js";
 import type { ToolError } from "./shared.js";
-import { errorMessage, isInsideRoot, isMissingPathError } from "./workspace-boundary.js";
+import {
+  deepestCommonDirectory,
+  errorMessage,
+  isInsideRoot,
+  isMissingPathError,
+} from "./workspace-boundary.js";
 
 /**
  * The method graph page: a standalone HTML file `mthds_validate` writes beside
@@ -288,19 +293,6 @@ export async function writeGraphPage(
 
 function notWritten(reported: string, error: ToolError): GraphPageOutcome {
   return { path: reported, written: false, error };
-}
-
-/** The deepest directory that is, or holds, every one of `dirs` (absolute, real paths). */
-export function deepestCommonDirectory(dirs: readonly string[]): string {
-  let common = dirs[0] ?? path.sep;
-  for (const dir of dirs.slice(1)) {
-    while (!isInsideRoot(common, dir)) {
-      const parent = path.dirname(common);
-      if (parent === common) return common;
-      common = parent;
-    }
-  }
-  return common;
 }
 
 type Inspection =

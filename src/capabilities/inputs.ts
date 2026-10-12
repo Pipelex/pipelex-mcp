@@ -18,12 +18,14 @@ import {
 } from "./method-versions.js";
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
 import {
+  FILES_TOO_LARGE,
   METHOD_REF_GRAMMAR,
   buildApiConfig,
+  bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
-  filesInputSchema,
   resolveSubmittedFiles,
+  resourcesOption,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
@@ -37,6 +39,7 @@ import type {
   FileResolver,
   SubmittedFile,
   SubmittedFileInput,
+  TemplateFiles,
   ToolError,
 } from "./shared.js";
 
@@ -58,7 +61,7 @@ const inputsTemplateFormatSchema = z.enum(["json", "toml"]);
 export type InputsTemplateFormat = z.infer<typeof inputsTemplateFormatSchema>;
 
 export const mthdsInputsInputSchema = {
-  files: filesInputSchema.optional(),
+  files: bundleFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
@@ -126,6 +129,8 @@ export interface MthdsInputsInput {
 /** The inputs request after `{ path }` resolution — what the checks and the API call consume. */
 interface ResolvedInputsRequest {
   files: SubmittedFile[];
+  /** The bundle's template files, keyed by the path a step names; sent beside `files` only. */
+  resources?: TemplateFiles;
   method_ref?: string;
   method_id?: string;
   pipe_ref?: string;
@@ -204,6 +209,7 @@ const INPUTS_BY_FILES_ERROR_OPTIONS: ClassifyErrorOptions = {
     hint: "Check the submitted files against the route's limits on their number and size, and pass pipe_ref, when you name one, as a qualified domain.pipe_code.",
   },
   selection: INPUTS_SELECTION_TEXTURE,
+  tooLarge: FILES_TOO_LARGE,
 };
 
 /**
@@ -277,7 +283,11 @@ export async function buildMthdsInputs(
     return errorResult("Inputs template was not run: request input is invalid.", resolution.errors);
   }
 
-  const request: ResolvedInputsRequest = { ...input, files: resolution.files };
+  const request: ResolvedInputsRequest = {
+    ...input,
+    files: resolution.files,
+    resources: resolution.resources,
+  };
   const inputErrors = validateInputsRequest(request);
   if (inputErrors.length > 0) {
     return errorResult("Inputs template was not run: request input is invalid.", inputErrors);
@@ -476,7 +486,7 @@ function toPipeIoRequest(input: ResolvedInputsRequest): PipeIORequest {
       ? { method_ref: input.method_ref }
       : input.method_id !== undefined
         ? { method_id: input.method_id }
-        : { files: toMthdsFileItems(input.files) };
+        : { files: toMthdsFileItems(input.files), ...resourcesOption(input.resources) };
   return input.pipe_ref === undefined ? selector : { ...selector, pipe_ref: input.pipe_ref };
 }
 

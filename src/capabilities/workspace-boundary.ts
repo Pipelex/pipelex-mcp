@@ -30,6 +30,23 @@ export function isInsideRoot(root: string, candidate: string): boolean {
   return candidate === root || candidate.startsWith(root + path.sep);
 }
 
+/**
+ * The deepest directory that is, or holds, every one of `dirs` (absolute
+ * paths, all real or all as submitted). The method graph page is written
+ * there, and a bundle's template files are keyed against it.
+ */
+export function deepestCommonDirectory(dirs: readonly string[]): string {
+  let common = dirs[0] ?? path.sep;
+  for (const dir of dirs.slice(1)) {
+    while (!isInsideRoot(common, dir)) {
+      const parent = path.dirname(common);
+      if (parent === common) return common;
+      common = parent;
+    }
+  }
+  return common;
+}
+
 export type AncestorCheck =
   | { ok: true }
   | { ok: false; reason: "escape" }

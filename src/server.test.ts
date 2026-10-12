@@ -466,11 +466,30 @@ describe("the workshop's contexts and dispatch", () => {
 
     const contexts = buildLocalToolContexts({ PIPELEX_BASE_URL: "http://127.0.0.1:8081" }, rootDir);
 
-    expect(contexts.validation.resolver).toBe(contexts.inputs.resolver);
-    expect(contexts.validation.resolver).toBe(contexts.run.resolver);
+    // Every method-taking tool reads the bundle's template files through one
+    // resolver; the save reads `.mthds` alone, since the catalog stores no
+    // template file.
+    for (const resolver of [
+      contexts.inputs.resolver,
+      contexts.codegen.resolver,
+      contexts.prepare.resolver,
+      contexts.run.resolver,
+    ]) {
+      expect(resolver).toBe(contexts.validation.resolver);
+    }
+    expect(contexts.validation.resolver?.resolveTemplate).toBeDefined();
+    expect(contexts.catalogWrite.resolver?.resolveTemplate).toBeUndefined();
     await expect(contexts.validation.resolver?.resolve("bundle.mthds")).resolves.toEqual({
       ok: true,
       content: 'domain = "demo"',
+    });
+    await expect(contexts.catalogWrite.resolver?.resolve("bundle.mthds")).resolves.toEqual({
+      ok: true,
+      content: 'domain = "demo"',
+    });
+    await expect(contexts.catalogWrite.resolver?.resolve("invoice.xlsx")).resolves.toMatchObject({
+      ok: false,
+      message: "Path is not a .mthds file: invoice.xlsx",
     });
 
     const { client, close } = await connectClient(createLocalServer({ contexts }));
