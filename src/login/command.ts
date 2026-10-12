@@ -13,7 +13,10 @@
  * listener. Either way the key must start with `plx_sk_`, is checked with
  * `GET /v1/me` against the base URL the workshop pairs with a saved key, and is
  * saved by `saveApiKeyToHomeEnv` (`../credentials.ts`): refused when the API
- * refuses it, saved with a warning when it could not be checked.
+ * refuses it, saved with a warning when it could not be checked, and saved
+ * with this shell's `PIPELEX_BASE_URL` beside it when the file alone would
+ * pair it with another API, so a host that does not pass this shell's
+ * environment sends the key where it was checked.
  *
  * Nothing here prints, logs or puts the key in a message. Output goes through
  * the injected writers, `process.stdout` and `process.stderr` by default, and
@@ -81,7 +84,9 @@ export const LOGIN_USAGE = [
   "  --help       Show this help.",
   "",
   "The key is checked against PIPELEX_BASE_URL, else the one saved in the same file, else",
-  `${DEFAULT_API_URL}. PIPELEX_APP_URL names another Pipelex app, ${DEFAULT_APP_URL}`,
+  `${DEFAULT_API_URL}. A PIPELEX_BASE_URL set here that the file does not already give is`,
+  "saved beside the key, so a host that does not pass this shell's environment sends the",
+  `key to the same API. PIPELEX_APP_URL names another Pipelex app, ${DEFAULT_APP_URL}`,
   "by default.",
   "",
 ].join("\n");
@@ -391,12 +396,16 @@ async function checkAndSave(
 
   if (check.verdict === "refused") {
     context.err(`${api} refused the key (HTTP ${check.status}). Nothing was saved.`);
+    // A browser login has already minted the key in the user's organization.
+    if (source === "browser") context.err(`${unusedKeySentence(appOrigin)}.`);
     context.err(
       `Check that the key is current and belongs to ${expectedApi(context.env, fileValues, homeFile)}, then run \`${source === "paste" ? PASTE_COMMAND : LOGIN_COMMAND}\` again.`,
     );
     return EXIT_NOT_SAVED;
   }
 
+  // The save writes this shell's PIPELEX_BASE_URL beside the key when the
+  // file alone would pair the key with another API than the one just asked.
   const saved = await saveApiKeyToHomeEnv(context.env, key, { homedir: context.homedir });
   if (saved.status !== "saved") {
     reportFailedSave(context, saved, source, appOrigin);
@@ -404,13 +413,22 @@ async function checkAndSave(
   }
 
   const file = displayPath(saved.file, context.homedir);
+  const savedAs =
+    saved.baseUrl === undefined
+      ? "as PIPELEX_API_KEY"
+      : `as PIPELEX_API_KEY, beside PIPELEX_BASE_URL for ${apiOrigin(saved.baseUrl)}`;
   if (check.verdict === "accepted") {
     context.out(
-      `Logged in as ${check.email}. Your Pipelex API key is saved in \`${file}\` as PIPELEX_API_KEY.`,
+      `Logged in as ${check.email}. Your Pipelex API key is saved in \`${file}\` ${savedAs}.`,
     );
   } else {
     context.err(
-      `Could not check the key: ${check.reason}. It is saved in \`${file}\` as PIPELEX_API_KEY anyway: run \`${LOGIN_COMMAND}\` again if a tool call refuses it.`,
+      `Could not check the key: ${check.reason}. It is saved anyway, in \`${file}\` ${savedAs}: run \`${LOGIN_COMMAND}\` again if a tool call refuses it.`,
+    );
+  }
+  if (saved.baseUrl !== undefined) {
+    context.out(
+      "This shell sets PIPELEX_BASE_URL, so it is saved with the key: a host that does not pass this shell's environment sends the key to the same API.",
     );
   }
   context.out(
@@ -454,17 +472,40 @@ function refusalOf(
       return RELATIVE_HOME_SENTENCE;
     case "unreadable":
       return `\`${displayPath(refusal.file, context.homedir)}\` could not be read, so its other lines could not be kept: it must be a regular file you can read, of at most 1 MiB, in UTF-8.`;
+    case "unwritable_value":
+      return `This shell's ${refusal.name} would have to be saved beside the key in \`${displayPath(refusal.file, context.homedir)}\`, and a .env file cannot hold it unquoted: it holds a #, a line break, enclosing quotes or a space at either end.`;
     case "failed":
       return `${when === "before" ? "A key cannot be saved" : "The key could not be saved"} in \`${displayPath(refusal.file, context.homedir)}\`: ${refusal.reason}.`;
+  }
+}
+
+/** What the user must fix before running the login again, as a clause. */
+function fixOf(refusal: HomeEnvRefusal): string {
+  switch (refusal.status) {
+    case "relative_home":
+      return "fix PIPELEX_HOME";
+    case "unwritable_value":
+      return `fix or unset ${refusal.name} in this shell`;
+    case "unreadable":
+    case "failed":
+      return "fix that file";
   }
 }
 
 /** The pre-flight's refusal, before any key exists. */
 function reportUnwritable(context: LoginContext, refusal: HomeEnvRefusal, command: string): void {
   context.err(`${refusalOf(context, refusal, "before")} Nothing was saved.`);
-  if (refusal.status !== "relative_home") {
+  // The relative home's sentence already says what to do.
+  if (refusal.status === "unwritable_value") {
+    context.err(`Fix or unset ${refusal.name} in this shell, then run \`${command}\` again.`);
+  } else if (refusal.status !== "relative_home") {
     context.err(`Fix that file, then run \`${command}\` again.`);
   }
+}
+
+/** The sentence a browser login gives a key it received and did not save, since the page already minted it. */
+function unusedKeySentence(appOrigin: string): string {
+  return `The key this login received went unused: revoke it on the Developer page of the Pipelex app (${appOrigin})`;
 }
 
 /** A save that failed after the key arrived, which the pre-flight could not foresee. */
@@ -475,11 +516,12 @@ function reportFailedSave(
   appOrigin: string,
 ): void {
   context.err(`${refusalOf(context, saved, "after")} Nothing was saved.`);
+  const fix = fixOf(saved);
   // A browser login has already minted the key in the user's organization.
   context.err(
     source === "browser"
-      ? `The key this login received went unused: revoke it on the Developer page of the Pipelex app (${appOrigin}), fix that file, then run \`${LOGIN_COMMAND}\` again.`
-      : `The key you pasted was not saved: fix that file, then run \`${PASTE_COMMAND}\` again.`,
+      ? `${unusedKeySentence(appOrigin)}, ${fix}, then run \`${LOGIN_COMMAND}\` again.`
+      : `The key you pasted was not saved: ${fix}, then run \`${PASTE_COMMAND}\` again.`,
   );
 }
 

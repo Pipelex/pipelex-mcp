@@ -725,6 +725,101 @@ describe("saveApiKeyToHomeEnv", () => {
     expect(await saveApiKeyToHomeEnv({}, KEY, { homedir })).toMatchObject({ status: "failed" });
   });
 
+  describe("the base URL saved with the key", () => {
+    const DEV = "https://api-dev.pipelex.com";
+
+    it("writes the environment's base URL beside the key, in the same write, when the file has none", async () => {
+      const home = await makeTempDir();
+      const rename = vi.spyOn(fs, "rename");
+      let saved: Awaited<ReturnType<typeof saveApiKeyToHomeEnv>>;
+      try {
+        saved = await saveApiKeyToHomeEnv({ PIPELEX_HOME: home, PIPELEX_BASE_URL: DEV }, KEY);
+        // One temporary file, one rename: no reader ever sees the key without its base URL.
+        expect(rename).toHaveBeenCalledTimes(1);
+      } finally {
+        rename.mockRestore();
+      }
+
+      expect(saved).toEqual({ status: "saved", file: path.join(home, ".env"), baseUrl: DEV });
+      expect(await fs.readFile(path.join(home, ".env"), "utf8")).toBe(
+        `PIPELEX_API_KEY=${KEY}\nPIPELEX_BASE_URL=${DEV}\n`,
+      );
+      expect(await leftovers(home, [".env"])).toEqual([]);
+      // A host that passes no PIPELEX_BASE_URL now pairs the key with that API.
+      expect(await resolveWorkshopCredentials({ PIPELEX_HOME: home })).toMatchObject({
+        apiKey: KEY,
+        baseUrl: DEV,
+        source: "file",
+      });
+    });
+
+    it("replaces the file's base URL where it stands when the environment names another", async () => {
+      const home = await homeWith(
+        "# dev\nexport PIPELEX_BASE_URL=http://127.0.0.1:8081\nPIPELEX_API_KEY=plx_sk_old\nA=1\n",
+      );
+
+      const saved = await saveApiKeyToHomeEnv({ PIPELEX_HOME: home, PIPELEX_BASE_URL: DEV }, KEY);
+
+      expect(saved).toMatchObject({ status: "saved", baseUrl: DEV });
+      expect(await fs.readFile(path.join(home, ".env"), "utf8")).toBe(
+        `# dev\nexport PIPELEX_BASE_URL=${DEV}\nPIPELEX_API_KEY=${KEY}\nA=1\n`,
+      );
+    });
+
+    it("writes nothing about the base URL when the environment sets none or the one the file already yields", async () => {
+      const cases: [string, string | undefined][] = [
+        [`PIPELEX_BASE_URL=${DEV}\n`, undefined],
+        [`PIPELEX_BASE_URL=${DEV}\n`, ""],
+        [`PIPELEX_BASE_URL=${DEV}\n`, `${DEV}/`],
+        [`PIPELEX_BASE_URL='${DEV}'\n`, "HTTPS://API-DEV.pipelex.com:443"],
+        ["A=1\n", DEFAULT_API_URL],
+        ["A=1\n", undefined],
+      ];
+
+      for (const [before, baseUrl] of cases) {
+        const home = await homeWith(before);
+        const env = {
+          PIPELEX_HOME: home,
+          ...(baseUrl === undefined ? {} : { PIPELEX_BASE_URL: baseUrl }),
+        };
+
+        const saved = await saveApiKeyToHomeEnv(env, KEY);
+
+        expect(saved, `${before} ${baseUrl}`).toEqual({
+          status: "saved",
+          file: path.join(home, ".env"),
+        });
+        expect(await fs.readFile(path.join(home, ".env"), "utf8"), `${before} ${baseUrl}`).toBe(
+          `${before}PIPELEX_API_KEY=${KEY}\n`,
+        );
+      }
+    });
+
+    it("refuses a base URL a .env file cannot hold unquoted, writing nothing and never quoting it", async () => {
+      for (const baseUrl of [
+        `${DEV}#fragment`,
+        `${DEV} `,
+        `"${DEV}"`,
+        `${DEV}\nPIPELEX_API_KEY=plx_sk_injected`,
+      ]) {
+        const home = await homeWith("A=1\n");
+        const env = { PIPELEX_HOME: home, PIPELEX_BASE_URL: baseUrl };
+        const refusal = {
+          status: "unwritable_value",
+          file: path.join(home, ".env"),
+          name: "PIPELEX_BASE_URL",
+        };
+
+        expect(await checkHomeEnvWritable(env), JSON.stringify(baseUrl)).toEqual(refusal);
+        const saved = await saveApiKeyToHomeEnv(env, KEY);
+
+        expect(saved, JSON.stringify(baseUrl)).toEqual(refusal);
+        expect(await fs.readFile(path.join(home, ".env"), "utf8")).toBe("A=1\n");
+        expect(await leftovers(home, [".env"])).toEqual([]);
+      }
+    });
+  });
+
   it("refuses a value that is not a Pipelex API key, writing nothing and never quoting it", async () => {
     const home = await makeTempDir();
 

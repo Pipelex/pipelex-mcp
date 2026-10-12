@@ -12,7 +12,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ApiConfig } from "../capabilities/shared.js";
 import { DEFAULT_API_URL } from "../capabilities/shared.js";
-import { LOGIN_COMMAND, RELATIVE_HOME_SENTENCE } from "../credentials.js";
+import {
+  LOGIN_COMMAND,
+  RELATIVE_HOME_SENTENCE,
+  resolveWorkshopCredentials,
+} from "../credentials.js";
 import {
   DEFAULT_APP_URL,
   EXIT_INTERRUPTED,
@@ -325,6 +329,10 @@ describe("the browser login", () => {
     expect(run.stderr).toContain(
       `${DEFAULT_API_URL} refused the key (HTTP ${status}). Nothing was saved.`,
     );
+    // The page minted the key before the API refused it, so it sits unused in the organization.
+    expect(run.stderr).toContain(
+      `The key this login received went unused: revoke it on the Developer page of the Pipelex app (${DEFAULT_APP_URL}).`,
+    );
     expect(run.stderr).toContain(
       `belongs to the hosted API, ${DEFAULT_API_URL}, used when PIPELEX_BASE_URL is not set`,
     );
@@ -363,7 +371,7 @@ describe("the browser login", () => {
 
       expect(run.code, reason).toBe(EXIT_SAVED);
       expect(run.stderr, reason).toContain(`Could not check the key: ${reason}.`);
-      expect(run.stderr, reason).toContain("PIPELEX_API_KEY anyway");
+      expect(run.stderr, reason).toContain("It is saved anyway, in");
       expect(await savedFile(home), reason).toBe(`PIPELEX_API_KEY=${KEY}\n`);
       expectNoKeyIn(run, KEY);
     }
@@ -421,6 +429,111 @@ describe("the browser login", () => {
     expect(run.stderr).toContain(
       "belongs to the API PIPELEX_BASE_URL names, http://127.0.0.1:8081",
     );
+  });
+
+  describe("the base URL the key was checked against", () => {
+    const LOCAL = "http://127.0.0.1:8081";
+
+    it("is saved beside the key when the file has none, so a host without this shell's environment pairs them", async () => {
+      const home = await makeHome();
+      const client = fakeClient();
+
+      const run = await login([], {
+        env: { PIPELEX_HOME: home, PIPELEX_BASE_URL: `${LOCAL}/` },
+        openBrowser: browserSending(KEY),
+        createClient: client.createClient,
+      });
+
+      expect(run.code).toBe(EXIT_SAVED);
+      expect(client.configs[0].baseUrl).toBe(`${LOCAL}/`);
+      expect(await savedFile(home)).toBe(`PIPELEX_API_KEY=${KEY}\nPIPELEX_BASE_URL=${LOCAL}/\n`);
+      expect(run.stdout).toContain(
+        `Your Pipelex API key is saved in \`${path.join(home, ".env")}\` as PIPELEX_API_KEY, beside PIPELEX_BASE_URL for ${LOCAL}.`,
+      );
+      expect(run.stdout).toContain(
+        "This shell sets PIPELEX_BASE_URL, so it is saved with the key: a host that does not pass this shell's environment sends the key to the same API.",
+      );
+      // A host such as Claude Desktop passes neither variable, and reads the pair from the file.
+      const credentials = await resolveWorkshopCredentials({ PIPELEX_HOME: home });
+      expect(credentials).toMatchObject({ apiKey: KEY, baseUrl: `${LOCAL}/`, source: "file" });
+      expectNoKeyIn(run, KEY);
+    });
+
+    it("replaces the file's base URL when this shell names another, and says so on an unchecked key too", async () => {
+      const home = await makeHome(`PIPELEX_BASE_URL=https://api-dev.pipelex.com\n`);
+      const unreachable = new ApiUnreachableError("down", LOCAL, "ECONNREFUSED");
+
+      const run = await login([], {
+        env: { PIPELEX_HOME: home, PIPELEX_BASE_URL: LOCAL },
+        openBrowser: browserSending(KEY),
+        createClient: fakeClient({ error: unreachable }).createClient,
+      });
+
+      expect(run.code).toBe(EXIT_SAVED);
+      expect(await savedFile(home)).toBe(`PIPELEX_BASE_URL=${LOCAL}\nPIPELEX_API_KEY=${KEY}\n`);
+      expect(run.stderr).toContain(
+        `It is saved anyway, in \`${path.join(home, ".env")}\` as PIPELEX_API_KEY, beside PIPELEX_BASE_URL for ${LOCAL}:`,
+      );
+      expect(run.stdout).toContain("This shell sets PIPELEX_BASE_URL, so it is saved with the key");
+    });
+
+    it("is left alone when this shell sets none, and the file's own line is kept", async () => {
+      const home = await makeHome(`PIPELEX_BASE_URL=${LOCAL}\n`);
+
+      const run = await login([], {
+        env: { PIPELEX_HOME: home },
+        openBrowser: browserSending(KEY),
+        createClient: fakeClient().createClient,
+      });
+
+      expect(run.code).toBe(EXIT_SAVED);
+      expect(await savedFile(home)).toBe(`PIPELEX_BASE_URL=${LOCAL}\nPIPELEX_API_KEY=${KEY}\n`);
+      expect(run.stdout).not.toContain("beside PIPELEX_BASE_URL");
+      expect(run.stdout).not.toContain("This shell sets PIPELEX_BASE_URL");
+    });
+
+    it("is not written when this shell sets the one the file already yields", async () => {
+      const withLine = await makeHome(`PIPELEX_BASE_URL=${LOCAL}\n`);
+      const withNone = await makeHome();
+
+      const same = await login([], {
+        env: { PIPELEX_HOME: withLine, PIPELEX_BASE_URL: LOCAL },
+        openBrowser: browserSending(KEY),
+        createClient: fakeClient().createClient,
+      });
+      const hosted = await login([], {
+        env: { PIPELEX_HOME: withNone, PIPELEX_BASE_URL: DEFAULT_API_URL },
+        openBrowser: browserSending(KEY),
+        createClient: fakeClient().createClient,
+      });
+
+      expect(same.code).toBe(EXIT_SAVED);
+      expect(await savedFile(withLine)).toBe(`PIPELEX_BASE_URL=${LOCAL}\nPIPELEX_API_KEY=${KEY}\n`);
+      expect(hosted.code).toBe(EXIT_SAVED);
+      expect(await savedFile(withNone)).toBe(`PIPELEX_API_KEY=${KEY}\n`);
+      for (const run of [same, hosted]) {
+        expect(run.stdout).not.toContain("This shell sets PIPELEX_BASE_URL");
+      }
+    });
+
+    it("is refused before any key is minted when a .env file cannot hold it unquoted", async () => {
+      const home = await makeHome("A=1\n");
+      const openListener = vi.fn(openLoopbackListener);
+      const secret = "https://user:secret@api-dev.pipelex.com#here";
+
+      const run = await login([], {
+        env: { PIPELEX_HOME: home, PIPELEX_BASE_URL: secret },
+        openListener,
+      });
+
+      expect(run.code).toBe(EXIT_NOT_SAVED);
+      expect(run.stderr).toBe(
+        `This shell's PIPELEX_BASE_URL would have to be saved beside the key in \`${path.join(home, ".env")}\`, and a .env file cannot hold it unquoted: it holds a #, a line break, enclosing quotes or a space at either end. Nothing was saved.\nFix or unset PIPELEX_BASE_URL in this shell, then run \`${LOGIN_COMMAND}\` again.\n`,
+      );
+      expect(openListener).not.toHaveBeenCalled();
+      expect(await savedFile(home)).toBe("A=1\n");
+      expectNoKeyIn(run, secret, "secret");
+    });
   });
 
   it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
@@ -694,6 +807,37 @@ describe("the pasted login", () => {
     expect(openBrowser).not.toHaveBeenCalled();
     expect(openListener).not.toHaveBeenCalled();
     expect(await savedFile(home)).toBe(`PIPELEX_API_KEY=${KEY}\n`);
+    expectNoKeyIn(run, KEY);
+  });
+
+  it("saves nothing when the API refuses a pasted key, and does not call it a key the login received", async () => {
+    const home = await makeHome();
+
+    const run = await login(["--paste"], {
+      env: { PIPELEX_HOME: home },
+      stdin: new FakeTerminal(true, [KEY, "\r"]),
+      createClient: fakeClient({
+        error: new ApiResponseError(
+          "HTTP 401",
+          `${DEFAULT_API_URL}/v1/me`,
+          401,
+          "refused",
+          "{}",
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+        ),
+      }).createClient,
+    });
+
+    expect(run.code).toBe(EXIT_NOT_SAVED);
+    expect(run.stderr).toContain(
+      `${DEFAULT_API_URL} refused the key (HTTP 401). Nothing was saved.`,
+    );
+    expect(run.stderr).not.toContain("went unused");
+    expect(run.stderr).toContain(`then run \`${PASTE_COMMAND}\` again.`);
+    expect(await savedFile(home)).toBeUndefined();
     expectNoKeyIn(run, KEY);
   });
 

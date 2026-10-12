@@ -346,6 +346,9 @@ const PIPELEX_API_KEY_PATTERN = /^plx_sk_[A-Za-z0-9._~-]+$/;
 /** The variable the login saves its key under, in the home `.env`. */
 const API_KEY_NAME = "PIPELEX_API_KEY";
 
+/** The variable the login saves beside the key when the file alone would pair it with another API. */
+const BASE_URL_NAME = "PIPELEX_BASE_URL";
+
 /** Whether a value has the shape of a Pipelex API key: `plx_sk_`, then URL-safe characters. */
 export function isWellFormedApiKey(value: string): boolean {
   return PIPELEX_API_KEY_PATTERN.test(value);
@@ -354,14 +357,19 @@ export function isWellFormedApiKey(value: string): boolean {
 /**
  * What saving a key in the home `.env` did. `file` is the home `.env` itself,
  * the path a user knows, even when it is a symlink and the write went to its
- * target. `unreadable` is a file that exists and could not be read under the
- * reader's rules, whose other lines the writer therefore cannot keep; `failed`
- * carries a reason that never quotes the key or the file's contents.
+ * target. `saved` carries `baseUrl` when the environment's `PIPELEX_BASE_URL`
+ * was written beside the key. `unreadable` is a file that exists and could not
+ * be read under the reader's rules, whose other lines the writer therefore
+ * cannot keep; `unwritable_value` is a variable of the environment's, named,
+ * that the save had to write beside the key and that a `.env` file cannot hold
+ * unquoted; `failed` carries a reason that never quotes the key, a value or
+ * the file's contents.
  */
 export type HomeEnvSave =
-  | { status: "saved"; file: string }
+  | { status: "saved"; file: string; baseUrl?: string }
   | { status: "relative_home" }
   | { status: "unreadable"; file: string }
+  | { status: "unwritable_value"; file: string; name: string }
   | { status: "failed"; file: string; reason: string };
 
 /**
@@ -374,14 +382,22 @@ export type HomeEnvSave =
  * `export` assignment keeps its `export`, so a file a shell sources still
  * exports the key; a missing directory is created at `0700`; and:
  *
+ * - **The key keeps the environment's base URL with it.** When the environment
+ *   sets a `PIPELEX_BASE_URL` other than the one the file alone yields (its
+ *   own, else the hosted API), that value is written beside the key, under the
+ *   same rules and in the same write, since the key is checked against the
+ *   environment's base URL (`fileBranchBaseUrl`) while a host that does not
+ *   pass this environment reads the file alone. With no `PIPELEX_BASE_URL` in
+ *   the environment, nothing about the base URL is written.
  * - A symlinked `.env` is resolved with `realpath` first, so the link stays a
  *   link and its target is what is rewritten.
  * - The new content goes to a temporary file at mode `0600` in the target's
  *   directory, which is renamed over the target, so the file is never readable
  *   by others and a workshop reading it mid-write never sees half of it.
  * - The new content is parsed before anything is written, and the write is
- *   refused unless it gives the key exactly and every other variable the value
- *   it had: a line this module would misread is never rewritten.
+ *   refused unless it gives each value it writes exactly and every other
+ *   variable the value it had: a line this module would misread is never
+ *   rewritten, and a value a `.env` file cannot hold unquoted is never written.
  *
  * A file that exists and cannot be read, or is over {@link MAX_HOME_ENV_BYTES},
  * or is not UTF-8, is refused rather than replaced, since its other lines could
@@ -394,7 +410,7 @@ export async function saveApiKeyToHomeEnv(
 ): Promise<HomeEnvSave> {
   const plan = await planSave(env, apiKey, options);
   if (plan.status !== "ready") return plan;
-  const { file, target, content } = plan;
+  const { file, target, content, baseUrl } = plan;
 
   const dir = path.dirname(target);
   const temporary = path.join(
@@ -418,7 +434,7 @@ export async function saveApiKeyToHomeEnv(
     await fs.rm(temporary, { force: true }).catch(() => undefined);
     return { status: "failed", file, reason: writeFailureReason(err) };
   }
-  return { status: "saved", file };
+  return { status: "saved", file, ...(baseUrl === undefined ? {} : { baseUrl }) };
 }
 
 /** A save's refusals, without its success. */
@@ -426,11 +442,12 @@ export type HomeEnvRefusal = Exclude<HomeEnvSave, { status: "saved" }>;
 
 /**
  * Whether a key could be saved in the home `.env` now: every check the writer
- * makes before it writes, and whether the directory it would write in, or the
- * nearest one that exists, is writable. The login runs it before a key is
- * minted, since a key minted for a file it then cannot write is left unused in
- * the user's organization. The save checks everything again, so a file that
- * changes in between is still refused. Never throws.
+ * makes before it writes, the base URL it would write beside the key included,
+ * and whether the directory it would write in, or the nearest one that exists,
+ * is writable. The login runs it before a key is minted, since a key minted
+ * for a file it then cannot write is left unused in the user's organization.
+ * The save checks everything again, so a file that changes in between is still
+ * refused. Never throws.
  */
 export async function checkHomeEnvWritable(
   env: CredentialsEnv,
@@ -447,7 +464,9 @@ export async function checkHomeEnvWritable(
 /** A well-formed key the pre-flight composes the file with, never written anywhere. */
 const PLACEHOLDER_KEY = `${PIPELEX_API_KEY_PREFIX}placeholder`;
 
-type SavePlan = { status: "ready"; file: string; target: string; content: string } | HomeEnvRefusal;
+type SavePlan =
+  | { status: "ready"; file: string; target: string; content: string; baseUrl?: string }
+  | HomeEnvRefusal;
 
 /** Everything a save decides before it writes: where, and the file's new content. */
 async function planSave(
@@ -500,15 +519,74 @@ async function planSave(
     }
   }
 
-  const next = withAssignment(content, API_KEY_NAME, apiKey);
-  if (!keepsEveryOtherValue(content, next, API_KEY_NAME, apiKey)) {
-    return {
-      status: "failed",
-      file,
-      reason: `it holds lines this login cannot rewrite without changing them; set ${API_KEY_NAME} in it by hand`,
-    };
+  // Every value is decided against the very content being rewritten, so the
+  // base URL decision cannot go stale between a read and the write.
+  const rewriteRefused = (names: string[]): HomeEnvRefusal => ({
+    status: "failed",
+    file,
+    reason: `it holds lines this login cannot rewrite without changing them; set ${names.join(" and ")} in it by hand`,
+  });
+  let current: NodeJS.Dict<string>;
+  try {
+    current = parseEnv(stripBom(content));
+  } catch {
+    return rewriteRefused([API_KEY_NAME]);
   }
-  return { status: "ready", file, target, content: next };
+  const baseUrl = baseUrlToSave(env, current);
+  const entries = new Map([[API_KEY_NAME, apiKey]]);
+  if (baseUrl !== undefined) {
+    if (!holdsUnquoted(BASE_URL_NAME, baseUrl)) {
+      return { status: "unwritable_value", file, name: BASE_URL_NAME };
+    }
+    entries.set(BASE_URL_NAME, baseUrl);
+  }
+
+  let next = content;
+  for (const [name, value] of entries) next = withAssignment(next, name, value);
+  if (!keepsEveryOtherValue(content, next, entries)) return rewriteRefused([...entries.keys()]);
+  return {
+    status: "ready",
+    file,
+    target,
+    content: next,
+    ...(baseUrl === undefined ? {} : { baseUrl }),
+  };
+}
+
+/**
+ * The base URL a save writes beside the key, or `undefined` when it writes
+ * none: the environment's `PIPELEX_BASE_URL` when it is set and the file alone
+ * would pair the key with another API, its own `PIPELEX_BASE_URL` or else the
+ * hosted one. The two are compared as the client reads a base URL, trailing
+ * slashes dropped and an http(s) URL normalized, so `https://API.example.com/`
+ * matches `https://api.example.com`.
+ */
+function baseUrlToSave(env: CredentialsEnv, fileValues: NodeJS.Dict<string>): string | undefined {
+  const fromEnv = env.PIPELEX_BASE_URL || undefined;
+  if (fromEnv === undefined) return undefined;
+  const fromFileAlone = fileBranchBaseUrl({}, fileValues);
+  return comparableBaseUrl(fromEnv) === comparableBaseUrl(fromFileAlone) ? undefined : fromEnv;
+}
+
+/** A base URL as the client reads it: trailing slashes dropped, an http(s) URL normalized by the URL parser. */
+function comparableBaseUrl(value: string): string {
+  const trimmed = value.replace(/\/+$/, "");
+  const url = URL.parse(trimmed);
+  if (url === null || (url.protocol !== "http:" && url.protocol !== "https:")) return trimmed;
+  return url.href.replace(/\/+$/, "");
+}
+
+/**
+ * Whether `name=value`, written unquoted, reads back as exactly `value`: a
+ * `#`, a line break, enclosing quotes or a space at either end would be read
+ * otherwise.
+ */
+function holdsUnquoted(name: string, value: string): boolean {
+  try {
+    return parseEnv(`${name}=${value}\n`)[name] === value;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -618,14 +696,23 @@ function assignmentSpan(lines: string[], index: number, assignment: Assignment):
   return 1;
 }
 
-/** Whether the rewrite gives `name` exactly `value` and every other variable the value it had. */
-function keepsEveryOtherValue(before: string, after: string, name: string, value: string): boolean {
+/**
+ * Whether the rewrite gives each written name exactly its value and every
+ * other variable the value it had.
+ */
+function keepsEveryOtherValue(
+  before: string,
+  after: string,
+  written: ReadonlyMap<string, string>,
+): boolean {
   try {
     const old = parseEnv(stripBom(before));
     const next = parseEnv(stripBom(after));
-    if (next[name] !== value) return false;
+    for (const [name, value] of written) {
+      if (next[name] !== value) return false;
+    }
     const names = new Set([...Object.keys(old), ...Object.keys(next)]);
-    names.delete(name);
+    for (const name of written.keys()) names.delete(name);
     return [...names].every((other) => old[other] === next[other]);
   } catch {
     return false;
