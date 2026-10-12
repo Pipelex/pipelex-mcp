@@ -1,8 +1,7 @@
 import {
-  ApiResponseError,
-  ApiUnreachableError,
   collectArtifacts,
   isTerminalRunStatus,
+  runMayHaveStartedOf,
   summarizeUsage,
 } from "@pipelex/sdk";
 import type {
@@ -38,13 +37,15 @@ import {
   MAX_IMAGE_CANDIDATE_ENTRIES,
   METHOD_REF_GRAMMAR,
   buildApiConfig,
+  bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
-  filesInputSchema,
   imageCandidatesOf,
   inputsPathSchema,
   resolveInputsSource,
+  hasTemplateFiles,
   resolveSubmittedFiles,
+  resourcesOption,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
@@ -61,6 +62,7 @@ import type {
   SubmittedFileInput,
   ToolError,
 } from "./shared.js";
+import type { TemplateFiles } from "./template-files.js";
 import {
   START_MAY_HAVE_RUN_HINT,
   START_MAY_HAVE_RUN_SUMMARY,
@@ -97,7 +99,7 @@ const RUN_STATUS_SET: Record<RunStatus, true> = {
 export const runStatusSchema = z.enum(Object.keys(RUN_STATUS_SET) as [RunStatus, ...RunStatus[]]);
 
 export const mthdsRunInputSchema = {
-  files: filesInputSchema.optional(),
+  files: bundleFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
@@ -387,6 +389,8 @@ export interface MthdsRunInput {
 /** The run request after `{ path }` and `inputs_path` resolution — what the checks and the API call consume. */
 interface ResolvedRunRequest {
   files: SubmittedFile[];
+  /** The bundle's template files, keyed by the path a step names; sent beside `files` only. */
+  resources?: TemplateFiles;
   method_ref?: string;
   method_id?: string;
   pipe_code?: string;
@@ -1301,6 +1305,7 @@ export async function startMthdsRun(
   const request: ResolvedRunRequest = {
     ...selection,
     files: resolution.files,
+    resources: resolution.resources,
     ...(inputsResolution.inputs === undefined ? {} : { inputs: inputsResolution.inputs }),
   };
   const inputErrors = validateRunRequest(request);
@@ -1352,71 +1357,37 @@ export async function startMthdsRun(
     else if (content.disproved) forgetMethodVersionsSupported(context.methodVersions);
     return startResult(ack, content);
   } catch (err) {
-    const classified = classifyStartError(err, { ...classifyOptions, auth: context.authError });
+    const classified = classifyStartError(err, {
+      ...classifyOptions,
+      auth: context.authError,
+      bundleResources: hasTemplateFiles(request.resources),
+    });
     const error = await selectorFailure(err, classified, plan, context.methodVersions);
     return startErrorResult(startSummaryForError(error), [error]);
   }
 }
 
 /**
- * Network codes that mean the start request never reached the server, so no
- * run can exist and a retry is safe. Anything else an unreachable API reports
- * (the SDK's own timeout, a reset connection, no code at all) may have come
- * after the server accepted the request.
- */
-const START_NOT_SENT_CODES: ReadonlySet<string> = new Set([
-  "ECONNREFUSED",
-  "ENOTFOUND",
-  "EAI_AGAIN",
-  "ENETUNREACH",
-  "EHOSTUNREACH",
-  "UND_ERR_CONNECT_TIMEOUT",
-]);
-
-/** HTTP statuses from `/v1/start` after which the run may exist; see {@link startMayHaveRun}. */
-const START_MAY_HAVE_RUN_STATUSES: ReadonlySet<number> = new Set([500, 502, 504, 408]);
-
-/**
  * Classify a failed start, refusing a retry when the run may exist. A start
  * creates a durable run that spends inference credit, and this client sends no
  * idempotency key, so retrying after a lost acknowledgement would start a second
- * run. That is the case for a timeout or a dropped connection after the request
- * went out; for a 502, a 504 or a 408, where something in front of the runner
- * answered for a request it may have accepted; and for a 500, which the platform
- * relays from the runner when its start call failed, and which can arrive after
- * Temporal has already recorded the start.
+ * run.
  *
- * This overrides the SDK's `retryable` on purpose, as `notRetryableCreate`
- * (`catalog-write.ts`) does for a method create: the SDK's verdict says whether
- * asking again can succeed, never whether it is safe, and it does not depend on
- * the route. A retry that succeeds here is the second paid run, so it stays
- * refused until the client can send an idempotency key. The warning does not
- * wait on the SDK's `retryable` either: the runner's catch-all 500 states
- * `retryable: false` whatever it interrupted, and a start it interrupted after
- * Temporal recorded the run must still say the run may exist.
+ * Whether the run may exist is the SDK's reading (`runMayHaveStartedOf`, the
+ * `runMayHaveStarted` every error of a `start` carries since `@pipelex/sdk`
+ * 0.39.0), not this server's: a transport failure that does not prove nothing
+ * was sent, a `2xx` the SDK could not read (the acknowledgement of a start the
+ * server accepted), a `408` a proxy may answer for a request it forwarded, and
+ * every `5xx` but a `501` and the platform's `503` coded
+ * `pipeline_start_unavailable`, a start it refused before reaching the runner.
+ * The SDK already makes such an error not retryable; this arm puts the hint and
+ * the headline on it, telling the caller to look for the run before starting
+ * another, which the route's server-error texture would not.
  */
 export function classifyStartError(err: unknown, options: ClassifyErrorOptions): ToolError {
   const error = classifyError(err, options);
-  if (!startMayHaveRun(err)) return error;
+  if (!runMayHaveStartedOf(err)) return error;
   return { ...error, retryable: false, hint: START_MAY_HAVE_RUN_HINT };
-}
-
-function startMayHaveRun(err: unknown): boolean {
-  if (err instanceof ApiUnreachableError) {
-    return err.code === undefined || !START_NOT_SENT_CODES.has(err.code);
-  }
-  // A 408 is a request the server says it never received whole, but a proxy
-  // may answer it for one it forwarded, and a wrong retry here is a second
-  // paid run. A 500 is the runner's own failed start, relayed as it came since
-  // pipelex-server#145 (a 502 before): the runner wraps a failed Temporal start
-  // call in PipelexBridgeDispatchError whether or not the workflow began. A 429
-  // is a throttle refusing the request before it runs, and a 503 a platform
-  // that could not take it. A 2xx the SDK could not read is a start the server
-  // accepted whose acknowledgement was lost, so the run exists.
-  if (err instanceof ApiResponseError) {
-    return (err.status >= 200 && err.status < 300) || START_MAY_HAVE_RUN_STATUSES.has(err.status);
-  }
-  return false;
 }
 
 /** One cheap self-healing status read — `GET /v1/runs/{id}/status`. */
@@ -1506,7 +1477,12 @@ function toStartOptions(input: ResolvedRunRequest): PipelexStartOptions {
   return {
     ...(input.files.length === 0
       ? {}
-      : { mthds_contents: input.files.map((file) => file.content) }),
+      : {
+          mthds_contents: input.files.map((file) => file.content),
+          // The template files the bundle's steps read, which the runner
+          // loads with the contents; they never travel without them.
+          ...resourcesOption(input.resources),
+        }),
     ...(input.pipe_code === undefined ? {} : { pipe_code: input.pipe_code }),
     ...(input.inputs === undefined ? {} : { inputs: input.inputs }),
     // `method_ref` is the SDK's named Pipelex-API run-source extension

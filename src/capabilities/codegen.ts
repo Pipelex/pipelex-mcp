@@ -25,10 +25,12 @@ import {
   DEFAULT_AUTH_HINT,
   METHOD_REF_GRAMMAR,
   buildApiConfig,
+  bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
-  filesInputSchema,
+  hasTemplateFiles,
   resolveSubmittedFiles,
+  resourcesOption,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
@@ -44,6 +46,7 @@ import type {
   SubmittedFileInput,
   ToolError,
 } from "./shared.js";
+import type { TemplateFiles } from "./template-files.js";
 
 /**
  * The one projection kind this tool asks for. Concept-set-wide `types` is the
@@ -129,7 +132,7 @@ const CODEGEN_TARGET_DETAIL = CODEGEN_TARGETS.map(
 const codegenTargetSchema = z.enum(CODEGEN_TARGETS);
 
 export const mthdsCodegenInputSchema = {
-  files: filesInputSchema.optional(),
+  files: bundleFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
@@ -259,6 +262,12 @@ export interface MthdsCodegenInput {
 /** The codegen request after `{ path }` resolution — what the checks and the API call consume. */
 interface ResolvedCodegenRequest {
   files: SubmittedFile[];
+  /**
+   * The bundle's template files, keyed by the path a step names; sent beside
+   * `files` only. The generated code does not depend on them, but the route
+   * loads the bundle, and a step whose template file was not sent fails it.
+   */
+  resources?: TemplateFiles;
   method_ref?: string;
   method_id?: string;
   target: CodegenTarget;
@@ -484,7 +493,11 @@ export async function generateMthdsCode(
     return errorResult(INVALID_REQUEST_SUMMARY, resolution.errors);
   }
 
-  const request: ResolvedCodegenRequest = { ...input, files: resolution.files };
+  const request: ResolvedCodegenRequest = {
+    ...input,
+    files: resolution.files,
+    resources: resolution.resources,
+  };
   const inputErrors = [
     ...validateMethodSelectorRequest(request.files, request, { rule: "one_selector" }),
     ...validateCodegenWriteRequest(request.output_dir, context.saveRoot),
@@ -523,6 +536,7 @@ export async function generateMthdsCode(
       ...classifyOptions,
       auth: context.authError,
       forbidden: forbiddenTexture(context.authError),
+      bundleResources: hasTemplateFiles(request.resources),
     });
     const error = await selectorFailure(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);
@@ -1020,9 +1034,9 @@ function languageFor(artifactPath: string): string {
 // ignoring it. Every selector is a server pass-through — the runner resolves
 // an address, the hosted platform resolves an id; nothing is expanded here.
 function toCodegenRequest(request: ResolvedCodegenRequest): CodegenRequest {
-  const selector: Pick<CodegenRequest, "files" | "method_ref" | "method_id"> =
+  const selector: Pick<CodegenRequest, "files" | "method_ref" | "method_id" | "resources"> =
     request.files.length > 0
-      ? { files: toMthdsFileItems(request.files) }
+      ? { files: toMthdsFileItems(request.files), ...resourcesOption(request.resources) }
       : request.method_ref !== undefined
         ? { method_ref: request.method_ref }
         : request.method_id !== undefined

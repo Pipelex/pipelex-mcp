@@ -114,7 +114,7 @@ import {
 } from "./capabilities/validate.js";
 import type { MthdsValidateInput, ValidationContext } from "./capabilities/validate.js";
 import { defineTool } from "./tool-definition.js";
-import { localFileResolver } from "./files.js";
+import { localBundleFileResolver, localFileResolver } from "./files.js";
 
 /** The capability contexts the workshop's tools run over — one per capability it registers. */
 export interface LocalToolContexts {
@@ -139,9 +139,12 @@ export function buildLocalToolContexts(
   env: NodeJS.ProcessEnv = process.env,
   rootDir: string = process.cwd(),
 ): LocalToolContexts {
-  // One resolver for every bundle argument, gated on `.mthds`, and a second
-  // for mthds_save_method's `python`, gated on `.py`. The extension IS the read
-  // boundary, so one resolver serving both would let each read the other's files.
+  // The method-taking tools' `files` reads `.mthds` files and, as bytes, the
+  // template files their PipeDocGen steps name. mthds_save_method's `files`
+  // reads `.mthds` alone, since the catalog stores no template file, and its
+  // `python` reads `.py` alone. The extension IS the read boundary, so one
+  // resolver serving two arguments would let each read the other's files.
+  const bundleResolver = localBundleFileResolver(rootDir);
   const resolver = localFileResolver(rootDir);
   const pythonResolver = localFileResolver(rootDir, ".py");
   // A third, for mthds_run and mthds_prepare_inputs's `inputs_path`: `.json`
@@ -163,9 +166,11 @@ export function buildLocalToolContexts(
   // `GET /v1/version` once rather than once per tool (`method-versions.ts`).
   const methodVersions = createMethodVersionsMemory();
 
+  // The save's validation leg sends the contents it already read, so this
+  // base's resolver serves mthds_validate alone.
   const validation: ValidationContext = {
     ...buildValidationContext(env),
-    resolver,
+    resolver: bundleResolver,
     methodVersions,
   };
 
@@ -181,14 +186,24 @@ export function buildLocalToolContexts(
       methodVersions,
     },
     validation: { ...validation, saveRoot: rootDir },
-    inputs: { ...buildInputsContext(env), resolver, methodVersions },
+    inputs: { ...buildInputsContext(env), resolver: bundleResolver, methodVersions },
     // `saveRoot` is the working directory on every writer: codegen resolves
     // `output_dir` against it, as the download tool resolves `dir`.
-    codegen: { ...buildCodegenContext(env), resolver, saveRoot: rootDir, methodVersions },
+    codegen: {
+      ...buildCodegenContext(env),
+      resolver: bundleResolver,
+      saveRoot: rootDir,
+      methodVersions,
+    },
     // The workshop is co-located with the user's files, so its prepare tool
     // uploads file-bearing inputs (local paths, data: URLs, bytes).
-    prepare: { ...buildPrepareContext(env), resolver, methodVersions, inputsResolver },
-    run: { ...buildRunContext(env), resolver, methodVersions, inputsResolver },
+    prepare: {
+      ...buildPrepareContext(env),
+      resolver: bundleResolver,
+      methodVersions,
+      inputsResolver,
+    },
+    run: { ...buildRunContext(env), resolver: bundleResolver, methodVersions, inputsResolver },
     images: buildImagesContext(env),
     artifacts: { ...buildArtifactsContext(env), saveRoot: rootDir },
   };
@@ -293,6 +308,7 @@ export const mthdsValidateTool = defineTool({
     "Addresses and ids are resolved server-side, so no bundle enters the conversation. A bare id validates the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which. " +
     "A valid verdict carries the main pipe's typed signature (main_pipe): its ref, each declared input with the concept it expects and how many items, and the concept it produces — " +
     "type a call site from that instead of guessing the shapes of a method you cannot read. " +
+    "A bundle whose PipeDocGen steps fill templates takes those template files in files as { path } too, and a valid verdict's warnings carry what the template check found in them. " +
     `Files given as { path } also get the method's flowchart written beside them as ${GRAPH_PAGE_FILENAME}, a standalone page the user can open in a browser (graph_page: false skips it); the result says where.`,
   inputSchema: mthdsValidateInputSchema,
   outputSchema: mthdsValidateOutputSchema,

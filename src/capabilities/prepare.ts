@@ -13,12 +13,14 @@ import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./m
 import {
   METHOD_REF_GRAMMAR,
   buildApiConfig,
+  bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
-  filesInputSchema,
   inputsPathSchema,
   resolveInputsSource,
+  hasTemplateFiles,
   resolveSubmittedFiles,
+  resourcesOption,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
@@ -34,10 +36,11 @@ import type {
   SubmittedFileInput,
   ToolError,
 } from "./shared.js";
+import type { TemplateFiles } from "./template-files.js";
 import { MAX_UPLOAD_BYTES, SizeGuardedPipelexApiClient, formatMib } from "./upload-ceiling.js";
 
 export const mthdsPrepareInputsInputSchema = {
-  files: filesInputSchema.optional(),
+  files: bundleFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
@@ -102,6 +105,8 @@ export interface MthdsPrepareInputsInput {
 /** The prepare request after `{ path }` and `inputs_path` resolution — what the checks and the prepare step consume. */
 interface ResolvedPrepareRequest {
   files: SubmittedFile[];
+  /** The bundle's template files, keyed by the path a step names; sent beside `files` only. */
+  resources?: TemplateFiles;
   method_ref?: string;
   method_id?: string;
   pipe_ref?: string;
@@ -281,6 +286,7 @@ export async function prepareMthdsInputs(
   const request: ResolvedPrepareRequest = {
     ...selection,
     files: resolution.files,
+    resources: resolution.resources,
     inputs: inputsResolution.inputs ?? {},
   };
   const inputErrors = validatePrepareInputsRequest(request);
@@ -324,7 +330,14 @@ export async function prepareMthdsInputs(
     };
     prepared = await prepareWithUpload(client, envelope);
   } catch (err) {
-    const classified = classifyError(err, { ...classifyOptions, auth: context.authError });
+    // A `413` from the pipe I/O read of a request carrying template files is
+    // about them; an input the storage service refuses as too large is a
+    // `RejectedAssetError`, which the `asset` texture takes either way.
+    const classified = classifyError(err, {
+      ...classifyOptions,
+      auth: context.authError,
+      bundleResources: hasTemplateFiles(request.resources),
+    });
     const error = await selectorFailure(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);
   }
@@ -341,11 +354,14 @@ export async function prepareMthdsInputs(
  * to be exactly one by {@link validatePrepareInputsRequest}. The SDK takes it
  * as-is: nothing here resolves an address or an id, the route does.
  */
-type PrepareSelector = { files: MthdsFileItem[] } | { method_ref: string } | { method_id: string };
+type PrepareSelector =
+  | { files: MthdsFileItem[]; resources?: TemplateFiles }
+  | { method_ref: string }
+  | { method_id: string };
 
 function prepareSelectorOf(request: ResolvedPrepareRequest): PrepareSelector {
   if (request.files.length > 0) {
-    return { files: toMthdsFileItems(request.files) };
+    return { files: toMthdsFileItems(request.files), ...resourcesOption(request.resources) };
   }
   if (request.method_ref !== undefined) {
     return { method_ref: request.method_ref };
@@ -389,7 +405,9 @@ function prepareWithUpload(
     inputs: envelope.inputs,
   };
   if ("files" in envelope.selector) {
-    return client.prepareInputs({ ...base, files: envelope.selector.files });
+    const { files, resources } = envelope.selector;
+    // The template files ride the files arm alone, as the SDK's XOR types them.
+    return client.prepareInputs({ ...base, files, ...resourcesOption(resources) });
   }
   if ("method_ref" in envelope.selector) {
     return client.prepareInputs({ ...base, method_ref: envelope.selector.method_ref });
