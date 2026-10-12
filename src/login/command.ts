@@ -35,6 +35,7 @@ import pkg from "../../package.json" with { type: "json" };
 import { mcpAppInfo } from "../capabilities/client-identification.js";
 import { DEFAULT_API_URL, createPipelexApiClient } from "../capabilities/shared.js";
 import type { ApiConfig } from "../capabilities/shared.js";
+import { errorMessage } from "../capabilities/workspace-boundary.js";
 import {
   LOGIN_COMMAND,
   PIPELEX_API_KEY_PREFIX,
@@ -163,7 +164,7 @@ export async function runLoginCommand(
     stdout(LOGIN_USAGE);
     return EXIT_SAVED;
   }
-  return runLogin({ paste: parsed.paste }, { ...deps, stdout, stderr });
+  return runLogin({ paste: parsed.paste }, deps, stdout, stderr);
 }
 
 /** How the key reached the login, which decides what a failed save tells the user to do with it. */
@@ -177,13 +178,16 @@ interface LoginContext {
   write: (text: string) => void;
 }
 
-/** The login itself, once its arguments are read. Resolves the exit code. */
+/**
+ * The login itself, once its arguments are read, writing through the writers
+ * its one caller resolved. Resolves the exit code.
+ */
 async function runLogin(
   options: { paste: boolean },
-  deps: LoginDependencies = {},
+  deps: LoginDependencies,
+  stdout: (text: string) => void,
+  stderr: (text: string) => void,
 ): Promise<number> {
-  const stdout = deps.stdout ?? ((text: string) => void process.stdout.write(text));
-  const stderr = deps.stderr ?? ((text: string) => void process.stderr.write(text));
   const context: LoginContext = {
     env: deps.env ?? process.env,
     homedir: deps.homedir ?? os.homedir,
@@ -630,8 +634,4 @@ export function platformBrowserOpener(
       child.unref();
     });
   };
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

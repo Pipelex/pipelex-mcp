@@ -1,5 +1,6 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
+import { errorMessage } from "./capabilities/workspace-boundary.js";
 import { writeStderr } from "./log.js";
 import { runLoginCommand } from "./login/command.js";
 import { createLocalServer } from "./server.js";
@@ -48,8 +49,4 @@ async function serveStdio(): Promise<void> {
     writeStderr(`pipelex-mcp failed to start: ${errorMessage(err)}`);
     process.exitCode = 1;
   }
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

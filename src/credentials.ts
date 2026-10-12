@@ -643,7 +643,7 @@ function writeFailureReason(err: unknown): string {
  * assignment and an old multi-line value of `name` is replaced whole.
  */
 function withAssignment(content: string, name: string, value: string): string {
-  const bom = content.startsWith("﻿") ? "﻿" : "";
+  const bom = content.startsWith("\uFEFF") ? "\uFEFF" : "";
   const body = content.slice(bom.length);
   const eol = body.includes("\r\n") ? "\r\n" : "\n";
   const lines = body.match(/[^\n]*\n|[^\n]+$/g) ?? [];
