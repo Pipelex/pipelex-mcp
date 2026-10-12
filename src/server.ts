@@ -10,6 +10,8 @@ import type {
   McpClientInfo,
   McpShell,
 } from "./capabilities/client-identification.js";
+import { credentialsResolver } from "./credentials.js";
+import type { CredentialsResolver } from "./credentials.js";
 import { buildLocalToolContexts, localToolDefinitions, patchLocalApiContexts } from "./tools.js";
 import type { LocalToolContexts, LocalToolDefinition } from "./tools.js";
 
@@ -62,6 +64,13 @@ export interface LocalServerOptions {
   env?: NodeJS.ProcessEnv;
   rootDir?: string;
   contexts?: LocalToolContexts;
+  /**
+   * Decides each tool call's key, base URL and auth-failure texture. When the
+   * server builds its own contexts it defaults to `env` and the home `.env`
+   * (`credentials.ts`); supplied `contexts` keep the values they carry unless
+   * a resolver is supplied with them.
+   */
+  credentials?: CredentialsResolver;
 }
 
 export function createLocalServer(options: LocalServerOptions = {}): McpServer {
@@ -69,6 +78,7 @@ export function createLocalServer(options: LocalServerOptions = {}): McpServer {
     capabilities: {},
     instructions: LOCAL_SERVER_INSTRUCTIONS,
   });
+  const env = options.env ?? process.env;
   // Every client a tool call builds names the workshop and the AI host driving
   // it: `pipelex-mcp/<v> (workshop; host=<name>/<version>)`. The host is the
   // `clientInfo` of the MCP `initialize` handshake, which is only known once
@@ -76,12 +86,14 @@ export function createLocalServer(options: LocalServerOptions = {}): McpServer {
   // each client is constructed, never captured here. Applied to supplied
   // contexts too: the identity is the server's, not the caller's.
   const contexts = patchLocalApiContexts(
-    options.contexts ?? buildLocalToolContexts(options.env, options.rootDir ?? process.cwd()),
+    options.contexts ?? buildLocalToolContexts(env, options.rootDir ?? process.cwd()),
     { appInfo: workshopAppInfoSource(() => server.server.getClientVersion()) },
   );
+  const credentials =
+    options.credentials ?? (options.contexts === undefined ? credentialsResolver(env) : undefined);
 
   for (const definition of localToolDefinitions) {
-    registerLocalTool(server, definition, contexts);
+    registerLocalTool(server, definition, contexts, credentials);
   }
 
   return server;
@@ -112,6 +124,7 @@ function registerLocalTool(
   server: McpServer,
   definition: LocalToolDefinition,
   contexts: LocalToolContexts,
+  credentials: CredentialsResolver | undefined,
 ): void {
   // The table retains each handler's precise input type. Registration through
   // the plain SDK is necessarily homogeneous at this loop boundary; the SDK
@@ -125,6 +138,24 @@ function registerLocalTool(
       outputSchema: tool.outputSchema,
       annotations: tool.annotations,
     },
-    async (input) => (await tool.handler(input, contexts)) as CallToolResult,
+    async (input) =>
+      (await tool.handler(input, await callContexts(contexts, credentials))) as CallToolResult,
   );
+}
+
+/**
+ * The contexts one tool call runs over. The key and its base URL are decided
+ * afresh for every call, so a key saved in the home `.env` while the session
+ * runs is used from the next call, and every capability keeps reading plain
+ * `baseUrl` and `apiKey` fields. Every field is written on every call, `apiKey`
+ * and `baseUrlSource` included when they are `undefined`, so no call inherits
+ * another's.
+ */
+async function callContexts(
+  contexts: LocalToolContexts,
+  credentials: CredentialsResolver | undefined,
+): Promise<LocalToolContexts> {
+  if (credentials === undefined) return contexts;
+  const { baseUrl, apiKey, authError, baseUrlSource } = await credentials();
+  return patchLocalApiContexts(contexts, { baseUrl, apiKey, authError, baseUrlSource });
 }

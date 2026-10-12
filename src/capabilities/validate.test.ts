@@ -1171,7 +1171,7 @@ describe("validateMthds", () => {
     expect(result.summary).toMatch(/unreachable|misconfigured/i);
   });
 
-  it("does not claim unreachable for an auth failure", async () => {
+  it("headlines an auth failure as the key, not as an unreachable API", async () => {
     const result = await validateMthds(
       { files: [{ content: 'domain = "demo"' }] },
       {
@@ -1196,8 +1196,13 @@ describe("validateMthds", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
-    expect(result.summary).toMatch(/misconfigured/i);
+    expect(result.structuredContent.errors?.[0]).toMatchObject({ class: "config", kind: "auth" });
+    // The key, never the network: a user with no key must not be sent to
+    // debug connectivity (L-260924-a58ae1).
+    expect(result.summary).toBe(
+      "Validation could not start: the Pipelex API key is missing or was refused.",
+    );
+    expect(result.summary).not.toMatch(/unreachable|misconfigured/i);
   });
 });
 

@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   METHOD_ID_SELECTOR_SENTENCE,
   methodVersionReportSchema,
+  methodVersionsOf,
   planById,
   selectorFailure,
   withMethodContent,
@@ -29,6 +30,7 @@ import {
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
@@ -154,6 +156,8 @@ export interface PrepareContext extends ApiConfig, MethodVersionsAware {
   inputsResolver?: FileResolver;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 export function buildPrepareContext(env = process.env): PrepareContext {
@@ -315,7 +319,7 @@ export async function prepareMthdsInputs(
       // platform is asked beside the request, which never waits on it, and the
       // result says whose signature the inputs were prepared against
       // (`method-versions.ts`).
-      plan = planById(request.method_id, context.methodVersions, client, {
+      plan = planById(request.method_id, methodVersionsOf(context), client, {
         needBareReport: true,
       });
       sent = { ...request, method_id: plan.send };
@@ -336,9 +340,10 @@ export async function prepareMthdsInputs(
     const classified = classifyError(err, {
       ...classifyOptions,
       auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
       bundleResources: hasTemplateFiles(request.resources),
     });
-    const error = await selectorFailure(err, classified, plan, context.methodVersions);
+    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     return errorResult(summaryForError(error), [error]);
   }
 
@@ -477,6 +482,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Inputs could not be prepared: the Pipelex API returned an error.",
   paywall:
     "Inputs could not be prepared: the organization's Pipelex plan does not cover this call.",
+  auth: "Inputs could not be prepared: the Pipelex API key is missing or was refused.",
 };
 
 function summaryForError(error: ToolError): string {

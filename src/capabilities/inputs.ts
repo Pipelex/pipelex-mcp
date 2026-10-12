@@ -12,6 +12,7 @@ import type { ProjectedInputsTemplate } from "./inputs-template.js";
 import {
   METHOD_ID_SELECTOR_SENTENCE,
   methodVersionReportSchema,
+  methodVersionsOf,
   planById,
   selectorFailure,
   withMethodContent,
@@ -34,6 +35,7 @@ import {
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
@@ -176,6 +178,8 @@ export interface InputsContext extends ApiConfig, MethodVersionsAware {
   resolver?: FileResolver;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 export function buildInputsContext(env = process.env): InputsContext {
@@ -302,7 +306,7 @@ export async function buildMthdsInputs(
       // selectors yet, and the latest published version on one that does: the
       // platform is asked beside the request, which never waits on it, and the
       // result says which content the template came from (`method-versions.ts`).
-      plan = planById(request.method_id, context.methodVersions, client, {
+      plan = planById(request.method_id, methodVersionsOf(context), client, {
         needBareReport: true,
       });
       sent = { ...request, method_id: plan.send };
@@ -312,9 +316,10 @@ export async function buildMthdsInputs(
     const classified = classifyError(err, {
       ...inputsErrorOptions(request),
       auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
       bundleResources: hasTemplateFiles(request.resources),
     });
-    const error = await selectorFailure(err, classified, plan, context.methodVersions);
+    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     return errorResult(summaryForError(error), [error]);
   }
 
@@ -352,6 +357,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Inputs template could not be completed: the Pipelex API returned an error.",
   paywall:
     "Inputs template could not start: the organization's Pipelex plan does not cover this call.",
+  auth: "Inputs template could not start: the Pipelex API key is missing or was refused.",
 };
 
 function summaryForError(error: ToolError): string {

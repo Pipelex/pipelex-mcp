@@ -31,10 +31,15 @@ import {
   withLinkLock,
 } from "./catalog-link.js";
 import type { LinkFileReport, LinkRead, LinkReplacement, MethodLink } from "./catalog-link.js";
-import { methodVersionsSupport, readMethodSelector, versionReaderOf } from "./method-versions.js";
+import {
+  methodVersionsOf,
+  methodVersionsSupport,
+  readMethodSelector,
+  versionReaderOf,
+} from "./method-versions.js";
 import type {
   MethodSelector,
-  MethodVersionsMemory,
+  MethodVersionsMemories,
   MethodVersionsSupport,
 } from "./method-versions.js";
 import {
@@ -51,6 +56,7 @@ import {
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
@@ -413,8 +419,8 @@ export interface CatalogWriteClient {
 
 export interface CatalogWriteContext extends ApiConfig {
   client?: CatalogWriteClient;
-  /** The workshop's shared memory of whether the platform resolves version selectors. */
-  methodVersions?: MethodVersionsMemory;
+  /** The workshop's shared memory of whether each platform resolves version selectors. */
+  methodVersions?: MethodVersionsMemories;
   /** Fills `{ path }` items of `files` — `.mthds` only. */
   resolver?: FileResolver;
   /** Fills `{ path }` items of `python` — `.py` only. */
@@ -427,6 +433,8 @@ export interface CatalogWriteContext extends ApiConfig {
   /** The validation capability these saves run the bundle through — `mthds_validate`'s own. */
   validation: ValidationContext;
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 export function buildCatalogWriteContext(env = process.env): CatalogWriteContext {
@@ -443,7 +451,7 @@ export function catalogVersionsSupport(
   context: CatalogWriteContext,
   client: CatalogWriteClient,
 ): Promise<MethodVersionsSupport> {
-  return methodVersionsSupport(context.methodVersions, versionReaderOf(client));
+  return methodVersionsSupport(methodVersionsOf(context), versionReaderOf(client));
 }
 
 /**
@@ -563,6 +571,7 @@ const SAVE_ERROR_SUMMARIES: ErrorSummaries = {
   input_domain: "The method was not saved: the request was rejected.",
   runtime: "The method was not saved: the Pipelex API returned an error.",
   paywall: "The method was not saved: the organization's Pipelex plan does not cover this call.",
+  auth: "The method was not saved: the Pipelex API key is missing or was refused.",
 };
 
 const GET_ERROR_SUMMARIES: ErrorSummaries = {
@@ -570,6 +579,7 @@ const GET_ERROR_SUMMARIES: ErrorSummaries = {
   input_domain: "The method was not fetched: the request was rejected.",
   runtime: "The method was not fetched: the Pipelex API returned an error.",
   paywall: "The method was not fetched: the organization's Pipelex plan does not cover this call.",
+  auth: "The method was not fetched: the Pipelex API key is missing or was refused.",
 };
 
 /**
@@ -852,6 +862,7 @@ async function saveToCatalog(
     const error = classifyError(err, {
       ...(targetId === undefined ? CREATE_ERROR_OPTIONS : DRAFT_ERROR_OPTIONS),
       auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
     });
     return saveError(summaryForToolError(error, SAVE_ERROR_SUMMARIES), [error]);
   }
@@ -875,7 +886,11 @@ async function saveToCatalog(
     try {
       stored = await client.createMethod(writeInput);
     } catch (err) {
-      const error = classifyError(err, { ...CREATE_ERROR_OPTIONS, auth: context.authError });
+      const error = classifyError(err, {
+        ...CREATE_ERROR_OPTIONS,
+        auth: context.authError,
+        baseUrlSource: context.baseUrlSource,
+      });
       return saveError(summaryForToolError(error, SAVE_ERROR_SUMMARIES), [
         notRetryableCreate(err, error),
       ]);
@@ -899,7 +914,11 @@ async function saveToCatalog(
     try {
       stored = await client.writeDraft(targetId, draftInput);
     } catch (err) {
-      const error = classifyError(err, { ...DRAFT_ERROR_OPTIONS, auth: context.authError });
+      const error = classifyError(err, {
+        ...DRAFT_ERROR_OPTIONS,
+        auth: context.authError,
+        baseUrlSource: context.baseUrlSource,
+      });
       const reported =
         error.location === "expected_updated_at" && token !== undefined
           ? await draftConflictError(error, client, targetId, {
@@ -943,7 +962,11 @@ async function saveToCatalog(
         stored = { ...stored, name: renamed.name };
         saved = "renamed";
       } catch (err) {
-        renameError = classifyError(err, { ...RENAME_ERROR_OPTIONS, auth: context.authError });
+        renameError = classifyError(err, {
+          ...RENAME_ERROR_OPTIONS,
+          auth: context.authError,
+          baseUrlSource: context.baseUrlSource,
+        });
       }
     }
   }
@@ -1627,7 +1650,11 @@ export async function getMthdsMethod(
     if (err instanceof EmptyMethodSourceError) {
       return emptySourceError();
     }
-    const error = classifyError(err, { ...GET_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, {
+      ...GET_ERROR_OPTIONS,
+      auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
+    });
     return getError(summaryForToolError(error, GET_ERROR_SUMMARIES), [error]);
   }
 
@@ -1680,7 +1707,11 @@ function versionReadError(
   wanted: number,
   context: CatalogWriteContext,
 ): GetMethodResult {
-  const error = classifyError(err, { ...GET_ERROR_OPTIONS, auth: context.authError });
+  const error = classifyError(err, {
+    ...GET_ERROR_OPTIONS,
+    auth: context.authError,
+    baseUrlSource: context.baseUrlSource,
+  });
   if (!(err instanceof ApiResponseError) || err.code !== "method_version_not_found") {
     return getError(summaryForToolError(error, GET_ERROR_SUMMARIES), [error]);
   }

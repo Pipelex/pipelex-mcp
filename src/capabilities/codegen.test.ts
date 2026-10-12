@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
 import type { CodegenRequest, CodegenResponse, CodegenValidReport } from "@pipelex/sdk";
 
+import { resolveWorkshopCredentials } from "../credentials.js";
 import { recordedTsZodReport } from "./codegen-fixture.js";
 import {
   CODEGEN_CONTENT_CAP,
@@ -102,6 +103,14 @@ const invalidReport: CodegenResponse = {
 };
 
 const bytesOf = (text: string): number => new TextEncoder().encode(text).length;
+
+/** Codegen's headline for a missing or refused key, which names the route's gate too. */
+const CODEGEN_AUTH_HEADLINE =
+  "Code generation could not start: the Pipelex API key is missing or was refused, or code generation is not enabled for its organization.";
+
+/** What codegen's 403 adds after the key's own hint, whichever one it is. */
+const CODEGEN_GATE_SENTENCE =
+  "Code generation can refuse even a key every other tool accepts, since the hosted Pipelex API enables /v1/codegen per organization, by its plan or feature flags: if other tools work with the key, ask for code generation to be enabled for its organization.";
 
 const tempDirs: string[] = [];
 
@@ -586,13 +595,51 @@ describe("generateMthdsCode error classification", () => {
   });
 
   it("tells a 403 caller about the feature-flag gate, on top of the deployment's auth wording", async () => {
-    const { error } = await classify({ files, target: "ts-zod" }, responseError(403));
+    const { error, summary } = await classify({ files, target: "ts-zod" }, responseError(403));
 
     expect(error?.class).toBe("config");
+    expect(error?.kind).toBe("auth");
     expect(error?.location).toBe("PIPELEX_API_KEY");
     expect(error?.hint).toContain("Check PIPELEX_API_KEY");
     expect(error?.hint).toContain("feature flags");
     expect(error?.retryable).toBe(false);
+    // The headline names both causes of the route's 403, never connectivity.
+    expect(summary).toBe(CODEGEN_AUTH_HEADLINE);
+  });
+
+  it("follows each of the workshop's key hints with the gate, and reads well after each", async () => {
+    const home = await makeTempDir();
+    const noKey = await resolveWorkshopCredentials({ PIPELEX_HOME: home });
+    const hostKey = await resolveWorkshopCredentials({ PIPELEX_API_KEY: "plx_sk_host" });
+    await fs.writeFile(path.join(home, ".env"), "PIPELEX_API_KEY=plx_sk_saved\n");
+    const fileKey = await resolveWorkshopCredentials({ PIPELEX_HOME: home });
+    expect([noKey.source, hostKey.source, fileKey.source]).toEqual(["none", "host", "file"]);
+
+    for (const credentials of [noKey, hostKey, fileKey]) {
+      const result = await generateMthdsCode(
+        { files, target: "ts-zod" },
+        {
+          baseUrl: credentials.baseUrl,
+          authError: credentials.authError,
+          client: {
+            async codegen() {
+              throw responseError(403);
+            },
+          },
+        },
+      );
+
+      const error = result.structuredContent.errors?.[0];
+      expect(result.summary, credentials.source).toBe(CODEGEN_AUTH_HEADLINE);
+      expect(error, credentials.source).toMatchObject({ class: "config", kind: "auth" });
+      // The key's own hint leads, the login named exactly, and the gate's
+      // sentence follows it speaking of the route, never of a credential that
+      // may not exist ("If the credential is valid" after "No key is set").
+      expect(error?.hint, credentials.source).toBe(
+        `${credentials.authError.hint} ${CODEGEN_GATE_SENTENCE}`,
+      );
+      expect(error?.hint, credentials.source).toContain("`npx -y @pipelex/mcp@latest login`");
+    }
   });
 
   it("composes the console's sign-in-again wording with the gate on a 403", async () => {
@@ -616,11 +663,13 @@ describe("generateMthdsCode error classification", () => {
   });
 
   it("keeps a 401 on the plain auth wording — a rejected credential is not a gate", async () => {
-    const { error } = await classify({ files, target: "ts-zod" }, responseError(401));
+    const { error, summary } = await classify({ files, target: "ts-zod" }, responseError(401));
 
     expect(error?.class).toBe("config");
+    expect(error?.kind).toBe("auth");
     expect(error?.location).toBe("PIPELEX_API_KEY");
     expect(error?.hint).not.toContain("feature flags");
+    expect(summary).toBe(CODEGEN_AUTH_HEADLINE);
   });
 
   it("classifies a 402 as a paywall with its own headline", async () => {

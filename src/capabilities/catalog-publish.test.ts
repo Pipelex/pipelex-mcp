@@ -319,4 +319,34 @@ describe("publishMthdsMethod", () => {
     expect(error?.message).toContain("nothing was published");
     expect(publishMethodToolResult(result).isError).toBe(true);
   });
+
+  it("headlines a refused key as the key, not as connectivity", async () => {
+    const result = await publishMthdsMethod(
+      { method_id: "mt_one", expected_draft_updated_at: TOKEN },
+      contextFor(
+        publishing(async () => {
+          throw new ApiResponseError(
+            "unauthorized",
+            "https://api-dev.pipelex.com/v1/methods/mt_one/publish",
+            401,
+            "Unauthorized",
+            "{}",
+            undefined,
+            "Missing API key",
+            undefined,
+            "unauthorized",
+          );
+        }),
+      ),
+    );
+
+    expect(errorsOf(result)[0]).toMatchObject({
+      class: "config",
+      kind: "auth",
+      location: "PIPELEX_API_KEY",
+    });
+    expect(result.summary).toBe(
+      "The method was not published: the Pipelex API key is missing or was refused.",
+    );
+  });
 });

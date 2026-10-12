@@ -33,6 +33,7 @@ import {
   classifyError,
   createPipelexApiClient,
   DEFAULT_API_URL,
+  DEFAULT_AUTH_HINT,
   filesInputSchema,
   imageCandidatesOf,
   itemToolError,
@@ -1214,6 +1215,130 @@ describe("classifyError", () => {
     });
   });
 
+  // A missing or refused key is `config`, like an unreachable API, so without
+  // the kind every capability's headline blamed connectivity for it
+  // (L-260924-a58ae1). Every credential arm tags it, and only those.
+  describe("tags a missing or refused key as kind auth", () => {
+    const texture = { location: "PIPELEX_API_KEY", hint: "No Pipelex API key is set." };
+
+    it("tags a 401 and a 403 through the generic arm, keeping the key's texture", async () => {
+      for (const status of [401, 403]) {
+        const error = classifyError(await refused(status, { detail: "Missing API key" }), {
+          auth: texture,
+        });
+
+        expect(error, String(status)).toEqual({
+          class: "config",
+          kind: "auth",
+          location: "PIPELEX_API_KEY",
+          message: "Missing API key",
+          hint: "No Pipelex API key is set.",
+          retryable: false,
+        });
+      }
+    });
+
+    it("tags a route's gated 403 too, whose hint composes the key's with the gate's", async () => {
+      const error = classifyError(await refused(403, { code: "forbidden" }), {
+        auth: texture,
+        forbidden: { hint: "No Pipelex API key is set. Or the route is gated." },
+      });
+
+      expect(error).toMatchObject({
+        class: "config",
+        kind: "auth",
+        location: "PIPELEX_API_KEY",
+        hint: "No Pipelex API key is set. Or the route is gated.",
+      });
+    });
+
+    it("tags the upload leg's refused credential, as the SDK raises it", async () => {
+      const err = await uploadFailure(() =>
+        Promise.resolve(
+          Response.json(
+            { status: 401, title: "Unauthorized", detail: "Missing API key" },
+            { status: 401, headers: { "content-type": "application/problem+json" } },
+          ),
+        ),
+      );
+      expect(err).toBeInstanceOf(UploadAuthenticationError);
+
+      expect(classifyError(err, { auth: texture })).toMatchObject({
+        class: "config",
+        kind: "auth",
+        location: "PIPELEX_API_KEY",
+        hint: "No Pipelex API key is set.",
+        retryable: false,
+      });
+    });
+
+    it("tags the artifact family's refused credential", () => {
+      const verdict = {
+        scope: "main_stuff" as const,
+        artifacts: [],
+        saved_paths: [],
+        all_saved: true,
+      };
+      for (const status of [401, 403]) {
+        const error = classifyError(
+          new ArtifactAuthenticationError(
+            "The resolve route refused the credential.",
+            status,
+            verdict,
+          ),
+          { auth: texture },
+        );
+
+        expect(error, String(status)).toMatchObject({
+          class: "config",
+          kind: "auth",
+          location: "PIPELEX_API_KEY",
+          hint: "No Pipelex API key is set.",
+        });
+      }
+    });
+
+    it("gives every credential arm the same default hint when no texture is set", async () => {
+      const verdict = {
+        scope: "main_stuff" as const,
+        artifacts: [],
+        saved_paths: [],
+        all_saved: true,
+      };
+      const errors = {
+        generic: await refused(401, { detail: "Missing API key" }),
+        upload: new UploadAuthenticationError("refused", 401),
+        artifact: new ArtifactAuthenticationError("refused", 403, verdict),
+      };
+      for (const [arm, err] of Object.entries(errors)) {
+        expect(classifyError(err), arm).toMatchObject({
+          class: "config",
+          kind: "auth",
+          location: "PIPELEX_API_KEY",
+          hint: DEFAULT_AUTH_HINT,
+        });
+      }
+    });
+
+    it("leaves the execution-locus refusals untagged, at the method and not the key", async () => {
+      for (const errorType of ["MethodStructuresRefusedError", "CustomCodeRequiresSandbox"]) {
+        const error = classifyError(
+          await refused(403, runnerProblem(errorType, "Refused by the execution locus.", "input")),
+          { auth: texture, methodLocation: "method_ref" },
+        );
+
+        expect(error, errorType).toMatchObject({ class: "input_domain", location: "method_ref" });
+        expect(error.kind, errorType).toBeUndefined();
+      }
+    });
+
+    it("tags nothing else: an unreachable API, a paywall and a route's 404 keep their own", async () => {
+      expect(classifyError(await unreachable("ECONNREFUSED")).kind).toBeUndefined();
+      expect(classifyError(await refused(402, { detail: "Plan limit" })).kind).toBe("paywall");
+      expect(classifyError(await refused(404, { code: "not_found" })).kind).toBeUndefined();
+    });
+  });
+
   describe("the upload leg", () => {
     it("reads a wrapped plan refusal as the paywall it is, not a passing fault", async () => {
       const err = await uploadFailure(() =>
@@ -1511,6 +1636,7 @@ describe("summaryForToolError", () => {
     input_domain: "request headline",
     runtime: "server headline",
     paywall: "billing headline",
+    auth: "key headline",
   };
 
   it("maps an untagged error by its class", () => {
@@ -1531,6 +1657,15 @@ describe("summaryForToolError", () => {
         summaries,
       ),
     ).toBe("billing headline");
+  });
+
+  it("names the key, not connectivity, for a missing or refused key", () => {
+    expect(
+      summaryForToolError(
+        { class: "config", kind: "auth", message: "Missing API key", retryable: false },
+        summaries,
+      ),
+    ).toBe("key headline");
   });
 });
 
@@ -1754,6 +1889,132 @@ describe("blueprintMainPipeRefOf", () => {
   it("treats a blueprint that is not an object as declaring nothing", () => {
     for (const blueprint of [undefined, null, "demo.main", 7, ["demo.main"]]) {
       expect(blueprintMainPipeRefOf(blueprint)).toBeUndefined();
+    }
+  });
+});
+
+describe("createPipelexApiClient", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  /** The `Authorization` header a client built by the factory sends. */
+  async function sentAuthorization(apiKey: string | undefined): Promise<string | null> {
+    let seen: string | null = null;
+    vi.stubGlobal("fetch", (_url: string, init?: { headers?: HeadersInit }) => {
+      seen = new Headers(init?.headers).get("authorization");
+      return Promise.resolve(Response.json({}));
+    });
+    await createPipelexApiClient({ baseUrl: "https://api.test", apiKey }).health();
+    return seen;
+  }
+
+  it("sends the config's key, and no key at all when the config has none", async () => {
+    // The SDK falls back to the process's own PIPELEX_API_KEY when it is handed
+    // no key, which would put an ambient key on a call the workshop resolved as
+    // keyless; the config's key is the whole decision.
+    vi.stubEnv("PIPELEX_API_KEY", "plx_sk_ambient");
+
+    expect(await sentAuthorization("plx_sk_config")).toBe("Bearer plx_sk_config");
+    expect(await sentAuthorization(undefined)).toBeNull();
+  });
+});
+
+describe("classifyError with the base URL's source", () => {
+  const baseUrlSource = {
+    hint: "The PIPELEX_BASE_URL in use was read from `~/.pipelex/.env` beside the saved key.",
+  };
+
+  /** What the SDK throws building a client on a base URL carrying a path: the generic `config` arm. */
+  function refusedBaseUrl(): unknown {
+    try {
+      createPipelexApiClient({ baseUrl: `${DEFAULT_API_URL}/v1` });
+    } catch (err) {
+      return err;
+    }
+    throw new Error("the client took a base URL carrying a path");
+  }
+
+  it("adds the source to the unreachable API's hint, and only when the call carries one", async () => {
+    const unreachableHint =
+      "Start pipelex-api locally or set PIPELEX_BASE_URL to a reachable host-only API base URL.";
+    const err = await unreachable("ECONNREFUSED");
+
+    expect(classifyError(err)).toMatchObject({
+      location: "PIPELEX_BASE_URL",
+      hint: unreachableHint,
+    });
+    expect(classifyError(err, { baseUrlSource })).toEqual({
+      class: "config",
+      location: "PIPELEX_BASE_URL",
+      message: expect.any(String),
+      hint: `${unreachableHint} ${baseUrlSource.hint}`,
+      retryable: true,
+    });
+  });
+
+  it("adds the source to the generic config arm a refused base URL falls to", () => {
+    const err = refusedBaseUrl();
+    expect(err).toBeInstanceOf(RequestArgumentError);
+
+    expect(classifyError(err)).toMatchObject({
+      class: "config",
+      location: "PIPELEX_BASE_URL",
+      hint: "Check PIPELEX_BASE_URL and the submitted request.",
+    });
+    expect(classifyError(err, { baseUrlSource })).toMatchObject({
+      class: "config",
+      location: "PIPELEX_BASE_URL",
+      hint: `Check PIPELEX_BASE_URL and the submitted request. ${baseUrlSource.hint}`,
+    });
+  });
+
+  it("adds the source to a missing or unimplemented route", async () => {
+    const missing = classifyError(await refused(404, { detail: "Not Found" }), {
+      route: "/v1/methods/{id}",
+      baseUrlSource,
+    });
+    expect(missing).toMatchObject({
+      class: "config",
+      location: "PIPELEX_BASE_URL",
+      hint: `Check that PIPELEX_BASE_URL points to a host serving /v1/methods/{id}. ${baseUrlSource.hint}`,
+    });
+
+    const unimplemented = classifyError(await refused(501, { detail: "Not Implemented" }), {
+      route: "/v1/methods/{id}",
+      baseUrlSource,
+    });
+    expect(unimplemented).toMatchObject({
+      location: "PIPELEX_BASE_URL",
+      hint: `The deployment PIPELEX_BASE_URL points at does not implement /v1/methods/{id}. ${baseUrlSource.hint}`,
+    });
+  });
+
+  it("adds the source once to a wrapped unreachable API on the upload leg", async () => {
+    const err = await uploadFailure(() =>
+      Promise.reject(
+        new TypeError("fetch failed", {
+          cause: Object.assign(new Error("ECONNREFUSED"), { code: "ECONNREFUSED" }),
+        }),
+      ),
+    );
+    expect(err).toBeInstanceOf(UploadTransportError);
+
+    const hint = classifyError(err, { baseUrlSource }).hint ?? "";
+    expect(hint.split(baseUrlSource.hint)).toHaveLength(2);
+    expect(hint.endsWith(baseUrlSource.hint)).toBe(true);
+  });
+
+  it("leaves every failure the base URL cannot fix as it is", async () => {
+    const failures = [
+      await refused(401, { detail: "Missing API key" }),
+      await refused(500, { detail: "Server fault" }),
+      new ApiUnreachableError("no answer in time", DEFAULT_API_URL, "ABORT_TIMEOUT"),
+      new RequestArgumentError("No run source given."),
+    ];
+
+    for (const err of failures) {
+      expect(classifyError(err, { baseUrlSource })).toEqual(classifyError(err));
     }
   });
 });

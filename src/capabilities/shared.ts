@@ -440,13 +440,21 @@ export type ErrorClass = z.infer<typeof errorClassSchema>;
 
 /**
  * Refinement of {@link ErrorClass} for a condition whose class is settled but
- * whose *cause* the class cannot name. Today the only member is `paywall`: a
- * 402 is deliberately `config` (the deployment cannot make this call as
- * credentialed), yet the class alone would have every headline blame
- * connectivity for what is a billing limit. Adding a member here is how a new
- * such cause gets a headline — never by re-classifying it.
+ * whose *cause* the class cannot name. Both members are `config`, and the
+ * class alone would have every headline blame connectivity for them:
+ *
+ * - `paywall`: a 402 is deliberately `config` (the deployment cannot make this
+ *   call as credentialed), yet it is a billing limit.
+ * - `auth`: a missing or refused key (a 401 or 403 outside the execution-locus
+ *   gate, and the upload and artifact families' authentication errors) is
+ *   `config`, since the key is the environment's, yet "the Pipelex API is
+ *   unreachable or misconfigured" sends a user who has no key to debug the
+ *   network.
+ *
+ * Adding a member here is how a new such cause gets a headline — never by
+ * re-classifying it.
  */
-export const errorKindSchema = z.enum(["paywall"]);
+export const errorKindSchema = z.enum(["paywall", "auth"]);
 
 export type ErrorKind = z.infer<typeof errorKindSchema>;
 
@@ -455,7 +463,7 @@ export const toolErrorSchema = z.object({
   kind: errorKindSchema
     .optional()
     .describe(
-      "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call.",
+      "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
     ),
   location: z.string().optional(),
   message: z.string(),
@@ -470,10 +478,10 @@ export interface ToolError {
   /**
    * Set where the concrete SDK error / HTTP status is still known
    * ({@link classifyError}), for the same reason `retryable` is: `class` is
-   * the machine contract and must stay coarse, but a paywall and an
-   * unreachable API are both `config` and read nothing alike to a human. A
-   * machine consumer still branches on `class`; `kind` is what lets it — and
-   * the summary headline — tell the two apart without sniffing the message.
+   * the machine contract and must stay coarse, but a paywall, a missing key
+   * and an unreachable API are all `config` and read nothing alike to a human.
+   * A machine consumer still branches on `class`; `kind` is what lets it — and
+   * the summary headline — tell them apart without sniffing the message.
    */
   kind?: ErrorKind;
   location?: string;
@@ -493,17 +501,18 @@ export interface ToolError {
  * A capability's no-verdict headlines: one per {@link ErrorClass}, plus one for
  * every {@link ErrorKind}. Declaring the kind headlines is **mandatory** — that
  * is the point of the type. A capability that forgot one would silently print
- * the connectivity headline for a billing refusal, which is the defect this
- * shape exists to make unrepresentable: the miss is a type error, not something
- * a reviewer has to catch.
+ * the connectivity headline for a billing refusal or a missing key, which is
+ * the defect this shape exists to make unrepresentable: the miss is a type
+ * error, not something a reviewer has to catch.
  */
 export type ErrorSummaries = Record<ErrorClass, string> & Record<ErrorKind, string>;
 
 /**
  * Pick a capability's headline for one {@link ToolError}. `kind` is checked
- * ahead of `class` because it is the refinement: a 402 is `config` by contract,
- * so consulting the class map first would print "the Pipelex API is unreachable
- * or misconfigured" for a plan limit and send the agent to debug the base URL.
+ * ahead of `class` because it is the refinement: a 402 and a refused key are
+ * `config` by contract, so consulting the class map first would print "the
+ * Pipelex API is unreachable or misconfigured" for a plan limit or a missing
+ * key and send the agent to debug the base URL.
  */
 export function summaryForToolError(error: ToolError, summaries: ErrorSummaries): string {
   return error.kind === undefined ? summaries[error.class] : summaries[error.kind];
@@ -591,11 +600,16 @@ export interface ApiConfig {
 /**
  * What the workshop may override on every capability context that talks to
  * the API. Its tool table applies it to the whole context set, since that
- * table is where the list of contexts lives.
+ * table is where the list of contexts lives. The workshop patches `appInfo`
+ * once, when its server is built, and `baseUrl`, `apiKey`, `authError` and
+ * `baseUrlSource` at the start of every tool call, from its host's environment
+ * and the saved key in the home `.env` (`src/credentials.ts`).
  */
 export interface ApiContextPatch {
+  baseUrl?: string;
   apiKey?: string;
   authError?: AuthErrorTexture;
+  baseUrlSource?: BaseUrlSourceTexture;
   appInfo?: AppInfoSource;
 }
 
@@ -619,7 +633,11 @@ export function createPipelexApiClient<T extends PipelexApiClient = PipelexApiCl
 ): T {
   const options: PipelexApiClientOptions = {
     baseUrl: config.baseUrl,
-    apiKey: config.apiKey,
+    // The config's key is the whole decision. Handed none, the SDK falls back
+    // to the process's own `PIPELEX_API_KEY`, so a call the workshop resolved as
+    // keyless (`src/credentials.ts`) could still carry an ambient key; an empty
+    // string is the SDK's "no key", which sends no `Authorization` header.
+    apiKey: config.apiKey ?? "",
     appInfo: config.appInfo?.() ?? BARE_APP_INFO,
   };
   const Client =
@@ -997,15 +1015,32 @@ export interface ClassifyErrorOptions {
     hint: string;
   };
   /**
-   * Per-deployment texture for auth failures (HTTP 401/403, and the upload and
-   * artifact families' authentication errors). The default wording points at the `PIPELEX_API_KEY` env
-   * var — right for the workshop, where the caller owns the process env. A
-   * deployment whose callers authenticate some other way overrides it, and
-   * capabilities thread it from their context's `authError` field; the
-   * workshop never sets it.
+   * Per-call texture for auth failures (HTTP 401/403, and the upload and
+   * artifact families' authentication errors). Capabilities thread it from
+   * their context's `authError` field. The workshop sets it on every tool call
+   * from where that call's key came from (`src/credentials.ts`): no key at
+   * all, the host's key, or the key saved in the home `.env`, each with its
+   * own hint. Unset, as in a capability's own tests, the wording is the
+   * generic {@link DEFAULT_AUTH_HINT} at `PIPELEX_API_KEY`.
    */
   auth?: {
     location?: string;
+    hint: string;
+  };
+  /**
+   * Per-call texture for every failure located at `PIPELEX_BASE_URL` (an
+   * unreachable API, a missing run lifecycle or upload route, a route the
+   * deployment does not serve or implement, and a `config` failure nothing
+   * else words, such as a base URL the SDK refused before sending): a
+   * sentence appended to that failure's hint, saying where the base URL came
+   * from. Capabilities thread it from their context's `baseUrlSource` field,
+   * beside `auth`. The workshop sets it only on a tool call whose base URL it
+   * read from the home `.env` beside the saved key (`src/credentials.ts`),
+   * since a hint naming `PIPELEX_BASE_URL` alone would send the user to an
+   * environment variable the host never set. Unset, every such hint names
+   * `PIPELEX_BASE_URL` alone.
+   */
+  baseUrlSource?: {
     hint: string;
   };
   /**
@@ -1067,8 +1102,17 @@ export interface ClassifyErrorOptions {
   };
 }
 
-/** The per-deployment auth-failure texture a capability context can carry. */
+/** The auth-failure texture a capability context can carry. */
 export type AuthErrorTexture = NonNullable<ClassifyErrorOptions["auth"]>;
+
+/** The base-URL-failure texture a capability context can carry. */
+export type BaseUrlSourceTexture = NonNullable<ClassifyErrorOptions["baseUrlSource"]>;
+
+/**
+ * Where every failure the base URL can fix locates, and the one location
+ * {@link ClassifyErrorOptions.baseUrlSource} annotates.
+ */
+const BASE_URL_LOCATION = "PIPELEX_BASE_URL";
 
 const DEFAULT_BAD_REQUEST: NonNullable<ClassifyErrorOptions["badRequest"]> = {
   location: "files",
@@ -1161,8 +1205,34 @@ function toolError(verdict: ToolVerdict, texture: ToolTexture): ToolError {
  * `PipelineRequestError` from `mthds` is `config`, and a fault nothing names is
  * retryable `runtime`, since wrongly stopping a live follow is worse than one
  * more read.
+ *
+ * Whatever the arm, a failure located at `PIPELEX_BASE_URL` then takes the
+ * call's {@link ClassifyErrorOptions.baseUrlSource} sentence, applied here
+ * once rather than in each arm, so an arm added later cannot miss it. A
+ * caller that replaces the hint afterwards drops it, and `classifyStartError`
+ * does so on purpose: its may-have-run hint replaces whatever this function
+ * wrote, since it must stay the exact marker the run's headline reads.
  */
 export function classifyError(err: unknown, options: ClassifyErrorOptions = {}): ToolError {
+  return withBaseUrlSource(classifyFailure(err, options), options.baseUrlSource);
+}
+
+/**
+ * Append the base URL's source to a failure located at `PIPELEX_BASE_URL`;
+ * every other failure, and every call without the texture, is left as it is.
+ */
+function withBaseUrlSource(error: ToolError, source: BaseUrlSourceTexture | undefined): ToolError {
+  if (source === undefined || error.location !== BASE_URL_LOCATION) return error;
+  return toolError(error, {
+    kind: error.kind,
+    location: error.location,
+    message: error.message,
+    hint: error.hint === undefined ? source.hint : `${error.hint} ${source.hint}`,
+  });
+}
+
+/** {@link classifyError} without the base URL's source, which only the outermost call appends. */
+function classifyFailure(err: unknown, options: ClassifyErrorOptions): ToolError {
   if (err instanceof ApiResponseError) return classifyApiResponseError(err, options);
   if (err instanceof UploadTransportError) return classifyUploadTransportError(err, options);
   if (err instanceof PipelexRequestError) {
@@ -1210,7 +1280,7 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
       };
     }
     return {
-      location: "PIPELEX_BASE_URL",
+      location: BASE_URL_LOCATION,
       message,
       hint: "Start pipelex-api locally or set PIPELEX_BASE_URL to a reachable host-only API base URL.",
     };
@@ -1220,7 +1290,7 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
   // lifecycle (a bare pipelex-api runner).
   if (err instanceof RunLifecycleUnavailableError) {
     return {
-      location: "PIPELEX_BASE_URL",
+      location: BASE_URL_LOCATION,
       message,
       hint: "Durable runs need the hosted Pipelex API; point PIPELEX_BASE_URL at a deployment serving /v1/runs/* (a bare pipelex-api runner does not).",
     };
@@ -1287,7 +1357,7 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
   // The configured deployment has no upload route (a bare pipelex-api runner).
   if (err instanceof UnsupportedUploadCapabilityError) {
     return {
-      location: "PIPELEX_BASE_URL",
+      location: BASE_URL_LOCATION,
       message,
       hint: "The configured Pipelex deployment has no /v1/upload route. Point PIPELEX_BASE_URL at the hosted Pipelex API, or pass assets as http(s) URLs / pipelex-storage:// references.",
     };
@@ -1295,9 +1365,10 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
 
   if (err instanceof UploadAuthenticationError) {
     return {
+      kind: "auth",
       location: options.auth?.location ?? "PIPELEX_API_KEY",
       message,
-      hint: options.auth?.hint ?? "Check the API key for the configured Pipelex API.",
+      hint: options.auth?.hint ?? DEFAULT_AUTH_HINT,
     };
   }
 
@@ -1329,6 +1400,7 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
   // UploadAuthenticationError on the upload leg.
   if (err instanceof ArtifactAuthenticationError) {
     return {
+      kind: "auth",
       location: options.auth?.location ?? "PIPELEX_API_KEY",
       message,
       hint: options.auth?.hint ?? DEFAULT_AUTH_HINT,
@@ -1363,7 +1435,7 @@ function genericTexture(verdict: ToolVerdict, message: string): ToolTexture {
   switch (verdict.class) {
     case "config":
       return {
-        location: "PIPELEX_BASE_URL",
+        location: BASE_URL_LOCATION,
         message,
         hint: "Check PIPELEX_BASE_URL and the submitted request.",
       };
@@ -1395,7 +1467,7 @@ function classifyUploadTransportError(
     cause instanceof ApiUnreachableError ||
     (cause instanceof ApiResponseError && cause.status === 402)
   ) {
-    return classifyError(cause, options);
+    return classifyFailure(cause, options);
   }
   const verdict = toolVerdictOf(err);
   if (verdict.retryable) {
@@ -1487,15 +1559,39 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     );
   }
 
+  // The platform's refusal of a run whose inputs reference a file another
+  // organization stored (`CrossOrgStorageAccessError`, on `/v1/start` and
+  // `/v1/execute`): a 403 coded `forbidden` whose domain the platform sets to
+  // `input`, the one such `forbidden` that a route this server calls can
+  // answer. The platform's other one, `OrganizationMismatchError`, is on its
+  // organization routes, and the single `/v1/resolve-storage-url` route, which
+  // can raise this one too, is never called; the runner's own 401 and 403,
+  // tagged `input` too, carry no `code` at all. A login is how it usually
+  // happens: the new key acts for another organization than the one the
+  // inputs were uploaded under. It is caught ahead of the generic 401/403
+  // arm, which would send a caller whose key is fine to go and mint another;
+  // its class and `retryable` stay the SDK's, read from the platform's members.
+  if (err.status === 403 && err.code === "forbidden" && err.errorDomain === "input") {
+    return toolError(verdict, {
+      location: "inputs",
+      message,
+      hint: `The inputs reference a file stored by another organization than the one the API key acts for, as when the key changed since the inputs were prepared, after a login for instance. Prepare the inputs again with ${WORKSHOP_TOOL_NAMES.prepareInputs} under the current key, then run again.`,
+    });
+  }
+
   if (err.status === 401 || err.status === 403) {
     // Overrides the SDK's class: a rejected credential is `config` here,
     // whatever the server tagged it. The runner tags its own 401 and 403
     // `input` (L-261007-8dffe5), the request carrying the credential, while
     // this server's credential is its environment, which no tool argument
     // changes, and the SDK's own reading of both statuses is `config`.
+    // `kind: "auth"` carries the cause into each capability's headline, so a
+    // missing key never reads as an unreachable API; a route's `forbidden`
+    // gate is a 403 too and keeps the kind, its headline naming both causes.
     return toolError(
       { ...verdict, class: "config" },
       {
+        kind: "auth",
         location: options.auth?.location ?? "PIPELEX_API_KEY",
         message,
         hint:
@@ -1561,7 +1657,7 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     return toolError(
       { ...verdict, class: "config" },
       {
-        location: "PIPELEX_BASE_URL",
+        location: BASE_URL_LOCATION,
         message,
         hint: `Check that PIPELEX_BASE_URL points to a host serving ${route}.`,
       },
@@ -1610,7 +1706,7 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
 
   if (err.status === 501) {
     return toolError(verdict, {
-      location: "PIPELEX_BASE_URL",
+      location: BASE_URL_LOCATION,
       message,
       hint: `The deployment PIPELEX_BASE_URL points at does not implement ${route}.`,
     });

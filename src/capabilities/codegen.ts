@@ -16,6 +16,7 @@ import type { CodegenWriteSuccess } from "./codegen-writer.js";
 import {
   METHOD_ID_SELECTOR_SENTENCE,
   methodVersionReportSchema,
+  methodVersionsOf,
   planById,
   selectorFailure,
   withMethodContent,
@@ -39,6 +40,7 @@ import {
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
@@ -335,6 +337,8 @@ export interface CodegenContext extends ApiConfig, MethodVersionsAware {
   saveRoot?: string;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 export function buildCodegenContext(env = process.env): CodegenContext {
@@ -409,16 +413,22 @@ const CODEGEN_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
   },
 };
 
+/** What a 403 from `/v1/codegen` may mean beyond the key, appended to the key's own hint. */
+const CODEGEN_GATE_SENTENCE =
+  "Code generation can refuse even a key every other tool accepts, since the hosted Pipelex API enables /v1/codegen per organization, by its plan or feature flags: if other tools work with the key, ask for code generation to be enabled for its organization.";
+
 /**
  * The 403 texture. The hosted authorizer gates `/v1/codegen` on a feature flag
  * as well as on the plan, so a caller whose credential is perfectly valid can
  * still be refused — and the generic "check your key" would send them to debug
  * the wrong thing. Composed per call so the deployment's own auth wording,
- * when its context carries one, stays in front.
+ * when its context carries one, stays in front. The gate's sentence follows
+ * whichever key hint leads, the one saying no key is set included, so it
+ * speaks of the route rather than of "this credential", which may not exist.
  */
 function forbiddenTexture(auth: AuthErrorTexture | undefined): { hint: string } {
   return {
-    hint: `${auth?.hint ?? DEFAULT_AUTH_HINT} If the credential is valid, code generation is not enabled for this organization on the hosted Pipelex API — its plan or feature flags do not cover /v1/codegen; ask for it to be enabled.`,
+    hint: `${auth?.hint ?? DEFAULT_AUTH_HINT} ${CODEGEN_GATE_SENTENCE}`,
   };
 }
 
@@ -525,7 +535,7 @@ export async function generateMthdsCode(
       // selectors yet, and the latest published version on one that does: the
       // platform is asked beside the request, which never waits on it, and the
       // result says which content the code came from (`method-versions.ts`).
-      plan = planById(request.method_id, context.methodVersions, client, {
+      plan = planById(request.method_id, methodVersionsOf(context), client, {
         needBareReport: true,
       });
       sent = { ...request, method_id: plan.send };
@@ -535,10 +545,11 @@ export async function generateMthdsCode(
     const classified = classifyError(err, {
       ...classifyOptions,
       auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
       forbidden: forbiddenTexture(context.authError),
       bundleResources: hasTemplateFiles(request.resources),
     });
-    const error = await selectorFailure(err, classified, plan, context.methodVersions);
+    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     return errorResult(summaryForError(error), [error]);
   }
 
@@ -675,6 +686,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Code generation could not be completed: the Pipelex API returned an error.",
   paywall:
     "Code generation could not start: the organization's Pipelex plan does not cover this call.",
+  auth: "Code generation could not start: the Pipelex API key is missing or was refused, or code generation is not enabled for its organization.",
 };
 
 function summaryForError(error: ToolError): string {

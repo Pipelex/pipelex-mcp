@@ -78,7 +78,7 @@ import {
   readMthdsModels,
 } from "./capabilities/models.js";
 import type { ModelsContext, MthdsModelsInput } from "./capabilities/models.js";
-import { createMethodVersionsMemory } from "./capabilities/method-versions.js";
+import { createMethodVersionsMemories } from "./capabilities/method-versions.js";
 import {
   buildPrepareContext,
   mthdsPrepareInputsInputSchema,
@@ -163,8 +163,9 @@ export function buildLocalToolContexts(
   // save's result never reports a page, so its validation leg writes none.
   // One memory of whether the platform resolves version selectors, shared by
   // every tool that reads or runs a saved method, so the workshop asks
-  // `GET /v1/version` once rather than once per tool (`method-versions.ts`).
-  const methodVersions = createMethodVersionsMemory();
+  // `GET /v1/version` once rather than once per tool. It keeps one answer per
+  // base URL, since each tool call resolves its own (`method-versions.ts`).
+  const methodVersions = createMethodVersionsMemories();
 
   // The save's validation leg sends the contents it already read, so this
   // base's resolver serves mthds_validate alone.
@@ -213,12 +214,15 @@ export function buildLocalToolContexts(
  * Apply one patch to every workshop context, the nested validation context of
  * `catalogWrite` included. This is the single list of contexts a server-level
  * override has to reach: `createLocalServer` lifts its handshake's `appInfo`
- * through it. A context left out here would be one whose calls go out without
- * the workshop's identity, which is why the list lives beside
- * `LocalToolContexts` and covers every member of it.
+ * through it once, and each tool call's key, base URL and failure textures
+ * (`credentials.ts`) through it again. A context left out here would be one
+ * whose calls go out without the workshop's identity or with another call's
+ * key, which is why the list lives beside `LocalToolContexts` and covers every
+ * member of it.
  *
  * Only the keys present in `patch` are written, and each is written
- * unconditionally — an `apiKey` of `""` is a value, not an absence.
+ * unconditionally — an `apiKey` of `""` is a value, not an absence, and an
+ * `apiKey` present as `undefined` clears the key.
  */
 export function patchLocalApiContexts(
   base: LocalToolContexts,

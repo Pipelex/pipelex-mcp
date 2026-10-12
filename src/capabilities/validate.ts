@@ -16,6 +16,7 @@ import { GRAPH_PAGE_FILENAME, graphPageSection, writeGraphPage } from "./graph-p
 import {
   METHOD_ID_SELECTOR_SENTENCE,
   methodVersionReportSchema,
+  methodVersionsOf,
   planById,
   selectorFailure,
   withMethodContent,
@@ -41,6 +42,7 @@ import {
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
@@ -375,6 +377,8 @@ export interface ValidationContext extends ApiConfig, MethodVersionsAware {
   resolver?: FileResolver;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
   /**
    * The working directory the method's graph page is written under — the same
    * name and meaning as `CodegenContext.saveRoot`. Set, a validation of files
@@ -576,7 +580,7 @@ async function validateRequest(
       // selectors and one that does not yet, so the platform is asked beside
       // the request, which never waits on it (`method-versions.ts`), and the
       // result says which content was validated.
-      plan = planById(request.method_id, context.methodVersions, client, {
+      plan = planById(request.method_id, methodVersionsOf(context), client, {
         needBareReport: true,
       });
       report = await client.validate({ method_id: plan.send }, true, undefined, undefined, [
@@ -590,9 +594,10 @@ async function validateRequest(
     const classified = classifyError(err, {
       ...classifyOptions,
       auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
       bundleResources: hasTemplateFiles(request.resources),
     });
-    const error = await selectorFailure(err, classified, plan, context.methodVersions);
+    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     return errorResult(summaryForError(error), [error]);
   }
 
@@ -625,6 +630,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   input_domain: "Validation was not run: the Pipelex API rejected the request.",
   runtime: "Validation could not be completed: the Pipelex API returned an error.",
   paywall: "Validation could not start: the organization's Pipelex plan does not cover this call.",
+  auth: "Validation could not start: the Pipelex API key is missing or was refused.",
 };
 
 function summaryForError(error: ToolError): string {

@@ -26,6 +26,7 @@ import {
   RUN_METHOD_ID_SELECTOR_SENTENCE,
   forgetMethodVersionsSupported,
   linkageSuffixError,
+  methodVersionsOf,
   noteMethodVersionsSupported,
   planById,
   runContentReport,
@@ -55,6 +56,7 @@ import {
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
@@ -525,6 +527,8 @@ export interface RunContext extends ApiConfig, MethodVersionsAware {
   inputsResolver?: FileResolver;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 export function buildRunContext(env = process.env): RunContext {
@@ -616,9 +620,12 @@ export const RUN_START_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
 
 /**
  * What an unknown run id means to the caller. The workshop's operator is its
- * user, so the deployment the key points at is theirs to check.
+ * user, so the deployment the key points at is theirs to check, and so is the
+ * key: runs are org-scoped, so a run another organization started, which is
+ * what a key changed since the start (a login in between) sees, reads exactly
+ * like a miss, as an unknown method id does.
  */
-const UNKNOWN_RUN_HINT = `No run with this id is known to the configured API. Check the run_id returned by ${WORKSHOP_TOOL_NAMES.run}, and that PIPELEX_BASE_URL points at the deployment that started it.`;
+const UNKNOWN_RUN_HINT = `No run with this id is known to the configured API. Check the run_id returned by ${WORKSHOP_TOOL_NAMES.run}, that PIPELEX_BASE_URL points at the deployment that started it, and that the API key in use belongs to the organization that started it: runs are org-scoped, so another organization's run reads exactly like a miss, as it does when the key changed since the run started, after a login for instance.`;
 
 const MALFORMED_RUN_ID_HINT = `Pass the run_id exactly as returned by ${WORKSHOP_TOOL_NAMES.run}.`;
 
@@ -1341,7 +1348,7 @@ export async function startMthdsRun(
     const client = runClient(context);
     let sent = request;
     if (request.method_id !== undefined && request.files.length === 0) {
-      plan = planById(request.method_id, context.methodVersions, client, {
+      plan = planById(request.method_id, methodVersionsOf(context), client, {
         needBareReport: false,
       });
       sent = { ...request, method_id: plan.send };
@@ -1353,16 +1360,17 @@ export async function startMthdsRun(
     // word that it resolves selectors, worth more than any cached answer; one
     // naming none for a bare id is its word that it does not, so a cached
     // `supported` is dropped before another tool reads a bare id as `latest`.
-    if (content.proved) noteMethodVersionsSupported(context.methodVersions);
-    else if (content.disproved) forgetMethodVersionsSupported(context.methodVersions);
+    if (content.proved) noteMethodVersionsSupported(methodVersionsOf(context));
+    else if (content.disproved) forgetMethodVersionsSupported(methodVersionsOf(context));
     return startResult(ack, content);
   } catch (err) {
     const classified = classifyStartError(err, {
       ...classifyOptions,
       auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
       bundleResources: hasTemplateFiles(request.resources),
     });
-    const error = await selectorFailure(err, classified, plan, context.methodVersions);
+    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     return startErrorResult(startSummaryForError(error), [error]);
   }
 }
@@ -1387,6 +1395,11 @@ export async function startMthdsRun(
 export function classifyStartError(err: unknown, options: ClassifyErrorOptions): ToolError {
   const error = classifyError(err, options);
   if (!runMayHaveStartedOf(err)) return error;
+  // The hint is replaced whole, on purpose, dropping whatever `classifyError`
+  // wrote, the base URL's source sentence of an unreachable start included:
+  // `startMayHaveRunError` recognises this case by the hint's exact text, so
+  // nothing may be appended to it, and checking for a second run matters
+  // more here than where the base URL was set.
   return { ...error, retryable: false, hint: START_MAY_HAVE_RUN_HINT };
 }
 
@@ -1404,7 +1417,11 @@ export async function getMthdsRunStatus(
     const read = await runClient(context).getRunStatus(input.run_id);
     return statusResult(read);
   } catch (err) {
-    const error = classifyError(err, { ...RUN_STATUS_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, {
+      ...RUN_STATUS_ERROR_OPTIONS,
+      auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
+    });
     return statusErrorResult(statusSummaryForError(error), [error]);
   }
 }
@@ -1434,7 +1451,11 @@ export async function getMthdsRunResults(
       artifacts: RUN_RESULTS_ARTIFACTS,
     });
   } catch (err) {
-    const error = classifyError(err, { ...RUN_RESULTS_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, {
+      ...RUN_RESULTS_ERROR_OPTIONS,
+      auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
+    });
     return resultsErrorResult(resultsSummaryForError(error), [error]);
   }
   const failedRead =
@@ -1499,6 +1520,7 @@ const START_ERROR_SUMMARIES: ErrorSummaries = {
   input_domain: "Run was not started: the Pipelex API rejected the request.",
   runtime: "Run could not be started: the Pipelex API returned an error.",
   paywall: "Run could not start: the organization's Pipelex plan does not cover this call.",
+  auth: "Run could not start: the Pipelex API key is missing or was refused.",
 };
 
 const STATUS_ERROR_SUMMARIES: ErrorSummaries = {
@@ -1507,6 +1529,7 @@ const STATUS_ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Run status could not be read: the Pipelex API returned an error.",
   paywall:
     "Run status could not be read: the organization's Pipelex plan does not cover this call.",
+  auth: "Run status could not be read: the Pipelex API key is missing or was refused.",
 };
 
 const RESULTS_ERROR_SUMMARIES: ErrorSummaries = {
@@ -1515,6 +1538,7 @@ const RESULTS_ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Run results could not be read: the Pipelex API returned an error.",
   paywall:
     "Run results could not be read: the organization's Pipelex plan does not cover this call.",
+  auth: "Run results could not be read: the Pipelex API key is missing or was refused.",
 };
 
 function startSummaryForError(error: ToolError): string {

@@ -53,7 +53,11 @@ import {
   STRICT_LLM_COMPLETION_REPORT,
   relayingArmOf,
 } from "./failed-run-fixtures.js";
-import { createMethodVersionsMemory, noteMethodVersionsSupported } from "./method-versions.js";
+import {
+  createMethodVersionsMemories,
+  methodVersionsOf,
+  noteMethodVersionsSupported,
+} from "./method-versions.js";
 import {
   classifyError,
   createPipelexApiClient,
@@ -160,6 +164,34 @@ describe("run-route error classification", () => {
     expect(error.message).toBe("Run not found");
   });
 
+  it("says an unknown run id may be another organization's, as after a login, on every run-id route", () => {
+    for (const [route, options] of [
+      ["status", RUN_STATUS_ERROR_OPTIONS],
+      ["results", RUN_RESULTS_ERROR_OPTIONS],
+    ] as const) {
+      const error = classifyError(
+        new ApiResponseError(
+          "HTTP 404",
+          `${DEFAULT_API_URL}/v1/runs/${RUN_ID}/${route}`,
+          404,
+          "Not Found",
+          "{}",
+          "not_found",
+          "Run not found",
+          undefined, // validationErrors
+          undefined, // code
+        ),
+        options,
+      );
+
+      expect(error.hint, route).toContain("PIPELEX_BASE_URL points at the deployment");
+      expect(error.hint, route).toContain(
+        "the API key in use belongs to the organization that started it",
+      );
+      expect(error.hint, route).toContain("after a login");
+    }
+  });
+
   it("keeps the missing-route 404 arm (config) on the start route", () => {
     const error = classifyError(
       new ApiResponseError(
@@ -201,6 +233,66 @@ describe("run-route error classification", () => {
     // must point at validation before blaming the platform.
     expect(error.class).toBe("runtime");
     expect(error.hint).toMatch(/mthds_validate/);
+  });
+
+  it("reads the platform's refusal of another organization's stored file as the inputs', not the key's", () => {
+    // The platform's `CrossOrgStorageAccessError`: a 403 coded `forbidden`,
+    // whose problem document sets the domain to `input` and `retryable` false.
+    const crossOrg = (): ApiResponseError =>
+      new ApiResponseError(
+        "HTTP 403",
+        `${DEFAULT_API_URL}/v1/start`,
+        403,
+        "Forbidden",
+        "{}",
+        undefined, // errorType
+        "Storage URI belongs to another organization.",
+        undefined, // validationErrors
+        "forbidden",
+        {
+          problem: {
+            errorDomain: "input",
+            retryable: false,
+            title: "File belongs to another organization",
+          },
+          mayStartRun: true,
+        },
+      );
+
+    for (const error of [
+      classifyError(crossOrg(), RUN_START_ERROR_OPTIONS),
+      classifyStartError(crossOrg(), RUN_START_ERROR_OPTIONS),
+    ]) {
+      expect(error.class).toBe("input_domain");
+      expect(error).not.toHaveProperty("kind");
+      expect(error.location).toBe("inputs");
+      expect(error.retryable).toBe(false);
+      expect(error.hint).toContain("mthds_prepare_inputs");
+      // Not an auth hint, which sends the user to check or replace the key.
+      expect(error.hint).not.toContain("PIPELEX_API_KEY");
+    }
+
+    // Any other `forbidden` is the platform's credential refusal, `config`
+    // in the SDK's reading, and keeps the auth arm.
+    const refusedKey = classifyError(
+      new ApiResponseError(
+        "HTTP 403",
+        `${DEFAULT_API_URL}/v1/start`,
+        403,
+        "Forbidden",
+        "{}",
+        undefined,
+        "Forbidden",
+        undefined,
+        "forbidden",
+      ),
+      RUN_START_ERROR_OPTIONS,
+    );
+    expect(refusedKey).toMatchObject({
+      class: "config",
+      kind: "auth",
+      location: "PIPELEX_API_KEY",
+    });
   });
 
   it("points a start-route 422 at the run request fields", () => {
@@ -1863,6 +1955,23 @@ describe("startMthdsRun by method_id", () => {
     expect(result.summary).not.toMatch(/unreachable/);
   });
 
+  it("headlines a refused key (401) as the key, not as connectivity", async () => {
+    const context = contextWith({
+      start: () => Promise.reject(refusedKey("/v1/start")),
+    });
+
+    const result = await startMthdsRun({ method_id: "mt_abc123" }, context);
+
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "config",
+      kind: "auth",
+      location: "PIPELEX_API_KEY",
+    });
+    expect(result.summary).toBe(
+      "Run could not start: the Pipelex API key is missing or was refused.",
+    );
+  });
+
   it("points a mixed-request 422 at files — the executed source — not method_id", async () => {
     const context = contextWith({
       start: () =>
@@ -1938,6 +2047,22 @@ describe("startMthdsRun by method_id", () => {
 
 // A 402 on a run route: the platform reports a plan limit this way, and its
 // problem `code` really is "forbidden" (never sniffed — the status decides).
+// A 401 on any route: the hosted API refuses a call that carries no key, or a
+// key it does not know, this way.
+function refusedKey(route: string): ApiResponseError {
+  return new ApiResponseError(
+    "HTTP 401",
+    `${DEFAULT_API_URL}${route}`,
+    401,
+    "Unauthorized",
+    "{}",
+    undefined, // errorType
+    "Missing API key",
+    undefined, // validationErrors
+    "unauthorized",
+  );
+}
+
 function paywall(routeSuffix: string): ApiResponseError {
   return new ApiResponseError(
     "HTTP 402",
@@ -2012,6 +2137,19 @@ describe("getMthdsRunStatus", () => {
       "Run status could not be read: the organization's Pipelex plan does not cover this call.",
     );
     expect(result.summary).not.toMatch(/unreachable/);
+  });
+
+  it("headlines a refused key (401) as the key, not as connectivity", async () => {
+    const context = contextWith({
+      getRunStatus: () => Promise.reject(refusedKey(`/v1/runs/${RUN_ID}/status`)),
+    });
+
+    const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.errors?.[0]?.kind).toBe("auth");
+    expect(result.summary).toBe(
+      "Run status could not be read: the Pipelex API key is missing or was refused.",
+    );
   });
 });
 
@@ -2212,6 +2350,19 @@ describe("getMthdsRunResults", () => {
       "Run results could not be read: the organization's Pipelex plan does not cover this call.",
     );
     expect(result.summary).not.toMatch(/unreachable/);
+  });
+
+  it("headlines a refused key (401) as the key, not as connectivity", async () => {
+    const context = contextWith({
+      getRunResult: () => Promise.reject(refusedKey(`/v1/runs/${RUN_ID}/result`)),
+    });
+
+    const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.errors?.[0]?.kind).toBe("auth");
+    expect(result.summary).toBe(
+      "Run results could not be read: the Pipelex API key is missing or was refused.",
+    );
   });
 });
 
@@ -2493,28 +2644,34 @@ describe("startMthdsRun by method_id, on both platforms", () => {
   it("forgets a cached supported when a bare id's acknowledgement names no version", async () => {
     // Round 2: the run reported the draft while the memory kept `supported`,
     // so for its lifetime every tooling tool read the same bare id as `latest`.
-    const memory = createMethodVersionsMemory();
-    noteMethodVersionsSupported(memory);
     const seen = { versionCalls: 0 } as { options?: PipelexStartOptions; versionCalls: number };
-    const context = { ...starting({}, versionsUnsupported, seen), methodVersions: memory };
+    const context = {
+      ...starting({}, versionsUnsupported, seen),
+      methodVersions: createMethodVersionsMemories(),
+    };
+    const memory = methodVersionsOf(context);
+    noteMethodVersionsSupported(memory);
 
     const result = await startMthdsRun({ method_id: "mt_abc123" }, context);
 
     expect(result.structuredContent).toMatchObject({ method_version: "draft" });
-    expect(memory.cached).toBeUndefined();
+    expect(memory?.cached).toBeUndefined();
   });
 
   it("keeps a cached supported when an accepted suffix's acknowledgement names no version", async () => {
     // Only a platform that resolves suffixes accepts one, so the acknowledgement
     // naming no version contradicts nothing.
-    const memory = createMethodVersionsMemory();
-    noteMethodVersionsSupported(memory);
     const seen = { versionCalls: 0 } as { options?: PipelexStartOptions; versionCalls: number };
-    const context = { ...starting({}, versionsSupported, seen), methodVersions: memory };
+    const context = {
+      ...starting({}, versionsSupported, seen),
+      methodVersions: createMethodVersionsMemories(),
+    };
+    const memory = methodVersionsOf(context);
+    noteMethodVersionsSupported(memory);
 
     await startMthdsRun({ method_id: "mt_abc123@draft" }, context);
 
-    expect(memory.cached?.support).toBe("supported");
+    expect(memory?.cached?.support).toBe("supported");
   });
 
   it("sends @draft and @n as given on every platform, without asking", async () => {
