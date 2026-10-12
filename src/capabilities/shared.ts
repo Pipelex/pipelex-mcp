@@ -1562,10 +1562,13 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
   // The platform's refusal of a run whose inputs reference a file another
   // organization stored (`CrossOrgStorageAccessError`, on `/v1/start` and
   // `/v1/execute`): a 403 coded `forbidden` whose domain the platform sets to
-  // `input`, the one `forbidden` that carries it, while the runner's own 401
-  // and 403, tagged `input` too, carry no `code` at all. A login is how it
-  // usually happens: the new key acts for another organization than the one
-  // the inputs were uploaded under. It is caught ahead of the generic 401/403
+  // `input`, the one such `forbidden` that a route this server calls can
+  // answer. The platform's other one, `OrganizationMismatchError`, is on its
+  // organization routes, and the single `/v1/resolve-storage-url` route, which
+  // can raise this one too, is never called; the runner's own 401 and 403,
+  // tagged `input` too, carry no `code` at all. A login is how it usually
+  // happens: the new key acts for another organization than the one the
+  // inputs were uploaded under. It is caught ahead of the generic 401/403
   // arm, which would send a caller whose key is fine to go and mint another;
   // its class and `retryable` stay the SDK's, read from the platform's members.
   if (err.status === 403 && err.code === "forbidden" && err.errorDomain === "input") {

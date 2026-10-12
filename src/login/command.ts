@@ -467,7 +467,7 @@ async function checkAndSave(
   }
   if (saved.baseUrl !== undefined) {
     context.out(
-      `PIPELEX_BASE_URL is saved with the key, so a host that does not pass this shell's environment sends the key to the API that checked it, and the pipelex CLI, which loads that file over its environment, now uses ${apiOrigin(saved.baseUrl)} in every shell.`,
+      `PIPELEX_BASE_URL is saved with the key, so a host that does not pass this shell's environment, and the pipelex CLI, which loads that file over its environment, now send the key to ${apiOrigin(saved.baseUrl)} in every shell.`,
     );
   }
   context.out(

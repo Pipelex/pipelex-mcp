@@ -510,7 +510,7 @@ describe("the browser login", () => {
       );
       expect(run.stdout).toContain(`Checking the key with ${LOCAL}…`);
       expect(run.stdout).toContain(
-        `PIPELEX_BASE_URL is saved with the key, so a host that does not pass this shell's environment sends the key to the API that checked it, and the pipelex CLI, which loads that file over its environment, now uses ${LOCAL} in every shell.`,
+        `PIPELEX_BASE_URL is saved with the key, so a host that does not pass this shell's environment, and the pipelex CLI, which loads that file over its environment, now send the key to ${LOCAL} in every shell.`,
       );
       // A host such as Claude Desktop passes neither variable, and reads the pair from the file.
       const credentials = await resolveWorkshopCredentials({ PIPELEX_HOME: home });
@@ -533,7 +533,11 @@ describe("the browser login", () => {
       expect(run.stderr).toContain(
         `It is saved anyway, in \`${path.join(home, ".env")}\` as PIPELEX_API_KEY, beside PIPELEX_BASE_URL for ${LOCAL}:`,
       );
-      expect(run.stdout).toContain("PIPELEX_BASE_URL is saved with the key");
+      // No API checked this key, so the sentence must not say one did.
+      expect(run.stdout).toContain(
+        `PIPELEX_BASE_URL is saved with the key, so a host that does not pass this shell's environment, and the pipelex CLI, which loads that file over its environment, now send the key to ${LOCAL} in every shell.`,
+      );
+      expect(run.stdout).not.toContain("checked it");
     });
 
     it("is left alone when this shell sets none, and the file's own line is kept", async () => {
