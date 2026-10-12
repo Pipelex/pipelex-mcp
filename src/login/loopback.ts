@@ -9,6 +9,9 @@
  * and ignored, and the wait goes on: a callback whose `state` is missing or
  * different did not come from the page this login opened, since any page open
  * in the browser can send a request to a local port, so its key is discarded.
+ * A request target that is no URL at all, such as `//[`, is answered 400, and
+ * a request whose handling throws anyway is answered 500: nothing a request
+ * carries may end the login.
  *
  * The callback's URL carries the key, so the listener logs nothing, and the
  * pages it serves tell the browser not to cache them nor send them on as a
@@ -89,7 +92,7 @@ export async function openLoopbackListener(
   let deliver: ((key: string) => void) | undefined;
   let refused: ((refusal: CallbackRefusal) => void) | undefined;
 
-  const server = http.createServer((request, response) => {
+  const handle = (request: http.IncomingMessage, response: http.ServerResponse): void => {
     const answer = (status: number, heading: string, body: string, then?: () => void): void => {
       sendPage(response, status, heading, body, then);
     };
@@ -97,7 +100,13 @@ export async function openLoopbackListener(
       answer(405, "Not allowed", "This address only answers the Pipelex login callback.");
       return;
     }
-    const url = new URL(request.url ?? "/", `http://${LOOPBACK_HOST}`);
+    // A request target such as `//` or `//[` is no URL at all: `new URL`
+    // would throw on it, which nothing here may do.
+    const url = URL.parse(request.url ?? "/", `http://${LOOPBACK_HOST}`);
+    if (url === null) {
+      answer(400, "Bad request", "This address only answers the Pipelex login callback.");
+      return;
+    }
     if (url.pathname !== CALLBACK_PATH) {
       answer(404, "Not found", "This address only answers the Pipelex login callback.");
       return;
@@ -105,7 +114,7 @@ export async function openLoopbackListener(
     if (received !== undefined) {
       answer(
         409,
-        "Already logged in",
+        "Key already received",
         "This login has already received its key. You can close this tab.",
       );
       return;
@@ -133,16 +142,35 @@ export async function openLoopbackListener(
     const key = keys[0];
     received = key;
     // The key is handed over once the page is flushed, so closing the
-    // listener right after cannot cut the browser's answer short.
+    // listener right after cannot cut the browser's answer short. The page
+    // says the key arrived, not that the login succeeded: the terminal
+    // checks the key after this page is served.
     answer(
       200,
-      "Logged in",
+      "Key received",
       "The Pipelex login received your key. You can close this tab and return to your terminal.",
       () => {
         handedOver = key;
         deliver?.(key);
       },
     );
+  };
+
+  const server = http.createServer((request, response) => {
+    const receivedBefore = received;
+    try {
+      handle(request, response);
+    } catch {
+      // Nothing above is expected to throw, a refusal callback aside; if
+      // anything does, the browser is answered and the wait goes on, since an
+      // uncaught throw here would end the login. Nothing is logged: the
+      // request's URL may carry the key.
+      answerUnexpected(response, () => {
+        // A key this request was accepting never reached its page, so it is
+        // not handed over: it is forgotten, and the next callback may bring it.
+        if (receivedBefore === undefined && handedOver === undefined) received = undefined;
+      });
+    }
   });
 
   server.on("connection", (socket: Socket) => {
@@ -196,6 +224,29 @@ export async function openLoopbackListener(
       return closing;
     },
   };
+}
+
+/**
+ * The answer to a request whose handling threw: an error page when nothing was
+ * sent yet, after `unsent` runs, else the connection dropped, which hands over
+ * a key whose page was already on its way.
+ */
+function answerUnexpected(response: http.ServerResponse, unsent: () => void): void {
+  if (response.headersSent) {
+    response.destroy();
+    return;
+  }
+  unsent();
+  try {
+    sendPage(
+      response,
+      500,
+      "Something went wrong",
+      "The Pipelex login could not answer this request, and is still waiting. Return to your terminal.",
+    );
+  } catch {
+    response.destroy();
+  }
 }
 
 const PAGE_TEMPLATE =

@@ -44,6 +44,28 @@ function get(port: number, pathAndQuery: string, method = "GET"): Promise<Answer
   });
 }
 
+/**
+ * One request written on a raw socket, its request target exactly as given,
+ * which `http.request` would refuse or rewrite: the status and headers of the
+ * answer, read until the listener closes the connection.
+ */
+function rawGet(port: number, target: string): Promise<{ status: number; head: string }> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, LOOPBACK_HOST);
+    let received = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => (received += chunk));
+    socket.on("error", reject);
+    socket.on("close", () => {
+      const head = received.split("\r\n\r\n")[0];
+      resolve({ status: Number(/^HTTP\/1\.1 (\d{3})/.exec(head)?.[1] ?? 0), head });
+    });
+    socket.on("connect", () =>
+      socket.write(`GET ${target} HTTP/1.1\r\nHost: ${LOOPBACK_HOST}\r\nConnection: close\r\n\r\n`),
+    );
+  });
+}
+
 function callback(params: Record<string, string | string[]>): string {
   const query = new URLSearchParams();
   for (const [name, value] of Object.entries(params)) {
@@ -84,7 +106,10 @@ describe("the loopback listener", () => {
 
     expect(await waiting).toBe(KEY);
     expect(answer.status).toBe(200);
-    expect(answer.body).toContain("Logged in");
+    // The terminal checks the key after this page is served, so the page
+    // claims the key's arrival, never a login.
+    expect(answer.body).toContain("<h1>Key received</h1>");
+    expect(answer.body).not.toContain("Logged in");
     expect(answer.body).not.toContain(KEY);
     expect(answer.headers["cache-control"]).toBe("no-store");
     expect(answer.headers["referrer-policy"]).toBe("no-referrer");
@@ -179,6 +204,54 @@ describe("the loopback listener", () => {
     expect(onRefusal).not.toHaveBeenCalled();
   });
 
+  it("answers a request target that is no URL with a 400, and goes on waiting", async () => {
+    const listener = await listen();
+    const onRefusal = vi.fn();
+    const waiting = listener.waitForApiKey({ timeoutMs: 5_000, onRefusal });
+
+    const slashes = await rawGet(listener.port, "//");
+    const bracket = await rawGet(listener.port, "//[");
+    const answer = await get(listener.port, callback({ api_key: KEY, state: listener.state }));
+
+    for (const refused of [slashes, bracket]) {
+      expect(refused.status).toBe(400);
+      expect(refused.head).toMatch(/^cache-control: no-store$/im);
+      expect(refused.head).toMatch(/^referrer-policy: no-referrer$/im);
+      expect(refused.head).toMatch(/^x-content-type-options: nosniff$/im);
+    }
+    expect(onRefusal).not.toHaveBeenCalled();
+    expect(answer.status).toBe(200);
+    expect(await waiting).toBe(KEY);
+  });
+
+  it("answers a request whose handling throws with a 500, logs nothing, and goes on waiting", async () => {
+    const stdout = vi.spyOn(process.stdout, "write");
+    const stderr = vi.spyOn(process.stderr, "write");
+    try {
+      const listener = await listen();
+      const waiting = listener.waitForApiKey({
+        timeoutMs: 5_000,
+        onRefusal: () => {
+          throw new Error("the terminal is gone");
+        },
+      });
+
+      const thrown = await get(listener.port, callback({ api_key: "plx_sk_forged", state: "x" }));
+      const answer = await get(listener.port, callback({ api_key: KEY, state: listener.state }));
+
+      expect(thrown.status).toBe(500);
+      expect(thrown.headers["cache-control"]).toBe("no-store");
+      expect(thrown.body).not.toContain("plx_sk_forged");
+      expect(answer.status).toBe(200);
+      expect(await waiting).toBe(KEY);
+      expect(stdout).not.toHaveBeenCalled();
+      expect(stderr).not.toHaveBeenCalled();
+    } finally {
+      stdout.mockRestore();
+      stderr.mockRestore();
+    }
+  });
+
   it("keeps the first key and refuses any later callback", async () => {
     const listener = await listen();
 
@@ -189,6 +262,7 @@ describe("the loopback listener", () => {
     );
 
     expect(later.status).toBe(409);
+    expect(later.body).toContain("Key already received");
     expect(await listener.waitForApiKey({ timeoutMs: 5_000 })).toBe(KEY);
   });
 
