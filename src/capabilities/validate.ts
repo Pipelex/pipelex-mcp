@@ -23,7 +23,6 @@ import {
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
 import type { GraphPageFile, GraphPageOutcome } from "./graph-page.js";
 import {
-  FILES_TOO_LARGE,
   METHOD_REF_GRAMMAR,
   asRecord,
   blueprintMainPipeRefOf,
@@ -31,7 +30,7 @@ import {
   bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
-  isTemplateFilePath,
+  hasTemplateFiles,
   resolveSubmittedFiles,
   resourcesOption,
   summaryForToolError,
@@ -47,9 +46,10 @@ import type {
   FileResolver,
   SubmittedFile,
   SubmittedFileInput,
-  TemplateFiles,
   ToolError,
 } from "./shared.js";
+import { isTemplateFilePath } from "./template-files.js";
+import type { TemplateFiles } from "./template-files.js";
 
 export const mthdsValidateInputSchema = {
   files: bundleFilesInputSchema.optional(),
@@ -393,7 +393,6 @@ export function buildValidationContext(env = process.env): ValidationContext {
 const VALIDATE_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/validate",
   methodLocation: "files",
-  tooLarge: FILES_TOO_LARGE,
 };
 
 /**
@@ -588,7 +587,11 @@ async function validateRequest(
       throw new Error("No method selector survived request validation.");
     }
   } catch (err) {
-    const classified = classifyError(err, { ...classifyOptions, auth: context.authError });
+    const classified = classifyError(err, {
+      ...classifyOptions,
+      auth: context.authError,
+      bundleResources: hasTemplateFiles(request.resources),
+    });
     const error = await selectorFailure(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);
   }

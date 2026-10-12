@@ -11,7 +11,6 @@ import {
 } from "./method-versions.js";
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
 import {
-  FILES_TOO_LARGE,
   METHOD_REF_GRAMMAR,
   buildApiConfig,
   bundleFilesInputSchema,
@@ -19,6 +18,7 @@ import {
   createPipelexApiClient,
   inputsPathSchema,
   resolveInputsSource,
+  hasTemplateFiles,
   resolveSubmittedFiles,
   resourcesOption,
   summaryForToolError,
@@ -34,9 +34,9 @@ import type {
   FileResolver,
   SubmittedFile,
   SubmittedFileInput,
-  TemplateFiles,
   ToolError,
 } from "./shared.js";
+import type { TemplateFiles } from "./template-files.js";
 import { MAX_UPLOAD_BYTES, SizeGuardedPipelexApiClient, formatMib } from "./upload-ceiling.js";
 
 export const mthdsPrepareInputsInputSchema = {
@@ -198,10 +198,6 @@ const PREPARE_ERROR_OPTIONS: ClassifyErrorOptions = {
   // reaches `preparation`, so a bare 400 or 422 is never about the pipe.
   preparation: PREPARE_SIGNATURE_TEXTURE,
   asset: PREPARE_ASSET_TEXTURE,
-  // A `413` from the pipe I/O read is the bundle's template files: an input
-  // the storage service refuses as too large is a `RejectedAssetError`, which
-  // the `asset` texture takes.
-  tooLarge: FILES_TOO_LARGE,
 };
 
 /**
@@ -334,7 +330,14 @@ export async function prepareMthdsInputs(
     };
     prepared = await prepareWithUpload(client, envelope);
   } catch (err) {
-    const classified = classifyError(err, { ...classifyOptions, auth: context.authError });
+    // A `413` from the pipe I/O read of a request carrying template files is
+    // about them; an input the storage service refuses as too large is a
+    // `RejectedAssetError`, which the `asset` texture takes either way.
+    const classified = classifyError(err, {
+      ...classifyOptions,
+      auth: context.authError,
+      bundleResources: hasTemplateFiles(request.resources),
+    });
     const error = await selectorFailure(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);
   }
@@ -404,7 +407,7 @@ function prepareWithUpload(
   if ("files" in envelope.selector) {
     const { files, resources } = envelope.selector;
     // The template files ride the files arm alone, as the SDK's XOR types them.
-    return client.prepareInputs({ ...base, files, ...(resources ? { resources } : {}) });
+    return client.prepareInputs({ ...base, files, ...resourcesOption(resources) });
   }
   if ("method_ref" in envelope.selector) {
     return client.prepareInputs({ ...base, method_ref: envelope.selector.method_ref });

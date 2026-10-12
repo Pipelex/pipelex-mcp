@@ -18,12 +18,12 @@ import {
 } from "./method-versions.js";
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
 import {
-  FILES_TOO_LARGE,
   METHOD_REF_GRAMMAR,
   buildApiConfig,
   bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
+  hasTemplateFiles,
   resolveSubmittedFiles,
   resourcesOption,
   summaryForToolError,
@@ -39,9 +39,9 @@ import type {
   FileResolver,
   SubmittedFile,
   SubmittedFileInput,
-  TemplateFiles,
   ToolError,
 } from "./shared.js";
+import type { TemplateFiles } from "./template-files.js";
 
 /**
  * `mthds_inputs_template` — the workshop's fill-in template for one pipe's
@@ -209,7 +209,6 @@ const INPUTS_BY_FILES_ERROR_OPTIONS: ClassifyErrorOptions = {
     hint: "Check the submitted files against the route's limits on their number and size, and pass pipe_ref, when you name one, as a qualified domain.pipe_code.",
   },
   selection: INPUTS_SELECTION_TEXTURE,
-  tooLarge: FILES_TOO_LARGE,
 };
 
 /**
@@ -313,6 +312,7 @@ export async function buildMthdsInputs(
     const classified = classifyError(err, {
       ...inputsErrorOptions(request),
       auth: context.authError,
+      bundleResources: hasTemplateFiles(request.resources),
     });
     const error = await selectorFailure(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);

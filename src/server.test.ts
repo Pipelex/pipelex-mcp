@@ -477,8 +477,8 @@ describe("the workshop's contexts and dispatch", () => {
     ]) {
       expect(resolver).toBe(contexts.validation.resolver);
     }
-    expect(contexts.validation.resolver?.resolveTemplate).toBeDefined();
-    expect(contexts.catalogWrite.resolver?.resolveTemplate).toBeUndefined();
+    expect(contexts.validation.resolver?.resolveTemplates).toBeDefined();
+    expect(contexts.catalogWrite.resolver?.resolveTemplates).toBeUndefined();
     await expect(contexts.validation.resolver?.resolve("bundle.mthds")).resolves.toEqual({
       ok: true,
       content: 'domain = "demo"',

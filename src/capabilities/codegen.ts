@@ -23,12 +23,12 @@ import {
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
 import {
   DEFAULT_AUTH_HINT,
-  FILES_TOO_LARGE,
   METHOD_REF_GRAMMAR,
   buildApiConfig,
   bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
+  hasTemplateFiles,
   resolveSubmittedFiles,
   resourcesOption,
   summaryForToolError,
@@ -44,9 +44,9 @@ import type {
   FileResolver,
   SubmittedFile,
   SubmittedFileInput,
-  TemplateFiles,
   ToolError,
 } from "./shared.js";
+import type { TemplateFiles } from "./template-files.js";
 
 /**
  * The one projection kind this tool asks for. Concept-set-wide `types` is the
@@ -364,7 +364,6 @@ const CODEGEN_ERROR_OPTIONS: ClassifyErrorOptions = {
     location: "target",
     hint: `Pass target as one of ${TARGET_LIST}. If the target is right, the configured Pipelex API may predate it — check its version.`,
   },
-  tooLarge: FILES_TOO_LARGE,
 };
 
 /**
@@ -537,6 +536,7 @@ export async function generateMthdsCode(
       ...classifyOptions,
       auth: context.authError,
       forbidden: forbiddenTexture(context.authError),
+      bundleResources: hasTemplateFiles(request.resources),
     });
     const error = await selectorFailure(err, classified, plan, context.methodVersions);
     return errorResult(summaryForError(error), [error]);

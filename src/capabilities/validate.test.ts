@@ -1319,6 +1319,19 @@ describe("validateMthds with a bundle's template files", () => {
     );
   });
 
+  /** A bundle whose PipeDocGen step fills templates/invoice.xlsx. */
+  const INVOICE_BUNDLE = [
+    'domain = "invoice"',
+    "",
+    "[pipe.render_invoice]",
+    'type = "PipeDocGen"',
+    'description = "Fill the invoice workbook"',
+    'inputs = { invoice = "Invoice" }',
+    'output = "Document"',
+    'template_file = "templates/invoice.xlsx"',
+    "",
+  ].join("\n");
+
   /** A working directory holding a bundle that fills a workbook, read through the real resolver. */
   async function bundleWithTemplate(): Promise<string> {
     const root = await fs.realpath(
@@ -1326,7 +1339,7 @@ describe("validateMthds with a bundle's template files", () => {
     );
     tempDirs.push(root);
     await fs.mkdir(path.join(root, "methods/invoice/templates"), { recursive: true });
-    await fs.writeFile(path.join(root, "methods/invoice/invoice.mthds"), 'domain = "invoice"');
+    await fs.writeFile(path.join(root, "methods/invoice/invoice.mthds"), INVOICE_BUNDLE);
     await fs.writeFile(path.join(root, "methods/invoice/templates/invoice.xlsx"), XLSX);
     return root;
   }
@@ -1358,7 +1371,7 @@ describe("validateMthds with a bundle's template files", () => {
     });
 
     expect(capturedFiles).toEqual([
-      { content: 'domain = "invoice"', uri: "methods/invoice/invoice.mthds" },
+      { content: INVOICE_BUNDLE, uri: "methods/invoice/invoice.mthds" },
     ]);
     const resources = capturedOptions?.resources as Record<string, Uint8Array> | undefined;
     expect(Object.keys(resources ?? {})).toEqual(["templates/invoice.xlsx"]);
@@ -1372,7 +1385,7 @@ describe("validateMthds with a bundle's template files", () => {
     // The graph page draws the method's text, never the workbook.
     const page = await fs.readFile(path.join(root, "methods/invoice", GRAPH_PAGE_FILENAME), "utf8");
     expect(page).toContain('"name":"invoice.mthds"');
-    expect(page).not.toContain("invoice.xlsx");
+    expect(page).not.toMatch(/"name":"[^"]*invoice\.xlsx"/);
   });
 
   it("omits warnings from a valid verdict that has none, and resources from a request with no template", async () => {
@@ -1398,7 +1411,49 @@ describe("validateMthds with a bundle's template files", () => {
     expect(result.structuredContent).not.toHaveProperty("warnings");
   });
 
-  it("refuses a template file outside the bundle's directory before calling the API", async () => {
+  it("refuses the flowchart page it wrote when it comes back among the files", async () => {
+    // A model globbing the bundle's directory picks up method-graph.html,
+    // which carries a template suffix and which no step names.
+    const root = await bundleWithTemplate();
+    const client = {
+      ...selectorValidateNotCalled,
+      async validateFiles() {
+        return validReport;
+      },
+    };
+    const context = {
+      baseUrl: DEFAULT_API_URL,
+      resolver: localBundleFileResolver(root),
+      saveRoot: root,
+      client,
+    };
+    await validateMthds(BY_PATH, context);
+    let called = false;
+
+    const result = await validateMthds(
+      { files: [...BY_PATH.files, { path: `methods/invoice/${GRAPH_PAGE_FILENAME}` }] },
+      {
+        ...context,
+        client: {
+          ...client,
+          async validateFiles() {
+            called = true;
+            return validReport;
+          },
+        },
+      },
+    );
+
+    expect(called).toBe(false);
+    expect(result.structuredContent.errors).toHaveLength(1);
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "files[2].path",
+    });
+    expect(result.structuredContent.errors?.[0]?.message).toContain("named by no PipeDocGen step");
+  });
+
+  it("refuses a template file no step names before calling the API", async () => {
     const root = await bundleWithTemplate();
     await fs.mkdir(path.join(root, "shared"));
     await fs.writeFile(path.join(root, "shared/invoice.xlsx"), XLSX);

@@ -1,14 +1,24 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import type {
-  FileResolution,
-  FileResolver,
-  TemplateFileResolution,
-} from "./capabilities/shared.js";
-import { MAX_TEMPLATE_FILE_BYTES, TEMPLATE_FILE_EXTENSIONS } from "./capabilities/shared.js";
+import type { FileResolution, FileResolver } from "./capabilities/shared.js";
 import {
-  deepestCommonDirectory,
+  MAX_TEMPLATE_FILE_BYTES,
+  TEMPLATE_FILE_EXTENSIONS,
+  planTemplateFiles,
+  templateBudgetRefusals,
+  templateKeyOf,
+} from "./capabilities/template-files.js";
+import type {
+  BundleFileOnDisk,
+  LocatedTemplate,
+  NamedTemplate,
+  SubmittedTemplate,
+  TemplateFiles,
+  TemplateFilesResolution,
+  TemplateRefusal,
+} from "./capabilities/template-files.js";
+import {
   errorMessage,
   isInsideRoot,
   isMissingPathError,
@@ -17,6 +27,7 @@ import {
 const MTHDS_EXTENSION = ".mthds";
 const INLINE_FALLBACK = "or inline the contents as { content, uri? }.";
 const TEMPLATE_SUFFIXES = TEMPLATE_FILE_EXTENSIONS.join(", ");
+const TEMPLATE_FALLBACK = "or move the file where the step's template_file leads.";
 
 /**
  * What a resolver may vary besides its extension, each chosen where the
@@ -82,7 +93,9 @@ export function localFileResolver(
           `This argument reads ${reads}. Point at a ${extension} file, ${fallback}`,
         );
       }
-      const target = await containedTarget(rootDir, submitted, {
+      const root = await workingDirectory(rootDir);
+      if (!root.ok) return root;
+      const target = await containedTarget(rootDir, root.real, submitted, {
         kind: `a ${extension} file`,
         fallback,
         maxBytes: options.maxBytes,
@@ -100,24 +113,22 @@ export function localFileResolver(
 /**
  * The resolver of the method-taking tools' `files`: `.mthds` files read as
  * text, as {@link localFileResolver} reads them, and the template files a
- * bundle's `PipeDocGen` steps name read as bytes through `resolveTemplate`.
+ * bundle's `PipeDocGen` steps name read as bytes through `resolveTemplates`.
  *
- * A template file passes the same three gates as every read, ahead of it, and
- * one more of its own. **What**: its suffix must be one of
+ * `resolveTemplates` takes the request's template files together, once the
+ * `.mthds` files resolved, and decides everything before reading a byte of
+ * any. Each submitted file passes the read side's gates: its suffix is one of
  * `TEMPLATE_FILE_EXTENSIONS`, checked on the submitted name before the
- * filesystem is touched, so the widened gate still never opens a `.env`.
- * **Where**: its real path must lie inside the working directory, and also
- * inside the bundle's directory, the deepest one holding the bundle's
- * `.mthds` `{ path }` items, on real paths too, as pipelex's own loader
- * refuses a template file that leaves its bundle's directory: a symlink does
- * not make a file part of the method. **Failure as a value**: every refusal is
- * a {@link TemplateFileResolution}, never a throw. Its size is held to
- * `MAX_TEMPLATE_FILE_BYTES` on the stat, before the read.
- *
- * The key is the template's path relative to that directory, taken from the
- * submitted paths rather than the real ones, so it is the layout the caller
- * named, written with forward slashes: `invoice.mthds` beside
- * `templates/invoice.xlsx` sends `templates/invoice.xlsx`.
+ * filesystem is touched, so the widened gate still never opens a `.env`; its
+ * real path lies inside the working directory; it is a regular file within
+ * `MAX_TEMPLATE_FILE_BYTES` on its stat. Then each step's `template_file` is
+ * looked up beside the `.mthds` file naming it, and `planTemplateFiles`
+ * matches the two by real path: a submitted file is sent under the key of the
+ * step naming it, the same file submitted twice once, and a file no step names
+ * is refused, as is one a step reaches only through a symlink out of its own
+ * directory, which pipelex's loader refuses too. The request's bounds are held
+ * on the stat sizes, and again on the bytes read. The working directory and
+ * each `.mthds` file's directory are resolved once per request.
  */
 export function localBundleFileResolver(rootDir: string = process.cwd()): FileResolver {
   const text = localFileResolver(rootDir, MTHDS_EXTENSION, {
@@ -125,100 +136,164 @@ export function localBundleFileResolver(rootDir: string = process.cwd()): FileRe
   });
   return {
     resolve: (submitted) => text.resolve(submitted),
-    async resolveTemplate(
-      submitted: string,
-      bundlePaths: readonly string[],
-    ): Promise<TemplateFileResolution> {
-      // The widened extension gate, still ahead of any filesystem access.
-      const extension = path.extname(submitted).toLowerCase();
-      if (!(TEMPLATE_FILE_EXTENSIONS as readonly string[]).includes(extension)) {
-        return failure(
-          `Path is not a template file: ${submitted}`,
-          `A template file is one of ${TEMPLATE_SUFFIXES}. Point at the file a PipeDocGen step names.`,
-        );
-      }
-
-      // Where the template sits in the bundle, from the submitted paths alone,
-      // before anything is opened.
-      const bundleDir = deepestCommonDirectory(
-        bundlePaths.map((bundlePath) => path.dirname(path.resolve(rootDir, bundlePath))),
-      );
-      const relative = path.relative(bundleDir, path.resolve(rootDir, submitted));
-      if (
-        relative === "" ||
-        relative === ".." ||
-        relative.startsWith(`..${path.sep}`) ||
-        path.isAbsolute(relative)
-      ) {
-        return failure(
-          `Template file ${submitted} is outside the bundle's directory, ${displayDir(rootDir, bundleDir)}, the deepest directory holding the .mthds files given as { path }.`,
-          "A template file is sent under its path relative to that directory, as the step's template_file names it, so it must sit at or under it. Move it into the bundle's directory.",
-        );
-      }
-
-      const fallback = "or move the file where the step's template_file names it.";
-      const target = await containedTarget(rootDir, submitted, {
-        kind: "a template file",
-        fallback,
-        maxBytes: MAX_TEMPLATE_FILE_BYTES,
-      });
-      if (!target.ok) return target;
-
-      let bundleReal: string;
-      try {
-        bundleReal = await fs.realpath(bundleDir);
-      } catch (err) {
-        return failure(
-          `Could not resolve the bundle's directory, ${displayDir(rootDir, bundleDir)}: ${errorMessage(err)}`,
-          "Check that the .mthds files given as { path } are there.",
-        );
-      }
-      if (!isInsideRoot(bundleReal, target.real)) {
-        return failure(
-          `Template file ${submitted} resolves to ${target.real}, which is outside the bundle's directory, ${displayDir(rootDir, bundleDir)}. A symlink does not make a file part of the method.`,
-          "Copy the template file into the bundle's directory, where the step's template_file names it.",
-        );
-      }
-
-      try {
-        const bytes = await fs.readFile(target.real);
-        return {
-          ok: true,
-          key: relative.split(path.sep).join("/"),
-          bytes: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
-        };
-      } catch (err) {
-        return readFailure(submitted, err, fallback);
-      }
-    },
+    resolveTemplates: (templates, bundle, requestBytes) =>
+      resolveTemplateFiles(rootDir, templates, bundle, requestBytes),
   };
 }
 
-/** A submitted path that passed the containment and file checks: its real path. */
-type ContainedTarget = { ok: true; real: string } | { ok: false; message: string; hint: string };
+async function resolveTemplateFiles(
+  rootDir: string,
+  templates: readonly SubmittedTemplate[],
+  bundle: readonly BundleFileOnDisk[],
+  requestBytes: number,
+): Promise<TemplateFilesResolution> {
+  const root = await workingDirectory(rootDir);
+  if (!root.ok) return { ok: false, refusals: [{ message: root.message, hint: root.hint }] };
+
+  const refusals: TemplateRefusal[] = [];
+  const located: LocatedTemplate[] = [];
+  for (const template of templates) {
+    // The widened extension gate, still ahead of any filesystem access.
+    const extension = path.extname(template.path).toLowerCase();
+    if (!(TEMPLATE_FILE_EXTENSIONS as readonly string[]).includes(extension)) {
+      refusals.push({
+        index: template.index,
+        message: `Path is not a template file: ${template.path}`,
+        hint: `A template file is one of ${TEMPLATE_SUFFIXES}. Point at the file a PipeDocGen step names.`,
+      });
+      continue;
+    }
+    const target = await containedTarget(rootDir, root.real, template.path, {
+      kind: "a template file",
+      fallback: TEMPLATE_FALLBACK,
+      maxBytes: MAX_TEMPLATE_FILE_BYTES,
+    });
+    if (!target.ok) {
+      refusals.push({ index: template.index, message: target.message, hint: target.hint });
+      continue;
+    }
+    located.push({
+      index: template.index,
+      path: template.path,
+      real: target.real,
+      size: target.size,
+    });
+  }
+
+  const named = await lookUpNamedTemplates(rootDir, bundle);
+  const plan = planTemplateFiles(located, named, requestBytes);
+  refusals.push(...plan.refusals);
+  if (refusals.length > 0) return { ok: false, refusals: sortedByItem(refusals) };
+
+  // Read each file once, whatever number of keys it is sent under, and hold
+  // the request to its bounds again on what was read: a file can grow
+  // between its stat and its read.
+  const bytesByReal = new Map<string, Uint8Array>();
+  const read: { key: string; index: number; path: string; size: number; bytes: Uint8Array }[] = [];
+  for (const entry of plan.planned) {
+    let bytes = bytesByReal.get(entry.real);
+    if (bytes === undefined) {
+      try {
+        const buffer = await fs.readFile(entry.real);
+        bytes = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+      } catch (err) {
+        const failed = readFailure(entry.path, err, TEMPLATE_FALLBACK);
+        return {
+          ok: false,
+          refusals: [{ index: entry.index, message: failed.message, hint: failed.hint }],
+        };
+      }
+      bytesByReal.set(entry.real, bytes);
+    }
+    read.push({ ...entry, size: bytes.byteLength, bytes });
+  }
+  const overRead = templateBudgetRefusals(read, requestBytes);
+  if (overRead.length > 0) return { ok: false, refusals: overRead };
+
+  const resources: TemplateFiles = {};
+  for (const entry of read) resources[entry.key] = entry.bytes;
+  return { ok: true, resources };
+}
 
 /**
- * The checks every read makes after its extension gate: the working directory
- * resolves, the target exists, its real path lies inside the working
- * directory, it is a regular file, and it is within `maxBytes` when one is set,
- * all before a byte of it is read.
+ * Each step's template file, looked up where its `template_file` leads from
+ * the directory of the `.mthds` file naming it, by real path. A path the
+ * runner refuses is skipped, so no file is sent under it; a missing file is
+ * `null`, for the runner to say the step's file was not supplied.
  */
-async function containedTarget(
+async function lookUpNamedTemplates(
   rootDir: string,
-  submitted: string,
-  options: { kind: string; fallback: string; maxBytes?: number },
-): Promise<ContainedTarget> {
-  const { kind, fallback, maxBytes } = options;
-  let rootReal: string;
+  bundle: readonly BundleFileOnDisk[],
+): Promise<NamedTemplate[]> {
+  const realDirs = new Map<string, string | null>();
+  const named: NamedTemplate[] = [];
+  for (const file of bundle) {
+    const dir = path.dirname(path.resolve(rootDir, file.path));
+    if (!realDirs.has(dir)) realDirs.set(dir, await fs.realpath(dir).catch(() => null));
+    const realDir = realDirs.get(dir) ?? null;
+    if (realDir === null) continue;
+    for (const templateFile of file.named) {
+      const key = templateKeyOf(templateFile);
+      if (key === undefined) continue;
+      const real = await regularFileRealPath(path.join(dir, ...key.split("/")));
+      named.push({
+        key,
+        mthdsPath: file.path,
+        real,
+        escapes: real !== null && !isInsideRoot(realDir, real),
+      });
+    }
+  }
+  return named;
+}
+
+/** The real path of a regular file at `target`, or `null` when there is none. */
+async function regularFileRealPath(target: string): Promise<string | null> {
   try {
-    rootReal = await fs.realpath(rootDir);
+    const real = await fs.realpath(target);
+    return (await fs.stat(real)).isFile() ? real : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Refusals in the order of the items they are about, the whole-submission ones first. */
+function sortedByItem(refusals: TemplateRefusal[]): TemplateRefusal[] {
+  return [...refusals].sort((a, b) => (a.index ?? -1) - (b.index ?? -1));
+}
+
+/** The working directory's real path, resolved once per request. */
+async function workingDirectory(
+  rootDir: string,
+): Promise<{ ok: true; real: string } | { ok: false; message: string; hint: string }> {
+  try {
+    return { ok: true, real: await fs.realpath(rootDir) };
   } catch (err) {
     return failure(
       `Could not resolve the server's working directory: ${errorMessage(err)}`,
       `The local workshop resolves paths relative to its working directory (${rootDir}), which must exist.`,
     );
   }
+}
 
+/** A submitted path that passed the containment and file checks: its real path and its size on the stat. */
+type ContainedTarget =
+  | { ok: true; real: string; size: number }
+  | { ok: false; message: string; hint: string };
+
+/**
+ * The checks every read makes after its extension gate: the target exists,
+ * its real path lies inside the working directory (whose real path is
+ * `rootReal`), it is a regular file, and it is within `maxBytes` when one is
+ * set, all before a byte of it is read.
+ */
+async function containedTarget(
+  rootDir: string,
+  rootReal: string,
+  submitted: string,
+  options: { kind: string; fallback: string; maxBytes?: number },
+): Promise<ContainedTarget> {
+  const { kind, fallback, maxBytes } = options;
   const target = path.resolve(rootDir, submitted);
 
   let real: string;
@@ -258,16 +333,10 @@ async function containedTarget(
         `Shrink the file, ${fallback}`,
       );
     }
+    return { ok: true, real, size: stats.size };
   } catch (err) {
     return readFailure(submitted, err, fallback);
   }
-  return { ok: true, real };
-}
-
-/** The bundle's directory as the caller would name it: relative to the working directory. */
-function displayDir(rootDir: string, dir: string): string {
-  const relative = path.relative(path.resolve(rootDir), dir);
-  return relative === "" ? "." : relative;
 }
 
 function readFailure(

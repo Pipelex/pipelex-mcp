@@ -1,5 +1,3 @@
-import path from "node:path";
-
 import {
   ApiResponseError,
   ApiUnreachableError,
@@ -29,6 +27,19 @@ import { z } from "zod";
 
 import { BARE_APP_INFO } from "./client-identification.js";
 import type { AppInfoSource } from "./client-identification.js";
+import {
+  MAX_TEMPLATE_FILES,
+  MAX_TEMPLATE_FILE_BYTES,
+  TEMPLATE_FILE_EXTENSIONS,
+  isTemplateFilePath,
+  templateFilesNamedBy,
+} from "./template-files.js";
+import type {
+  BundleFileOnDisk,
+  SubmittedTemplate,
+  TemplateFiles,
+  TemplateFilesResolution,
+} from "./template-files.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 
 export const DEFAULT_API_URL = "https://api.pipelex.com";
@@ -65,35 +76,6 @@ export const filesInputSchema = z
   );
 
 /**
- * The suffixes of the template files a `PipeDocGen` step reads beside its
- * bundle: an HTML template for a PDF, the office file itself for a workbook, a
- * document or a deck. The runner's own list is `DocGenFormat.template_file_suffix`
- * in pipelex (`pipelex/cogt/doc_gen/doc_gen_format.py`), one suffix per format.
- * The `files` argument of the method-taking tools reads these, and only these,
- * besides `.mthds`: it is the extension gate of the read side, widened on
- * purpose, so a suffix a new format brings is added here deliberately.
- */
-export const TEMPLATE_FILE_EXTENSIONS = [".html", ".xlsx", ".docx", ".pptx"] as const;
-
-/**
- * The runner's default limits on the files sent with a bundle (`pipelex-api`'s
- * `limits.py`): 32 files, 5 MiB each and 10 MiB in all. The workshop holds a
- * submission to them before it sends a byte, the count and each file's size
- * before any template file is read, so it never holds more than a request the
- * runner would take. A deployment may configure larger ones, which this server
- * cannot see; the defaults are what every deployment the workshop targets runs.
- */
-export const MAX_TEMPLATE_FILES = 32;
-export const MAX_TEMPLATE_FILE_BYTES = 5 * 1024 * 1024;
-export const MAX_TEMPLATE_FILES_TOTAL_BYTES = 10 * 1024 * 1024;
-
-/** Whether `submitted` names a template file by its suffix, case-insensitively, the way the read gate does. */
-export function isTemplateFilePath(submitted: string): boolean {
-  const extension = path.extname(submitted).toLowerCase();
-  return (TEMPLATE_FILE_EXTENSIONS as readonly string[]).includes(extension);
-}
-
-/**
  * The `files` argument of the method-taking tools (`mthds_validate`,
  * `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`,
  * `mthds_run`): the shape of {@link filesInputSchema}, whose `{ path }` arm
@@ -102,8 +84,9 @@ export function isTemplateFilePath(submitted: string): boolean {
  * {@link filesInputSchema}, since the catalog stores `.mthds` and `.py` files
  * only. A template file is given by path alone: an inline item is always a
  * `.mthds` file's text, so a binary file never travels through the
- * conversation, and the key a template is sent under comes from where it sits
- * on disk rather than from a label.
+ * conversation, and the key a template is sent under is the step's own
+ * `template_file`, found from where the file sits on disk rather than from a
+ * label (`template-files.ts`).
  */
 export const bundleFilesInputSchema = z
   .array(
@@ -123,9 +106,9 @@ export const bundleFilesInputSchema = z
   )
   .describe(
     "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). " +
-      "A template file is given only as { path } and is sent under its path relative to the directory of the .mthds files given as { path } (the deepest one holding them all), which must be exactly the step's template_file: " +
-      '[{ path: "invoice.mthds" }, { path: "templates/invoice.xlsx" }] sends templates/invoice.xlsx. ' +
-      `At most ${MAX_TEMPLATE_FILES} template files, ${MAX_TEMPLATE_FILE_BYTES / (1024 * 1024)} MiB each and ${MAX_TEMPLATE_FILES_TOTAL_BYTES / (1024 * 1024)} MiB in all.`,
+      "A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, " +
+      'so [{ path: "invoice.mthds" }, { path: "templates/invoice.xlsx" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. ' +
+      `At most ${MAX_TEMPLATE_FILES} template files, ${MAX_TEMPLATE_FILE_BYTES / (1024 * 1024)} MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded.`,
   );
 
 /** A submitted file resolved to its contents — what the capabilities consume. */
@@ -154,37 +137,28 @@ export type FileResolution =
   | { ok: false; message: string; hint: string };
 
 /**
- * Outcome of reading one template file of a bundle: its bytes, and the key it
- * is sent under, its path relative to the bundle's directory written with
- * forward slashes. Failures are values, as {@link FileResolution}'s are.
- */
-export type TemplateFileResolution =
-  | { ok: true; key: string; bytes: Uint8Array }
-  | { ok: false; message: string; hint: string };
-
-/**
  * The seam the workshop fills with a filesystem-backed resolver
  * (`localFileResolver` and `localBundleFileResolver` in its `src/files.ts`). A
  * context built without one — the core's own `build…Context`, as the live
  * suite uses — turns every `{ path }` item into an instructive rejection.
  *
- * `resolveTemplate` is what makes an argument take a bundle's template files.
- * Present, a `{ path }` item carrying a template suffix
- * ({@link isTemplateFilePath}) is read through it as bytes, keyed against
- * `bundlePaths`, the submitted paths of the bundle's other `{ path }` items.
- * Absent, such an item goes to `resolve` like any other, whose extension gate
- * refuses it: `mthds_save_method`'s `files` reads `.mthds` alone.
+ * `resolveTemplates` is what makes an argument take a bundle's template files.
+ * Present, the `{ path }` items carrying a template suffix
+ * ({@link isTemplateFilePath}) are handed to it together, once every other
+ * item resolved, with the `.mthds` files read from disk and the
+ * `template_file` each of their `PipeDocGen` steps names, and the size of
+ * those files' text, which the same request carries. Absent, such an item goes
+ * to `resolve` like any other, whose extension gate refuses it:
+ * `mthds_save_method`'s `files` reads `.mthds` alone.
  */
 export interface FileResolver {
   resolve(path: string): Promise<FileResolution>;
-  resolveTemplate?(path: string, bundlePaths: readonly string[]): Promise<TemplateFileResolution>;
+  resolveTemplates?(
+    templates: readonly SubmittedTemplate[],
+    bundle: readonly BundleFileOnDisk[],
+    requestBytes: number,
+  ): Promise<TemplateFilesResolution>;
 }
-
-/**
- * A bundle's template files, keyed by the path a step names, each as its
- * bytes: what `@pipelex/sdk` sends as a request's `resources`.
- */
-export type TemplateFiles = Record<string, Uint8Array>;
 
 export interface ResolvedFiles {
   files: SubmittedFile[];
@@ -200,10 +174,13 @@ export interface ResolvedFiles {
 export function resourcesOption(resources: TemplateFiles | undefined): {
   resources?: TemplateFiles;
 } {
-  return resources !== undefined && Object.keys(resources).length > 0 ? { resources } : {};
+  return hasTemplateFiles(resources) ? { resources } : {};
 }
 
-const MIB = 1024 * 1024;
+/** Whether a request carries template files: what decides how its refusals read (`bundleResources`). */
+export function hasTemplateFiles(resources: TemplateFiles | undefined): resources is TemplateFiles {
+  return resources !== undefined && Object.keys(resources).length > 0;
+}
 
 /**
  * Resolve the submitted-files union into plain `{ content, uri? }` items and
@@ -215,55 +192,36 @@ const MIB = 1024 * 1024;
  * the local workshop that resolves paths. `files` and `resources` are only
  * meaningful when `errors` is empty.
  *
- * On a resolver that reads template files (`resolveTemplate`), a `{ path }`
- * item with a template suffix becomes an entry of `resources` instead of a
- * file, keyed by its path relative to the deepest directory holding the
- * bundle's other `{ path }` items. Those paths are taken from the submitted
- * items, and the count is held to {@link MAX_TEMPLATE_FILES}, before any
- * template file is opened; the total is held to
- * {@link MAX_TEMPLATE_FILES_TOTAL_BYTES} as they are read, each one's own size
- * being the resolver's to check on its stat. A template file has no inline
- * form, so an inline item labelled with a template suffix is refused rather
- * than sent as a `.mthds` file's text.
+ * On a resolver that reads template files (`resolveTemplates`), the `{ path }`
+ * items with a template suffix are set aside and resolved last, against the
+ * `.mthds` files that resolved from disk: every other item is resolved and
+ * refused first, and a request with any refusal reads no template file, since
+ * which step names a template depends on the very files refused. Each
+ * template's key is the `template_file` of the step naming it
+ * (`template-files.ts`). A template file has no inline form, so an inline item
+ * labelled with a template suffix is refused rather than sent as a `.mthds`
+ * file's text.
  */
 export async function resolveSubmittedFiles(
   files: SubmittedFileInput[],
   resolver?: FileResolver,
 ): Promise<ResolvedFiles> {
   const resolved: SubmittedFile[] = [];
-  const templates = new Map<string, Uint8Array>();
+  const onDisk: { path: string; content: string }[] = [];
+  const templates: SubmittedTemplate[] = [];
   const errors: ToolError[] = [];
-
-  const readTemplate = resolver?.resolveTemplate?.bind(resolver);
-  const isTemplateItem = (file: SubmittedFileInput): boolean =>
-    readTemplate !== undefined && !("content" in file) && isTemplateFilePath(file.path);
-  const bundlePaths = files.flatMap((file) =>
-    "content" in file || file.path.trim() === "" || isTemplateItem(file) ? [] : [file.path],
-  );
-  const templateCount = files.filter(isTemplateItem).length;
-  const tooManyTemplates = templateCount > MAX_TEMPLATE_FILES;
-  if (tooManyTemplates) {
-    errors.push({
-      class: "input_domain",
-      location: "files",
-      message: `${templateCount} template files were submitted, over the limit of ${MAX_TEMPLATE_FILES} one request takes.`,
-      hint: "Send only the template files the bundle's PipeDocGen steps name.",
-      retryable: false,
-    });
-  }
-  let templateBytes = 0;
-  let overTotal = false;
+  const takesTemplates = resolver?.resolveTemplates !== undefined;
 
   for (const [index, file] of files.entries()) {
     // First-match union semantics: a pathological { content, path } item is
     // the content arm, and its path is ignored.
     if ("content" in file) {
-      if (readTemplate !== undefined && file.uri != null && isTemplateFilePath(file.uri)) {
+      if (takesTemplates && file.uri != null && isTemplateFilePath(file.uri)) {
         errors.push({
           class: "input_domain",
           location: `files[${index}].uri`,
           message: `An inline item carries a .mthds file's text, and this one is labelled as a template file: ${file.uri}.`,
-          hint: "Give a template file as { path }, so its bytes are read from disk and sent under its path; a template file never travels inline.",
+          hint: "Give a template file as { path }, so its bytes are read from disk and sent under the path its step names; a template file never travels inline.",
           retryable: false,
         });
         continue;
@@ -297,53 +255,15 @@ export async function resolveSubmittedFiles(
       continue;
     }
 
-    if (readTemplate !== undefined && isTemplateFilePath(file.path)) {
-      // The count was refused as a whole, and a total already over the limit
-      // is reported once, at the file that crossed it: nothing more is read.
-      if (tooManyTemplates || overTotal) continue;
-      if (bundlePaths.length === 0) {
-        errors.push({
-          class: "input_domain",
-          location: `files[${index}].path`,
-          message: `${file.path} is a template file, and no .mthds file was given as { path } for it to sit beside, so nothing says which path it is sent under.`,
-          hint: "A template file is sent under its path relative to the directory of the bundle's .mthds files: give those files as { path } too.",
-          retryable: false,
-        });
-        continue;
-      }
-      const template = await readTemplate(file.path, bundlePaths);
-      if (!template.ok) {
-        errors.push({
-          class: "input_domain",
-          location: `files[${index}].path`,
-          message: template.message,
-          hint: template.hint,
-          retryable: false,
-        });
-        continue;
-      }
-      // The same file submitted twice (`templates/a.docx` and
-      // `./templates/a.docx`) keys the same, and is sent and counted once.
-      if (templates.has(template.key)) continue;
-      templateBytes += template.bytes.byteLength;
-      if (templateBytes > MAX_TEMPLATE_FILES_TOTAL_BYTES) {
-        overTotal = true;
-        errors.push({
-          class: "input_domain",
-          location: `files[${index}].path`,
-          message: `The template files total more than ${MAX_TEMPLATE_FILES_TOTAL_BYTES / MIB} MiB once ${file.path} is added, more than one request takes.`,
-          hint: "Send only the template files the bundle's PipeDocGen steps name, or make them smaller.",
-          retryable: false,
-        });
-        continue;
-      }
-      templates.set(template.key, template.bytes);
+    if (takesTemplates && isTemplateFilePath(file.path)) {
+      templates.push({ index, path: file.path });
       continue;
     }
 
     const resolution = await resolver.resolve(file.path);
     if (resolution.ok) {
       resolved.push({ content: resolution.content, uri: file.path });
+      onDisk.push({ path: file.path, content: resolution.content });
     } else {
       errors.push({
         class: "input_domain",
@@ -355,7 +275,47 @@ export async function resolveSubmittedFiles(
     }
   }
 
-  return { files: resolved, resources: Object.fromEntries(templates), errors };
+  const resources: TemplateFiles = {};
+  if (errors.length > 0 || templates.length === 0 || resolver?.resolveTemplates === undefined) {
+    return { files: resolved, resources, errors };
+  }
+
+  if (onDisk.length === 0) {
+    for (const template of templates) {
+      errors.push({
+        class: "input_domain",
+        location: `files[${template.index}].path`,
+        message: `${template.path} is a template file, and no .mthds file was given as { path } for a step of it to name it.`,
+        hint: "A template file is sent under the template_file of the step naming it, found from the directory of that step's .mthds file: give the .mthds files as { path } too.",
+        retryable: false,
+      });
+    }
+    return { files: resolved, resources, errors };
+  }
+
+  const bundle: BundleFileOnDisk[] = onDisk.map((file) => ({
+    path: file.path,
+    named: templateFilesNamedBy(file.content),
+  }));
+  // The method's text rides the same request, every inline file included.
+  const requestBytes = resolved.reduce(
+    (total, file) => total + Buffer.byteLength(file.content, "utf8"),
+    0,
+  );
+  const outcome = await resolver.resolveTemplates(templates, bundle, requestBytes);
+  if (outcome.ok) {
+    return { files: resolved, resources: outcome.resources, errors };
+  }
+  for (const refusal of outcome.refusals) {
+    errors.push({
+      class: "input_domain",
+      location: refusal.index === undefined ? "files" : `files[${refusal.index}].path`,
+      message: refusal.message,
+      hint: refusal.hint,
+      retryable: false,
+    });
+  }
+  return { files: resolved, resources, errors };
 }
 
 /**
@@ -1020,6 +980,14 @@ export interface ClassifyErrorOptions {
     hint: string;
   };
   /**
+   * Set by a capability when the request carried a bundle's template files
+   * (its `resources`). Only then are the runner's refusals of those files
+   * (`bundleResourceRefusalTexture`) and a `413` read as about them
+   * ({@link FILES_TOO_LARGE}); a request that sent none keeps the route's own
+   * handling, since the same type there is not about anything it sent.
+   */
+  bundleResources?: boolean;
+  /**
    * Per-route 5xx hint override. Use it when a route is known to report
    * request-caused failures as a generic server error (the hosted `/v1/start`
    * answers 503 "Failed to start pipeline" for an invalid bundle), so the
@@ -1461,10 +1429,14 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
   }
 
   // The runner's refusals of the template files sent with a bundle, typed by
-  // their `error_type` on every route that takes them. Ahead of the generic
-  // 400/422 arm, whose locator follows the route's selector (`target` on
-  // codegen's files shape) and whose hint says nothing about a template file.
-  const resourceRefusal = bundleResourceRefusalTexture(err.errorType);
+  // their `error_type` on every route that takes them, and read so only on a
+  // request that carried some: elsewhere the same type is about files this
+  // server never sent, and the route's own texture says more. Ahead of the
+  // generic 400/422 arm, whose locator follows the route's selector (`target`
+  // on codegen's files shape) and whose hint says nothing about a template.
+  const resourceRefusal = options.bundleResources
+    ? bundleResourceRefusalTexture(err.errorType)
+    : undefined;
   if (resourceRefusal !== undefined) {
     return toolError(
       { ...verdict, class: resourceRefusal.class ?? verdict.class },
@@ -1612,11 +1584,15 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     );
   }
 
-  if (err.status === 413 && options.tooLarge) {
+  // A route's own size texture first; a request that carried template files
+  // otherwise reads a `413` as about them, and one that carried none keeps
+  // the unexpected-status arm, since nothing it sent is known to be at fault.
+  const tooLarge = options.tooLarge ?? (options.bundleResources ? FILES_TOO_LARGE : undefined);
+  if (err.status === 413 && tooLarge !== undefined) {
     return toolError(verdict, {
-      location: options.tooLarge.location,
+      location: tooLarge.location,
       message,
-      hint: options.tooLarge.hint,
+      hint: tooLarge.hint,
     });
   }
 
@@ -1654,7 +1630,7 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
 
 /** Where a submitted template file is keyed, said once for every hint that needs it. */
 const TEMPLATE_KEY_RULE =
-  "A template file is sent under its path relative to the directory of the bundle's .mthds files given as { path }, and that path must be exactly the one the PipeDocGen step's template_file names.";
+  "A template file is sent under the template_file of the PipeDocGen step naming it, and found where that path leads from the directory of the step's .mthds file, given as { path }.";
 
 /**
  * The texture of the runner's refusal of the files sent with a bundle, the
@@ -1673,7 +1649,9 @@ const TEMPLATE_KEY_RULE =
  *   argument fixes it: the class is overridden to `runtime`, where the SDK
  *   reads a 400 as the caller's.
  *
- * The size refusals are `413`s, textured per route by {@link FILES_TOO_LARGE}.
+ * The size refusals are `413`s, textured by {@link FILES_TOO_LARGE}. Both
+ * apply only to a request that carried template files
+ * (`ClassifyErrorOptions.bundleResources`).
  */
 function bundleResourceRefusalTexture(
   errorType: string | undefined,
@@ -1682,12 +1660,12 @@ function bundleResourceRefusalTexture(
     case "InvalidResourcePath":
       return {
         location: "files",
-        hint: `${TEMPLATE_KEY_RULE} Submit each template file once, from inside that directory.`,
+        hint: `${TEMPLATE_KEY_RULE} Check that template_file: it must be a relative path that stays inside the bundle.`,
       };
     case "BundleResourceNotNamedError":
       return {
         location: "files",
-        hint: `Every template file sent must be named by a PipeDocGen step of the bundle. ${TEMPLATE_KEY_RULE} Drop the files no step names, or move them where the step's template_file says.`,
+        hint: `Every template file sent must be named by a PipeDocGen step of the bundle. ${TEMPLATE_KEY_RULE} Drop the files no step names.`,
       };
     case "InvalidBase64":
       return {
@@ -1700,19 +1678,18 @@ function bundleResourceRefusalTexture(
 }
 
 /**
- * The `413` texture of a route that takes a bundle's files, set on its files
- * shape. Every `413` there is about the submission: the runner's
- * `PayloadTooLarge` (too many template files, one too large, too many bytes in
- * all, or a body over its limit), its `BundleResourcesTooLargeError` (the
- * `.html` template files, which travel inline with the method wherever it
+ * The `413` texture of a request that carried template files. Every `413`
+ * there is read as about them, since the workshop held them to the runner's
+ * limits and the gateway's before sending: the runner's `PayloadTooLarge` (a
+ * limit a deployment configured lower), its `BundleResourcesTooLargeError`
+ * (the `.html` template files, which travel inline with the method wherever it
  * runs, over 512 KiB in all), and the hosted gateway's refusal of a request
- * over its 10 MiB quota, which carries no type. That quota, which
- * `upload-ceiling.ts` measures, counts the template files base64-encoded, so
- * on the hosted API it binds before the runner's 10 MiB of files does.
+ * over its 10 MiB quota, which carries no type, when a run's inputs filled the
+ * room the template files left.
  */
 export const FILES_TOO_LARGE: NonNullable<ClassifyErrorOptions["tooLarge"]> = {
   location: "files",
-  hint: `The request is larger than the API takes. A bundle's template files are held to ${MAX_TEMPLATE_FILES} files, ${MAX_TEMPLATE_FILE_BYTES / MIB} MiB each and ${MAX_TEMPLATE_FILES_TOTAL_BYTES / MIB} MiB in all, its .html templates to 512 KiB in all, and on the hosted API a whole request, the template files base64-encoded, to 10 MiB. Send only the template files the steps name, or make them smaller.`,
+  hint: `The request is larger than the API takes. A bundle's template files are held to ${MAX_TEMPLATE_FILES} files and ${MAX_TEMPLATE_FILE_BYTES / (1024 * 1024)} MiB each, its .html templates to 512 KiB in all, and on the hosted API a whole request, the template files base64-encoded and a run's inputs included, to 10 MiB. Send only the template files the steps name, make them smaller, or move large inputs into files.`,
 };
 
 /**

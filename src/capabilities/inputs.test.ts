@@ -492,9 +492,11 @@ describe("buildMthdsInputs path submissions", () => {
           async resolve() {
             return { ok: true, content: 'domain = "invoice"' };
           },
-          async resolveTemplate(path, bundlePaths) {
-            expect(bundlePaths).toEqual(["methods/invoice.mthds"]);
-            return { ok: true, key: path.slice("methods/".length), bytes: XLSX };
+          async resolveTemplates(templates, bundle, requestBytes) {
+            expect(templates).toEqual([{ index: 1, path: "methods/templates/invoice.xlsx" }]);
+            expect(bundle).toEqual([{ path: "methods/invoice.mthds", named: [] }]);
+            expect(requestBytes).toBe('domain = "invoice"'.length);
+            return { ok: true, resources: { "templates/invoice.xlsx": XLSX } };
           },
         },
       },

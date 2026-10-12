@@ -451,7 +451,7 @@
                 }
               ]
             },
-            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). A template file is given only as { path } and is sent under its path relative to the directory of the .mthds files given as { path } (the deepest one holding them all), which must be exactly the step's template_file: [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx. At most 32 template files, 5 MiB each and 10 MiB in all."
+            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. At most 32 template files, 5 MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded."
           },
           "method_ref": {
             "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side: the repository is fetched at the tag and the package's own file names label the diagnostics; no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.",
@@ -789,7 +789,7 @@
                 }
               ]
             },
-            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). A template file is given only as { path } and is sent under its path relative to the directory of the .mthds files given as { path } (the deepest one holding them all), which must be exactly the step's template_file: [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx. At most 32 template files, 5 MiB each and 10 MiB in all."
+            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. At most 32 template files, 5 MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded."
           },
           "method_ref": {
             "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.",
@@ -981,7 +981,7 @@
                 }
               ]
             },
-            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). A template file is given only as { path } and is sent under its path relative to the directory of the .mthds files given as { path } (the deepest one holding them all), which must be exactly the step's template_file: [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx. At most 32 template files, 5 MiB each and 10 MiB in all."
+            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. At most 32 template files, 5 MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded."
           },
           "method_ref": {
             "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.",
@@ -1254,7 +1254,7 @@
                 }
               ]
             },
-            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). A template file is given only as { path } and is sent under its path relative to the directory of the .mthds files given as { path } (the deepest one holding them all), which must be exactly the step's template_file: [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx. At most 32 template files, 5 MiB each and 10 MiB in all."
+            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. At most 32 template files, 5 MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded."
           },
           "method_ref": {
             "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0 — the signature source. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.",
@@ -1435,7 +1435,7 @@
                 }
               ]
             },
-            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). A template file is given only as { path } and is sent under its path relative to the directory of the .mthds files given as { path } (the deepest one holding them all), which must be exactly the step's template_file: [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx. At most 32 template files, 5 MiB each and 10 MiB in all."
+            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. At most 32 template files, 5 MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded."
           },
           "method_ref": {
             "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side: the repository is fetched at the tag and the resolved commit SHA comes back as provenance. A complete run source of its own — it pairs with NOTHING (not files, not method_id).",
