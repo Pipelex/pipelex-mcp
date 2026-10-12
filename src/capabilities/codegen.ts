@@ -40,6 +40,7 @@ import {
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
@@ -336,6 +337,8 @@ export interface CodegenContext extends ApiConfig, MethodVersionsAware {
   saveRoot?: string;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 export function buildCodegenContext(env = process.env): CodegenContext {
@@ -536,6 +539,7 @@ export async function generateMthdsCode(
     const classified = classifyError(err, {
       ...classifyOptions,
       auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
       forbidden: forbiddenTexture(context.authError),
       bundleResources: hasTemplateFiles(request.resources),
     });

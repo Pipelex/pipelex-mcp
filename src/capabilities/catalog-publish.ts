@@ -208,7 +208,11 @@ export async function publishMthdsMethod(
     support = catalogVersionsSupport(context, client);
     result = await client.publishMethod(methodId, { expected_draft_updated_at: expected });
   } catch (err) {
-    const error = classifyError(err, { ...PUBLISH_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, {
+      ...PUBLISH_ERROR_OPTIONS,
+      auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
+    });
     const reported =
       error.location === "expected_draft_updated_at" && client
         ? await staleTokenError(error, client, methodId, expected)

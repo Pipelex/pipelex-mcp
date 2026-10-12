@@ -904,6 +904,54 @@ describe("the workshop's key, read on every call", () => {
       await close();
     }
   });
+
+  it("names the saved file in a base URL failure only when the base URL is the file's", async () => {
+    const home = await makeTempDir();
+    await fs.writeFile(
+      path.join(home, ".env"),
+      "PIPELEX_API_KEY=plx_sk_saved\nPIPELEX_BASE_URL=https://saved.pipelex.test\n",
+    );
+    vi.stubGlobal("fetch", () =>
+      Promise.reject(
+        new TypeError("fetch failed", {
+          cause: Object.assign(new Error("ECONNREFUSED"), { code: "ECONNREFUSED" }),
+        }),
+      ),
+    );
+    const note = `The PIPELEX_BASE_URL in use, https://saved.pipelex.test, was read from \`${path.join(home, ".env")}\` beside the saved key`;
+
+    /** The first error of each call, by a server whose environment is `env`. */
+    async function errorsOf(env: Record<string, string>) {
+      const server = createLocalServer({ env, rootDir: await makeTempDir() });
+      const { client, close } = await connectClient(server);
+      try {
+        const calls = [
+          client.callTool({ name: "mthds_list_methods", arguments: {} }),
+          client.callTool({ name: "mthds_validate", arguments: { method_id: "mt_demo" } }),
+        ];
+        return (await Promise.all(calls)).map(
+          (result) =>
+            (result.structuredContent as { errors: { location?: string; hint?: string }[] })
+              .errors[0],
+        );
+      } finally {
+        await close();
+      }
+    }
+
+    for (const error of await errorsOf({ PIPELEX_HOME: home })) {
+      expect(error).toMatchObject({ location: "PIPELEX_BASE_URL" });
+      expect(error?.hint).toContain(note);
+      expect(error?.hint).not.toContain("plx_sk_saved");
+    }
+    for (const error of await errorsOf({
+      PIPELEX_HOME: home,
+      PIPELEX_BASE_URL: "https://env.pipelex.test",
+    })) {
+      expect(error).toMatchObject({ location: "PIPELEX_BASE_URL" });
+      expect(error?.hint).not.toContain(".env");
+    }
+  });
 });
 
 function isToolDefinition(value: unknown): value is { name: string } {

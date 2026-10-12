@@ -42,6 +42,7 @@ import {
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
@@ -376,6 +377,8 @@ export interface ValidationContext extends ApiConfig, MethodVersionsAware {
   resolver?: FileResolver;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
   /**
    * The working directory the method's graph page is written under — the same
    * name and meaning as `CodegenContext.saveRoot`. Set, a validation of files
@@ -591,6 +594,7 @@ async function validateRequest(
     const classified = classifyError(err, {
       ...classifyOptions,
       auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
       bundleResources: hasTemplateFiles(request.resources),
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));

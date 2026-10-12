@@ -39,7 +39,13 @@ import {
   toolResultContent,
   validateRunIdRequest,
 } from "./shared.js";
-import type { ApiConfig, AuthErrorTexture, ErrorSummaries, ToolError } from "./shared.js";
+import type {
+  ApiConfig,
+  AuthErrorTexture,
+  BaseUrlSourceTexture,
+  ErrorSummaries,
+  ToolError,
+} from "./shared.js";
 import { errorMessage, resolveSaveDir } from "./workspace-boundary.js";
 
 /**
@@ -287,6 +293,8 @@ export interface ArtifactsContext extends ApiConfig {
   allowHttp?: boolean;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 export function buildArtifactsContext(env = process.env): ArtifactsContext {
@@ -388,7 +396,11 @@ export async function downloadMthdsArtifacts(
     client = artifactClient(context);
     state = await client.getRunResult(input.run_id, { artifacts: DOWNLOAD_RESULT_ARTIFACTS });
   } catch (err) {
-    const error = classifyError(err, { ...RUN_RESULTS_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, {
+      ...RUN_RESULTS_ERROR_OPTIONS,
+      auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
+    });
     return errorResult(summaryForToolError(error, ERROR_SUMMARIES), [error]);
   }
 
@@ -464,7 +476,11 @@ export async function downloadMthdsArtifacts(
       allowHttp: allowsPlainHttp(context),
     });
   } catch (err) {
-    const error = classifyError(err, { ...BULK_RESOLVE_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, {
+      ...BULK_RESOLVE_ERROR_OPTIONS,
+      auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
+    });
     return refusedResult(error, err, output, target.root);
   }
 

@@ -42,6 +42,7 @@ import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ContentImage,
   ErrorSummaries,
   ImageCandidate,
@@ -273,6 +274,8 @@ export interface ImagesContext extends ApiConfig {
   allowHttp?: boolean;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 export function buildImagesContext(env = process.env): ImagesContext {
@@ -335,7 +338,11 @@ export async function showMthdsRunImages(
     client = imagesClient(context);
     state = await client.getRunResult(input.run_id, { artifacts: SHOW_IMAGES_RESULT_ARTIFACTS });
   } catch (err) {
-    const error = classifyError(err, { ...RUN_RESULTS_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, {
+      ...RUN_RESULTS_ERROR_OPTIONS,
+      auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
+    });
     return errorResult(summaryForToolError(error, ERROR_SUMMARIES), [error]);
   }
 
@@ -600,7 +607,11 @@ async function walkCandidates(
       }
       // Not about this reference: the resolve route refused the whole request,
       // or the host is unreachable. Nothing after it can succeed either.
-      const error = classifyError(err, { ...BULK_RESOLVE_ERROR_OPTIONS, auth: context.authError });
+      const error = classifyError(err, {
+        ...BULK_RESOLVE_ERROR_OPTIONS,
+        auth: context.authError,
+        baseUrlSource: context.baseUrlSource,
+      });
       entries.push({ uri: candidate.uri, inlined: false, error });
       wholeRequestError = error;
       stopped = true;
@@ -662,7 +673,11 @@ async function walkCandidates(
         error:
           err instanceof ArtifactFetchError
             ? itemToolError({ code: err.code, detail: err.message }, location)
-            : classifyError(err, { ...BULK_RESOLVE_ERROR_OPTIONS, auth: context.authError }),
+            : classifyError(err, {
+                ...BULK_RESOLVE_ERROR_OPTIONS,
+                auth: context.authError,
+                baseUrlSource: context.baseUrlSource,
+              }),
       });
       continue;
     }

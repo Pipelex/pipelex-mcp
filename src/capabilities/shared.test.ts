@@ -1784,3 +1784,102 @@ describe("createPipelexApiClient", () => {
     expect(await sentAuthorization(undefined)).toBeNull();
   });
 });
+
+describe("classifyError with the base URL's source", () => {
+  const baseUrlSource = {
+    hint: "The PIPELEX_BASE_URL in use was read from `~/.pipelex/.env` beside the saved key.",
+  };
+
+  /** What the SDK throws building a client on a base URL carrying a path: the generic `config` arm. */
+  function refusedBaseUrl(): unknown {
+    try {
+      createPipelexApiClient({ baseUrl: `${DEFAULT_API_URL}/v1` });
+    } catch (err) {
+      return err;
+    }
+    throw new Error("the client took a base URL carrying a path");
+  }
+
+  it("adds the source to the unreachable API's hint, and only when the call carries one", async () => {
+    const unreachableHint =
+      "Start pipelex-api locally or set PIPELEX_BASE_URL to a reachable host-only API base URL.";
+    const err = await unreachable("ECONNREFUSED");
+
+    expect(classifyError(err)).toMatchObject({
+      location: "PIPELEX_BASE_URL",
+      hint: unreachableHint,
+    });
+    expect(classifyError(err, { baseUrlSource })).toEqual({
+      class: "config",
+      location: "PIPELEX_BASE_URL",
+      message: expect.any(String),
+      hint: `${unreachableHint} ${baseUrlSource.hint}`,
+      retryable: true,
+    });
+  });
+
+  it("adds the source to the generic config arm a refused base URL falls to", () => {
+    const err = refusedBaseUrl();
+    expect(err).toBeInstanceOf(RequestArgumentError);
+
+    expect(classifyError(err)).toMatchObject({
+      class: "config",
+      location: "PIPELEX_BASE_URL",
+      hint: "Check PIPELEX_BASE_URL and the submitted request.",
+    });
+    expect(classifyError(err, { baseUrlSource })).toMatchObject({
+      class: "config",
+      location: "PIPELEX_BASE_URL",
+      hint: `Check PIPELEX_BASE_URL and the submitted request. ${baseUrlSource.hint}`,
+    });
+  });
+
+  it("adds the source to a missing or unimplemented route", async () => {
+    const missing = classifyError(await refused(404, { detail: "Not Found" }), {
+      route: "/v1/methods/{id}",
+      baseUrlSource,
+    });
+    expect(missing).toMatchObject({
+      class: "config",
+      location: "PIPELEX_BASE_URL",
+      hint: `Check that PIPELEX_BASE_URL points to a host serving /v1/methods/{id}. ${baseUrlSource.hint}`,
+    });
+
+    const unimplemented = classifyError(await refused(501, { detail: "Not Implemented" }), {
+      route: "/v1/methods/{id}",
+      baseUrlSource,
+    });
+    expect(unimplemented).toMatchObject({
+      location: "PIPELEX_BASE_URL",
+      hint: `The deployment PIPELEX_BASE_URL points at does not implement /v1/methods/{id}. ${baseUrlSource.hint}`,
+    });
+  });
+
+  it("adds the source once to a wrapped unreachable API on the upload leg", async () => {
+    const err = await uploadFailure(() =>
+      Promise.reject(
+        new TypeError("fetch failed", {
+          cause: Object.assign(new Error("ECONNREFUSED"), { code: "ECONNREFUSED" }),
+        }),
+      ),
+    );
+    expect(err).toBeInstanceOf(UploadTransportError);
+
+    const hint = classifyError(err, { baseUrlSource }).hint ?? "";
+    expect(hint.split(baseUrlSource.hint)).toHaveLength(2);
+    expect(hint.endsWith(baseUrlSource.hint)).toBe(true);
+  });
+
+  it("leaves every failure the base URL cannot fix as it is", async () => {
+    const failures = [
+      await refused(401, { detail: "Missing API key" }),
+      await refused(500, { detail: "Server fault" }),
+      new ApiUnreachableError("no answer in time", DEFAULT_API_URL, "ABORT_TIMEOUT"),
+      new RequestArgumentError("No run source given."),
+    ];
+
+    for (const err of failures) {
+      expect(classifyError(err, { baseUrlSource })).toEqual(classifyError(err));
+    }
+  });
+});

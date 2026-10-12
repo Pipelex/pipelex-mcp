@@ -370,3 +370,89 @@ describe("the auth texture", () => {
     expect(credentials.authError.hint).not.toContain(userHome);
   });
 });
+
+describe("the base URL texture", () => {
+  it("names the file and the origin when the base URL in use is the file's", async () => {
+    const userHome = await makeTempDir();
+    await fs.mkdir(path.join(userHome, ".pipelex"));
+    await fs.writeFile(
+      path.join(userHome, ".pipelex", ".env"),
+      "PIPELEX_API_KEY=plx_sk_file_secret\nPIPELEX_BASE_URL=https://user:hunter2@api-dev.pipelex.com/v1?token=abc\n",
+    );
+
+    const credentials = await resolveWorkshopCredentials(
+      { PIPELEX_BASE_URL: "" },
+      { homedir: homedirAt(userHome) },
+    );
+
+    expect(credentials.source).toBe("file");
+    expect(credentials.baseUrlSource).toEqual({
+      hint: `The PIPELEX_BASE_URL in use, https://api-dev.pipelex.com, was read from \`${path.join("~", ".pipelex", ".env")}\` beside the saved key: fix it there, or set PIPELEX_BASE_URL in the host's configuration, which overrides the file's.`,
+    });
+    for (const leak of ["secret", "hunter2", "user", "token", "abc", "/v1", userHome]) {
+      expect(credentials.baseUrlSource?.hint).not.toContain(leak);
+    }
+  });
+
+  it("names the file without a value when the file's base URL is not an http(s) URL", async () => {
+    const home = await homeWith("PIPELEX_API_KEY=plx_sk_file\nPIPELEX_BASE_URL=localhost:8081\n");
+
+    const credentials = await resolveWorkshopCredentials(
+      { PIPELEX_HOME: home },
+      { homedir: homedirAt("/nowhere") },
+    );
+
+    expect(credentials.baseUrlSource?.hint).toMatch(
+      new RegExp(
+        `^The PIPELEX_BASE_URL in use was read from \`${escapeRegExp(path.join(home, ".env"))}\``,
+      ),
+    );
+    expect(credentials.baseUrlSource?.hint).not.toContain("localhost");
+  });
+
+  it("is absent when the environment sets the base URL, even beside the file's key", async () => {
+    const home = await homeWith(
+      "PIPELEX_API_KEY=plx_sk_file\nPIPELEX_BASE_URL=https://api-dev.pipelex.com\n",
+    );
+
+    const credentials = await resolveWorkshopCredentials({
+      PIPELEX_HOME: home,
+      PIPELEX_BASE_URL: "http://localhost:8081",
+    });
+
+    expect(credentials).toMatchObject({ source: "file", baseUrl: "http://localhost:8081" });
+    expect(credentials.baseUrlSource).toBeUndefined();
+  });
+
+  it("is absent when the file's key goes to the hosted API by default", async () => {
+    const home = await homeWith("PIPELEX_API_KEY=plx_sk_file\nPIPELEX_BASE_URL=\n");
+
+    const credentials = await resolveWorkshopCredentials({ PIPELEX_HOME: home });
+
+    expect(credentials).toMatchObject({ source: "file", baseUrl: DEFAULT_API_URL });
+    expect(credentials.baseUrlSource).toBeUndefined();
+  });
+
+  it("is absent when the key is the host's, or when there is none", async () => {
+    // The file's base URL never comes with the host's key, nor goes out alone.
+    const saved = await homeWith(
+      "PIPELEX_API_KEY=plx_sk_file\nPIPELEX_BASE_URL=https://api-dev.pipelex.com\n",
+    );
+    const keyless = await homeWith("PIPELEX_BASE_URL=https://api-dev.pipelex.com\n");
+
+    const host = await resolveWorkshopCredentials({
+      PIPELEX_API_KEY: "plx_sk_host",
+      PIPELEX_HOME: saved,
+    });
+    const none = await resolveWorkshopCredentials({ PIPELEX_HOME: keyless });
+
+    expect(host.source).toBe("host");
+    expect(host.baseUrlSource).toBeUndefined();
+    expect(none.source).toBe("none");
+    expect(none.baseUrlSource).toBeUndefined();
+  });
+});
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}

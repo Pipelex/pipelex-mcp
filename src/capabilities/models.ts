@@ -43,6 +43,7 @@ import {
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
   ToolError,
@@ -268,6 +269,8 @@ export interface ModelsContext extends ApiConfig {
   client?: ModelsClient;
   /** Deployment-specific auth-failure texture; the `PIPELEX_API_KEY` wording by default. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 export function buildModelsContext(env = process.env): ModelsContext {
@@ -746,6 +749,7 @@ function listingErrorOptions(context: ModelsContext, err: unknown): ClassifyErro
       ? orglessTexture(context)
       : { location: "category", hint: OLDER_PROTOCOL_HINT },
     auth: context.authError,
+    baseUrlSource: context.baseUrlSource,
   };
 }
 
@@ -814,7 +818,12 @@ function checkErrorOptions(
           class: "config",
           hint: "The runner refused the check request this tool built, which happens when it serves another version of /v1/models/check; the message says what it refused.",
         };
-  return { route: "/v1/models/check", badRequest, auth: context.authError };
+  return {
+    route: "/v1/models/check",
+    badRequest,
+    auth: context.authError,
+    baseUrlSource: context.baseUrlSource,
+  };
 }
 
 function isOrglessRefusal(err: unknown): boolean {

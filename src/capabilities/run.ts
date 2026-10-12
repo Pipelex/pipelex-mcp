@@ -56,6 +56,7 @@ import {
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
@@ -526,6 +527,8 @@ export interface RunContext extends ApiConfig, MethodVersionsAware {
   inputsResolver?: FileResolver;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 export function buildRunContext(env = process.env): RunContext {
@@ -1361,6 +1364,7 @@ export async function startMthdsRun(
     const classified = classifyStartError(err, {
       ...classifyOptions,
       auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
       bundleResources: hasTemplateFiles(request.resources),
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
@@ -1405,7 +1409,11 @@ export async function getMthdsRunStatus(
     const read = await runClient(context).getRunStatus(input.run_id);
     return statusResult(read);
   } catch (err) {
-    const error = classifyError(err, { ...RUN_STATUS_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, {
+      ...RUN_STATUS_ERROR_OPTIONS,
+      auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
+    });
     return statusErrorResult(statusSummaryForError(error), [error]);
   }
 }
@@ -1435,7 +1443,11 @@ export async function getMthdsRunResults(
       artifacts: RUN_RESULTS_ARTIFACTS,
     });
   } catch (err) {
-    const error = classifyError(err, { ...RUN_RESULTS_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, {
+      ...RUN_RESULTS_ERROR_OPTIONS,
+      auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
+    });
     return resultsErrorResult(resultsSummaryForError(error), [error]);
   }
   const failedRead =

@@ -35,6 +35,7 @@ import {
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
@@ -177,6 +178,8 @@ export interface InputsContext extends ApiConfig, MethodVersionsAware {
   resolver?: FileResolver;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 export function buildInputsContext(env = process.env): InputsContext {
@@ -313,6 +316,7 @@ export async function buildMthdsInputs(
     const classified = classifyError(err, {
       ...inputsErrorOptions(request),
       auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
       bundleResources: hasTemplateFiles(request.resources),
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));

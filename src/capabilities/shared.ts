@@ -592,14 +592,15 @@ export interface ApiConfig {
  * What the workshop may override on every capability context that talks to
  * the API. Its tool table applies it to the whole context set, since that
  * table is where the list of contexts lives. The workshop patches `appInfo`
- * once, when its server is built, and `baseUrl`, `apiKey` and `authError` at
- * the start of every tool call, from its host's environment and the saved key
- * in the home `.env` (`src/credentials.ts`).
+ * once, when its server is built, and `baseUrl`, `apiKey`, `authError` and
+ * `baseUrlSource` at the start of every tool call, from its host's environment
+ * and the saved key in the home `.env` (`src/credentials.ts`).
  */
 export interface ApiContextPatch {
   baseUrl?: string;
   apiKey?: string;
   authError?: AuthErrorTexture;
+  baseUrlSource?: BaseUrlSourceTexture;
   appInfo?: AppInfoSource;
 }
 
@@ -1018,6 +1019,22 @@ export interface ClassifyErrorOptions {
     hint: string;
   };
   /**
+   * Per-call texture for every failure located at `PIPELEX_BASE_URL` (an
+   * unreachable API, a missing run lifecycle or upload route, a route the
+   * deployment does not serve or implement, and a `config` failure nothing
+   * else words, such as a base URL the SDK refused before sending): a
+   * sentence appended to that failure's hint, saying where the base URL came
+   * from. Capabilities thread it from their context's `baseUrlSource` field,
+   * beside `auth`. The workshop sets it only on a tool call whose base URL it
+   * read from the home `.env` beside the saved key (`src/credentials.ts`),
+   * since a hint naming `PIPELEX_BASE_URL` alone would send the user to an
+   * environment variable the host never set. Unset, every such hint names
+   * `PIPELEX_BASE_URL` alone.
+   */
+  baseUrlSource?: {
+    hint: string;
+  };
+  /**
    * Per-route hint override for a 403 specifically. The generic 401/403 arm
    * says "check your credential", which is right for a rejected key or an
    * expired session and wrong for a route a deployment gates beyond
@@ -1078,6 +1095,15 @@ export interface ClassifyErrorOptions {
 
 /** The auth-failure texture a capability context can carry. */
 export type AuthErrorTexture = NonNullable<ClassifyErrorOptions["auth"]>;
+
+/** The base-URL-failure texture a capability context can carry. */
+export type BaseUrlSourceTexture = NonNullable<ClassifyErrorOptions["baseUrlSource"]>;
+
+/**
+ * Where every failure the base URL can fix locates, and the one location
+ * {@link ClassifyErrorOptions.baseUrlSource} annotates.
+ */
+const BASE_URL_LOCATION = "PIPELEX_BASE_URL";
 
 const DEFAULT_BAD_REQUEST: NonNullable<ClassifyErrorOptions["badRequest"]> = {
   location: "files",
@@ -1170,8 +1196,31 @@ function toolError(verdict: ToolVerdict, texture: ToolTexture): ToolError {
  * `PipelineRequestError` from `mthds` is `config`, and a fault nothing names is
  * retryable `runtime`, since wrongly stopping a live follow is worse than one
  * more read.
+ *
+ * Whatever the arm, a failure located at `PIPELEX_BASE_URL` then takes the
+ * call's {@link ClassifyErrorOptions.baseUrlSource} sentence, applied here
+ * once rather than in each arm, so an arm added later cannot miss it.
  */
 export function classifyError(err: unknown, options: ClassifyErrorOptions = {}): ToolError {
+  return withBaseUrlSource(classifyFailure(err, options), options.baseUrlSource);
+}
+
+/**
+ * Append the base URL's source to a failure located at `PIPELEX_BASE_URL`;
+ * every other failure, and every call without the texture, is left as it is.
+ */
+function withBaseUrlSource(error: ToolError, source: BaseUrlSourceTexture | undefined): ToolError {
+  if (source === undefined || error.location !== BASE_URL_LOCATION) return error;
+  return toolError(error, {
+    kind: error.kind,
+    location: error.location,
+    message: error.message,
+    hint: error.hint === undefined ? source.hint : `${error.hint} ${source.hint}`,
+  });
+}
+
+/** {@link classifyError} without the base URL's source, which only the outermost call appends. */
+function classifyFailure(err: unknown, options: ClassifyErrorOptions): ToolError {
   if (err instanceof ApiResponseError) return classifyApiResponseError(err, options);
   if (err instanceof UploadTransportError) return classifyUploadTransportError(err, options);
   if (err instanceof PipelexRequestError) {
@@ -1219,7 +1268,7 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
       };
     }
     return {
-      location: "PIPELEX_BASE_URL",
+      location: BASE_URL_LOCATION,
       message,
       hint: "Start pipelex-api locally or set PIPELEX_BASE_URL to a reachable host-only API base URL.",
     };
@@ -1229,7 +1278,7 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
   // lifecycle (a bare pipelex-api runner).
   if (err instanceof RunLifecycleUnavailableError) {
     return {
-      location: "PIPELEX_BASE_URL",
+      location: BASE_URL_LOCATION,
       message,
       hint: "Durable runs need the hosted Pipelex API; point PIPELEX_BASE_URL at a deployment serving /v1/runs/* (a bare pipelex-api runner does not).",
     };
@@ -1296,7 +1345,7 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
   // The configured deployment has no upload route (a bare pipelex-api runner).
   if (err instanceof UnsupportedUploadCapabilityError) {
     return {
-      location: "PIPELEX_BASE_URL",
+      location: BASE_URL_LOCATION,
       message,
       hint: "The configured Pipelex deployment has no /v1/upload route. Point PIPELEX_BASE_URL at the hosted Pipelex API, or pass assets as http(s) URLs / pipelex-storage:// references.",
     };
@@ -1372,7 +1421,7 @@ function genericTexture(verdict: ToolVerdict, message: string): ToolTexture {
   switch (verdict.class) {
     case "config":
       return {
-        location: "PIPELEX_BASE_URL",
+        location: BASE_URL_LOCATION,
         message,
         hint: "Check PIPELEX_BASE_URL and the submitted request.",
       };
@@ -1404,7 +1453,7 @@ function classifyUploadTransportError(
     cause instanceof ApiUnreachableError ||
     (cause instanceof ApiResponseError && cause.status === 402)
   ) {
-    return classifyError(cause, options);
+    return classifyFailure(cause, options);
   }
   const verdict = toolVerdictOf(err);
   if (verdict.retryable) {
@@ -1570,7 +1619,7 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     return toolError(
       { ...verdict, class: "config" },
       {
-        location: "PIPELEX_BASE_URL",
+        location: BASE_URL_LOCATION,
         message,
         hint: `Check that PIPELEX_BASE_URL points to a host serving ${route}.`,
       },
@@ -1619,7 +1668,7 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
 
   if (err.status === 501) {
     return toolError(verdict, {
-      location: "PIPELEX_BASE_URL",
+      location: BASE_URL_LOCATION,
       message,
       hint: `The deployment PIPELEX_BASE_URL points at does not implement ${route}.`,
     });

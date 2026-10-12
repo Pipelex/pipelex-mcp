@@ -56,6 +56,7 @@ import {
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
@@ -432,6 +433,8 @@ export interface CatalogWriteContext extends ApiConfig {
   /** The validation capability these saves run the bundle through — `mthds_validate`'s own. */
   validation: ValidationContext;
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 export function buildCatalogWriteContext(env = process.env): CatalogWriteContext {
@@ -857,6 +860,7 @@ async function saveToCatalog(
     const error = classifyError(err, {
       ...(targetId === undefined ? CREATE_ERROR_OPTIONS : DRAFT_ERROR_OPTIONS),
       auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
     });
     return saveError(summaryForToolError(error, SAVE_ERROR_SUMMARIES), [error]);
   }
@@ -880,7 +884,11 @@ async function saveToCatalog(
     try {
       stored = await client.createMethod(writeInput);
     } catch (err) {
-      const error = classifyError(err, { ...CREATE_ERROR_OPTIONS, auth: context.authError });
+      const error = classifyError(err, {
+        ...CREATE_ERROR_OPTIONS,
+        auth: context.authError,
+        baseUrlSource: context.baseUrlSource,
+      });
       return saveError(summaryForToolError(error, SAVE_ERROR_SUMMARIES), [
         notRetryableCreate(err, error),
       ]);
@@ -904,7 +912,11 @@ async function saveToCatalog(
     try {
       stored = await client.writeDraft(targetId, draftInput);
     } catch (err) {
-      const error = classifyError(err, { ...DRAFT_ERROR_OPTIONS, auth: context.authError });
+      const error = classifyError(err, {
+        ...DRAFT_ERROR_OPTIONS,
+        auth: context.authError,
+        baseUrlSource: context.baseUrlSource,
+      });
       const reported =
         error.location === "expected_updated_at" && token !== undefined
           ? await draftConflictError(error, client, targetId, {
@@ -948,7 +960,11 @@ async function saveToCatalog(
         stored = { ...stored, name: renamed.name };
         saved = "renamed";
       } catch (err) {
-        renameError = classifyError(err, { ...RENAME_ERROR_OPTIONS, auth: context.authError });
+        renameError = classifyError(err, {
+          ...RENAME_ERROR_OPTIONS,
+          auth: context.authError,
+          baseUrlSource: context.baseUrlSource,
+        });
       }
     }
   }
@@ -1632,7 +1648,11 @@ export async function getMthdsMethod(
     if (err instanceof EmptyMethodSourceError) {
       return emptySourceError();
     }
-    const error = classifyError(err, { ...GET_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, {
+      ...GET_ERROR_OPTIONS,
+      auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
+    });
     return getError(summaryForToolError(error, GET_ERROR_SUMMARIES), [error]);
   }
 
@@ -1685,7 +1705,11 @@ function versionReadError(
   wanted: number,
   context: CatalogWriteContext,
 ): GetMethodResult {
-  const error = classifyError(err, { ...GET_ERROR_OPTIONS, auth: context.authError });
+  const error = classifyError(err, {
+    ...GET_ERROR_OPTIONS,
+    auth: context.authError,
+    baseUrlSource: context.baseUrlSource,
+  });
   if (!(err instanceof ApiResponseError) || err.code !== "method_version_not_found") {
     return getError(summaryForToolError(error, GET_ERROR_SUMMARIES), [error]);
   }

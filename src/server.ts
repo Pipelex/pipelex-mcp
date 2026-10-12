@@ -147,14 +147,15 @@ function registerLocalTool(
  * The contexts one tool call runs over. The key and its base URL are decided
  * afresh for every call, so a key saved in the home `.env` while the session
  * runs is used from the next call, and every capability keeps reading plain
- * `baseUrl` and `apiKey` fields. All three are written on every call, `apiKey`
- * included when it is `undefined`, so no call inherits another's.
+ * `baseUrl` and `apiKey` fields. Every field is written on every call, `apiKey`
+ * and `baseUrlSource` included when they are `undefined`, so no call inherits
+ * another's.
  */
 async function callContexts(
   contexts: LocalToolContexts,
   credentials: CredentialsResolver | undefined,
 ): Promise<LocalToolContexts> {
   if (credentials === undefined) return contexts;
-  const { baseUrl, apiKey, authError } = await credentials();
-  return patchLocalApiContexts(contexts, { baseUrl, apiKey, authError });
+  const { baseUrl, apiKey, authError, baseUrlSource } = await credentials();
+  return patchLocalApiContexts(contexts, { baseUrl, apiKey, authError, baseUrlSource });
 }

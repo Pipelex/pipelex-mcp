@@ -13,6 +13,7 @@ import {
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
   ToolError,
@@ -112,6 +113,8 @@ export interface CatalogContext extends ApiConfig {
   client?: CatalogClient;
   /** Deployment-specific auth-failure texture; env-var wording by default. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 export function buildCatalogContext(env = process.env): CatalogContext {
@@ -393,6 +396,7 @@ function catalogErrorOptions(
             hint: `The cursor was rejected — it may be stale, truncated, or from a different catalog. Drop it and call ${WORKSHOP_TOOL_NAMES.listMethods} again from the start.`,
           },
     auth: context.authError,
+    baseUrlSource: context.baseUrlSource,
   };
 }
 

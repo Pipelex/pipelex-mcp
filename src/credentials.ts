@@ -4,9 +4,11 @@
  * `pipelex login` saves its key as `PIPELEX_API_KEY` in `~/.pipelex/.env`, or
  * in the `.env` of `PIPELEX_HOME` when that is set, and the workshop reads the
  * same file whenever its host passes no key. This module owns that file: it
- * locates the home directory, reads the file, and decides each tool call's key,
- * base URL and auth-failure texture. The login's writer belongs here too, so
- * that the file is read and written by one module under one set of rules.
+ * locates the home directory, reads the file, and decides each tool call's key
+ * and base URL, with the textures its failures carry: which key an auth
+ * failure was about, and, when the base URL is the file's, that a failure at
+ * `PIPELEX_BASE_URL` is about the file. The login's writer belongs here too,
+ * so that the file is read and written by one module under one set of rules.
  *
  * The rules, and where they part from the pipelex runtime's on purpose:
  *
@@ -32,8 +34,9 @@
  *   for the same reason.
  *
  * Nothing here logs, and no text it writes quotes the key or the file's
- * contents. The API is named by its origin alone, so a base URL carrying
- * credentials or a query never reaches the model.
+ * contents. The API is named by its origin alone, the file's base URL
+ * included, so a base URL carrying credentials or a query never reaches the
+ * model.
  */
 
 import { promises as fs } from "node:fs";
@@ -42,7 +45,7 @@ import path from "node:path";
 import { parseEnv } from "node:util";
 
 import { DEFAULT_API_URL } from "./capabilities/shared.js";
-import type { AuthErrorTexture } from "./capabilities/shared.js";
+import type { AuthErrorTexture, BaseUrlSourceTexture } from "./capabilities/shared.js";
 
 /** The command a user runs to save a key, in the one spelling every text gives it. */
 export const LOGIN_COMMAND = "npx -y @pipelex/mcp@latest login";
@@ -149,12 +152,19 @@ function isNotFound(err: unknown): boolean {
 /** Where a call's key came from: the host's environment, the home `.env`, or nowhere. */
 export type KeySource = "host" | "file" | "none";
 
-/** One tool call's API coordinates, and the auth-failure texture that says which key failed. */
+/** One tool call's API coordinates, and the textures that say where they came from when a call fails. */
 export interface WorkshopCredentials {
   baseUrl: string;
   apiKey?: string;
   source: KeySource;
   authError: AuthErrorTexture;
+  /**
+   * Set only when the base URL is the home `.env`'s: the key is the file's and
+   * the environment sets no `PIPELEX_BASE_URL`. A failure at
+   * `PIPELEX_BASE_URL` then says the value came from the file, which a hint
+   * naming the variable alone would hide.
+   */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 /** Resolves one tool call's credentials. The workshop calls it at the start of every call. */
@@ -191,11 +201,16 @@ export async function resolveWorkshopCredentials(
   const fileKey = read.status === "read" ? read.values.PIPELEX_API_KEY || undefined : undefined;
   if (read.status === "read" && fileKey !== undefined) {
     const baseUrl = fileBranchBaseUrl(env, read.values);
+    const file = displayPath(read.file, homedir);
+    // The file's base URL is the one in use exactly when the environment sets
+    // none and the file sets one, as `fileBranchBaseUrl` decides it.
+    const baseUrlFromFile = !env.PIPELEX_BASE_URL && Boolean(read.values.PIPELEX_BASE_URL);
     return {
       baseUrl,
       apiKey: fileKey,
       source: "file",
-      authError: fileKeyTexture(displayPath(read.file, homedir), baseUrl),
+      authError: fileKeyTexture(file, baseUrl),
+      ...(baseUrlFromFile ? { baseUrlSource: fileBaseUrlTexture(file, baseUrl) } : {}),
     };
   }
 
@@ -241,6 +256,22 @@ function fileKeyTexture(file: string, baseUrl: string): AuthErrorTexture {
   };
 }
 
+/**
+ * The sentence a failure at `PIPELEX_BASE_URL` gains when the base URL is the
+ * file's: where it was read, and that the host's configuration overrides it.
+ * The base URL is named by its origin alone, or not at all when it has none.
+ */
+function fileBaseUrlTexture(file: string, baseUrl: string): BaseUrlSourceTexture {
+  const origin = httpOrigin(baseUrl);
+  const subject =
+    origin === undefined
+      ? "The PIPELEX_BASE_URL in use"
+      : `The PIPELEX_BASE_URL in use, ${origin},`;
+  return {
+    hint: `${subject} was read from \`${file}\` beside the saved key: fix it there, or set PIPELEX_BASE_URL in the host's configuration, which overrides the file's.`,
+  };
+}
+
 function noKeyTexture(read: HomeEnvRead, homedir: () => string): AuthErrorTexture {
   const hint =
     read.status === "relative_home"
@@ -257,13 +288,18 @@ function noKeyTexture(read: HomeEnvRead, homedir: () => string): AuthErrorTextur
  * shown at all.
  */
 export function apiOrigin(baseUrl: string): string {
+  return httpOrigin(baseUrl) ?? "the configured Pipelex API";
+}
+
+/** The origin of an http(s) URL, or `undefined` for any other value. */
+function httpOrigin(baseUrl: string): string | undefined {
   try {
     const url = new URL(baseUrl);
     if (url.protocol === "http:" || url.protocol === "https:") return url.origin;
   } catch {
-    // Not a URL: named generically below.
+    // Not a URL: it has no origin to show.
   }
-  return "the configured Pipelex API";
+  return undefined;
 }
 
 /** A path as a hint shows it: `~/…` under the user's home directory, absolute otherwise. */
