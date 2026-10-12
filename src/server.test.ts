@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -26,6 +27,7 @@ import {
   sentencesAbout,
 } from "./shell-test-support.js";
 import pkg from "../package.json" with { type: "json" };
+import { LOGIN_USAGE } from "./login/command.js";
 import { LOCAL_SERVER_INFO, createLocalServer } from "./server.js";
 import * as localTools from "./tools.js";
 import { buildLocalToolContexts, localToolDefinitions } from "./tools.js";
@@ -551,33 +553,79 @@ describe("the workshop's contexts and dispatch", () => {
     }
   });
 
-  it("handshakes through the actual stdio entry point without diagnostic output", async () => {
-    const transport = new StdioClientTransport({
-      command: process.execPath,
-      args: ["--import", "tsx", fileURLToPath(new URL("./main.ts", import.meta.url))],
-      cwd: process.cwd(),
-      env: { ...process.env, PIPELEX_BASE_URL: "http://127.0.0.1:8081" },
-      stderr: "pipe",
-    });
-    let stderrText = "";
-    transport.stderr?.on("data", (chunk) => {
-      stderrText += chunk.toString();
-    });
-    const client = new Client({ name: "pipelex-mcp-stdio-test", version: "0.0.0" });
+  // `login` is the one subcommand; any other argument list, a stray argument
+  // a host registration passes included, starts the server as it always did.
+  it.each([[[]], [["--stray", "serve"]]])(
+    "handshakes through the actual stdio entry point without diagnostic output, with arguments %j",
+    async (extraArgs: string[]) => {
+      const transport = new StdioClientTransport({
+        command: process.execPath,
+        args: [
+          "--import",
+          "tsx",
+          fileURLToPath(new URL("./main.ts", import.meta.url)),
+          ...extraArgs,
+        ],
+        cwd: process.cwd(),
+        env: { ...process.env, PIPELEX_BASE_URL: "http://127.0.0.1:8081" },
+        stderr: "pipe",
+      });
+      let stderrText = "";
+      transport.stderr?.on("data", (chunk) => {
+        stderrText += chunk.toString();
+      });
+      const client = new Client({ name: "pipelex-mcp-stdio-test", version: "0.0.0" });
 
-    try {
-      await client.connect(transport);
-      const listed = await client.listTools();
+      try {
+        await client.connect(transport);
+        const listed = await client.listTools();
 
-      expect(listed.tools.map((tool) => tool.name)).toEqual(
-        localToolDefinitions.map((definition) => definition.name),
-      );
-      expect(client.getInstructions()).toContain("Prefer `{ path: string }` files");
-    } finally {
-      await client.close();
-    }
+        expect(listed.tools.map((tool) => tool.name)).toEqual(
+          localToolDefinitions.map((definition) => definition.name),
+        );
+        expect(client.getInstructions()).toContain("Prefer `{ path: string }` files");
+      } finally {
+        await client.close();
+      }
 
-    expect(stderrText).toBe("");
+      expect(stderrText).toBe("");
+    },
+    10_000,
+  );
+});
+
+/** Run the real entry point to its exit, as a person runs it in a terminal. */
+function runEntryPoint(
+  args: string[],
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      ["--import", "tsx", fileURLToPath(new URL("./main.ts", import.meta.url)), ...args],
+      { cwd: process.cwd(), env: process.env, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk.toString()));
+    child.stderr.on("data", (chunk) => (stderr += chunk.toString()));
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+describe("the entry point's login dispatch", () => {
+  it("runs login --help and exits 0, starting no server", async () => {
+    const run = await runEntryPoint(["login", "--help"]);
+
+    expect(run).toEqual({ code: 0, stdout: LOGIN_USAGE, stderr: "" });
+  }, 10_000);
+
+  it("refuses a mistyped login option with the usage and a non-zero exit, instead of waiting on stdin", async () => {
+    const run = await runEntryPoint(["login", "--paset"]);
+
+    expect(run.code).toBe(2);
+    expect(run.stdout).toBe("");
+    expect(run.stderr).toBe(`Unknown option for login: --paset.\n\n${LOGIN_USAGE}`);
   }, 10_000);
 });
 

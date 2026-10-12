@@ -2,6 +2,8 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { parseEnv } from "node:util";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_API_URL } from "./capabilities/shared.js";
@@ -10,10 +12,14 @@ import {
   MAX_HOME_ENV_BYTES,
   RELATIVE_HOME_SENTENCE,
   apiOrigin,
+  checkHomeEnvWritable,
   credentialsResolver,
+  displayPath,
+  isWellFormedApiKey,
   readHomeEnv,
   resolvePipelexHome,
   resolveWorkshopCredentials,
+  saveApiKeyToHomeEnv,
 } from "./credentials.js";
 
 const tempDirs: string[] = [];
@@ -456,3 +462,324 @@ describe("the base URL texture", () => {
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+describe("saveApiKeyToHomeEnv", () => {
+  const KEY = "plx_sk_new.Key_~-1";
+  const POSIX = process.platform !== "win32";
+
+  async function modeOf(file: string): Promise<number> {
+    return (await fs.stat(file)).mode & 0o777;
+  }
+
+  /** The names in a directory that are not the files a test put there: a leftover temporary file. */
+  async function leftovers(dir: string, expected: string[]): Promise<string[]> {
+    return (await fs.readdir(dir)).filter((name) => !expected.includes(name));
+  }
+
+  it("creates the home directory and the file, with the key alone at mode 0600", async () => {
+    const home = path.join(await makeTempDir(), "nested", "pipelex-home");
+
+    const saved = await saveApiKeyToHomeEnv({ PIPELEX_HOME: home }, KEY);
+
+    expect(saved).toEqual({ status: "saved", file: path.join(home, ".env") });
+    expect(await fs.readFile(path.join(home, ".env"), "utf8")).toBe(`PIPELEX_API_KEY=${KEY}\n`);
+    if (POSIX) expect(await modeOf(path.join(home, ".env"))).toBe(0o600);
+    expect(await leftovers(home, [".env"])).toEqual([]);
+  });
+
+  it("saves in ~/.pipelex/.env when PIPELEX_HOME is unset, and a reader then finds the key", async () => {
+    const userHome = await makeTempDir();
+    const homedir = homedirAt(userHome);
+
+    const saved = await saveApiKeyToHomeEnv({}, KEY, { homedir });
+    const credentials = await resolveWorkshopCredentials({}, { homedir });
+
+    expect(saved).toEqual({ status: "saved", file: path.join(userHome, ".pipelex", ".env") });
+    expect(credentials).toMatchObject({ apiKey: KEY, source: "file" });
+    expect(displayPath(path.join(userHome, ".pipelex", ".env"), homedir)).toBe(
+      `~${path.sep}${path.join(".pipelex", ".env")}`,
+    );
+  });
+
+  it("replaces every assignment of the key in place, export ones included, and keeps every other line", async () => {
+    const before = [
+      "# Pipelex credentials",
+      "PIPELEX_BASE_URL=https://api-dev.pipelex.com",
+      "PIPELEX_API_KEY=plx_sk_old_one",
+      "",
+      "export PIPELEX_API_KEY=plx_sk_old_two # from a shell",
+      '  PIPELEX_API_KEY = "plx_sk_old_three"',
+      "# PIPELEX_API_KEY=plx_sk_commented_out",
+      "OPENAI_API_KEY='sk-other' # a comment",
+      "PIPELEX_API_KEY_BACKUP=plx_sk_kept",
+      "",
+    ].join("\n");
+    const home = await homeWith(before);
+
+    const saved = await saveApiKeyToHomeEnv({ PIPELEX_HOME: home }, KEY);
+
+    expect(saved.status).toBe("saved");
+    expect(await fs.readFile(path.join(home, ".env"), "utf8")).toBe(
+      [
+        "# Pipelex credentials",
+        "PIPELEX_BASE_URL=https://api-dev.pipelex.com",
+        `PIPELEX_API_KEY=${KEY}`,
+        "",
+        `export PIPELEX_API_KEY=${KEY}`,
+        `PIPELEX_API_KEY=${KEY}`,
+        "# PIPELEX_API_KEY=plx_sk_commented_out",
+        "OPENAI_API_KEY='sk-other' # a comment",
+        "PIPELEX_API_KEY_BACKUP=plx_sk_kept",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("appends the key when the file holds none, ending an unterminated last line first", async () => {
+    const home = await homeWith("PIPELEX_BASE_URL=https://api-dev.pipelex.com");
+
+    await saveApiKeyToHomeEnv({ PIPELEX_HOME: home }, KEY);
+
+    expect(await fs.readFile(path.join(home, ".env"), "utf8")).toBe(
+      `PIPELEX_BASE_URL=https://api-dev.pipelex.com\nPIPELEX_API_KEY=${KEY}\n`,
+    );
+  });
+
+  it("keeps a file's CRLF line endings and its byte-order mark", async () => {
+    const home = await homeWith("\uFEFFA=1\r\nPIPELEX_API_KEY=plx_sk_old\r\nB=2\r\n");
+
+    await saveApiKeyToHomeEnv({ PIPELEX_HOME: home }, KEY);
+
+    expect(await fs.readFile(path.join(home, ".env"), "utf8")).toBe(
+      `\uFEFFA=1\r\nPIPELEX_API_KEY=${KEY}\r\nB=2\r\n`,
+    );
+  });
+
+  it("never takes a line inside another variable's quoted value for an assignment", async () => {
+    const before = 'NOTE="first line\nPIPELEX_API_KEY=plx_sk_inside_a_value\nlast line"\nZ=1\n';
+    const home = await homeWith(before);
+
+    await saveApiKeyToHomeEnv({ PIPELEX_HOME: home }, KEY);
+    const after = await fs.readFile(path.join(home, ".env"), "utf8");
+
+    expect(after).toBe(`${before}PIPELEX_API_KEY=${KEY}\n`);
+    expect(parseEnv(after)).toEqual({
+      NOTE: "first line\nPIPELEX_API_KEY=plx_sk_inside_a_value\nlast line",
+      Z: "1",
+      PIPELEX_API_KEY: KEY,
+    });
+  });
+
+  it("replaces an old multi-line value of the key whole", async () => {
+    const home = await homeWith('A=1\nPIPELEX_API_KEY="plx_sk_\nbroken"\nB=2\n');
+
+    await saveApiKeyToHomeEnv({ PIPELEX_HOME: home }, KEY);
+
+    expect(await fs.readFile(path.join(home, ".env"), "utf8")).toBe(
+      `A=1\nPIPELEX_API_KEY=${KEY}\nB=2\n`,
+    );
+  });
+
+  it.skipIf(!POSIX)("tightens a file others could read to 0600", async () => {
+    const home = await homeWith("A=1\n");
+    await fs.chmod(path.join(home, ".env"), 0o644);
+
+    await saveApiKeyToHomeEnv({ PIPELEX_HOME: home }, KEY);
+
+    expect(await modeOf(path.join(home, ".env"))).toBe(0o600);
+  });
+
+  it.skipIf(!POSIX)(
+    "keeps a symlinked .env a link, and rewrites the file it points to",
+    async () => {
+      const dotfiles = await makeTempDir();
+      const target = path.join(dotfiles, "pipelex.env");
+      await fs.writeFile(target, "A=1\n");
+      const home = await makeTempDir();
+      await fs.symlink(target, path.join(home, ".env"));
+
+      const saved = await saveApiKeyToHomeEnv({ PIPELEX_HOME: home }, KEY);
+
+      expect(saved).toEqual({ status: "saved", file: path.join(home, ".env") });
+      expect((await fs.lstat(path.join(home, ".env"))).isSymbolicLink()).toBe(true);
+      expect(await fs.readFile(target, "utf8")).toBe(`A=1\nPIPELEX_API_KEY=${KEY}\n`);
+      expect(await modeOf(target)).toBe(0o600);
+      expect(await leftovers(dotfiles, ["pipelex.env"])).toEqual([]);
+    },
+  );
+
+  it.skipIf(!POSIX)(
+    "refuses a symlinked .env whose target does not exist, and leaves the link",
+    async () => {
+      const home = await makeTempDir();
+      await fs.symlink(path.join(home, "missing.env"), path.join(home, ".env"));
+
+      const saved = await saveApiKeyToHomeEnv({ PIPELEX_HOME: home }, KEY);
+
+      expect(saved).toMatchObject({ status: "failed", file: path.join(home, ".env") });
+      expect(saved.status === "failed" && saved.reason).toContain("symbolic link");
+      expect((await fs.lstat(path.join(home, ".env"))).isSymbolicLink()).toBe(true);
+    },
+  );
+
+  it("refuses a .env it cannot read or that is past the cap, rather than lose its other lines", async () => {
+    const dirHome = await makeTempDir();
+    await fs.mkdir(path.join(dirHome, ".env"));
+    const bigHome = await makeTempDir();
+    await fs.writeFile(path.join(bigHome, ".env"), "A=1\n");
+    await fs.truncate(path.join(bigHome, ".env"), MAX_HOME_ENV_BYTES + 1);
+    const binaryHome = await makeTempDir();
+    await fs.writeFile(path.join(binaryHome, ".env"), Buffer.from([0x41, 0x3d, 0xff, 0xfe, 0x0a]));
+
+    for (const home of [dirHome, bigHome, binaryHome]) {
+      const saved = await saveApiKeyToHomeEnv({ PIPELEX_HOME: home }, KEY);
+
+      expect(saved, home).toEqual({ status: "unreadable", file: path.join(home, ".env") });
+    }
+    expect((await fs.stat(path.join(bigHome, ".env"))).size).toBe(MAX_HOME_ENV_BYTES + 1);
+    expect(await fs.readFile(path.join(binaryHome, ".env"))).toEqual(
+      Buffer.from([0x41, 0x3d, 0xff, 0xfe, 0x0a]),
+    );
+  });
+
+  it.skipIf(!POSIX || process.getuid?.() === 0)(
+    "refuses a .env without read permission, and leaves it as it was",
+    async () => {
+      const home = await homeWith("A=1\n");
+      await fs.chmod(path.join(home, ".env"), 0o000);
+
+      const saved = await saveApiKeyToHomeEnv({ PIPELEX_HOME: home }, KEY);
+
+      expect(saved).toEqual({ status: "unreadable", file: path.join(home, ".env") });
+      await fs.chmod(path.join(home, ".env"), 0o600);
+      expect(await fs.readFile(path.join(home, ".env"), "utf8")).toBe("A=1\n");
+    },
+  );
+
+  it.skipIf(!POSIX || process.getuid?.() === 0)(
+    "reports a directory it cannot write to, leaving the file and no temporary file behind",
+    async () => {
+      const home = await homeWith("A=1\n");
+      await fs.chmod(home, 0o500);
+
+      try {
+        const saved = await saveApiKeyToHomeEnv({ PIPELEX_HOME: home }, KEY);
+
+        expect(saved).toEqual({
+          status: "failed",
+          file: path.join(home, ".env"),
+          reason: "permission denied",
+        });
+      } finally {
+        await fs.chmod(home, 0o700);
+      }
+      expect(await fs.readFile(path.join(home, ".env"), "utf8")).toBe("A=1\n");
+      expect(await leftovers(home, [".env"])).toEqual([]);
+    },
+  );
+
+  it("reports a home that is a file, without throwing", async () => {
+    const home = path.join(await makeTempDir(), "not-a-directory");
+    await fs.writeFile(home, "A=1\n");
+
+    const saved = await saveApiKeyToHomeEnv({ PIPELEX_HOME: home }, KEY);
+
+    expect(saved.status).not.toBe("saved");
+    expect(await fs.readFile(home, "utf8")).toBe("A=1\n");
+  });
+
+  it("refuses a relative PIPELEX_HOME, and a user with no home directory, without writing", async () => {
+    const homedir = (): string => {
+      throw new Error("no home directory");
+    };
+
+    expect(await saveApiKeyToHomeEnv({ PIPELEX_HOME: "relative/home" }, KEY)).toEqual({
+      status: "relative_home",
+    });
+    expect(await saveApiKeyToHomeEnv({}, KEY, { homedir })).toMatchObject({ status: "failed" });
+  });
+
+  it("refuses a value that is not a Pipelex API key, writing nothing and never quoting it", async () => {
+    const home = await makeTempDir();
+
+    for (const value of [
+      "sk-not-pipelex",
+      "plx_sk_",
+      "plx_sk_has space",
+      'plx_sk_"quoted"',
+      "plx_sk_a#b",
+    ]) {
+      const saved = await saveApiKeyToHomeEnv({ PIPELEX_HOME: home }, value);
+
+      expect(saved, value).toMatchObject({ status: "failed" });
+      expect(JSON.stringify(saved), value).not.toContain(value);
+    }
+    expect(await fs.readdir(home)).toEqual([]);
+  });
+});
+
+describe("isWellFormedApiKey", () => {
+  it("takes plx_sk_ followed by URL-safe characters only", () => {
+    expect(isWellFormedApiKey("plx_sk_abc.DEF_123~-")).toBe(true);
+    for (const value of [
+      "",
+      "plx_sk_",
+      "plx_pk_abc",
+      " plx_sk_abc",
+      "plx_sk_a/b",
+      "plx_sk_a=b",
+      "plx_sk_a\nb",
+    ]) {
+      expect(isWellFormedApiKey(value), JSON.stringify(value)).toBe(false);
+    }
+  });
+});
+
+describe("checkHomeEnvWritable", () => {
+  const POSIX = process.platform !== "win32";
+
+  it("finds a home that does not exist yet writable when its nearest existing parent is", async () => {
+    const home = path.join(await makeTempDir(), "not", "yet");
+
+    expect(await checkHomeEnvWritable({ PIPELEX_HOME: home })).toEqual({
+      status: "writable",
+      file: path.join(home, ".env"),
+    });
+    await expect(fs.stat(home)).rejects.toThrow();
+  });
+
+  it("refuses what the save would refuse, writing nothing", async () => {
+    const dirHome = await makeTempDir();
+    await fs.mkdir(path.join(dirHome, ".env"));
+    const fileHome = path.join(await makeTempDir(), "not-a-directory");
+    await fs.writeFile(fileHome, "A=1\n");
+
+    expect(await checkHomeEnvWritable({ PIPELEX_HOME: "relative/home" })).toEqual({
+      status: "relative_home",
+    });
+    expect(await checkHomeEnvWritable({ PIPELEX_HOME: dirHome })).toEqual({
+      status: "unreadable",
+      file: path.join(dirHome, ".env"),
+    });
+    expect((await checkHomeEnvWritable({ PIPELEX_HOME: fileHome })).status).not.toBe("writable");
+    expect(await fs.readFile(fileHome, "utf8")).toBe("A=1\n");
+  });
+
+  it.skipIf(!POSIX || process.getuid?.() === 0)(
+    "refuses a home directory it cannot write in, and leaves the file alone",
+    async () => {
+      const home = await homeWith("A=1\n");
+      await fs.chmod(home, 0o500);
+      try {
+        expect(await checkHomeEnvWritable({ PIPELEX_HOME: home })).toEqual({
+          status: "failed",
+          file: path.join(home, ".env"),
+          reason: "permission denied",
+        });
+      } finally {
+        await fs.chmod(home, 0o700);
+      }
+      expect(await fs.readFile(path.join(home, ".env"), "utf8")).toBe("A=1\n");
+    },
+  );
+});

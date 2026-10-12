@@ -39,7 +39,8 @@
  * model.
  */
 
-import { promises as fs } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseEnv } from "node:util";
@@ -131,18 +132,32 @@ export async function readHomeEnv(
   if (home.kind === "relative") return { status: "relative_home" };
 
   const file = path.join(home.dir, HOME_ENV_FILENAME);
+  const read = await readEnvFileBytes(file);
+  if (read.status !== "read") return { status: read.status, file };
+  // A leading byte-order mark would otherwise become part of the first name.
+  return { status: "read", file, values: parseEnv(stripBom(read.bytes.toString("utf8"))) };
+}
+
+/**
+ * The bytes of a `.env` file, under the reader's rules: a regular file of at
+ * most {@link MAX_HOME_ENV_BYTES}, checked on `stat` before it is opened, so a
+ * directory, a device or an oversized file is refused without being opened.
+ * `stat` follows a symlinked `.env` to its target, as a dotfiles setup makes it.
+ */
+async function readEnvFileBytes(
+  file: string,
+): Promise<{ status: "read"; bytes: Buffer } | { status: "missing" | "unreadable" }> {
   try {
-    // Checked before the read, so a directory, a device or an oversized file
-    // is refused without being opened. `stat` follows a symlinked `.env` to
-    // its target, as a dotfiles setup makes it.
     const stats = await fs.stat(file);
-    if (!stats.isFile() || stats.size > MAX_HOME_ENV_BYTES) return { status: "unreadable", file };
-    const content = await fs.readFile(file, "utf8");
-    // A leading byte-order mark would otherwise become part of the first name.
-    return { status: "read", file, values: parseEnv(content.replace(/^\uFEFF/, "")) };
+    if (!stats.isFile() || stats.size > MAX_HOME_ENV_BYTES) return { status: "unreadable" };
+    return { status: "read", bytes: await fs.readFile(file) };
   } catch (err) {
-    return isNotFound(err) ? { status: "missing", file } : { status: "unreadable", file };
+    return { status: isNotFound(err) ? "missing" : "unreadable" };
   }
+}
+
+function stripBom(text: string): string {
+  return text.replace(/^\uFEFF/, "");
 }
 
 function isNotFound(err: unknown): boolean {
@@ -303,7 +318,7 @@ function httpOrigin(baseUrl: string): string | undefined {
 }
 
 /** A path as a hint shows it: `~/…` under the user's home directory, absolute otherwise. */
-function displayPath(file: string, homedir: () => string): string {
+export function displayPath(file: string, homedir: () => string = os.homedir): string {
   try {
     const relative = path.relative(homedir(), file);
     const outside = relative === ".." || relative.startsWith(`..${path.sep}`);
@@ -314,4 +329,305 @@ function displayPath(file: string, homedir: () => string): string {
     // No home directory to abbreviate against.
   }
   return file;
+}
+
+// ── the writer ──────────────────────────────────────────────────────
+
+/** Every Pipelex API key starts with this. */
+export const PIPELEX_API_KEY_PREFIX = "plx_sk_";
+
+/**
+ * The prefix, then URL-safe characters only. The key is written unquoted, as
+ * `pipelex login` writes it, so a character a `.env` parser reads as a quote,
+ * a comment or a separator must never be part of one.
+ */
+const PIPELEX_API_KEY_PATTERN = /^plx_sk_[A-Za-z0-9._~-]+$/;
+
+/** The variable the login saves its key under, in the home `.env`. */
+const API_KEY_NAME = "PIPELEX_API_KEY";
+
+/** Whether a value has the shape of a Pipelex API key: `plx_sk_`, then URL-safe characters. */
+export function isWellFormedApiKey(value: string): boolean {
+  return PIPELEX_API_KEY_PATTERN.test(value);
+}
+
+/**
+ * What saving a key in the home `.env` did. `file` is the home `.env` itself,
+ * the path a user knows, even when it is a symlink and the write went to its
+ * target. `unreadable` is a file that exists and could not be read under the
+ * reader's rules, whose other lines the writer therefore cannot keep; `failed`
+ * carries a reason that never quotes the key or the file's contents.
+ */
+export type HomeEnvSave =
+  | { status: "saved"; file: string }
+  | { status: "relative_home" }
+  | { status: "unreadable"; file: string }
+  | { status: "failed"; file: string; reason: string };
+
+/**
+ * Save `PIPELEX_API_KEY=<key>` in the home `.env`, the file the workshop and
+ * the pipelex CLI both read, under the rules pipelex's `set_env_file_entry`
+ * follows: every assignment of the key, an `export` one included, is replaced
+ * where it stands, so no later line can shadow it; every other line is kept as
+ * it is, comments, quoting and line endings included; the value is written
+ * unquoted; the directory is created when missing. Then rules of its own: an
+ * `export` assignment keeps its `export`, so a file a shell sources still
+ * exports the key; a missing directory is created at `0700`; and:
+ *
+ * - A symlinked `.env` is resolved with `realpath` first, so the link stays a
+ *   link and its target is what is rewritten.
+ * - The new content goes to a temporary file at mode `0600` in the target's
+ *   directory, which is renamed over the target, so the file is never readable
+ *   by others and a workshop reading it mid-write never sees half of it.
+ * - The new content is parsed before anything is written, and the write is
+ *   refused unless it gives the key exactly and every other variable the value
+ *   it had: a line this module would misread is never rewritten.
+ *
+ * A file that exists and cannot be read, or is over {@link MAX_HOME_ENV_BYTES},
+ * or is not UTF-8, is refused rather than replaced, since its other lines could
+ * not be kept. Never throws: every failure is a status.
+ */
+export async function saveApiKeyToHomeEnv(
+  env: CredentialsEnv,
+  apiKey: string,
+  options: HomeOptions = {},
+): Promise<HomeEnvSave> {
+  const plan = await planSave(env, apiKey, options);
+  if (plan.status !== "ready") return plan;
+  const { file, target, content } = plan;
+
+  const dir = path.dirname(target);
+  const temporary = path.join(
+    dir,
+    `.${path.basename(target)}.${randomBytes(6).toString("hex")}.tmp`,
+  );
+  try {
+    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+    const handle = await fs.open(temporary, "wx", 0o600);
+    try {
+      await handle.writeFile(content, "utf8");
+      // The mode `open` was given is filtered through the umask, so it is set
+      // again: the key must never sit in a file another user can read.
+      await handle.chmod(0o600);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await fs.rename(temporary, target);
+  } catch (err) {
+    await fs.rm(temporary, { force: true }).catch(() => undefined);
+    return { status: "failed", file, reason: writeFailureReason(err) };
+  }
+  return { status: "saved", file };
+}
+
+/** A save's refusals, without its success. */
+export type HomeEnvRefusal = Exclude<HomeEnvSave, { status: "saved" }>;
+
+/**
+ * Whether a key could be saved in the home `.env` now: every check the writer
+ * makes before it writes, and whether the directory it would write in, or the
+ * nearest one that exists, is writable. The login runs it before a key is
+ * minted, since a key minted for a file it then cannot write is left unused in
+ * the user's organization. The save checks everything again, so a file that
+ * changes in between is still refused. Never throws.
+ */
+export async function checkHomeEnvWritable(
+  env: CredentialsEnv,
+  options: HomeOptions = {},
+): Promise<{ status: "writable"; file: string } | HomeEnvRefusal> {
+  const plan = await planSave(env, PLACEHOLDER_KEY, options);
+  if (plan.status !== "ready") return plan;
+  const refusal = await directoryRefusal(path.dirname(plan.target));
+  return refusal === undefined
+    ? { status: "writable", file: plan.file }
+    : { status: "failed", file: plan.file, reason: refusal };
+}
+
+/** A well-formed key the pre-flight composes the file with, never written anywhere. */
+const PLACEHOLDER_KEY = `${PIPELEX_API_KEY_PREFIX}placeholder`;
+
+type SavePlan = { status: "ready"; file: string; target: string; content: string } | HomeEnvRefusal;
+
+/** Everything a save decides before it writes: where, and the file's new content. */
+async function planSave(
+  env: CredentialsEnv,
+  apiKey: string,
+  options: HomeOptions,
+): Promise<SavePlan> {
+  let home: PipelexHome;
+  try {
+    home = resolvePipelexHome(env, options);
+  } catch {
+    return {
+      status: "failed",
+      file: path.join("~", HOME_DIR_NAME, HOME_ENV_FILENAME),
+      reason: "no home directory could be found for this user",
+    };
+  }
+  if (home.kind === "relative") return { status: "relative_home" };
+  const file = path.join(home.dir, HOME_ENV_FILENAME);
+  if (!isWellFormedApiKey(apiKey)) {
+    return { status: "failed", file, reason: "the value is not a Pipelex API key" };
+  }
+
+  let target = file;
+  try {
+    if ((await fs.lstat(file)).isSymbolicLink()) target = await fs.realpath(file);
+  } catch (err) {
+    if (!isNotFound(err)) return { status: "unreadable", file };
+    // `lstat` found nothing, which the write creates, or `realpath` found a
+    // link to nothing, which a rename would replace with a file.
+    if (await isSymlink(file)) {
+      return {
+        status: "failed",
+        file,
+        reason:
+          "it is a symbolic link to a file that does not exist; create that file or remove the link",
+      };
+    }
+  }
+
+  const existing = await readEnvFileBytes(target);
+  if (existing.status === "unreadable") return { status: "unreadable", file };
+  let content = "";
+  if (existing.status === "read") {
+    try {
+      // `ignoreBOM` keeps a byte-order mark in the text, so it is written back.
+      content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(existing.bytes);
+    } catch {
+      return { status: "unreadable", file };
+    }
+  }
+
+  const next = withAssignment(content, API_KEY_NAME, apiKey);
+  if (!keepsEveryOtherValue(content, next, API_KEY_NAME, apiKey)) {
+    return {
+      status: "failed",
+      file,
+      reason: `it holds lines this login cannot rewrite without changing them; set ${API_KEY_NAME} in it by hand`,
+    };
+  }
+  return { status: "ready", file, target, content: next };
+}
+
+/**
+ * Why a file could not be created in `dir`, or `undefined` when it could: the
+ * nearest directory that exists must be a directory this user can write in,
+ * since the save creates whatever is missing below it.
+ */
+async function directoryRefusal(dir: string): Promise<string | undefined> {
+  for (let current = dir; ; current = path.dirname(current)) {
+    try {
+      if (!(await fs.stat(current)).isDirectory()) return writeFailureReason({ code: "ENOTDIR" });
+      await fs.access(current, fsConstants.W_OK);
+      return undefined;
+    } catch (err) {
+      if (!isNotFound(err) || path.dirname(current) === current) return writeFailureReason(err);
+    }
+  }
+}
+
+async function isSymlink(file: string): Promise<boolean> {
+  try {
+    return (await fs.lstat(file)).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/** A write failure in words that never quote the key: the system's own, by its code when it has a known one. */
+function writeFailureReason(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  switch (code) {
+    case "EACCES":
+    case "EPERM":
+      return "permission denied";
+    case "EROFS":
+      return "the file system is read-only";
+    case "ENOSPC":
+      return "no space is left on the device";
+    case "EDQUOT":
+      return "the disk quota is exceeded";
+    case "ENOTDIR":
+    case "EEXIST":
+      return "a file stands where a directory should be";
+    default:
+      return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/**
+ * The file with every assignment of `name` replaced by `name=value`, in place
+ * and keeping an `export` prefix, or the assignment appended when there is
+ * none. A value quoted over several lines is one assignment, as `parseEnv`
+ * reads it, so a line inside another variable's value is never taken for an
+ * assignment and an old multi-line value of `name` is replaced whole.
+ */
+function withAssignment(content: string, name: string, value: string): string {
+  const bom = content.startsWith("﻿") ? "﻿" : "";
+  const body = content.slice(bom.length);
+  const eol = body.includes("\r\n") ? "\r\n" : "\n";
+  const lines = body.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  const out: string[] = [];
+  let replaced = false;
+  for (let index = 0; index < lines.length; ) {
+    const assignment = readAssignment(lines[index]);
+    const span = assignment === undefined ? 1 : assignmentSpan(lines, index, assignment);
+    if (assignment?.name === name) {
+      out.push(`${assignment.exported ? "export " : ""}${name}=${value}${eol}`);
+      replaced = true;
+    } else {
+      out.push(...lines.slice(index, index + span));
+    }
+    index += span;
+  }
+  if (!replaced) {
+    if (body !== "" && !body.endsWith("\n")) out.push(eol);
+    out.push(`${name}=${value}${eol}`);
+  }
+  return bom + out.join("");
+}
+
+interface Assignment {
+  name: string;
+  exported: boolean;
+  /** The value as written after `=`, up to the end of the line, without its line ending. */
+  rawValue: string;
+}
+
+const ASSIGNMENT_LINE = /^[ \t]*(export[ \t]+)?([A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=[ \t]*(.*)$/;
+
+function readAssignment(line: string): Assignment | undefined {
+  const match = ASSIGNMENT_LINE.exec(line.replace(/\r?\n$/, ""));
+  if (match === null) return undefined;
+  return { name: match[2], exported: match[1] !== undefined, rawValue: match[3] };
+}
+
+/**
+ * How many lines an assignment spans: one, unless its value opens a quote
+ * whose closing quote is on a later line, as `parseEnv` searches for it.
+ */
+function assignmentSpan(lines: string[], index: number, assignment: Assignment): number {
+  const quote = assignment.rawValue[0];
+  if (quote !== '"' && quote !== "'" && quote !== "`") return 1;
+  if (assignment.rawValue.indexOf(quote, 1) !== -1) return 1;
+  for (let later = index + 1; later < lines.length; later += 1) {
+    if (lines[later].includes(quote)) return later - index + 1;
+  }
+  return 1;
+}
+
+/** Whether the rewrite gives `name` exactly `value` and every other variable the value it had. */
+function keepsEveryOtherValue(before: string, after: string, name: string, value: string): boolean {
+  try {
+    const old = parseEnv(stripBom(before));
+    const next = parseEnv(stripBom(after));
+    if (next[name] !== value) return false;
+    const names = new Set([...Object.keys(old), ...Object.keys(next)]);
+    names.delete(name);
+    return [...names].every((other) => old[other] === next[other]);
+  } catch {
+    return false;
+  }
 }
