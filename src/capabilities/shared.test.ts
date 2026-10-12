@@ -1214,6 +1214,108 @@ describe("classifyError", () => {
     });
   });
 
+  // A missing or refused key is `config`, like an unreachable API, so without
+  // the kind every capability's headline blamed connectivity for it
+  // (L-260924-a58ae1). Every credential arm tags it, and only those.
+  describe("tags a missing or refused key as kind auth", () => {
+    const texture = { location: "PIPELEX_API_KEY", hint: "No Pipelex API key is set." };
+
+    it("tags a 401 and a 403 through the generic arm, keeping the key's texture", async () => {
+      for (const status of [401, 403]) {
+        const error = classifyError(await refused(status, { detail: "Missing API key" }), {
+          auth: texture,
+        });
+
+        expect(error, String(status)).toEqual({
+          class: "config",
+          kind: "auth",
+          location: "PIPELEX_API_KEY",
+          message: "Missing API key",
+          hint: "No Pipelex API key is set.",
+          retryable: false,
+        });
+      }
+    });
+
+    it("tags a route's gated 403 too, whose hint composes the key's with the gate's", async () => {
+      const error = classifyError(await refused(403, { code: "forbidden" }), {
+        auth: texture,
+        forbidden: { hint: "No Pipelex API key is set. Or the route is gated." },
+      });
+
+      expect(error).toMatchObject({
+        class: "config",
+        kind: "auth",
+        location: "PIPELEX_API_KEY",
+        hint: "No Pipelex API key is set. Or the route is gated.",
+      });
+    });
+
+    it("tags the upload leg's refused credential, as the SDK raises it", async () => {
+      const err = await uploadFailure(() =>
+        Promise.resolve(
+          Response.json(
+            { status: 401, title: "Unauthorized", detail: "Missing API key" },
+            { status: 401, headers: { "content-type": "application/problem+json" } },
+          ),
+        ),
+      );
+      expect(err).toBeInstanceOf(UploadAuthenticationError);
+
+      expect(classifyError(err, { auth: texture })).toMatchObject({
+        class: "config",
+        kind: "auth",
+        location: "PIPELEX_API_KEY",
+        hint: "No Pipelex API key is set.",
+        retryable: false,
+      });
+    });
+
+    it("tags the artifact family's refused credential", () => {
+      const verdict = {
+        scope: "main_stuff" as const,
+        artifacts: [],
+        saved_paths: [],
+        all_saved: true,
+      };
+      for (const status of [401, 403]) {
+        const error = classifyError(
+          new ArtifactAuthenticationError(
+            "The resolve route refused the credential.",
+            status,
+            verdict,
+          ),
+          { auth: texture },
+        );
+
+        expect(error, String(status)).toMatchObject({
+          class: "config",
+          kind: "auth",
+          location: "PIPELEX_API_KEY",
+          hint: "No Pipelex API key is set.",
+        });
+      }
+    });
+
+    it("leaves the execution-locus refusals untagged, at the method and not the key", async () => {
+      for (const errorType of ["MethodStructuresRefusedError", "CustomCodeRequiresSandbox"]) {
+        const error = classifyError(
+          await refused(403, runnerProblem(errorType, "Refused by the execution locus.", "input")),
+          { auth: texture, methodLocation: "method_ref" },
+        );
+
+        expect(error, errorType).toMatchObject({ class: "input_domain", location: "method_ref" });
+        expect(error.kind, errorType).toBeUndefined();
+      }
+    });
+
+    it("tags nothing else: an unreachable API, a paywall and a route's 404 keep their own", async () => {
+      expect(classifyError(await unreachable("ECONNREFUSED")).kind).toBeUndefined();
+      expect(classifyError(await refused(402, { detail: "Plan limit" })).kind).toBe("paywall");
+      expect(classifyError(await refused(404, { code: "not_found" })).kind).toBeUndefined();
+    });
+  });
+
   describe("the upload leg", () => {
     it("reads a wrapped plan refusal as the paywall it is, not a passing fault", async () => {
       const err = await uploadFailure(() =>
@@ -1511,6 +1613,7 @@ describe("summaryForToolError", () => {
     input_domain: "request headline",
     runtime: "server headline",
     paywall: "billing headline",
+    auth: "key headline",
   };
 
   it("maps an untagged error by its class", () => {
@@ -1531,6 +1634,15 @@ describe("summaryForToolError", () => {
         summaries,
       ),
     ).toBe("billing headline");
+  });
+
+  it("names the key, not connectivity, for a missing or refused key", () => {
+    expect(
+      summaryForToolError(
+        { class: "config", kind: "auth", message: "Missing API key", retryable: false },
+        summaries,
+      ),
+    ).toBe("key headline");
   });
 });
 

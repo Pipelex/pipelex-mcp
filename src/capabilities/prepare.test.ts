@@ -324,8 +324,14 @@ describe("prepareMthdsInputs — the SDK upload walk", () => {
     );
 
     expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.kind).toBe("auth");
     expect(result.structuredContent.errors?.[0]?.location).toBe("authorization");
     expect(result.structuredContent.errors?.[0]?.hint).toBe("reconnect the connector");
+    // The upload leg's refused key headlines as the key, as the pipe I/O
+    // route's does, never as an unreachable API.
+    expect(result.summary).toBe(
+      "Inputs could not be prepared: the Pipelex API key is missing or was refused.",
+    );
   });
 
   it("maps an upload transport fault to runtime (retryable)", async () => {

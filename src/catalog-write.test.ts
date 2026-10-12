@@ -148,6 +148,21 @@ function draftConflict(): ApiResponseError {
   );
 }
 
+/** The 401 the platform answers a call that carries no key, or a key it does not know. */
+function refusedKey(route: string): ApiResponseError {
+  return new ApiResponseError(
+    "unauthorized",
+    `https://api-dev.pipelex.com${route}`,
+    401,
+    "Unauthorized",
+    "{}",
+    undefined,
+    "Missing API key",
+    undefined,
+    "unauthorized",
+  );
+}
+
 /** A client whose every arm throws — each test opts into the one it needs. */
 const clientNotCalled: CatalogWriteClient = {
   async getMethod(): Promise<MethodData> {
@@ -1170,6 +1185,32 @@ describe("saveMthdsMethod", () => {
     expect(error.hint).toContain("mthds_list_methods");
   });
 
+  it("headlines a refused key on the create as the key, not as connectivity", async () => {
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], name: "Demo" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async createMethod(): Promise<MethodData> {
+            throw refusedKey("/v1/methods");
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    expect(errorsOf(result.structuredContent)[0]).toMatchObject({
+      class: "config",
+      kind: "auth",
+      location: "PIPELEX_API_KEY",
+    });
+    expect(result.summary).toBe(
+      "The method was not saved: the Pipelex API key is missing or was refused.",
+    );
+  });
+
   it("warns that the method may exist when the create's answer came back unreadable", async () => {
     // A 2xx the SDK could not read is a create the platform accepted, which the
     // SDK reports as a final ApiResponseError: the method exists all the same.
@@ -1525,6 +1566,30 @@ describe("getMthdsMethod", () => {
     );
 
     expect(errorsOf(result.structuredContent)[0]).toMatchObject({ location: "method_id" });
+  });
+
+  it("headlines a refused key as the key, not as connectivity", async () => {
+    const result = await getMthdsMethod(
+      { method_id: "mt_one" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async getMethod(): Promise<MethodData> {
+            throw refusedKey("/v1/methods/mt_one");
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    expect(errorsOf(result.structuredContent)[0]).toMatchObject({
+      class: "config",
+      kind: "auth",
+      location: "PIPELEX_API_KEY",
+    });
+    expect(result.summary).toBe(
+      "The method was not fetched: the Pipelex API key is missing or was refused.",
+    );
   });
 });
 

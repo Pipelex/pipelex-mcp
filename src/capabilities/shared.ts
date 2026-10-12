@@ -440,13 +440,21 @@ export type ErrorClass = z.infer<typeof errorClassSchema>;
 
 /**
  * Refinement of {@link ErrorClass} for a condition whose class is settled but
- * whose *cause* the class cannot name. Today the only member is `paywall`: a
- * 402 is deliberately `config` (the deployment cannot make this call as
- * credentialed), yet the class alone would have every headline blame
- * connectivity for what is a billing limit. Adding a member here is how a new
- * such cause gets a headline — never by re-classifying it.
+ * whose *cause* the class cannot name. Both members are `config`, and the
+ * class alone would have every headline blame connectivity for them:
+ *
+ * - `paywall`: a 402 is deliberately `config` (the deployment cannot make this
+ *   call as credentialed), yet it is a billing limit.
+ * - `auth`: a missing or refused key (a 401 or 403 outside the execution-locus
+ *   gate, and the upload and artifact families' authentication errors) is
+ *   `config`, since the key is the environment's, yet "the Pipelex API is
+ *   unreachable or misconfigured" sends a user who has no key to debug the
+ *   network.
+ *
+ * Adding a member here is how a new such cause gets a headline — never by
+ * re-classifying it.
  */
-export const errorKindSchema = z.enum(["paywall"]);
+export const errorKindSchema = z.enum(["paywall", "auth"]);
 
 export type ErrorKind = z.infer<typeof errorKindSchema>;
 
@@ -455,7 +463,7 @@ export const toolErrorSchema = z.object({
   kind: errorKindSchema
     .optional()
     .describe(
-      "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call.",
+      "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
     ),
   location: z.string().optional(),
   message: z.string(),
@@ -470,10 +478,10 @@ export interface ToolError {
   /**
    * Set where the concrete SDK error / HTTP status is still known
    * ({@link classifyError}), for the same reason `retryable` is: `class` is
-   * the machine contract and must stay coarse, but a paywall and an
-   * unreachable API are both `config` and read nothing alike to a human. A
-   * machine consumer still branches on `class`; `kind` is what lets it — and
-   * the summary headline — tell the two apart without sniffing the message.
+   * the machine contract and must stay coarse, but a paywall, a missing key
+   * and an unreachable API are all `config` and read nothing alike to a human.
+   * A machine consumer still branches on `class`; `kind` is what lets it — and
+   * the summary headline — tell them apart without sniffing the message.
    */
   kind?: ErrorKind;
   location?: string;
@@ -493,17 +501,18 @@ export interface ToolError {
  * A capability's no-verdict headlines: one per {@link ErrorClass}, plus one for
  * every {@link ErrorKind}. Declaring the kind headlines is **mandatory** — that
  * is the point of the type. A capability that forgot one would silently print
- * the connectivity headline for a billing refusal, which is the defect this
- * shape exists to make unrepresentable: the miss is a type error, not something
- * a reviewer has to catch.
+ * the connectivity headline for a billing refusal or a missing key, which is
+ * the defect this shape exists to make unrepresentable: the miss is a type
+ * error, not something a reviewer has to catch.
  */
 export type ErrorSummaries = Record<ErrorClass, string> & Record<ErrorKind, string>;
 
 /**
  * Pick a capability's headline for one {@link ToolError}. `kind` is checked
- * ahead of `class` because it is the refinement: a 402 is `config` by contract,
- * so consulting the class map first would print "the Pipelex API is unreachable
- * or misconfigured" for a plan limit and send the agent to debug the base URL.
+ * ahead of `class` because it is the refinement: a 402 and a refused key are
+ * `config` by contract, so consulting the class map first would print "the
+ * Pipelex API is unreachable or misconfigured" for a plan limit or a missing
+ * key and send the agent to debug the base URL.
  */
 export function summaryForToolError(error: ToolError, summaries: ErrorSummaries): string {
   return error.kind === undefined ? summaries[error.class] : summaries[error.kind];
@@ -1353,6 +1362,7 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
 
   if (err instanceof UploadAuthenticationError) {
     return {
+      kind: "auth",
       location: options.auth?.location ?? "PIPELEX_API_KEY",
       message,
       hint: options.auth?.hint ?? "Check the API key for the configured Pipelex API.",
@@ -1387,6 +1397,7 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
   // UploadAuthenticationError on the upload leg.
   if (err instanceof ArtifactAuthenticationError) {
     return {
+      kind: "auth",
       location: options.auth?.location ?? "PIPELEX_API_KEY",
       message,
       hint: options.auth?.hint ?? DEFAULT_AUTH_HINT,
@@ -1551,9 +1562,13 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     // `input` (L-261007-8dffe5), the request carrying the credential, while
     // this server's credential is its environment, which no tool argument
     // changes, and the SDK's own reading of both statuses is `config`.
+    // `kind: "auth"` carries the cause into each capability's headline, so a
+    // missing key never reads as an unreachable API; a route's `forbidden`
+    // gate is a 403 too and keeps the kind, its headline naming both causes.
     return toolError(
       { ...verdict, class: "config" },
       {
+        kind: "auth",
         location: options.auth?.location ?? "PIPELEX_API_KEY",
         message,
         hint:

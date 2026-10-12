@@ -679,9 +679,16 @@ describe("downloadMthdsArtifacts", () => {
     const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
 
     expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "config",
+      kind: "auth",
       location: "PIPELEX_API_KEY",
       retryable: false,
     });
+    // The output was written, so the headline speaks of the files, and of
+    // the key rather than of an unreachable API.
+    expect(result.summary.split("\n")[0]).toBe(
+      "The run's files could not be saved: the Pipelex API key is missing or was refused.",
+    );
     // Every item would be an `aborted` error inviting a retry the refusal
     // itself rules out, so only what is on disk rides: the output.
     expect(result.structuredContent.artifacts).toBeUndefined();
@@ -895,6 +902,27 @@ describe("downloadMthdsArtifacts", () => {
       retryable: false,
     });
     expect(result.summary).toContain("rejected the request");
+  });
+
+  it("headlines a refused key on the results route as the key, before anything is saved", async () => {
+    const root = await makeTempDir();
+    const client: ArtifactClient = {
+      getRunStatus: noStatusRead,
+      getRunResult: () =>
+        Promise.reject(apiError(`/v1/runs/${RUN_ID}/results`, 401, "Missing API key")),
+      downloadArtifacts: () => Promise.reject(new Error("must not be called")),
+    };
+
+    const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
+
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "config",
+      kind: "auth",
+      location: "PIPELEX_API_KEY",
+    });
+    expect(result.summary).toBe(
+      "The run could not be saved: the Pipelex API key is missing or was refused.",
+    );
   });
 
   it("classifies an unreachable API as retryable config", async () => {

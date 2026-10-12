@@ -587,6 +587,22 @@ describe("buildMthdsInputs by method_id (server pass-through)", () => {
       "Inputs template could not start: the organization's Pipelex plan does not cover this call.",
     );
   });
+
+  it("headlines a refused key (401) as the key, not as connectivity", async () => {
+    const result = await buildMthdsInputs(
+      { method_id: "mt_123" },
+      contextWith(apiError(401, "Unauthenticated", "Missing API key")),
+    );
+
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "config",
+      kind: "auth",
+      location: "PIPELEX_API_KEY",
+    });
+    expect(result.summary).toBe(
+      "Inputs template could not start: the Pipelex API key is missing or was refused.",
+    );
+  });
 });
 
 describe("buildMthdsInputs by method_ref (server pass-through)", () => {

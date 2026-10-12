@@ -388,6 +388,21 @@ describe("listMthdsMethods failures", () => {
     expect(firstError(result)?.hint).not.toContain("organization");
   });
 
+  it("headlines a missing or refused key as the key, not as connectivity", async () => {
+    for (const status of [401, 403]) {
+      const refused = await failure(apiError(status, "Missing API key"));
+      expect(firstError(refused), String(status)).toMatchObject({
+        class: "config",
+        kind: "auth",
+        location: "PIPELEX_API_KEY",
+        retryable: false,
+      });
+      expect(refused.summary, String(status)).toBe(
+        "Method catalog could not be listed: the Pipelex API key is missing or was refused.",
+      );
+    }
+  });
+
   it("maps paywall, missing route, and server faults with catalog-specific semantics", async () => {
     const paywall = await failure(apiError(402, "Subscription required"));
     expect(firstError(paywall)).toMatchObject({

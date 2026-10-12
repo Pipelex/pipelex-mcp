@@ -881,6 +881,49 @@ describe("the workshop's key, read on every call", () => {
     }
   });
 
+  it("headlines a keyless call as the missing key, with the login in its content", async () => {
+    // The 401 a keyless call meets is `config`, as an unreachable API is; the
+    // headline, which a host may show alone, must say which (L-260924-a58ae1).
+    stubApi(emptyPage);
+    const server = createLocalServer({
+      env: { PIPELEX_HOME: await makeTempDir(), PIPELEX_BASE_URL: "https://api.pipelex.test" },
+      rootDir: await makeTempDir(),
+    });
+    const { client, close } = await connectClient(server);
+
+    try {
+      const calls = [
+        {
+          name: "mthds_list_methods",
+          arguments: {},
+          headline:
+            "Method catalog could not be listed: the Pipelex API key is missing or was refused.",
+        },
+        {
+          name: "mthds_run_status",
+          arguments: { run_id: "run_keyless" },
+          headline: "Run status could not be read: the Pipelex API key is missing or was refused.",
+        },
+      ];
+      for (const call of calls) {
+        const result = await client.callTool({ name: call.name, arguments: call.arguments });
+
+        expect(result.isError, call.name).toBe(true);
+        expect(result.structuredContent, call.name).toMatchObject({
+          status: "error",
+          errors: [{ class: "config", kind: "auth", location: "PIPELEX_API_KEY" }],
+        });
+        const [text] = result.content as { type: string; text: string }[];
+        expect(text?.text.split("\n")[0], call.name).toBe(call.headline);
+        expect(text?.text, call.name).toContain("No Pipelex API key is set");
+        expect(text?.text, call.name).toContain("`npx -y @pipelex/mcp@latest login`");
+        expect(text?.text, call.name).not.toMatch(/unreachable|misconfigured/);
+      }
+    } finally {
+      await close();
+    }
+  });
+
   it("keeps the host's key when the host passes one, whatever the file holds", async () => {
     const home = await makeTempDir();
     await fs.writeFile(

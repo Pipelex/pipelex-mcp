@@ -406,6 +406,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Method catalog could not be listed: the Pipelex API returned an error.",
   paywall:
     "Method catalog could not be listed: the organization's Pipelex plan does not cover this call.",
+  auth: "Method catalog could not be listed: the Pipelex API key is missing or was refused.",
 };
 
 function summaryForError(error: ToolError): string {

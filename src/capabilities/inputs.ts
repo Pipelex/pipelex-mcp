@@ -357,6 +357,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Inputs template could not be completed: the Pipelex API returned an error.",
   paywall:
     "Inputs template could not start: the organization's Pipelex plan does not cover this call.",
+  auth: "Inputs template could not start: the Pipelex API key is missing or was refused.",
 };
 
 function summaryForError(error: ToolError): string {

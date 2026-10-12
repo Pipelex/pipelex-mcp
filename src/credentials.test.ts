@@ -322,6 +322,32 @@ describe("resolveWorkshopCredentials", () => {
 });
 
 describe("the auth texture", () => {
+  it("names the login in every hint, spelled with @latest as every text gives it", async () => {
+    // A copy of the package cached before `login` existed ignores its
+    // arguments and starts the stdio server, which waits silently: `@latest`
+    // is what keeps the command from looking like a hung login.
+    expect(LOGIN_COMMAND).toBe("npx -y @pipelex/mcp@latest login");
+
+    const unreadable = await makeTempDir();
+    await fs.mkdir(path.join(unreadable, ".env"));
+    const hints = [
+      // No key: no file, an unreadable file, a relative home.
+      await resolveWorkshopCredentials({ PIPELEX_HOME: await makeTempDir() }),
+      await resolveWorkshopCredentials({ PIPELEX_HOME: unreadable }),
+      await resolveWorkshopCredentials({ PIPELEX_HOME: "relative/home" }),
+      // The host's key, and the saved key.
+      await resolveWorkshopCredentials({ PIPELEX_API_KEY: "plx_sk_host" }),
+      await resolveWorkshopCredentials({
+        PIPELEX_HOME: await homeWith("PIPELEX_API_KEY=plx_sk_saved\n"),
+      }),
+    ].map((credentials) => credentials.authError.hint);
+
+    expect(hints).toHaveLength(5);
+    for (const hint of hints) {
+      expect(hint).toContain("`npx -y @pipelex/mcp@latest login`");
+    }
+  });
+
   it("says which key was refused, by which API, and never quotes the key", async () => {
     const home = await homeWith("PIPELEX_API_KEY=plx_sk_file_secret\n");
 

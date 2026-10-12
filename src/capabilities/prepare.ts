@@ -482,6 +482,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Inputs could not be prepared: the Pipelex API returned an error.",
   paywall:
     "Inputs could not be prepared: the organization's Pipelex plan does not cover this call.",
+  auth: "Inputs could not be prepared: the Pipelex API key is missing or was refused.",
 };
 
 function summaryForError(error: ToolError): string {

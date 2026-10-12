@@ -844,6 +844,7 @@ const LISTING_ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Model deck could not be read: the Pipelex API returned an error.",
   paywall:
     "Model deck could not be read: the organization's Pipelex plan does not cover this call.",
+  auth: "Model deck could not be read: the Pipelex API key is missing or was refused.",
 };
 
 const CHECK_ERROR_SUMMARIES: ErrorSummaries = {
@@ -852,6 +853,7 @@ const CHECK_ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Model reference could not be checked: the Pipelex API returned an error.",
   paywall:
     "Model reference could not be checked: the organization's Pipelex plan does not cover this call.",
+  auth: "Model reference could not be checked: the Pipelex API key is missing or was refused.",
 };
 
 function errorResult(summary: string, errors: ToolError[]): ModelsResult {

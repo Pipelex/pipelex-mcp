@@ -945,6 +945,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   input_domain: "No images were shown: the Pipelex API rejected the request.",
   runtime: "Images could not be shown: the Pipelex API returned an error.",
   paywall: "Images could not be shown: the organization's Pipelex plan does not cover this call.",
+  auth: "Images could not be shown: the Pipelex API key is missing or was refused.",
 };
 
 function errorResult(summary: string, errors: ToolError[]): ShowImagesResult {

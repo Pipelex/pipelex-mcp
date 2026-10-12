@@ -1867,6 +1867,23 @@ describe("startMthdsRun by method_id", () => {
     expect(result.summary).not.toMatch(/unreachable/);
   });
 
+  it("headlines a refused key (401) as the key, not as connectivity", async () => {
+    const context = contextWith({
+      start: () => Promise.reject(refusedKey("/v1/start")),
+    });
+
+    const result = await startMthdsRun({ method_id: "mt_abc123" }, context);
+
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "config",
+      kind: "auth",
+      location: "PIPELEX_API_KEY",
+    });
+    expect(result.summary).toBe(
+      "Run could not start: the Pipelex API key is missing or was refused.",
+    );
+  });
+
   it("points a mixed-request 422 at files — the executed source — not method_id", async () => {
     const context = contextWith({
       start: () =>
@@ -1942,6 +1959,22 @@ describe("startMthdsRun by method_id", () => {
 
 // A 402 on a run route: the platform reports a plan limit this way, and its
 // problem `code` really is "forbidden" (never sniffed — the status decides).
+// A 401 on any route: the hosted API refuses a call that carries no key, or a
+// key it does not know, this way.
+function refusedKey(route: string): ApiResponseError {
+  return new ApiResponseError(
+    "HTTP 401",
+    `${DEFAULT_API_URL}${route}`,
+    401,
+    "Unauthorized",
+    "{}",
+    undefined, // errorType
+    "Missing API key",
+    undefined, // validationErrors
+    "unauthorized",
+  );
+}
+
 function paywall(routeSuffix: string): ApiResponseError {
   return new ApiResponseError(
     "HTTP 402",
@@ -2016,6 +2049,19 @@ describe("getMthdsRunStatus", () => {
       "Run status could not be read: the organization's Pipelex plan does not cover this call.",
     );
     expect(result.summary).not.toMatch(/unreachable/);
+  });
+
+  it("headlines a refused key (401) as the key, not as connectivity", async () => {
+    const context = contextWith({
+      getRunStatus: () => Promise.reject(refusedKey(`/v1/runs/${RUN_ID}/status`)),
+    });
+
+    const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.errors?.[0]?.kind).toBe("auth");
+    expect(result.summary).toBe(
+      "Run status could not be read: the Pipelex API key is missing or was refused.",
+    );
   });
 });
 
@@ -2216,6 +2262,19 @@ describe("getMthdsRunResults", () => {
       "Run results could not be read: the organization's Pipelex plan does not cover this call.",
     );
     expect(result.summary).not.toMatch(/unreachable/);
+  });
+
+  it("headlines a refused key (401) as the key, not as connectivity", async () => {
+    const context = contextWith({
+      getRunResult: () => Promise.reject(refusedKey(`/v1/runs/${RUN_ID}/result`)),
+    });
+
+    const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.errors?.[0]?.kind).toBe("auth");
+    expect(result.summary).toBe(
+      "Run results could not be read: the Pipelex API key is missing or was refused.",
+    );
   });
 });
 
