@@ -164,6 +164,34 @@ describe("run-route error classification", () => {
     expect(error.message).toBe("Run not found");
   });
 
+  it("says an unknown run id may be another organization's, as after a login, on every run-id route", () => {
+    for (const [route, options] of [
+      ["status", RUN_STATUS_ERROR_OPTIONS],
+      ["results", RUN_RESULTS_ERROR_OPTIONS],
+    ] as const) {
+      const error = classifyError(
+        new ApiResponseError(
+          "HTTP 404",
+          `${DEFAULT_API_URL}/v1/runs/${RUN_ID}/${route}`,
+          404,
+          "Not Found",
+          "{}",
+          "not_found",
+          "Run not found",
+          undefined, // validationErrors
+          undefined, // code
+        ),
+        options,
+      );
+
+      expect(error.hint, route).toContain("PIPELEX_BASE_URL points at the deployment");
+      expect(error.hint, route).toContain(
+        "the API key in use belongs to the organization that started it",
+      );
+      expect(error.hint, route).toContain("after a login");
+    }
+  });
+
   it("keeps the missing-route 404 arm (config) on the start route", () => {
     const error = classifyError(
       new ApiResponseError(

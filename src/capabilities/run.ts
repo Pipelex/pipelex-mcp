@@ -620,9 +620,12 @@ export const RUN_START_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
 
 /**
  * What an unknown run id means to the caller. The workshop's operator is its
- * user, so the deployment the key points at is theirs to check.
+ * user, so the deployment the key points at is theirs to check, and so is the
+ * key: runs are org-scoped, so a run another organization started, which is
+ * what a key changed since the start (a login in between) sees, reads exactly
+ * like a miss, as an unknown method id does.
  */
-const UNKNOWN_RUN_HINT = `No run with this id is known to the configured API. Check the run_id returned by ${WORKSHOP_TOOL_NAMES.run}, and that PIPELEX_BASE_URL points at the deployment that started it.`;
+const UNKNOWN_RUN_HINT = `No run with this id is known to the configured API. Check the run_id returned by ${WORKSHOP_TOOL_NAMES.run}, that PIPELEX_BASE_URL points at the deployment that started it, and that the API key in use belongs to the organization that started it: runs are org-scoped, so another organization's run reads exactly like a miss, as it does when the key changed since the run started, after a login for instance.`;
 
 const MALFORMED_RUN_ID_HINT = `Pass the run_id exactly as returned by ${WORKSHOP_TOOL_NAMES.run}.`;
 
