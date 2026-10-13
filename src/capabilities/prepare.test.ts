@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   ApiResponseError,
@@ -111,6 +111,21 @@ describe("prepareInputsToolResult", () => {
 describe("validatePrepareInputsRequest", () => {
   it("inherits the shared one-selector checks", () => {
     expect(validatePrepareInputsRequest({ files: [], inputs: {} })).toHaveLength(1);
+  });
+
+  it.each([
+    ["a bare pipe_code", "extract", 'got the bare "extract"'],
+    ["a dependency package's pipe", "alias->docs.extract", "names a dependency package's pipe"],
+  ])("refuses %s at pipe_ref, as the SDK would before sending", (_label, pipeRef, reason) => {
+    const errors = validatePrepareInputsRequest({ files, pipe_ref: pipeRef, inputs: {} });
+
+    expect(errors).toEqual([
+      expect.objectContaining({ class: "input_domain", location: "pipe_ref", retryable: false }),
+    ]);
+    expect(errors[0]?.message).toContain(reason);
+    expect(validatePrepareInputsRequest({ files, pipe_ref: "docs.extract", inputs: {} })).toEqual(
+      [],
+    );
   });
 
   it("rejects a blank pipe_ref", () => {
@@ -749,6 +764,28 @@ describe("prepareMthdsInputs — request shape and transport", () => {
     expect(refused.structuredContent.status).toBe("error");
     expect(refused.structuredContent).not.toHaveProperty("files_sent");
   });
+
+  it.each([["extract"], ["alias->docs.extract"]])(
+    "refuses the pipe_ref %s before the folder's files are sent, listing none",
+    async (pipeRef) => {
+      const prepare = vi.fn((_request: PrepareInputsRequest): Promise<PreparedInputs> => {
+        throw new Error("no request expected");
+      });
+
+      const result = await prepareMthdsInputs(
+        { method_dir: "methods", pipe_ref: pipeRef, inputs: {} },
+        { baseUrl: DEFAULT_API_URL, resolver: methodFolderResolver(), client: uploadWith(prepare) },
+      );
+
+      expect(result.structuredContent.status).toBe("error");
+      expect(result.structuredContent.errors?.[0]).toMatchObject({
+        class: "input_domain",
+        location: "pipe_ref",
+      });
+      expect(result.structuredContent).not.toHaveProperty("files_sent");
+      expect(prepare).not.toHaveBeenCalled();
+    },
+  );
 
   it("surfaces an unreachable API as config", async () => {
     const result = await prepareMthdsInputs(

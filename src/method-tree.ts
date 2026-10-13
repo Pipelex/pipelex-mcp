@@ -31,8 +31,9 @@ import type { Ignore } from "ignore";
  *   each such directory, so a reference into one can be refused by name;
  * - **the `.gitignore` files inside the root exclude it**, at any depth, read
  *   with git's own semantics (negation, anchoring, directory-only patterns,
- *   a deeper file overriding a shallower one, and no re-inclusion under an
- *   excluded directory). Only those files count: neither the user's global
+ *   a deeper file overriding a shallower one, its negation re-including what
+ *   a shallower one excluded, and no re-inclusion under an excluded
+ *   directory), every file's patterns rebased onto the root in one matcher. Only those files count: neither the user's global
  *   excludes nor a `.gitignore` above the root, so one folder yields one tree
  *   on every machine. Patterns match case-sensitively for the same reason,
  *   whatever `core.ignorecase` a checkout would carry. A `.gitignore` that is
@@ -96,11 +97,17 @@ export type MethodTreeResult =
   | { ok: true; listing: MethodTreeListing }
   | { ok: false; path: string; message: string };
 
-/** A `.gitignore` in force, with the tree path of the directory holding it (`""` for the root). */
-interface Level {
-  base: string;
-  matcher: Ignore;
+/**
+ * The `.gitignore` rules in force in a directory: the patterns of every file
+ * from the root down to it, each rebased onto the root and the shallower
+ * files' first, and one matcher over them all (absent while there are none).
+ */
+interface Rules {
+  patterns: readonly string[];
+  matcher: Ignore | undefined;
 }
+
+const NO_RULES: Rules = { patterns: [], matcher: undefined };
 
 /**
  * List the tree under `root`, an absolute path to an existing directory,
@@ -116,11 +123,11 @@ export async function listMethodTree(
   const files: MethodTreeFile[] = [];
   const symlinks: string[] = [];
   const nestedRepositories: string[] = [];
-  const queue: { dir: string; levels: readonly Level[] }[] = [{ dir: "", levels: [] }];
+  const queue: { dir: string; rules: Rules }[] = [{ dir: "", rules: NO_RULES }];
   let entries = 0;
 
   while (queue.length > 0) {
-    const { dir, levels: above } = queue.shift()!;
+    const { dir, rules: above } = queue.shift()!;
     const absolute = absoluteOf(root, dir);
 
     let names: string[];
@@ -151,11 +158,14 @@ export async function listMethodTree(
       continue;
     }
 
-    let levels = above;
+    let rules = above;
     if (names.includes(GITIGNORE)) {
       const own = await readGitignore(absolute);
       if (!own.ok) return { ok: false, path: join(dir, GITIGNORE), message: own.message };
-      if (own.matcher !== undefined) levels = [...above, { base: dir, matcher: own.matcher }];
+      if (own.text !== undefined) {
+        const patterns = [...above.patterns, ...rebaseGitignore(own.text, dir)];
+        rules = { patterns, matcher: ignore({ ignorecase: false }).add(patterns) };
+      }
     }
 
     for (const name of names.sort(byteOrder)) {
@@ -172,16 +182,16 @@ export async function listMethodTree(
 
       if (stats.isSymbolicLink()) {
         // Git matches a link as a file, never as a directory.
-        if (!isExcluded(levels, treePath, false)) symlinks.push(treePath);
+        if (!isExcluded(rules, treePath, false)) symlinks.push(treePath);
         continue;
       }
       if (stats.isDirectory()) {
-        if (DEFAULT_EXCLUDED_DIRECTORIES.has(name) || isExcluded(levels, treePath, true)) continue;
+        if (DEFAULT_EXCLUDED_DIRECTORIES.has(name) || isExcluded(rules, treePath, true)) continue;
         if (++entries > maxEntries) return truncatedListing(files, symlinks, nestedRepositories);
-        queue.push({ dir: treePath, levels });
+        queue.push({ dir: treePath, rules });
         continue;
       }
-      if (!stats.isFile() || isExcluded(levels, treePath, false)) continue;
+      if (!stats.isFile() || isExcluded(rules, treePath, false)) continue;
       if (++entries > maxEntries) return truncatedListing(files, symlinks, nestedRepositories);
       files.push({ path: treePath, size: stats.size });
     }
@@ -191,36 +201,74 @@ export async function listMethodTree(
 }
 
 /**
- * Whether the `.gitignore` files in force exclude `treePath`, the deepest one
- * that has a say deciding, as git reads a lower-level file over a higher-level
- * one. Each file's patterns are relative to its own directory. A parent
- * directory excluded higher up never reaches here, since the walk does not
- * enter it, which is git's "no re-inclusion under an excluded directory".
+ * Whether the `.gitignore` rules in force exclude `treePath`, a directory
+ * tested as `path/` so a directory-only pattern reads it. One matcher holds
+ * every file's patterns, so the last pattern matching wins whichever file it
+ * came from, as git reads a deeper file over a shallower one: a deeper `!build/`
+ * re-includes what a shallower `build/` excluded. A path whose parent directory
+ * is excluded stays excluded, which is git's "no re-inclusion under an excluded
+ * directory"; the walk never enters such a directory in any case.
  */
-function isExcluded(levels: readonly Level[], treePath: string, isDirectory: boolean): boolean {
-  for (let index = levels.length - 1; index >= 0; index -= 1) {
-    const level = levels[index]!;
-    const relative = level.base === "" ? treePath : treePath.slice(level.base.length + 1);
-    const verdict = level.matcher.test(isDirectory ? `${relative}/` : relative);
-    if (verdict.ignored) return true;
-    if (verdict.unignored) return false;
-  }
-  return false;
+function isExcluded(rules: Rules, treePath: string, isDirectory: boolean): boolean {
+  if (rules.matcher === undefined) return false;
+  return rules.matcher.ignores(isDirectory ? `${treePath}/` : treePath);
 }
 
 /**
- * The patterns of the `.gitignore` in `directory`, when it holds one as a
- * regular file. A UTF-8 byte-order mark is skipped, as git skips it.
+ * The patterns of a `.gitignore` held by the directory at tree path `base`,
+ * rebased onto the root so one matcher can hold every file's patterns.
+ *
+ * Git reads a pattern relative to the directory of its `.gitignore`: one with
+ * a slash at its start or in its middle is anchored there, and one without
+ * matches at any depth below it. So an unanchored pattern is prefixed with
+ * `<base>` and a `**` segment, to match at any depth below `base`, and an
+ * anchored one with `<base>` alone, its leading slash dropped; a negation keeps
+ * its `!` in front, a directory-only pattern keeps its trailing slash, and the
+ * glob characters of `base` are escaped so a directory named `[draft]` is
+ * matched by name. Comments and blank lines are dropped, trailing unescaped
+ * spaces trimmed. The root's own file is taken as written.
+ */
+function rebaseGitignore(text: string, base: string): string[] {
+  const lines = text.split(/\r?\n/);
+  if (base === "") return lines;
+  const prefix = escapeGlob(base);
+  const rebased: string[] = [];
+  for (const raw of lines) {
+    const line = raw.replace(/(?<!\\) +$/, "");
+    if (line === "" || line.startsWith("#")) continue;
+    const negated = line.startsWith("!");
+    let body = negated ? line.slice(1) : line;
+    // An escaped leading `!` or `#` is literal, and stays literal once it no
+    // longer leads the pattern.
+    if (body.startsWith("\\!") || body.startsWith("\\#")) body = body.slice(1);
+    const directoryOnly = body.endsWith("/");
+    const core = directoryOnly ? body.slice(0, -1) : body;
+    if (core === "" || core === "/") continue;
+    const anchored = core.includes("/");
+    const pattern = anchored ? `${prefix}/${core.replace(/^\/+/, "")}` : `${prefix}/**/${core}`;
+    rebased.push(`${negated ? "!" : ""}${pattern}${directoryOnly ? "/" : ""}`);
+  }
+  return rebased;
+}
+
+/** `treePath` as a literal at the head of a pattern: its glob characters escaped, and a leading `!` or `#`. */
+function escapeGlob(treePath: string): string {
+  const escaped = treePath.replace(/[\\*?[\]]/g, "\\$&");
+  return /^[!#]/.test(escaped) ? `\\${escaped}` : escaped;
+}
+
+/**
+ * The text of the `.gitignore` in `directory`, when it holds one as a regular
+ * file. A UTF-8 byte-order mark is skipped, as git skips it.
  */
 async function readGitignore(
   directory: string,
-): Promise<{ ok: true; matcher?: Ignore } | { ok: false; message: string }> {
+): Promise<{ ok: true; text?: string } | { ok: false; message: string }> {
   const target = path.join(directory, GITIGNORE);
   try {
     const stats = await fs.lstat(target);
     if (!stats.isFile()) return { ok: true };
-    const text = (await fs.readFile(target, "utf8")).replace(/^\uFEFF/, "");
-    return { ok: true, matcher: ignore({ ignorecase: false }).add(text) };
+    return { ok: true, text: (await fs.readFile(target, "utf8")).replace(/^\uFEFF/, "") };
   } catch (err) {
     if (isMissing(err)) return { ok: true };
     return { ok: false, message: errorMessage(err) };

@@ -302,11 +302,17 @@ async function resolveMethodFolder(
   }
 
   // The template files the steps name, among the tree's members. The lookup
-  // is case-sensitive, as on the runner's filesystem, whatever this one does.
-  const members = new Map<string, MethodTreeFile>(files.map((file) => [file.path, file]));
+  // is case-sensitive, as on the runner's filesystem, whatever this one does,
+  // but blind to Unicode normalization: a name is compared in NFC, as git
+  // records a macOS file whose name the disk holds decomposed, and as a path
+  // in files reaches the same file on such a disk. A member is read by its
+  // name on disk and sent under the step's key, as files does.
+  const members = new Map<string, MethodTreeFile>();
   const membersByFoldedPath = new Map<string, string>();
   for (const file of files) {
-    const folded = file.path.toLowerCase();
+    const composed = file.path.normalize("NFC");
+    if (!members.has(composed)) members.set(composed, file);
+    const folded = composed.toLowerCase();
     if (!membersByFoldedPath.has(folded)) membersByFoldedPath.set(folded, file.path);
   }
   const named: NamedTemplate[] = [];
@@ -319,7 +325,7 @@ async function resolveMethodFolder(
       const key = templateKeyOf(templateFile);
       if (key === undefined) continue;
       const treePath = dir === "." ? key : `${dir}/${key}`;
-      const member = isTemplateFilePath(key) ? members.get(treePath) : undefined;
+      const member = isTemplateFilePath(key) ? members.get(treePath.normalize("NFC")) : undefined;
       if (member === undefined && isTemplateFilePath(key)) {
         const refusal = missedTemplateRefusal(
           shown,
@@ -331,13 +337,13 @@ async function resolveMethodFolder(
         );
         if (refusal !== undefined) lookupRefusals.set(`${file.treePath}\0${treePath}`, refusal);
       }
-      const real = member === undefined ? null : path.join(folder, ...treePath.split("/"));
+      const real = member === undefined ? null : path.join(folder, ...member.path.split("/"));
       named.push({ key, mthdsPath: file.path, real, escapes: false });
-      if (member !== undefined && real !== null && !located.has(treePath)) {
-        treePathByReal.set(real, treePath);
-        located.set(treePath, {
+      if (member !== undefined && real !== null && !located.has(member.path)) {
+        treePathByReal.set(real, member.path);
+        located.set(member.path, {
           index: located.size,
-          path: shown(treePath),
+          path: shown(member.path),
           real,
           size: member.size,
         });
@@ -392,7 +398,8 @@ async function resolveMethodFolder(
  * path leads into a nested repository, which is out of the folder with
  * everything under it, or the folder holds the file spelled in another case,
  * which a case-insensitive filesystem would open here and a case-sensitive
- * runner would not.
+ * runner would not. Names are compared in NFC, so a case near-miss is one of
+ * case alone.
  */
 function missedTemplateRefusal(
   shown: (treePath: string) => string,
@@ -403,15 +410,20 @@ function missedTemplateRefusal(
   membersByFoldedPath: ReadonlyMap<string, string>,
 ): { message: string; hint: string } | undefined {
   const step = `A PipeDocGen step of ${shown(mthdsTreePath)} names the template_file "${templateFile}"`;
-  const repository = nestedRepositories.find((repo) => treePath.startsWith(`${repo}/`));
+  const composed = treePath.normalize("NFC");
+  const repository = nestedRepositories.find((repo) =>
+    composed.startsWith(`${repo.normalize("NFC")}/`),
+  );
   if (repository !== undefined) {
     return {
       message: `${step}, which leads into ${shown(repository)}, a nested git repository: a directory holding a .git entry is not part of the method's folder.`,
       hint: "Move the template file out of the nested repository into the method's folder, or pass method_dir for a folder that is not a repository's parent.",
     };
   }
-  const spelled = membersByFoldedPath.get(treePath.toLowerCase());
-  if (spelled !== undefined && spelled !== treePath) {
+  // Only a difference of case is refused: the lookup already reads both
+  // Unicode normalizations of a name as one.
+  const spelled = membersByFoldedPath.get(composed.toLowerCase());
+  if (spelled !== undefined && spelled.normalize("NFC") !== composed) {
     return {
       message: `${step}, which leads to ${shown(treePath)}, and the folder holds ${shown(spelled)}, spelled in another case.`,
       hint: "Template files are matched case-sensitively, as the runner reads them: make the step's template_file and the file's name agree letter for letter.",

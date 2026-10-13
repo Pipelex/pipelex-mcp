@@ -751,6 +751,41 @@ describe("localBundleFileResolver", () => {
       ]);
     });
 
+    it.each([
+      ["decomposed on disk, composed in the step", "NFD", "NFC"],
+      ["composed on disk, decomposed in the step", "NFC", "NFD"],
+    ] as const)(
+      "finds a template whose name is %s, reads it by its name on disk and sends it under the step's key",
+      async (_label, onDisk, inStep) => {
+        const stored = `modèle.html`.normalize(onDisk);
+        const named = `templates/${`modèle.html`.normalize(inStep)}`;
+        expect(stored).not.toBe(`modèle.html`.normalize(inStep));
+        await placeBundle("methods/invoice/invoice.mthds", [named]);
+        await placeTemplate(`methods/invoice/templates/${stored}`);
+
+        const resolution = await folder("methods/invoice");
+
+        if (!resolution.ok) throw new Error(resolution.refusals.map((r) => r.message).join("; "));
+        expect(Object.keys(resolution.resources)).toEqual([named]);
+        expect(resolution.resources[named]).toEqual(TEMPLATE_BYTES);
+        expect(resolution.sent).toEqual([
+          path.join("methods", "invoice", "invoice.mthds"),
+          path.join("methods", "invoice", "templates", stored),
+        ]);
+      },
+    );
+
+    it("refuses a case near-miss whatever the normalization of either spelling", async () => {
+      await placeBundle("methods/invoice/invoice.mthds", [
+        `Templates/Modèle.html`.normalize("NFD"),
+      ]);
+      await placeTemplate(`methods/invoice/templates/${`modèle.html`.normalize("NFC")}`);
+
+      const refusal = await refusalOf("methods/invoice");
+
+      expect(refusal.message).toContain("spelled in another case");
+    });
+
     it("sends a template named by two steps once per key, read once", async () => {
       await placeBundle("methods/invoice/invoice.mthds", [
         "templates/invoice.xlsx",

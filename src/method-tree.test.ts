@@ -118,6 +118,55 @@ describe("listMethodTree", () => {
     ]);
   });
 
+  // The expectations below are what `git add -n -A` adds from the same tree,
+  // recorded with git 2.x: they pin git's reading, not this module's.
+  describe("as git reads several .gitignore files together", () => {
+    it("lets a deeper !build/ re-include what a shallower build/ excludes, at any depth below it", async () => {
+      await place(".gitignore", "build/\n");
+      await place("a/.gitignore", "!build/\n");
+      await place("main.mthds");
+      await place("build/x.mthds");
+      await place("a/build/keep.mthds");
+      await place("a/b/build/deep.mthds");
+
+      expect(await members()).toEqual(["a/b/build/deep.mthds", "a/build/keep.mthds", "main.mthds"]);
+    });
+
+    it("re-includes a file by negation inside a re-included directory, and nothing beside it", async () => {
+      await place(".gitignore", "build/\n*.tmp.mthds\n");
+      await place("a/.gitignore", "!build/\n!keep.tmp.mthds\n");
+      await place("a/build/keep.tmp.mthds");
+      await place("a/build/other.tmp.mthds");
+      await place("a/build/plain.mthds");
+      await place("build/keep.tmp.mthds");
+
+      expect(await members()).toEqual(["a/build/keep.tmp.mthds", "a/build/plain.mthds"]);
+    });
+
+    it("keeps one directory of an excluded directory's contents: docs/* then !docs/method/", async () => {
+      await place(".gitignore", "docs/*\n!docs/method/\n");
+      await place("main.mthds");
+      await place("docs/readme.mthds");
+      await place("docs/method/m.mthds");
+      await place("docs/other/x.mthds");
+
+      expect(await members()).toEqual(["docs/method/m.mthds", "main.mthds"]);
+    });
+
+    it("anchors a deeper pattern with a slash at its own directory, and reads a directory name as a literal", async () => {
+      await place("a/.gitignore", "/out\n*.tmp\n");
+      await place("a/out/x.mthds");
+      await place("a/b/out/y.mthds");
+      await place("a/q.tmp");
+      await place("[draft]/.gitignore", "*.tmp\n");
+      await place("[draft]/n.tmp");
+      await place("[draft]/k.mthds");
+      await place("d/n.tmp");
+
+      expect(await members()).toEqual(["[draft]/k.mthds", "a/b/out/y.mthds", "d/n.tmp"]);
+    });
+  });
+
   it("re-includes nothing under a directory a .gitignore excludes", async () => {
     await place(".gitignore", "runs/\n!runs/keep.mthds\n");
     await place("main.mthds");

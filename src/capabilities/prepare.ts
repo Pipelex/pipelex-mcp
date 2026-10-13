@@ -453,9 +453,43 @@ export function validatePrepareInputsRequest(input: ResolvedPrepareRequest): Too
       hint: "Pass a qualified domain.pipe_code, or omit pipe_ref to default to the closure's main_pipe.",
       retryable: false,
     });
+  } else if (input.pipe_ref !== undefined) {
+    const refusal = pipeRefRefusal(input.pipe_ref.trim());
+    if (refusal !== undefined) errors.push(refusal);
   }
 
   return errors;
+}
+
+/**
+ * The SDK's `prepareInputs` refuses two spellings of `pipe_ref` before any
+ * request (`normalizePipeRef`): an `alias->domain.pipe_code` ref, since
+ * preparation covers the method's own pipes and not a dependency package's,
+ * and a bare `pipe_code`, since a request names a pipe by its qualified ref.
+ * Refused here first, with the SDK's reasons, so the refusal is the tool's own
+ * request error: a folder's files are then known never to have left the
+ * machine, where the SDK's `InputPreparationError` cannot say whether they did.
+ */
+function pipeRefRefusal(pipeRef: string): ToolError | undefined {
+  if (pipeRef.includes("->")) {
+    return {
+      class: "input_domain",
+      location: "pipe_ref",
+      message: `pipe_ref "${pipeRef}" names a dependency package's pipe; preparation covers the method's own pipes.`,
+      hint: "Name one of the method's own pipes as domain.pipe_code, or omit pipe_ref to default to the method's main_pipe.",
+      retryable: false,
+    };
+  }
+  if (!pipeRef.includes(".")) {
+    return {
+      class: "input_domain",
+      location: "pipe_ref",
+      message: `pipe_ref must be qualified (domain.pipe_code), got the bare "${pipeRef}".`,
+      hint: "Qualify the pipe with its domain, as domain.pipe_code, or omit pipe_ref to default to the method's main_pipe.",
+      retryable: false,
+    };
+  }
+  return undefined;
 }
 
 export function prepareInputsResult(
