@@ -1458,6 +1458,91 @@ describe("validateMthds with a bundle's template files", () => {
     expect(result.structuredContent.errors?.[0]?.message).toContain("named by no PipeDocGen step");
   });
 
+  it("reads a method folder whole, lists what it sent, and draws the graph page into the folder", async () => {
+    const root = await bundleWithTemplate();
+    await fs.writeFile(path.join(root, "methods/invoice/notes.md"), "not part of the method");
+    let capturedFiles: MthdsFile[] | undefined;
+    let capturedOptions: ValidateFilesOptions | undefined;
+
+    const result = await validateMthds(
+      { method_dir: "methods/invoice" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: localBundleFileResolver(root),
+        saveRoot: root,
+        client: {
+          ...selectorValidateNotCalled,
+          async validateFiles(files, options) {
+            capturedFiles = files;
+            capturedOptions = options;
+            return validReport;
+          },
+        },
+      },
+    );
+
+    const sent = [
+      path.join("methods", "invoice", "invoice.mthds"),
+      path.join("methods", "invoice", "templates", "invoice.xlsx"),
+    ];
+    expect(capturedFiles).toEqual([{ content: INVOICE_BUNDLE, uri: sent[0] }]);
+    expect(Object.keys(capturedOptions?.resources ?? {})).toEqual(["templates/invoice.xlsx"]);
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      is_valid: true,
+      files_sent: sent,
+      graph_page: { written: true },
+    });
+    expect(toolResult(result).content[0].text).toContain(`## Files sent`);
+    await expect(
+      fs.readFile(path.join(root, "methods/invoice", GRAPH_PAGE_FILENAME), "utf8"),
+    ).resolves.toContain('"name":"invoice.mthds"');
+
+    // The page it drew is no member the folder sends the next time.
+    const again = await validateMthds(
+      { method_dir: "methods/invoice", graph_page: false },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: localBundleFileResolver(root),
+        client: { ...selectorValidateNotCalled, validateFiles: async () => validReport },
+      },
+    );
+    expect(again.structuredContent.files_sent).toEqual(sent);
+  });
+
+  it("refuses a folder holding no .mthds file at its top before calling the API, at method_dir", async () => {
+    const root = await bundleWithTemplate();
+
+    const result = await validateMthds(
+      { method_dir: "methods" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: localBundleFileResolver(root),
+        client: { ...selectorValidateNotCalled, ...validateFilesNotCalled },
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "method_dir",
+    });
+    expect(result.structuredContent).not.toHaveProperty("files_sent");
+  });
+
+  it("refuses method_dir beside method_id, one selector on a tooling tool", async () => {
+    const result = await validateMthds(
+      { method_dir: "methods/invoice", method_id: "mt_abc123" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: localBundleFileResolver("/nonexistent-root"),
+        client: { ...selectorValidateNotCalled, ...validateFilesNotCalled },
+      },
+    );
+
+    expect(result.structuredContent.errors?.map((error) => error.location)).toEqual(["method_id"]);
+  });
+
   it("refuses a template file no step names before calling the API", async () => {
     const root = await bundleWithTemplate();
     await fs.mkdir(path.join(root, "shared"));

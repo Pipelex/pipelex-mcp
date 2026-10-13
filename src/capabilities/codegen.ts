@@ -29,13 +29,16 @@ import {
   bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
+  filesSentSchema,
   hasTemplateFiles,
-  resolveSubmittedFiles,
+  methodDirInputSchema,
+  resolveMethodFiles,
   resourcesOption,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
+  withFilesSent,
 } from "./shared.js";
 import type {
   ApiConfig,
@@ -134,18 +137,19 @@ const CODEGEN_TARGET_DETAIL = CODEGEN_TARGETS.map(
 const codegenTargetSchema = z.enum(CODEGEN_TARGETS);
 
 export const mthdsCodegenInputSchema = {
+  method_dir: methodDirInputSchema("one_selector"),
   files: bundleFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
     .describe(
-      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.`,
+      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of method_dir / files / method_ref / method_id.`,
     ),
   method_id: z
     .string()
     .optional()
     .describe(
-      `Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of files / method_ref / method_id.`,
+      `Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of method_dir / files / method_ref / method_id.`,
     ),
   target: codegenTargetSchema.describe(
     `Which typed projection to emit. Required, no default — choose it from the calling context, and the user's explicit request wins: ${CODEGEN_TARGET_DETAIL}. Field keys are snake_case in every target.`,
@@ -247,6 +251,7 @@ const codegenStructuredContentSchema = z.object({
       "Written arm only, present when non-empty — every check drift that is NOT an orphan, which would mean the write itself is broken.",
     ),
   method_version: methodVersionReportSchema,
+  files_sent: filesSentSchema,
   validation_errors: z.array(z.unknown()).optional(),
   errors: z.array(toolErrorSchema).optional(),
 });
@@ -254,6 +259,7 @@ const codegenStructuredContentSchema = z.object({
 export const mthdsCodegenOutputSchema = codegenStructuredContentSchema;
 
 export interface MthdsCodegenInput {
+  method_dir?: string;
   files?: SubmittedFileInput[];
   method_ref?: string;
   method_id?: string;
@@ -307,6 +313,8 @@ export interface CodegenStructuredContent {
   drifts?: unknown[];
   /** By-id calls only: the content the code was generated from, when this server can tell. */
   method_version?: MethodVersionReport;
+  /** Calls on a method folder only: every file read from it and sent. */
+  files_sent?: string[];
   validation_errors?: unknown[];
   errors?: ToolError[];
 }
@@ -498,7 +506,7 @@ export async function generateMthdsCode(
   input: MthdsCodegenInput,
   context: CodegenContext = buildCodegenContext(),
 ): Promise<CodegenResult> {
-  const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
+  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector");
   if (resolution.errors.length > 0) {
     return errorResult(INVALID_REQUEST_SUMMARY, resolution.errors);
   }
@@ -516,6 +524,17 @@ export async function generateMthdsCode(
     return errorResult(INVALID_REQUEST_SUMMARY, inputErrors);
   }
 
+  return withFilesSent(await requestCodegen(request, context), resolution.sent);
+}
+
+/**
+ * One `POST /v1/codegen` for a request that passed its checks, then the
+ * report's checks, the preflight, the write arm and the projection.
+ */
+async function requestCodegen(
+  request: ResolvedCodegenRequest,
+  context: CodegenContext,
+): Promise<CodegenResult> {
   // Classify options follow the request's selector shape — each failure
   // locates at the field that caused it.
   const classifyOptions =
@@ -697,7 +716,11 @@ function summaryForError(error: ToolError): string {
 export function codegenToolResult(result: CodegenResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(result.summary, result.structuredContent.errors),
+    content: toolResultContent(
+      result.summary,
+      result.structuredContent.errors,
+      result.structuredContent.files_sent,
+    ),
     isError: result.structuredContent.status === "error",
   };
 }

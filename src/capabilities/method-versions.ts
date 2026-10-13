@@ -406,14 +406,18 @@ export function planMethodSelector(
  * why before anything is sent. This refusal is the linkage form's own rule,
  * true on every platform, and reads nothing of the platform's answer.
  */
-export function linkageSuffixError(value: string): ToolError | undefined {
+export function linkageSuffixError(
+  value: string,
+  source: "files" | "method_dir" = "files",
+): ToolError | undefined {
   const selector = readMethodSelector(value);
   if (selector.form !== "draft" && selector.form !== "version") return undefined;
+  const runs = source === "files" ? "these files" : "the folder";
   return {
     class: "input_domain",
     location: "method_id",
-    message: `Beside files, method_id only files the run under its method, so it must be the bare id \`${selector.methodId}\`, not \`${value}\`: the files are what runs, and a version suffix would claim a version that did not.`,
-    hint: `Pass method_id "${selector.methodId}" to run these files and record the run under the method, or drop files to run \`${value}\` itself.`,
+    message: `Beside ${source}, method_id only files the run under its method, so it must be the bare id \`${selector.methodId}\`, not \`${value}\`: ${source === "files" ? "the files are" : "the folder is"} what runs, and a version suffix would claim a version that did not.`,
+    hint: `Pass method_id "${selector.methodId}" to run ${runs} and record the run under the method, or drop ${source} to run \`${value}\` itself.`,
     retryable: false,
   };
 }

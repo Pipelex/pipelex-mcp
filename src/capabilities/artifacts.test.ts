@@ -21,6 +21,7 @@ import type {
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  GENERATED_DIRECTORY_GITIGNORE,
   MAX_FOUND_AT_PATHS,
   artifactsToolResult,
   downloadMthdsArtifacts,
@@ -760,7 +761,8 @@ describe("downloadMthdsArtifacts", () => {
       retryable: false,
     });
     expect(empty.structuredContent.errors?.[0]?.hint).toContain("dir");
-    expect(await fs.readdir(path.join(root, "runs"))).toEqual(["runevil"]);
+    // `runs/` was created by the first save, so it alone carries the mark.
+    expect(await fs.readdir(path.join(root, "runs"))).toEqual([".gitignore", "runevil"]);
   });
 
   it('saves into the working directory itself when dir is "."', async () => {
@@ -774,6 +776,85 @@ describe("downloadMthdsArtifacts", () => {
 
     expect(result.structuredContent.output?.path).toBe("main_stuff.json");
     expect(await fs.readdir(root)).toEqual(["main_stuff.json"]);
+  });
+
+  describe("the mark on a directory it creates", () => {
+    const readMark = (root: string, ...segments: string[]) =>
+      fs.readFile(path.join(root, ...segments, ".gitignore"), "utf8");
+    const hasMark = (root: string, ...segments: string[]) =>
+      fs.lstat(path.join(root, ...segments, ".gitignore")).then(
+        () => true,
+        () => false,
+      );
+
+    it("writes a .gitignore of * into the topmost directory it creates, and lists it nowhere", async () => {
+      const root = await makeTempDir();
+      const { client } = fakeClient(completedState({ answer: 42 }));
+
+      const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
+
+      expect(await readMark(root, "runs")).toBe(GENERATED_DIRECTORY_GITIGNORE);
+      expect(GENERATED_DIRECTORY_GITIGNORE).toBe("*\n");
+      // runs/ covers everything below it, so the run's own folder needs none.
+      expect(await hasMark(root, RUN_DIR)).toBe(false);
+      expect(result.structuredContent.saved_paths).toEqual([OUTPUT_PATH]);
+      expect(result.summary).not.toContain(".gitignore");
+    });
+
+    it("marks the run's folder alone when runs/ already exists, leaving runs/ as it was", async () => {
+      const root = await makeTempDir();
+      await fs.mkdir(path.join(root, "runs"));
+      const { client } = fakeClient(completedState({ answer: 42 }));
+
+      await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
+
+      expect(await hasMark(root, "runs")).toBe(false);
+      expect(await readMark(root, RUN_DIR)).toBe("*\n");
+    });
+
+    it("marks the first missing directory of a dir it names", async () => {
+      const root = await makeTempDir();
+      await fs.mkdir(path.join(root, "work"));
+      const { client } = fakeClient(completedState({ answer: 42 }));
+
+      await downloadMthdsArtifacts(
+        { run_id: RUN_ID, dir: "work/assets/run-1" },
+        contextIn(root, client),
+      );
+
+      expect(await hasMark(root, "work")).toBe(false);
+      expect(await readMark(root, "work", "assets")).toBe("*\n");
+      expect(await hasMark(root, "work", "assets", "run-1")).toBe(false);
+    });
+
+    it("never marks a directory it found, nor touches the .gitignore one holds", async () => {
+      const root = await makeTempDir();
+      await fs.mkdir(path.join(root, "out"));
+      await fs.writeFile(path.join(root, "out", ".gitignore"), "custom\n");
+      await fs.mkdir(path.join(root, "plain"));
+      const { client } = fakeClient(completedState({ answer: 42 }));
+
+      await downloadMthdsArtifacts({ run_id: RUN_ID, dir: "out" }, contextIn(root, client));
+      await downloadMthdsArtifacts({ run_id: RUN_ID, dir: "plain" }, contextIn(root, client));
+      await downloadMthdsArtifacts({ run_id: RUN_ID, dir: "." }, contextIn(root, client));
+
+      expect(await readMark(root, "out")).toBe("custom\n");
+      expect(await hasMark(root, "plain")).toBe(false);
+      expect(await hasMark(root)).toBe(false);
+    });
+
+    it("marks nothing when the run has nothing to save yet", async () => {
+      const root = await makeTempDir();
+      const { client } = fakeClient({
+        state: "running",
+        pipeline_run_id: RUN_ID,
+        retry_after_seconds: 5,
+      });
+
+      await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
+
+      expect(await fs.readdir(root)).toEqual([]);
+    });
   });
 
   it("never overwrites an existing main_stuff.json — the new one takes a suffix", async () => {

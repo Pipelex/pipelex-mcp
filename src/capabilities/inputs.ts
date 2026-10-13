@@ -24,13 +24,16 @@ import {
   bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
+  filesSentSchema,
   hasTemplateFiles,
-  resolveSubmittedFiles,
+  methodDirInputSchema,
+  resolveMethodFiles,
   resourcesOption,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
+  withFilesSent,
 } from "./shared.js";
 import type {
   ApiConfig,
@@ -63,18 +66,19 @@ const inputsTemplateFormatSchema = z.enum(["json", "toml"]);
 export type InputsTemplateFormat = z.infer<typeof inputsTemplateFormatSchema>;
 
 export const mthdsInputsInputSchema = {
+  method_dir: methodDirInputSchema("one_selector"),
   files: bundleFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
     .describe(
-      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.`,
+      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of method_dir / files / method_ref / method_id.`,
     ),
   method_id: z
     .string()
     .optional()
     .describe(
-      `Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of files / method_ref / method_id.`,
+      `Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of method_dir / files / method_ref / method_id.`,
     ),
   pipe_ref: z
     .string()
@@ -113,6 +117,7 @@ const inputsStructuredContentSchema = z.object({
     .optional()
     .describe('The fill-in inputs template, as raw TOML text (format "toml").'),
   method_version: methodVersionReportSchema,
+  files_sent: filesSentSchema,
   validation_errors: z.array(z.unknown()).optional(),
   errors: z.array(toolErrorSchema).optional(),
 });
@@ -120,6 +125,7 @@ const inputsStructuredContentSchema = z.object({
 export const mthdsInputsOutputSchema = inputsStructuredContentSchema;
 
 export interface MthdsInputsInput {
+  method_dir?: string;
   files?: SubmittedFileInput[];
   method_ref?: string;
   method_id?: string;
@@ -150,6 +156,8 @@ export interface InputsStructuredContent {
   inputs_toml?: string;
   /** By-id calls only: the content the template was projected from, when this server can tell. */
   method_version?: MethodVersionReport;
+  /** Calls on a method folder only: every file read from it and sent. */
+  files_sent?: string[];
   validation_errors?: unknown[];
   errors?: ToolError[];
 }
@@ -281,7 +289,7 @@ export async function buildMthdsInputs(
   input: MthdsInputsInput,
   context: InputsContext = buildInputsContext(),
 ): Promise<InputsResult> {
-  const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
+  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector");
   if (resolution.errors.length > 0) {
     return errorResult("Inputs template was not run: request input is invalid.", resolution.errors);
   }
@@ -296,6 +304,14 @@ export async function buildMthdsInputs(
     return errorResult("Inputs template was not run: request input is invalid.", inputErrors);
   }
 
+  return withFilesSent(await requestInputsTemplate(request, context), resolution.sent);
+}
+
+/** One `POST /v1/pipe-io` for a request that passed its checks, and the projection of its answer. */
+async function requestInputsTemplate(
+  request: ResolvedInputsRequest,
+  context: InputsContext,
+): Promise<InputsResult> {
   let report: PipeIOResponse;
   let plan: SelectorPlan | undefined;
   try {
@@ -367,7 +383,11 @@ function summaryForError(error: ToolError): string {
 export function inputsToolResult(result: InputsResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(result.summary, result.structuredContent.errors),
+    content: toolResultContent(
+      result.summary,
+      result.structuredContent.errors,
+      result.structuredContent.files_sent,
+    ),
     isError: result.structuredContent.status === "error",
   };
 }

@@ -124,7 +124,7 @@ export const mthdsDownloadArtifactsInputSchema = {
     .string()
     .optional()
     .describe(
-      'Directory to save into, relative to the server\'s working directory (created if missing; it must stay inside that directory — no absolute paths, no `..`). Omit to save into `runs/<run_id>`, one folder per run; pass "." to save into the working directory itself.',
+      "Directory to save into, relative to the server's working directory (created if missing, and then given a .gitignore of * so neither git nor a method folder above takes the run's files for its own; it must stay inside that directory — no absolute paths, no `..`). Omit to save into `runs/<run_id>`, one folder per run; pass \".\" to save into the working directory itself.",
     ),
 };
 
@@ -448,6 +448,13 @@ export async function downloadMthdsArtifacts(
     return errorResult("Nothing was saved: the target directory is invalid.", [target.error]);
   }
 
+  if (target.created !== undefined) {
+    const marked = await markGenerated(target.created, dir);
+    if (marked !== undefined) {
+      return errorResult("Nothing was saved: the new directory could not be marked.", [marked]);
+    }
+  }
+
   // The output goes first, so it always takes its own name: a stored file
   // whose name would collide with it is the one the SDK suffixes. A directory
   // that cannot take one small JSON file will not take the downloads either,
@@ -491,6 +498,45 @@ export async function downloadMthdsArtifacts(
     verdict.artifacts.map((item, index) => projectItem(item, index, target.root)),
     target.root,
   );
+}
+
+// ── the generated-directory mark ────────────────────────────────────
+
+/** What a directory this tool creates holds first: a `.gitignore` excluding everything in it, itself included. */
+export const GENERATED_DIRECTORY_GITIGNORE = "*\n";
+
+/**
+ * Mark `created`, the topmost directory this call created, as generated: a
+ * `.gitignore` holding `*`. A run saved beside a method lands inside the
+ * method's folder, and the folder's membership rule reads the `.gitignore`
+ * files inside it, so the mark keeps the run's files out of the method that
+ * folder holds — and out of git — without the rule knowing `runs/` by name.
+ *
+ * Only a directory this call created is marked, never one it found, and an
+ * existing `.gitignore` is never overwritten (`wx`): a directory the user made
+ * stays theirs to mark. Returns a refusal at `dir` when the file cannot be
+ * written, as the output file's failure is, since a directory that cannot take
+ * two bytes will not take the run either.
+ */
+async function markGenerated(
+  created: string,
+  requestedDir: string,
+): Promise<ToolError | undefined> {
+  try {
+    await fs.writeFile(path.join(created, ".gitignore"), GENERATED_DIRECTORY_GITIGNORE, {
+      flag: "wx",
+    });
+    return undefined;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return undefined;
+    return {
+      class: "input_domain",
+      location: "dir",
+      message: `Could not write .gitignore in the directory created for ${requestedDir}: ${errorMessage(err)}`,
+      hint: "Check that the directory is writable and has room, or pass another dir.",
+      retryable: false,
+    };
+  }
 }
 
 // ── the output file ─────────────────────────────────────────────────

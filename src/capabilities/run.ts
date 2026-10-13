@@ -41,17 +41,20 @@ import {
   bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
+  filesSentSchema,
   imageCandidatesOf,
   inputsPathSchema,
+  methodDirInputSchema,
   resolveInputsSource,
   hasTemplateFiles,
-  resolveSubmittedFiles,
+  resolveMethodFiles,
   resourcesOption,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
   validateRunIdRequest,
+  withFilesSent,
 } from "./shared.js";
 import type {
   ApiConfig,
@@ -101,18 +104,19 @@ const RUN_STATUS_SET: Record<RunStatus, true> = {
 export const runStatusSchema = z.enum(Object.keys(RUN_STATUS_SET) as [RunStatus, ...RunStatus[]]);
 
 export const mthdsRunInputSchema = {
+  method_dir: methodDirInputSchema("run_source"),
   files: bundleFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
     .describe(
-      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side: the repository is fetched at the tag and the resolved commit SHA comes back as provenance. A complete run source of its own — it pairs with NOTHING (not files, not method_id).`,
+      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side: the repository is fetched at the tag and the resolved commit SHA comes back as provenance. A complete run source of its own — it pairs with NOTHING (not method_dir, not files, not method_id).`,
     ),
   method_id: z
     .string()
     .optional()
     .describe(
-      `Catalog id (mt_…) of a registered method, resolved server-side and requiring an API key (the catalog is org-scoped). ${RUN_METHOD_ID_SELECTOR_SENTENCE} With files also present, the files run and method_id, which must then be bare, only files the run under its method. Provide files, method_ref, or method_id (files + method_id together is also legal).`,
+      `Catalog id (mt_…) of a registered method, resolved server-side and requiring an API key (the catalog is org-scoped). ${RUN_METHOD_ID_SELECTOR_SENTENCE} With method_dir or files also present, the folder or the files run and method_id, which must then be bare, only files the run under its method. Provide method_dir, files, method_ref, or method_id (method_dir or files + method_id together is also legal).`,
     ),
   pipe_code: z
     .string()
@@ -183,6 +187,7 @@ export const mthdsRunOutputSchema = z.object({
     .optional()
     .describe("method_ref runs only — the address, tag, and resolved commit SHA that was fetched."),
   method_version: runMethodVersionSchema,
+  files_sent: filesSentSchema,
   available_view_specs: z
     .array(runViewSpecSchema)
     .describe(
@@ -380,6 +385,7 @@ export const mthdsRunResultsOutputSchema = z.object({
 });
 
 export interface MthdsRunInput {
+  method_dir?: string;
   files?: SubmittedFileInput[];
   method_ref?: string;
   method_id?: string;
@@ -415,6 +421,8 @@ export interface RunStartStructuredContent {
   method_provenance?: MethodProvenance;
   /** Runs by `method_id` alone: the version that runs, or `"draft"`. */
   method_version?: number | "draft";
+  /** Runs of a method folder only: every file read from it and sent. */
+  files_sent?: string[];
   available_view_specs: RunViewSpec[];
   errors?: ToolError[];
 }
@@ -1297,7 +1305,7 @@ export async function startMthdsRun(
   input: MthdsRunInput,
   context: RunContext = buildRunContext(),
 ): Promise<RunStartResult> {
-  const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
+  const resolution = await resolveMethodFiles(input, context.resolver, "run_source");
   const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
     required: false,
   });
@@ -1337,12 +1345,24 @@ export async function startMthdsRun(
   // what runs, and its selector is planned against the platform's answer
   // (`method-versions.ts`).
   if (request.method_id !== undefined && request.files.length > 0) {
-    const linkageError = linkageSuffixError(request.method_id);
+    const linkageError = linkageSuffixError(
+      request.method_id,
+      input.method_dir === undefined ? "files" : "method_dir",
+    );
     if (linkageError !== undefined) {
       return startErrorResult("Run was not started: request input is invalid.", [linkageError]);
     }
   }
 
+  return withFilesSent(await requestRunStart(request, classifyOptions, context), resolution.sent);
+}
+
+/** One `POST /v1/start` for a request that passed its checks, and its acknowledgement's projection. */
+async function requestRunStart(
+  request: ResolvedRunRequest,
+  classifyOptions: ClassifyErrorOptions,
+  context: RunContext,
+): Promise<RunStartResult> {
   let plan: SelectorPlan | undefined;
   try {
     const client = runClient(context);
@@ -1583,7 +1603,11 @@ function resultsErrorResult(summary: string, errors: ToolError[]): RunResultsRes
 export function runToolResult(result: RunStartResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(result.summary, result.structuredContent.errors),
+    content: toolResultContent(
+      result.summary,
+      result.structuredContent.errors,
+      result.structuredContent.files_sent,
+    ),
     isError: result.structuredContent.status === "error",
   };
 }

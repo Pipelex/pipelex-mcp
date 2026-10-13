@@ -17,15 +17,18 @@ import {
   bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
+  filesSentSchema,
   inputsPathSchema,
+  methodDirInputSchema,
   resolveInputsSource,
   hasTemplateFiles,
-  resolveSubmittedFiles,
+  resolveMethodFiles,
   resourcesOption,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
+  withFilesSent,
 } from "./shared.js";
 import type {
   ApiConfig,
@@ -42,18 +45,19 @@ import type { TemplateFiles } from "./template-files.js";
 import { MAX_UPLOAD_BYTES, SizeGuardedPipelexApiClient, formatMib } from "./upload-ceiling.js";
 
 export const mthdsPrepareInputsInputSchema = {
+  method_dir: methodDirInputSchema("one_selector"),
   files: bundleFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
     .describe(
-      `Published method address — ${METHOD_REF_GRAMMAR} — the signature source. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.`,
+      `Published method address — ${METHOD_REF_GRAMMAR} — the signature source. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of method_dir / files / method_ref / method_id.`,
     ),
   method_id: z
     .string()
     .optional()
     .describe(
-      `Catalog id (mt_…) of a registered method — the signature source, resolved server-side and requiring an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of files / method_ref / method_id.`,
+      `Catalog id (mt_…) of a registered method — the signature source, resolved server-side and requiring an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of method_dir / files / method_ref / method_id.`,
     ),
   pipe_ref: z
     .string()
@@ -90,12 +94,14 @@ const prepareStructuredContentSchema = z.object({
       "The pipelex-storage:// uris of the assets uploaded this call; [] when all inputs pass through.",
     ),
   method_version: methodVersionReportSchema,
+  files_sent: filesSentSchema,
   errors: z.array(toolErrorSchema).optional(),
 });
 
 export const mthdsPrepareInputsOutputSchema = prepareStructuredContentSchema;
 
 export interface MthdsPrepareInputsInput {
+  method_dir?: string;
   files?: SubmittedFileInput[];
   method_ref?: string;
   method_id?: string;
@@ -123,6 +129,8 @@ export interface PrepareStructuredContent {
   uploads?: string[];
   /** By-id calls only: the content whose signature the inputs were prepared against, when this server can tell. */
   method_version?: MethodVersionReport;
+  /** Calls on a method folder only: every file read from it and sent. */
+  files_sent?: string[];
   errors?: ToolError[];
 }
 
@@ -275,7 +283,7 @@ export async function prepareMthdsInputs(
   input: MthdsPrepareInputsInput,
   context: PrepareContext = buildPrepareContext(),
 ): Promise<PrepareResult> {
-  const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
+  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector");
   const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
     required: true,
   });
@@ -298,6 +306,14 @@ export async function prepareMthdsInputs(
     return errorResult("Inputs were not prepared: request input is invalid.", inputErrors);
   }
 
+  return withFilesSent(await requestPreparedInputs(request, context), resolution.sent);
+}
+
+/** The SDK's `prepareInputs` for a request that passed its checks, and the projection of what it prepared. */
+async function requestPreparedInputs(
+  request: ResolvedPrepareRequest,
+  context: PrepareContext,
+): Promise<PrepareResult> {
   // Classify options follow the request's selector shape, exactly as
   // mthds_validate and mthds_codegen do — each failure locates at the field
   // that caused it.
@@ -380,7 +396,7 @@ function prepareSelectorOf(request: ResolvedPrepareRequest): PrepareSelector {
   // broke, and this lands in the capability's own catch as a classified
   // no-verdict instead.
   throw new InputPreparationError(
-    "Cannot prepare inputs: no method selector. Supply exactly one of files, method_ref or method_id.",
+    "Cannot prepare inputs: no method selector. Supply exactly one of method_dir, files, method_ref or method_id.",
   );
 }
 
@@ -492,7 +508,11 @@ function summaryForError(error: ToolError): string {
 export function prepareInputsToolResult(result: PrepareResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(result.summary, result.structuredContent.errors),
+    content: toolResultContent(
+      result.summary,
+      result.structuredContent.errors,
+      result.structuredContent.files_sent,
+    ),
     isError: result.structuredContent.status === "error",
   };
 }

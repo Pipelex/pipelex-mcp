@@ -31,13 +31,16 @@ import {
   bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
+  filesSentSchema,
   hasTemplateFiles,
-  resolveSubmittedFiles,
+  methodDirInputSchema,
+  resolveMethodFiles,
   resourcesOption,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
+  withFilesSent,
 } from "./shared.js";
 import type {
   ApiConfig,
@@ -54,24 +57,25 @@ import { isTemplateFilePath } from "./template-files.js";
 import type { TemplateFiles } from "./template-files.js";
 
 export const mthdsValidateInputSchema = {
+  method_dir: methodDirInputSchema("one_selector"),
   files: bundleFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
     .describe(
-      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side: the repository is fetched at the tag and the package's own file names label the diagnostics; no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.`,
+      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side: the repository is fetched at the tag and the package's own file names label the diagnostics; no bundle enters the conversation. Supply exactly ONE of method_dir / files / method_ref / method_id.`,
     ),
   method_id: z
     .string()
     .optional()
     .describe(
-      `Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of files / method_ref / method_id.`,
+      `Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of method_dir / files / method_ref / method_id.`,
     ),
   graph_page: z
     .boolean()
     .optional()
     .describe(
-      `Whether to write the method's flowchart, ${GRAPH_PAGE_FILENAME}, beside files given as { path } (default true): a standalone page that embeds the files and draws the graph when opened in a browser. It is rewritten on every validation and never replaces a file this tool did not write. Pass false to leave the directory untouched.`,
+      `Whether to write the method's flowchart, ${GRAPH_PAGE_FILENAME}, into method_dir or beside files given as { path } (default true): a standalone page that embeds the files and draws the graph when opened in a browser. It is rewritten on every validation and never replaces a file this tool did not write. Pass false to leave the directory untouched.`,
     ),
 };
 
@@ -237,9 +241,10 @@ const validationStructuredContentSchema = z.object({
     })
     .optional()
     .describe(
-      `The method's flowchart as a standalone HTML page (${GRAPH_PAGE_FILENAME}) beside the validated files, which the user can open in a browser. Present when every file was given as { path } and graph_page was not false, whatever the verdict; absent otherwise.`,
+      `The method's flowchart as a standalone HTML page (${GRAPH_PAGE_FILENAME}) beside the validated files, which the user can open in a browser. Present when the method came from method_dir or every file was given as { path }, and graph_page was not false, whatever the verdict; absent otherwise.`,
     ),
   method_version: methodVersionReportSchema,
+  files_sent: filesSentSchema,
   warnings: z
     .array(z.unknown())
     .optional()
@@ -253,6 +258,7 @@ const validationStructuredContentSchema = z.object({
 export const mthdsValidateOutputSchema = validationStructuredContentSchema;
 
 export interface MthdsValidateInput {
+  method_dir?: string;
   files?: SubmittedFileInput[];
   method_ref?: string;
   method_id?: string;
@@ -314,6 +320,8 @@ export interface ValidationStructuredContent {
   graph_page?: GraphPageStructuredContent;
   /** By-id validations only: the content validated, when this server can tell. */
   method_version?: MethodVersionReport;
+  /** Validations of a method folder only: every file read from it and sent. */
+  files_sent?: string[];
   /** A valid verdict's advisory findings, relayed as the API sent them; absent when empty. */
   warnings?: unknown[];
   validation_errors?: unknown[];
@@ -459,7 +467,7 @@ export async function validateMthds(
   input: MthdsValidateInput,
   context: ValidationContext = buildValidationContext(),
 ): Promise<ValidationResult> {
-  const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
+  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector");
   if (resolution.errors.length > 0) {
     return errorResult("Validation was not run: request input is invalid.", resolution.errors);
   }
@@ -476,7 +484,7 @@ export async function validateMthds(
     return errorResult("Validation was not run: request input is invalid.", inputErrors);
   }
 
-  const result = await validateRequest(request, context);
+  const result = withFilesSent(await validateRequest(request, context), resolution.sent);
   const saveRoot = context.saveRoot;
   const pageFiles = graphPageFilesOf(input, request.files);
   if (saveRoot === undefined || pageFiles === undefined) {
@@ -495,12 +503,15 @@ export async function validateMthds(
 
 /**
  * The files the graph page embeds, with the paths they were given at: only
- * when the caller did not opt out and EVERY `.mthds` item came as `{ path }`.
- * An inline item has no directory to write beside, and a page embedding some
- * of the method's files but not others would draw a different method from the
- * one validated. The template files are not the method's text, so they are
- * left out: the resolution put them in `resources`, never among `resolved`,
- * and only a request that resolved without an error reaches here.
+ * when the caller did not opt out and EVERY `.mthds` item came as `{ path }`,
+ * or the method came from `method_dir`, whose files all carry the path they
+ * were read at, so the page lands in the folder itself, the deepest directory
+ * holding a bundle with one at its top. An inline item has no directory to
+ * write beside, and a page embedding some of the method's files but not
+ * others would draw a different method from the one validated. The template
+ * files are not the method's text, so they are left out: the resolution put
+ * them in `resources`, never among `resolved`, and only a request that
+ * resolved without an error reaches here.
  */
 function graphPageFilesOf(
   input: MthdsValidateInput,
@@ -508,6 +519,14 @@ function graphPageFilesOf(
 ): GraphPageFile[] | undefined {
   if (input.graph_page === false) {
     return undefined;
+  }
+  if (input.method_dir !== undefined) {
+    const pageFiles: GraphPageFile[] = [];
+    for (const file of resolved) {
+      if (file.uri == null) return undefined;
+      pageFiles.push({ path: file.uri, content: file.content });
+    }
+    return pageFiles.length > 0 ? pageFiles : undefined;
   }
   const submitted = (input.files ?? []).filter(
     (file) => "content" in file || !isTemplateFilePath(file.path),
@@ -638,7 +657,11 @@ function summaryForError(error: ToolError): string {
 }
 
 export function toolResult(result: ValidationResult) {
-  const [text] = toolResultContent(result.summary, result.structuredContent.errors);
+  const [text] = toolResultContent(
+    result.summary,
+    result.structuredContent.errors,
+    result.structuredContent.files_sent,
+  );
   const content =
     result.graphPage === undefined
       ? [text]

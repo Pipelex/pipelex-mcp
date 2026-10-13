@@ -686,6 +686,45 @@ describe("prepareMthdsInputs — request shape and transport", () => {
     expect(result.structuredContent.status).toBe("ok");
   });
 
+  it("reads a method folder through the resolver and lists every file it sent", async () => {
+    const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    let captured: PrepareInputsRequest | undefined;
+
+    const result = await prepareMthdsInputs(
+      { method_dir: "methods", inputs: {} },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: {
+          async resolve() {
+            throw new Error("a folder is not read file by file");
+          },
+          async resolveMethodDir(methodDir) {
+            return {
+              ok: true,
+              files: [{ path: `${methodDir}/invoice.mthds`, content: 'domain = "invoice"' }],
+              resources: { "templates/invoice.xlsx": XLSX },
+              sent: [`${methodDir}/invoice.mthds`, `${methodDir}/templates/invoice.xlsx`],
+            };
+          },
+        },
+        client: uploadWith(async (request) => {
+          captured = request;
+          return { inputs: {}, uploads: [] };
+        }),
+      },
+    );
+
+    expect(captured).toMatchObject({
+      files: [{ content: 'domain = "invoice"', source: "methods/invoice.mthds" }],
+      resources: { "templates/invoice.xlsx": XLSX },
+    });
+    expect(result.structuredContent.files_sent).toEqual([
+      "methods/invoice.mthds",
+      "methods/templates/invoice.xlsx",
+    ]);
+    expect(prepareInputsToolResult(result).content[0].text).toContain("## Files sent");
+  });
+
   it("surfaces an unreachable API as config", async () => {
     const result = await prepareMthdsInputs(
       { files, inputs: {} },

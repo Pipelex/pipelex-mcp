@@ -106,9 +106,60 @@ export const bundleFilesInputSchema = z
   )
   .describe(
     "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). " +
+      "For a method whose folder is on disk, pass method_dir instead, which finds these files itself. " +
       "A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, " +
       'so [{ path: "invoice.mthds" }, { path: "templates/invoice.xlsx" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. ' +
       `At most ${MAX_TEMPLATE_FILES} template files, ${MAX_TEMPLATE_FILE_BYTES / (1024 * 1024)} MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded.`,
+  );
+
+/**
+ * `method_dir`, the folder arm of the method-taking tools: the method's folder
+ * on disk, from which the workshop finds the `.mthds` files under the
+ * membership rule (`src/method-tree.ts`) and the template files their
+ * `PipeDocGen` steps name, and sends those, nothing else. It is a top-level
+ * field beside `files`, `method_ref` and `method_id` rather than a third arm of
+ * the files union, since a folder is not a file and a folder beside listed
+ * files would suggest merging the two. It composes as `files` does: alone on
+ * the tooling tools, and beside a bare `method_id` as run-history linkage on
+ * `mthds_run` ({@link SelectorRule}).
+ */
+export function methodDirInputSchema(rule: SelectorRule) {
+  const pairing =
+    rule === "run_source"
+      ? "It pairs as files do: never with files or method_ref, and with a bare method_id the folder runs and the id only files the run under its method."
+      : "Supply exactly ONE of method_dir / files / method_ref / method_id.";
+  return z
+    .string()
+    .optional()
+    .describe(
+      "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. " +
+        "The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. " +
+        "It skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, and what the .gitignore files inside the folder exclude, and refuses a folder holding a symbolic link it does not skip. " +
+        `Its template files are held to the limits files states, and its .mthds files to the runner's: at most ${MAX_FOLDER_MTHDS_FILES}, of ${MAX_FOLDER_MTHDS_FILE_BYTES / (1024 * 1024)} MiB each. ` +
+        `Prefer it to files for a method on disk; the result's files_sent lists every file sent. ${pairing}`,
+    );
+}
+
+/**
+ * The runner's default bounds on a request's `.mthds` files (`pipelex-api`'s
+ * `limits.py`: `MAX_MTHDS_FILES_PER_REQUEST` and `MAX_MTHDS_FILE_KIB`), which
+ * the workshop holds a method folder to before reading it, since a folder can
+ * hold more `.mthds` files than the agent thought of. A deployment configured
+ * with larger limits is not seen, as with the template files' limits.
+ */
+export const MAX_FOLDER_MTHDS_FILES = 16;
+export const MAX_FOLDER_MTHDS_FILE_BYTES = 1024 * 1024;
+
+/**
+ * `files_sent`, the listing every method-taking tool's result carries when its
+ * method came from `method_dir`: what left the machine, so a stray `.mthds`
+ * file the folder held is seen rather than sent silently.
+ */
+export const filesSentSchema = z
+  .array(z.string())
+  .optional()
+  .describe(
+    "Every file this call read from method_dir and sent, each as method_dir joined with its path inside the folder: the .mthds files, then the template files their PipeDocGen steps name. Present only when the method came from method_dir.",
   );
 
 /** A submitted file resolved to its contents — what the capabilities consume. */
@@ -150,6 +201,10 @@ export type FileResolution =
  * those files' text, which the same request carries. Absent, such an item goes
  * to `resolve` like any other, whose extension gate refuses it:
  * `mthds_save_method`'s `files` reads `.mthds` alone.
+ *
+ * `resolveMethodDir` is what makes a tool take `method_dir`: it reads a method
+ * folder whole, its `.mthds` files and the template files their steps name,
+ * and holds them to the request's bounds. Absent, `method_dir` is refused.
  */
 export interface FileResolver {
   resolve(path: string): Promise<FileResolution>;
@@ -158,13 +213,188 @@ export interface FileResolver {
     bundle: readonly BundleFileOnDisk[],
     requestBytes: number,
   ): Promise<TemplateFilesResolution>;
+  resolveMethodDir?(methodDir: string): Promise<MethodDirResolution>;
 }
+
+/**
+ * Outcome of reading a method folder. On success, `files` are its `.mthds`
+ * files in the order they are sent, each under the path the caller can open
+ * (`method_dir` joined with its path inside the folder), `resources` the
+ * template files keyed by the step naming each, and `sent` every file sent,
+ * the `.mthds` files first. Failures are values, all located at `method_dir`.
+ */
+export type MethodDirResolution =
+  | {
+      ok: true;
+      files: { path: string; content: string }[];
+      resources: TemplateFiles;
+      sent: string[];
+    }
+  | { ok: false; refusals: { message: string; hint: string }[] };
 
 export interface ResolvedFiles {
   files: SubmittedFile[];
   /** The bundle's template files; empty when none was submitted. */
   resources: TemplateFiles;
   errors: ToolError[];
+}
+
+/** What a method-taking request names its method by, before anything is read. */
+export interface MethodSourceInput extends MethodSelectors {
+  files?: SubmittedFileInput[];
+  method_dir?: string;
+}
+
+export interface ResolvedMethodFiles extends ResolvedFiles {
+  /**
+   * Every file read from `method_dir` and sent, as the caller can open it;
+   * absent when the method did not come from a folder. A capability puts it
+   * on its result through {@link withFilesSent}.
+   */
+  sent?: string[];
+}
+
+/**
+ * Resolve a method-taking request's source into the `{ content, uri? }` items
+ * and template files every check and route already takes: `files` through
+ * {@link resolveSubmittedFiles}, or `method_dir` through the resolver's
+ * `resolveMethodDir`. The folder's pairings are refused before it is read, at
+ * the field that came second in the order method_dir, files, method_ref,
+ * method_id, as the other pairs are: `files` beside it at `method_dir`,
+ * `method_ref` at `method_ref`, and `method_id` at `method_id` on the tooling
+ * tools, while on `mthds_run` a folder takes a `method_id` beside it as files
+ * do. The selector checks that follow ({@link validateMethodSelectorRequest})
+ * see the folder's files as they see listed ones.
+ */
+export async function resolveMethodFiles(
+  source: MethodSourceInput,
+  resolver: FileResolver | undefined,
+  rule: SelectorRule,
+): Promise<ResolvedMethodFiles> {
+  if (source.method_dir === undefined) {
+    return resolveSubmittedFiles(source.files ?? [], resolver);
+  }
+  const refused = (errors: ToolError[]): ResolvedMethodFiles => ({
+    files: [],
+    resources: {},
+    errors,
+  });
+
+  const pairingErrors = methodDirPairingErrors(source, source.method_dir, rule);
+  if (pairingErrors.length > 0) return refused(pairingErrors);
+
+  if (resolver?.resolveMethodDir === undefined) {
+    return refused([
+      {
+        class: "input_domain",
+        location: "method_dir",
+        message:
+          "This deployment cannot read a folder from disk; submit the method's files instead.",
+        hint: "Resubmit the method's .mthds files inline as files [{ content, uri? }], or use the local workshop server (npx @pipelex/mcp), which reads method_dir.",
+        retryable: false,
+      },
+    ]);
+  }
+
+  const outcome = await resolver.resolveMethodDir(source.method_dir);
+  if (!outcome.ok) {
+    return refused(
+      outcome.refusals.map((refusal) => ({
+        class: "input_domain" as const,
+        location: "method_dir",
+        message: refusal.message,
+        hint: refusal.hint,
+        retryable: false,
+      })),
+    );
+  }
+  return {
+    files: outcome.files.map((file) => ({ content: file.content, uri: file.path })),
+    resources: outcome.resources,
+    errors: [],
+    sent: outcome.sent,
+  };
+}
+
+/** `method_dir`'s own request-shape checks: not blank, and none of the pairings its rule refuses. */
+function methodDirPairingErrors(
+  source: MethodSourceInput,
+  methodDir: string,
+  rule: SelectorRule,
+): ToolError[] {
+  if (methodDir.trim() === "") {
+    return [
+      {
+        class: "input_domain",
+        location: "method_dir",
+        message: "method_dir must not be empty when supplied.",
+        hint: "Pass the folder holding the method's .mthds files, relative to the server's working directory (\".\" for that directory itself).",
+        retryable: false,
+      },
+    ];
+  }
+  const errors: ToolError[] = [];
+  if ((source.files ?? []).length > 0) {
+    errors.push({
+      class: "input_domain",
+      location: "method_dir",
+      message:
+        "method_dir and files are mutually exclusive — pass the method's folder or list its files, never both.",
+      hint: "method_dir finds the .mthds files and the template files their steps name by itself; drop files to send the folder, or drop method_dir to send exactly the files listed.",
+      retryable: false,
+    });
+  }
+  if (source.method_ref !== undefined && source.method_ref.trim() !== "") {
+    errors.push({
+      class: "input_domain",
+      location: "method_ref",
+      message:
+        "method_dir and method_ref are mutually exclusive — submit the folder or the address, never both.",
+      hint: "An address is a complete method source resolved server-side; drop method_ref to operate on the folder, or drop method_dir to operate on the published package.",
+      retryable: false,
+    });
+  }
+  if (rule === "one_selector" && source.method_id !== undefined && source.method_id.trim() !== "") {
+    errors.push({
+      class: "input_domain",
+      location: "method_id",
+      message:
+        "method_dir and method_id are mutually exclusive on this tool — submit the folder or the catalog id, never both.",
+      hint: "This operation is stateless, so there is no run-history linkage for an extra id to feed; drop method_id to operate on the folder, or drop method_dir to operate on the registered method.",
+      retryable: false,
+    });
+  }
+  return errors;
+}
+
+/**
+ * Put a folder's listing on a result produced once its request was sent, a
+ * no-verdict error included, since its files left the machine either way.
+ * Each error located at `files` or at one of its items is relocated to
+ * `method_dir`: the route's textures name `files`, which this caller never
+ * passed. A request whose method did not come from a folder (`sent`
+ * undefined) is returned as it was.
+ */
+export function withFilesSent<
+  R extends { structuredContent: { errors?: ToolError[]; files_sent?: string[] } },
+>(result: R, sent: string[] | undefined): R {
+  if (sent === undefined) return result;
+  const { errors } = result.structuredContent;
+  return {
+    ...result,
+    structuredContent: {
+      ...result.structuredContent,
+      files_sent: sent,
+      ...(errors === undefined ? {} : { errors: errors.map(atMethodDir) }),
+    },
+  };
+}
+
+function atMethodDir(error: ToolError): ToolError {
+  const location = error.location;
+  return location === "files" || location?.startsWith("files[") === true
+    ? { ...error, location: "method_dir" }
+    : error;
 }
 
 /**
@@ -555,13 +785,50 @@ export type ContentImage = {
  * cause. Surfacing message + hint here keeps the human/LLM-readable stream
  * actually actionable (the workspace "format follows consumer" rule), while
  * `structuredContent.errors` stays the untouched contract.
+ *
+ * `filesSent`, a method folder's `files_sent`, closes the text with the list
+ * of what the call sent ({@link filesSentSection}), after the error list,
+ * which belongs right under the headline it details.
  */
-export function toolResultContent(summary: string, errors?: ToolError[]): [ContentText] {
-  if (errors === undefined || errors.length === 0) {
-    return [{ type: "text", text: summary }];
+export function toolResultContent(
+  summary: string,
+  errors?: ToolError[],
+  filesSent?: readonly string[],
+): [ContentText] {
+  const parts = [summary];
+  if (errors !== undefined && errors.length > 0) {
+    parts.push(errors.map(formatToolError).join("\n"));
   }
-  const details = errors.map(formatToolError).join("\n");
-  return [{ type: "text", text: `${summary}\n\n${details}` }];
+  if (filesSent !== undefined && filesSent.length > 0) {
+    parts.push(filesSentSection(filesSent));
+  }
+  return [{ type: "text", text: parts.join("\n\n") }];
+}
+
+/**
+ * The summary's account of what a method folder sent: every file, so the
+ * reader sees a `.mthds` file the folder held without anyone listing it.
+ */
+export function filesSentSection(paths: readonly string[]): string {
+  return [
+    "## Files sent",
+    "",
+    "Read from the method's folder and sent, and nothing else from it:",
+    "",
+    ...paths.map((sent) => `- ${codeSpan(asOneLine(sent))}`),
+  ].join("\n");
+}
+
+/**
+ * `text` as a Markdown code span that a backtick inside it cannot close: the
+ * fence is one backtick longer than the longest run in the text, padded with
+ * a space when the text starts or ends with one, as CommonMark reads it.
+ */
+function codeSpan(text: string): string {
+  const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((run) => run[0].length));
+  const fence = "`".repeat(longest + 1);
+  const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
+  return `${fence}${pad}${text}${pad}${fence}`;
 }
 
 function formatToolError(error: ToolError): string {
@@ -719,7 +986,9 @@ export const METHOD_REF_GRAMMAR =
 /**
  * The selectors a method-taking request may carry beside its (already
  * resolved) inline files. `undefined` means "not supplied"; a supplied-but-
- * blank value is rejected loudly rather than treated as absent.
+ * blank value is rejected loudly rather than treated as absent. A method
+ * folder (`method_dir`) has resolved into those files by the time these are
+ * checked, its own pairings refused first ({@link resolveMethodFiles}).
  */
 export interface MethodSelectors {
   method_ref?: string;
@@ -731,13 +1000,13 @@ export interface MethodSelectors {
  * Method Selectors):
  *
  * - `"one_selector"` — the tooling tools (`mthds_validate`,
- *   `mthds_inputs_template`, `mthds_prepare_inputs`, `mthds_codegen`): exactly one of files /
- *   `method_ref` / `method_id`. Stateless operations have no Run row, so
+ *   `mthds_inputs_template`, `mthds_prepare_inputs`, `mthds_codegen`): exactly one of
+ *   `method_dir` / files / `method_ref` / `method_id`. Stateless operations have no Run row, so
  *   "linkage" has no referent and an extra selector could only be ignored —
  *   the worst contract of the three.
- * - `"run_source"` — `mthds_run`: inline files win and `method_id` beside them
- *   demotes to run-history linkage (legal pair), while `method_ref` is a
- *   complete run source of its own and pairs with nothing.
+ * - `"run_source"` — `mthds_run`: inline files, or a method folder, win and
+ *   `method_id` beside them demotes to run-history linkage (legal pair), while
+ *   `method_ref` is a complete run source of its own and pairs with nothing.
  */
 export type SelectorRule = "one_selector" | "run_source";
 
@@ -790,8 +1059,8 @@ export function validateMethodSelectorRequest(
     errors.push({
       class: "input_domain",
       location: "files",
-      message: "Provide MTHDS files, a method_ref address, or a method_id.",
-      hint: `Submit files as [{ content, uri? }], a published method's address (${METHOD_REF_GRAMMAR}) as method_ref, or the catalog id (mt_…) of a registered method as method_id.`,
+      message: "Provide a method folder, MTHDS files, a method_ref address, or a method_id.",
+      hint: `Pass the method's folder as method_dir, submit files as [{ path }] or [{ content, uri? }], a published method's address (${METHOD_REF_GRAMMAR}) as method_ref, or the catalog id (mt_…) of a registered method as method_id.`,
       retryable: false,
     });
   }

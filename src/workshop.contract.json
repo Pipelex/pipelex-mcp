@@ -9,7 +9,7 @@
         "listChanged": true
       }
     },
-    "instructions": "This is the Pipelex plugin's local workshop for executable AI methods written in MTHDS (.mthds). The usual flow: `mthds_list_methods` to find a saved method, `mthds_validate`, `mthds_inputs_template` and fill it, `mthds_prepare_inputs`, `mthds_run`, then `mthds_run_status` and `mthds_run_results` with the run id, and `mthds_show_images` to see a picture it produced or `mthds_download_artifacts` to save its output and files. A method only turns the inputs it is given into results; fetching from mail, drives or business systems, running on a schedule and writing back are up to whatever calls it. When the Pipelex connector's `pipelex_*` tools are also present, use these `mthds_*` tools for all method work and never mix the two, which can be signed in to different organizations. `mthds_codegen` turns a method into typed code, `mthds_models` lists and checks model references, `mthds_save_method` saves a bundle as a draft, `mthds_get_method` pulls one back, and `mthds_publish_method` publishes it, only when the user asks. Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`, `mthds_run`) takes its method as files, a published address as method_ref, or a catalog id (mt_…) as method_id; a bare id names the latest published version, mt_…@draft the draft. Prefer `{ path: string }` files to inline content; a path resolves against the working directory. Call `mthds_list_methods` when the user asks what saved methods exist or names one without its mt_ id; choose by name and description and pass its id. `mthds_run` spends inference credit. A picture from `mthds_show_images` stays in the conversation from then on, so show one when asked, never by reflex. This workshop has no views, so report each result to the user yourself."
+    "instructions": "This is the Pipelex plugin's local workshop for executable AI methods written in MTHDS (.mthds). The usual flow: `mthds_list_methods` to find a saved method, `mthds_validate`, `mthds_inputs_template` and fill it, `mthds_prepare_inputs`, `mthds_run`, then `mthds_run_status` and `mthds_run_results` with the run id, and `mthds_show_images` to see a picture it produced or `mthds_download_artifacts` to save its output and files. A method only turns the inputs it is given into results; fetching from mail, drives or business systems, running on a schedule and writing back are up to whatever calls it. When the Pipelex connector's `pipelex_*` tools are also present, use these `mthds_*` tools for all method work and never mix the two, which can be signed in to different organizations. `mthds_codegen` turns a method into typed code, `mthds_models` checks model references, `mthds_save_method` saves a bundle as a draft, `mthds_get_method` pulls one back, and `mthds_publish_method` publishes it, only when the user asks. Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`, `mthds_run`) takes its method as its folder on disk (method_dir, preferred), files (`{ path }` over inline), a published address (method_ref) or a catalog id (mt_…, method_id); a bare id names the latest published version, mt_…@draft the draft, and a path resolves against the working directory. Call `mthds_list_methods` when the user asks what saved methods exist or names one without its mt_ id; choose by name and description and pass its id. `mthds_run` spends inference credit. A picture from `mthds_show_images` stays in the conversation, so show one when asked, never by reflex. This workshop has no views; report each result to the user yourself."
   },
   "tools": [
     {
@@ -412,10 +412,14 @@
     },
     {
       "name": "mthds_validate",
-      "description": "Validate an MTHDS method with the Pipelex API — from submitted file contents, from a published method's address passed as method_ref, or from a registered method's catalog id (mt_…) passed as method_id. Supply exactly ONE of files / method_ref / method_id — never several. Addresses and ids are resolved server-side, so no bundle enters the conversation. A bare id validates the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which. A valid verdict carries the main pipe's typed signature (main_pipe): its ref, each declared input with the concept it expects and how many items, and the concept it produces — type a call site from that instead of guessing the shapes of a method you cannot read. A bundle whose PipeDocGen steps fill templates takes those template files in files as { path } too, and a valid verdict's warnings carry what the template check found in them. Files given as { path } also get the method's flowchart written beside them as method-graph.html, a standalone page the user can open in a browser (graph_page: false skips it); the result says where.",
+      "description": "Validate an MTHDS method with the Pipelex API — from its folder on disk passed as method_dir, from submitted files, from a published method's address passed as method_ref, or from a registered method's catalog id (mt_…) passed as method_id. Supply exactly ONE of method_dir / files / method_ref / method_id — never several; for a method on disk, prefer method_dir, which finds its .mthds files and templates itself. Addresses and ids are resolved server-side, so no bundle enters the conversation. A bare id validates the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which. A valid verdict carries the main pipe's typed signature (main_pipe): its ref, each declared input with the concept it expects and how many items, and the concept it produces — type a call site from that instead of guessing the shapes of a method you cannot read. A bundle whose PipeDocGen steps fill templates needs those template files: method_dir sends them, files takes them as { path } items, and a valid verdict's warnings carry what the template check found in them. A method_dir, or files given as { path }, also gets the method's flowchart written beside its files as method-graph.html, a standalone page the user can open in a browser (graph_page: false skips it); the result says where.",
       "inputSchema": {
         "type": "object",
         "properties": {
+          "method_dir": {
+            "description": "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. It skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, and what the .gitignore files inside the folder exclude, and refuses a folder holding a symbolic link it does not skip. Its template files are held to the limits files states, and its .mthds files to the runner's: at most 16, of 1 MiB each. Prefer it to files for a method on disk; the result's files_sent lists every file sent. Supply exactly ONE of method_dir / files / method_ref / method_id.",
+            "type": "string"
+          },
           "files": {
             "type": "array",
             "items": {
@@ -453,18 +457,18 @@
                 }
               ]
             },
-            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. At most 32 template files, 5 MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded."
+            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). For a method whose folder is on disk, pass method_dir instead, which finds these files itself. A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. At most 32 template files, 5 MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded."
           },
           "method_ref": {
-            "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side: the repository is fetched at the tag and the package's own file names label the diagnostics; no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.",
+            "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side: the repository is fetched at the tag and the package's own file names label the diagnostics; no bundle enters the conversation. Supply exactly ONE of method_dir / files / method_ref / method_id.",
             "type": "string"
           },
           "method_id": {
-            "description": "Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). A bare id names the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which content was read. Supply exactly ONE of files / method_ref / method_id.",
+            "description": "Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). A bare id names the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which content was read. Supply exactly ONE of method_dir / files / method_ref / method_id.",
             "type": "string"
           },
           "graph_page": {
-            "description": "Whether to write the method's flowchart, method-graph.html, beside files given as { path } (default true): a standalone page that embeds the files and draws the graph when opened in a browser. It is rewritten on every validation and never replaces a file this tool did not write. Pass false to leave the directory untouched.",
+            "description": "Whether to write the method's flowchart, method-graph.html, into method_dir or beside files given as { path } (default true): a standalone page that embeds the files and draws the graph when opened in a browser. It is rewritten on every validation and never replaces a file this tool did not write. Pass false to leave the directory untouched.",
             "type": "boolean"
           }
         },
@@ -601,7 +605,7 @@
             "additionalProperties": false
           },
           "graph_page": {
-            "description": "The method's flowchart as a standalone HTML page (method-graph.html) beside the validated files, which the user can open in a browser. Present when every file was given as { path } and graph_page was not false, whatever the verdict; absent otherwise.",
+            "description": "The method's flowchart as a standalone HTML page (method-graph.html) beside the validated files, which the user can open in a browser. Present when the method came from method_dir or every file was given as { path }, and graph_page was not false, whatever the verdict; absent otherwise.",
             "type": "object",
             "properties": {
               "path": {
@@ -676,6 +680,13 @@
                 ]
               }
             ]
+          },
+          "files_sent": {
+            "description": "Every file this call read from method_dir and sent, each as method_dir joined with its path inside the folder: the .mthds files, then the template files their PipeDocGen steps name. Present only when the method came from method_dir.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "warnings": {
             "description": "A valid verdict's advisory findings, which never change is_valid; absent when there are none. A template_check_warning item is a finding of a PipeDocGen step's template check in the template file it was sent, such as a field that matches no input: it carries pipe_code, template_file (the file as the step names it) and template_location (the place in the file, in the engine's words), each null when unknown.",
@@ -752,10 +763,14 @@
     },
     {
       "name": "mthds_inputs_template",
-      "description": "Project a pipe's declared inputs as a fill-in template — from submitted MTHDS file contents, from a published method's address passed as method_ref, or from a registered method's catalog id (mt_…) passed as method_id. Supply exactly ONE of files / method_ref / method_id — never several. A bare id projects from the method's latest published version, mt_…@draft from its draft and mt_…@<n> from version n; the result says which.",
+      "description": "Project a pipe's declared inputs as a fill-in template — from the method's folder on disk passed as method_dir, from submitted MTHDS files, from a published method's address passed as method_ref, or from a registered method's catalog id (mt_…) passed as method_id. Supply exactly ONE of method_dir / files / method_ref / method_id — never several; for a method on disk, prefer method_dir. A bare id projects from the method's latest published version, mt_…@draft from its draft and mt_…@<n> from version n; the result says which.",
       "inputSchema": {
         "type": "object",
         "properties": {
+          "method_dir": {
+            "description": "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. It skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, and what the .gitignore files inside the folder exclude, and refuses a folder holding a symbolic link it does not skip. Its template files are held to the limits files states, and its .mthds files to the runner's: at most 16, of 1 MiB each. Prefer it to files for a method on disk; the result's files_sent lists every file sent. Supply exactly ONE of method_dir / files / method_ref / method_id.",
+            "type": "string"
+          },
           "files": {
             "type": "array",
             "items": {
@@ -793,14 +808,14 @@
                 }
               ]
             },
-            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. At most 32 template files, 5 MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded."
+            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). For a method whose folder is on disk, pass method_dir instead, which finds these files itself. A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. At most 32 template files, 5 MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded."
           },
           "method_ref": {
-            "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.",
+            "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of method_dir / files / method_ref / method_id.",
             "type": "string"
           },
           "method_id": {
-            "description": "Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). A bare id names the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which content was read. Supply exactly ONE of files / method_ref / method_id.",
+            "description": "Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). A bare id names the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which content was read. Supply exactly ONE of method_dir / files / method_ref / method_id.",
             "type": "string"
           },
           "pipe_ref": {
@@ -878,6 +893,13 @@
               }
             ]
           },
+          "files_sent": {
+            "description": "Every file this call read from method_dir and sent, each as method_dir joined with its path inside the folder: the .mthds files, then the template files their PipeDocGen steps name. Present only when the method came from method_dir.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "validation_errors": {
             "type": "array",
             "items": {}
@@ -945,10 +967,14 @@
     },
     {
       "name": "mthds_codegen",
-      "description": "Generate typed code for an MTHDS method: its concept set projected into typed models by the Pipelex codegen engine, stamped and locked so the written tree can be checked offline. Supply exactly ONE of files / method_ref / method_id — never several; an address or an id is resolved server-side, so no bundle enters the conversation. target is required and has no default — choose it from the project, and the user's explicit request wins: ts-zod for a TypeScript or JavaScript project (a package.json, .ts sources); python-pydantic for a Python project that consumes run results without a Pipelex runtime; python-structures for writing a Pipelex host or a @pipe_func implementation. Pass output_dir (a DEDICATED generated directory, such as src/generated/<method>/) to write the tree to disk, so the bytes never enter the conversation. Without output_dir, write every returned artifact at its path and the lock as codegen.lock beside them, VERBATIM — any byte change breaks the stamp and the lock.",
+      "description": "Generate typed code for an MTHDS method: its concept set projected into typed models by the Pipelex codegen engine, stamped and locked so the written tree can be checked offline. Name the method by exactly ONE of method_dir (its folder on disk, preferred for a method on disk) / files / method_ref / method_id — never several; an address or an id is resolved server-side, so no bundle enters the conversation. target is required and has no default — choose it from the project, and the user's explicit request wins: ts-zod for a TypeScript or JavaScript project (a package.json, .ts sources); python-pydantic for a Python project that consumes run results without a Pipelex runtime; python-structures for writing a Pipelex host or a @pipe_func implementation. Pass output_dir (a DEDICATED generated directory, such as src/generated/<method>/) to write the tree to disk, so the bytes never enter the conversation. Without output_dir, write every returned artifact at its path and the lock as codegen.lock beside them, VERBATIM — any byte change breaks the stamp and the lock.",
       "inputSchema": {
         "type": "object",
         "properties": {
+          "method_dir": {
+            "description": "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. It skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, and what the .gitignore files inside the folder exclude, and refuses a folder holding a symbolic link it does not skip. Its template files are held to the limits files states, and its .mthds files to the runner's: at most 16, of 1 MiB each. Prefer it to files for a method on disk; the result's files_sent lists every file sent. Supply exactly ONE of method_dir / files / method_ref / method_id.",
+            "type": "string"
+          },
           "files": {
             "type": "array",
             "items": {
@@ -986,14 +1012,14 @@
                 }
               ]
             },
-            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. At most 32 template files, 5 MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded."
+            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). For a method whose folder is on disk, pass method_dir instead, which finds these files itself. A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. At most 32 template files, 5 MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded."
           },
           "method_ref": {
-            "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.",
+            "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of method_dir / files / method_ref / method_id.",
             "type": "string"
           },
           "method_id": {
-            "description": "Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). A bare id names the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which content was read. Supply exactly ONE of files / method_ref / method_id.",
+            "description": "Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). A bare id names the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which content was read. Supply exactly ONE of method_dir / files / method_ref / method_id.",
             "type": "string"
           },
           "target": {
@@ -1152,6 +1178,13 @@
               }
             ]
           },
+          "files_sent": {
+            "description": "Every file this call read from method_dir and sent, each as method_dir joined with its path inside the folder: the .mthds files, then the template files their PipeDocGen steps name. Present only when the method came from method_dir.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "validation_errors": {
             "type": "array",
             "items": {}
@@ -1219,10 +1252,14 @@
     },
     {
       "name": "mthds_prepare_inputs",
-      "description": "Prepare a pipe's FILLED inputs for a run — upload file-bearing values (local paths, data: URLs, bytes) to Pipelex storage and rewrite them to pipelex-storage:// so they are run-ready. http(s) URLs and existing pipelex-storage:// references pass through unchanged; an inputs set that is already all pass-through can skip this and go straight to mthds_run. Name the method as files, as a published method's address via method_ref, or as a registered method's catalog id via method_id — exactly ONE of the three, never several — plus the filled inputs from mthds_inputs_template. Pass the inputs inline as inputs, or, for a large or machine-produced set, as inputs_path, the path of a .json file in the workspace — exactly one of the two. Uploads are made with your API key.",
+      "description": "Prepare a pipe's FILLED inputs for a run — upload file-bearing values (local paths, data: URLs, bytes) to Pipelex storage and rewrite them to pipelex-storage:// so they are run-ready. http(s) URLs and existing pipelex-storage:// references pass through unchanged; an inputs set that is already all pass-through can skip this and go straight to mthds_run. Name the method by its folder on disk via method_dir (preferred for a method on disk), as files, as a published method's address via method_ref, or as a registered method's catalog id via method_id — exactly ONE of the four, never several — plus the filled inputs from mthds_inputs_template. Pass the inputs inline as inputs, or, for a large or machine-produced set, as inputs_path, the path of a .json file in the workspace — exactly one of the two. Uploads are made with your API key.",
       "inputSchema": {
         "type": "object",
         "properties": {
+          "method_dir": {
+            "description": "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. It skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, and what the .gitignore files inside the folder exclude, and refuses a folder holding a symbolic link it does not skip. Its template files are held to the limits files states, and its .mthds files to the runner's: at most 16, of 1 MiB each. Prefer it to files for a method on disk; the result's files_sent lists every file sent. Supply exactly ONE of method_dir / files / method_ref / method_id.",
+            "type": "string"
+          },
           "files": {
             "type": "array",
             "items": {
@@ -1260,14 +1297,14 @@
                 }
               ]
             },
-            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. At most 32 template files, 5 MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded."
+            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). For a method whose folder is on disk, pass method_dir instead, which finds these files itself. A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. At most 32 template files, 5 MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded."
           },
           "method_ref": {
-            "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0 — the signature source. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.",
+            "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0 — the signature source. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of method_dir / files / method_ref / method_id.",
             "type": "string"
           },
           "method_id": {
-            "description": "Catalog id (mt_…) of a registered method — the signature source, resolved server-side and requiring an API key (the catalog is org-scoped). A bare id names the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which content was read. Supply exactly ONE of files / method_ref / method_id.",
+            "description": "Catalog id (mt_…) of a registered method — the signature source, resolved server-side and requiring an API key (the catalog is org-scoped). A bare id names the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which content was read. Supply exactly ONE of method_dir / files / method_ref / method_id.",
             "type": "string"
           },
           "pipe_ref": {
@@ -1338,6 +1375,13 @@
               }
             ]
           },
+          "files_sent": {
+            "description": "Every file this call read from method_dir and sent, each as method_dir joined with its path inside the folder: the .mthds files, then the template files their PipeDocGen steps name. Present only when the method came from method_dir.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "errors": {
             "type": "array",
             "items": {
@@ -1401,10 +1445,14 @@
     },
     {
       "name": "mthds_run",
-      "description": "Start a durable run of a MTHDS method — from submitted file contents, from a published method's address passed as method_ref (resolved server-side at the tag, with the fetched commit returned as provenance), or from a registered method's catalog id (mt_…) passed as method_id. method_ref is a complete run source and pairs with NOTHING (not files, not method_id); files + method_id together is legal — the files run and method_id is recorded as run-history linkage. A bare id runs the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n, and the result says which ran: to run what you just saved, pass mt_…@draft. Executes the method on the hosted Pipelex API and spends inference credit. When running from files, validate the bundle with mthds_validate and fill the inputs template from mthds_inputs_template first — validation gives a structured, repairable verdict, where a start-time rejection only reports the failure. For a large or machine-produced inputs set, pass inputs_path, the path of a .json file in the workspace, instead of inputs — never both. Returns the durable run id immediately (never blocks); follow up with mthds_run_status and mthds_run_results.",
+      "description": "Start a durable run of a MTHDS method — from its folder on disk passed as method_dir (preferred for a method on disk: it sends the .mthds files and the templates its steps name), from submitted files, from a published method's address passed as method_ref (resolved server-side at the tag, with the fetched commit returned as provenance), or from a registered method's catalog id (mt_…) passed as method_id. method_ref is a complete run source and pairs with NOTHING; method_dir or files + method_id together is legal — the folder or files run and method_id is recorded as run-history linkage. A bare id runs the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n, and the result says which ran: to run what you just saved, pass mt_…@draft. Executes the method on the hosted Pipelex API and spends inference credit. When running from a folder or files, validate the bundle with mthds_validate and fill the inputs template from mthds_inputs_template first — validation gives a structured, repairable verdict, where a start-time rejection only reports the failure. For a large or machine-produced inputs set, pass inputs_path, the path of a .json file in the workspace, instead of inputs — never both. Returns the durable run id immediately (never blocks); follow up with mthds_run_status and mthds_run_results.",
       "inputSchema": {
         "type": "object",
         "properties": {
+          "method_dir": {
+            "description": "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. It skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, and what the .gitignore files inside the folder exclude, and refuses a folder holding a symbolic link it does not skip. Its template files are held to the limits files states, and its .mthds files to the runner's: at most 16, of 1 MiB each. Prefer it to files for a method on disk; the result's files_sent lists every file sent. It pairs as files do: never with files or method_ref, and with a bare method_id the folder runs and the id only files the run under its method.",
+            "type": "string"
+          },
           "files": {
             "type": "array",
             "items": {
@@ -1442,14 +1490,14 @@
                 }
               ]
             },
-            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. At most 32 template files, 5 MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded."
+            "description": "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). For a method whose folder is on disk, pass method_dir instead, which finds these files itself. A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. At most 32 template files, 5 MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded."
           },
           "method_ref": {
-            "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side: the repository is fetched at the tag and the resolved commit SHA comes back as provenance. A complete run source of its own — it pairs with NOTHING (not files, not method_id).",
+            "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side: the repository is fetched at the tag and the resolved commit SHA comes back as provenance. A complete run source of its own — it pairs with NOTHING (not method_dir, not files, not method_id).",
             "type": "string"
           },
           "method_id": {
-            "description": "Catalog id (mt_…) of a registered method, resolved server-side and requiring an API key (the catalog is org-scoped). A bare id runs the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which ran. With files also present, the files run and method_id, which must then be bare, only files the run under its method. Provide files, method_ref, or method_id (files + method_id together is also legal).",
+            "description": "Catalog id (mt_…) of a registered method, resolved server-side and requiring an API key (the catalog is org-scoped). A bare id runs the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which ran. With method_dir or files also present, the folder or the files run and method_id, which must then be bare, only files the run under its method. Provide method_dir, files, method_ref, or method_id (method_dir or files + method_id together is also legal).",
             "type": "string"
           },
           "pipe_code": {
@@ -1542,6 +1590,13 @@
                 "const": "draft"
               }
             ]
+          },
+          "files_sent": {
+            "description": "Every file this call read from method_dir and sent, each as method_dir joined with its path inside the folder: the .mthds files, then the template files their PipeDocGen steps name. Present only when the method came from method_dir.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "available_view_specs": {
             "type": "array",
@@ -2380,7 +2435,7 @@
             "description": "The durable run id returned by mthds_run — the run to save to disk."
           },
           "dir": {
-            "description": "Directory to save into, relative to the server's working directory (created if missing; it must stay inside that directory — no absolute paths, no `..`). Omit to save into `runs/<run_id>`, one folder per run; pass \".\" to save into the working directory itself.",
+            "description": "Directory to save into, relative to the server's working directory (created if missing, and then given a .gitignore of * so neither git nor a method folder above takes the run's files for its own; it must stay inside that directory — no absolute paths, no `..`). Omit to save into `runs/<run_id>`, one folder per run; pass \".\" to save into the working directory itself.",
             "type": "string"
           }
         },

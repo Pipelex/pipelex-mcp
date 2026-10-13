@@ -189,6 +189,7 @@ export function planTemplateFiles(
   located: readonly LocatedTemplate[],
   named: readonly NamedTemplate[],
   requestBytes: number,
+  options: TemplateBudgetOptions = {},
 ): { planned: PlannedTemplate[]; refusals: TemplateRefusal[] } {
   const namesByReal = new Map<string, NamedTemplate[]>();
   const realsByKey = new Map<string, Map<string, string>>();
@@ -246,7 +247,10 @@ export function planTemplateFiles(
       });
     }
   }
-  return { planned, refusals: [...refusals, ...templateBudgetRefusals(planned, requestBytes)] };
+  return {
+    planned,
+    refusals: [...refusals, ...templateBudgetRefusals(planned, requestBytes, options)],
+  };
 }
 
 /** Where the steps' template files were looked for, for a refusal of a file none of them names. */
@@ -259,6 +263,16 @@ function expectedLocations(named: readonly NamedTemplate[]): string {
     );
   const more = named.length > shown.length ? `, and ${named.length - shown.length} more` : "";
   return `; the steps name ${shown.join(", ")}${more}`;
+}
+
+/**
+ * What a caller of the planner may word for itself. `countHint` replaces the
+ * hint of the count refusal, which otherwise tells a caller who listed the
+ * files to send only the named ones: a method folder sends nothing else, so
+ * the advice there is about the steps.
+ */
+export interface TemplateBudgetOptions {
+  countHint?: string;
 }
 
 /**
@@ -285,12 +299,13 @@ function expectedLocations(named: readonly NamedTemplate[]): string {
 export function templateBudgetRefusals(
   entries: readonly { key: string; index: number; path: string; size: number }[],
   requestBytes: number,
+  options: TemplateBudgetOptions = {},
 ): TemplateRefusal[] {
   if (entries.length > MAX_TEMPLATE_FILES) {
     return [
       {
         message: `${entries.length} template files would be sent, over the ${MAX_TEMPLATE_FILES} one request takes.`,
-        hint: ONLY_NAMED_HINT,
+        hint: options.countHint ?? ONLY_NAMED_HINT,
       },
     ];
   }

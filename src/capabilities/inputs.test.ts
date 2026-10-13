@@ -509,6 +509,41 @@ describe("buildMthdsInputs path submissions", () => {
     expect(result.structuredContent.status).toBe("ok");
   });
 
+  it("reads a method folder through the resolver and lists every file it sent", async () => {
+    const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    const requests: PipeIORequest[] = [];
+
+    const result = await buildMthdsInputs(
+      { method_dir: "methods" },
+      {
+        ...contextWith(validReport, requests),
+        resolver: {
+          async resolve() {
+            throw new Error("a folder is not read file by file");
+          },
+          async resolveMethodDir(methodDir) {
+            return {
+              ok: true,
+              files: [{ path: `${methodDir}/invoice.mthds`, content: 'domain = "invoice"' }],
+              resources: { "templates/invoice.xlsx": XLSX },
+              sent: [`${methodDir}/invoice.mthds`, `${methodDir}/templates/invoice.xlsx`],
+            };
+          },
+        },
+      },
+    );
+
+    expect(requests[0]?.files).toEqual([
+      { content: 'domain = "invoice"', source: "methods/invoice.mthds" },
+    ]);
+    expect(requests[0]?.resources).toEqual({ "templates/invoice.xlsx": XLSX });
+    expect(result.structuredContent.files_sent).toEqual([
+      "methods/invoice.mthds",
+      "methods/templates/invoice.xlsx",
+    ]);
+    expect(inputsToolResult(result).content[0].text).toContain("- `methods/invoice.mthds`");
+  });
+
   it("rejects { path } items instructively without a resolver (hosted)", async () => {
     const result = await buildMthdsInputs(
       { files: [{ path: "methods/bundle.mthds" }] },
