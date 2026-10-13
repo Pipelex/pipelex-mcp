@@ -27,12 +27,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import {
-  StdioClientTransport,
-  getDefaultEnvironment,
-} from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 import { LIVE_API_KEY_ENV, liveApiTarget } from "../src/capabilities/e2e-support.js";
+import { emptySmokeHome, smokeChildEnv } from "./smoke-env.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER_ENTRYPOINT = path.join(REPO_ROOT, "src", "main.ts");
@@ -662,16 +660,10 @@ async function main(): Promise<void> {
     return;
   }
 
-  // The child gets the SDK's safe base environment plus the server's two knobs,
-  // set from the live pair, so the server resolves exactly the API this script
-  // just reported and never an ambient PIPELEX_BASE_URL meant for other tools.
-  const childEnv: Record<string, string> = {
-    ...getDefaultEnvironment(),
-    PIPELEX_BASE_URL: config.baseUrl,
-  };
-  if (config.apiKey !== undefined) {
-    childEnv.PIPELEX_API_KEY = config.apiKey;
-  }
+  // The child resolves exactly the API and the key this script just reported:
+  // the live pair, and an empty PIPELEX_HOME of its own, so a run without a key
+  // never falls back to the developer's saved one (`smoke-env.ts`).
+  const childEnv = smokeChildEnv(config, emptySmokeHome());
 
   const transport = new StdioClientTransport({
     command: TSX_BIN,

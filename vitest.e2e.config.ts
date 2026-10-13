@@ -13,7 +13,9 @@
  * way `make smoke` does and refuses to start without them.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { defineConfig } from "vitest/config";
 
@@ -26,10 +28,18 @@ if (existsSync(".env")) {
   process.loadEnvFile(".env");
 }
 
+// The live suite runs on its own pair, `PIPELEX_E2E_BASE_URL` and
+// `PIPELEX_E2E_API_KEY`, never on the key the developer saved in the home
+// `.env`, which the workshop reads whenever its host passes none
+// (`src/credentials.ts`). Every test sees an empty home of its own instead.
+const testHome = mkdtempSync(path.join(os.tmpdir(), "pipelex-mcp-e2e-home-"));
+process.on("exit", () => rmSync(testHome, { recursive: true, force: true }));
+
 export default defineConfig({
   test: {
     include: ["src/**/*.e2e.ts"],
     environment: "node",
+    env: { PIPELEX_HOME: testHome },
     // A cold hosted API answers in seconds, not milliseconds, and the run suite
     // polls a durable execution to a terminal state.
     testTimeout: 120_000,

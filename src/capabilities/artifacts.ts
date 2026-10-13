@@ -39,7 +39,13 @@ import {
   toolResultContent,
   validateRunIdRequest,
 } from "./shared.js";
-import type { ApiConfig, AuthErrorTexture, ErrorSummaries, ToolError } from "./shared.js";
+import type {
+  ApiConfig,
+  AuthErrorTexture,
+  BaseUrlSourceTexture,
+  ErrorSummaries,
+  ToolError,
+} from "./shared.js";
 import { errorMessage, resolveSaveDir } from "./workspace-boundary.js";
 
 /**
@@ -118,7 +124,7 @@ export const mthdsDownloadArtifactsInputSchema = {
     .string()
     .optional()
     .describe(
-      'Directory to save into, relative to the server\'s working directory (created if missing; it must stay inside that directory — no absolute paths, no `..`). Omit to save into `runs/<run_id>`, one folder per run; pass "." to save into the working directory itself.',
+      "Directory to save into, relative to the server's working directory (created if missing, and then given a .gitignore of * so neither git nor a method folder above takes the run's files for its own; it must stay inside that directory — no absolute paths, no `..`). Omit to save into `runs/<run_id>`, one folder per run; pass \".\" to save into the working directory itself.",
     ),
 };
 
@@ -287,6 +293,8 @@ export interface ArtifactsContext extends ApiConfig {
   allowHttp?: boolean;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 export function buildArtifactsContext(env = process.env): ArtifactsContext {
@@ -388,7 +396,11 @@ export async function downloadMthdsArtifacts(
     client = artifactClient(context);
     state = await client.getRunResult(input.run_id, { artifacts: DOWNLOAD_RESULT_ARTIFACTS });
   } catch (err) {
-    const error = classifyError(err, { ...RUN_RESULTS_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, {
+      ...RUN_RESULTS_ERROR_OPTIONS,
+      auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
+    });
     return errorResult(summaryForToolError(error, ERROR_SUMMARIES), [error]);
   }
 
@@ -436,6 +448,20 @@ export async function downloadMthdsArtifacts(
     return errorResult("Nothing was saved: the target directory is invalid.", [target.error]);
   }
 
+  // A dir the caller names gets the mark on the directory the run lands in,
+  // and only when this call created it; the default location gets it on the
+  // topmost directory created there, `runs/` the first time.
+  let marked: string | undefined;
+  if (target.created !== undefined) {
+    const markedDir = input.dir === undefined ? target.created : target.dir;
+    const failure = await markGenerated(markedDir, dir);
+    if (failure !== undefined) {
+      await removeCreatedDirectories(target.dir, target.created);
+      return errorResult("Nothing was saved: the new directory could not be marked.", [failure]);
+    }
+    marked = path.relative(target.root, markedDir);
+  }
+
   // The output goes first, so it always takes its own name: a stored file
   // whose name would collide with it is the one the SDK suffixes. A directory
   // that cannot take one small JSON file will not take the downloads either,
@@ -452,7 +478,7 @@ export async function downloadMthdsArtifacts(
   };
 
   if (collectArtifacts(mainStuff).length === 0) {
-    return completedResult(runId, DOWNLOAD_SCOPE, output, [], target.root);
+    return withMarkNote(completedResult(runId, DOWNLOAD_SCOPE, output, [], target.root), marked);
   }
 
   let verdict: DownloadArtifactsResult;
@@ -464,17 +490,93 @@ export async function downloadMthdsArtifacts(
       allowHttp: allowsPlainHttp(context),
     });
   } catch (err) {
-    const error = classifyError(err, { ...BULK_RESOLVE_ERROR_OPTIONS, auth: context.authError });
-    return refusedResult(error, err, output, target.root);
+    const error = classifyError(err, {
+      ...BULK_RESOLVE_ERROR_OPTIONS,
+      auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
+    });
+    return withMarkNote(refusedResult(error, err, output, target.root), marked);
   }
 
-  return completedResult(
-    runId,
-    verdict.scope,
-    output,
-    verdict.artifacts.map((item, index) => projectItem(item, index, target.root)),
-    target.root,
+  return withMarkNote(
+    completedResult(
+      runId,
+      verdict.scope,
+      output,
+      verdict.artifacts.map((item, index) => projectItem(item, index, target.root)),
+      target.root,
+    ),
+    marked,
   );
+}
+
+// ── the generated-directory mark ────────────────────────────────────
+
+/** What a directory this tool creates holds first: a `.gitignore` excluding everything in it, itself included. */
+export const GENERATED_DIRECTORY_GITIGNORE = "*\n";
+
+/**
+ * Mark `dir` as generated: a `.gitignore` holding `*`. A run saved beside a
+ * method lands inside the method's folder, and the folder's membership rule
+ * reads the `.gitignore` files inside it, so the mark keeps the run's files
+ * out of the method that folder holds — and out of git — without the rule
+ * knowing `runs/` by name.
+ *
+ * The caller passes a directory this call created, never one it found: the
+ * directory the run lands in for a `dir` the caller names, the topmost one
+ * created for the default location. An existing `.gitignore` is never
+ * overwritten (`wx`), so a directory the user made stays theirs to mark.
+ * Returns a refusal at `dir` when the file cannot be written, as the output
+ * file's failure is, since a directory that cannot take two bytes will not
+ * take the run either.
+ */
+async function markGenerated(dir: string, requestedDir: string): Promise<ToolError | undefined> {
+  try {
+    await fs.writeFile(path.join(dir, ".gitignore"), GENERATED_DIRECTORY_GITIGNORE, {
+      flag: "wx",
+    });
+    return undefined;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return undefined;
+    return {
+      class: "input_domain",
+      location: "dir",
+      message: `Could not write .gitignore in the directory created for ${requestedDir}: ${errorMessage(err)}`,
+      hint: "Check that the directory is writable and has room, or pass another dir.",
+      retryable: false,
+    };
+  }
+}
+
+/**
+ * Undo the directories a save created when it could not mark them: from
+ * `dir` up to `created` inclusive, each removed only while empty, so a retry
+ * creates them again and marks them rather than finding them unmarked and
+ * leaving them so. Best effort: a directory that is not empty, or will not
+ * go, stops the climb and stays.
+ */
+async function removeCreatedDirectories(dir: string, created: string): Promise<void> {
+  let current = dir;
+  for (;;) {
+    try {
+      await fs.rmdir(current);
+    } catch {
+      return;
+    }
+    if (current === created) return;
+    const parent = path.dirname(current);
+    if (parent === current) return;
+    current = parent;
+  }
+}
+
+/** The summary line naming the directory the save marked as generated, when it marked one. */
+function withMarkNote(result: ArtifactsResult, marked: string | undefined): ArtifactsResult {
+  if (marked === undefined) return result;
+  return {
+    ...result,
+    summary: `${result.summary}\n\nCreated \`${marked}\` and gave it a \`.gitignore\` of \`*\`, so git and a method folder above it leave the run's files out.`,
+  };
 }
 
 // ── the output file ─────────────────────────────────────────────────
@@ -762,6 +864,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   input_domain: "The run was not saved: the Pipelex API rejected the request.",
   runtime: "The run could not be saved: the Pipelex API returned an error.",
   paywall: "The run could not be saved: the organization's Pipelex plan does not cover this call.",
+  auth: "The run could not be saved: the Pipelex API key is missing or was refused.",
 };
 
 /**
@@ -775,6 +878,7 @@ const FILES_ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "The run's files could not be saved: the Pipelex API returned an error.",
   paywall:
     "The run's files could not be saved: the organization's Pipelex plan does not cover this call.",
+  auth: "The run's files could not be saved: the Pipelex API key is missing or was refused.",
 };
 
 function errorResult(summary: string, errors: ToolError[]): ArtifactsResult {

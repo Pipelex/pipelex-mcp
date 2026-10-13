@@ -16,6 +16,7 @@ import { GRAPH_PAGE_FILENAME, graphPageSection, writeGraphPage } from "./graph-p
 import {
   METHOD_ID_SELECTOR_SENTENCE,
   methodVersionReportSchema,
+  methodVersionsOf,
   planById,
   selectorFailure,
   withMethodContent,
@@ -30,17 +31,23 @@ import {
   bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
+  filesSentSchema,
   hasTemplateFiles,
-  resolveSubmittedFiles,
+  methodDirInputSchema,
+  resolveMethodFiles,
   resourcesOption,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
+  withFilesSent,
+  failedBeforeSending,
+  markUnsent,
 } from "./shared.js";
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
@@ -52,24 +59,25 @@ import { isTemplateFilePath } from "./template-files.js";
 import type { TemplateFiles } from "./template-files.js";
 
 export const mthdsValidateInputSchema = {
+  method_dir: methodDirInputSchema("one_selector"),
   files: bundleFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
     .describe(
-      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side: the repository is fetched at the tag and the package's own file names label the diagnostics; no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.`,
+      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side: the repository is fetched at the tag and the package's own file names label the diagnostics; no bundle enters the conversation. Supply exactly ONE of method_dir / files / method_ref / method_id.`,
     ),
   method_id: z
     .string()
     .optional()
     .describe(
-      `Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of files / method_ref / method_id.`,
+      `Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of method_dir / files / method_ref / method_id.`,
     ),
   graph_page: z
     .boolean()
     .optional()
     .describe(
-      `Whether to write the method's flowchart, ${GRAPH_PAGE_FILENAME}, beside files given as { path } (default true): a standalone page that embeds the files and draws the graph when opened in a browser. It is rewritten on every validation and never replaces a file this tool did not write. Pass false to leave the directory untouched.`,
+      `Whether to write the method's flowchart, ${GRAPH_PAGE_FILENAME}, into method_dir or beside files given as { path } (default true): a standalone page that embeds the files and draws the graph when opened in a browser. It is rewritten on every validation and never replaces a file this tool did not write. Pass false to leave the directory untouched.`,
     ),
 };
 
@@ -235,9 +243,10 @@ const validationStructuredContentSchema = z.object({
     })
     .optional()
     .describe(
-      `The method's flowchart as a standalone HTML page (${GRAPH_PAGE_FILENAME}) beside the validated files, which the user can open in a browser. Present when every file was given as { path } and graph_page was not false, whatever the verdict; absent otherwise.`,
+      `The method's flowchart as a standalone HTML page (${GRAPH_PAGE_FILENAME}) beside the validated files, which the user can open in a browser. Present when the method came from method_dir or every file was given as { path }, and graph_page was not false, whatever the verdict; absent otherwise.`,
     ),
   method_version: methodVersionReportSchema,
+  files_sent: filesSentSchema,
   warnings: z
     .array(z.unknown())
     .optional()
@@ -251,6 +260,7 @@ const validationStructuredContentSchema = z.object({
 export const mthdsValidateOutputSchema = validationStructuredContentSchema;
 
 export interface MthdsValidateInput {
+  method_dir?: string;
   files?: SubmittedFileInput[];
   method_ref?: string;
   method_id?: string;
@@ -312,6 +322,8 @@ export interface ValidationStructuredContent {
   graph_page?: GraphPageStructuredContent;
   /** By-id validations only: the content validated, when this server can tell. */
   method_version?: MethodVersionReport;
+  /** Validations of a method folder only: every file read from it and sent. */
+  files_sent?: string[];
   /** A valid verdict's advisory findings, relayed as the API sent them; absent when empty. */
   warnings?: unknown[];
   validation_errors?: unknown[];
@@ -375,6 +387,8 @@ export interface ValidationContext extends ApiConfig, MethodVersionsAware {
   resolver?: FileResolver;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
   /**
    * The working directory the method's graph page is written under — the same
    * name and meaning as `CodegenContext.saveRoot`. Set, a validation of files
@@ -455,7 +469,7 @@ export async function validateMthds(
   input: MthdsValidateInput,
   context: ValidationContext = buildValidationContext(),
 ): Promise<ValidationResult> {
-  const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
+  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector");
   if (resolution.errors.length > 0) {
     return errorResult("Validation was not run: request input is invalid.", resolution.errors);
   }
@@ -472,7 +486,7 @@ export async function validateMthds(
     return errorResult("Validation was not run: request input is invalid.", inputErrors);
   }
 
-  const result = await validateRequest(request, context);
+  const result = withFilesSent(await validateRequest(request, context), resolution.sent);
   const saveRoot = context.saveRoot;
   const pageFiles = graphPageFilesOf(input, request.files);
   if (saveRoot === undefined || pageFiles === undefined) {
@@ -491,12 +505,15 @@ export async function validateMthds(
 
 /**
  * The files the graph page embeds, with the paths they were given at: only
- * when the caller did not opt out and EVERY `.mthds` item came as `{ path }`.
- * An inline item has no directory to write beside, and a page embedding some
- * of the method's files but not others would draw a different method from the
- * one validated. The template files are not the method's text, so they are
- * left out: the resolution put them in `resources`, never among `resolved`,
- * and only a request that resolved without an error reaches here.
+ * when the caller did not opt out and EVERY `.mthds` item came as `{ path }`,
+ * or the method came from `method_dir`, whose files all carry the path they
+ * were read at, so the page lands in the folder itself, the deepest directory
+ * holding a bundle with one at its top. An inline item has no directory to
+ * write beside, and a page embedding some of the method's files but not
+ * others would draw a different method from the one validated. The template
+ * files are not the method's text, so they are left out: the resolution put
+ * them in `resources`, never among `resolved`, and only a request that
+ * resolved without an error reaches here.
  */
 function graphPageFilesOf(
   input: MthdsValidateInput,
@@ -504,6 +521,14 @@ function graphPageFilesOf(
 ): GraphPageFile[] | undefined {
   if (input.graph_page === false) {
     return undefined;
+  }
+  if (input.method_dir !== undefined) {
+    const pageFiles: GraphPageFile[] = [];
+    for (const file of resolved) {
+      if (file.uri == null) return undefined;
+      pageFiles.push({ path: file.uri, content: file.content });
+    }
+    return pageFiles.length > 0 ? pageFiles : undefined;
   }
   const submitted = (input.files ?? []).filter(
     (file) => "content" in file || !isTemplateFilePath(file.path),
@@ -542,6 +567,7 @@ async function validateRequest(
 
   let report: PipelexValidationResult;
   let plan: SelectorPlan | undefined;
+  let client: ValidationClient | undefined;
   try {
     // `views` is the structured-view opt-in (the `render` sibling): the
     // descriptor spec keeps `input_form` off the report unless a caller asks.
@@ -552,7 +578,7 @@ async function validateRequest(
     // id — nothing is expanded client-side, and `mthds_sources` stays
     // undefined (labels come from the package's, or the stored method's, real
     // file names).
-    const client = validationClient(context);
+    client = validationClient(context);
     if (request.files.length > 0) {
       report = await client.validateFiles(toMthdsFiles(request.files), {
         allowSignatures: true,
@@ -576,7 +602,7 @@ async function validateRequest(
       // selectors and one that does not yet, so the platform is asked beside
       // the request, which never waits on it (`method-versions.ts`), and the
       // result says which content was validated.
-      plan = planById(request.method_id, context.methodVersions, client, {
+      plan = planById(request.method_id, methodVersionsOf(context), client, {
         needBareReport: true,
       });
       report = await client.validate({ method_id: plan.send }, true, undefined, undefined, [
@@ -590,10 +616,14 @@ async function validateRequest(
     const classified = classifyError(err, {
       ...classifyOptions,
       auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
       bundleResources: hasTemplateFiles(request.resources),
     });
-    const error = await selectorFailure(err, classified, plan, context.methodVersions);
-    return errorResult(summaryForError(error), [error]);
+    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
+    const failed = errorResult(summaryForError(error), [error]);
+    // A client that could not be built, or an argument refused before
+    // sending, sent no file of a folder.
+    return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
 
   // The API responded; projecting it must not be reported as an unreachable
@@ -625,6 +655,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   input_domain: "Validation was not run: the Pipelex API rejected the request.",
   runtime: "Validation could not be completed: the Pipelex API returned an error.",
   paywall: "Validation could not start: the organization's Pipelex plan does not cover this call.",
+  auth: "Validation could not start: the Pipelex API key is missing or was refused.",
 };
 
 function summaryForError(error: ToolError): string {
@@ -632,7 +663,11 @@ function summaryForError(error: ToolError): string {
 }
 
 export function toolResult(result: ValidationResult) {
-  const [text] = toolResultContent(result.summary, result.structuredContent.errors);
+  const [text] = toolResultContent(
+    result.summary,
+    result.structuredContent.errors,
+    result.structuredContent.files_sent,
+  );
   const content =
     result.graphPage === undefined
       ? [text]

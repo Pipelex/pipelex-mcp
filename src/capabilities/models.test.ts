@@ -790,6 +790,12 @@ describe("failures", () => {
       "Model deck could not be read: the organization's Pipelex plan does not cover this call.",
     );
 
+    const keyless = await readMthdsModels({}, contextFailing(apiError(401, "Missing API key")));
+    expect(firstError(keyless)).toMatchObject({ class: "config", kind: "auth" });
+    expect(keyless.summary).toBe(
+      "Model deck could not be read: the Pipelex API key is missing or was refused.",
+    );
+
     const missing = await readMthdsModels({}, contextFailing(apiError(404, "Not Found")));
     expect(firstError(missing)).toMatchObject({ class: "config", location: "PIPELEX_BASE_URL" });
     expect(firstError(missing)?.hint).toContain("/v1/models");
@@ -863,10 +869,16 @@ describe("the check's refusals", () => {
     expect(firstError(result)?.hint).toContain("/v1/models/check");
   });
 
-  it("words a paywall and a server fault as a check", async () => {
+  it("words a paywall, a refused key and a server fault as a check", async () => {
     const paywall = await refused(apiError(402, "Pay"));
     expect(paywall.summary).toBe(
       "Model reference could not be checked: the organization's Pipelex plan does not cover this call.",
+    );
+
+    const keyless = await refused(apiError(403, "Forbidden"));
+    expect(firstError(keyless)).toMatchObject({ class: "config", kind: "auth" });
+    expect(keyless.summary).toBe(
+      "Model reference could not be checked: the Pipelex API key is missing or was refused.",
     );
 
     const fault = await refused(apiError(500, "boom"));

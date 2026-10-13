@@ -14,6 +14,7 @@ import {
   PipelexRequestError,
   PipelineRequestError,
   RejectedAssetError,
+  RequestArgumentError,
   RunLifecycleUnavailableError,
   ScopeUnavailableError,
   UnsupportedUploadCapabilityError,
@@ -106,9 +107,60 @@ export const bundleFilesInputSchema = z
   )
   .describe(
     "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). " +
+      "For a method whose folder is on disk, pass method_dir instead, which finds these files itself. " +
       "A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, " +
       'so [{ path: "invoice.mthds" }, { path: "templates/invoice.xlsx" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. ' +
       `At most ${MAX_TEMPLATE_FILES} template files, ${MAX_TEMPLATE_FILE_BYTES / (1024 * 1024)} MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded.`,
+  );
+
+/**
+ * `method_dir`, the folder arm of the method-taking tools: the method's folder
+ * on disk, from which the workshop finds the `.mthds` files under the
+ * membership rule (`src/method-tree.ts`) and the template files their
+ * `PipeDocGen` steps name, and sends those, nothing else. It is a top-level
+ * field beside `files`, `method_ref` and `method_id` rather than a third arm of
+ * the files union, since a folder is not a file and a folder beside listed
+ * files would suggest merging the two. It composes as `files` does: alone on
+ * the tooling tools, and beside a bare `method_id` as run-history linkage on
+ * `mthds_run` ({@link SelectorRule}).
+ */
+export function methodDirInputSchema(rule: SelectorRule) {
+  const pairing =
+    rule === "run_source"
+      ? "It pairs as files do: never with files or method_ref, and with a bare method_id the folder runs and the id only files the run under its method."
+      : "Supply exactly ONE of method_dir / files / method_ref / method_id.";
+  return z
+    .string()
+    .optional()
+    .describe(
+      "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. " +
+        "The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. " +
+        "It skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, and what the .gitignore files inside the folder exclude, and refuses a folder holding a symbolic link it does not skip. " +
+        `Its template files are held to the limits files states, and its .mthds files to the runner's: at most ${MAX_FOLDER_MTHDS_FILES}, of ${MAX_FOLDER_MTHDS_FILE_BYTES / (1024 * 1024)} MiB each. ` +
+        `Prefer it to files for a method on disk; the result's files_sent lists every file sent. ${pairing}`,
+    );
+}
+
+/**
+ * The runner's default bounds on a request's `.mthds` files (`pipelex-api`'s
+ * `limits.py`: `MAX_MTHDS_FILES_PER_REQUEST` and `MAX_MTHDS_FILE_KIB`), which
+ * the workshop holds a method folder to before reading it, since a folder can
+ * hold more `.mthds` files than the agent thought of. A deployment configured
+ * with larger limits is not seen, as with the template files' limits.
+ */
+export const MAX_FOLDER_MTHDS_FILES = 16;
+export const MAX_FOLDER_MTHDS_FILE_BYTES = 1024 * 1024;
+
+/**
+ * `files_sent`, the listing every method-taking tool's result carries when its
+ * method came from `method_dir`: what left the machine, so a stray `.mthds`
+ * file the folder held is seen rather than sent silently.
+ */
+export const filesSentSchema = z
+  .array(z.string())
+  .optional()
+  .describe(
+    "Every file this call read from method_dir and sent, each as method_dir joined with its path inside the folder: the .mthds files, then the template files their PipeDocGen steps name. Present only when the method came from method_dir.",
   );
 
 /** A submitted file resolved to its contents — what the capabilities consume. */
@@ -150,6 +202,10 @@ export type FileResolution =
  * those files' text, which the same request carries. Absent, such an item goes
  * to `resolve` like any other, whose extension gate refuses it:
  * `mthds_save_method`'s `files` reads `.mthds` alone.
+ *
+ * `resolveMethodDir` is what makes a tool take `method_dir`: it reads a method
+ * folder whole, its `.mthds` files and the template files their steps name,
+ * and holds them to the request's bounds. Absent, `method_dir` is refused.
  */
 export interface FileResolver {
   resolve(path: string): Promise<FileResolution>;
@@ -158,13 +214,215 @@ export interface FileResolver {
     bundle: readonly BundleFileOnDisk[],
     requestBytes: number,
   ): Promise<TemplateFilesResolution>;
+  resolveMethodDir?(methodDir: string): Promise<MethodDirResolution>;
 }
+
+/**
+ * Outcome of reading a method folder. On success, `files` are its `.mthds`
+ * files in the order they are sent, each under the path the caller can open
+ * (`method_dir` joined with its path inside the folder), `resources` the
+ * template files keyed by the step naming each, and `sent` every file sent,
+ * the `.mthds` files first. Failures are values, all located at `method_dir`.
+ */
+export type MethodDirResolution =
+  | {
+      ok: true;
+      files: { path: string; content: string }[];
+      resources: TemplateFiles;
+      sent: string[];
+    }
+  | { ok: false; refusals: { message: string; hint: string }[] };
 
 export interface ResolvedFiles {
   files: SubmittedFile[];
   /** The bundle's template files; empty when none was submitted. */
   resources: TemplateFiles;
   errors: ToolError[];
+}
+
+/** What a method-taking request names its method by, before anything is read. */
+export interface MethodSourceInput extends MethodSelectors {
+  files?: SubmittedFileInput[];
+  method_dir?: string;
+}
+
+export interface ResolvedMethodFiles extends ResolvedFiles {
+  /**
+   * Every file read from `method_dir` and sent, as the caller can open it;
+   * absent when the method did not come from a folder. A capability puts it
+   * on its result through {@link withFilesSent}.
+   */
+  sent?: string[];
+}
+
+/**
+ * Resolve a method-taking request's source into the `{ content, uri? }` items
+ * and template files every check and route already takes: `files` through
+ * {@link resolveSubmittedFiles}, or `method_dir` through the resolver's
+ * `resolveMethodDir`. The folder's pairings are refused before it is read, at
+ * the field that came second in the order method_dir, files, method_ref,
+ * method_id, as the other pairs are: `files` beside it at `method_dir`,
+ * `method_ref` at `method_ref`, and `method_id` at `method_id` on the tooling
+ * tools, while on `mthds_run` a folder takes a `method_id` beside it as files
+ * do. The selector checks that follow ({@link validateMethodSelectorRequest})
+ * see the folder's files as they see listed ones.
+ */
+export async function resolveMethodFiles(
+  source: MethodSourceInput,
+  resolver: FileResolver | undefined,
+  rule: SelectorRule,
+): Promise<ResolvedMethodFiles> {
+  if (source.method_dir === undefined) {
+    return resolveSubmittedFiles(source.files ?? [], resolver);
+  }
+  const refused = (errors: ToolError[]): ResolvedMethodFiles => ({
+    files: [],
+    resources: {},
+    errors,
+  });
+
+  const pairingErrors = methodDirPairingErrors(source, source.method_dir, rule);
+  if (pairingErrors.length > 0) return refused(pairingErrors);
+
+  if (resolver?.resolveMethodDir === undefined) {
+    return refused([
+      {
+        class: "input_domain",
+        location: "method_dir",
+        message:
+          "This deployment cannot read a folder from disk; submit the method's files instead.",
+        hint: "Resubmit the method's .mthds files inline as files [{ content, uri? }], or use the local workshop server (npx @pipelex/mcp), which reads method_dir.",
+        retryable: false,
+      },
+    ]);
+  }
+
+  const outcome = await resolver.resolveMethodDir(source.method_dir);
+  if (!outcome.ok) {
+    return refused(
+      outcome.refusals.map((refusal) => ({
+        class: "input_domain" as const,
+        location: "method_dir",
+        message: refusal.message,
+        hint: refusal.hint,
+        retryable: false,
+      })),
+    );
+  }
+  return {
+    files: outcome.files.map((file) => ({ content: file.content, uri: file.path })),
+    resources: outcome.resources,
+    errors: [],
+    sent: outcome.sent,
+  };
+}
+
+/** `method_dir`'s own request-shape checks: not blank, and none of the pairings its rule refuses. */
+function methodDirPairingErrors(
+  source: MethodSourceInput,
+  methodDir: string,
+  rule: SelectorRule,
+): ToolError[] {
+  if (methodDir.trim() === "") {
+    return [
+      {
+        class: "input_domain",
+        location: "method_dir",
+        message: "method_dir must not be empty when supplied.",
+        hint: "Pass the folder holding the method's .mthds files, relative to the server's working directory (\".\" for that directory itself).",
+        retryable: false,
+      },
+    ];
+  }
+  const errors: ToolError[] = [];
+  if ((source.files ?? []).length > 0) {
+    errors.push({
+      class: "input_domain",
+      location: "method_dir",
+      message:
+        "method_dir and files are mutually exclusive — pass the method's folder or list its files, never both.",
+      hint: "method_dir finds the .mthds files and the template files their steps name by itself; drop files to send the folder, or drop method_dir to send exactly the files listed.",
+      retryable: false,
+    });
+  }
+  if (source.method_ref !== undefined && source.method_ref.trim() !== "") {
+    errors.push({
+      class: "input_domain",
+      location: "method_ref",
+      message:
+        "method_dir and method_ref are mutually exclusive — submit the folder or the address, never both.",
+      hint: "An address is a complete method source resolved server-side; drop method_ref to operate on the folder, or drop method_dir to operate on the published package.",
+      retryable: false,
+    });
+  }
+  if (rule === "one_selector" && source.method_id !== undefined && source.method_id.trim() !== "") {
+    errors.push({
+      class: "input_domain",
+      location: "method_id",
+      message:
+        "method_dir and method_id are mutually exclusive on this tool — submit the folder or the catalog id, never both.",
+      hint: "This operation is stateless, so there is no run-history linkage for an extra id to feed; drop method_id to operate on the folder, or drop method_dir to operate on the registered method.",
+      retryable: false,
+    });
+  }
+  return errors;
+}
+
+/**
+ * The no-verdict results whose request never left the machine, held by
+ * identity so the mark rides no field a host could see.
+ */
+const unsentResults = new WeakSet<object>();
+
+/**
+ * Mark a no-verdict result as one whose request was never sent, so
+ * {@link withFilesSent} lists no file on it. A request fn marks its failure
+ * when the client could not be built or {@link failedBeforeSending} says so.
+ */
+export function markUnsent<R extends object>(result: R): R {
+  unsentResults.add(result);
+  return result;
+}
+
+/**
+ * Whether a call failed before its request left the machine. The SDK raises
+ * `RequestArgumentError` for an argument it refuses before sending anything,
+ * the base URL its client is built with among them; every other failure of a
+ * call may have come after the request was sent, so it counts as sent.
+ */
+export function failedBeforeSending(err: unknown): boolean {
+  return err instanceof RequestArgumentError;
+}
+
+/**
+ * Put a folder's listing on a result produced once its request was sent, a
+ * no-verdict error included, since its files left the machine either way. A
+ * result {@link markUnsent} marked, whose request never left, gets no listing.
+ * Each error located at `files` or at one of its items is relocated to
+ * `method_dir` either way: the route's textures name `files`, which this
+ * caller never passed. A request whose method did not come from a folder
+ * (`sent` undefined) is returned as it was.
+ */
+export function withFilesSent<
+  R extends { structuredContent: { errors?: ToolError[]; files_sent?: string[] } },
+>(result: R, sent: string[] | undefined): R {
+  if (sent === undefined) return result;
+  const { errors } = result.structuredContent;
+  return {
+    ...result,
+    structuredContent: {
+      ...result.structuredContent,
+      ...(unsentResults.has(result) ? {} : { files_sent: sent }),
+      ...(errors === undefined ? {} : { errors: errors.map(atMethodDir) }),
+    },
+  };
+}
+
+function atMethodDir(error: ToolError): ToolError {
+  const location = error.location;
+  return location === "files" || location?.startsWith("files[") === true
+    ? { ...error, location: "method_dir" }
+    : error;
 }
 
 /**
@@ -440,13 +698,21 @@ export type ErrorClass = z.infer<typeof errorClassSchema>;
 
 /**
  * Refinement of {@link ErrorClass} for a condition whose class is settled but
- * whose *cause* the class cannot name. Today the only member is `paywall`: a
- * 402 is deliberately `config` (the deployment cannot make this call as
- * credentialed), yet the class alone would have every headline blame
- * connectivity for what is a billing limit. Adding a member here is how a new
- * such cause gets a headline — never by re-classifying it.
+ * whose *cause* the class cannot name. Both members are `config`, and the
+ * class alone would have every headline blame connectivity for them:
+ *
+ * - `paywall`: a 402 is deliberately `config` (the deployment cannot make this
+ *   call as credentialed), yet it is a billing limit.
+ * - `auth`: a missing or refused key (a 401 or 403 outside the execution-locus
+ *   gate, and the upload and artifact families' authentication errors) is
+ *   `config`, since the key is the environment's, yet "the Pipelex API is
+ *   unreachable or misconfigured" sends a user who has no key to debug the
+ *   network.
+ *
+ * Adding a member here is how a new such cause gets a headline — never by
+ * re-classifying it.
  */
-export const errorKindSchema = z.enum(["paywall"]);
+export const errorKindSchema = z.enum(["paywall", "auth"]);
 
 export type ErrorKind = z.infer<typeof errorKindSchema>;
 
@@ -455,7 +721,7 @@ export const toolErrorSchema = z.object({
   kind: errorKindSchema
     .optional()
     .describe(
-      "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call.",
+      "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
     ),
   location: z.string().optional(),
   message: z.string(),
@@ -470,10 +736,10 @@ export interface ToolError {
   /**
    * Set where the concrete SDK error / HTTP status is still known
    * ({@link classifyError}), for the same reason `retryable` is: `class` is
-   * the machine contract and must stay coarse, but a paywall and an
-   * unreachable API are both `config` and read nothing alike to a human. A
-   * machine consumer still branches on `class`; `kind` is what lets it — and
-   * the summary headline — tell the two apart without sniffing the message.
+   * the machine contract and must stay coarse, but a paywall, a missing key
+   * and an unreachable API are all `config` and read nothing alike to a human.
+   * A machine consumer still branches on `class`; `kind` is what lets it — and
+   * the summary headline — tell them apart without sniffing the message.
    */
   kind?: ErrorKind;
   location?: string;
@@ -493,17 +759,18 @@ export interface ToolError {
  * A capability's no-verdict headlines: one per {@link ErrorClass}, plus one for
  * every {@link ErrorKind}. Declaring the kind headlines is **mandatory** — that
  * is the point of the type. A capability that forgot one would silently print
- * the connectivity headline for a billing refusal, which is the defect this
- * shape exists to make unrepresentable: the miss is a type error, not something
- * a reviewer has to catch.
+ * the connectivity headline for a billing refusal or a missing key, which is
+ * the defect this shape exists to make unrepresentable: the miss is a type
+ * error, not something a reviewer has to catch.
  */
 export type ErrorSummaries = Record<ErrorClass, string> & Record<ErrorKind, string>;
 
 /**
  * Pick a capability's headline for one {@link ToolError}. `kind` is checked
- * ahead of `class` because it is the refinement: a 402 is `config` by contract,
- * so consulting the class map first would print "the Pipelex API is unreachable
- * or misconfigured" for a plan limit and send the agent to debug the base URL.
+ * ahead of `class` because it is the refinement: a 402 and a refused key are
+ * `config` by contract, so consulting the class map first would print "the
+ * Pipelex API is unreachable or misconfigured" for a plan limit or a missing
+ * key and send the agent to debug the base URL.
  */
 export function summaryForToolError(error: ToolError, summaries: ErrorSummaries): string {
   return error.kind === undefined ? summaries[error.class] : summaries[error.kind];
@@ -546,13 +813,50 @@ export type ContentImage = {
  * cause. Surfacing message + hint here keeps the human/LLM-readable stream
  * actually actionable (the workspace "format follows consumer" rule), while
  * `structuredContent.errors` stays the untouched contract.
+ *
+ * `filesSent`, a method folder's `files_sent`, closes the text with the list
+ * of what the call sent ({@link filesSentSection}), after the error list,
+ * which belongs right under the headline it details.
  */
-export function toolResultContent(summary: string, errors?: ToolError[]): [ContentText] {
-  if (errors === undefined || errors.length === 0) {
-    return [{ type: "text", text: summary }];
+export function toolResultContent(
+  summary: string,
+  errors?: ToolError[],
+  filesSent?: readonly string[],
+): [ContentText] {
+  const parts = [summary];
+  if (errors !== undefined && errors.length > 0) {
+    parts.push(errors.map(formatToolError).join("\n"));
   }
-  const details = errors.map(formatToolError).join("\n");
-  return [{ type: "text", text: `${summary}\n\n${details}` }];
+  if (filesSent !== undefined && filesSent.length > 0) {
+    parts.push(filesSentSection(filesSent));
+  }
+  return [{ type: "text", text: parts.join("\n\n") }];
+}
+
+/**
+ * The summary's account of what a method folder sent: every file, so the
+ * reader sees a `.mthds` file the folder held without anyone listing it.
+ */
+export function filesSentSection(paths: readonly string[]): string {
+  return [
+    "## Files sent",
+    "",
+    "Read from the method's folder and sent, and nothing else from it:",
+    "",
+    ...paths.map((sent) => `- ${codeSpan(asOneLine(sent))}`),
+  ].join("\n");
+}
+
+/**
+ * `text` as a Markdown code span that a backtick inside it cannot close: the
+ * fence is one backtick longer than the longest run in the text, padded with
+ * a space when the text starts or ends with one, as CommonMark reads it.
+ */
+function codeSpan(text: string): string {
+  const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((run) => run[0].length));
+  const fence = "`".repeat(longest + 1);
+  const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
+  return `${fence}${pad}${text}${pad}${fence}`;
 }
 
 function formatToolError(error: ToolError): string {
@@ -591,11 +895,16 @@ export interface ApiConfig {
 /**
  * What the workshop may override on every capability context that talks to
  * the API. Its tool table applies it to the whole context set, since that
- * table is where the list of contexts lives.
+ * table is where the list of contexts lives. The workshop patches `appInfo`
+ * once, when its server is built, and `baseUrl`, `apiKey`, `authError` and
+ * `baseUrlSource` at the start of every tool call, from its host's environment
+ * and the saved key in the home `.env` (`src/credentials.ts`).
  */
 export interface ApiContextPatch {
+  baseUrl?: string;
   apiKey?: string;
   authError?: AuthErrorTexture;
+  baseUrlSource?: BaseUrlSourceTexture;
   appInfo?: AppInfoSource;
 }
 
@@ -619,7 +928,11 @@ export function createPipelexApiClient<T extends PipelexApiClient = PipelexApiCl
 ): T {
   const options: PipelexApiClientOptions = {
     baseUrl: config.baseUrl,
-    apiKey: config.apiKey,
+    // The config's key is the whole decision. Handed none, the SDK falls back
+    // to the process's own `PIPELEX_API_KEY`, so a call the workshop resolved as
+    // keyless (`src/credentials.ts`) could still carry an ambient key; an empty
+    // string is the SDK's "no key", which sends no `Authorization` header.
+    apiKey: config.apiKey ?? "",
     appInfo: config.appInfo?.() ?? BARE_APP_INFO,
   };
   const Client =
@@ -701,7 +1014,9 @@ export const METHOD_REF_GRAMMAR =
 /**
  * The selectors a method-taking request may carry beside its (already
  * resolved) inline files. `undefined` means "not supplied"; a supplied-but-
- * blank value is rejected loudly rather than treated as absent.
+ * blank value is rejected loudly rather than treated as absent. A method
+ * folder (`method_dir`) has resolved into those files by the time these are
+ * checked, its own pairings refused first ({@link resolveMethodFiles}).
  */
 export interface MethodSelectors {
   method_ref?: string;
@@ -713,13 +1028,13 @@ export interface MethodSelectors {
  * Method Selectors):
  *
  * - `"one_selector"` — the tooling tools (`mthds_validate`,
- *   `mthds_inputs_template`, `mthds_prepare_inputs`, `mthds_codegen`): exactly one of files /
- *   `method_ref` / `method_id`. Stateless operations have no Run row, so
+ *   `mthds_inputs_template`, `mthds_prepare_inputs`, `mthds_codegen`): exactly one of
+ *   `method_dir` / files / `method_ref` / `method_id`. Stateless operations have no Run row, so
  *   "linkage" has no referent and an extra selector could only be ignored —
  *   the worst contract of the three.
- * - `"run_source"` — `mthds_run`: inline files win and `method_id` beside them
- *   demotes to run-history linkage (legal pair), while `method_ref` is a
- *   complete run source of its own and pairs with nothing.
+ * - `"run_source"` — `mthds_run`: inline files, or a method folder, win and
+ *   `method_id` beside them demotes to run-history linkage (legal pair), while
+ *   `method_ref` is a complete run source of its own and pairs with nothing.
  */
 export type SelectorRule = "one_selector" | "run_source";
 
@@ -730,7 +1045,7 @@ export type SelectorRule = "one_selector" | "run_source";
  * before anything reaches the wire (mirroring the API's own 422s). Selector
  * format beyond non-blank stays server-owned (the `run_id` stance).
  *
- * Every method-taking tool exposes all three selectors, so the teaching text is
+ * Every method-taking tool exposes every selector, so the teaching text is
  * unconditional. It was not always: `mthds_prepare_inputs` withheld
  * `method_ref` while the SDK's `prepareInputs` took inline files only, and this
  * function took an `acceptsMethodRef` flag to keep the "no selector" message
@@ -772,8 +1087,8 @@ export function validateMethodSelectorRequest(
     errors.push({
       class: "input_domain",
       location: "files",
-      message: "Provide MTHDS files, a method_ref address, or a method_id.",
-      hint: `Submit files as [{ content, uri? }], a published method's address (${METHOD_REF_GRAMMAR}) as method_ref, or the catalog id (mt_…) of a registered method as method_id.`,
+      message: "Provide a method folder, MTHDS files, a method_ref address, or a method_id.",
+      hint: `Pass the method's folder as method_dir, submit files as [{ path }] or [{ content, uri? }], a published method's address (${METHOD_REF_GRAMMAR}) as method_ref, or the catalog id (mt_…) of a registered method as method_id.`,
       retryable: false,
     });
   }
@@ -997,15 +1312,32 @@ export interface ClassifyErrorOptions {
     hint: string;
   };
   /**
-   * Per-deployment texture for auth failures (HTTP 401/403, and the upload and
-   * artifact families' authentication errors). The default wording points at the `PIPELEX_API_KEY` env
-   * var — right for the workshop, where the caller owns the process env. A
-   * deployment whose callers authenticate some other way overrides it, and
-   * capabilities thread it from their context's `authError` field; the
-   * workshop never sets it.
+   * Per-call texture for auth failures (HTTP 401/403, and the upload and
+   * artifact families' authentication errors). Capabilities thread it from
+   * their context's `authError` field. The workshop sets it on every tool call
+   * from where that call's key came from (`src/credentials.ts`): no key at
+   * all, the host's key, or the key saved in the home `.env`, each with its
+   * own hint. Unset, as in a capability's own tests, the wording is the
+   * generic {@link DEFAULT_AUTH_HINT} at `PIPELEX_API_KEY`.
    */
   auth?: {
     location?: string;
+    hint: string;
+  };
+  /**
+   * Per-call texture for every failure located at `PIPELEX_BASE_URL` (an
+   * unreachable API, a missing run lifecycle or upload route, a route the
+   * deployment does not serve or implement, and a `config` failure nothing
+   * else words, such as a base URL the SDK refused before sending): a
+   * sentence appended to that failure's hint, saying where the base URL came
+   * from. Capabilities thread it from their context's `baseUrlSource` field,
+   * beside `auth`. The workshop sets it only on a tool call whose base URL it
+   * read from the home `.env` beside the saved key (`src/credentials.ts`),
+   * since a hint naming `PIPELEX_BASE_URL` alone would send the user to an
+   * environment variable the host never set. Unset, every such hint names
+   * `PIPELEX_BASE_URL` alone.
+   */
+  baseUrlSource?: {
     hint: string;
   };
   /**
@@ -1067,8 +1399,17 @@ export interface ClassifyErrorOptions {
   };
 }
 
-/** The per-deployment auth-failure texture a capability context can carry. */
+/** The auth-failure texture a capability context can carry. */
 export type AuthErrorTexture = NonNullable<ClassifyErrorOptions["auth"]>;
+
+/** The base-URL-failure texture a capability context can carry. */
+export type BaseUrlSourceTexture = NonNullable<ClassifyErrorOptions["baseUrlSource"]>;
+
+/**
+ * Where every failure the base URL can fix locates, and the one location
+ * {@link ClassifyErrorOptions.baseUrlSource} annotates.
+ */
+const BASE_URL_LOCATION = "PIPELEX_BASE_URL";
 
 const DEFAULT_BAD_REQUEST: NonNullable<ClassifyErrorOptions["badRequest"]> = {
   location: "files",
@@ -1161,8 +1502,34 @@ function toolError(verdict: ToolVerdict, texture: ToolTexture): ToolError {
  * `PipelineRequestError` from `mthds` is `config`, and a fault nothing names is
  * retryable `runtime`, since wrongly stopping a live follow is worse than one
  * more read.
+ *
+ * Whatever the arm, a failure located at `PIPELEX_BASE_URL` then takes the
+ * call's {@link ClassifyErrorOptions.baseUrlSource} sentence, applied here
+ * once rather than in each arm, so an arm added later cannot miss it. A
+ * caller that replaces the hint afterwards drops it, and `classifyStartError`
+ * does so on purpose: its may-have-run hint replaces whatever this function
+ * wrote, since it must stay the exact marker the run's headline reads.
  */
 export function classifyError(err: unknown, options: ClassifyErrorOptions = {}): ToolError {
+  return withBaseUrlSource(classifyFailure(err, options), options.baseUrlSource);
+}
+
+/**
+ * Append the base URL's source to a failure located at `PIPELEX_BASE_URL`;
+ * every other failure, and every call without the texture, is left as it is.
+ */
+function withBaseUrlSource(error: ToolError, source: BaseUrlSourceTexture | undefined): ToolError {
+  if (source === undefined || error.location !== BASE_URL_LOCATION) return error;
+  return toolError(error, {
+    kind: error.kind,
+    location: error.location,
+    message: error.message,
+    hint: error.hint === undefined ? source.hint : `${error.hint} ${source.hint}`,
+  });
+}
+
+/** {@link classifyError} without the base URL's source, which only the outermost call appends. */
+function classifyFailure(err: unknown, options: ClassifyErrorOptions): ToolError {
   if (err instanceof ApiResponseError) return classifyApiResponseError(err, options);
   if (err instanceof UploadTransportError) return classifyUploadTransportError(err, options);
   if (err instanceof PipelexRequestError) {
@@ -1210,7 +1577,7 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
       };
     }
     return {
-      location: "PIPELEX_BASE_URL",
+      location: BASE_URL_LOCATION,
       message,
       hint: "Start pipelex-api locally or set PIPELEX_BASE_URL to a reachable host-only API base URL.",
     };
@@ -1220,7 +1587,7 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
   // lifecycle (a bare pipelex-api runner).
   if (err instanceof RunLifecycleUnavailableError) {
     return {
-      location: "PIPELEX_BASE_URL",
+      location: BASE_URL_LOCATION,
       message,
       hint: "Durable runs need the hosted Pipelex API; point PIPELEX_BASE_URL at a deployment serving /v1/runs/* (a bare pipelex-api runner does not).",
     };
@@ -1287,7 +1654,7 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
   // The configured deployment has no upload route (a bare pipelex-api runner).
   if (err instanceof UnsupportedUploadCapabilityError) {
     return {
-      location: "PIPELEX_BASE_URL",
+      location: BASE_URL_LOCATION,
       message,
       hint: "The configured Pipelex deployment has no /v1/upload route. Point PIPELEX_BASE_URL at the hosted Pipelex API, or pass assets as http(s) URLs / pipelex-storage:// references.",
     };
@@ -1295,9 +1662,10 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
 
   if (err instanceof UploadAuthenticationError) {
     return {
+      kind: "auth",
       location: options.auth?.location ?? "PIPELEX_API_KEY",
       message,
-      hint: options.auth?.hint ?? "Check the API key for the configured Pipelex API.",
+      hint: options.auth?.hint ?? DEFAULT_AUTH_HINT,
     };
   }
 
@@ -1329,6 +1697,7 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
   // UploadAuthenticationError on the upload leg.
   if (err instanceof ArtifactAuthenticationError) {
     return {
+      kind: "auth",
       location: options.auth?.location ?? "PIPELEX_API_KEY",
       message,
       hint: options.auth?.hint ?? DEFAULT_AUTH_HINT,
@@ -1363,7 +1732,7 @@ function genericTexture(verdict: ToolVerdict, message: string): ToolTexture {
   switch (verdict.class) {
     case "config":
       return {
-        location: "PIPELEX_BASE_URL",
+        location: BASE_URL_LOCATION,
         message,
         hint: "Check PIPELEX_BASE_URL and the submitted request.",
       };
@@ -1395,7 +1764,7 @@ function classifyUploadTransportError(
     cause instanceof ApiUnreachableError ||
     (cause instanceof ApiResponseError && cause.status === 402)
   ) {
-    return classifyError(cause, options);
+    return classifyFailure(cause, options);
   }
   const verdict = toolVerdictOf(err);
   if (verdict.retryable) {
@@ -1487,15 +1856,39 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     );
   }
 
+  // The platform's refusal of a run whose inputs reference a file another
+  // organization stored (`CrossOrgStorageAccessError`, on `/v1/start` and
+  // `/v1/execute`): a 403 coded `forbidden` whose domain the platform sets to
+  // `input`, the one such `forbidden` that a route this server calls can
+  // answer. The platform's other one, `OrganizationMismatchError`, is on its
+  // organization routes, and the single `/v1/resolve-storage-url` route, which
+  // can raise this one too, is never called; the runner's own 401 and 403,
+  // tagged `input` too, carry no `code` at all. A login is how it usually
+  // happens: the new key acts for another organization than the one the
+  // inputs were uploaded under. It is caught ahead of the generic 401/403
+  // arm, which would send a caller whose key is fine to go and mint another;
+  // its class and `retryable` stay the SDK's, read from the platform's members.
+  if (err.status === 403 && err.code === "forbidden" && err.errorDomain === "input") {
+    return toolError(verdict, {
+      location: "inputs",
+      message,
+      hint: `The inputs reference a file stored by another organization than the one the API key acts for, as when the key changed since the inputs were prepared, after a login for instance. Prepare the inputs again with ${WORKSHOP_TOOL_NAMES.prepareInputs} under the current key, then run again.`,
+    });
+  }
+
   if (err.status === 401 || err.status === 403) {
     // Overrides the SDK's class: a rejected credential is `config` here,
     // whatever the server tagged it. The runner tags its own 401 and 403
     // `input` (L-261007-8dffe5), the request carrying the credential, while
     // this server's credential is its environment, which no tool argument
     // changes, and the SDK's own reading of both statuses is `config`.
+    // `kind: "auth"` carries the cause into each capability's headline, so a
+    // missing key never reads as an unreachable API; a route's `forbidden`
+    // gate is a 403 too and keeps the kind, its headline naming both causes.
     return toolError(
       { ...verdict, class: "config" },
       {
+        kind: "auth",
         location: options.auth?.location ?? "PIPELEX_API_KEY",
         message,
         hint:
@@ -1561,7 +1954,7 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     return toolError(
       { ...verdict, class: "config" },
       {
-        location: "PIPELEX_BASE_URL",
+        location: BASE_URL_LOCATION,
         message,
         hint: `Check that PIPELEX_BASE_URL points to a host serving ${route}.`,
       },
@@ -1610,7 +2003,7 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
 
   if (err.status === 501) {
     return toolError(verdict, {
-      location: "PIPELEX_BASE_URL",
+      location: BASE_URL_LOCATION,
       message,
       hint: `The deployment PIPELEX_BASE_URL points at does not implement ${route}.`,
     });

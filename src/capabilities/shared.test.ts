@@ -33,17 +33,22 @@ import {
   classifyError,
   createPipelexApiClient,
   DEFAULT_API_URL,
+  DEFAULT_AUTH_HINT,
   filesInputSchema,
   imageCandidatesOf,
   itemToolError,
   looksLikeImageKey,
   parseAllowHttpOverride,
+  resolveMethodFiles,
   resolveSubmittedFiles,
   storageKeyOf,
   summaryForToolError,
   toolResultContent,
   validateMethodSelectorRequest,
   validateRunIdRequest,
+  withFilesSent,
+  failedBeforeSending,
+  markUnsent,
 } from "./shared.js";
 import type { ErrorSummaries, FileResolver, ToolError } from "./shared.js";
 import type {
@@ -413,6 +418,257 @@ describe("resolveSubmittedFiles with template files", () => {
   });
 });
 
+describe("resolveMethodFiles", () => {
+  const SENT = ["m/main.mthds", "m/templates/a.html"];
+  const folderResolver: FileResolver = {
+    resolve: () => Promise.reject(new Error("a folder is not read file by file")),
+    resolveMethodDir: (methodDir) =>
+      Promise.resolve({
+        ok: true,
+        files: [{ path: `${methodDir}/main.mthds`, content: 'domain = "demo"' }],
+        resources: { "templates/a.html": new Uint8Array([60, 112, 62]) },
+        sent: SENT,
+      }),
+  };
+
+  it("resolves the files union as before when no folder is passed", async () => {
+    const resolution = await resolveMethodFiles(
+      { files: [{ content: 'domain = "demo"' }] },
+      folderResolver,
+      "one_selector",
+    );
+
+    expect(resolution).toEqual({
+      files: [{ content: 'domain = "demo"' }],
+      resources: {},
+      errors: [],
+    });
+  });
+
+  it("hands a folder's files, templates and listing on, each file labelled by its path", async () => {
+    const resolution = await resolveMethodFiles({ method_dir: "m" }, folderResolver, "run_source");
+
+    expect(resolution).toEqual({
+      files: [{ content: 'domain = "demo"', uri: "m/main.mthds" }],
+      resources: { "templates/a.html": new Uint8Array([60, 112, 62]) },
+      errors: [],
+      sent: SENT,
+    });
+  });
+
+  it("refuses a blank folder before reading anything", async () => {
+    const resolution = await resolveMethodFiles(
+      { method_dir: "  " },
+      { resolve: () => Promise.reject(new Error("never")) },
+      "one_selector",
+    );
+
+    expect(resolution.errors).toEqual([
+      expect.objectContaining({
+        class: "input_domain",
+        location: "method_dir",
+        message: "method_dir must not be empty when supplied.",
+      }),
+    ]);
+  });
+
+  it("refuses a folder beside files or an address on every tool, at the second field", async () => {
+    for (const rule of ["one_selector", "run_source"] as const) {
+      const resolution = await resolveMethodFiles(
+        {
+          method_dir: "m",
+          files: [{ content: 'domain = "demo"' }],
+          method_ref: "github.com/acme/methods/invoice",
+        },
+        folderResolver,
+        rule,
+      );
+
+      expect(resolution.errors.map((error) => error.location)).toEqual([
+        "method_dir",
+        "method_ref",
+      ]);
+      expect(resolution.errors[0]?.message).toContain(
+        "method_dir and files are mutually exclusive",
+      );
+      expect(resolution.sent).toBeUndefined();
+    }
+  });
+
+  it("refuses a folder beside a method_id on the tooling tools, and pairs them on a run", async () => {
+    const tooling = await resolveMethodFiles(
+      { method_dir: "m", method_id: "mt_abc123" },
+      folderResolver,
+      "one_selector",
+    );
+    expect(tooling.errors).toEqual([
+      expect.objectContaining({ location: "method_id", retryable: false }),
+    ]);
+
+    const run = await resolveMethodFiles(
+      { method_dir: "m", method_id: "mt_abc123" },
+      folderResolver,
+      "run_source",
+    );
+    expect(run.errors).toEqual([]);
+    expect(run.sent).toEqual(SENT);
+  });
+
+  it("says when a deployment cannot read a folder", async () => {
+    const resolution = await resolveMethodFiles({ method_dir: "m" }, undefined, "one_selector");
+
+    expect(resolution.errors).toEqual([
+      expect.objectContaining({
+        class: "input_domain",
+        location: "method_dir",
+        message:
+          "This deployment cannot read a folder from disk; submit the method's files instead.",
+      }),
+    ]);
+  });
+
+  it("locates every refusal of the folder at method_dir", async () => {
+    const refusing: FileResolver = {
+      resolve: () => Promise.reject(new Error("never")),
+      resolveMethodDir: () =>
+        Promise.resolve({
+          ok: false,
+          refusals: [
+            { message: "first", hint: "one" },
+            { message: "second", hint: "two" },
+          ],
+        }),
+    };
+
+    const resolution = await resolveMethodFiles({ method_dir: "m" }, refusing, "one_selector");
+
+    expect(resolution.errors).toEqual([
+      {
+        class: "input_domain",
+        location: "method_dir",
+        message: "first",
+        hint: "one",
+        retryable: false,
+      },
+      {
+        class: "input_domain",
+        location: "method_dir",
+        message: "second",
+        hint: "two",
+        retryable: false,
+      },
+    ]);
+  });
+});
+
+describe("withFilesSent", () => {
+  const error = (location?: string): ToolError => ({
+    class: "input_domain",
+    ...(location === undefined ? {} : { location }),
+    message: "m",
+    hint: "h",
+    retryable: false,
+  });
+
+  it("returns a result whose method came from files unchanged", () => {
+    const result = { structuredContent: { status: "error", errors: [error("files")] } };
+
+    expect(withFilesSent(result, undefined)).toBe(result);
+  });
+
+  it("lists the files sent and relocates the errors that named files to method_dir", () => {
+    const result: {
+      structuredContent: { status: string; errors?: ToolError[]; files_sent?: string[] };
+    } = {
+      structuredContent: {
+        status: "error",
+        errors: [error("files"), error("files[2].content"), error("method_id"), error()],
+      },
+    };
+
+    const listed = withFilesSent(result, ["m/main.mthds"]);
+
+    expect(listed.structuredContent.files_sent).toEqual(["m/main.mthds"]);
+    expect(listed.structuredContent.errors?.map((item) => item.location)).toEqual([
+      "method_dir",
+      "method_dir",
+      "method_id",
+      undefined,
+    ]);
+  });
+
+  it("lists no file on a result marked unsent, and still relocates its errors", () => {
+    const result: {
+      structuredContent: { status: string; errors?: ToolError[]; files_sent?: string[] };
+    } = markUnsent({ structuredContent: { status: "error", errors: [error("files")] } });
+
+    const bare = withFilesSent(result, ["m/main.mthds"]);
+
+    expect(bare.structuredContent).not.toHaveProperty("files_sent");
+    expect(bare.structuredContent.errors?.[0]?.location).toBe("method_dir");
+  });
+
+  it("reads only the SDK's refusal of an argument as a failure before sending", () => {
+    expect(failedBeforeSending(new RequestArgumentError("bad base URL"))).toBe(true);
+    expect(
+      failedBeforeSending(new ApiUnreachableError("reset", DEFAULT_API_URL, "ECONNRESET")),
+    ).toBe(false);
+    expect(failedBeforeSending(new Error("anything else"))).toBe(false);
+  });
+
+  it("lists the files sent on a produced verdict, which carries no errors", () => {
+    const result: { structuredContent: { status: string; files_sent?: string[] } } = {
+      structuredContent: { status: "ok" },
+    };
+
+    const listed = withFilesSent(result, ["m/main.mthds"]);
+
+    expect(listed.structuredContent).toEqual({ status: "ok", files_sent: ["m/main.mthds"] });
+  });
+});
+
+describe("toolResultContent", () => {
+  it("closes the summary with every file a folder sent, after the errors", () => {
+    const [content] = toolResultContent(
+      "Validation was not run.",
+      [error()],
+      ["m/main.mthds", "m/templates/a `b`.html"],
+    );
+
+    expect(content.text).toBe(
+      [
+        "Validation was not run.",
+        "",
+        "- `method_dir` — m",
+        "  *Hint: h*",
+        "",
+        "## Files sent",
+        "",
+        "Read from the method's folder and sent, and nothing else from it:",
+        "",
+        "- `m/main.mthds`",
+        // A backtick in a path cannot close the span it is shown in.
+        "- ``m/templates/a `b`.html``",
+      ].join("\n"),
+    );
+
+    function error(): ToolError {
+      return {
+        class: "input_domain",
+        location: "method_dir",
+        message: "m",
+        hint: "h",
+        retryable: false,
+      };
+    }
+  });
+
+  it("adds no files-sent section when no folder was read", () => {
+    expect(toolResultContent("Done.", [], [])[0].text).toBe("Done.");
+    expect(toolResultContent("Done.")[0].text).toBe("Done.");
+  });
+});
+
 describe("toolResultContent", () => {
   it("returns just the summary when there are no errors (success)", () => {
     expect(toolResultContent("# Validation passed")).toEqual([
@@ -509,7 +765,9 @@ describe("validateMethodSelectorRequest", () => {
     expect(errors).toHaveLength(1);
     expect(errors[0]?.class).toBe("input_domain");
     expect(errors[0]?.location).toBe("files");
-    expect(errors[0]?.message).toBe("Provide MTHDS files, a method_ref address, or a method_id.");
+    expect(errors[0]?.message).toBe(
+      "Provide a method folder, MTHDS files, a method_ref address, or a method_id.",
+    );
     expect(errors[0]?.hint).toContain("github.com/");
   });
 
@@ -1214,6 +1472,130 @@ describe("classifyError", () => {
     });
   });
 
+  // A missing or refused key is `config`, like an unreachable API, so without
+  // the kind every capability's headline blamed connectivity for it
+  // (L-260924-a58ae1). Every credential arm tags it, and only those.
+  describe("tags a missing or refused key as kind auth", () => {
+    const texture = { location: "PIPELEX_API_KEY", hint: "No Pipelex API key is set." };
+
+    it("tags a 401 and a 403 through the generic arm, keeping the key's texture", async () => {
+      for (const status of [401, 403]) {
+        const error = classifyError(await refused(status, { detail: "Missing API key" }), {
+          auth: texture,
+        });
+
+        expect(error, String(status)).toEqual({
+          class: "config",
+          kind: "auth",
+          location: "PIPELEX_API_KEY",
+          message: "Missing API key",
+          hint: "No Pipelex API key is set.",
+          retryable: false,
+        });
+      }
+    });
+
+    it("tags a route's gated 403 too, whose hint composes the key's with the gate's", async () => {
+      const error = classifyError(await refused(403, { code: "forbidden" }), {
+        auth: texture,
+        forbidden: { hint: "No Pipelex API key is set. Or the route is gated." },
+      });
+
+      expect(error).toMatchObject({
+        class: "config",
+        kind: "auth",
+        location: "PIPELEX_API_KEY",
+        hint: "No Pipelex API key is set. Or the route is gated.",
+      });
+    });
+
+    it("tags the upload leg's refused credential, as the SDK raises it", async () => {
+      const err = await uploadFailure(() =>
+        Promise.resolve(
+          Response.json(
+            { status: 401, title: "Unauthorized", detail: "Missing API key" },
+            { status: 401, headers: { "content-type": "application/problem+json" } },
+          ),
+        ),
+      );
+      expect(err).toBeInstanceOf(UploadAuthenticationError);
+
+      expect(classifyError(err, { auth: texture })).toMatchObject({
+        class: "config",
+        kind: "auth",
+        location: "PIPELEX_API_KEY",
+        hint: "No Pipelex API key is set.",
+        retryable: false,
+      });
+    });
+
+    it("tags the artifact family's refused credential", () => {
+      const verdict = {
+        scope: "main_stuff" as const,
+        artifacts: [],
+        saved_paths: [],
+        all_saved: true,
+      };
+      for (const status of [401, 403]) {
+        const error = classifyError(
+          new ArtifactAuthenticationError(
+            "The resolve route refused the credential.",
+            status,
+            verdict,
+          ),
+          { auth: texture },
+        );
+
+        expect(error, String(status)).toMatchObject({
+          class: "config",
+          kind: "auth",
+          location: "PIPELEX_API_KEY",
+          hint: "No Pipelex API key is set.",
+        });
+      }
+    });
+
+    it("gives every credential arm the same default hint when no texture is set", async () => {
+      const verdict = {
+        scope: "main_stuff" as const,
+        artifacts: [],
+        saved_paths: [],
+        all_saved: true,
+      };
+      const errors = {
+        generic: await refused(401, { detail: "Missing API key" }),
+        upload: new UploadAuthenticationError("refused", 401),
+        artifact: new ArtifactAuthenticationError("refused", 403, verdict),
+      };
+      for (const [arm, err] of Object.entries(errors)) {
+        expect(classifyError(err), arm).toMatchObject({
+          class: "config",
+          kind: "auth",
+          location: "PIPELEX_API_KEY",
+          hint: DEFAULT_AUTH_HINT,
+        });
+      }
+    });
+
+    it("leaves the execution-locus refusals untagged, at the method and not the key", async () => {
+      for (const errorType of ["MethodStructuresRefusedError", "CustomCodeRequiresSandbox"]) {
+        const error = classifyError(
+          await refused(403, runnerProblem(errorType, "Refused by the execution locus.", "input")),
+          { auth: texture, methodLocation: "method_ref" },
+        );
+
+        expect(error, errorType).toMatchObject({ class: "input_domain", location: "method_ref" });
+        expect(error.kind, errorType).toBeUndefined();
+      }
+    });
+
+    it("tags nothing else: an unreachable API, a paywall and a route's 404 keep their own", async () => {
+      expect(classifyError(await unreachable("ECONNREFUSED")).kind).toBeUndefined();
+      expect(classifyError(await refused(402, { detail: "Plan limit" })).kind).toBe("paywall");
+      expect(classifyError(await refused(404, { code: "not_found" })).kind).toBeUndefined();
+    });
+  });
+
   describe("the upload leg", () => {
     it("reads a wrapped plan refusal as the paywall it is, not a passing fault", async () => {
       const err = await uploadFailure(() =>
@@ -1511,6 +1893,7 @@ describe("summaryForToolError", () => {
     input_domain: "request headline",
     runtime: "server headline",
     paywall: "billing headline",
+    auth: "key headline",
   };
 
   it("maps an untagged error by its class", () => {
@@ -1531,6 +1914,15 @@ describe("summaryForToolError", () => {
         summaries,
       ),
     ).toBe("billing headline");
+  });
+
+  it("names the key, not connectivity, for a missing or refused key", () => {
+    expect(
+      summaryForToolError(
+        { class: "config", kind: "auth", message: "Missing API key", retryable: false },
+        summaries,
+      ),
+    ).toBe("key headline");
   });
 });
 
@@ -1754,6 +2146,132 @@ describe("blueprintMainPipeRefOf", () => {
   it("treats a blueprint that is not an object as declaring nothing", () => {
     for (const blueprint of [undefined, null, "demo.main", 7, ["demo.main"]]) {
       expect(blueprintMainPipeRefOf(blueprint)).toBeUndefined();
+    }
+  });
+});
+
+describe("createPipelexApiClient", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  /** The `Authorization` header a client built by the factory sends. */
+  async function sentAuthorization(apiKey: string | undefined): Promise<string | null> {
+    let seen: string | null = null;
+    vi.stubGlobal("fetch", (_url: string, init?: { headers?: HeadersInit }) => {
+      seen = new Headers(init?.headers).get("authorization");
+      return Promise.resolve(Response.json({}));
+    });
+    await createPipelexApiClient({ baseUrl: "https://api.test", apiKey }).health();
+    return seen;
+  }
+
+  it("sends the config's key, and no key at all when the config has none", async () => {
+    // The SDK falls back to the process's own PIPELEX_API_KEY when it is handed
+    // no key, which would put an ambient key on a call the workshop resolved as
+    // keyless; the config's key is the whole decision.
+    vi.stubEnv("PIPELEX_API_KEY", "plx_sk_ambient");
+
+    expect(await sentAuthorization("plx_sk_config")).toBe("Bearer plx_sk_config");
+    expect(await sentAuthorization(undefined)).toBeNull();
+  });
+});
+
+describe("classifyError with the base URL's source", () => {
+  const baseUrlSource = {
+    hint: "The PIPELEX_BASE_URL in use was read from `~/.pipelex/.env` beside the saved key.",
+  };
+
+  /** What the SDK throws building a client on a base URL carrying a path: the generic `config` arm. */
+  function refusedBaseUrl(): unknown {
+    try {
+      createPipelexApiClient({ baseUrl: `${DEFAULT_API_URL}/v1` });
+    } catch (err) {
+      return err;
+    }
+    throw new Error("the client took a base URL carrying a path");
+  }
+
+  it("adds the source to the unreachable API's hint, and only when the call carries one", async () => {
+    const unreachableHint =
+      "Start pipelex-api locally or set PIPELEX_BASE_URL to a reachable host-only API base URL.";
+    const err = await unreachable("ECONNREFUSED");
+
+    expect(classifyError(err)).toMatchObject({
+      location: "PIPELEX_BASE_URL",
+      hint: unreachableHint,
+    });
+    expect(classifyError(err, { baseUrlSource })).toEqual({
+      class: "config",
+      location: "PIPELEX_BASE_URL",
+      message: expect.any(String),
+      hint: `${unreachableHint} ${baseUrlSource.hint}`,
+      retryable: true,
+    });
+  });
+
+  it("adds the source to the generic config arm a refused base URL falls to", () => {
+    const err = refusedBaseUrl();
+    expect(err).toBeInstanceOf(RequestArgumentError);
+
+    expect(classifyError(err)).toMatchObject({
+      class: "config",
+      location: "PIPELEX_BASE_URL",
+      hint: "Check PIPELEX_BASE_URL and the submitted request.",
+    });
+    expect(classifyError(err, { baseUrlSource })).toMatchObject({
+      class: "config",
+      location: "PIPELEX_BASE_URL",
+      hint: `Check PIPELEX_BASE_URL and the submitted request. ${baseUrlSource.hint}`,
+    });
+  });
+
+  it("adds the source to a missing or unimplemented route", async () => {
+    const missing = classifyError(await refused(404, { detail: "Not Found" }), {
+      route: "/v1/methods/{id}",
+      baseUrlSource,
+    });
+    expect(missing).toMatchObject({
+      class: "config",
+      location: "PIPELEX_BASE_URL",
+      hint: `Check that PIPELEX_BASE_URL points to a host serving /v1/methods/{id}. ${baseUrlSource.hint}`,
+    });
+
+    const unimplemented = classifyError(await refused(501, { detail: "Not Implemented" }), {
+      route: "/v1/methods/{id}",
+      baseUrlSource,
+    });
+    expect(unimplemented).toMatchObject({
+      location: "PIPELEX_BASE_URL",
+      hint: `The deployment PIPELEX_BASE_URL points at does not implement /v1/methods/{id}. ${baseUrlSource.hint}`,
+    });
+  });
+
+  it("adds the source once to a wrapped unreachable API on the upload leg", async () => {
+    const err = await uploadFailure(() =>
+      Promise.reject(
+        new TypeError("fetch failed", {
+          cause: Object.assign(new Error("ECONNREFUSED"), { code: "ECONNREFUSED" }),
+        }),
+      ),
+    );
+    expect(err).toBeInstanceOf(UploadTransportError);
+
+    const hint = classifyError(err, { baseUrlSource }).hint ?? "";
+    expect(hint.split(baseUrlSource.hint)).toHaveLength(2);
+    expect(hint.endsWith(baseUrlSource.hint)).toBe(true);
+  });
+
+  it("leaves every failure the base URL cannot fix as it is", async () => {
+    const failures = [
+      await refused(401, { detail: "Missing API key" }),
+      await refused(500, { detail: "Server fault" }),
+      new ApiUnreachableError("no answer in time", DEFAULT_API_URL, "ABORT_TIMEOUT"),
+      new RequestArgumentError("No run source given."),
+    ];
+
+    for (const err of failures) {
+      expect(classifyError(err, { baseUrlSource })).toEqual(classifyError(err));
     }
   });
 });

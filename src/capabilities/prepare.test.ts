@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   ApiResponseError,
@@ -8,6 +8,7 @@ import {
   InvalidLocalSourceError,
   MethodLoadError,
   RejectedAssetError,
+  RequestArgumentError,
   UnsupportedUploadCapabilityError,
   UploadAuthenticationError,
   UploadTransportError,
@@ -21,6 +22,7 @@ import {
   validatePrepareInputsRequest,
 } from "./prepare.js";
 import { DEFAULT_API_URL } from "./shared.js";
+import type { FileResolver } from "./shared.js";
 
 /** Fake arm for tests whose request must never reach the SDK. */
 const prepareInputsNotCalled = {
@@ -109,6 +111,21 @@ describe("prepareInputsToolResult", () => {
 describe("validatePrepareInputsRequest", () => {
   it("inherits the shared one-selector checks", () => {
     expect(validatePrepareInputsRequest({ files: [], inputs: {} })).toHaveLength(1);
+  });
+
+  it.each([
+    ["a bare pipe_code", "extract", 'got the bare "extract"'],
+    ["a dependency package's pipe", "alias->docs.extract", "names a dependency package's pipe"],
+  ])("refuses %s at pipe_ref, as the SDK would before sending", (_label, pipeRef, reason) => {
+    const errors = validatePrepareInputsRequest({ files, pipe_ref: pipeRef, inputs: {} });
+
+    expect(errors).toEqual([
+      expect.objectContaining({ class: "input_domain", location: "pipe_ref", retryable: false }),
+    ]);
+    expect(errors[0]?.message).toContain(reason);
+    expect(validatePrepareInputsRequest({ files, pipe_ref: "docs.extract", inputs: {} })).toEqual(
+      [],
+    );
   });
 
   it("rejects a blank pipe_ref", () => {
@@ -324,8 +341,14 @@ describe("prepareMthdsInputs — the SDK upload walk", () => {
     );
 
     expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.errors?.[0]?.kind).toBe("auth");
     expect(result.structuredContent.errors?.[0]?.location).toBe("authorization");
     expect(result.structuredContent.errors?.[0]?.hint).toBe("reconnect the connector");
+    // The upload leg's refused key headlines as the key, as the pipe I/O
+    // route's does, never as an unreachable API.
+    expect(result.summary).toBe(
+      "Inputs could not be prepared: the Pipelex API key is missing or was refused.",
+    );
   });
 
   it("maps an upload transport fault to runtime (retryable)", async () => {
@@ -680,6 +703,90 @@ describe("prepareMthdsInputs — request shape and transport", () => {
     expect(result.structuredContent.status).toBe("ok");
   });
 
+  it("reads a method folder through the resolver and lists every file it sent", async () => {
+    const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    let captured: PrepareInputsRequest | undefined;
+
+    const result = await prepareMthdsInputs(
+      { method_dir: "methods", inputs: {} },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: {
+          async resolve() {
+            throw new Error("a folder is not read file by file");
+          },
+          async resolveMethodDir(methodDir) {
+            return {
+              ok: true,
+              files: [{ path: `${methodDir}/invoice.mthds`, content: 'domain = "invoice"' }],
+              resources: { "templates/invoice.xlsx": XLSX },
+              sent: [`${methodDir}/invoice.mthds`, `${methodDir}/templates/invoice.xlsx`],
+            };
+          },
+        },
+        client: uploadWith(async (request) => {
+          captured = request;
+          return { inputs: {}, uploads: [] };
+        }),
+      },
+    );
+
+    expect(captured).toMatchObject({
+      files: [{ content: 'domain = "invoice"', source: "methods/invoice.mthds" }],
+      resources: { "templates/invoice.xlsx": XLSX },
+    });
+    expect(result.structuredContent.files_sent).toEqual([
+      "methods/invoice.mthds",
+      "methods/templates/invoice.xlsx",
+    ]);
+    expect(prepareInputsToolResult(result).content[0].text).toContain("## Files sent");
+  });
+
+  it("lists no file of a folder when the request never left the machine", async () => {
+    const unbuilt = await prepareMthdsInputs(
+      { method_dir: "methods", inputs: {} },
+      { baseUrl: "invalid-no-scheme", resolver: methodFolderResolver() },
+    );
+    expect(unbuilt.structuredContent.status).toBe("error");
+    expect(unbuilt.structuredContent).not.toHaveProperty("files_sent");
+    expect(prepareInputsToolResult(unbuilt).content[0].text).not.toContain("Files sent");
+
+    const refused = await prepareMthdsInputs(
+      { method_dir: "methods", inputs: {} },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: methodFolderResolver(),
+        client: uploadWith(async () => {
+          throw new RequestArgumentError("refused before sending");
+        }),
+      },
+    );
+    expect(refused.structuredContent.status).toBe("error");
+    expect(refused.structuredContent).not.toHaveProperty("files_sent");
+  });
+
+  it.each([["extract"], ["alias->docs.extract"]])(
+    "refuses the pipe_ref %s before the folder's files are sent, listing none",
+    async (pipeRef) => {
+      const prepare = vi.fn((_request: PrepareInputsRequest): Promise<PreparedInputs> => {
+        throw new Error("no request expected");
+      });
+
+      const result = await prepareMthdsInputs(
+        { method_dir: "methods", pipe_ref: pipeRef, inputs: {} },
+        { baseUrl: DEFAULT_API_URL, resolver: methodFolderResolver(), client: uploadWith(prepare) },
+      );
+
+      expect(result.structuredContent.status).toBe("error");
+      expect(result.structuredContent.errors?.[0]).toMatchObject({
+        class: "input_domain",
+        location: "pipe_ref",
+      });
+      expect(result.structuredContent).not.toHaveProperty("files_sent");
+      expect(prepare).not.toHaveBeenCalled();
+    },
+  );
+
   it("surfaces an unreachable API as config", async () => {
     const result = await prepareMthdsInputs(
       { files, inputs: {} },
@@ -710,3 +817,20 @@ describe("prepareMthdsInputs — request shape and transport", () => {
 // Type-only: the fixture must satisfy the SDK's own file item type.
 const _typedFiles: MthdsFileItem[] = files;
 void _typedFiles;
+
+/** A resolver reading a method folder as `methods/`, with one template file. */
+function methodFolderResolver(): FileResolver {
+  return {
+    async resolve() {
+      throw new Error("a folder is not read file by file");
+    },
+    async resolveMethodDir(methodDir) {
+      return {
+        ok: true,
+        files: [{ path: `${methodDir}/invoice.mthds`, content: 'domain = "invoice"' }],
+        resources: { "templates/invoice.xlsx": new Uint8Array([0x50, 0x4b, 0x03, 0x04]) },
+        sent: [`${methodDir}/invoice.mthds`, `${methodDir}/templates/invoice.xlsx`],
+      };
+    },
+  };
+}

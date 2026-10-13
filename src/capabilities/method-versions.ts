@@ -37,7 +37,8 @@ import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
  * the draft there.
  *
  * Only `supported` is cached, for ten minutes, in the memory the workshop
- * shares across its tools (`createMethodVersionsMemory`). `unsupported` is
+ * shares across its tools (`createMethodVersionsMemories`), one answer per
+ * base URL. `unsupported` is
  * asked afresh by every call that depends on it, because it is the answer that
  * goes stale misleadingly: once the platform resolves selectors, a bare id
  * reported as the draft is the published version, for as long as a cached
@@ -59,8 +60,10 @@ import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
  * always says which it ran.
  *
  * This mirrors the webapp's `src/lib/method-versions-support.ts`, without its
- * server-instance concerns: one workshop process serves one user and one base
- * URL.
+ * server-instance concerns: one workshop process serves one user. It can reach
+ * more than one platform, though, since the workshop resolves its base URL on
+ * every tool call (`src/credentials.ts`), so its memory keeps each base URL's
+ * answer apart (`MethodVersionsMemories`).
  */
 
 /** The `GET /v1/version` extension a platform lists once it resolves version selectors. */
@@ -81,8 +84,8 @@ export const METHOD_VERSIONS_TTL_MS = 10 * 60_000;
 export const METHOD_VERSIONS_HANDSHAKE_MS = 3_000;
 
 /**
- * The workshop's memory of the platform's answer, shared by every tool of one
- * server. A context without one asks on every call, which is what the hermetic
+ * One platform's answer, as the workshop remembers it: the platform one base
+ * URL names. A call without one asks on every call, which is what the hermetic
  * tests do so that no answer leaks from one test into the next.
  */
 export interface MethodVersionsMemory {
@@ -94,6 +97,44 @@ export interface MethodVersionsMemory {
 
 export function createMethodVersionsMemory(): MethodVersionsMemory {
   return { generation: 0 };
+}
+
+/**
+ * The workshop's memory, shared by every tool of one server: one
+ * {@link MethodVersionsMemory} per base URL, each with its own cached answer,
+ * in-flight handshake and generation. The workshop decides its base URL on
+ * every tool call, from its host's environment or the home `.env`, so two
+ * calls of one session can reach two platforms, and one platform's answer must
+ * never stand for another's: a `supported` remembered for an API that resolves
+ * selectors would report a bare id read on one that does not as the latest
+ * published version, while that platform read the draft. The map is never
+ * pruned; it holds one small entry per base URL a session has used.
+ */
+export interface MethodVersionsMemories {
+  readonly byBaseUrl: Map<string, MethodVersionsMemory>;
+}
+
+export function createMethodVersionsMemories(): MethodVersionsMemories {
+  return { byBaseUrl: new Map() };
+}
+
+/**
+ * The memory of the platform `baseUrl` names, created on first use, or none
+ * when there is no shared memory. Keyed by the base URL exactly as it is
+ * configured: two spellings of one API ask once each, which costs a handshake,
+ * while one key for two APIs would cost a wrong answer.
+ */
+export function methodVersionsMemoryFor(
+  memories: MethodVersionsMemories | undefined,
+  baseUrl: string,
+): MethodVersionsMemory | undefined {
+  if (memories === undefined) return undefined;
+  let memory = memories.byBaseUrl.get(baseUrl);
+  if (memory === undefined) {
+    memory = createMethodVersionsMemory();
+    memories.byBaseUrl.set(baseUrl, memory);
+  }
+  return memory;
 }
 
 /** What reads `GET /v1/version`: the client's own `version()`. */
@@ -277,10 +318,21 @@ export const runMethodVersionSchema = z
 
 /**
  * The context field every capability that reads or runs a saved method by id
- * carries: the workshop's shared memory of the platform's answer.
+ * carries: the workshop's shared memory of the platforms' answers.
  */
 export interface MethodVersionsAware {
-  methodVersions?: MethodVersionsMemory;
+  methodVersions?: MethodVersionsMemories;
+}
+
+/**
+ * The memory of the platform a context's calls reach: the one its own
+ * `baseUrl` names, which is the base URL its client is built with, so the
+ * answer read is always the answering platform's own.
+ */
+export function methodVersionsOf(
+  context: MethodVersionsAware & { baseUrl: string },
+): MethodVersionsMemory | undefined {
+  return methodVersionsMemoryFor(context.methodVersions, context.baseUrl);
 }
 
 /** What a by-id call sends, and what it can say about the content it reads. */
@@ -354,14 +406,18 @@ export function planMethodSelector(
  * why before anything is sent. This refusal is the linkage form's own rule,
  * true on every platform, and reads nothing of the platform's answer.
  */
-export function linkageSuffixError(value: string): ToolError | undefined {
+export function linkageSuffixError(
+  value: string,
+  source: "files" | "method_dir" = "files",
+): ToolError | undefined {
   const selector = readMethodSelector(value);
   if (selector.form !== "draft" && selector.form !== "version") return undefined;
+  const runs = source === "files" ? "these files" : "the folder";
   return {
     class: "input_domain",
     location: "method_id",
-    message: `Beside files, method_id only files the run under its method, so it must be the bare id \`${selector.methodId}\`, not \`${value}\`: the files are what runs, and a version suffix would claim a version that did not.`,
-    hint: `Pass method_id "${selector.methodId}" to run these files and record the run under the method, or drop files to run \`${value}\` itself.`,
+    message: `Beside ${source}, method_id only files the run under its method, so it must be the bare id \`${selector.methodId}\`, not \`${value}\`: ${source === "files" ? "the files are" : "the folder is"} what runs, and a version suffix would claim a version that did not.`,
+    hint: `Pass method_id "${selector.methodId}" to run ${runs} and record the run under the method, or drop ${source} to run \`${value}\` itself.`,
     retryable: false,
   };
 }

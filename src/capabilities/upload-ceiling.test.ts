@@ -8,6 +8,7 @@ import {
   SizeGuardedPipelexApiClient,
   base64DecodedLength,
   formatMib,
+  formatSizeOverLimit,
 } from "./upload-ceiling.js";
 
 describe("MAX_UPLOAD_BYTES", () => {
@@ -40,6 +41,25 @@ describe("formatMib", () => {
   it("renders a limit a caller can act on", () => {
     expect(formatMib(7 * 1024 * 1024)).toBe("7.0 MiB");
     expect(formatMib(MAX_UPLOAD_BYTES)).toBe("7.5 MiB");
+  });
+});
+
+describe("formatSizeOverLimit", () => {
+  it("prints MiB when the size and the limit read apart", () => {
+    expect(formatSizeOverLimit(9 * 1024 * 1024, MAX_UPLOAD_BYTES)).toEqual({
+      size: "9.0 MiB",
+      limit: "7.5 MiB",
+    });
+  });
+
+  it("never prints a size equal to the limit it exceeds: exact bytes when MiB would match", () => {
+    const shown = formatSizeOverLimit(MAX_UPLOAD_BYTES + 1, MAX_UPLOAD_BYTES);
+
+    expect(shown.size).not.toBe(shown.limit);
+    expect(shown).toEqual({
+      size: `${(MAX_UPLOAD_BYTES + 1).toLocaleString("en-US")} bytes`,
+      limit: `${MAX_UPLOAD_BYTES.toLocaleString("en-US")} bytes`,
+    });
   });
 });
 
@@ -84,6 +104,22 @@ describe("SizeGuardedPipelexApiClient", () => {
     // the SDK gives a real one.
     expect((error as RejectedAssetError).status).toBe(413);
     expect((error as RejectedAssetError).code).toBe("too_large");
+  });
+
+  it("names an upload just over the limit apart from the limit itself", async () => {
+    const client = new SizeGuardedPipelexApiClient({ baseUrl: "https://api.pipelex.test" });
+    // A whole number of base64 quanta, so the decoded length is exact.
+    const decoded = MAX_UPLOAD_BYTES + 3 - (MAX_UPLOAD_BYTES % 3);
+    const justOver = "A".repeat((decoded / 3) * 4);
+
+    const error = await client
+      .upload({ filename: "edge.pdf", data: justOver, content_type: "application/pdf" })
+      .catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(RejectedAssetError);
+    expect((error as RejectedAssetError).message).toBe(
+      `"edge.pdf" is ${decoded.toLocaleString("en-US")} bytes, over the ${MAX_UPLOAD_BYTES.toLocaleString("en-US")} bytes Pipelex upload limit.`,
+    );
   });
 
   it("reaches the caller of uploadFile as a refused asset, not as a retryable transport fault", async () => {

@@ -12,6 +12,7 @@ import type { ProjectedInputsTemplate } from "./inputs-template.js";
 import {
   METHOD_ID_SELECTOR_SENTENCE,
   methodVersionReportSchema,
+  methodVersionsOf,
   planById,
   selectorFailure,
   withMethodContent,
@@ -23,17 +24,23 @@ import {
   bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
+  filesSentSchema,
   hasTemplateFiles,
-  resolveSubmittedFiles,
+  methodDirInputSchema,
+  resolveMethodFiles,
   resourcesOption,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
+  withFilesSent,
+  failedBeforeSending,
+  markUnsent,
 } from "./shared.js";
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
@@ -49,8 +56,8 @@ import type { TemplateFiles } from "./template-files.js";
  *
  * It reads one `POST /v1/pipe-io` for the one pipe, with no dry run, and
  * projects the template client-side from the pipe's `input_form` descriptor
- * through `inputs-template.ts`'s `inputsTemplateFor`. All three selectors are
- * server pass-throughs: the runner resolves an address, and the hosted platform
+ * through `inputs-template.ts`'s `inputsTemplateFor`. Every selector is a
+ * server pass-through: the runner resolves an address, and the hosted platform
  * resolves a catalog id. The route picks the pipe too, so the template is for
  * the pipe `mthds_prepare_inputs` would prepare and a run naming none would
  * execute.
@@ -61,18 +68,19 @@ const inputsTemplateFormatSchema = z.enum(["json", "toml"]);
 export type InputsTemplateFormat = z.infer<typeof inputsTemplateFormatSchema>;
 
 export const mthdsInputsInputSchema = {
+  method_dir: methodDirInputSchema("one_selector"),
   files: bundleFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
     .describe(
-      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.`,
+      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of method_dir / files / method_ref / method_id.`,
     ),
   method_id: z
     .string()
     .optional()
     .describe(
-      `Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of files / method_ref / method_id.`,
+      `Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of method_dir / files / method_ref / method_id.`,
     ),
   pipe_ref: z
     .string()
@@ -111,6 +119,7 @@ const inputsStructuredContentSchema = z.object({
     .optional()
     .describe('The fill-in inputs template, as raw TOML text (format "toml").'),
   method_version: methodVersionReportSchema,
+  files_sent: filesSentSchema,
   validation_errors: z.array(z.unknown()).optional(),
   errors: z.array(toolErrorSchema).optional(),
 });
@@ -118,6 +127,7 @@ const inputsStructuredContentSchema = z.object({
 export const mthdsInputsOutputSchema = inputsStructuredContentSchema;
 
 export interface MthdsInputsInput {
+  method_dir?: string;
   files?: SubmittedFileInput[];
   method_ref?: string;
   method_id?: string;
@@ -148,6 +158,8 @@ export interface InputsStructuredContent {
   inputs_toml?: string;
   /** By-id calls only: the content the template was projected from, when this server can tell. */
   method_version?: MethodVersionReport;
+  /** Calls on a method folder only: every file read from it and sent. */
+  files_sent?: string[];
   validation_errors?: unknown[];
   errors?: ToolError[];
 }
@@ -176,6 +188,8 @@ export interface InputsContext extends ApiConfig, MethodVersionsAware {
   resolver?: FileResolver;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 export function buildInputsContext(env = process.env): InputsContext {
@@ -277,7 +291,7 @@ export async function buildMthdsInputs(
   input: MthdsInputsInput,
   context: InputsContext = buildInputsContext(),
 ): Promise<InputsResult> {
-  const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
+  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector");
   if (resolution.errors.length > 0) {
     return errorResult("Inputs template was not run: request input is invalid.", resolution.errors);
   }
@@ -292,17 +306,26 @@ export async function buildMthdsInputs(
     return errorResult("Inputs template was not run: request input is invalid.", inputErrors);
   }
 
+  return withFilesSent(await requestInputsTemplate(request, context), resolution.sent);
+}
+
+/** One `POST /v1/pipe-io` for a request that passed its checks, and the projection of its answer. */
+async function requestInputsTemplate(
+  request: ResolvedInputsRequest,
+  context: InputsContext,
+): Promise<InputsResult> {
   let report: PipeIOResponse;
   let plan: SelectorPlan | undefined;
+  let client: InputsClient | undefined;
   try {
-    const client = inputsClient(context);
+    client = inputsClient(context);
     let sent = request;
     if (request.method_id !== undefined) {
       // A bare id reads the draft on a platform that does not resolve version
       // selectors yet, and the latest published version on one that does: the
       // platform is asked beside the request, which never waits on it, and the
       // result says which content the template came from (`method-versions.ts`).
-      plan = planById(request.method_id, context.methodVersions, client, {
+      plan = planById(request.method_id, methodVersionsOf(context), client, {
         needBareReport: true,
       });
       sent = { ...request, method_id: plan.send };
@@ -312,10 +335,14 @@ export async function buildMthdsInputs(
     const classified = classifyError(err, {
       ...inputsErrorOptions(request),
       auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
       bundleResources: hasTemplateFiles(request.resources),
     });
-    const error = await selectorFailure(err, classified, plan, context.methodVersions);
-    return errorResult(summaryForError(error), [error]);
+    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
+    const failed = errorResult(summaryForError(error), [error]);
+    // A client that could not be built, or an argument refused before
+    // sending, sent no file of a folder.
+    return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
 
   // The API responded; projecting it must not be reported as an unreachable
@@ -352,6 +379,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Inputs template could not be completed: the Pipelex API returned an error.",
   paywall:
     "Inputs template could not start: the organization's Pipelex plan does not cover this call.",
+  auth: "Inputs template could not start: the Pipelex API key is missing or was refused.",
 };
 
 function summaryForError(error: ToolError): string {
@@ -361,7 +389,11 @@ function summaryForError(error: ToolError): string {
 export function inputsToolResult(result: InputsResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(result.summary, result.structuredContent.errors),
+    content: toolResultContent(
+      result.summary,
+      result.structuredContent.errors,
+      result.structuredContent.files_sent,
+    ),
     isError: result.structuredContent.status === "error",
   };
 }

@@ -2,7 +2,11 @@ import path from "node:path";
 
 import { parse as parseToml } from "smol-toml";
 
-import { GATEWAY_REQUEST_LIMIT_BYTES, base64EncodedLength, formatMib } from "./upload-ceiling.js";
+import {
+  GATEWAY_REQUEST_LIMIT_BYTES,
+  base64EncodedLength,
+  formatSizeOverLimit,
+} from "./upload-ceiling.js";
 
 /**
  * A bundle's template files: what a `PipeDocGen` step fills, sent beside the
@@ -189,6 +193,7 @@ export function planTemplateFiles(
   located: readonly LocatedTemplate[],
   named: readonly NamedTemplate[],
   requestBytes: number,
+  options: TemplateBudgetOptions = {},
 ): { planned: PlannedTemplate[]; refusals: TemplateRefusal[] } {
   const namesByReal = new Map<string, NamedTemplate[]>();
   const realsByKey = new Map<string, Map<string, string>>();
@@ -246,7 +251,10 @@ export function planTemplateFiles(
       });
     }
   }
-  return { planned, refusals: [...refusals, ...templateBudgetRefusals(planned, requestBytes)] };
+  return {
+    planned,
+    refusals: [...refusals, ...templateBudgetRefusals(planned, requestBytes, options)],
+  };
 }
 
 /** Where the steps' template files were looked for, for a refusal of a file none of them names. */
@@ -259,6 +267,16 @@ function expectedLocations(named: readonly NamedTemplate[]): string {
     );
   const more = named.length > shown.length ? `, and ${named.length - shown.length} more` : "";
   return `; the steps name ${shown.join(", ")}${more}`;
+}
+
+/**
+ * What a caller of the planner may word for itself. `countHint` replaces the
+ * hint of the count refusal, which otherwise tells a caller who listed the
+ * files to send only the named ones: a method folder sends nothing else, so
+ * the advice there is about the steps.
+ */
+export interface TemplateBudgetOptions {
+  countHint?: string;
 }
 
 /**
@@ -285,12 +303,13 @@ function expectedLocations(named: readonly NamedTemplate[]): string {
 export function templateBudgetRefusals(
   entries: readonly { key: string; index: number; path: string; size: number }[],
   requestBytes: number,
+  options: TemplateBudgetOptions = {},
 ): TemplateRefusal[] {
   if (entries.length > MAX_TEMPLATE_FILES) {
     return [
       {
         message: `${entries.length} template files would be sent, over the ${MAX_TEMPLATE_FILES} one request takes.`,
-        hint: ONLY_NAMED_HINT,
+        hint: options.countHint ?? ONLY_NAMED_HINT,
       },
     ];
   }
@@ -299,9 +318,10 @@ export function templateBudgetRefusals(
   let encodedBytes = requestBytes + REQUEST_ENVELOPE_ALLOWANCE_BYTES;
   for (const entry of entries) {
     if (entry.size > MAX_TEMPLATE_FILE_BYTES) {
+      const shown = formatSizeOverLimit(entry.size, MAX_TEMPLATE_FILE_BYTES);
       refusals.push({
         index: entry.index,
-        message: `${entry.path} is ${formatMib(entry.size)}, over the ${formatMib(MAX_TEMPLATE_FILE_BYTES)} one template file may be.`,
+        message: `${entry.path} is ${shown.size}, over the ${shown.limit} one template file may be.`,
         hint: "Make the template file smaller.",
       });
       continue;
@@ -310,17 +330,19 @@ export function templateBudgetRefusals(
     // The key and the JSON quoting around the key and the value travel too.
     encodedBytes += base64EncodedLength(entry.size) + entry.key.length + 8;
     if (rawBytes > MAX_TEMPLATE_FILES_TOTAL_BYTES) {
+      const shown = formatSizeOverLimit(rawBytes, MAX_TEMPLATE_FILES_TOTAL_BYTES);
       refusals.push({
         index: entry.index,
-        message: `The template files come to ${formatMib(rawBytes)} once ${entry.path} is added, over the ${formatMib(MAX_TEMPLATE_FILES_TOTAL_BYTES)} one request takes.`,
+        message: `The template files come to ${shown.size} once ${entry.path} is added, over the ${shown.limit} one request takes.`,
         hint: "Send only the template files the steps name, or make them smaller.",
       });
       break;
     }
     if (encodedBytes > GATEWAY_REQUEST_LIMIT_BYTES) {
+      const shown = formatSizeOverLimit(encodedBytes, GATEWAY_REQUEST_LIMIT_BYTES);
       refusals.push({
         index: entry.index,
-        message: `Once ${entry.path} is added, the request comes to ${formatMib(encodedBytes)} with its template files base64-encoded, over the ${formatMib(GATEWAY_REQUEST_LIMIT_BYTES)} the hosted API's gateway takes.`,
+        message: `Once ${entry.path} is added, the request comes to ${shown.size} with its template files base64-encoded, over the ${shown.limit} the hosted API's gateway takes.`,
         hint: "Template files travel base64-encoded, a third larger than on disk, so a request holds about 7.4 MiB of them beside a small bundle. Send only the template files the steps name, or make them smaller.",
       });
       break;

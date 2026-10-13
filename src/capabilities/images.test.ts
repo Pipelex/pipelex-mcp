@@ -533,6 +533,26 @@ describe("showMthdsRunImages", () => {
     expect(result.summary).toContain("plan does not cover this call");
   });
 
+  it("names the key in the headline when the resolve route refuses it", async () => {
+    const { client } = fakeClient({
+      [COVER]: {
+        throws: () => apiError("/v1/resolve-storage-url/bulk", 401, "Missing API key"),
+      },
+    });
+
+    const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "config",
+      kind: "auth",
+      location: "PIPELEX_API_KEY",
+    });
+    expect(result.summary).toBe(
+      "Images could not be shown: the Pipelex API key is missing or was refused.",
+    );
+  });
+
   it("stays a PRODUCED verdict when a picture had already arrived", async () => {
     // Partial success is still partial success: the refusal rides its own
     // entry, the pictures that arrived are never discarded, and the untouched

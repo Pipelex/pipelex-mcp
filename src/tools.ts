@@ -78,7 +78,7 @@ import {
   readMthdsModels,
 } from "./capabilities/models.js";
 import type { ModelsContext, MthdsModelsInput } from "./capabilities/models.js";
-import { createMethodVersionsMemory } from "./capabilities/method-versions.js";
+import { createMethodVersionsMemories } from "./capabilities/method-versions.js";
 import {
   buildPrepareContext,
   mthdsPrepareInputsInputSchema,
@@ -140,7 +140,8 @@ export function buildLocalToolContexts(
   rootDir: string = process.cwd(),
 ): LocalToolContexts {
   // The method-taking tools' `files` reads `.mthds` files and, as bytes, the
-  // template files their PipeDocGen steps name. mthds_save_method's `files`
+  // template files their PipeDocGen steps name, and their `method_dir` reads a
+  // method folder through the same resolver. mthds_save_method's `files`
   // reads `.mthds` alone, since the catalog stores no template file, and its
   // `python` reads `.py` alone. The extension IS the read boundary, so one
   // resolver serving two arguments would let each read the other's files.
@@ -163,8 +164,9 @@ export function buildLocalToolContexts(
   // save's result never reports a page, so its validation leg writes none.
   // One memory of whether the platform resolves version selectors, shared by
   // every tool that reads or runs a saved method, so the workshop asks
-  // `GET /v1/version` once rather than once per tool (`method-versions.ts`).
-  const methodVersions = createMethodVersionsMemory();
+  // `GET /v1/version` once rather than once per tool. It keeps one answer per
+  // base URL, since each tool call resolves its own (`method-versions.ts`).
+  const methodVersions = createMethodVersionsMemories();
 
   // The save's validation leg sends the contents it already read, so this
   // base's resolver serves mthds_validate alone.
@@ -213,12 +215,15 @@ export function buildLocalToolContexts(
  * Apply one patch to every workshop context, the nested validation context of
  * `catalogWrite` included. This is the single list of contexts a server-level
  * override has to reach: `createLocalServer` lifts its handshake's `appInfo`
- * through it. A context left out here would be one whose calls go out without
- * the workshop's identity, which is why the list lives beside
- * `LocalToolContexts` and covers every member of it.
+ * through it once, and each tool call's key, base URL and failure textures
+ * (`credentials.ts`) through it again. A context left out here would be one
+ * whose calls go out without the workshop's identity or with another call's
+ * key, which is why the list lives beside `LocalToolContexts` and covers every
+ * member of it.
  *
  * Only the keys present in `patch` are written, and each is written
- * unconditionally — an `apiKey` of `""` is a value, not an absence.
+ * unconditionally — an `apiKey` of `""` is a value, not an absence, and an
+ * `apiKey` present as `undefined` clears the key.
  */
 export function patchLocalApiContexts(
   base: LocalToolContexts,
@@ -302,14 +307,14 @@ export const mthdsModelsTool = defineTool({
 export const mthdsValidateTool = defineTool({
   name: "mthds_validate",
   description:
-    "Validate an MTHDS method with the Pipelex API — from submitted file contents, from a published method's address passed as method_ref, " +
+    "Validate an MTHDS method with the Pipelex API — from its folder on disk passed as method_dir, from submitted files, from a published method's address passed as method_ref, " +
     "or from a registered method's catalog id (mt_…) passed as method_id. " +
-    "Supply exactly ONE of files / method_ref / method_id — never several. " +
+    "Supply exactly ONE of method_dir / files / method_ref / method_id — never several; for a method on disk, prefer method_dir, which finds its .mthds files and templates itself. " +
     "Addresses and ids are resolved server-side, so no bundle enters the conversation. A bare id validates the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which. " +
     "A valid verdict carries the main pipe's typed signature (main_pipe): its ref, each declared input with the concept it expects and how many items, and the concept it produces — " +
     "type a call site from that instead of guessing the shapes of a method you cannot read. " +
-    "A bundle whose PipeDocGen steps fill templates takes those template files in files as { path } too, and a valid verdict's warnings carry what the template check found in them. " +
-    `Files given as { path } also get the method's flowchart written beside them as ${GRAPH_PAGE_FILENAME}, a standalone page the user can open in a browser (graph_page: false skips it); the result says where.`,
+    "A bundle whose PipeDocGen steps fill templates needs those template files: method_dir sends them, files takes them as { path } items, and a valid verdict's warnings carry what the template check found in them. " +
+    `A method_dir, or files given as { path }, also gets the method's flowchart written beside its files as ${GRAPH_PAGE_FILENAME}, a standalone page the user can open in a browser (graph_page: false skips it); the result says where.`,
   inputSchema: mthdsValidateInputSchema,
   outputSchema: mthdsValidateOutputSchema,
   annotations: {
@@ -334,9 +339,9 @@ export const mthdsValidateTool = defineTool({
 export const mthdsInputsTemplateTool = defineTool({
   name: "mthds_inputs_template",
   description:
-    "Project a pipe's declared inputs as a fill-in template — from submitted MTHDS file contents, from a published method's address passed as method_ref, " +
+    "Project a pipe's declared inputs as a fill-in template — from the method's folder on disk passed as method_dir, from submitted MTHDS files, from a published method's address passed as method_ref, " +
     "or from a registered method's catalog id (mt_…) passed as method_id. " +
-    "Supply exactly ONE of files / method_ref / method_id — never several. " +
+    "Supply exactly ONE of method_dir / files / method_ref / method_id — never several; for a method on disk, prefer method_dir. " +
     "A bare id projects from the method's latest published version, mt_…@draft from its draft and mt_…@<n> from version n; the result says which.",
   inputSchema: mthdsInputsInputSchema,
   outputSchema: mthdsInputsOutputSchema,
@@ -361,7 +366,7 @@ export const mthdsInputsTemplateTool = defineTool({
  */
 const CODEGEN_DESCRIPTION = [
   "Generate typed code for an MTHDS method: its concept set projected into typed models by the Pipelex codegen engine, stamped and locked so the written tree can be checked offline.",
-  "Supply exactly ONE of files / method_ref / method_id — never several; an address or an id is resolved server-side, so no bundle enters the conversation.",
+  "Name the method by exactly ONE of method_dir (its folder on disk, preferred for a method on disk) / files / method_ref / method_id — never several; an address or an id is resolved server-side, so no bundle enters the conversation.",
   `target is required and has no default — choose it from the project, and the user's explicit request wins: ${CODEGEN_TARGET_RULE}.`,
   "Pass output_dir (a DEDICATED generated directory, such as src/generated/<method>/) to write the tree to disk, so the bytes never enter the conversation.",
   "Without output_dir, write every returned artifact at its path and the lock as codegen.lock beside them, VERBATIM — any byte change breaks the stamp and the lock.",
@@ -395,7 +400,7 @@ export const mthdsPrepareInputsTool = defineTool({
   description:
     "Prepare a pipe's FILLED inputs for a run — upload file-bearing values (local paths, data: URLs, bytes) to Pipelex storage and rewrite them to pipelex-storage:// so they are run-ready. " +
     "http(s) URLs and existing pipelex-storage:// references pass through unchanged; an inputs set that is already all pass-through can skip this and go straight to mthds_run. " +
-    "Name the method as files, as a published method's address via method_ref, or as a registered method's catalog id via method_id — exactly ONE of the three, never several — plus the filled inputs from mthds_inputs_template. " +
+    "Name the method by its folder on disk via method_dir (preferred for a method on disk), as files, as a published method's address via method_ref, or as a registered method's catalog id via method_id — exactly ONE of them, never several — plus the filled inputs from mthds_inputs_template. " +
     "Pass the inputs inline as inputs, or, for a large or machine-produced set, as inputs_path, the path of a .json file in the workspace — exactly one of the two. " +
     "Uploads are made with your API key.",
   inputSchema: mthdsPrepareInputsInputSchema,
@@ -414,13 +419,13 @@ export const mthdsPrepareInputsTool = defineTool({
 export const mthdsRunTool = defineTool({
   name: "mthds_run",
   description:
-    "Start a durable run of a MTHDS method — from submitted file contents, from a published method's address passed as method_ref " +
+    "Start a durable run of a MTHDS method — from its folder on disk passed as method_dir (preferred for a method on disk: it sends the .mthds files and the templates its steps name), from submitted files, from a published method's address passed as method_ref " +
     "(resolved server-side at the tag, with the fetched commit returned as provenance), " +
     "or from a registered method's catalog id (mt_…) passed as method_id. " +
-    "method_ref is a complete run source and pairs with NOTHING (not files, not method_id); files + method_id together is legal — the files run and method_id is recorded as run-history linkage. " +
+    "method_ref is a complete run source and pairs with NOTHING; method_dir or files + method_id together is legal — the folder or files run and method_id is recorded as run-history linkage. " +
     "A bare id runs the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n, and the result says which ran: to run what you just saved, pass mt_…@draft. " +
     "Executes the method on the hosted Pipelex API and spends inference credit. " +
-    "When running from files, validate the bundle with mthds_validate and fill the inputs template from mthds_inputs_template first — " +
+    "When running from a folder or files, validate the bundle with mthds_validate and fill the inputs template from mthds_inputs_template first — " +
     "validation gives a structured, repairable verdict, where a start-time rejection only reports the failure. " +
     "For a large or machine-produced inputs set, pass inputs_path, the path of a .json file in the workspace, instead of inputs — never both. " +
     "Returns the durable run id immediately (never blocks); follow up with mthds_run_status and mthds_run_results.",

@@ -16,6 +16,7 @@ import type { CodegenWriteSuccess } from "./codegen-writer.js";
 import {
   METHOD_ID_SELECTOR_SENTENCE,
   methodVersionReportSchema,
+  methodVersionsOf,
   planById,
   selectorFailure,
   withMethodContent,
@@ -28,17 +29,23 @@ import {
   bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
+  filesSentSchema,
   hasTemplateFiles,
-  resolveSubmittedFiles,
+  methodDirInputSchema,
+  resolveMethodFiles,
   resourcesOption,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
+  withFilesSent,
+  failedBeforeSending,
+  markUnsent,
 } from "./shared.js";
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
@@ -132,18 +139,19 @@ const CODEGEN_TARGET_DETAIL = CODEGEN_TARGETS.map(
 const codegenTargetSchema = z.enum(CODEGEN_TARGETS);
 
 export const mthdsCodegenInputSchema = {
+  method_dir: methodDirInputSchema("one_selector"),
   files: bundleFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
     .describe(
-      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.`,
+      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of method_dir / files / method_ref / method_id.`,
     ),
   method_id: z
     .string()
     .optional()
     .describe(
-      `Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of files / method_ref / method_id.`,
+      `Catalog id (mt_…) of a registered method, resolved server-side — requires an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of method_dir / files / method_ref / method_id.`,
     ),
   target: codegenTargetSchema.describe(
     `Which typed projection to emit. Required, no default — choose it from the calling context, and the user's explicit request wins: ${CODEGEN_TARGET_DETAIL}. Field keys are snake_case in every target.`,
@@ -245,6 +253,7 @@ const codegenStructuredContentSchema = z.object({
       "Written arm only, present when non-empty — every check drift that is NOT an orphan, which would mean the write itself is broken.",
     ),
   method_version: methodVersionReportSchema,
+  files_sent: filesSentSchema,
   validation_errors: z.array(z.unknown()).optional(),
   errors: z.array(toolErrorSchema).optional(),
 });
@@ -252,6 +261,7 @@ const codegenStructuredContentSchema = z.object({
 export const mthdsCodegenOutputSchema = codegenStructuredContentSchema;
 
 export interface MthdsCodegenInput {
+  method_dir?: string;
   files?: SubmittedFileInput[];
   method_ref?: string;
   method_id?: string;
@@ -305,6 +315,8 @@ export interface CodegenStructuredContent {
   drifts?: unknown[];
   /** By-id calls only: the content the code was generated from, when this server can tell. */
   method_version?: MethodVersionReport;
+  /** Calls on a method folder only: every file read from it and sent. */
+  files_sent?: string[];
   validation_errors?: unknown[];
   errors?: ToolError[];
 }
@@ -335,6 +347,8 @@ export interface CodegenContext extends ApiConfig, MethodVersionsAware {
   saveRoot?: string;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 export function buildCodegenContext(env = process.env): CodegenContext {
@@ -409,16 +423,22 @@ const CODEGEN_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
   },
 };
 
+/** What a 403 from `/v1/codegen` may mean beyond the key, appended to the key's own hint. */
+const CODEGEN_GATE_SENTENCE =
+  "Code generation can refuse even a key every other tool accepts, since the hosted Pipelex API enables /v1/codegen per organization, by its plan or feature flags: if other tools work with the key, ask for code generation to be enabled for its organization.";
+
 /**
  * The 403 texture. The hosted authorizer gates `/v1/codegen` on a feature flag
  * as well as on the plan, so a caller whose credential is perfectly valid can
  * still be refused — and the generic "check your key" would send them to debug
  * the wrong thing. Composed per call so the deployment's own auth wording,
- * when its context carries one, stays in front.
+ * when its context carries one, stays in front. The gate's sentence follows
+ * whichever key hint leads, the one saying no key is set included, so it
+ * speaks of the route rather than of "this credential", which may not exist.
  */
 function forbiddenTexture(auth: AuthErrorTexture | undefined): { hint: string } {
   return {
-    hint: `${auth?.hint ?? DEFAULT_AUTH_HINT} If the credential is valid, code generation is not enabled for this organization on the hosted Pipelex API — its plan or feature flags do not cover /v1/codegen; ask for it to be enabled.`,
+    hint: `${auth?.hint ?? DEFAULT_AUTH_HINT} ${CODEGEN_GATE_SENTENCE}`,
   };
 }
 
@@ -488,7 +508,7 @@ export async function generateMthdsCode(
   input: MthdsCodegenInput,
   context: CodegenContext = buildCodegenContext(),
 ): Promise<CodegenResult> {
-  const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
+  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector");
   if (resolution.errors.length > 0) {
     return errorResult(INVALID_REQUEST_SUMMARY, resolution.errors);
   }
@@ -506,6 +526,17 @@ export async function generateMthdsCode(
     return errorResult(INVALID_REQUEST_SUMMARY, inputErrors);
   }
 
+  return withFilesSent(await requestCodegen(request, context), resolution.sent);
+}
+
+/**
+ * One `POST /v1/codegen` for a request that passed its checks, then the
+ * report's checks, the preflight, the write arm and the projection.
+ */
+async function requestCodegen(
+  request: ResolvedCodegenRequest,
+  context: CodegenContext,
+): Promise<CodegenResult> {
   // Classify options follow the request's selector shape — each failure
   // locates at the field that caused it.
   const classifyOptions =
@@ -517,15 +548,16 @@ export async function generateMthdsCode(
 
   let report: CodegenResponse;
   let plan: SelectorPlan | undefined;
+  let client: CodegenClient | undefined;
   try {
-    const client = codegenClient(context);
+    client = codegenClient(context);
     let sent = request;
     if (request.method_id !== undefined) {
       // A bare id reads the draft on a platform that does not resolve version
       // selectors yet, and the latest published version on one that does: the
       // platform is asked beside the request, which never waits on it, and the
       // result says which content the code came from (`method-versions.ts`).
-      plan = planById(request.method_id, context.methodVersions, client, {
+      plan = planById(request.method_id, methodVersionsOf(context), client, {
         needBareReport: true,
       });
       sent = { ...request, method_id: plan.send };
@@ -535,11 +567,15 @@ export async function generateMthdsCode(
     const classified = classifyError(err, {
       ...classifyOptions,
       auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
       forbidden: forbiddenTexture(context.authError),
       bundleResources: hasTemplateFiles(request.resources),
     });
-    const error = await selectorFailure(err, classified, plan, context.methodVersions);
-    return errorResult(summaryForError(error), [error]);
+    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
+    const failed = errorResult(summaryForError(error), [error]);
+    // A client that could not be built, or an argument refused before
+    // sending, sent no file of a folder.
+    return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
 
   // A produced-invalid verdict never touches disk: it carries
@@ -675,6 +711,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Code generation could not be completed: the Pipelex API returned an error.",
   paywall:
     "Code generation could not start: the organization's Pipelex plan does not cover this call.",
+  auth: "Code generation could not start: the Pipelex API key is missing or was refused, or code generation is not enabled for its organization.",
 };
 
 function summaryForError(error: ToolError): string {
@@ -685,7 +722,11 @@ function summaryForError(error: ToolError): string {
 export function codegenToolResult(result: CodegenResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(result.summary, result.structuredContent.errors),
+    content: toolResultContent(
+      result.summary,
+      result.structuredContent.errors,
+      result.structuredContent.files_sent,
+    ),
     isError: result.structuredContent.status === "error",
   };
 }

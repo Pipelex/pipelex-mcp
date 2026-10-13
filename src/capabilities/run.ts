@@ -26,6 +26,7 @@ import {
   RUN_METHOD_ID_SELECTOR_SENTENCE,
   forgetMethodVersionsSupported,
   linkageSuffixError,
+  methodVersionsOf,
   noteMethodVersionsSupported,
   planById,
   runContentReport,
@@ -40,21 +41,27 @@ import {
   bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
+  filesSentSchema,
   imageCandidatesOf,
   inputsPathSchema,
+  methodDirInputSchema,
   resolveInputsSource,
   hasTemplateFiles,
-  resolveSubmittedFiles,
+  resolveMethodFiles,
   resourcesOption,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
   validateRunIdRequest,
+  withFilesSent,
+  failedBeforeSending,
+  markUnsent,
 } from "./shared.js";
 import type {
   ApiConfig,
   AuthErrorTexture,
+  BaseUrlSourceTexture,
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
@@ -99,18 +106,19 @@ const RUN_STATUS_SET: Record<RunStatus, true> = {
 export const runStatusSchema = z.enum(Object.keys(RUN_STATUS_SET) as [RunStatus, ...RunStatus[]]);
 
 export const mthdsRunInputSchema = {
+  method_dir: methodDirInputSchema("run_source"),
   files: bundleFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
     .describe(
-      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side: the repository is fetched at the tag and the resolved commit SHA comes back as provenance. A complete run source of its own — it pairs with NOTHING (not files, not method_id).`,
+      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side: the repository is fetched at the tag and the resolved commit SHA comes back as provenance. A complete run source of its own — it pairs with NOTHING (not method_dir, not files, not method_id).`,
     ),
   method_id: z
     .string()
     .optional()
     .describe(
-      `Catalog id (mt_…) of a registered method, resolved server-side and requiring an API key (the catalog is org-scoped). ${RUN_METHOD_ID_SELECTOR_SENTENCE} With files also present, the files run and method_id, which must then be bare, only files the run under its method. Provide files, method_ref, or method_id (files + method_id together is also legal).`,
+      `Catalog id (mt_…) of a registered method, resolved server-side and requiring an API key (the catalog is org-scoped). ${RUN_METHOD_ID_SELECTOR_SENTENCE} With method_dir or files also present, the folder or the files run and method_id, which must then be bare, only files the run under its method. Provide method_dir, files, method_ref, or method_id (method_dir or files + method_id together is also legal).`,
     ),
   pipe_code: z
     .string()
@@ -181,6 +189,7 @@ export const mthdsRunOutputSchema = z.object({
     .optional()
     .describe("method_ref runs only — the address, tag, and resolved commit SHA that was fetched."),
   method_version: runMethodVersionSchema,
+  files_sent: filesSentSchema,
   available_view_specs: z
     .array(runViewSpecSchema)
     .describe(
@@ -378,6 +387,7 @@ export const mthdsRunResultsOutputSchema = z.object({
 });
 
 export interface MthdsRunInput {
+  method_dir?: string;
   files?: SubmittedFileInput[];
   method_ref?: string;
   method_id?: string;
@@ -413,6 +423,8 @@ export interface RunStartStructuredContent {
   method_provenance?: MethodProvenance;
   /** Runs by `method_id` alone: the version that runs, or `"draft"`. */
   method_version?: number | "draft";
+  /** Runs of a method folder only: every file read from it and sent. */
+  files_sent?: string[];
   available_view_specs: RunViewSpec[];
   errors?: ToolError[];
 }
@@ -525,6 +537,8 @@ export interface RunContext extends ApiConfig, MethodVersionsAware {
   inputsResolver?: FileResolver;
   /** Deployment-specific auth-failure texture; default env-var wording when absent. */
   authError?: AuthErrorTexture;
+  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
+  baseUrlSource?: BaseUrlSourceTexture;
 }
 
 export function buildRunContext(env = process.env): RunContext {
@@ -616,9 +630,12 @@ export const RUN_START_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
 
 /**
  * What an unknown run id means to the caller. The workshop's operator is its
- * user, so the deployment the key points at is theirs to check.
+ * user, so the deployment the key points at is theirs to check, and so is the
+ * key: runs are org-scoped, so a run another organization started, which is
+ * what a key changed since the start (a login in between) sees, reads exactly
+ * like a miss, as an unknown method id does.
  */
-const UNKNOWN_RUN_HINT = `No run with this id is known to the configured API. Check the run_id returned by ${WORKSHOP_TOOL_NAMES.run}, and that PIPELEX_BASE_URL points at the deployment that started it.`;
+const UNKNOWN_RUN_HINT = `No run with this id is known to the configured API. Check the run_id returned by ${WORKSHOP_TOOL_NAMES.run}, that PIPELEX_BASE_URL points at the deployment that started it, and that the API key in use belongs to the organization that started it: runs are org-scoped, so another organization's run reads exactly like a miss, as it does when the key changed since the run started, after a login for instance.`;
 
 const MALFORMED_RUN_ID_HINT = `Pass the run_id exactly as returned by ${WORKSHOP_TOOL_NAMES.run}.`;
 
@@ -1290,7 +1307,7 @@ export async function startMthdsRun(
   input: MthdsRunInput,
   context: RunContext = buildRunContext(),
 ): Promise<RunStartResult> {
-  const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
+  const resolution = await resolveMethodFiles(input, context.resolver, "run_source");
   const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
     required: false,
   });
@@ -1330,18 +1347,31 @@ export async function startMthdsRun(
   // what runs, and its selector is planned against the platform's answer
   // (`method-versions.ts`).
   if (request.method_id !== undefined && request.files.length > 0) {
-    const linkageError = linkageSuffixError(request.method_id);
+    const linkageError = linkageSuffixError(
+      request.method_id,
+      input.method_dir === undefined ? "files" : "method_dir",
+    );
     if (linkageError !== undefined) {
       return startErrorResult("Run was not started: request input is invalid.", [linkageError]);
     }
   }
 
+  return withFilesSent(await requestRunStart(request, classifyOptions, context), resolution.sent);
+}
+
+/** One `POST /v1/start` for a request that passed its checks, and its acknowledgement's projection. */
+async function requestRunStart(
+  request: ResolvedRunRequest,
+  classifyOptions: ClassifyErrorOptions,
+  context: RunContext,
+): Promise<RunStartResult> {
   let plan: SelectorPlan | undefined;
+  let client: RunClient | undefined;
   try {
-    const client = runClient(context);
+    client = runClient(context);
     let sent = request;
     if (request.method_id !== undefined && request.files.length === 0) {
-      plan = planById(request.method_id, context.methodVersions, client, {
+      plan = planById(request.method_id, methodVersionsOf(context), client, {
         needBareReport: false,
       });
       sent = { ...request, method_id: plan.send };
@@ -1353,17 +1383,21 @@ export async function startMthdsRun(
     // word that it resolves selectors, worth more than any cached answer; one
     // naming none for a bare id is its word that it does not, so a cached
     // `supported` is dropped before another tool reads a bare id as `latest`.
-    if (content.proved) noteMethodVersionsSupported(context.methodVersions);
-    else if (content.disproved) forgetMethodVersionsSupported(context.methodVersions);
+    if (content.proved) noteMethodVersionsSupported(methodVersionsOf(context));
+    else if (content.disproved) forgetMethodVersionsSupported(methodVersionsOf(context));
     return startResult(ack, content);
   } catch (err) {
     const classified = classifyStartError(err, {
       ...classifyOptions,
       auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
       bundleResources: hasTemplateFiles(request.resources),
     });
-    const error = await selectorFailure(err, classified, plan, context.methodVersions);
-    return startErrorResult(startSummaryForError(error), [error]);
+    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
+    const failed = startErrorResult(startSummaryForError(error), [error]);
+    // A client that could not be built, or an argument refused before
+    // sending, sent no file of a folder.
+    return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
 }
 
@@ -1387,6 +1421,11 @@ export async function startMthdsRun(
 export function classifyStartError(err: unknown, options: ClassifyErrorOptions): ToolError {
   const error = classifyError(err, options);
   if (!runMayHaveStartedOf(err)) return error;
+  // The hint is replaced whole, on purpose, dropping whatever `classifyError`
+  // wrote, the base URL's source sentence of an unreachable start included:
+  // `startMayHaveRunError` recognises this case by the hint's exact text, so
+  // nothing may be appended to it, and checking for a second run matters
+  // more here than where the base URL was set.
   return { ...error, retryable: false, hint: START_MAY_HAVE_RUN_HINT };
 }
 
@@ -1404,7 +1443,11 @@ export async function getMthdsRunStatus(
     const read = await runClient(context).getRunStatus(input.run_id);
     return statusResult(read);
   } catch (err) {
-    const error = classifyError(err, { ...RUN_STATUS_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, {
+      ...RUN_STATUS_ERROR_OPTIONS,
+      auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
+    });
     return statusErrorResult(statusSummaryForError(error), [error]);
   }
 }
@@ -1434,7 +1477,11 @@ export async function getMthdsRunResults(
       artifacts: RUN_RESULTS_ARTIFACTS,
     });
   } catch (err) {
-    const error = classifyError(err, { ...RUN_RESULTS_ERROR_OPTIONS, auth: context.authError });
+    const error = classifyError(err, {
+      ...RUN_RESULTS_ERROR_OPTIONS,
+      auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
+    });
     return resultsErrorResult(resultsSummaryForError(error), [error]);
   }
   const failedRead =
@@ -1499,6 +1546,7 @@ const START_ERROR_SUMMARIES: ErrorSummaries = {
   input_domain: "Run was not started: the Pipelex API rejected the request.",
   runtime: "Run could not be started: the Pipelex API returned an error.",
   paywall: "Run could not start: the organization's Pipelex plan does not cover this call.",
+  auth: "Run could not start: the Pipelex API key is missing or was refused.",
 };
 
 const STATUS_ERROR_SUMMARIES: ErrorSummaries = {
@@ -1507,6 +1555,7 @@ const STATUS_ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Run status could not be read: the Pipelex API returned an error.",
   paywall:
     "Run status could not be read: the organization's Pipelex plan does not cover this call.",
+  auth: "Run status could not be read: the Pipelex API key is missing or was refused.",
 };
 
 const RESULTS_ERROR_SUMMARIES: ErrorSummaries = {
@@ -1515,6 +1564,7 @@ const RESULTS_ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Run results could not be read: the Pipelex API returned an error.",
   paywall:
     "Run results could not be read: the organization's Pipelex plan does not cover this call.",
+  auth: "Run results could not be read: the Pipelex API key is missing or was refused.",
 };
 
 function startSummaryForError(error: ToolError): string {
@@ -1559,7 +1609,11 @@ function resultsErrorResult(summary: string, errors: ToolError[]): RunResultsRes
 export function runToolResult(result: RunStartResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(result.summary, result.structuredContent.errors),
+    content: toolResultContent(
+      result.summary,
+      result.structuredContent.errors,
+      result.structuredContent.files_sent,
+    ),
     isError: result.structuredContent.status === "error",
   };
 }

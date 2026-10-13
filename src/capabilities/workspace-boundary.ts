@@ -128,7 +128,17 @@ export async function createContainedSubdirectory(
 }
 
 export type SaveDirResolution =
-  | { ok: true; root: string; dir: string }
+  | {
+      ok: true;
+      root: string;
+      dir: string;
+      /**
+       * The real path of the topmost directory this call created, `dir` itself
+       * or one of its ancestors inside `root`; absent when `dir` already
+       * existed. What a writer does with it is the writer's own policy.
+       */
+      created?: string;
+    }
   | { ok: false; error: ToolError };
 
 /**
@@ -150,6 +160,8 @@ export type SaveDirResolution =
  * created at write time by {@link createContainedSubdirectory}. Containment
  * without creation is {@link containedPath}, which is what lets a caller
  * contain every destination before deciding whether to write any of them.
+ * The topmost directory it had to create comes back as `created`, contained
+ * like the rest, so a writer can tell a directory it made from one it found.
  */
 export async function resolveSaveDir(
   saveRoot: string,
@@ -193,8 +205,12 @@ export async function resolveSaveDir(
   }
 
   let real: string;
+  let created: string | undefined;
   try {
-    await fs.mkdir(target, { recursive: true });
+    // `mkdir -p` answers the first directory it created, none when the
+    // target already existed.
+    const first = await fs.mkdir(target, { recursive: true });
+    created = first === undefined ? undefined : await fs.realpath(first);
     real = await fs.realpath(target);
     if (!(await fs.stat(real)).isDirectory()) {
       return {
@@ -212,11 +228,16 @@ export async function resolveSaveDir(
     return { ok: false, error: unusableDirError(dir, err, location) };
   }
 
-  if (!isInsideRoot(root, real)) {
+  if (
+    !isInsideRoot(root, real) ||
+    (created !== undefined && (created === root || !isInsideRoot(root, created)))
+  ) {
     return { ok: false, error: escapeError(dir, root, location) };
   }
 
-  return { ok: true, root, dir: real };
+  return created === undefined
+    ? { ok: true, root, dir: real }
+    : { ok: true, root, dir: real, created };
 }
 
 /**
