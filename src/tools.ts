@@ -400,7 +400,7 @@ export const mthdsPrepareInputsTool = defineTool({
   description:
     "Prepare a pipe's FILLED inputs for a run — upload file-bearing values (local paths, data: URLs, bytes) to Pipelex storage and rewrite them to pipelex-storage:// so they are run-ready. " +
     "http(s) URLs and existing pipelex-storage:// references pass through unchanged; an inputs set that is already all pass-through can skip this and go straight to mthds_run. " +
-    "Name the method by its folder on disk via method_dir (preferred for a method on disk), as files, as a published method's address via method_ref, or as a registered method's catalog id via method_id — exactly ONE of the four, never several — plus the filled inputs from mthds_inputs_template. " +
+    "Name the method by its folder on disk via method_dir (preferred for a method on disk), as files, as a published method's address via method_ref, or as a registered method's catalog id via method_id — exactly ONE of them, never several — plus the filled inputs from mthds_inputs_template. " +
     "Pass the inputs inline as inputs, or, for a large or machine-produced set, as inputs_path, the path of a .json file in the workspace — exactly one of the two. " +
     "Uploads are made with your API key.",
   inputSchema: mthdsPrepareInputsInputSchema,

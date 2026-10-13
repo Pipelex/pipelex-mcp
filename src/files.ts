@@ -241,7 +241,13 @@ async function resolveMethodFolder(
       `Check its permissions, or keep it out of the method with a .gitignore inside the folder; ${FOLDER_FALLBACK}`,
     );
   }
-  const { files, symlinks, truncated } = tree.listing;
+  const { files, symlinks, nestedRepositories, truncated, rootIsVirtualEnvironment } = tree.listing;
+  if (rootIsVirtualEnvironment) {
+    return refuse(
+      `${methodDir} holds a pyvenv.cfg file, which makes it a Python virtual environment, and nothing in one is part of a method's folder.`,
+      `Pass the folder holding the method's .mthds files, outside the virtual environment, ${FOLDER_FALLBACK}`,
+    );
+  }
   const mthds = files.filter((file) => isMthdsPath(file.path)).sort(topLevelFirst);
 
   if (!mthds.some((file) => !file.path.includes("/")) && !truncated) {
@@ -260,7 +266,7 @@ async function resolveMethodFolder(
   if (symlinks.length > 0) {
     return refuse(
       `The method's folder holds ${symlinks.length === 1 ? "a symbolic link" : `${symlinks.length} symbolic links`}: ${listed(symlinks.map(shown))}.`,
-      "A link in a method's folder is refused, never followed: replace it with the file it points at, or keep it out with a .gitignore inside the folder or a name starting with a dot.",
+      "A link in a method's folder is refused, never followed: replace it with the file it points at, or keep it out with a name starting with a dot or a .gitignore line inside the folder, written without a trailing slash (node_modules, not node_modules/), since git matches a link as a file.",
     );
   }
   if (mthds.length > MAX_FOLDER_MTHDS_FILES) {
@@ -295,11 +301,18 @@ async function resolveMethodFolder(
     bundle.push({ treePath: file.path, path: shown(file.path), content });
   }
 
-  // The template files the steps name, among the tree's members.
+  // The template files the steps name, among the tree's members. The lookup
+  // is case-sensitive, as on the runner's filesystem, whatever this one does.
   const members = new Map<string, MethodTreeFile>(files.map((file) => [file.path, file]));
+  const membersByFoldedPath = new Map<string, string>();
+  for (const file of files) {
+    const folded = file.path.toLowerCase();
+    if (!membersByFoldedPath.has(folded)) membersByFoldedPath.set(folded, file.path);
+  }
   const named: NamedTemplate[] = [];
   const located = new Map<string, LocatedTemplate>();
   const treePathByReal = new Map<string, string>();
+  const lookupRefusals = new Map<string, { message: string; hint: string }>();
   for (const file of bundle) {
     const dir = path.posix.dirname(file.treePath);
     for (const templateFile of templateFilesNamedBy(file.content)) {
@@ -307,6 +320,17 @@ async function resolveMethodFolder(
       if (key === undefined) continue;
       const treePath = dir === "." ? key : `${dir}/${key}`;
       const member = isTemplateFilePath(key) ? members.get(treePath) : undefined;
+      if (member === undefined && isTemplateFilePath(key)) {
+        const refusal = missedTemplateRefusal(
+          shown,
+          file.treePath,
+          templateFile,
+          treePath,
+          nestedRepositories,
+          membersByFoldedPath,
+        );
+        if (refusal !== undefined) lookupRefusals.set(`${file.treePath}\0${treePath}`, refusal);
+      }
       const real = member === undefined ? null : path.join(folder, ...treePath.split("/"));
       named.push({ key, mthdsPath: file.path, real, escapes: false });
       if (member !== undefined && real !== null && !located.has(treePath)) {
@@ -320,6 +344,7 @@ async function resolveMethodFolder(
       }
     }
   }
+  if (lookupRefusals.size > 0) return { ok: false, refusals: [...lookupRefusals.values()] };
   const templates = [...located.entries()]
     .sort(([a], [b]) => byteOrder(a, b))
     .map(([, template]) => template);
@@ -358,6 +383,41 @@ async function resolveMethodFolder(
     resources,
     sent: [...bundle.map((file) => file.path), ...sentTemplates],
   };
+}
+
+/**
+ * Why a template a step names, that is no member of the folder, is refused
+ * rather than left for the runner to report as not supplied; `undefined` when
+ * it is simply missing. Two cases are the author's mistake and say so: the
+ * path leads into a nested repository, which is out of the folder with
+ * everything under it, or the folder holds the file spelled in another case,
+ * which a case-insensitive filesystem would open here and a case-sensitive
+ * runner would not.
+ */
+function missedTemplateRefusal(
+  shown: (treePath: string) => string,
+  mthdsTreePath: string,
+  templateFile: string,
+  treePath: string,
+  nestedRepositories: readonly string[],
+  membersByFoldedPath: ReadonlyMap<string, string>,
+): { message: string; hint: string } | undefined {
+  const step = `A PipeDocGen step of ${shown(mthdsTreePath)} names the template_file "${templateFile}"`;
+  const repository = nestedRepositories.find((repo) => treePath.startsWith(`${repo}/`));
+  if (repository !== undefined) {
+    return {
+      message: `${step}, which leads into ${shown(repository)}, a nested git repository: a directory holding a .git entry is not part of the method's folder.`,
+      hint: "Move the template file out of the nested repository into the method's folder, or pass method_dir for a folder that is not a repository's parent.",
+    };
+  }
+  const spelled = membersByFoldedPath.get(treePath.toLowerCase());
+  if (spelled !== undefined && spelled !== treePath) {
+    return {
+      message: `${step}, which leads to ${shown(treePath)}, and the folder holds ${shown(spelled)}, spelled in another case.`,
+      hint: "Template files are matched case-sensitively, as the runner reads them: make the step's template_file and the file's name agree letter for letter.",
+    };
+  }
+  return undefined;
 }
 
 /**

@@ -2,7 +2,11 @@ import path from "node:path";
 
 import { parse as parseToml } from "smol-toml";
 
-import { GATEWAY_REQUEST_LIMIT_BYTES, base64EncodedLength, formatMib } from "./upload-ceiling.js";
+import {
+  GATEWAY_REQUEST_LIMIT_BYTES,
+  base64EncodedLength,
+  formatSizeOverLimit,
+} from "./upload-ceiling.js";
 
 /**
  * A bundle's template files: what a `PipeDocGen` step fills, sent beside the
@@ -314,9 +318,10 @@ export function templateBudgetRefusals(
   let encodedBytes = requestBytes + REQUEST_ENVELOPE_ALLOWANCE_BYTES;
   for (const entry of entries) {
     if (entry.size > MAX_TEMPLATE_FILE_BYTES) {
+      const shown = formatSizeOverLimit(entry.size, MAX_TEMPLATE_FILE_BYTES);
       refusals.push({
         index: entry.index,
-        message: `${entry.path} is ${formatMib(entry.size)}, over the ${formatMib(MAX_TEMPLATE_FILE_BYTES)} one template file may be.`,
+        message: `${entry.path} is ${shown.size}, over the ${shown.limit} one template file may be.`,
         hint: "Make the template file smaller.",
       });
       continue;
@@ -325,17 +330,19 @@ export function templateBudgetRefusals(
     // The key and the JSON quoting around the key and the value travel too.
     encodedBytes += base64EncodedLength(entry.size) + entry.key.length + 8;
     if (rawBytes > MAX_TEMPLATE_FILES_TOTAL_BYTES) {
+      const shown = formatSizeOverLimit(rawBytes, MAX_TEMPLATE_FILES_TOTAL_BYTES);
       refusals.push({
         index: entry.index,
-        message: `The template files come to ${formatMib(rawBytes)} once ${entry.path} is added, over the ${formatMib(MAX_TEMPLATE_FILES_TOTAL_BYTES)} one request takes.`,
+        message: `The template files come to ${shown.size} once ${entry.path} is added, over the ${shown.limit} one request takes.`,
         hint: "Send only the template files the steps name, or make them smaller.",
       });
       break;
     }
     if (encodedBytes > GATEWAY_REQUEST_LIMIT_BYTES) {
+      const shown = formatSizeOverLimit(encodedBytes, GATEWAY_REQUEST_LIMIT_BYTES);
       refusals.push({
         index: entry.index,
-        message: `Once ${entry.path} is added, the request comes to ${formatMib(encodedBytes)} with its template files base64-encoded, over the ${formatMib(GATEWAY_REQUEST_LIMIT_BYTES)} the hosted API's gateway takes.`,
+        message: `Once ${entry.path} is added, the request comes to ${shown.size} with its template files base64-encoded, over the ${shown.limit} the hosted API's gateway takes.`,
         hint: "Template files travel base64-encoded, a third larger than on disk, so a request holds about 7.4 MiB of them beside a small bundle. Send only the template files the steps name, or make them smaller.",
       });
       break;

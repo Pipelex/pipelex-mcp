@@ -693,6 +693,54 @@ describe("localBundleFileResolver", () => {
       ]);
     });
 
+    it("refuses a template the folder holds only in another case, naming both spellings", async () => {
+      await placeBundle("methods/invoice/invoice.mthds", ["Templates/Invoice.docx"]);
+      await placeTemplate("methods/invoice/templates/invoice.docx");
+
+      const refusal = await refusalOf("methods/invoice");
+
+      expect(refusal.message).toBe(
+        `A PipeDocGen step of ${path.join("methods", "invoice", "invoice.mthds")} names the template_file "Templates/Invoice.docx", which leads to ${path.join("methods", "invoice", "Templates", "Invoice.docx")}, and the folder holds ${path.join("methods", "invoice", "templates", "invoice.docx")}, spelled in another case.`,
+      );
+      expect(refusal.hint).toContain("case-sensitively");
+    });
+
+    it("refuses a template reference into a nested repository, naming it", async () => {
+      await placeBundle("methods/invoice/invoice.mthds", ["vendor/kit/report.html"]);
+      await placeTemplate("methods/invoice/vendor/kit/.git", new TextEncoder().encode("gitdir: x"));
+      await placeTemplate("methods/invoice/vendor/kit/report.html");
+
+      const refusal = await refusalOf("methods/invoice");
+
+      expect(refusal.message).toContain(
+        `which leads into ${path.join("methods", "invoice", "vendor", "kit")}, a nested git repository`,
+      );
+      expect(refusal.hint).toContain("nested repository");
+    });
+
+    it("refuses a folder that is itself a virtual environment, saying why", async () => {
+      await placeBundle("methods/invoice/invoice.mthds", []);
+      await placeTemplate("methods/invoice/pyvenv.cfg", new TextEncoder().encode("home = x"));
+
+      const refusal = await refusalOf("methods/invoice");
+
+      expect(refusal.message).toContain("holds a pyvenv.cfg file");
+      expect(refusal.message).toContain("Python virtual environment");
+    });
+
+    it("leaves out a virtual environment and a nested repository, sending neither's files", async () => {
+      await placeTemplate("methods/invoice/templates/invoice.xlsx");
+      await placeTemplate("methods/invoice/venv/pyvenv.cfg", new TextEncoder().encode("home = x"));
+      await placeBundle("methods/invoice/venv/lib/stray.mthds", []);
+      await placeTemplate("methods/invoice/vendor/repo/.git/HEAD", new TextEncoder().encode("ref"));
+      await placeBundle("methods/invoice/vendor/repo/other.mthds", []);
+
+      expect(await sent("methods/invoice")).toEqual([
+        path.join("methods", "invoice", "invoice.mthds"),
+        path.join("methods", "invoice", "templates", "invoice.xlsx"),
+      ]);
+    });
+
     it("never reads a file a step names without a template suffix", async () => {
       await placeBundle("methods/invoice/invoice.mthds", ["notes.txt", "secrets.env"]);
       await placeTemplate("methods/invoice/notes.txt");

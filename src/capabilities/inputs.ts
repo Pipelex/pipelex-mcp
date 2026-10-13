@@ -34,6 +34,8 @@ import {
   toolResultContent,
   validateMethodSelectorRequest,
   withFilesSent,
+  failedBeforeSending,
+  markUnsent,
 } from "./shared.js";
 import type {
   ApiConfig,
@@ -54,8 +56,8 @@ import type { TemplateFiles } from "./template-files.js";
  *
  * It reads one `POST /v1/pipe-io` for the one pipe, with no dry run, and
  * projects the template client-side from the pipe's `input_form` descriptor
- * through `inputs-template.ts`'s `inputsTemplateFor`. All three selectors are
- * server pass-throughs: the runner resolves an address, and the hosted platform
+ * through `inputs-template.ts`'s `inputsTemplateFor`. Every selector is a
+ * server pass-through: the runner resolves an address, and the hosted platform
  * resolves a catalog id. The route picks the pipe too, so the template is for
  * the pipe `mthds_prepare_inputs` would prepare and a run naming none would
  * execute.
@@ -314,8 +316,9 @@ async function requestInputsTemplate(
 ): Promise<InputsResult> {
   let report: PipeIOResponse;
   let plan: SelectorPlan | undefined;
+  let client: InputsClient | undefined;
   try {
-    const client = inputsClient(context);
+    client = inputsClient(context);
     let sent = request;
     if (request.method_id !== undefined) {
       // A bare id reads the draft on a platform that does not resolve version
@@ -336,7 +339,10 @@ async function requestInputsTemplate(
       bundleResources: hasTemplateFiles(request.resources),
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
-    return errorResult(summaryForError(error), [error]);
+    const failed = errorResult(summaryForError(error), [error]);
+    // A client that could not be built, or an argument refused before
+    // sending, sent no file of a folder.
+    return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
 
   // The API responded; projecting it must not be reported as an unreachable

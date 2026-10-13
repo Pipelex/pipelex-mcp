@@ -14,6 +14,7 @@ import {
   PipelexRequestError,
   PipelineRequestError,
   RejectedAssetError,
+  RequestArgumentError,
   RunLifecycleUnavailableError,
   ScopeUnavailableError,
   UnsupportedUploadCapabilityError,
@@ -368,12 +369,39 @@ function methodDirPairingErrors(
 }
 
 /**
+ * The no-verdict results whose request never left the machine, held by
+ * identity so the mark rides no field a host could see.
+ */
+const unsentResults = new WeakSet<object>();
+
+/**
+ * Mark a no-verdict result as one whose request was never sent, so
+ * {@link withFilesSent} lists no file on it. A request fn marks its failure
+ * when the client could not be built or {@link failedBeforeSending} says so.
+ */
+export function markUnsent<R extends object>(result: R): R {
+  unsentResults.add(result);
+  return result;
+}
+
+/**
+ * Whether a call failed before its request left the machine. The SDK raises
+ * `RequestArgumentError` for an argument it refuses before sending anything,
+ * the base URL its client is built with among them; every other failure of a
+ * call may have come after the request was sent, so it counts as sent.
+ */
+export function failedBeforeSending(err: unknown): boolean {
+  return err instanceof RequestArgumentError;
+}
+
+/**
  * Put a folder's listing on a result produced once its request was sent, a
- * no-verdict error included, since its files left the machine either way.
+ * no-verdict error included, since its files left the machine either way. A
+ * result {@link markUnsent} marked, whose request never left, gets no listing.
  * Each error located at `files` or at one of its items is relocated to
- * `method_dir`: the route's textures name `files`, which this caller never
- * passed. A request whose method did not come from a folder (`sent`
- * undefined) is returned as it was.
+ * `method_dir` either way: the route's textures name `files`, which this
+ * caller never passed. A request whose method did not come from a folder
+ * (`sent` undefined) is returned as it was.
  */
 export function withFilesSent<
   R extends { structuredContent: { errors?: ToolError[]; files_sent?: string[] } },
@@ -384,7 +412,7 @@ export function withFilesSent<
     ...result,
     structuredContent: {
       ...result.structuredContent,
-      files_sent: sent,
+      ...(unsentResults.has(result) ? {} : { files_sent: sent }),
       ...(errors === undefined ? {} : { errors: errors.map(atMethodDir) }),
     },
   };
@@ -1017,7 +1045,7 @@ export type SelectorRule = "one_selector" | "run_source";
  * before anything reaches the wire (mirroring the API's own 422s). Selector
  * format beyond non-blank stays server-owned (the `run_id` stance).
  *
- * Every method-taking tool exposes all three selectors, so the teaching text is
+ * Every method-taking tool exposes every selector, so the teaching text is
  * unconditional. It was not always: `mthds_prepare_inputs` withheld
  * `method_ref` while the SDK's `prepareInputs` took inline files only, and this
  * function took an `acceptsMethodRef` flag to keep the "no selector" message

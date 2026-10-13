@@ -8,6 +8,7 @@ import {
   ApiResponseError,
   ApiUnreachableError,
   MissingMainStuffError,
+  RequestArgumentError,
   runMayHaveStartedOf,
 } from "@pipelex/sdk";
 import type {
@@ -2863,6 +2864,30 @@ describe("startMthdsRun from a method folder", () => {
     expect(result.structuredContent.errors?.[0]?.message).toContain("the folder is what runs");
     expect(result.structuredContent.errors?.[0]?.hint).toContain("drop method_dir");
     expect(result.structuredContent).not.toHaveProperty("files_sent");
+  });
+
+  it("lists no file of a folder when the start never left the machine", async () => {
+    const root = await methodFolder();
+
+    const unbuilt = await startMthdsRun(
+      { method_dir: "invoice" },
+      { baseUrl: "invalid-no-scheme", resolver: localBundleFileResolver(root) },
+    );
+    expect(unbuilt.structuredContent.status).toBe("error");
+    expect(unbuilt.structuredContent).not.toHaveProperty("files_sent");
+    expect(runToolResult(unbuilt).content[0].text).not.toContain("Files sent");
+
+    const refused = await startMthdsRun(
+      { method_dir: "invoice" },
+      {
+        ...contextWith({
+          start: () => Promise.reject(new RequestArgumentError("refused before sending")),
+        }),
+        resolver: localBundleFileResolver(root),
+      },
+    );
+    expect(refused.structuredContent.status).toBe("error");
+    expect(refused.structuredContent).not.toHaveProperty("files_sent");
   });
 
   it("refuses a folder beside method_ref before reading it", async () => {

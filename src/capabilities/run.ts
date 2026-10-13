@@ -55,6 +55,8 @@ import {
   validateMethodSelectorRequest,
   validateRunIdRequest,
   withFilesSent,
+  failedBeforeSending,
+  markUnsent,
 } from "./shared.js";
 import type {
   ApiConfig,
@@ -1364,8 +1366,9 @@ async function requestRunStart(
   context: RunContext,
 ): Promise<RunStartResult> {
   let plan: SelectorPlan | undefined;
+  let client: RunClient | undefined;
   try {
-    const client = runClient(context);
+    client = runClient(context);
     let sent = request;
     if (request.method_id !== undefined && request.files.length === 0) {
       plan = planById(request.method_id, methodVersionsOf(context), client, {
@@ -1391,7 +1394,10 @@ async function requestRunStart(
       bundleResources: hasTemplateFiles(request.resources),
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
-    return startErrorResult(startSummaryForError(error), [error]);
+    const failed = startErrorResult(startSummaryForError(error), [error]);
+    // A client that could not be built, or an argument refused before
+    // sending, sent no file of a folder.
+    return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
 }
 

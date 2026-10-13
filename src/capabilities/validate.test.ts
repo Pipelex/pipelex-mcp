@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
+import { ApiResponseError, ApiUnreachableError, RequestArgumentError } from "@pipelex/sdk";
 import type {
   InputForm,
   MthdsFile,
@@ -1508,6 +1508,52 @@ describe("validateMthds with a bundle's template files", () => {
       },
     );
     expect(again.structuredContent.files_sent).toEqual(sent);
+  });
+
+  it("lists no file of a folder when the request never left the machine", async () => {
+    const root = await bundleWithTemplate();
+
+    // The client refuses the base URL as it is built.
+    const unbuilt = await validateMthds(
+      { method_dir: "methods/invoice", graph_page: false },
+      { baseUrl: "invalid-no-scheme", resolver: localBundleFileResolver(root) },
+    );
+    expect(unbuilt.structuredContent.status).toBe("error");
+    expect(unbuilt.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(unbuilt.structuredContent).not.toHaveProperty("files_sent");
+    expect(toolResult(unbuilt).content[0].text).not.toContain("Files sent");
+
+    // The SDK refuses an argument before sending.
+    const refused = await validateMthds(
+      { method_dir: "methods/invoice", graph_page: false },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: localBundleFileResolver(root),
+        client: {
+          ...selectorValidateNotCalled,
+          validateFiles: () => Promise.reject(new RequestArgumentError("refused before sending")),
+        },
+      },
+    );
+    expect(refused.structuredContent.status).toBe("error");
+    expect(refused.structuredContent).not.toHaveProperty("files_sent");
+
+    // A request that left the machine lists them, whatever the failure.
+    const unreachable = await validateMthds(
+      { method_dir: "methods/invoice", graph_page: false },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: localBundleFileResolver(root),
+        client: {
+          ...selectorValidateNotCalled,
+          validateFiles: () =>
+            Promise.reject(
+              new ApiUnreachableError("connection reset", DEFAULT_API_URL, "ECONNRESET"),
+            ),
+        },
+      },
+    );
+    expect(unreachable.structuredContent.files_sent).toHaveLength(2);
   });
 
   it("refuses a folder holding no .mthds file at its top before calling the API, at method_dir", async () => {

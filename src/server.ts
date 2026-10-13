@@ -44,7 +44,7 @@ export const LOCAL_SERVER_INSTRUCTIONS = [
   "systems, running on a schedule and writing back are up to whatever calls it.",
   "When the Pipelex connector's `pipelex_*` tools are also present, use these `mthds_*` tools for all",
   "method work and never mix the two, which can be signed in to different organizations.",
-  "`mthds_codegen` turns a method into typed code, `mthds_models` checks model references,",
+  "`mthds_codegen` turns a method into typed code, `mthds_models` lists and checks model references,",
   "`mthds_save_method` saves a bundle as a draft, `mthds_get_method` pulls one back,",
   "and `mthds_publish_method` publishes it, only when the user asks.",
   "Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`,",

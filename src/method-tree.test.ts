@@ -194,6 +194,51 @@ describe("listMethodTree", () => {
     expect(await members()).toEqual(["main.mthds", "rules.txt"]);
   });
 
+  it("leaves out a directory holding pyvenv.cfg, whatever its name and with no .gitignore", async () => {
+    await place("main.mthds");
+    await place("venv/pyvenv.cfg", "home = /usr/bin");
+    await place("venv/lib/site-packages/pkg/data.mthds");
+    await place("tools/env-3.12/pyvenv.cfg");
+    await place("tools/env-3.12/bin/activate");
+    await place("tools/keep.mthds");
+    // A directory named pyvenv.cfg marks nothing.
+    await place("odd/pyvenv.cfg/inner.mthds");
+
+    expect(await members()).toEqual([
+      "main.mthds",
+      "odd/pyvenv.cfg/inner.mthds",
+      "tools/keep.mthds",
+    ]);
+    expect((await listing()).rootIsVirtualEnvironment).toBe(false);
+  });
+
+  it("lists nothing of a root that is itself a virtual environment, and says so", async () => {
+    await place("pyvenv.cfg", "home = /usr/bin");
+    await place("main.mthds");
+    await place("lib/site-packages/pkg/data.mthds");
+
+    const result = await listing();
+
+    expect(result.files).toEqual([]);
+    expect(result.rootIsVirtualEnvironment).toBe(true);
+  });
+
+  it("leaves out a nested repository below the root, directory or submodule file, and names it", async () => {
+    await place("main.mthds");
+    await place(".git/HEAD", "ref: refs/heads/main");
+    await place("vendor/lib/.git/HEAD", "ref: refs/heads/main");
+    await place("vendor/lib/shared.mthds");
+    await place("modules/sub/.git", "gitdir: ../../.git/modules/sub");
+    await place("modules/sub/templates/report.html");
+    await place("modules/own.mthds");
+
+    const result = await listing();
+
+    // The root's own .git makes the root no nested repository.
+    expect(result.files.map((file) => file.path)).toEqual(["main.mthds", "modules/own.mthds"]);
+    expect(result.nestedRepositories).toEqual(["modules/sub", "vendor/lib"]);
+  });
+
   it("stops at the entry bound and says the listing is truncated", async () => {
     await place("a.mthds");
     await place("b.mthds");

@@ -41,6 +41,8 @@ import {
   toolResultContent,
   validateMethodSelectorRequest,
   withFilesSent,
+  failedBeforeSending,
+  markUnsent,
 } from "./shared.js";
 import type {
   ApiConfig,
@@ -565,6 +567,7 @@ async function validateRequest(
 
   let report: PipelexValidationResult;
   let plan: SelectorPlan | undefined;
+  let client: ValidationClient | undefined;
   try {
     // `views` is the structured-view opt-in (the `render` sibling): the
     // descriptor spec keeps `input_form` off the report unless a caller asks.
@@ -575,7 +578,7 @@ async function validateRequest(
     // id — nothing is expanded client-side, and `mthds_sources` stays
     // undefined (labels come from the package's, or the stored method's, real
     // file names).
-    const client = validationClient(context);
+    client = validationClient(context);
     if (request.files.length > 0) {
       report = await client.validateFiles(toMthdsFiles(request.files), {
         allowSignatures: true,
@@ -617,7 +620,10 @@ async function validateRequest(
       bundleResources: hasTemplateFiles(request.resources),
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
-    return errorResult(summaryForError(error), [error]);
+    const failed = errorResult(summaryForError(error), [error]);
+    // A client that could not be built, or an argument refused before
+    // sending, sent no file of a folder.
+    return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
 
   // The API responded; projecting it must not be reported as an unreachable

@@ -18,7 +18,7 @@ import type {
   RunResults,
   RunResultState,
 } from "@pipelex/sdk";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   GENERATED_DIRECTORY_GITIGNORE,
@@ -787,7 +787,7 @@ describe("downloadMthdsArtifacts", () => {
         () => false,
       );
 
-    it("writes a .gitignore of * into the topmost directory it creates, and lists it nowhere", async () => {
+    it("writes a .gitignore of * into runs/ when it creates it, says so once, and lists it nowhere", async () => {
       const root = await makeTempDir();
       const { client } = fakeClient(completedState({ answer: 42 }));
 
@@ -798,7 +798,8 @@ describe("downloadMthdsArtifacts", () => {
       // runs/ covers everything below it, so the run's own folder needs none.
       expect(await hasMark(root, RUN_DIR)).toBe(false);
       expect(result.structuredContent.saved_paths).toEqual([OUTPUT_PATH]);
-      expect(result.summary).not.toContain(".gitignore");
+      expect(result.summary).toContain("Created `runs` and gave it a `.gitignore` of `*`");
+      expect(result.summary.split(".gitignore").length - 1).toBe(1);
     });
 
     it("marks the run's folder alone when runs/ already exists, leaving runs/ as it was", async () => {
@@ -812,19 +813,24 @@ describe("downloadMthdsArtifacts", () => {
       expect(await readMark(root, RUN_DIR)).toBe("*\n");
     });
 
-    it("marks the first missing directory of a dir it names", async () => {
+    it("marks only the directory the run lands in for a dir it names, never the ancestors it creates", async () => {
       const root = await makeTempDir();
       await fs.mkdir(path.join(root, "work"));
       const { client } = fakeClient(completedState({ answer: 42 }));
 
-      await downloadMthdsArtifacts(
+      const result = await downloadMthdsArtifacts(
         { run_id: RUN_ID, dir: "work/assets/run-1" },
         contextIn(root, client),
       );
 
       expect(await hasMark(root, "work")).toBe(false);
-      expect(await readMark(root, "work", "assets")).toBe("*\n");
-      expect(await hasMark(root, "work", "assets", "run-1")).toBe(false);
+      // A directory the caller names is theirs to keep: an ancestor this call
+      // created stays unmarked, so a file put there later is not hidden.
+      expect(await hasMark(root, "work", "assets")).toBe(false);
+      expect(await readMark(root, "work", "assets", "run-1")).toBe("*\n");
+      expect(result.summary).toContain(
+        `Created \`${path.join("work", "assets", "run-1")}\` and gave it a \`.gitignore\` of \`*\``,
+      );
     });
 
     it("never marks a directory it found, nor touches the .gitignore one holds", async () => {
@@ -834,13 +840,63 @@ describe("downloadMthdsArtifacts", () => {
       await fs.mkdir(path.join(root, "plain"));
       const { client } = fakeClient(completedState({ answer: 42 }));
 
-      await downloadMthdsArtifacts({ run_id: RUN_ID, dir: "out" }, contextIn(root, client));
-      await downloadMthdsArtifacts({ run_id: RUN_ID, dir: "plain" }, contextIn(root, client));
-      await downloadMthdsArtifacts({ run_id: RUN_ID, dir: "." }, contextIn(root, client));
+      const results = [
+        await downloadMthdsArtifacts({ run_id: RUN_ID, dir: "out" }, contextIn(root, client)),
+        await downloadMthdsArtifacts({ run_id: RUN_ID, dir: "plain" }, contextIn(root, client)),
+        await downloadMthdsArtifacts({ run_id: RUN_ID, dir: "." }, contextIn(root, client)),
+      ];
 
       expect(await readMark(root, "out")).toBe("custom\n");
       expect(await hasMark(root, "plain")).toBe(false);
       expect(await hasMark(root)).toBe(false);
+      for (const result of results) expect(result.summary).not.toContain(".gitignore");
+    });
+
+    it("removes the directories it created when it cannot mark them, so a retry marks them", async () => {
+      const root = await makeTempDir();
+      await fs.mkdir(path.join(root, "work"));
+      const { client, requests } = fakeClient(completedState({ answer: 42 }));
+      const realWriteFile = fs.writeFile.bind(fs);
+      const writeFile = vi.spyOn(fs, "writeFile").mockImplementation((file, data, options) => {
+        if (typeof file === "string" && path.basename(file) === ".gitignore") {
+          return Promise.reject(
+            Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" }),
+          );
+        }
+        return realWriteFile(file, data, options);
+      });
+      let failed: Awaited<ReturnType<typeof downloadMthdsArtifacts>>;
+      let defaultFailed: Awaited<ReturnType<typeof downloadMthdsArtifacts>>;
+      try {
+        failed = await downloadMthdsArtifacts(
+          { run_id: RUN_ID, dir: "work/assets/run-1" },
+          contextIn(root, client),
+        );
+        defaultFailed = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
+      } finally {
+        writeFile.mockRestore();
+      }
+
+      for (const result of [failed, defaultFailed]) {
+        expect(result.structuredContent.status).toBe("error");
+        expect(result.structuredContent.errors?.[0]).toMatchObject({
+          class: "input_domain",
+          location: "dir",
+        });
+        expect(result.structuredContent.errors?.[0]?.message).toContain("ENOSPC");
+      }
+      expect(requests).toEqual([]);
+      // Back to what it found: work/ stays, everything below it is gone.
+      expect(await fs.readdir(root)).toEqual(["work"]);
+      expect(await fs.readdir(path.join(root, "work"))).toEqual([]);
+
+      const retried = await downloadMthdsArtifacts(
+        { run_id: RUN_ID, dir: "work/assets/run-1" },
+        contextIn(root, client),
+      );
+
+      expect(retried.structuredContent.status).toBe("ok");
+      expect(await readMark(root, "work", "assets", "run-1")).toBe("*\n");
     });
 
     it("marks nothing when the run has nothing to save yet", async () => {

@@ -36,6 +36,25 @@ export function formatMib(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
+/**
+ * Render a measured size and the limit it exceeds, for a refusal to quote
+ * side by side. MiB to one decimal reads best, but a size just over its limit
+ * rounds to the limit's own figure ("7.5 MiB, over the 7.5 MiB limit"), which
+ * reads as a refusal of something within bounds; when the two would print
+ * alike, both print as exact byte counts instead.
+ */
+export function formatSizeOverLimit(size: number, limit: number): { size: string; limit: string } {
+  const sizeMib = formatMib(size);
+  const limitMib = formatMib(limit);
+  if (sizeMib !== limitMib) return { size: sizeMib, limit: limitMib };
+  return { size: formatExactBytes(size), limit: formatExactBytes(limit) };
+}
+
+/** A byte count in full, its thousands grouped: `7,864,321 bytes`. */
+function formatExactBytes(bytes: number): string {
+  return `${String(bytes).replace(/\B(?=(\d{3})+(?!\d))/g, ",")} bytes`;
+}
+
 /** The length of `bytes` bytes once encoded in standard padded base64, as the SDK sends them. */
 export function base64EncodedLength(bytes: number): number {
   return 4 * Math.ceil(bytes / 3);
@@ -74,8 +93,9 @@ export class SizeGuardedPipelexApiClient extends PipelexApiClient {
   override async upload(input: UploadInput): Promise<UploadedFile> {
     const size = base64DecodedLength(input.data);
     if (size > MAX_UPLOAD_BYTES) {
+      const shown = formatSizeOverLimit(size, MAX_UPLOAD_BYTES);
       throw new RejectedAssetError(
-        `"${input.filename}" is ${formatMib(size)}, over the ${formatMib(MAX_UPLOAD_BYTES)} Pipelex upload limit.`,
+        `"${input.filename}" is ${shown.size}, over the ${shown.limit} Pipelex upload limit.`,
         input.filename,
         413,
         { code: "too_large" },

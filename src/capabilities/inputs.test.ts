@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
+import { ApiResponseError, ApiUnreachableError, RequestArgumentError } from "@pipelex/sdk";
 import type {
   CrateInvalidReport,
   InputForm,
@@ -17,6 +17,7 @@ import {
 } from "./inputs.js";
 import type { InputsContext } from "./inputs.js";
 import { DEFAULT_API_URL } from "./shared.js";
+import type { FileResolver } from "./shared.js";
 
 /** One declared input, a `Text` named `question`, on the pipe the route selected. */
 const demoInputForm: InputForm = {
@@ -544,6 +545,26 @@ describe("buildMthdsInputs path submissions", () => {
     expect(inputsToolResult(result).content[0].text).toContain("- `methods/invoice.mthds`");
   });
 
+  it("lists no file of a folder when the request never left the machine", async () => {
+    // The client refuses the base URL as it is built.
+    const unbuilt = await buildMthdsInputs(
+      { method_dir: "methods" },
+      { baseUrl: "invalid-no-scheme", resolver: methodFolderResolver() },
+    );
+    expect(unbuilt.structuredContent.status).toBe("error");
+    expect(unbuilt.structuredContent).not.toHaveProperty("files_sent");
+    expect(inputsToolResult(unbuilt).content[0].text).not.toContain("Files sent");
+
+    // The SDK refuses an argument before sending.
+    const refused = await buildMthdsInputs({ method_dir: "methods" }, {
+      baseUrl: DEFAULT_API_URL,
+      resolver: methodFolderResolver(),
+      client: { pipeIo: () => Promise.reject(new RequestArgumentError("refused before sending")) },
+    } as InputsContext);
+    expect(refused.structuredContent.status).toBe("error");
+    expect(refused.structuredContent).not.toHaveProperty("files_sent");
+  });
+
   it("rejects { path } items instructively without a resolver (hosted)", async () => {
     const result = await buildMthdsInputs(
       { files: [{ path: "methods/bundle.mthds" }] },
@@ -782,3 +803,20 @@ describe("buildMthdsInputs by method_id, on both platforms", () => {
     expect(result.summary).toContain("could not ask the platform");
   });
 });
+
+/** A resolver reading a method folder as `methods/`, with one template file. */
+function methodFolderResolver(): FileResolver {
+  return {
+    async resolve() {
+      throw new Error("a folder is not read file by file");
+    },
+    async resolveMethodDir(methodDir) {
+      return {
+        ok: true,
+        files: [{ path: `${methodDir}/invoice.mthds`, content: 'domain = "invoice"' }],
+        resources: { "templates/invoice.xlsx": new Uint8Array([0x50, 0x4b, 0x03, 0x04]) },
+        sent: [`${methodDir}/invoice.mthds`, `${methodDir}/templates/invoice.xlsx`],
+      };
+    },
+  };
+}

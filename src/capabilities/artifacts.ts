@@ -448,11 +448,18 @@ export async function downloadMthdsArtifacts(
     return errorResult("Nothing was saved: the target directory is invalid.", [target.error]);
   }
 
+  // A dir the caller names gets the mark on the directory the run lands in,
+  // and only when this call created it; the default location gets it on the
+  // topmost directory created there, `runs/` the first time.
+  let marked: string | undefined;
   if (target.created !== undefined) {
-    const marked = await markGenerated(target.created, dir);
-    if (marked !== undefined) {
-      return errorResult("Nothing was saved: the new directory could not be marked.", [marked]);
+    const markedDir = input.dir === undefined ? target.created : target.dir;
+    const failure = await markGenerated(markedDir, dir);
+    if (failure !== undefined) {
+      await removeCreatedDirectories(target.dir, target.created);
+      return errorResult("Nothing was saved: the new directory could not be marked.", [failure]);
     }
+    marked = path.relative(target.root, markedDir);
   }
 
   // The output goes first, so it always takes its own name: a stored file
@@ -471,7 +478,7 @@ export async function downloadMthdsArtifacts(
   };
 
   if (collectArtifacts(mainStuff).length === 0) {
-    return completedResult(runId, DOWNLOAD_SCOPE, output, [], target.root);
+    return withMarkNote(completedResult(runId, DOWNLOAD_SCOPE, output, [], target.root), marked);
   }
 
   let verdict: DownloadArtifactsResult;
@@ -488,15 +495,18 @@ export async function downloadMthdsArtifacts(
       auth: context.authError,
       baseUrlSource: context.baseUrlSource,
     });
-    return refusedResult(error, err, output, target.root);
+    return withMarkNote(refusedResult(error, err, output, target.root), marked);
   }
 
-  return completedResult(
-    runId,
-    verdict.scope,
-    output,
-    verdict.artifacts.map((item, index) => projectItem(item, index, target.root)),
-    target.root,
+  return withMarkNote(
+    completedResult(
+      runId,
+      verdict.scope,
+      output,
+      verdict.artifacts.map((item, index) => projectItem(item, index, target.root)),
+      target.root,
+    ),
+    marked,
   );
 }
 
@@ -506,24 +516,23 @@ export async function downloadMthdsArtifacts(
 export const GENERATED_DIRECTORY_GITIGNORE = "*\n";
 
 /**
- * Mark `created`, the topmost directory this call created, as generated: a
- * `.gitignore` holding `*`. A run saved beside a method lands inside the
- * method's folder, and the folder's membership rule reads the `.gitignore`
- * files inside it, so the mark keeps the run's files out of the method that
- * folder holds — and out of git — without the rule knowing `runs/` by name.
+ * Mark `dir` as generated: a `.gitignore` holding `*`. A run saved beside a
+ * method lands inside the method's folder, and the folder's membership rule
+ * reads the `.gitignore` files inside it, so the mark keeps the run's files
+ * out of the method that folder holds — and out of git — without the rule
+ * knowing `runs/` by name.
  *
- * Only a directory this call created is marked, never one it found, and an
- * existing `.gitignore` is never overwritten (`wx`): a directory the user made
- * stays theirs to mark. Returns a refusal at `dir` when the file cannot be
- * written, as the output file's failure is, since a directory that cannot take
- * two bytes will not take the run either.
+ * The caller passes a directory this call created, never one it found: the
+ * directory the run lands in for a `dir` the caller names, the topmost one
+ * created for the default location. An existing `.gitignore` is never
+ * overwritten (`wx`), so a directory the user made stays theirs to mark.
+ * Returns a refusal at `dir` when the file cannot be written, as the output
+ * file's failure is, since a directory that cannot take two bytes will not
+ * take the run either.
  */
-async function markGenerated(
-  created: string,
-  requestedDir: string,
-): Promise<ToolError | undefined> {
+async function markGenerated(dir: string, requestedDir: string): Promise<ToolError | undefined> {
   try {
-    await fs.writeFile(path.join(created, ".gitignore"), GENERATED_DIRECTORY_GITIGNORE, {
+    await fs.writeFile(path.join(dir, ".gitignore"), GENERATED_DIRECTORY_GITIGNORE, {
       flag: "wx",
     });
     return undefined;
@@ -537,6 +546,37 @@ async function markGenerated(
       retryable: false,
     };
   }
+}
+
+/**
+ * Undo the directories a save created when it could not mark them: from
+ * `dir` up to `created` inclusive, each removed only while empty, so a retry
+ * creates them again and marks them rather than finding them unmarked and
+ * leaving them so. Best effort: a directory that is not empty, or will not
+ * go, stops the climb and stays.
+ */
+async function removeCreatedDirectories(dir: string, created: string): Promise<void> {
+  let current = dir;
+  for (;;) {
+    try {
+      await fs.rmdir(current);
+    } catch {
+      return;
+    }
+    if (current === created) return;
+    const parent = path.dirname(current);
+    if (parent === current) return;
+    current = parent;
+  }
+}
+
+/** The summary line naming the directory the save marked as generated, when it marked one. */
+function withMarkNote(result: ArtifactsResult, marked: string | undefined): ArtifactsResult {
+  if (marked === undefined) return result;
+  return {
+    ...result,
+    summary: `${result.summary}\n\nCreated \`${marked}\` and gave it a \`.gitignore\` of \`*\`, so git and a method folder above it leave the run's files out.`,
+  };
 }
 
 // ── the output file ─────────────────────────────────────────────────

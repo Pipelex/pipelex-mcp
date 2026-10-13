@@ -39,6 +39,8 @@ import {
   toolResultContent,
   validateMethodSelectorRequest,
   withFilesSent,
+  failedBeforeSending,
+  markUnsent,
 } from "./shared.js";
 import type {
   ApiConfig,
@@ -546,8 +548,9 @@ async function requestCodegen(
 
   let report: CodegenResponse;
   let plan: SelectorPlan | undefined;
+  let client: CodegenClient | undefined;
   try {
-    const client = codegenClient(context);
+    client = codegenClient(context);
     let sent = request;
     if (request.method_id !== undefined) {
       // A bare id reads the draft on a platform that does not resolve version
@@ -569,7 +572,10 @@ async function requestCodegen(
       bundleResources: hasTemplateFiles(request.resources),
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
-    return errorResult(summaryForError(error), [error]);
+    const failed = errorResult(summaryForError(error), [error]);
+    // A client that could not be built, or an argument refused before
+    // sending, sent no file of a folder.
+    return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
 
   // A produced-invalid verdict never touches disk: it carries

@@ -29,6 +29,8 @@ import {
   toolResultContent,
   validateMethodSelectorRequest,
   withFilesSent,
+  failedBeforeSending,
+  markUnsent,
 } from "./shared.js";
 import type {
   ApiConfig,
@@ -326,8 +328,9 @@ async function requestPreparedInputs(
 
   let prepared: PreparedInputs;
   let plan: SelectorPlan | undefined;
+  let client: PrepareClient | undefined;
   try {
-    const client = prepareClient(context);
+    client = prepareClient(context);
     let sent = request;
     if (request.method_id !== undefined) {
       // A bare id reads the draft on a platform that does not resolve version
@@ -360,7 +363,10 @@ async function requestPreparedInputs(
       bundleResources: hasTemplateFiles(request.resources),
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
-    return errorResult(summaryForError(error), [error]);
+    const failed = errorResult(summaryForError(error), [error]);
+    // A client that could not be built, or an argument refused before
+    // sending, sent no file of a folder.
+    return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
 
   return await withMethodContent(

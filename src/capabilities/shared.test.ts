@@ -47,6 +47,8 @@ import {
   validateMethodSelectorRequest,
   validateRunIdRequest,
   withFilesSent,
+  failedBeforeSending,
+  markUnsent,
 } from "./shared.js";
 import type { ErrorSummaries, FileResolver, ToolError } from "./shared.js";
 import type {
@@ -593,6 +595,25 @@ describe("withFilesSent", () => {
       "method_id",
       undefined,
     ]);
+  });
+
+  it("lists no file on a result marked unsent, and still relocates its errors", () => {
+    const result: {
+      structuredContent: { status: string; errors?: ToolError[]; files_sent?: string[] };
+    } = markUnsent({ structuredContent: { status: "error", errors: [error("files")] } });
+
+    const bare = withFilesSent(result, ["m/main.mthds"]);
+
+    expect(bare.structuredContent).not.toHaveProperty("files_sent");
+    expect(bare.structuredContent.errors?.[0]?.location).toBe("method_dir");
+  });
+
+  it("reads only the SDK's refusal of an argument as a failure before sending", () => {
+    expect(failedBeforeSending(new RequestArgumentError("bad base URL"))).toBe(true);
+    expect(
+      failedBeforeSending(new ApiUnreachableError("reset", DEFAULT_API_URL, "ECONNRESET")),
+    ).toBe(false);
+    expect(failedBeforeSending(new Error("anything else"))).toBe(false);
   });
 
   it("lists the files sent on a produced verdict, which carries no errors", () => {
