@@ -445,7 +445,7 @@ export const mthdsRunTool = defineTool({
 export const mthdsRunStatusTool = defineTool({
   name: "mthds_run_status",
   description:
-    "Check on a durable MTHDS run by its run id — one cheap status read. " +
+    "Check on a durable MTHDS run by its run id: its status and how far it has got, such as which step is running and how many items of a batch are done. " +
     "Honor the retry hint in the response instead of polling in a tight loop.",
   inputSchema: mthdsRunStatusInputSchema,
   outputSchema: mthdsRunStatusOutputSchema,

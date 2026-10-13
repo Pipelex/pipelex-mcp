@@ -16,7 +16,7 @@ Core actions:
 - Project a pipe's declared inputs as a fill-in template (`mthds_inputs_template`), so an assistant can prepare inputs for a run without leaving the conversation. This unblocks the CLI-free skills in `../pipelex-plugins` (`pipelex-inputs`, `pipelex-design`) that used to shell out to `mthds-agent inputs bundle`.
 - Generate typed code for a method (`mthds_codegen`): project its concept set into typed models — TypeScript (`ts-zod`) or Python (`python-pydantic`, `python-structures`), the target chosen from the project's context — stamped and locked by the Pipelex codegen engine, so an assistant working in a project writes the generated files and the lock verbatim and the offline check passes on the tree. Passing `output_dir` writes that tree straight into the project, so the bytes never enter the conversation at all.
 - Prepare a pipe's *filled* inputs for a run (`mthds_prepare_inputs`): upload file-bearing values (local paths, `data:` URLs, bytes) to Pipelex storage and rewrite them to `pipelex-storage://`, so the inputs are run-ready, using the user's key. The method is named the same ways as everywhere else, so a **published** method with a file-bearing input now has a path to a run that does not require every asset to already be a URL.
-- Start a durable run of a method on the hosted Pipelex API (`mthds_run`), then check on it (`mthds_run_status`) and report its results (`mthds_run_results`) and show its pictures (`mthds_show_images`) by durable run id — the run outlives any single tool call and even the conversation.
+- Start a durable run of a method on the hosted Pipelex API (`mthds_run`), then check on it and how far it has got (`mthds_run_status`) and report its results (`mthds_run_results`) and show its pictures (`mthds_show_images`) by durable run id — the run outlives any single tool call and even the conversation.
 - Save a completed run to disk (`mthds_download_artifacts`): the main output verbatim as `main_stuff.json`, and every `pipelex-storage://` reference in it resolved to a fresh link through the API and saved beside it, under `runs/<run_id>/` in the server's working directory by default. This is the download counterpart of `mthds_prepare_inputs` — the output and a generated image or PDF land where the user is, instead of living in the conversation or behind a presigned link that expires within the hour.
 - Carry a bundle between the workspace and the organization's catalog (`mthds_save_method`, `mthds_get_method`, `mthds_publish_method`): save the files on disk as a method's draft, creating the method or writing the draft of the one the directory is linked to; bring a saved method's draft, or one of its published versions, back; and, when the user asks for it, publish the draft as the method's next version.
 
@@ -237,13 +237,13 @@ No-verdict failures use the shared error shape. Unreachable API is retryable `co
 
 ### Run Scope (the run family)
 
-The run family adds durable (async) method execution against the hosted Pipelex API, wrapping `@pipelex/sdk`'s run lifecycle (`client.start` → `POST /v1/start`, `client.getRunStatus` → `GET /v1/runs/{id}/status`, `client.getRunResult` → `GET /v1/runs/{id}/results`). The MCP adds no execution logic and stays stateless: all run state lives behind the durable `run_id` on the platform. The server never calls the blocking `POST /v1/execute` or the SDK's blocking wrappers (`waitForResult`, `startAndWaitForResult`), and never surfaces `result_url` or other presigned URLs into model context.
+The run family adds durable (async) method execution against the hosted Pipelex API, wrapping `@pipelex/sdk`'s run lifecycle (`client.start` → `POST /v1/start`, `client.getRunStatus` → `GET /v1/runs/{id}/status`, `client.getRunProgress` → `GET /v1/runs/{id}/progress`, `client.getRunResult` → `GET /v1/runs/{id}/results`). The MCP adds no execution logic and stays stateless: all run state lives behind the durable `run_id` on the platform. The server never calls the blocking `POST /v1/execute` or the SDK's blocking wrappers (`waitForResult`, `startAndWaitForResult`), and never surfaces `result_url` or other presigned URLs into model context.
 
 **Run flow**:
 
 1. The assistant starts a run with `mthds_run`, giving files, an address or an id and the inputs filled from `mthds_inputs_template`, prepared by `mthds_prepare_inputs` where they carry local files.
 2. The start tool returns the durable `run_id` immediately.
-3. If the user asks how it is going, the assistant calls the status tool — one cheap read, with a retry hint in the summary so it doesn't spin-poll.
+3. If the user asks how it is going, the assistant calls the status tool — a cheap read of the run's status and of how far it has got, with a retry hint in the summary so it doesn't spin-poll.
 4. Once the run is terminal, the assistant calls the results tool and reports the main output (bounded) on success, or, on a failure, why the run failed, what to do and what to give support.
 5. Because everything is behind the durable id, the flow survives conversation gaps: days later, "what did that run produce?" is a single results call.
 
@@ -290,11 +290,60 @@ The run family adds durable (async) method execution against the hosted Pipelex 
   created_at?: string;
   finished_at?: string | null;
   failure?: RunFailure;        // terminal statuses other than COMPLETED, when the run stored an error report — see below
+  progress?: RunProgress;      // the run's progress snapshot, when the progress read answered — see below
+  progress_invocations_omitted?: number;  // how many invocations progress.invocations leaves out; absent when none
   errors?: ToolError[];
 }
 ```
 
 The `content` summary while non-terminal includes "check again in ~Ns" from the retry hint.
+
+**A run says how far it has got.** After the status read, the status tool reads the run's progress snapshot once, `client.getRunProgress` → `GET /v1/runs/{id}/progress`, whatever the status, pending and ended runs included. The snapshot is the one the hosted progress contract defines (`conformance/specs/pipelex-platform-api.md`, "Run progress"): which invocations of which pipes have started, ended or been skipped, how far each batch has got, which outcome each condition took, where the run is retrying or stuck, and a one-line `summary` the contract words from the snapshot alone. The tool relays it as `progress`:
+
+```ts
+interface RunProgress {
+  pipeline_run_id: string;
+  mode: string;                 // "live" on the hosted API
+  status: string;               // pending, running, succeeded, failed or canceled; an open set
+  version: number;              // of two snapshots of a run, the higher version is the newer
+  assembled_at: string;         // when the platform projected it
+  summary: string;              // the platform's one line, as it sent it
+  degradation?: ProgressDegradation;    // the run status's, when the run reads degraded
+  invocations: ProgressInvocation[];    // at most MAX_PROGRESS_INVOCATIONS (50) — see below
+}
+
+interface ProgressInvocation {
+  path: string;                 // the entry pipe's pipe_ref, then step_<n>, branch_<n>, item_<n>, outcome_<key> or default per level, joined by "/"
+  pipe_code: string;
+  pipe_ref: string;
+  pipe_type: string;            // an open string, such as "PipeLLM"
+  status: string;               // scheduled, running, succeeded, failed, skipped or canceled; an open set
+  started_at: string | null;
+  ended_at: string | null;
+  step_count?: number;          // a sequence's steps
+  branch_count?: number;        // a parallel's branches
+  skip_reason?: string;
+  batch?: { total: number; done: number; running: number; failed: number };   // a batch that has fanned out
+  condition?: { selected_outcome: string | null };                              // a condition that has resolved; null for its default
+  attempts?: number;            // health: how many times its work has been tried, when more than once
+  last_failure?: { message: string; at?: string };                             // health: the latest failure of its work
+  degradation?: ProgressDegradation;    // health: the run is stuck at this invocation
+}
+
+interface ProgressDegradation {
+  reason: string;               // "workflow_task_failing" or "status_unavailable"; an open set
+  message?: string | null;      // the platform's account
+  failed_attempts?: number | null;
+  failing_since?: string | null;
+  ends_at?: string | null;      // when the platform ends the run as failed if it is still failing then
+}
+```
+
+- **The summary is the platform's, relayed.** The `content` summary gives it a paragraph of its own right after the status, after the whole account of why an ended run ended: exactly `Progress: <summary>`, a line break in the summary collapsed to a space. This server words no progress of its own, so that the workshop and the hosted console's run status say the same progress the same way.
+- **The contract's known members, each with its type.** `root_path` and `chain`, which describe a snapshot of part of a run and which the hosted plane never sets, are dropped, and so is any member a later platform adds. An optional member is kept only when it has its type, since the MCP server checks `structuredContent` against the tool's output schema and a mismatch would fail the call; a snapshot whose required members do not have theirs, its own or an invocation's, is relayed as no snapshot at all. The texts the runtime and the platform write freely are bounded as a failure's are, `last_failure.message` and `degradation.message` to `FAILURE_MESSAGE_MAX_CODE_POINTS` and `skip_reason` to `FAILURE_FIELD_MAX_CODE_POINTS`; the summary is not, being the contract's own line.
+- **At most fifty invocations, those worth reading first.** A wide batch gives the snapshot one invocation per item and every invocation below each, so `invocations` lists at most `MAX_PROGRESS_INVOCATIONS` (50) of them. Those running, failed or carrying a health annotation (`attempts`, `last_failure`, `degradation`) are kept first, each with its ancestors, then the others in snapshot order while room is left, and the list keeps snapshot order, so each invocation still follows its ancestors. When the invocations needing attention alone pass the cap, the first fifty of them in snapshot order are kept. `progress_invocations_omitted` counts what was left out.
+- **Best effort.** The read is bounded by `PROGRESS_READ_TIMEOUT_MS` (5 s), far under the SDK's own poll timeout. A read that fails for any reason, a server older than the route (which the SDK reports as `RunLifecycleUnavailableError`), a `404`, a `5xx`, an answer the SDK cannot read or the deadline, leaves the status to go out alone, with no `progress` and no word about it: the progress never turns the status into an error and never holds it back. It is read after the status, so it can be a moment ahead of it.
+- **The progress and the degradation never contradict each other.** A degraded status read gets the reassurance that its status is the last one recorded and that the run itself is unaffected only when the platform could not read the run (`degradation.reason` `status_unavailable`, or no `degradation`, which is how a platform older than it says the same), and never beside a snapshot reporting the run stuck, a `degradation` for any other reason, which the progress read made a moment later can carry. A run whose workflow task keeps failing (`workflow_task_failing`), or degraded for a reason this server does not know, is not reassured: its progress paragraph says that it is not progressing and at which invocation.
 
 **A failed run says why.** When a run fails, the runner stores an error report on it, or the platform writes one for an ending no runner reported (a workflow that kept failing, a timeout, a workflow that vanished), and the platform serves that report on the status read (`RunRead.error`) and, from the platform release that relays it, in the body of the results read's `409`. Every failed arm of the run family carries it as one `failure` object: the status tool on a terminal status other than `COMPLETED`, and the `failed` state of the results tool, the image tool and `mthds_download_artifacts`.
 
@@ -1199,8 +1248,8 @@ The structured output is:
 **Tool: `mthds_run_status`**
 
 - **Input**: `{ run_id }`
-- **Output**: `{ status, run_id?, run_status?, is_terminal?, degraded?, retry_after_seconds?, created_at?, finished_at?, failure?, errors? }` in `structuredContent`, plus a text summary with a check-again hint while non-terminal, and why the run failed once it ended without completing.
-- **Behavior**: One cheap self-healing status read (`GET /v1/runs/{id}/status`). A terminal non-COMPLETED status is a produced verdict, not an error, and carries the run's stored error report as `failure` (see "A failed run says why").
+- **Output**: `{ status, run_id?, run_status?, is_terminal?, degraded?, retry_after_seconds?, created_at?, finished_at?, method_version?, failure?, progress?, progress_invocations_omitted?, errors? }` in `structuredContent`, plus a text summary with a check-again hint while non-terminal, why the run failed once it ended without completing, and the platform's one-line progress summary as `Progress: …` when the progress read answered.
+- **Behavior**: One cheap self-healing status read (`GET /v1/runs/{id}/status`), then one best-effort read of the run's progress snapshot (`GET /v1/runs/{id}/progress`), bounded at 5 s and left out when it fails (see "A run says how far it has got"). A terminal non-COMPLETED status is a produced verdict, not an error, and carries the run's stored error report as `failure` (see "A failed run says why").
 - **Annotations**: Read-only, non-destructive, no open-world publishing.
 - **View**: none.
 
@@ -1290,7 +1339,7 @@ Run a method durably:
 
 1. The user asks the assistant to run a `.mthds` method (usually after validating it and filling the inputs template).
 2. The assistant submits the files (or an address or an id), the pipe to run, and the filled inputs to `mthds_run`; the tool returns the durable `run_id` immediately.
-3. The assistant checks on the run with `mthds_run_status` when asked (honoring the retry hint rather than spin-polling); once the run is terminal it reports through `mthds_run_results`, and `mthds_show_images` shows a picture the run produced when someone asks to see it.
+3. The assistant checks on the run with `mthds_run_status` when asked, reading its one-line progress (honoring the retry hint rather than spin-polling); once the run is terminal it reports through `mthds_run_results`, and `mthds_show_images` shows a picture the run produced when someone asks to see it.
 4. Days later, the same `run_id` still answers `mthds_run_status` / `mthds_run_results` — the run is durable and the MCP is stateless.
 
 Save a run's produced files to disk:

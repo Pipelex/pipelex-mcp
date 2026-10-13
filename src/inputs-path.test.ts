@@ -50,6 +50,7 @@ describe("inputs_path on the workshop", () => {
           return Promise.resolve({ pipeline_run_id: RUN_ID, state: "STARTED" });
         },
         getRunStatus: () => Promise.reject(new Error("getRunStatus must not be called")),
+        getRunProgress: () => Promise.reject(new Error("getRunProgress must not be called")),
         getRunResult: () => Promise.reject(new Error("getRunResult must not be called")),
       },
     };
@@ -348,6 +349,7 @@ describe("inputs_path on the workshop", () => {
             return Promise.resolve({ pipeline_run_id: RUN_ID });
           },
           getRunStatus: () => Promise.reject(new Error("getRunStatus must not be called")),
+          getRunProgress: () => Promise.reject(new Error("getRunProgress must not be called")),
           getRunResult: () => Promise.reject(new Error("getRunResult must not be called")),
         },
       };

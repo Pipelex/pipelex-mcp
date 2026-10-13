@@ -9,6 +9,7 @@ import {
   ApiUnreachableError,
   MissingMainStuffError,
   RequestArgumentError,
+  RunLifecycleUnavailableError,
   runMayHaveStartedOf,
 } from "@pipelex/sdk";
 import type {
@@ -17,6 +18,7 @@ import type {
   MethodProvenance,
   OutputForm,
   PipeIOContracts,
+  RunProgress,
   RunRead,
   RunResultArtifact,
   RunResults,
@@ -37,9 +39,11 @@ import {
   getMthdsRunResults,
   getMthdsRunStatus,
   MAIN_STUFF_CAP,
+  PROGRESS_READ_TIMEOUT_MS,
   projectRunUsage,
   projectUsageByPipe,
   readFailedRun,
+  readRunProgress,
   resultsResult,
   RUN_RESULTS_ARTIFACTS,
   RUN_RESULTS_ERROR_OPTIONS,
@@ -60,6 +64,15 @@ import {
   STRICT_LLM_COMPLETION_REPORT,
   relayingArmOf,
 } from "./failed-run-fixtures.js";
+import { MAX_PROGRESS_INVOCATIONS } from "./run-progress.js";
+import {
+  FAILED_RUN_SNAPSHOT,
+  MID_RUN_SNAPSHOT,
+  MID_RUN_SUMMARY,
+  PENDING_SNAPSHOT,
+  STUCK_ITEM_DEGRADATION,
+  wideBatchSnapshot,
+} from "./run-progress-fixtures.js";
 import {
   createMethodVersionsMemories,
   methodVersionsOf,
@@ -583,6 +596,113 @@ describe("statusResult", () => {
     expect(result.structuredContent.degraded).toBe(true);
     expect(result.structuredContent.retry_after_seconds).toBe(10);
     expect(result.summary).toMatch(/last-known/i);
+  });
+
+  describe("with the run's progress", () => {
+    const REASSURANCE = "The run itself is unaffected.";
+
+    it("relays a running run's snapshot and gives its summary a paragraph right after the status", () => {
+      const result = statusResult(
+        runRead({ status: "RUNNING", retry_after_seconds: 5 }),
+        MID_RUN_SNAPSHOT,
+      );
+
+      expect(result.structuredContent.progress).toEqual(MID_RUN_SNAPSHOT);
+      expect(result.structuredContent).not.toHaveProperty("progress_invocations_omitted");
+      expect(result.summary).toBe(
+        [
+          `Run \`${RUN_ID}\` is RUNNING — not terminal yet. Check again in ~5s.`,
+          `Progress: ${MID_RUN_SUMMARY}`,
+        ].join("\n\n"),
+      );
+    });
+
+    it("relays a pending run's snapshot", () => {
+      const result = statusResult(runRead({ status: "PENDING" }), PENDING_SNAPSHOT);
+
+      expect(result.structuredContent.progress).toEqual(PENDING_SNAPSHOT);
+      expect(result.summary.split("\n\n")).toEqual([
+        expect.stringContaining("is PENDING — not terminal yet"),
+        "Progress: Waiting to start",
+      ]);
+    });
+
+    it("relays an ended run's snapshot after the whole account of why it ended", () => {
+      const { statusRead } = RECORDED_FAILED_RUNS.llmCompletion;
+
+      const result = statusResult(statusRead, FAILED_RUN_SNAPSHOT);
+      const paragraphs = result.summary.split("\n\n");
+
+      expect(result.structuredContent.failure).toMatchObject({ error_type: "LLMCompletionError" });
+      expect(result.structuredContent.progress?.status).toBe("failed");
+      expect(paragraphs).toHaveLength(2);
+      expect(paragraphs[0]).toContain("Why: LLM completion\n");
+      expect(paragraphs[0]).toContain(`For support: Run ${statusRead.pipeline_run_id}`);
+      expect(paragraphs[1]).toBe(
+        "Progress: Failed at condense_filing (step 3 of 4, item 2 of 3, step 2 of 2)",
+      );
+    });
+
+    it("counts the invocations a wide snapshot leaves out beside it", () => {
+      const snapshot = wideBatchSnapshot(40, 39);
+
+      const result = statusResult(runRead({ status: "RUNNING" }), snapshot);
+
+      expect(result.structuredContent.progress?.invocations).toHaveLength(MAX_PROGRESS_INVOCATIONS);
+      expect(result.structuredContent.progress_invocations_omitted).toBe(
+        snapshot.invocations.length - MAX_PROGRESS_INVOCATIONS,
+      );
+      expect(result.structuredContent.progress?.invocations.map((each) => each.path)).toContain(
+        "filings.review_filings/step_1/item_39/step_2",
+      );
+    });
+
+    it("answers the status alone from a snapshot it cannot read", () => {
+      const result = statusResult(runRead({ status: "RUNNING" }), {
+        ...MID_RUN_SNAPSHOT,
+        summary: undefined,
+      } as unknown as RunProgress);
+
+      expect(result.structuredContent.status).toBe("ok");
+      expect(result.structuredContent).not.toHaveProperty("progress");
+      expect(result.summary).not.toContain("Progress:");
+    });
+
+    it("never reassures a run whose workflow task keeps failing, which its progress says is not progressing", () => {
+      const result = statusResult(
+        runRead({ status: "RUNNING", degraded: true, degradation: STUCK_ITEM_DEGRADATION }),
+        MID_RUN_SNAPSHOT,
+      );
+
+      expect(result.structuredContent.degraded).toBe(true);
+      expect(result.summary).toContain("not progressing at summarize_filing");
+      expect(result.summary).not.toContain(REASSURANCE);
+    });
+
+    it("gives no reassurance for a degradation the status read cannot explain by the engine's absence", () => {
+      for (const reason of ["workflow_task_failing", "a_later_reason"]) {
+        const result = statusResult(
+          runRead({ status: "RUNNING", degraded: true, degradation: { reason } }),
+        );
+
+        expect(result.summary).not.toContain(REASSURANCE);
+      }
+    });
+
+    it("reassures a status the platform could not read, unless the progress read after it reports the run stuck", () => {
+      const unreadable = runRead({
+        status: "RUNNING",
+        degraded: true,
+        degradation: { reason: "status_unavailable" },
+      });
+
+      expect(statusResult(unreadable).summary).toContain(REASSURANCE);
+      expect(statusResult(unreadable, PENDING_SNAPSHOT).summary).toContain(REASSURANCE);
+      expect(statusResult(runRead({ status: "RUNNING", degraded: true })).summary).toContain(
+        REASSURANCE,
+      );
+      expect(statusResult(unreadable, MID_RUN_SNAPSHOT).summary).not.toContain(REASSURANCE);
+    });
   });
 });
 
@@ -1458,6 +1578,7 @@ describe("boundMainStuff", () => {
 interface FakeRunClient {
   start(options: PipelexStartOptions): Promise<RunResultStart>;
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
+  getRunProgress(runId: string, options?: { signal?: AbortSignal }): Promise<RunProgress>;
   getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
   version?(): Promise<unknown>;
 }
@@ -1465,6 +1586,7 @@ interface FakeRunClient {
 const NEVER_CLIENT: FakeRunClient = {
   start: () => Promise.reject(new Error("start must not be called")),
   getRunStatus: () => Promise.reject(new Error("getRunStatus must not be called")),
+  getRunProgress: () => Promise.reject(new Error("getRunProgress must not be called")),
   getRunResult: () => Promise.reject(new Error("getRunResult must not be called")),
 };
 
@@ -2157,6 +2279,161 @@ describe("getMthdsRunStatus", () => {
     expect(result.summary).toBe(
       "Run status could not be read: the Pipelex API key is missing or was refused.",
     );
+  });
+
+  describe("the progress read after it", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** A context whose status read answers `read`, recording the order of the reads. */
+    function progressContext(
+      read: RunRead,
+      getRunProgress: (runId: string, options?: { signal?: AbortSignal }) => Promise<RunProgress>,
+    ): { context: RunContext; calls: string[] } {
+      const calls: string[] = [];
+      const context = contextWith({
+        getRunStatus: (runId: string) => {
+          calls.push(`status ${runId}`);
+          return Promise.resolve(read);
+        },
+        getRunProgress: (runId: string, options?: { signal?: AbortSignal }) => {
+          calls.push(`progress ${runId}`);
+          return getRunProgress(runId, options);
+        },
+      });
+      return { context, calls };
+    }
+
+    it("reads a running run's progress after its status and relays it", async () => {
+      const { context, calls } = progressContext(runRead({ status: "RUNNING" }), () =>
+        Promise.resolve(MID_RUN_SNAPSHOT),
+      );
+
+      const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
+
+      expect(calls).toEqual([`status ${RUN_ID}`, `progress ${RUN_ID}`]);
+      expect(result.structuredContent.status).toBe("ok");
+      expect(result.structuredContent.progress).toEqual(MID_RUN_SNAPSHOT);
+      expect(result.summary).toContain(`\n\nProgress: ${MID_RUN_SUMMARY}`);
+    });
+
+    it("reads a pending run's progress", async () => {
+      const { context, calls } = progressContext(runRead({ status: "PENDING" }), () =>
+        Promise.resolve(PENDING_SNAPSHOT),
+      );
+
+      const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
+
+      expect(calls).toHaveLength(2);
+      expect(result.structuredContent.progress?.status).toBe("pending");
+      expect(result.summary).toContain("Progress: Waiting to start");
+    });
+
+    it("reads an ended run's progress too, for where it stopped", async () => {
+      const { statusRead } = RECORDED_FAILED_RUNS.llmCompletion;
+      const { context, calls } = progressContext(statusRead, () =>
+        Promise.resolve(FAILED_RUN_SNAPSHOT),
+      );
+
+      const result = await getMthdsRunStatus({ run_id: statusRead.pipeline_run_id }, context);
+
+      expect(calls).toEqual([
+        `status ${statusRead.pipeline_run_id}`,
+        `progress ${statusRead.pipeline_run_id}`,
+      ]);
+      expect(result.structuredContent.run_status).toBe("FAILED");
+      expect(result.structuredContent.failure).toBeDefined();
+      expect(result.summary).toContain(
+        "Progress: Failed at condense_filing (step 3 of 4, item 2 of 3, step 2 of 2)",
+      );
+    });
+
+    it("answers the status without progress when the progress read fails, never as an error", async () => {
+      const failures = [
+        new ApiResponseError(
+          "HTTP 503",
+          `${DEFAULT_API_URL}/v1/runs/${RUN_ID}/progress`,
+          503,
+          "Service Unavailable",
+          "{}",
+          "service_unavailable",
+          "The run's progress events could not be read",
+          undefined, // validationErrors
+          undefined, // code
+        ),
+        new ApiUnreachableError("connection reset", DEFAULT_API_URL, "ECONNRESET"),
+        new Error("an answer the SDK could not read"),
+      ];
+      for (const failure of failures) {
+        const { context } = progressContext(runRead({ status: "RUNNING" }), () =>
+          Promise.reject(failure),
+        );
+
+        const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
+
+        expect(result.structuredContent.status).toBe("ok");
+        expect(result.structuredContent.run_status).toBe("RUNNING");
+        expect(result.structuredContent).not.toHaveProperty("progress");
+        expect(result.structuredContent).not.toHaveProperty("errors");
+        expect(result.summary).not.toContain("Progress");
+      }
+    });
+
+    it("answers the status without progress on a server older than the progress route", async () => {
+      const { context } = progressContext(runRead({ status: "RUNNING" }), () =>
+        Promise.reject(
+          new RunLifecycleUnavailableError(
+            "The progress route is not served: the server is a bare runner, or a hosted API older than the progress route.",
+            `${DEFAULT_API_URL}/v1/runs/${RUN_ID}/progress`,
+          ),
+        ),
+      );
+
+      const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
+
+      expect(result.structuredContent.status).toBe("ok");
+      expect(result.structuredContent).not.toHaveProperty("progress");
+      expect(result.structuredContent).not.toHaveProperty("errors");
+      expect(result.summary).toMatch(
+        /^Run `[^`]+` is RUNNING — not terminal yet\. Check again in ~\d+s\.$/,
+      );
+    });
+
+    it("sends the status without the progress once the deadline passes", async () => {
+      vi.useFakeTimers();
+      let signal: AbortSignal | undefined;
+      const { context } = progressContext(runRead({ status: "RUNNING" }), (_runId, options) => {
+        signal = options?.signal;
+        // A read that never answers and ignores its signal: the deadline must hold anyway.
+        return new Promise<RunProgress>(() => undefined);
+      });
+
+      const pending = getMthdsRunStatus({ run_id: RUN_ID }, context);
+      await vi.advanceTimersByTimeAsync(PROGRESS_READ_TIMEOUT_MS);
+      const result = await pending;
+
+      expect(signal?.aborted).toBe(true);
+      expect(result.structuredContent.run_status).toBe("RUNNING");
+      expect(result.structuredContent).not.toHaveProperty("progress");
+    });
+
+    it("returns the snapshot when it answers in time, and aborts nothing", async () => {
+      let signal: AbortSignal | undefined;
+
+      const progress = await readRunProgress(
+        {
+          getRunProgress: (_runId, options) => {
+            signal = options?.signal;
+            return Promise.resolve(MID_RUN_SNAPSHOT);
+          },
+        },
+        RUN_ID,
+      );
+
+      expect(progress).toBe(MID_RUN_SNAPSHOT);
+      expect(signal?.aborted).toBe(false);
+    });
   });
 });
 
