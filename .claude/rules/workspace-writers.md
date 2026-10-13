@@ -8,6 +8,7 @@ paths:
   - "src/capabilities/catalog-write.ts"
   - "src/capabilities/catalog-link.ts"
   - "src/files.ts"
+  - "src/method-tree.ts"
 ---
 
 # The workshop's filesystem boundaries
@@ -20,7 +21,7 @@ The workshop reads `.mthds` files from the user's workspace and writes into it: 
 
 Above that the rules are **inverted, deliberately**, so never write one shared "write a file" helper: it would either suffix a regeneration or let a download clobber.
 
-- `mthds_download_artifacts` (`artifacts.ts`) **never overwrites** (`wx`, a numeric suffix on collision — its own `main_stuff.json` and the SDK's files alike), because a collision there means two different files. The SDK's `downloadArtifacts` owns the filename rule and the exclusive create; this repo owns the containment and the plain-http rule. The download link comes from our own API, so the fetch is not an SSRF surface, but the cap, the timeout and the no-redirect rule hold on their own regardless of who named the URL. That opt-in is derived, never defaulted on: `allowHttp` is true only when `PIPELEX_BASE_URL` is itself `http:` or `PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP` says so, and an unrecognized value refuses.
+- `mthds_download_artifacts` (`artifacts.ts`) **never overwrites** (`wx`, a numeric suffix on collision — its own `main_stuff.json` and the SDK's files alike), because a collision there means two different files. Its `.gitignore` of `*` goes only into a directory it `created`. The SDK's `downloadArtifacts` owns the filename rule and the exclusive create; this repo owns the containment and the plain-http rule. The download link comes from our own API, so the fetch is not an SSRF surface, but the cap, the timeout and the no-redirect rule hold on their own regardless of who named the URL. That opt-in is derived, never defaulted on: `allowHttp` is true only when `PIPELEX_BASE_URL` is itself `http:` or `PIPELEX_MCP_ARTIFACTS_ALLOW_HTTP` says so, and an unrecognized value refuses.
 - `mthds_codegen` (`codegen-writer.ts`) **must overwrite its own previous output and only that**, because its paths come from the engine and the lock hashes them, so regeneration has to land on the same names.
 - `mthds_validate`'s method graph page (`graph-page.ts`) takes codegen's side, since every validation regenerates it under the same name: create with `wx`, replace only a file carrying `GRAPH_PAGE_MARK`, leave a foreign file, a symlink or a directory untouched.
 
@@ -39,5 +40,7 @@ Above that the rules are **inverted, deliberately**, so never write one shared "
 ## The read side
 
 `src/files.ts` rejects any path whose extension the argument is not contracted to **before touching the filesystem**, so a prompt-injected `.env`, `.git/config` or key path is never opened; it enforces real-path containment, and it reports every failure as a `FileResolution` value, never a throw. Keep all three gates on the submitted items, ahead of any read.
+
+A method folder is decided on `src/method-tree.ts`'s listing before any read, which stays self-contained for its swap to `mthds-js`.
 
 The writers have no injected write seam on purpose: a real `mkdtemp` directory is the better test double, so their tests run against real temp trees.

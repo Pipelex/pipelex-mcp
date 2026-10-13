@@ -172,6 +172,7 @@ describe("the workshop's tool table", () => {
     expect(schema.properties?.target).not.toHaveProperty("default");
     expect(Object.keys(schema.properties ?? {}).sort()).toEqual([
       "files",
+      "method_dir",
       "method_id",
       "method_ref",
       "output_dir",
@@ -264,6 +265,10 @@ describe("the workshop's instructions", () => {
         // although every one of these tools resolves an address server-side.
         expect(sentences, `the ${tool} sentence must name method_ref`).toContain("method_ref");
         expect(sentences, `the ${tool} sentence must name method_id`).toContain("method_id");
+        // A method on disk is best passed as its folder, which finds its own
+        // files and templates; a sentence leaving it out steers a model back to
+        // listing files by hand and forgetting a template.
+        expect(sentences, `the ${tool} sentence must name method_dir`).toContain("method_dir");
       }
     } finally {
       await close();
@@ -481,6 +486,9 @@ describe("the workshop's contexts and dispatch", () => {
     }
     expect(contexts.validation.resolver?.resolveTemplates).toBeDefined();
     expect(contexts.catalogWrite.resolver?.resolveTemplates).toBeUndefined();
+    // The same goes for a method's folder: the save takes no folder.
+    expect(contexts.validation.resolver?.resolveMethodDir).toBeDefined();
+    expect(contexts.catalogWrite.resolver?.resolveMethodDir).toBeUndefined();
     await expect(contexts.validation.resolver?.resolve("bundle.mthds")).resolves.toEqual({
       ok: true,
       content: 'domain = "demo"',
@@ -496,8 +504,10 @@ describe("the workshop's contexts and dispatch", () => {
 
     const { client, close } = await connectClient(createLocalServer({ contexts }));
     try {
-      expect(client.getInstructions()).toContain("Prefer `{ path: string }` files");
-      expect(client.getInstructions()).toContain("files to inline content");
+      // A method on disk goes as its folder first, then as path files, and
+      // inline content last.
+      expect(client.getInstructions()).toContain("folder on disk (method_dir, preferred)");
+      expect(client.getInstructions()).toContain("files (`{ path }` over inline)");
       expect(client.getInstructions()).toContain("has no views");
     } finally {
       await close();
@@ -583,7 +593,7 @@ describe("the workshop's contexts and dispatch", () => {
         expect(listed.tools.map((tool) => tool.name)).toEqual(
           localToolDefinitions.map((definition) => definition.name),
         );
-        expect(client.getInstructions()).toContain("Prefer `{ path: string }` files");
+        expect(client.getInstructions()).toContain("(method_dir, preferred)");
       } finally {
         await client.close();
       }
@@ -705,8 +715,8 @@ const FLOW_ORDER = [
  * sentences must therefore name every form they accept. `mthds_list_methods`
  * is not one: it takes no method, it answers with ids. Nor is a tool that
  * takes an id to write or read one stored method, which accepts no address — a
- * new tool joins this list only when it takes the one-of `files` /
- * `method_ref` / `method_id`.
+ * new tool joins this list only when it takes the one-of `method_dir` /
+ * `files` / `method_ref` / `method_id`.
  */
 const SELECTOR_TOOLS = [
   "mthds_validate",

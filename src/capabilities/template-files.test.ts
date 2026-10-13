@@ -230,7 +230,13 @@ describe("templateBudgetRefusals", () => {
     );
 
     expect(refusals.map((refusal) => refusal.index)).toEqual([1]);
-    expect(refusals[0]?.message).toContain("5.0 MiB");
+    // One byte over rounds to the limit's own "5.0 MiB": both print exact.
+    expect(refusals[0]?.message).toBe(
+      `m/t1.docx is ${(MAX_TEMPLATE_FILE_BYTES + 1).toLocaleString("en-US")} bytes, over the ${MAX_TEMPLATE_FILE_BYTES.toLocaleString("en-US")} bytes one template file may be.`,
+    );
+    expect(
+      templateBudgetRefusals([entry(1, MAX_TEMPLATE_FILE_BYTES + MIB)], 0)[0]?.message,
+    ).toContain("is 6.0 MiB, over the 5.0 MiB");
   });
 
   it("measures the gateway's quota on the base64 length, with the method's text and an allowance", () => {
@@ -245,6 +251,11 @@ describe("templateBudgetRefusals", () => {
     const refusals = templateBudgetRefusals([entry(1, size), entry(2, size + 30)], requestBytes);
     expect(refusals.map((refusal) => refusal.index)).toEqual([2]);
     expect(refusals[0]?.message).toContain("base64-encoded");
+    // Just over the quota: the request's size and the quota print apart.
+    expect(refusals[0]?.message).not.toContain("10.0 MiB");
+    expect(refusals[0]?.message).toContain(
+      `over the ${GATEWAY_REQUEST_LIMIT_BYTES.toLocaleString("en-US")} bytes the hosted API's gateway takes`,
+    );
     expect(refusals[0]?.hint).toContain("7.4 MiB");
     // Raw bytes the runner would take: the encoded length is what binds.
     expect(2 * size + 30).toBeLessThan(MAX_TEMPLATE_FILES_TOTAL_BYTES);

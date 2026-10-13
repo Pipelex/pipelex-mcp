@@ -39,12 +39,16 @@ import {
   itemToolError,
   looksLikeImageKey,
   parseAllowHttpOverride,
+  resolveMethodFiles,
   resolveSubmittedFiles,
   storageKeyOf,
   summaryForToolError,
   toolResultContent,
   validateMethodSelectorRequest,
   validateRunIdRequest,
+  withFilesSent,
+  failedBeforeSending,
+  markUnsent,
 } from "./shared.js";
 import type { ErrorSummaries, FileResolver, ToolError } from "./shared.js";
 import type {
@@ -414,6 +418,257 @@ describe("resolveSubmittedFiles with template files", () => {
   });
 });
 
+describe("resolveMethodFiles", () => {
+  const SENT = ["m/main.mthds", "m/templates/a.html"];
+  const folderResolver: FileResolver = {
+    resolve: () => Promise.reject(new Error("a folder is not read file by file")),
+    resolveMethodDir: (methodDir) =>
+      Promise.resolve({
+        ok: true,
+        files: [{ path: `${methodDir}/main.mthds`, content: 'domain = "demo"' }],
+        resources: { "templates/a.html": new Uint8Array([60, 112, 62]) },
+        sent: SENT,
+      }),
+  };
+
+  it("resolves the files union as before when no folder is passed", async () => {
+    const resolution = await resolveMethodFiles(
+      { files: [{ content: 'domain = "demo"' }] },
+      folderResolver,
+      "one_selector",
+    );
+
+    expect(resolution).toEqual({
+      files: [{ content: 'domain = "demo"' }],
+      resources: {},
+      errors: [],
+    });
+  });
+
+  it("hands a folder's files, templates and listing on, each file labelled by its path", async () => {
+    const resolution = await resolveMethodFiles({ method_dir: "m" }, folderResolver, "run_source");
+
+    expect(resolution).toEqual({
+      files: [{ content: 'domain = "demo"', uri: "m/main.mthds" }],
+      resources: { "templates/a.html": new Uint8Array([60, 112, 62]) },
+      errors: [],
+      sent: SENT,
+    });
+  });
+
+  it("refuses a blank folder before reading anything", async () => {
+    const resolution = await resolveMethodFiles(
+      { method_dir: "  " },
+      { resolve: () => Promise.reject(new Error("never")) },
+      "one_selector",
+    );
+
+    expect(resolution.errors).toEqual([
+      expect.objectContaining({
+        class: "input_domain",
+        location: "method_dir",
+        message: "method_dir must not be empty when supplied.",
+      }),
+    ]);
+  });
+
+  it("refuses a folder beside files or an address on every tool, at the second field", async () => {
+    for (const rule of ["one_selector", "run_source"] as const) {
+      const resolution = await resolveMethodFiles(
+        {
+          method_dir: "m",
+          files: [{ content: 'domain = "demo"' }],
+          method_ref: "github.com/acme/methods/invoice",
+        },
+        folderResolver,
+        rule,
+      );
+
+      expect(resolution.errors.map((error) => error.location)).toEqual([
+        "method_dir",
+        "method_ref",
+      ]);
+      expect(resolution.errors[0]?.message).toContain(
+        "method_dir and files are mutually exclusive",
+      );
+      expect(resolution.sent).toBeUndefined();
+    }
+  });
+
+  it("refuses a folder beside a method_id on the tooling tools, and pairs them on a run", async () => {
+    const tooling = await resolveMethodFiles(
+      { method_dir: "m", method_id: "mt_abc123" },
+      folderResolver,
+      "one_selector",
+    );
+    expect(tooling.errors).toEqual([
+      expect.objectContaining({ location: "method_id", retryable: false }),
+    ]);
+
+    const run = await resolveMethodFiles(
+      { method_dir: "m", method_id: "mt_abc123" },
+      folderResolver,
+      "run_source",
+    );
+    expect(run.errors).toEqual([]);
+    expect(run.sent).toEqual(SENT);
+  });
+
+  it("says when a deployment cannot read a folder", async () => {
+    const resolution = await resolveMethodFiles({ method_dir: "m" }, undefined, "one_selector");
+
+    expect(resolution.errors).toEqual([
+      expect.objectContaining({
+        class: "input_domain",
+        location: "method_dir",
+        message:
+          "This deployment cannot read a folder from disk; submit the method's files instead.",
+      }),
+    ]);
+  });
+
+  it("locates every refusal of the folder at method_dir", async () => {
+    const refusing: FileResolver = {
+      resolve: () => Promise.reject(new Error("never")),
+      resolveMethodDir: () =>
+        Promise.resolve({
+          ok: false,
+          refusals: [
+            { message: "first", hint: "one" },
+            { message: "second", hint: "two" },
+          ],
+        }),
+    };
+
+    const resolution = await resolveMethodFiles({ method_dir: "m" }, refusing, "one_selector");
+
+    expect(resolution.errors).toEqual([
+      {
+        class: "input_domain",
+        location: "method_dir",
+        message: "first",
+        hint: "one",
+        retryable: false,
+      },
+      {
+        class: "input_domain",
+        location: "method_dir",
+        message: "second",
+        hint: "two",
+        retryable: false,
+      },
+    ]);
+  });
+});
+
+describe("withFilesSent", () => {
+  const error = (location?: string): ToolError => ({
+    class: "input_domain",
+    ...(location === undefined ? {} : { location }),
+    message: "m",
+    hint: "h",
+    retryable: false,
+  });
+
+  it("returns a result whose method came from files unchanged", () => {
+    const result = { structuredContent: { status: "error", errors: [error("files")] } };
+
+    expect(withFilesSent(result, undefined)).toBe(result);
+  });
+
+  it("lists the files sent and relocates the errors that named files to method_dir", () => {
+    const result: {
+      structuredContent: { status: string; errors?: ToolError[]; files_sent?: string[] };
+    } = {
+      structuredContent: {
+        status: "error",
+        errors: [error("files"), error("files[2].content"), error("method_id"), error()],
+      },
+    };
+
+    const listed = withFilesSent(result, ["m/main.mthds"]);
+
+    expect(listed.structuredContent.files_sent).toEqual(["m/main.mthds"]);
+    expect(listed.structuredContent.errors?.map((item) => item.location)).toEqual([
+      "method_dir",
+      "method_dir",
+      "method_id",
+      undefined,
+    ]);
+  });
+
+  it("lists no file on a result marked unsent, and still relocates its errors", () => {
+    const result: {
+      structuredContent: { status: string; errors?: ToolError[]; files_sent?: string[] };
+    } = markUnsent({ structuredContent: { status: "error", errors: [error("files")] } });
+
+    const bare = withFilesSent(result, ["m/main.mthds"]);
+
+    expect(bare.structuredContent).not.toHaveProperty("files_sent");
+    expect(bare.structuredContent.errors?.[0]?.location).toBe("method_dir");
+  });
+
+  it("reads only the SDK's refusal of an argument as a failure before sending", () => {
+    expect(failedBeforeSending(new RequestArgumentError("bad base URL"))).toBe(true);
+    expect(
+      failedBeforeSending(new ApiUnreachableError("reset", DEFAULT_API_URL, "ECONNRESET")),
+    ).toBe(false);
+    expect(failedBeforeSending(new Error("anything else"))).toBe(false);
+  });
+
+  it("lists the files sent on a produced verdict, which carries no errors", () => {
+    const result: { structuredContent: { status: string; files_sent?: string[] } } = {
+      structuredContent: { status: "ok" },
+    };
+
+    const listed = withFilesSent(result, ["m/main.mthds"]);
+
+    expect(listed.structuredContent).toEqual({ status: "ok", files_sent: ["m/main.mthds"] });
+  });
+});
+
+describe("toolResultContent", () => {
+  it("closes the summary with every file a folder sent, after the errors", () => {
+    const [content] = toolResultContent(
+      "Validation was not run.",
+      [error()],
+      ["m/main.mthds", "m/templates/a `b`.html"],
+    );
+
+    expect(content.text).toBe(
+      [
+        "Validation was not run.",
+        "",
+        "- `method_dir` — m",
+        "  *Hint: h*",
+        "",
+        "## Files sent",
+        "",
+        "Read from the method's folder and sent, and nothing else from it:",
+        "",
+        "- `m/main.mthds`",
+        // A backtick in a path cannot close the span it is shown in.
+        "- ``m/templates/a `b`.html``",
+      ].join("\n"),
+    );
+
+    function error(): ToolError {
+      return {
+        class: "input_domain",
+        location: "method_dir",
+        message: "m",
+        hint: "h",
+        retryable: false,
+      };
+    }
+  });
+
+  it("adds no files-sent section when no folder was read", () => {
+    expect(toolResultContent("Done.", [], [])[0].text).toBe("Done.");
+    expect(toolResultContent("Done.")[0].text).toBe("Done.");
+  });
+});
+
 describe("toolResultContent", () => {
   it("returns just the summary when there are no errors (success)", () => {
     expect(toolResultContent("# Validation passed")).toEqual([
@@ -510,7 +765,9 @@ describe("validateMethodSelectorRequest", () => {
     expect(errors).toHaveLength(1);
     expect(errors[0]?.class).toBe("input_domain");
     expect(errors[0]?.location).toBe("files");
-    expect(errors[0]?.message).toBe("Provide MTHDS files, a method_ref address, or a method_id.");
+    expect(errors[0]?.message).toBe(
+      "Provide a method folder, MTHDS files, a method_ref address, or a method_id.",
+    );
     expect(errors[0]?.hint).toContain("github.com/");
   });
 

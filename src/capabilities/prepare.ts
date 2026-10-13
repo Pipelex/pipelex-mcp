@@ -17,15 +17,20 @@ import {
   bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
+  filesSentSchema,
   inputsPathSchema,
+  methodDirInputSchema,
   resolveInputsSource,
   hasTemplateFiles,
-  resolveSubmittedFiles,
+  resolveMethodFiles,
   resourcesOption,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
+  withFilesSent,
+  failedBeforeSending,
+  markUnsent,
 } from "./shared.js";
 import type {
   ApiConfig,
@@ -42,18 +47,19 @@ import type { TemplateFiles } from "./template-files.js";
 import { MAX_UPLOAD_BYTES, SizeGuardedPipelexApiClient, formatMib } from "./upload-ceiling.js";
 
 export const mthdsPrepareInputsInputSchema = {
+  method_dir: methodDirInputSchema("one_selector"),
   files: bundleFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
     .describe(
-      `Published method address — ${METHOD_REF_GRAMMAR} — the signature source. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of files / method_ref / method_id.`,
+      `Published method address — ${METHOD_REF_GRAMMAR} — the signature source. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of method_dir / files / method_ref / method_id.`,
     ),
   method_id: z
     .string()
     .optional()
     .describe(
-      `Catalog id (mt_…) of a registered method — the signature source, resolved server-side and requiring an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of files / method_ref / method_id.`,
+      `Catalog id (mt_…) of a registered method — the signature source, resolved server-side and requiring an API key (the catalog is org-scoped). ${METHOD_ID_SELECTOR_SENTENCE} Supply exactly ONE of method_dir / files / method_ref / method_id.`,
     ),
   pipe_ref: z
     .string()
@@ -90,12 +96,14 @@ const prepareStructuredContentSchema = z.object({
       "The pipelex-storage:// uris of the assets uploaded this call; [] when all inputs pass through.",
     ),
   method_version: methodVersionReportSchema,
+  files_sent: filesSentSchema,
   errors: z.array(toolErrorSchema).optional(),
 });
 
 export const mthdsPrepareInputsOutputSchema = prepareStructuredContentSchema;
 
 export interface MthdsPrepareInputsInput {
+  method_dir?: string;
   files?: SubmittedFileInput[];
   method_ref?: string;
   method_id?: string;
@@ -123,6 +131,8 @@ export interface PrepareStructuredContent {
   uploads?: string[];
   /** By-id calls only: the content whose signature the inputs were prepared against, when this server can tell. */
   method_version?: MethodVersionReport;
+  /** Calls on a method folder only: every file read from it and sent. */
+  files_sent?: string[];
   errors?: ToolError[];
 }
 
@@ -275,7 +285,7 @@ export async function prepareMthdsInputs(
   input: MthdsPrepareInputsInput,
   context: PrepareContext = buildPrepareContext(),
 ): Promise<PrepareResult> {
-  const resolution = await resolveSubmittedFiles(input.files ?? [], context.resolver);
+  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector");
   const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
     required: true,
   });
@@ -298,6 +308,14 @@ export async function prepareMthdsInputs(
     return errorResult("Inputs were not prepared: request input is invalid.", inputErrors);
   }
 
+  return withFilesSent(await requestPreparedInputs(request, context), resolution.sent);
+}
+
+/** The SDK's `prepareInputs` for a request that passed its checks, and the projection of what it prepared. */
+async function requestPreparedInputs(
+  request: ResolvedPrepareRequest,
+  context: PrepareContext,
+): Promise<PrepareResult> {
   // Classify options follow the request's selector shape, exactly as
   // mthds_validate and mthds_codegen do — each failure locates at the field
   // that caused it.
@@ -310,8 +328,9 @@ export async function prepareMthdsInputs(
 
   let prepared: PreparedInputs;
   let plan: SelectorPlan | undefined;
+  let client: PrepareClient | undefined;
   try {
-    const client = prepareClient(context);
+    client = prepareClient(context);
     let sent = request;
     if (request.method_id !== undefined) {
       // A bare id reads the draft on a platform that does not resolve version
@@ -344,7 +363,10 @@ export async function prepareMthdsInputs(
       bundleResources: hasTemplateFiles(request.resources),
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
-    return errorResult(summaryForError(error), [error]);
+    const failed = errorResult(summaryForError(error), [error]);
+    // A client that could not be built, or an argument refused before
+    // sending, sent no file of a folder.
+    return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
 
   return await withMethodContent(
@@ -380,7 +402,7 @@ function prepareSelectorOf(request: ResolvedPrepareRequest): PrepareSelector {
   // broke, and this lands in the capability's own catch as a classified
   // no-verdict instead.
   throw new InputPreparationError(
-    "Cannot prepare inputs: no method selector. Supply exactly one of files, method_ref or method_id.",
+    "Cannot prepare inputs: no method selector. Supply exactly one of method_dir, files, method_ref or method_id.",
   );
 }
 
@@ -431,9 +453,43 @@ export function validatePrepareInputsRequest(input: ResolvedPrepareRequest): Too
       hint: "Pass a qualified domain.pipe_code, or omit pipe_ref to default to the closure's main_pipe.",
       retryable: false,
     });
+  } else if (input.pipe_ref !== undefined) {
+    const refusal = pipeRefRefusal(input.pipe_ref.trim());
+    if (refusal !== undefined) errors.push(refusal);
   }
 
   return errors;
+}
+
+/**
+ * The SDK's `prepareInputs` refuses two spellings of `pipe_ref` before any
+ * request (`normalizePipeRef`): an `alias->domain.pipe_code` ref, since
+ * preparation covers the method's own pipes and not a dependency package's,
+ * and a bare `pipe_code`, since a request names a pipe by its qualified ref.
+ * Refused here first, with the SDK's reasons, so the refusal is the tool's own
+ * request error: a folder's files are then known never to have left the
+ * machine, where the SDK's `InputPreparationError` cannot say whether they did.
+ */
+function pipeRefRefusal(pipeRef: string): ToolError | undefined {
+  if (pipeRef.includes("->")) {
+    return {
+      class: "input_domain",
+      location: "pipe_ref",
+      message: `pipe_ref "${pipeRef}" names a dependency package's pipe; preparation covers the method's own pipes.`,
+      hint: "Name one of the method's own pipes as domain.pipe_code, or omit pipe_ref to default to the method's main_pipe.",
+      retryable: false,
+    };
+  }
+  if (!pipeRef.includes(".")) {
+    return {
+      class: "input_domain",
+      location: "pipe_ref",
+      message: `pipe_ref must be qualified (domain.pipe_code), got the bare "${pipeRef}".`,
+      hint: "Qualify the pipe with its domain, as domain.pipe_code, or omit pipe_ref to default to the method's main_pipe.",
+      retryable: false,
+    };
+  }
+  return undefined;
 }
 
 export function prepareInputsResult(
@@ -492,7 +548,11 @@ function summaryForError(error: ToolError): string {
 export function prepareInputsToolResult(result: PrepareResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(result.summary, result.structuredContent.errors),
+    content: toolResultContent(
+      result.summary,
+      result.structuredContent.errors,
+      result.structuredContent.files_sent,
+    ),
     isError: result.structuredContent.status === "error",
   };
 }

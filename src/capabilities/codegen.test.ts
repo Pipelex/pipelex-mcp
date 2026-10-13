@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
+import { ApiResponseError, ApiUnreachableError, RequestArgumentError } from "@pipelex/sdk";
 import type { CodegenRequest, CodegenResponse, CodegenValidReport } from "@pipelex/sdk";
 
 import { resolveWorkshopCredentials } from "../credentials.js";
@@ -19,6 +19,7 @@ import {
   generateMthdsCode,
 } from "./codegen.js";
 import { DEFAULT_API_URL } from "./shared.js";
+import type { FileResolver } from "./shared.js";
 
 /**
  * A REAL engine response, recorded from a live `ts-zod` call — the only kind
@@ -796,6 +797,70 @@ describe("generateMthdsCode path submissions", () => {
     expect(result.structuredContent.status).toBe("ok");
   });
 
+  it("reads a method folder through the resolver and lists every file it sent", async () => {
+    const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    let captured: CodegenRequest | undefined;
+
+    const result = await generateMthdsCode(
+      { method_dir: "methods", target: "ts-zod" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: {
+          async resolve() {
+            throw new Error("a folder is not read file by file");
+          },
+          async resolveMethodDir(methodDir) {
+            return {
+              ok: true,
+              files: [{ path: `${methodDir}/invoice.mthds`, content: 'domain = "invoice"' }],
+              resources: { "templates/invoice.xlsx": XLSX },
+              sent: [`${methodDir}/invoice.mthds`, `${methodDir}/templates/invoice.xlsx`],
+            };
+          },
+        },
+        client: {
+          async codegen(request) {
+            captured = request;
+            return recordedReport;
+          },
+        },
+      },
+    );
+
+    expect(captured?.files).toEqual([
+      { content: 'domain = "invoice"', source: "methods/invoice.mthds" },
+    ]);
+    expect(captured?.resources).toEqual({ "templates/invoice.xlsx": XLSX });
+    expect(result.structuredContent.files_sent).toEqual([
+      "methods/invoice.mthds",
+      "methods/templates/invoice.xlsx",
+    ]);
+    expect(codegenToolResult(result).content[0].text).toContain("## Files sent");
+  });
+
+  it("lists no file of a folder when the request never left the machine", async () => {
+    const unbuilt = await generateMthdsCode(
+      { method_dir: "methods", target: "ts-zod" },
+      { baseUrl: "invalid-no-scheme", resolver: methodFolderResolver() },
+    );
+    expect(unbuilt.structuredContent.status).toBe("error");
+    expect(unbuilt.structuredContent).not.toHaveProperty("files_sent");
+    expect(codegenToolResult(unbuilt).content[0].text).not.toContain("Files sent");
+
+    const refused = await generateMthdsCode(
+      { method_dir: "methods", target: "ts-zod" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: methodFolderResolver(),
+        client: {
+          codegen: () => Promise.reject(new RequestArgumentError("refused before sending")),
+        },
+      },
+    );
+    expect(refused.structuredContent.status).toBe("error");
+    expect(refused.structuredContent).not.toHaveProperty("files_sent");
+  });
+
   it("rejects { path } items instructively without a resolver (hosted)", async () => {
     const result = await generateMthdsCode(
       { files: [{ path: "bundle.mthds" }], target: "ts-zod" },
@@ -1137,3 +1202,20 @@ describe("generateMthdsCode report-shape rules", () => {
     expect(result.structuredContent.errors?.[0]?.message).toContain("types.rb");
   });
 });
+
+/** A resolver reading a method folder as `methods/`, with one template file. */
+function methodFolderResolver(): FileResolver {
+  return {
+    async resolve() {
+      throw new Error("a folder is not read file by file");
+    },
+    async resolveMethodDir(methodDir) {
+      return {
+        ok: true,
+        files: [{ path: `${methodDir}/invoice.mthds`, content: 'domain = "invoice"' }],
+        resources: { "templates/invoice.xlsx": new Uint8Array([0x50, 0x4b, 0x03, 0x04]) },
+        sent: [`${methodDir}/invoice.mthds`, `${methodDir}/templates/invoice.xlsx`],
+      };
+    },
+  };
+}

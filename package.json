@@ -69,6 +69,7 @@
     "@vitest/coverage-v8": "^4.1.9",
     "eslint": "^9.39.4",
     "globals": "^16.5.0",
+    "ignore": "^7.0.10",
     "npm-package-arg": "^13.0.2",
     "prettier": "^3.8.4",
     "tsup": "^8.5.1",

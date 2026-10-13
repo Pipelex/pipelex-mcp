@@ -1,9 +1,14 @@
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ApiResponseError,
   ApiUnreachableError,
   MissingMainStuffError,
+  RequestArgumentError,
   runMayHaveStartedOf,
 } from "@pipelex/sdk";
 import type {
@@ -41,12 +46,14 @@ import {
   RUN_START_ERROR_OPTIONS,
   RUN_STATUS_ERROR_OPTIONS,
   runResultsToolResult,
+  runToolResult,
   startMthdsRun,
   startResult,
   statusResult,
   validateRunRequest,
 } from "./run.js";
 import type { FailedRunState, RunContext } from "./run.js";
+import { localBundleFileResolver } from "../files.js";
 import {
   CALLER_FACING_TIMEOUT_REPORT,
   RECORDED_FAILED_RUNS,
@@ -1890,7 +1897,7 @@ describe("startMthdsRun by method_id", () => {
     expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
     expect(result.structuredContent.errors?.[0]?.location).toBe("files");
     expect(result.structuredContent.errors?.[0]?.message).toBe(
-      "Provide MTHDS files, a method_ref address, or a method_id.",
+      "Provide a method folder, MTHDS files, a method_ref address, or a method_id.",
     );
   });
 
@@ -2769,5 +2776,154 @@ describe("startMthdsRun by method_id, on both platforms", () => {
     expect(
       statusResult({ ...read, method_version: null } as unknown as RunRead).structuredContent,
     ).not.toHaveProperty("method_version");
+  });
+});
+
+describe("startMthdsRun from a method folder", () => {
+  const tempDirs: string[] = [];
+  const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+  const BUNDLE = [
+    'domain = "invoice"',
+    'main_pipe = "render_invoice"',
+    "",
+    "[pipe.render_invoice]",
+    'type = "PipeDocGen"',
+    'description = "Fill the invoice workbook"',
+    'inputs = { invoice = "Invoice" }',
+    'output = "Document"',
+    'template_file = "templates/invoice.xlsx"',
+    "",
+  ].join("\n");
+
+  afterEach(async () => {
+    await Promise.all(
+      tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })),
+    );
+  });
+
+  async function methodFolder(): Promise<string> {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "pipelex-run-dir-")));
+    tempDirs.push(root);
+    await fs.mkdir(path.join(root, "invoice", "templates"), { recursive: true });
+    await fs.writeFile(path.join(root, "invoice", "invoice.mthds"), BUNDLE);
+    await fs.writeFile(path.join(root, "invoice", "templates", "invoice.xlsx"), XLSX);
+    await fs.writeFile(path.join(root, "invoice", "notes.md"), "not part of the method");
+    return root;
+  }
+
+  const SENT = [
+    path.join("invoice", "invoice.mthds"),
+    path.join("invoice", "templates", "invoice.xlsx"),
+  ];
+
+  it("runs the folder with a bare method_id as linkage, and lists every file it sent", async () => {
+    const root = await methodFolder();
+    let seen: PipelexStartOptions | undefined;
+    const context: RunContext = {
+      ...contextWith({
+        start: (options: PipelexStartOptions) => {
+          seen = options;
+          return Promise.resolve({ pipeline_run_id: RUN_ID });
+        },
+      }),
+      resolver: localBundleFileResolver(root),
+    };
+
+    const result = await startMthdsRun({ method_dir: "invoice", method_id: "mt_abc123" }, context);
+
+    expect(seen).toEqual({
+      mthds_contents: [BUNDLE],
+      method_id: "mt_abc123",
+      resources: { "templates/invoice.xlsx": XLSX },
+    });
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      run_id: RUN_ID,
+      files_sent: SENT,
+    });
+    const text = runToolResult(result).content[0].text;
+    expect(text).toContain("## Files sent");
+    expect(text).toContain(`- \`${SENT[1]}\``);
+  });
+
+  it("refuses a suffixed method_id beside a folder, in the folder's words, before starting", async () => {
+    const root = await methodFolder();
+    const context: RunContext = { ...contextWith({}), resolver: localBundleFileResolver(root) };
+
+    const result = await startMthdsRun(
+      { method_dir: "invoice", method_id: "mt_abc123@draft" },
+      context,
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "method_id",
+    });
+    expect(result.structuredContent.errors?.[0]?.message).toContain("Beside method_dir");
+    expect(result.structuredContent.errors?.[0]?.message).toContain("the folder is what runs");
+    expect(result.structuredContent.errors?.[0]?.hint).toContain("drop method_dir");
+    expect(result.structuredContent).not.toHaveProperty("files_sent");
+  });
+
+  it("lists no file of a folder when the start never left the machine", async () => {
+    const root = await methodFolder();
+
+    const unbuilt = await startMthdsRun(
+      { method_dir: "invoice" },
+      { baseUrl: "invalid-no-scheme", resolver: localBundleFileResolver(root) },
+    );
+    expect(unbuilt.structuredContent.status).toBe("error");
+    expect(unbuilt.structuredContent).not.toHaveProperty("files_sent");
+    expect(runToolResult(unbuilt).content[0].text).not.toContain("Files sent");
+
+    const refused = await startMthdsRun(
+      { method_dir: "invoice" },
+      {
+        ...contextWith({
+          start: () => Promise.reject(new RequestArgumentError("refused before sending")),
+        }),
+        resolver: localBundleFileResolver(root),
+      },
+    );
+    expect(refused.structuredContent.status).toBe("error");
+    expect(refused.structuredContent).not.toHaveProperty("files_sent");
+  });
+
+  it("refuses a folder beside method_ref before reading it", async () => {
+    const result = await startMthdsRun(
+      { method_dir: "invoice", method_ref: "github.com/acme/methods/invoice" },
+      { ...contextWith({}), resolver: localBundleFileResolver("/nonexistent-root") },
+    );
+
+    expect(result.structuredContent.errors?.map((error) => error.location)).toEqual(["method_ref"]);
+  });
+
+  it("locates a refusal of what it sent at method_dir, the field the caller passed", async () => {
+    const root = await methodFolder();
+    const tooLarge = new ApiResponseError(
+      "HTTP 413",
+      `${DEFAULT_API_URL}/v1/start`,
+      413,
+      "Content Too Large",
+      "{}",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    );
+    const context: RunContext = {
+      ...contextWith({ start: () => Promise.reject(tooLarge) }),
+      resolver: localBundleFileResolver(root),
+    };
+
+    const result = await startMthdsRun({ method_dir: "invoice" }, context);
+
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "method_dir",
+    });
+    // The files left the machine all the same.
+    expect(result.structuredContent.files_sent).toEqual(SENT);
   });
 });
