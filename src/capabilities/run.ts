@@ -10,6 +10,7 @@ import type {
   PipelexRunResultStart,
   PipelexStartOptions,
   PipeUsageSummary,
+  RunProgress,
   RunRead,
   RunResultArtifact,
   RunResults,
@@ -85,6 +86,13 @@ import {
   statusOnlyFailureMessage,
 } from "./run-failure.js";
 import type { RunFailure } from "./run-failure.js";
+import {
+  progressParagraph,
+  progressReportsStuck,
+  runProgressOf,
+  runProgressSchema,
+} from "./run-progress.js";
+import type { RunProgressProjection } from "./run-progress.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 
 /**
@@ -285,6 +293,16 @@ const runStatusStructuredContentSchema = z.object({
   failure: runFailureSchema
     .optional()
     .describe(`Terminal statuses other than COMPLETED only. ${FAILURE_FIELD_DESCRIPTION}`),
+  progress: runProgressSchema
+    .optional()
+    .describe(
+      "The run's progress snapshot, when the platform serves one: which pipes have run, how far each batch has got, where the run is retrying or stuck, and a one-line summary.",
+    ),
+  progress_invocations_omitted: z
+    .number()
+    .int()
+    .optional()
+    .describe("How many of the snapshot's invocations progress.invocations leaves out."),
   errors: z.array(toolErrorSchema).optional(),
 });
 
@@ -442,6 +460,10 @@ export interface RunStatusStructuredContent {
   method_version?: number | "draft";
   /** Terminal statuses other than COMPLETED, when the run stored an error report. */
   failure?: RunFailure;
+  /** The run's progress snapshot, when the progress read that follows the status read answered. */
+  progress?: RunProgressProjection;
+  /** How many of the snapshot's invocations `progress.invocations` leaves out; absent when none. */
+  progress_invocations_omitted?: number;
   errors?: ToolError[];
 }
 
@@ -524,6 +546,7 @@ export interface RunResultsResult {
 interface RunClient {
   start(options: PipelexStartOptions): Promise<PipelexRunResultStart>;
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
+  getRunProgress(runId: string, options?: { signal?: AbortSignal }): Promise<RunProgress>;
   getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
   /** `GET /v1/version`, read only to word the hint of a refused suffix — a selector is always sent as given; optional on a test seam. */
   version?(): Promise<unknown>;
@@ -917,18 +940,24 @@ export function startResult(
 }
 
 /**
- * Project a self-healing status read. A terminal non-COMPLETED status is a
- * produced verdict, and it carries why the run ended: the status read is where
- * the platform serves the run's stored error report (`RunRead.error`), so the
+ * Project a self-healing status read, with the progress snapshot read after it
+ * when that read answered. A terminal non-COMPLETED status is a produced
+ * verdict, and it carries why the run ended: the status read is where the
+ * platform serves the run's stored error report (`RunRead.error`), so the
  * `failure` object and the summary's sentences come from it. A read whose report
- * is `null` or malformed carries the status alone, and the summary says so.
+ * is `null` or malformed carries the status alone, and the summary says so. The
+ * snapshot, when there is one the projection can read, rides as `progress` and
+ * its summary as a paragraph of its own right after the status (see
+ * `run-progress.ts`).
  */
-export function statusResult(read: RunRead): RunStatusResult {
+export function statusResult(read: RunRead, snapshot?: RunProgress): RunStatusResult {
   const isTerminal = isTerminalRunStatus(read.status);
   const ended = isTerminal && read.status !== "COMPLETED";
   const failure = ended
     ? runFailureOf(read.pipeline_run_id, read.error, read.finished_at)
     : undefined;
+  const projected = snapshot === undefined ? undefined : runProgressOf(snapshot);
+  const progress = projected?.progress;
   // A hosted extension, narrowed rather than trusted like the ack's.
   const methodVersion =
     read.method_version === "draft" ||
@@ -951,15 +980,20 @@ export function statusResult(read: RunRead): RunStatusResult {
     ...(read.finished_at === undefined ? {} : { finished_at: read.finished_at }),
     ...(methodVersion === undefined ? {} : { method_version: methodVersion }),
     ...(failure === undefined ? {} : { failure }),
+    ...(progress === undefined ? {} : { progress }),
+    ...(projected === undefined || projected.omitted === 0
+      ? {}
+      : { progress_invocations_omitted: projected.omitted }),
   };
 
-  return { structuredContent, summary: statusSummary(read, isTerminal, failure) };
+  return { structuredContent, summary: statusSummary(read, isTerminal, failure, progress) };
 }
 
 function statusSummary(
   read: RunRead,
   isTerminal: boolean,
   failure: RunFailure | undefined,
+  progress: RunProgressProjection | undefined,
 ): string {
   const lines: string[] = [];
 
@@ -978,13 +1012,35 @@ function statusSummary(
     );
   }
 
-  if (read.degraded) {
+  if (progress !== undefined) lines.push(progressParagraph(progress));
+
+  if (reassuresDegradedRead(read, progress)) {
     lines.push(
       "Note: this status is the last-known value — the platform's live view was temporarily unreachable. The run itself is unaffected.",
     );
   }
 
   return lines.join("\n\n");
+}
+
+/**
+ * Whether a degraded read gets the reassurance that its status is the last one
+ * recorded and that the run itself is unaffected. That holds only when the
+ * platform could not read the run (`status_unavailable`, or no degradation, which
+ * is how a platform older than it says the same), and never beside a progress
+ * snapshot that reports the run stuck, which a read made a moment later can do.
+ * A run whose workflow task keeps failing (`workflow_task_failing`), or degraded
+ * for a reason this server does not know, is not reassured, since the progress
+ * paragraph's own clause says it is not progressing: whatever this summary says
+ * of a degradation must agree with that clause.
+ */
+function reassuresDegradedRead(
+  read: RunRead,
+  progress: RunProgressProjection | undefined,
+): boolean {
+  if (!read.degraded) return false;
+  const reason = read.degradation?.reason ?? "status_unavailable";
+  return reason === "status_unavailable" && !progressReportsStuck(progress);
 }
 
 /**
@@ -1276,6 +1332,43 @@ export async function readFailedRun(
   runId: string,
   timeoutMs: number = FAILED_RUN_READ_TIMEOUT_MS,
 ): Promise<RunRead | undefined> {
+  return readWithinDeadline((signal) => client.getRunStatus(runId, { signal }), timeoutMs);
+}
+
+/**
+ * How long the progress read after a status read may take before the status
+ * goes out without it. Far under the SDK's own 30 s poll timeout, since the
+ * progress only adds to a status already in hand.
+ */
+export const PROGRESS_READ_TIMEOUT_MS = 5_000;
+
+/**
+ * The one progress read that follows a status read, `GET /v1/runs/{id}/progress`.
+ * Best effort: a read that fails for any reason, a server older than the route
+ * (`RunLifecycleUnavailableError`) and an answer the SDK cannot read among them,
+ * or that takes longer than `timeoutMs`, gives no snapshot, and the status goes
+ * out without one, never as an error.
+ */
+export async function readRunProgress(
+  client: {
+    getRunProgress(runId: string, options?: { signal?: AbortSignal }): Promise<RunProgress>;
+  },
+  runId: string,
+  timeoutMs: number = PROGRESS_READ_TIMEOUT_MS,
+): Promise<RunProgress | undefined> {
+  return readWithinDeadline((signal) => client.getRunProgress(runId, { signal }), timeoutMs);
+}
+
+/**
+ * One read that adds to an answer already in hand: its value, or `undefined`
+ * when it fails or takes longer than `timeoutMs`. The deadline both aborts the
+ * request and stops waiting for it, so a client that ignores the signal cannot
+ * hold the answer either.
+ */
+async function readWithinDeadline<T>(
+  read: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+): Promise<T | undefined> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<undefined>((resolve) => {
@@ -1285,10 +1378,7 @@ export async function readFailedRun(
     }, timeoutMs);
   });
   try {
-    return await Promise.race([
-      client.getRunStatus(runId, { signal: controller.signal }),
-      deadline,
-    ]);
+    return await Promise.race([read(controller.signal), deadline]);
   } catch {
     return undefined;
   } finally {
@@ -1429,7 +1519,12 @@ export function classifyStartError(err: unknown, options: ClassifyErrorOptions):
   return { ...error, retryable: false, hint: START_MAY_HAVE_RUN_HINT };
 }
 
-/** One cheap self-healing status read — `GET /v1/runs/{id}/status`. */
+/**
+ * One cheap self-healing status read — `GET /v1/runs/{id}/status` — then one
+ * best-effort read of the run's progress, `GET /v1/runs/{id}/progress`, whatever
+ * the status: the progress only adds to the status, so its failure leaves the
+ * status to go out alone (`readRunProgress`).
+ */
 export async function getMthdsRunStatus(
   input: RunIdInput,
   context: RunContext = buildRunContext(),
@@ -1440,8 +1535,10 @@ export async function getMthdsRunStatus(
   }
 
   try {
-    const read = await runClient(context).getRunStatus(input.run_id);
-    return statusResult(read);
+    const client = runClient(context);
+    const read = await client.getRunStatus(input.run_id);
+    const progress = await readRunProgress(client, read.pipeline_run_id);
+    return statusResult(read, progress);
   } catch (err) {
     const error = classifyError(err, {
       ...RUN_STATUS_ERROR_OPTIONS,

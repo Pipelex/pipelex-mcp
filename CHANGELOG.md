@@ -2,6 +2,20 @@
 
 This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the Pipelex plugin runs. Up to and including 0.20.0 every release also deployed the hosted console at the same version, so those entries describe both servers. After 0.20.0 the console has its own release track and changelog, kept with the Pipelex connector rather than here, and the `console-vX.Y.Z` tags in this repository's history are its releases from that time; this file and the `vX.Y.Z` tags cover the workshop alone.
 
+## [Unreleased]
+
+### Added
+
+- **`mthds_run_status` says how far a run has got**: after the status, the tool reads the run's progress snapshot from the hosted API and relays it as `progress`, with its status, version, one-line summary, degradation and invocations, each invocation with its path, pipe, status and times, a batch's item counts, a condition's outcome and where it is retrying or stuck, and the Markdown gives the summary a paragraph of its own right after the status, `Progress: <summary>`, worded by the platform. At most 50 invocations are listed, those running or in trouble first with their ancestors, and `progress_invocations_omitted` counts the rest; the read is bounded at five seconds, and when it fails, or the hosted API is older than the progress route, the status comes back without progress, never as an error. The pinned contract changes accordingly: the tool's output gains `progress` and `progress_invocations_omitted`, and its description says it tells how far the run has got.
+
+### Changed
+
+- **`@pipelex/sdk` 0.40.0 → 0.44.0**: 0.44.0 reads a run's progress snapshot from the hosted API, which the `mthds_run_status` entry above is built on.
+
+### Fixed
+
+- **A run that is not progressing is no longer called unaffected**: `mthds_run_status` told every degraded run that the run itself was unaffected; it now says so only when the platform could not read the run, and not when the run's workflow task keeps failing, when it is degraded for a reason the tool does not know, or when its progress reports it stuck.
+
 ## [0.25.0] - 2026-10-13
 
 ### Added

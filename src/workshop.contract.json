@@ -1671,7 +1671,7 @@
     },
     {
       "name": "mthds_run_status",
-      "description": "Check on a durable MTHDS run by its run id — one cheap status read. Honor the retry hint in the response instead of polling in a tight loop.",
+      "description": "Check on a durable MTHDS run by its run id: its status and how far it has got, such as which step is running and how many items of a batch are done. Honor the retry hint in the response instead of polling in a tight loop.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1809,6 +1809,281 @@
               "run_id"
             ],
             "additionalProperties": false
+          },
+          "progress": {
+            "description": "The run's progress snapshot, when the platform serves one: which pipes have run, how far each batch has got, where the run is retrying or stuck, and a one-line summary.",
+            "type": "object",
+            "properties": {
+              "pipeline_run_id": {
+                "type": "string"
+              },
+              "mode": {
+                "type": "string",
+                "description": "\"live\" on the hosted API."
+              },
+              "status": {
+                "type": "string",
+                "description": "pending, running, succeeded, failed or canceled."
+              },
+              "version": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "Grows with each progress event the run records: of two snapshots, the higher version is the newer."
+              },
+              "assembled_at": {
+                "type": "string",
+                "description": "When the platform projected the snapshot."
+              },
+              "summary": {
+                "type": "string",
+                "description": "One line saying how far the run has got, which the summary repeats. Show it as it is; never parse it."
+              },
+              "degradation": {
+                "description": "The run status's degradation, when the run reads degraded.",
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "description": "Why the run reads degraded: \"workflow_task_failing\" (the run is not making progress) or \"status_unavailable\" (the platform could not read the run, so its status is the last one recorded). An open set."
+                  },
+                  "message": {
+                    "description": "The platform's account, to show as it is.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "failed_attempts": {
+                    "description": "How many times in a row the run has failed to advance.",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "failing_since": {
+                    "description": "When that series of failures began.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "ends_at": {
+                    "description": "When the platform ends the run as failed if it is still failing then.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "reason"
+                ],
+                "additionalProperties": false
+              },
+              "invocations": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "description": "The invocation's path: the entry pipe's pipe_ref, then one segment per controller level (step_<n>, branch_<n>, item_<n>, outcome_<key>, default), joined by /."
+                    },
+                    "pipe_code": {
+                      "type": "string"
+                    },
+                    "pipe_ref": {
+                      "type": "string"
+                    },
+                    "pipe_type": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "description": "scheduled, running, succeeded, failed, skipped or canceled."
+                    },
+                    "started_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "ended_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "step_count": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "branch_count": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "skip_reason": {
+                      "type": "string"
+                    },
+                    "batch": {
+                      "description": "On a batch that has fanned out, its items' counts.",
+                      "type": "object",
+                      "properties": {
+                        "total": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "done": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "running": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "failed": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "total",
+                        "done",
+                        "running",
+                        "failed"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "condition": {
+                      "description": "On a condition that has resolved, the outcome it took; null for its default.",
+                      "type": "object",
+                      "properties": {
+                        "selected_outcome": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "selected_outcome"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "attempts": {
+                      "description": "How many times its work has been tried, when more than once.",
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "last_failure": {
+                      "description": "The latest failure of its work.",
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "at": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "degradation": {
+                      "description": "The run is stuck at this invocation.",
+                      "type": "object",
+                      "properties": {
+                        "reason": {
+                          "type": "string",
+                          "description": "Why the run reads degraded: \"workflow_task_failing\" (the run is not making progress) or \"status_unavailable\" (the platform could not read the run, so its status is the last one recorded). An open set."
+                        },
+                        "message": {
+                          "description": "The platform's account, to show as it is.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "failed_attempts": {
+                          "description": "How many times in a row the run has failed to advance.",
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "failing_since": {
+                          "description": "When that series of failures began.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "ends_at": {
+                          "description": "When the platform ends the run as failed if it is still failing then.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "reason"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "pipe_code",
+                    "pipe_ref",
+                    "pipe_type",
+                    "status",
+                    "started_at",
+                    "ended_at"
+                  ],
+                  "additionalProperties": false
+                },
+                "description": "Invocations of pipes in the run, each listed after its ancestors: at most 50, those running or in trouble kept first."
+              }
+            },
+            "required": [
+              "pipeline_run_id",
+              "mode",
+              "status",
+              "version",
+              "assembled_at",
+              "summary",
+              "invocations"
+            ],
+            "additionalProperties": false
+          },
+          "progress_invocations_omitted": {
+            "description": "How many of the snapshot's invocations progress.invocations leaves out.",
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
           },
           "errors": {
             "type": "array",
