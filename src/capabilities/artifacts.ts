@@ -865,6 +865,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "The run could not be saved: the Pipelex API returned an error.",
   paywall: "The run could not be saved: the organization's Pipelex plan does not cover this call.",
   auth: "The run could not be saved: the Pipelex API key is missing or was refused.",
+  role: "The run could not be saved: your role in this organization does not allow this.",
 };
 
 /**
@@ -879,6 +880,7 @@ const FILES_ERROR_SUMMARIES: ErrorSummaries = {
   paywall:
     "The run's files could not be saved: the organization's Pipelex plan does not cover this call.",
   auth: "The run's files could not be saved: the Pipelex API key is missing or was refused.",
+  role: "The run's files could not be saved: your role in this organization does not allow this.",
 };
 
 function errorResult(summary: string, errors: ToolError[]): ArtifactsResult {

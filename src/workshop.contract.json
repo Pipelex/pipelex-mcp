@@ -109,11 +109,12 @@
                   ]
                 },
                 "kind": {
-                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                   "type": "string",
                   "enum": [
                     "paywall",
-                    "auth"
+                    "auth",
+                    "role"
                   ]
                 },
                 "location": {
@@ -364,11 +365,12 @@
                   ]
                 },
                 "kind": {
-                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                   "type": "string",
                   "enum": [
                     "paywall",
-                    "auth"
+                    "auth",
+                    "role"
                   ]
                 },
                 "location": {
@@ -629,11 +631,12 @@
                     ]
                   },
                   "kind": {
-                    "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                    "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                     "type": "string",
                     "enum": [
                       "paywall",
-                      "auth"
+                      "auth",
+                      "role"
                     ]
                   },
                   "location": {
@@ -711,11 +714,12 @@
                   ]
                 },
                 "kind": {
-                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                   "type": "string",
                   "enum": [
                     "paywall",
-                    "auth"
+                    "auth",
+                    "role"
                   ]
                 },
                 "location": {
@@ -918,11 +922,12 @@
                   ]
                 },
                 "kind": {
-                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                   "type": "string",
                   "enum": [
                     "paywall",
-                    "auth"
+                    "auth",
+                    "role"
                   ]
                 },
                 "location": {
@@ -1203,11 +1208,12 @@
                   ]
                 },
                 "kind": {
-                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                   "type": "string",
                   "enum": [
                     "paywall",
-                    "auth"
+                    "auth",
+                    "role"
                   ]
                 },
                 "location": {
@@ -1396,11 +1402,12 @@
                   ]
                 },
                 "kind": {
-                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                   "type": "string",
                   "enum": [
                     "paywall",
-                    "auth"
+                    "auth",
+                    "role"
                   ]
                 },
                 "location": {
@@ -1622,11 +1629,12 @@
                   ]
                 },
                 "kind": {
-                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                   "type": "string",
                   "enum": [
                     "paywall",
-                    "auth"
+                    "auth",
+                    "role"
                   ]
                 },
                 "location": {
@@ -2099,11 +2107,12 @@
                   ]
                 },
                 "kind": {
-                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                   "type": "string",
                   "enum": [
                     "paywall",
-                    "auth"
+                    "auth",
+                    "role"
                   ]
                 },
                 "location": {
@@ -2362,11 +2371,12 @@
                   ]
                 },
                 "kind": {
-                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                   "type": "string",
                   "enum": [
                     "paywall",
-                    "auth"
+                    "auth",
+                    "role"
                   ]
                 },
                 "location": {
@@ -2595,11 +2605,12 @@
                       ]
                     },
                     "kind": {
-                      "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                      "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                       "type": "string",
                       "enum": [
                         "paywall",
-                        "auth"
+                        "auth",
+                        "role"
                       ]
                     },
                     "location": {
@@ -2653,11 +2664,12 @@
                   ]
                 },
                 "kind": {
-                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                   "type": "string",
                   "enum": [
                     "paywall",
-                    "auth"
+                    "auth",
+                    "role"
                   ]
                 },
                 "location": {
@@ -2902,11 +2914,12 @@
                       ]
                     },
                     "kind": {
-                      "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                      "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                       "type": "string",
                       "enum": [
                         "paywall",
-                        "auth"
+                        "auth",
+                        "role"
                       ]
                     },
                     "location": {
@@ -2963,11 +2976,12 @@
                   ]
                 },
                 "kind": {
-                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                   "type": "string",
                   "enum": [
                     "paywall",
-                    "auth"
+                    "auth",
+                    "role"
                   ]
                 },
                 "location": {
@@ -3216,11 +3230,12 @@
                 ]
               },
               "kind": {
-                "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                 "type": "string",
                 "enum": [
                   "paywall",
-                  "auth"
+                  "auth",
+                  "role"
                 ]
               },
               "location": {
@@ -3262,11 +3277,12 @@
                   ]
                 },
                 "kind": {
-                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                   "type": "string",
                   "enum": [
                     "paywall",
-                    "auth"
+                    "auth",
+                    "role"
                   ]
                 },
                 "location": {
@@ -3495,11 +3511,12 @@
                   ]
                 },
                 "kind": {
-                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                   "type": "string",
                   "enum": [
                     "paywall",
-                    "auth"
+                    "auth",
+                    "role"
                   ]
                 },
                 "location": {
@@ -3674,11 +3691,12 @@
                   ]
                 },
                 "kind": {
-                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+                  "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
                   "type": "string",
                   "enum": [
                     "paywall",
-                    "auth"
+                    "auth",
+                    "role"
                   ]
                 },
                 "location": {

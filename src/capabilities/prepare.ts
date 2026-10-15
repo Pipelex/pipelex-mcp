@@ -539,6 +539,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   paywall:
     "Inputs could not be prepared: the organization's Pipelex plan does not cover this call.",
   auth: "Inputs could not be prepared: the Pipelex API key is missing or was refused.",
+  role: "Inputs could not be prepared: your role in this organization does not allow this.",
 };
 
 function summaryForError(error: ToolError): string {

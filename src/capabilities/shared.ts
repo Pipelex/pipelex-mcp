@@ -708,11 +708,15 @@ export type ErrorClass = z.infer<typeof errorClassSchema>;
  *   `config`, since the key is the environment's, yet "the Pipelex API is
  *   unreachable or misconfigured" sends a user who has no key to debug the
  *   network.
+ * - `role`: the platform's `403 role_not_permitted`, the role the key's owner
+ *   holds in its organization refusing the action. It is `config` too, and
+ *   reading it as `auth` would send a user whose key is fine to replace it or
+ *   to log in again, which changes nothing.
  *
  * Adding a member here is how a new such cause gets a headline — never by
  * re-classifying it.
  */
-export const errorKindSchema = z.enum(["paywall", "auth"]);
+export const errorKindSchema = z.enum(["paywall", "auth", "role"]);
 
 export type ErrorKind = z.infer<typeof errorKindSchema>;
 
@@ -721,7 +725,7 @@ export const toolErrorSchema = z.object({
   kind: errorKindSchema
     .optional()
     .describe(
-      "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused.",
+      "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
     ),
   location: z.string().optional(),
   message: z.string(),
@@ -759,9 +763,9 @@ export interface ToolError {
  * A capability's no-verdict headlines: one per {@link ErrorClass}, plus one for
  * every {@link ErrorKind}. Declaring the kind headlines is **mandatory** — that
  * is the point of the type. A capability that forgot one would silently print
- * the connectivity headline for a billing refusal or a missing key, which is
- * the defect this shape exists to make unrepresentable: the miss is a type
- * error, not something a reviewer has to catch.
+ * the connectivity headline for a billing refusal, a missing key or a role
+ * refusal, which is the defect this shape exists to make unrepresentable: the
+ * miss is a type error, not something a reviewer has to catch.
  */
 export type ErrorSummaries = Record<ErrorClass, string> & Record<ErrorKind, string>;
 
@@ -1420,6 +1424,17 @@ const DEFAULT_BAD_REQUEST: NonNullable<ClassifyErrorOptions["badRequest"]> = {
 export const DEFAULT_AUTH_HINT = "Check PIPELEX_API_KEY for the configured API.";
 
 /**
+ * The hint on the platform's `403 role_not_permitted`. It names no role on
+ * purpose: the same code refuses a runner a method change or an unpublished
+ * run, a member an admin action and a caller with no recognised role, and the
+ * server's `detail`, which is the error's message, says which role the caller
+ * holds and what the action needs. It never points at the key or a login,
+ * since neither changes the role.
+ */
+export const ROLE_REFUSAL_HINT =
+  "The API key was accepted: the role its owner holds in this organization does not allow this action, and only an admin of the organization can change that role.";
+
+/**
  * The `error_type`s of the `422`s `POST /v1/pipe-io` refuses a pipe selection
  * with, in the input domain: a `pipe_ref` that names no pipe, or no entry pipe
  * (`EntryPipeNotFoundError`), and a code matching several pipes, or several
@@ -1874,6 +1889,19 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
       message,
       hint: `The inputs reference a file stored by another organization than the one the API key acts for, as when the key changed since the inputs were prepared, after a login for instance. Prepare the inputs again with ${WORKSHOP_TOOL_NAMES.prepareInputs} under the current key, then run again.`,
     });
+  }
+
+  // The platform's refusal by role (`RoleNotPermittedError`): the key was
+  // accepted, and the role its owner holds in the organization does not allow
+  // the action. It answers a runner changing a method or running anything but
+  // a published version, a member taking an admin action, and a caller with no
+  // recognised role, so nothing here names a role: the server's `detail`, the
+  // message, names the caller's and what the action needs. It is caught ahead
+  // of the generic 401/403 arm, whose texture would tell a caller whose key is
+  // fine to replace it or log in again, and ahead of a route's `forbidden`
+  // gate. Its verdict stays the SDK's, read from the platform's members.
+  if (err.status === 403 && err.code === "role_not_permitted") {
+    return toolError(verdict, { kind: "role", message, hint: ROLE_REFUSAL_HINT });
   }
 
   if (err.status === 401 || err.status === 403) {

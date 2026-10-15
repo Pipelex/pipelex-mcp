@@ -656,6 +656,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Validation could not be completed: the Pipelex API returned an error.",
   paywall: "Validation could not start: the organization's Pipelex plan does not cover this call.",
   auth: "Validation could not start: the Pipelex API key is missing or was refused.",
+  role: "Validation could not start: your role in this organization does not allow this.",
 };
 
 function summaryForError(error: ToolError): string {

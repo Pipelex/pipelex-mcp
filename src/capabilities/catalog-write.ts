@@ -572,6 +572,7 @@ const SAVE_ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "The method was not saved: the Pipelex API returned an error.",
   paywall: "The method was not saved: the organization's Pipelex plan does not cover this call.",
   auth: "The method was not saved: the Pipelex API key is missing or was refused.",
+  role: "The method was not saved: your role in this organization does not allow this.",
 };
 
 const GET_ERROR_SUMMARIES: ErrorSummaries = {
@@ -580,6 +581,7 @@ const GET_ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "The method was not fetched: the Pipelex API returned an error.",
   paywall: "The method was not fetched: the organization's Pipelex plan does not cover this call.",
   auth: "The method was not fetched: the Pipelex API key is missing or was refused.",
+  role: "The method was not fetched: your role in this organization does not allow this.",
 };
 
 /**
