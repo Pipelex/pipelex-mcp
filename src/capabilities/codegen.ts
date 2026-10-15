@@ -712,6 +712,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   paywall:
     "Code generation could not start: the organization's Pipelex plan does not cover this call.",
   auth: "Code generation could not start: the Pipelex API key is missing or was refused, or code generation is not enabled for its organization.",
+  role: "Code generation could not start: your role in this organization does not allow this.",
 };
 
 function summaryForError(error: ToolError): string {

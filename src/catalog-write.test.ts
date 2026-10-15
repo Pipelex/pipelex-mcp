@@ -23,6 +23,7 @@ import {
 import {
   buildCatalogWriteContext,
   getMthdsMethod,
+  saveMethodToolResult,
   saveMthdsMethod,
   storedSourceFiles,
 } from "./capabilities/catalog-write.js";
@@ -162,6 +163,28 @@ function refusedKey(route: string): ApiResponseError {
     "unauthorized",
   );
 }
+
+/**
+ * The platform's refusal by role: the key was accepted, and the role its owner
+ * holds does not allow a method change, which is how a runner's save is met.
+ */
+function roleRefusal(route: string, detail: string): ApiResponseError {
+  return new ApiResponseError(
+    "HTTP 403",
+    `https://api-dev.pipelex.com${route}`,
+    403,
+    "Forbidden",
+    "{}",
+    undefined,
+    detail,
+    undefined,
+    "role_not_permitted",
+    { problem: { title: "Forbidden", errorDomain: "config", retryable: false } },
+  );
+}
+
+const RUNNER_CHANGE_DETAIL =
+  "Your role in this organization is runner: it runs the organization's published versions and changes no method.";
 
 /** A client whose every arm throws — each test opts into the one it needs. */
 const clientNotCalled: CatalogWriteClient = {
@@ -1208,6 +1231,63 @@ describe("saveMthdsMethod", () => {
     });
     expect(result.summary).toBe(
       "The method was not saved: the Pipelex API key is missing or was refused.",
+    );
+  });
+
+  it("headlines a draft write refused by role as the role, with the server's sentence", async () => {
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], method_id: "mt_one" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async writeDraft(): Promise<MethodData> {
+            throw roleRefusal("/v1/methods/mt_one/draft", RUNNER_CHANGE_DETAIL);
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({
+      class: "config",
+      kind: "role",
+      message: RUNNER_CHANGE_DETAIL,
+      retryable: false,
+    });
+    expect(error.location).toBeUndefined();
+    expect(result.summary).toBe(
+      "The method was not saved: your role in this organization does not allow this.",
+    );
+    const [content] = saveMethodToolResult(result).content;
+    expect(content.text).toContain(RUNNER_CHANGE_DETAIL);
+    expect(content.text).not.toMatch(/PIPELEX_API_KEY|log ?in/i);
+  });
+
+  it("keeps a create refused by role as the role, with no create retry warning", async () => {
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+
+    const result = await saveMthdsMethod(
+      { files: [{ path: "methods/demo/bundle.mthds" }], name: "Demo" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async createMethod(): Promise<MethodData> {
+            throw roleRefusal("/v1/methods", RUNNER_CHANGE_DETAIL);
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "config", kind: "role", retryable: false });
+    // A refusal is an answer, so nothing was minted and no list-first warning is due.
+    expect(error.hint).not.toContain("CREATE");
+    expect(result.summary).toBe(
+      "The method was not saved: your role in this organization does not allow this.",
     );
   });
 

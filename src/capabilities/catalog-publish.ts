@@ -166,6 +166,7 @@ const PUBLISH_ERROR_SUMMARIES: ErrorSummaries = {
   paywall:
     "The method was not published: the organization's Pipelex plan does not cover this call.",
   auth: "The method was not published: the Pipelex API key is missing or was refused.",
+  role: "The method was not published: your role in this organization does not allow this.",
 };
 
 export async function publishMthdsMethod(

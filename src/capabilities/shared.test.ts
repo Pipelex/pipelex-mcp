@@ -34,6 +34,7 @@ import {
   createPipelexApiClient,
   DEFAULT_API_URL,
   DEFAULT_AUTH_HINT,
+  ROLE_REFUSAL_HINT,
   filesInputSchema,
   imageCandidatesOf,
   itemToolError,
@@ -1596,6 +1597,79 @@ describe("classifyError", () => {
     });
   });
 
+  // The platform's refusal by role answers a runner changing a method, a member
+  // taking an admin action and a caller with no recognised role alike, so the
+  // arm names no role: the server's `detail` says which, and the key, which was
+  // accepted, is never blamed (L-261015-bfe8ec).
+  describe("reads a role refusal as the role, not the key", () => {
+    /** The platform's `RoleNotPermittedError`, as its problem document carries it. */
+    const roleRefusal = (detail?: string) =>
+      refused(403, {
+        type: "https://pipelex.com/errors/role_not_permitted",
+        title: "Forbidden",
+        code: "role_not_permitted",
+        error_domain: "config",
+        retryable: false,
+        ...(detail === undefined ? {} : { detail }),
+      });
+    const runnerDetail =
+      "Your role in this organization is runner: it runs the organization's published versions and changes no method.";
+    const loginTexture = {
+      location: "PIPELEX_API_KEY",
+      hint: "The key saved in `~/.pipelex/.env` was refused. Run `npx -y @pipelex/mcp@latest login` again.",
+    };
+
+    it("tags it kind role, with the server's detail as its message and no locator", async () => {
+      const error = classifyError(await roleRefusal(runnerDetail), { auth: loginTexture });
+
+      expect(error).toEqual({
+        class: "config",
+        kind: "role",
+        message: runnerDetail,
+        hint: ROLE_REFUSAL_HINT,
+        retryable: false,
+      });
+    });
+
+    it("never sends the caller to the key or a login, whatever texture the call carries", async () => {
+      const error = classifyError(await roleRefusal(runnerDetail), {
+        auth: loginTexture,
+        // A route's gate on a 403 (`mthds_codegen`'s) loses to the role too.
+        forbidden: { hint: "Check the key. Or the route is gated." },
+      });
+
+      expect(error.kind).toBe("role");
+      expect(error.location).toBeUndefined();
+      expect(error.hint).toBe(ROLE_REFUSAL_HINT);
+      expect(error.hint).not.toMatch(/PIPELEX_API_KEY|log ?in|replace|check/i);
+    });
+
+    it("assumes no role: a member refused an admin action reads the server's own sentence", async () => {
+      const memberDetail =
+        "Your role in this organization is member: this action needs the admin role.";
+      const error = classifyError(await roleRefusal(memberDetail));
+
+      expect(error).toMatchObject({ class: "config", kind: "role", message: memberDetail });
+      expect(`${error.message} ${error.hint}`).not.toMatch(/runner/i);
+      expect(ROLE_REFUSAL_HINT).not.toMatch(/runner|member|admin role/i);
+    });
+
+    it("falls back to the transport message when the refusal carries no detail", async () => {
+      const error = classifyError(await roleRefusal());
+
+      expect(error).toMatchObject({ class: "config", kind: "role", retryable: false });
+      expect(error.message).toMatch(/403/);
+    });
+
+    it("leaves every other 403 to the key's arm", async () => {
+      const error = classifyError(await refused(403, { code: "forbidden", detail: "Forbidden" }), {
+        auth: loginTexture,
+      });
+
+      expect(error).toMatchObject({ kind: "auth", location: "PIPELEX_API_KEY" });
+    });
+  });
+
   describe("the upload leg", () => {
     it("reads a wrapped plan refusal as the paywall it is, not a passing fault", async () => {
       const err = await uploadFailure(() =>
@@ -1894,6 +1968,7 @@ describe("summaryForToolError", () => {
     runtime: "server headline",
     paywall: "billing headline",
     auth: "key headline",
+    role: "role headline",
   };
 
   it("maps an untagged error by its class", () => {
@@ -1923,6 +1998,20 @@ describe("summaryForToolError", () => {
         summaries,
       ),
     ).toBe("key headline");
+  });
+
+  it("names the role, not the key, for a role refusal", () => {
+    expect(
+      summaryForToolError(
+        {
+          class: "config",
+          kind: "role",
+          message: "Your role in this organization is runner.",
+          retryable: false,
+        },
+        summaries,
+      ),
+    ).toBe("role headline");
   });
 });
 

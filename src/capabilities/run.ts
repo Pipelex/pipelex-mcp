@@ -1644,6 +1644,7 @@ const START_ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Run could not be started: the Pipelex API returned an error.",
   paywall: "Run could not start: the organization's Pipelex plan does not cover this call.",
   auth: "Run could not start: the Pipelex API key is missing or was refused.",
+  role: "Run could not start: your role in this organization does not allow this.",
 };
 
 const STATUS_ERROR_SUMMARIES: ErrorSummaries = {
@@ -1653,6 +1654,7 @@ const STATUS_ERROR_SUMMARIES: ErrorSummaries = {
   paywall:
     "Run status could not be read: the organization's Pipelex plan does not cover this call.",
   auth: "Run status could not be read: the Pipelex API key is missing or was refused.",
+  role: "Run status could not be read: your role in this organization does not allow this.",
 };
 
 const RESULTS_ERROR_SUMMARIES: ErrorSummaries = {
@@ -1662,6 +1664,7 @@ const RESULTS_ERROR_SUMMARIES: ErrorSummaries = {
   paywall:
     "Run results could not be read: the organization's Pipelex plan does not cover this call.",
   auth: "Run results could not be read: the Pipelex API key is missing or was refused.",
+  role: "Run results could not be read: your role in this organization does not allow this.",
 };
 
 function startSummaryForError(error: ToolError): string {

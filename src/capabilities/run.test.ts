@@ -3014,6 +3014,51 @@ describe("startMthdsRun by method_id, on both platforms", () => {
     );
   });
 
+  it("headlines a run of the draft refused by role as the role, with the server's sentence", async () => {
+    const detail =
+      "Your role in this organization is runner: it runs the organization's published versions, mt_…@<n> or the bare id, and not a draft.";
+    const result = await startMthdsRun(
+      { method_id: "mt_abc123@draft" },
+      contextWith({
+        start: () =>
+          Promise.reject(
+            new ApiResponseError(
+              "HTTP 403",
+              `${DEFAULT_API_URL}/v1/start`,
+              403,
+              "Forbidden",
+              "{}",
+              undefined,
+              detail,
+              undefined,
+              "role_not_permitted",
+              {
+                problem: { title: "Forbidden", errorDomain: "config", retryable: false },
+                mayStartRun: true,
+              },
+            ),
+          ),
+      }),
+    );
+
+    const error = result.structuredContent.errors?.[0];
+    expect(error).toMatchObject({
+      class: "config",
+      kind: "role",
+      message: detail,
+      retryable: false,
+    });
+    expect(error?.location).toBeUndefined();
+    // A refusal is an answer: nothing ran, so it is neither a may-have-run start
+    // nor a refused suffix.
+    expect(result.summary).toBe(
+      "Run could not start: your role in this organization does not allow this.",
+    );
+    const text = runToolResult(result).content[0].text;
+    expect(text).toContain(detail);
+    expect(text).not.toMatch(/PIPELEX_API_KEY|log ?in|version suffixes/i);
+  });
+
   it("explains a never-published method's bare id", async () => {
     const result = await startMthdsRun(
       { method_id: "mt_abc123" },

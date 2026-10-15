@@ -320,6 +320,46 @@ describe("publishMthdsMethod", () => {
     expect(publishMethodToolResult(result).isError).toBe(true);
   });
 
+  it("headlines a publish refused by role as the role, with the server's sentence", async () => {
+    const detail =
+      "Your role in this organization is runner: it runs the organization's published versions and changes no method.";
+    const result = await publishMthdsMethod(
+      { method_id: "mt_one", expected_draft_updated_at: TOKEN },
+      contextFor(
+        publishing(async () => {
+          throw new ApiResponseError(
+            "HTTP 403",
+            "https://api-dev.pipelex.com/v1/methods/mt_one/publish",
+            403,
+            "Forbidden",
+            "{}",
+            undefined,
+            detail,
+            undefined,
+            "role_not_permitted",
+            { problem: { title: "Forbidden", errorDomain: "config", retryable: false } },
+          );
+        }),
+      ),
+    );
+
+    const [error] = errorsOf(result);
+    expect(error).toMatchObject({
+      class: "config",
+      kind: "role",
+      message: detail,
+      retryable: false,
+    });
+    expect(error?.location).toBeUndefined();
+    expect(result.summary).toBe(
+      "The method was not published: your role in this organization does not allow this.",
+    );
+    const tool = publishMethodToolResult(result);
+    expect(tool.isError).toBe(true);
+    expect(tool.content[0].text).toContain(detail);
+    expect(tool.content[0].text).not.toMatch(/PIPELEX_API_KEY|log ?in/i);
+  });
+
   it("headlines a refused key as the key, not as connectivity", async () => {
     const result = await publishMthdsMethod(
       { method_id: "mt_one", expected_draft_updated_at: TOKEN },
