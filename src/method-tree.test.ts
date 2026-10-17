@@ -78,6 +78,100 @@ describe("listMethodTree", () => {
     expect(await members()).toEqual(["main.mthds", "steps/node_modules"]);
   });
 
+  // The cases below restate the conformance corpus's run-inputs-* trees
+  // (conformance/tests/method_tree/fixtures/cases/trees/), which mthds-js's
+  // lister is held to, so the swap to it changes no membership.
+  describe("a run's inputs file", () => {
+    it("leaves out inputs.json and inputs.toml at the root and at any depth, and reports them", async () => {
+      await place("main.mthds");
+      await place("inputs.json", '{"invoice": "invoice-1.pdf"}');
+      await place("inputs.toml", 'invoice = "invoice-2.pdf"');
+      await place("examples/README.md");
+      await place("examples/inputs.json");
+      await place("examples/inputs.toml");
+      await place("runs/2026/inputs.json", "{}");
+      await place("examples/invoice-inputs.json");
+
+      const result = await listing();
+
+      expect(result.files.map((file) => file.path)).toEqual([
+        "examples/README.md",
+        "examples/invoice-inputs.json",
+        "main.mthds",
+      ]);
+      expect(result.runInputs).toEqual([
+        "examples/inputs.json",
+        "examples/inputs.toml",
+        "inputs.json",
+        "inputs.toml",
+        "runs/2026/inputs.json",
+      ]);
+      expect(result.symlinks).toEqual([]);
+    });
+
+    it("leaves out a symbolic link of either name unfollowed, dangling or not, and never refuses it", async () => {
+      await place("main.mthds");
+      await place("data/sample.json", '{"invoice": "sample.pdf"}');
+      await fs.symlink(path.join(root, "data", "sample.json"), path.join(root, "inputs.json"));
+      await fs.symlink(path.join(root, "missing.toml"), path.join(root, "data", "inputs.toml"));
+
+      const result = await listing();
+
+      expect(result.files.map((file) => file.path)).toEqual(["data/sample.json", "main.mthds"]);
+      expect(result.symlinks).toEqual([]);
+      expect(result.runInputs).toEqual(["data/inputs.toml", "inputs.json"]);
+    });
+
+    it("keeps a directory of either name, leaving out only an inputs file inside it", async () => {
+      await place("main.mthds");
+      await place("inputs.json/sample.json");
+      await place("inputs.json/inputs.json");
+      await place("docs/inputs.toml/notes.md");
+
+      const result = await listing();
+
+      expect(result.files.map((file) => file.path)).toEqual([
+        "docs/inputs.toml/notes.md",
+        "inputs.json/sample.json",
+        "main.mthds",
+      ]);
+      expect(result.runInputs).toEqual(["inputs.json/inputs.json"]);
+    });
+
+    it("matches the names byte for byte, letter case included", async () => {
+      await place("main.mthds");
+      await place("Inputs.json");
+      await place("INPUTS.TOML");
+      await place("inputs.jsonc");
+      await place("inputs.json.bak");
+      await place("examples/my-inputs.json");
+
+      const result = await listing();
+
+      expect(result.files.map((file) => file.path)).toEqual([
+        "INPUTS.TOML",
+        "Inputs.json",
+        "examples/my-inputs.json",
+        "inputs.json.bak",
+        "inputs.jsonc",
+        "main.mthds",
+      ]);
+      expect(result.runInputs).toEqual([]);
+    });
+
+    it("leaves one out whatever a .gitignore says of it, since a default outranks the patterns", async () => {
+      await place(".gitignore", "inputs.json\n!inputs.toml\n");
+      await place("main.mthds");
+      await place("inputs.json");
+      await place("inputs.toml");
+
+      const result = await listing();
+
+      expect(result.files.map((file) => file.path)).toEqual(["main.mthds"]);
+      expect(result.runInputs).toEqual(["inputs.json", "inputs.toml"]);
+    });
+  });
+
   it("reads a .gitignore with git's semantics: patterns, negation, anchoring, directory-only", async () => {
     await place(".gitignore", ["*.log", "/build", "out/", "!keep.log"].join("\n"));
     await place("main.mthds");

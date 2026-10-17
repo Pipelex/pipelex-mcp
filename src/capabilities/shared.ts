@@ -135,7 +135,7 @@ export function methodDirInputSchema(rule: SelectorRule) {
     .describe(
       "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. " +
         "The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. " +
-        "It skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, and what the .gitignore files inside the folder exclude, and refuses a folder holding a symbolic link it does not skip. " +
+        "It skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, a run's inputs file (inputs.json or inputs.toml, at any depth, a link included), and what the .gitignore files inside the folder exclude, and refuses a folder holding a symbolic link it does not skip. " +
         `Its template files are held to the limits files states, and its .mthds files to the runner's: at most ${MAX_FOLDER_MTHDS_FILES}, of ${MAX_FOLDER_MTHDS_FILE_BYTES / (1024 * 1024)} MiB each. ` +
         `Prefer it to files for a method on disk; the result's files_sent lists every file sent. ${pairing}`,
     );
