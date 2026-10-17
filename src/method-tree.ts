@@ -21,6 +21,13 @@ import type { Ignore } from "ignore";
  * - **it sits under a `__pycache__/` or a `node_modules/` directory**, the
  *   defaults, read as directory-only patterns at any depth, as a `.gitignore`
  *   line would read them;
+ * - **it is named `inputs.json` or `inputs.toml`**, at any depth, a regular
+ *   file or a symbolic link, the link never followed: a run's inputs file,
+ *   which holds one run's real data and never travels with the method, so the
+ *   standard keeps it out of every tree as `run_inputs` (mthds' method-tree.md,
+ *   "Run Inputs Files"). It outranks the `.gitignore` files and is reported in
+ *   `runInputs`; the names match byte for byte, so `Inputs.json` is an ordinary
+ *   member, and a directory of either name excludes nothing;
  * - **it sits under a directory holding a `pyvenv.cfg` file**, which PEP 405
  *   puts at the top of every Python virtual environment, so a `venv/` without
  *   a dot stays out whatever its name; a root holding one is a virtual
@@ -59,6 +66,39 @@ export const DEFAULT_EXCLUDED_DIRECTORIES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The names of a run's inputs file, which the run-inputs default keeps out of
+ * every tree at any depth when the entry is a regular file or a symbolic link,
+ * never followed. The name and the predicate below mirror `mthds-js`'s
+ * `RUN_INPUTS_NAMES` and `isRunInputsFile`, so the swap stays mechanical.
+ */
+export const RUN_INPUTS_NAMES: ReadonlySet<string> = new Set(["inputs.json", "inputs.toml"]);
+
+/** What an entry is, read without following a symbolic link. */
+export type EntryKind = "file" | "directory" | "symlink" | "other";
+
+/** What an `lstat` result is, never following a link. */
+export function entryKindOf(entry: {
+  isSymbolicLink(): boolean;
+  isFile(): boolean;
+  isDirectory(): boolean;
+}): EntryKind {
+  if (entry.isSymbolicLink()) return "symlink";
+  if (entry.isFile()) return "file";
+  if (entry.isDirectory()) return "directory";
+  return "other";
+}
+
+/**
+ * Whether an entry of this name and kind is a run's inputs file: one named
+ * `inputs.json` or `inputs.toml`, byte for byte, that is a regular file or a
+ * symbolic link. A directory of either name is an ordinary directory, and any
+ * other entry, such as a named pipe, is passed over as every such entry is.
+ */
+export function isRunInputsFile(name: string, kind: EntryKind): boolean {
+  return RUN_INPUTS_NAMES.has(name) && (kind === "file" || kind === "symlink");
+}
+
+/**
  * How many members, files and directories, a walk visits before it stops.
  * A method's folder holds a handful of files; a folder past this is a project
  * or a home directory, and the walk is bounded so pointing at one costs a
@@ -87,6 +127,8 @@ export interface MethodTreeListing {
   symlinks: string[];
   /** The directories below the root left out for holding a `.git` entry, by tree path. */
   nestedRepositories: string[];
+  /** The run's inputs files left out by the run-inputs default, regular files and links alike, by tree path. */
+  runInputs: string[];
   /** The root itself holds a `pyvenv.cfg` file: it is a virtual environment, and the listing is empty. */
   rootIsVirtualEnvironment: boolean;
   /** The walk stopped at `maxEntries`, the whole root level read first. */
@@ -120,9 +162,7 @@ export async function listMethodTree(
   options: { maxEntries?: number } = {},
 ): Promise<MethodTreeResult> {
   const maxEntries = options.maxEntries ?? MAX_METHOD_TREE_ENTRIES;
-  const files: MethodTreeFile[] = [];
-  const symlinks: string[] = [];
-  const nestedRepositories: string[] = [];
+  const found: Found = { files: [], symlinks: [], nestedRepositories: [], runInputs: [] };
   const queue: { dir: string; rules: Rules }[] = [{ dir: "", rules: NO_RULES }];
   let entries = 0;
 
@@ -142,7 +182,7 @@ export async function listMethodTree(
     // it: it is known only once its own entries are read. The root's own
     // `.git` is the repository the folder belongs to, and leaves it whole.
     if (dir !== "" && names.includes(REPOSITORY_MARKER)) {
-      nestedRepositories.push(dir);
+      found.nestedRepositories.push(dir);
       continue;
     }
     const environment = await holdsFile(absolute, VIRTUAL_ENVIRONMENT_MARKER, names);
@@ -154,7 +194,10 @@ export async function listMethodTree(
       };
     }
     if (environment.holds) {
-      if (dir === "") return listingOf([], [], [], false, true);
+      if (dir === "") {
+        const nothing = { files: [], symlinks: [], nestedRepositories: [], runInputs: [] };
+        return listingOf(nothing, { rootIsVirtualEnvironment: true });
+      }
       continue;
     }
 
@@ -180,24 +223,39 @@ export async function listMethodTree(
         return { ok: false, path: treePath, message: errorMessage(err) };
       }
 
-      if (stats.isSymbolicLink()) {
-        // Git matches a link as a file, never as a directory.
-        if (!isExcluded(rules, treePath, false)) symlinks.push(treePath);
+      const kind = entryKindOf(stats);
+      if (isRunInputsFile(name, kind)) {
+        // A default, so it is decided ahead of the patterns, and a link of
+        // either name is left out unfollowed rather than refused.
+        found.runInputs.push(treePath);
         continue;
       }
-      if (stats.isDirectory()) {
+      if (kind === "symlink") {
+        // Git matches a link as a file, never as a directory.
+        if (!isExcluded(rules, treePath, false)) found.symlinks.push(treePath);
+        continue;
+      }
+      if (kind === "directory") {
         if (DEFAULT_EXCLUDED_DIRECTORIES.has(name) || isExcluded(rules, treePath, true)) continue;
-        if (++entries > maxEntries) return truncatedListing(files, symlinks, nestedRepositories);
+        if (++entries > maxEntries) return listingOf(found, { truncated: true });
         queue.push({ dir: treePath, rules });
         continue;
       }
-      if (!stats.isFile() || isExcluded(rules, treePath, false)) continue;
-      if (++entries > maxEntries) return truncatedListing(files, symlinks, nestedRepositories);
-      files.push({ path: treePath, size: stats.size });
+      if (kind !== "file" || isExcluded(rules, treePath, false)) continue;
+      if (++entries > maxEntries) return listingOf(found, { truncated: true });
+      found.files.push({ path: treePath, size: stats.size });
     }
   }
 
-  return listingOf(files, symlinks, nestedRepositories, false, false);
+  return listingOf(found, {});
+}
+
+/** What a walk has found so far, every list in the order the walk met it. */
+interface Found {
+  files: MethodTreeFile[];
+  symlinks: string[];
+  nestedRepositories: string[];
+  runInputs: string[];
 }
 
 /**
@@ -275,29 +333,20 @@ async function readGitignore(
   }
 }
 
-function truncatedListing(
-  files: MethodTreeFile[],
-  symlinks: string[],
-  nestedRepositories: string[],
-): MethodTreeResult {
-  return listingOf(files, symlinks, nestedRepositories, true, false);
-}
-
+/** The listing of what a walk found, every list sorted byte for byte. */
 function listingOf(
-  files: MethodTreeFile[],
-  symlinks: string[],
-  nestedRepositories: string[],
-  truncated: boolean,
-  rootIsVirtualEnvironment: boolean,
+  found: Found,
+  flags: { truncated?: boolean; rootIsVirtualEnvironment?: boolean },
 ): MethodTreeResult {
   return {
     ok: true,
     listing: {
-      files: sortedByPath(files),
-      symlinks: symlinks.sort(byteOrder),
-      nestedRepositories: nestedRepositories.sort(byteOrder),
-      truncated,
-      rootIsVirtualEnvironment,
+      files: sortedByPath(found.files),
+      symlinks: found.symlinks.sort(byteOrder),
+      nestedRepositories: found.nestedRepositories.sort(byteOrder),
+      runInputs: found.runInputs.sort(byteOrder),
+      truncated: flags.truncated ?? false,
+      rootIsVirtualEnvironment: flags.rootIsVirtualEnvironment ?? false,
     },
   };
 }

@@ -12,6 +12,7 @@ This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the
 ### Changed
 
 - **`@pipelex/sdk` 0.40.0 → 0.44.0**: 0.44.0 reads a run's progress snapshot from the hosted API, which the `mthds_run_status` entry above is built on.
+- **`method_dir` keeps a run's inputs file out of the method**: a regular file or a symbolic link named exactly `inputs.json` or `inputs.toml`, at any depth, is no part of a method's folder, as the MTHDS standard's membership rule says, so a link of either name, which used to refuse the folder, is now left out unfollowed, while a directory of either name, or a file named in another letter case such as `Inputs.json`, stays part of it. Naming the file as `inputs_path` still runs the method with it. The pinned contract changes accordingly: the `method_dir` description names the run's inputs file among what the folder skips.
 
 ### Fixed
 
