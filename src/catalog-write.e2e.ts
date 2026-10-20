@@ -10,8 +10,9 @@
  * `mthds_list_methods` fail every real call while the suite stayed green.
  *
  * The contexts come from `buildLocalToolContexts`, not hand-assembled, so what
- * runs here is the wiring a host actually gets — both resolvers, the save root,
- * and the validation context the save runs its bundle through.
+ * runs here is the wiring a host actually gets — the folder resolver, the save
+ * root, the limits handshake and the validation context the save runs its
+ * folder through.
  *
  * **This suite writes to the catalog, and never creates.** It writes the draft
  * of the durable row `make seed-e2e-fixture` creates, and publishes it, and
@@ -36,7 +37,7 @@
  * script, through the SDK rather than through the tool.
  */
 
-import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -142,7 +143,7 @@ beforeAll(async () => {
   const seeded = asSaved(
     await saveMthdsMethod(
       {
-        files: [{ path: CATALOG_WRITE_BUNDLE_FILE }],
+        method_dir: ".",
         name: CATALOG_WRITE_FIXTURE_NAME,
         method_id: fixtureId,
       },
@@ -183,7 +184,7 @@ describe("mthds_save_method (live)", () => {
 
     const result = await saveMthdsMethod(
       {
-        files: [{ path: CATALOG_WRITE_BUNDLE_FILE }],
+        method_dir: ".",
         name: CATALOG_WRITE_FIXTURE_NAME,
         method_id: fixtureId,
       },
@@ -218,10 +219,7 @@ describe("mthds_save_method (live)", () => {
     expect(pulled.structuredContent.status).toBe("ok");
     const link = await workRootLink();
 
-    const result = await saveMthdsMethod(
-      { files: [{ path: CATALOG_WRITE_BUNDLE_FILE }], method_id: link.method_id },
-      context,
-    );
+    const result = await saveMthdsMethod({ method_dir: ".", method_id: link.method_id }, context);
 
     const saved = asSaved(result);
     expect(saved.is_valid).toBe(true);
@@ -241,7 +239,7 @@ describe("mthds_save_method (live)", () => {
    */
   it("refuses a second create for a directory already linked", async () => {
     const result = await saveMthdsMethod(
-      { files: [{ path: CATALOG_WRITE_BUNDLE_FILE }], name: CATALOG_WRITE_FIXTURE_NAME },
+      { method_dir: ".", name: CATALOG_WRITE_FIXTURE_NAME },
       context,
     );
 
@@ -261,7 +259,7 @@ describe("mthds_save_method (live)", () => {
   it("refuses a draft write whose expected_updated_at is stale", async () => {
     const result = await saveMthdsMethod(
       {
-        files: [{ path: CATALOG_WRITE_BUNDLE_FILE }],
+        method_dir: ".",
         name: CATALOG_WRITE_FIXTURE_NAME,
         method_id: await linkedMethodId(),
         expected_updated_at: "2020-01-01T00:00:00Z",
@@ -295,6 +293,7 @@ describe("mthds_save_method (live)", () => {
     const brokenRoot = await makeTempDir("pipelex-mcp-catalog-write-broken-");
     const brokenContext = contextsFor(brokenRoot);
     await writeFile(join(brokenRoot, "broken.mthds"), INVALID_BUNDLE, "utf8");
+    await mkdir(join(brokenRoot, ".pipelex"));
     await copyFile(join(workRoot, LINK_FILE_NAME), join(brokenRoot, LINK_FILE_NAME));
 
     const before = await catalogRowNamed(CATALOG_WRITE_FIXTURE_NAME);
@@ -302,7 +301,7 @@ describe("mthds_save_method (live)", () => {
     let invalidToken: string | undefined;
     try {
       const result = await saveMthdsMethod(
-        { files: [{ path: "broken.mthds" }], method_id: fixtureId },
+        { method_dir: ".", method_id: fixtureId },
         brokenContext,
       );
 
@@ -324,7 +323,7 @@ describe("mthds_save_method (live)", () => {
       asSaved(
         await saveMthdsMethod(
           {
-            files: [{ path: CATALOG_WRITE_BUNDLE_FILE }],
+            method_dir: ".",
             method_id: fixtureId,
             ...(invalidToken === undefined ? {} : { expected_updated_at: invalidToken }),
           },
@@ -455,5 +454,62 @@ describe("mthds_get_method (live)", () => {
         .join("")
         .trim(),
     ).toBe(CATALOG_WRITE_BUNDLE.trim());
+  });
+});
+
+describe("a method tree (live)", () => {
+  /**
+   * A saved method is its folder's whole tree, so a file that is not a bundle
+   * goes up with the `.mthds` file and comes back byte for byte: uploaded by
+   * hash, stored, listed with a signed link, downloaded and checked against
+   * its hash. Like the invalid save above, it writes only the fixture's
+   * draft, from a folder linked by a copy of the shared root's link, and puts
+   * the draft back in `finally`.
+   */
+  it("saves a tree holding a file that is not a bundle, and pulls it back byte for byte", async () => {
+    const treeRoot = await makeTempDir("pipelex-mcp-catalog-tree-");
+    const sample = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0x10, 0x80, 0x0a]);
+    await writeFile(join(treeRoot, CATALOG_WRITE_BUNDLE_FILE), CATALOG_WRITE_BUNDLE, "utf8");
+    await mkdir(join(treeRoot, "data"));
+    await writeFile(join(treeRoot, "data", "sample.bin"), sample);
+    await mkdir(join(treeRoot, ".pipelex"));
+    await copyFile(join(workRoot, LINK_FILE_NAME), join(treeRoot, LINK_FILE_NAME));
+
+    let treeToken: string | undefined;
+    try {
+      const saved = asSaved(
+        await saveMthdsMethod({ method_dir: ".", method_id: fixtureId }, contextsFor(treeRoot)),
+      );
+      treeToken = saved.updated_at;
+      expect(saved.files_sent).toEqual([join("data", "sample.bin"), CATALOG_WRITE_BUNDLE_FILE]);
+      expect(saved.publish_state).toBe("draft_ahead");
+
+      const pullRoot = await makeTempDir("pipelex-mcp-catalog-tree-pull-");
+      const pulled = await getMthdsMethod(
+        { method_id: fixtureId, output_dir: "." },
+        contextsFor(pullRoot),
+      );
+      const sc = pulled.structuredContent as GetMethodSuccess;
+      expect(sc.status).toBe("ok");
+      expect(sc.files.map((file) => file.path)).toEqual([
+        "data/sample.bin",
+        CATALOG_WRITE_BUNDLE_FILE,
+      ]);
+      expect(new Uint8Array(await readFile(join(pullRoot, "data", "sample.bin")))).toEqual(sample);
+      expect(await readFile(join(pullRoot, CATALOG_WRITE_BUNDLE_FILE), "utf8")).toBe(
+        CATALOG_WRITE_BUNDLE,
+      );
+    } finally {
+      asSaved(
+        await saveMthdsMethod(
+          {
+            method_dir: ".",
+            method_id: fixtureId,
+            ...(treeToken === undefined ? {} : { expected_updated_at: treeToken }),
+          },
+          context,
+        ),
+      );
+    }
   });
 });

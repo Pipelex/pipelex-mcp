@@ -1638,7 +1638,7 @@ describe("validateMthds by selector (server pass-through)", () => {
       serverMessage,
       undefined, // validationErrors
       undefined, // code
-      errorDomain === undefined ? undefined : { problem: { errorDomain } },
+      errorDomain === undefined ? undefined : { details: { errorDomain } },
     );
   }
 

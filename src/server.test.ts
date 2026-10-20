@@ -473,34 +473,38 @@ describe("the workshop's contexts and dispatch", () => {
 
     const contexts = buildLocalToolContexts({ PIPELEX_BASE_URL: "http://127.0.0.1:8081" }, rootDir);
 
-    // Every method-taking tool reads the bundle's template files through one
-    // resolver; the save reads `.mthds` alone, since the catalog stores no
-    // template file.
+    // Every method-taking tool reads the bundle's template files and its
+    // folder through one resolver, and so does the save, whose folder is the
+    // method's whole tree.
     for (const resolver of [
       contexts.inputs.resolver,
       contexts.codegen.resolver,
       contexts.prepare.resolver,
       contexts.run.resolver,
+      contexts.catalogWrite.resolver,
     ]) {
       expect(resolver).toBe(contexts.validation.resolver);
     }
     expect(contexts.validation.resolver?.resolveTemplates).toBeDefined();
-    expect(contexts.catalogWrite.resolver?.resolveTemplates).toBeUndefined();
-    // The same goes for a method's folder: the save takes no folder.
     expect(contexts.validation.resolver?.resolveMethodDir).toBeDefined();
-    expect(contexts.catalogWrite.resolver?.resolveMethodDir).toBeUndefined();
+    expect(contexts.catalogWrite.resolver?.locateMethodDir).toBeDefined();
+    expect(contexts.catalogWrite.resolver?.readMethodTree).toBeDefined();
     await expect(contexts.validation.resolver?.resolve("bundle.mthds")).resolves.toEqual({
       ok: true,
       content: 'domain = "demo"',
     });
-    await expect(contexts.catalogWrite.resolver?.resolve("bundle.mthds")).resolves.toEqual({
-      ok: true,
-      content: 'domain = "demo"',
-    });
-    await expect(contexts.catalogWrite.resolver?.resolve("invoice.xlsx")).resolves.toMatchObject({
-      ok: false,
-      message: "Path is not a .mthds file: invoice.xlsx",
-    });
+    // The tree limits a platform stores a method under are the save's alone:
+    // the method-taking tools list a folder under the workshop's scan bound.
+    expect(contexts.catalogWrite.treeLimits).toBeDefined();
+    for (const context of [
+      contexts.validation,
+      contexts.inputs,
+      contexts.codegen,
+      contexts.prepare,
+      contexts.run,
+    ]) {
+      expect("treeLimits" in context).toBe(false);
+    }
 
     const { client, close } = await connectClient(createLocalServer({ contexts }));
     try {

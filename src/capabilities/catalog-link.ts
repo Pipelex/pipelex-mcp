@@ -6,8 +6,15 @@ import { DatabaseSync } from "node:sqlite";
 import { errorMessage, isMissingPathError } from "./workspace-boundary.js";
 
 /**
- * `pipelex-method.json` — the file that makes a directory *this* saved method,
- * written by `mthds_save_method` and `mthds_get_method` and by nobody else.
+ * `.pipelex/method.json` — the file that makes a method's folder *this* saved
+ * method, written by `mthds_save_method` and `mthds_get_method` and by nobody
+ * else.
+ *
+ * It sits under a dot directory because a save sends the folder's whole tree:
+ * the MTHDS standard's membership rule leaves out every path with a segment
+ * starting with a dot, so the link is never part of the method it names, and
+ * a pull never writes a stored file over it. `.pipelex/` is the workshop's
+ * own; the link is the only file it writes there.
  *
  * It is meant to be COMMITTED. A team shares an organization, so the link is
  * what lets the second person update the method the first one saved instead of
@@ -40,7 +47,40 @@ import { errorMessage, isMissingPathError } from "./workspace-boundary.js";
  * ({@link inLinkTurn}) or in another workshop process ({@link withLinkLock}).
  */
 
-export const LINK_FILE_NAME = "pipelex-method.json";
+/** The directory the link lives in, inside the method's folder. */
+export const LINK_DIRECTORY_NAME = ".pipelex";
+
+/** The link's own name, inside {@link LINK_DIRECTORY_NAME}. */
+const LINK_BASENAME = "method.json";
+
+/** The link's path inside the method's folder, as every message names it. */
+export const LINK_FILE_NAME = `${LINK_DIRECTORY_NAME}/${LINK_BASENAME}`;
+
+/** The link file of the folder `dir`. */
+export function linkFileOf(dir: string): string {
+  return path.join(dir, LINK_DIRECTORY_NAME, LINK_BASENAME);
+}
+
+/**
+ * The name the link had up to `@pipelex/mcp` 0.25.0, at the top of the folder.
+ * It is never read as a link: the workshop keeps no backward compatibility.
+ * It is only looked for, because a folder still holding it reads as unlinked
+ * and its whole tree, the old file included, would be saved as the method.
+ */
+export const LEGACY_LINK_FILE_NAME = "pipelex-method.json";
+
+/** The command that moves a legacy link into place, as every refusal names it. */
+export const LEGACY_LINK_MOVE = `mkdir -p ${LINK_DIRECTORY_NAME} && git mv ${LEGACY_LINK_FILE_NAME} ${LINK_FILE_NAME}`;
+
+/** Whether the folder `dir` still holds a legacy link at its top, whatever kind of entry it is. */
+export async function holdsLegacyLink(dir: string): Promise<boolean> {
+  try {
+    await fs.lstat(path.join(dir, LEGACY_LINK_FILE_NAME));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const LINK_COMMENT =
   "Written by the Pipelex workshop (@pipelex/mcp). This directory is saved on Pipelex as the method below. " +
@@ -137,10 +177,17 @@ async function writeMethodLink(
   dir: string,
   link: MethodLink,
 ): Promise<LinkFileReport> {
-  const absolute = path.join(dir, LINK_FILE_NAME);
+  const absolute = linkFileOf(dir);
   const relative = path.relative(root, absolute);
-  // Containing the DIRECTORY does not contain the leaf: a `pipelex-method.json`
-  // that is already a symlink sends this write wherever it points, which on the
+  // `.pipelex` is made here when it is missing, as a plain directory of the
+  // folder, and refused when it is anything else: a symlink would send the
+  // write wherever it points, even inside the workspace.
+  const holder = await linkDirectoryReason(dir, { create: true });
+  if (holder !== undefined) {
+    return { path: relative, written: false, reason: holder };
+  }
+  // Containing the DIRECTORY does not contain the leaf: a `method.json` that
+  // is already a symlink sends this write wherever it points, which on the
   // save path replaces a file the user owns with link JSON. The refusal lives
   // here rather than at either call site so both inherit it.
   const foreign = await foreignEntryReason(absolute);
@@ -152,6 +199,34 @@ async function writeMethodLink(
     return { path: relative, written: true };
   } catch (err) {
     return { path: relative, written: false, reason: errorMessage(err) };
+  }
+}
+
+/**
+ * Why the folder's `.pipelex` cannot hold the link, or `undefined` when it can:
+ * it must be a plain directory, never a symlink, read with `lstat`. A missing
+ * one holds no link, and `create` makes it.
+ */
+async function linkDirectoryReason(
+  dir: string,
+  options: { create: boolean },
+): Promise<string | undefined> {
+  const holder = path.join(dir, LINK_DIRECTORY_NAME);
+  try {
+    const entry = await fs.lstat(holder);
+    if (entry.isSymbolicLink()) {
+      return `\`${LINK_DIRECTORY_NAME}\` is a symlink, and the link file is never written or read through one`;
+    }
+    return entry.isDirectory() ? undefined : `\`${LINK_DIRECTORY_NAME}\` is not a directory`;
+  } catch (err) {
+    if (!isMissingPathError(err)) return errorMessage(err);
+  }
+  if (!options.create) return undefined;
+  try {
+    await fs.mkdir(holder);
+    return undefined;
+  } catch (err) {
+    return errorMessage(err);
   }
 }
 
@@ -211,7 +286,7 @@ export async function replaceMethodLink(
   expected: LinkRead,
   link: MethodLink,
 ): Promise<LinkReplacement> {
-  const relative = path.relative(root, path.join(dir, LINK_FILE_NAME));
+  const relative = path.relative(root, linkFileOf(dir));
   const current = await readMethodLink(dir);
   if (!sameLinkRead(expected, current)) {
     return {
@@ -608,10 +683,15 @@ export type LinkRead =
  * directory, which is exactly when writing over it is wrong.
  */
 export async function readMethodLink(dir: string): Promise<LinkRead> {
-  const absolute = path.join(dir, LINK_FILE_NAME);
-  // A symlinked link file is `unreadable`, not `none`: something else claims
-  // this directory, and following it would let a foreign file decide ownership
-  // — and then be overwritten by the link write that follows.
+  const absolute = linkFileOf(dir);
+  // A `.pipelex` that is a symlink or no directory is `unreadable`, as a
+  // symlinked link file is: something else claims this directory, and
+  // following it would let a foreign file decide ownership — and then be
+  // overwritten by the link write that follows.
+  const holder = await linkDirectoryReason(dir, { create: false });
+  if (holder !== undefined) {
+    return { kind: "unreadable", reason: holder };
+  }
   const foreign = await foreignEntryReason(absolute);
   if (foreign !== undefined) {
     return { kind: "unreadable", reason: foreign };
@@ -700,33 +780,4 @@ export async function existingDestinations(
     }
   }
   return present;
-}
-
-/**
- * The directory's own top-level `.mthds` files — "does a bundle already live
- * here at all".
- *
- * This is NOT {@link existingDestinations}, and the two are not
- * interchangeable. That one asks about the write set, which is what keeps a
- * pull from landing on a file it would replace; this one asks the ownership
- * question the link file exists for — a directory holding a bundle and no link
- * is somebody else's work, whatever that bundle's files happen to be called.
- * Asking only the first let a pull land beside a stranger's `their_bundle.mthds`
- * and then claim the whole directory with a link file.
- *
- * Top level only, and files only: a nested bundle under a directory of its own
- * is not a claim on this one, and an unreadable directory answers "nothing
- * here", which the write that follows reports for itself.
- */
-export async function bundleFilesIn(dir: string): Promise<string[]> {
-  let entries;
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  return entries
-    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".mthds"))
-    .map((entry) => entry.name)
-    .sort();
 }

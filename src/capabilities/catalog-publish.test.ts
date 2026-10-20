@@ -1,6 +1,6 @@
 import { ApiResponseError } from "@pipelex/sdk";
 import type {
-  MethodData,
+  MethodDetail,
   MethodPublishInput,
   MethodPublishResult,
   MethodVersionSummary,
@@ -13,11 +13,12 @@ import type { CatalogWriteClient, CatalogWriteContext } from "./catalog-write.js
 import type { ToolError } from "./shared.js";
 
 const TOKEN = "2026-09-20T12:00:00Z";
+const DIGEST = `sha256:${"a".repeat(64)}`;
 
 function versionSummary(overrides: Partial<MethodVersionSummary> = {}): MethodVersionSummary {
   return {
     version: 3,
-    source_digest: "a".repeat(64),
+    tree_digest: DIGEST,
     crate_fingerprint: "crate-fp",
     runner_version: "0.78.0",
     description: null,
@@ -27,16 +28,16 @@ function versionSummary(overrides: Partial<MethodVersionSummary> = {}): MethodVe
   };
 }
 
-function method(overrides: Partial<MethodData> = {}): MethodData {
+function method(overrides: Partial<MethodDetail> = {}): MethodDetail {
   return {
     method_id: "mt_one",
     org_id: "org_1",
     created_by_user_id: "user_1",
     name: "Summarize PDF",
-    mthds: "[]",
+    files: [],
     created_at: "2026-09-01T00:00:00Z",
     updated_at: TOKEN,
-    draft_digest: "a".repeat(64),
+    draft_digest: DIGEST,
     latest_version: 3,
     latest_published: versionSummary(),
     ...overrides,
@@ -58,6 +59,7 @@ function publishing(
     renameMethod: notCalled,
     getMethodVersion: notCalled,
     publishMethod: publish,
+    writeMethodTree: notCalled,
     ...extra,
   };
 }
@@ -337,7 +339,7 @@ describe("publishMthdsMethod", () => {
             detail,
             undefined,
             "role_not_permitted",
-            { problem: { title: "Forbidden", errorDomain: "config", retryable: false } },
+            { details: { title: "Forbidden", errorDomain: "config", retryable: false } },
           );
         }),
       ),

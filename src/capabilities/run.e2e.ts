@@ -27,6 +27,7 @@ import {
   PUBLISHED_METHOD_INPUT,
   PUBLISHED_METHOD_INPUT_NAME,
   PUBLISHED_METHOD_REF,
+  PUBLISHED_METHOD_TAG,
   apiAdvertisesExtension,
   fixtureMethodId,
   liveApiConfig,
@@ -218,7 +219,7 @@ describe.runIf(RUN_ENABLED)("mthds_run (live, SPENDS INFERENCE CREDIT)", () => {
       // asserted down to the SHA the tag pointed at — not merely present.
       expect(started.structuredContent.method_provenance).toEqual({
         address: "github.com/Pipelex/methods/text_stats",
-        tag: "v0.1.1",
+        tag: PUBLISHED_METHOD_TAG,
         commit_sha: PUBLISHED_METHOD_COMMIT,
       });
 

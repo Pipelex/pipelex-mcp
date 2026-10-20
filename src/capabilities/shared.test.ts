@@ -5,7 +5,6 @@ import {
   ApiUnreachableError,
   ArtifactAuthenticationError,
   ArtifactOperationError,
-  EmptyMethodSourceError,
   InputPreparationError,
   InvalidLocalSourceError,
   MissingMainStuffError,
@@ -1296,14 +1295,6 @@ describe("classifyError", () => {
       expect(
         classifyError(await refusal("EntryPipeNotFoundError"), withoutSelection).location,
       ).toBe("method_ref");
-    });
-
-    it("locates a stray EmptyMethodSourceError at method_id", () => {
-      expect(classifyError(new EmptyMethodSourceError("mt_123"))).toMatchObject({
-        class: "input_domain",
-        location: "method_id",
-        retryable: false,
-      });
     });
 
     it("locates a 413 at the declared size only on a route that declared the texture", async () => {

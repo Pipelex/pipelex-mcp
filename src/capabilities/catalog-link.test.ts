@@ -8,11 +8,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  LINK_DIRECTORY_NAME,
   LINK_FILE_NAME,
   LinkLockError,
+  NO_LINK,
   buildMethodLink,
   linkLockFile,
   readMethodLink,
+  replaceMethodLink,
   withLinkLock,
 } from "./catalog-link.js";
 
@@ -206,7 +209,7 @@ describe("withLinkLock, the lock every workshop process takes to write", () => {
     // is how a version pull from a second process landed between a save's
     // compare and its write and the next save replaced the draft with it.
     const dir = path.join(root, "work");
-    await fs.mkdir(dir);
+    await fs.mkdir(path.join(dir, LINK_DIRECTORY_NAME), { recursive: true });
     const link = buildMethodLink({
       apiHost: "api-dev.pipelex.com",
       methodId: "mt_one",
@@ -260,4 +263,71 @@ describe("withLinkLock, the lock every workshop process takes to write", () => {
     const final = await readMethodLink(dir);
     expect(final.kind === "link" ? final.link.name : final.kind).toBe(String(2 * swaps));
   }, 60_000);
+});
+
+describe("the link file lives in the folder's .pipelex directory", () => {
+  const link = buildMethodLink({
+    apiHost: "api-dev.pipelex.com",
+    methodId: "mt_one",
+    name: "Summarize PDF",
+    syncedUpdatedAt: "T0",
+  });
+
+  it("is named .pipelex/method.json, outside every method tree", () => {
+    // A segment starting with a dot is never a member of a method tree, so the
+    // link is never saved as one of the method's files.
+    expect(LINK_FILE_NAME).toBe(".pipelex/method.json");
+  });
+
+  it("makes .pipelex when it is missing, and reads back what it wrote", async () => {
+    const dir = path.join(root, "work");
+    await fs.mkdir(dir);
+
+    const replaced = await replaceMethodLink(root, dir, NO_LINK, link);
+
+    expect(replaced.report).toEqual({
+      path: path.join("work", ".pipelex", "method.json"),
+      written: true,
+    });
+    expect((await fs.lstat(path.join(dir, ".pipelex"))).isDirectory()).toBe(true);
+    const read = await readMethodLink(dir);
+    expect(read.kind === "link" ? read.link.method_id : read.kind).toBe("mt_one");
+  });
+
+  it("reads a folder without .pipelex as unlinked", async () => {
+    const dir = path.join(root, "work");
+    await fs.mkdir(dir);
+
+    expect(await readMethodLink(dir)).toEqual({ kind: "none" });
+  });
+
+  it("never reads or writes through a .pipelex that is a symlink", async () => {
+    const dir = path.join(root, "work");
+    const elsewhere = path.join(root, "elsewhere");
+    await fs.mkdir(dir);
+    await fs.mkdir(elsewhere);
+    await fs.writeFile(path.join(elsewhere, "method.json"), `${JSON.stringify(link)}\n`, "utf8");
+    await fs.symlink(elsewhere, path.join(dir, ".pipelex"));
+
+    const read = await readMethodLink(dir);
+    expect(read.kind).toBe("unreadable");
+    expect(read.kind === "unreadable" ? read.reason : "").toContain("is a symlink");
+
+    const replaced = await replaceMethodLink(root, dir, read, link);
+    expect(replaced.report.written).toBe(false);
+    expect(await fs.readFile(path.join(elsewhere, "method.json"), "utf8")).toBe(
+      `${JSON.stringify(link)}\n`,
+    );
+  });
+
+  it("reads a .pipelex that is a file as unreadable, and leaves it alone", async () => {
+    const dir = path.join(root, "work");
+    await fs.mkdir(dir);
+    await fs.writeFile(path.join(dir, ".pipelex"), "something else\n", "utf8");
+
+    const read = await readMethodLink(dir);
+    expect(read).toEqual({ kind: "unreadable", reason: "`.pipelex` is not a directory" });
+    expect((await replaceMethodLink(root, dir, read, link)).report.written).toBe(false);
+    expect(await fs.readFile(path.join(dir, ".pipelex"), "utf8")).toBe("something else\n");
+  });
 });

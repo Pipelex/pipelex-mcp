@@ -100,33 +100,50 @@ describe("inputs_path on the workshop", () => {
     // The membership rule keeps a run's inputs file out of the method's
     // folder; inputs_path reads it by its own path, so a folder's inputs.json
     // still feeds the run while never travelling as part of the method.
-    it.each(["a regular file", "a symbolic link"] as const)(
-      "runs a method folder with the inputs.json it holds as %s, sending only the .mthds file",
-      async (form) => {
-        await writeInputs("methods/invoice/invoice.mthds", 'domain = "invoice"\n');
-        if (form === "a regular file") {
-          await writeInputs("methods/invoice/inputs.json", JSON.stringify(INPUTS));
-        } else {
-          await writeInputs("methods/invoice/data/run-1.json", JSON.stringify(INPUTS));
-          await fs.symlink(
-            path.join(rootDir, "methods", "invoice", "data", "run-1.json"),
-            path.join(rootDir, "methods", "invoice", "inputs.json"),
-          );
-        }
-        const { context, seen } = runContext();
+    it("runs a method folder with the inputs.json it holds, sending only the .mthds file", async () => {
+      await writeInputs("methods/invoice/invoice.mthds", 'domain = "invoice"\n');
+      await writeInputs("methods/invoice/inputs.json", JSON.stringify(INPUTS));
+      const { context, seen } = runContext();
 
-        const result = await startMthdsRun(
-          { method_dir: "methods/invoice", inputs_path: "methods/invoice/inputs.json" },
-          context,
-        );
+      const result = await startMthdsRun(
+        { method_dir: "methods/invoice", inputs_path: "methods/invoice/inputs.json" },
+        context,
+      );
 
-        expect(result.structuredContent.status).toBe("ok");
-        expect(seen).toEqual([{ mthds_contents: ['domain = "invoice"\n'], inputs: INPUTS }]);
-        expect(result.structuredContent.files_sent).toEqual([
-          path.join("methods", "invoice", "invoice.mthds"),
-        ]);
-      },
-    );
+      expect(result.structuredContent.status).toBe("ok");
+      expect(seen).toEqual([{ mthds_contents: ['domain = "invoice"\n'], inputs: INPUTS }]);
+      expect(result.structuredContent.files_sent).toEqual([
+        path.join("methods", "invoice", "invoice.mthds"),
+      ]);
+    });
+
+    // mthds 0.32, the line @pipelex/sdk is built on, lists a run's inputs file
+    // as an ordinary member, so an inputs.json that is a symbolic link is
+    // refused as one, before the workshop can leave it out. The standard's
+    // rule, from mthds 0.33, keeps the link out unfollowed; the workshop takes
+    // it with that move.
+    it("refuses a method folder whose inputs.json is a symbolic link, naming it", async () => {
+      await writeInputs("methods/invoice/invoice.mthds", 'domain = "invoice"\n');
+      await writeInputs("methods/invoice/data/run-1.json", JSON.stringify(INPUTS));
+      await fs.symlink(
+        path.join(rootDir, "methods", "invoice", "data", "run-1.json"),
+        path.join(rootDir, "methods", "invoice", "inputs.json"),
+      );
+      const { context, seen } = runContext();
+
+      const result = await startMthdsRun(
+        { method_dir: "methods/invoice", inputs_path: "methods/invoice/data/run-1.json" },
+        context,
+      );
+
+      expect(result.structuredContent.status).toBe("error");
+      expect(seen).toEqual([]);
+      const [error] = (
+        result.structuredContent as { errors: { location?: string; message: string }[] }
+      ).errors;
+      expect(error?.location).toBe("method_dir");
+      expect(error?.message).toContain("inputs.json");
+    });
 
     it("reads an extension in any case", async () => {
       await writeInputs("inputs.JSON", JSON.stringify(INPUTS));
