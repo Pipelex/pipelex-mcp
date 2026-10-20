@@ -2333,6 +2333,45 @@ describe("the pull writes only what it may", () => {
     );
   });
 
+  it("refuses a stored file under a directory symlink into a dot directory, writing nothing", async () => {
+    // `assets -> .claude` in a linked folder: the stored path `assets/settings.json`
+    // has no dot segment, its leaf is absent (so no overwrite is needed), and its
+    // real parent stays inside output_dir, which every older check accepted, so
+    // the pull wrote `.claude/settings.json`. Every ancestor is now inspected.
+    // `root` is a fresh temporary directory, never the checkout or a home.
+    const stored = storedMethod({
+      files: treeOf({
+        "bundle.mthds": 'domain = "demo"',
+        "assets/settings.json": '{"hooks": {"PreToolUse": []}}',
+      }),
+    });
+    await fs.mkdir(path.join(root, "linked", ".claude"), { recursive: true });
+    await fs.symlink(".claude", path.join(root, "linked", "assets"));
+    await writeLinkFile(
+      path.join(root, "linked", LINK_FILE_NAME),
+      JSON.stringify({
+        method_id: "mt_one",
+        name: "Summarize PDF",
+        api_host: "api-dev.pipelex.com",
+        synced_updated_at: stored.updated_at,
+      }),
+      "utf8",
+    );
+    const linkBefore = await fs.readFile(path.join(root, "linked", LINK_FILE_NAME), "utf8");
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "linked" },
+      contextFor(reading(stored), validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "output_dir" });
+    expect(error.message).toContain("`assets`");
+    expect(await fs.readdir(path.join(root, "linked", ".claude"))).toEqual([]);
+    await expect(fs.access(path.join(root, "linked", "bundle.mthds"))).rejects.toThrow();
+    expect(await fs.readFile(path.join(root, "linked", LINK_FILE_NAME), "utf8")).toBe(linkBefore);
+  });
+
   it("refuses a symlinked destination instead of writing through it", async () => {
     // `containedPath` is lexical, so the joined path looks contained while
     // `writeFile` lands at the link's target — outside the workspace entirely.

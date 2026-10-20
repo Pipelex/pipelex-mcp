@@ -1856,11 +1856,12 @@ async function writtenResult(
     destinations.push({ file, name: file.path, absolute });
   }
 
-  // An entry this pull may not write through — a symlink, a directory — is
-  // refused for what it is before anything is planned, so the refusal names
+  // An entry this pull may not write through — a symlink, a directory, or a
+  // symlinked directory on a destination's path — is refused for what it is
+  // before anything is planned, so the refusal names
   // it rather than calling it unsaved work. The landing asks again inside its
   // turn, where the entry inspected is the one written.
-  const foreign = await foreignDestinationRefusal(destinations);
+  const foreign = await foreignDestinationRefusal(dir, destinations);
   if (foreign !== undefined) {
     return foreign;
   }
@@ -2113,11 +2114,12 @@ async function landPull(landing: {
   // `containedPath` is lexical — it joins and compares strings. A destination
   // that is a symlink passes it and then sends `writeFile` to the link's
   // target, which is how a pull wrote outside the workspace entirely. Inspect
-  // every destination on REAL entries before anything is created or written,
+  // every destination and every existing directory on its path on REAL
+  // entries before anything is created or written, the provisional link included,
   // exactly as `codegen-writer.ts` does, and inside the turn, so the entry
   // inspected is the one written. A link-only refresh is refused too: it would
   // vouch for a file that is not an ordinary file of this folder.
-  const foreign = await foreignDestinationRefusal(destinations);
+  const foreign = await foreignDestinationRefusal(dir, destinations);
   if (foreign !== undefined) {
     return { ok: false, result: foreign };
   }
@@ -2262,14 +2264,18 @@ async function landPull(landing: {
 
 /**
  * The refusal of a pull whose destination is an entry it may not write
- * through — a symlink, a directory, anything but an ordinary file — or
- * `undefined` when every destination is absent or an ordinary file.
+ * through — a symlink, a directory, anything but an ordinary file — or lies
+ * below a directory symlink ({@link ancestorReason}), or `undefined` when
+ * every destination is absent or an ordinary file on an ordinary path.
  */
 async function foreignDestinationRefusal(
+  dir: string,
   destinations: readonly Destination[],
 ): Promise<GetMethodResult | undefined> {
   for (const destination of destinations) {
-    const foreign = await foreignEntryReason(destination.absolute);
+    const foreign =
+      (await ancestorReason(dir, destination.absolute)) ??
+      (await foreignEntryReason(destination.absolute));
     if (foreign !== undefined) {
       return getError("The method was not written: output_dir holds an entry it may not write.", [
         {
@@ -2281,6 +2287,58 @@ async function foreignDestinationRefusal(
         },
       ]);
     }
+  }
+  return undefined;
+}
+
+/**
+ * Why the directories between `dir`, the pull's real output folder, and a
+ * destination may not be written through, or `undefined` when they may.
+ *
+ * A stored path is checked lexically ({@link storedNameReason}) and the
+ * destination's own entry with `lstat` ({@link foreignEntryReason}), and
+ * neither sees a directory symlink on the way: `assets -> .claude` in the
+ * folder let a stored `assets/settings.json`, which has no dot segment and
+ * whose real parent stays inside the folder, land in `.claude/`, where an
+ * agent reads its configuration. So every existing ancestor is inspected with
+ * `lstat` and a symlink anywhere on the path refuses the pull, and the path
+ * the write would really take, from the deepest existing ancestor's real path
+ * on, is held to the same dot-segment rule as the stored one.
+ */
+async function ancestorReason(dir: string, destination: string): Promise<string | undefined> {
+  const segments = path.relative(dir, path.dirname(destination)).split(path.sep).filter(Boolean);
+  let deepest = dir;
+  let walked = 0;
+  for (const segment of segments) {
+    const next = path.join(deepest, segment);
+    let entry;
+    try {
+      entry = await fs.lstat(next);
+    } catch (err) {
+      if (isMissingPathError(err)) break;
+      return errorMessage(err);
+    }
+    if (entry.isSymbolicLink()) {
+      return `\`${segments.slice(0, walked + 1).join("/")}\` on its path is a symlink, and writing through it would land wherever it points`;
+    }
+    // A file in the way fails the write, which reports it; nothing lies beyond it.
+    if (!entry.isDirectory()) break;
+    deepest = next;
+    walked += 1;
+  }
+  let realDeepest: string;
+  try {
+    realDeepest = await fs.realpath(deepest);
+  } catch (err) {
+    return errorMessage(err);
+  }
+  const realPath = path.join(realDeepest, ...segments.slice(walked), path.basename(destination));
+  const relative = path.relative(dir, realPath);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    return "its real path leaves the output folder";
+  }
+  if (relative.split(path.sep).some((segment) => segment.startsWith("."))) {
+    return `its real path in the output folder, \`${relative.split(path.sep).join("/")}\`, has a component beginning with a dot, which no method tree holds`;
   }
   return undefined;
 }
