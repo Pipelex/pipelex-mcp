@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { GRAPH_PAGE_MARK } from "./graph-page.js";
 import {
   FolderLimitError,
+  SCAN_ALLOWANCE_BYTES,
   SCAN_ALLOWANCE_FILES,
   describeTreeRefusal,
   isRunInputsPath,
@@ -487,17 +488,45 @@ describe("listFolderTree", () => {
       expect(tree.totalSize).toBe(20);
     });
 
-    it("stops a walk past its widened bound under the workshop's own scan limit", async () => {
+    it("names the limit's own owner and number when a walk stops past its widened bound", async () => {
       for (let index = 0; index < SCAN_ALLOWANCE_FILES + 2; index += 1) {
         await place(`f${index}.mthds`);
       }
 
-      const error = await refusal({ maxFileCount: 1 });
+      const announced = await refusal({ maxFileCount: 1 });
+      expect(announced).toBeInstanceOf(FolderLimitError);
+      expect((announced as FolderLimitError).owner).toBe("deployment");
+      expect((announced as FolderLimitError).maximum).toBe(1);
+      const text = describeTreeRefusal(announced, "");
+      expect(text.message).toContain("more than 1 files");
+      expect(text.message).toContain(
+        `past that limit plus the workshop's allowance of ${SCAN_ALLOWANCE_FILES}`,
+      );
+      expect(text.message).toContain(
+        "The Pipelex deployment this workshop talks to takes no method holding more than 1 files",
+      );
+
+      const ownBound = await refusal({ maxFileCount: 1, workshopSet: ["maxFileCount"] });
+      expect((ownBound as FolderLimitError).owner).toBe("workshop");
+      expect((ownBound as FolderLimitError).maximum).toBe(1);
+      expect(describeTreeRefusal(ownBound, "").message).toContain("the workshop's own");
+    });
+
+    it("names the unwidened size limit when the walk stops at a file past it and its allowance", async () => {
+      await place("main.mthds");
+      const big = path.join(root, "big.bin");
+      await fs.writeFile(big, "");
+      await fs.truncate(big, SCAN_ALLOWANCE_BYTES + 100);
+
+      const error = await refusal({ maxFileSize: 50 });
 
       expect(error).toBeInstanceOf(FolderLimitError);
-      expect((error as FolderLimitError).owner).toBe("workshop");
-      expect((error as FolderLimitError).maximum).toBe(1 + SCAN_ALLOWANCE_FILES);
-      expect(describeTreeRefusal(error, "").message).toContain("the workshop's own scan limit");
+      expect((error as FolderLimitError).owner).toBe("deployment");
+      expect((error as FolderLimitError).maximum).toBe(50);
+      const text = describeTreeRefusal(error, "").message;
+      expect(text).toContain("past the limit of 50 bytes for one file");
+      expect(text).toContain(`the workshop's allowance of ${SCAN_ALLOWANCE_BYTES} bytes`);
+      expect(text).toContain("a file over 50 bytes");
     });
 
     it("refuses a file past the size limit and a folder past the total", async () => {

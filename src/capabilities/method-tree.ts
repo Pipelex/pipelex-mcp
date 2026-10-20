@@ -29,8 +29,9 @@ import { errorMessage } from "./workspace-boundary.js";
  *   ({@link SCAN_ALLOWANCE_FILES}, {@link SCAN_ALLOWANCE_BYTES}), and the
  *   limits themselves are held exactly on the files kept. A refusal says whose
  *   limit it was ({@link FolderLimitError}): the deployment's, or the
- *   workshop's own scan limit, which a widened bound always is, as is one
- *   standing for a limit the deployment did not announce. The listing is rooted at the folder handed over
+ *   workshop's own scan limit, standing for one the deployment did not
+ *   announce, and names that limit's own number, saying so when the walk
+ *   stopped past it plus the allowance. The listing is rooted at the folder handed over
  *   (`discover: false`), never at a `METHODS.toml` found above it: the folder
  *   the caller named is the method.
  * - **A run's inputs files.** `inputs.json` and `inputs.toml`, at any depth,
@@ -149,19 +150,7 @@ export async function listFolderTree(
     tree = await listMethodTree(folder, { discover: false, limits: walkLimitsOf(limits) });
   } catch (err) {
     if (err instanceof TreeLimitExceededError) {
-      // A widened bound: the workshop's own scan limit, whoever set the limit under it.
-      const owner: LimitOwner = "workshop";
-      return {
-        ok: false,
-        error: new FolderLimitError(
-          err.root,
-          err.limit,
-          err.maximum,
-          err.reached,
-          err.names[0],
-          owner,
-        ),
-      };
+      return { ok: false, error: walkLimitError(err, limits) };
     }
     return { ok: false, error: asTreeError(err, folder) };
   }
@@ -242,6 +231,38 @@ function walkLimitsOf(limits: ListingLimits): MethodTreeLimits {
   };
 }
 
+/** Whose a limit is: the workshop's when it set it, the deployment's when the deployment announced it. */
+function ownerOf(limits: ListingLimits, limit: TreeLimit): LimitOwner {
+  return limits.workshopSet?.includes(limit) === true ? "workshop" : "deployment";
+}
+
+/**
+ * The refusal of a walk that stopped past a widened bound, told against the
+ * limit under it: that limit's owner and number, and that the walk stopped
+ * past it plus the allowance, since the bound `mthds` reports is the
+ * workshop's widening, which nobody announced.
+ */
+function walkLimitError(err: TreeLimitExceededError, limits: ListingLimits): FolderLimitError {
+  const maximum = limits[err.limit] ?? err.maximum;
+  const allowance = err.limit === "maxFileCount" ? SCAN_ALLOWANCE_FILES : SCAN_ALLOWANCE_BYTES;
+  const where = err.names[0];
+  const message =
+    err.limit === "maxFileSize"
+      ? `The method tree at ${err.root} holds ${where ?? "a file"}, of ${err.reached} bytes, past the limit of ${maximum} bytes for one file by more than the workshop's allowance of ${allowance} bytes for the files it leaves out; listing stopped there, before hashing any file.`
+      : err.limit === "maxFileCount"
+        ? `The method tree at ${err.root} holds more than ${maximum} files, the limit; listing stopped at ${err.reached} files, past that limit plus the workshop's allowance of ${allowance} for the files it leaves out, before hashing any file.`
+        : `The method tree at ${err.root} holds more than ${maximum} bytes, the limit for a whole tree; listing stopped at ${err.reached} bytes, past that limit plus the workshop's allowance of ${allowance} bytes for the files it leaves out, before hashing any file.`;
+  return new FolderLimitError(
+    err.root,
+    err.limit,
+    maximum,
+    err.reached,
+    where,
+    ownerOf(limits, err.limit),
+    message,
+  );
+}
+
 /**
  * The first limit the kept files pass, exactly, or nothing: what the
  * workshop leaves out never counts, since it is never sent.
@@ -251,8 +272,6 @@ function keptLimitBreach(
   kept: readonly ListedFile[],
   limits: ListingLimits,
 ): FolderLimitError | undefined {
-  const ownerOf = (limit: TreeLimit): LimitOwner =>
-    limits.workshopSet?.includes(limit) === true ? "workshop" : "deployment";
   const { maxFileCount, maxFileSize, maxTotalSize } = limits;
   if (maxFileSize !== undefined) {
     const big = kept.find((file) => file.size > maxFileSize);
@@ -263,7 +282,7 @@ function keptLimitBreach(
         maxFileSize,
         big.size,
         big.path,
-        ownerOf("maxFileSize"),
+        ownerOf(limits, "maxFileSize"),
         `The method tree at ${root} holds ${big.path}, of ${big.size} bytes, past the limit of ${maxFileSize} bytes for one file.`,
       );
     }
@@ -275,7 +294,7 @@ function keptLimitBreach(
       maxFileCount,
       kept.length,
       undefined,
-      ownerOf("maxFileCount"),
+      ownerOf(limits, "maxFileCount"),
       `The method tree at ${root} holds ${kept.length} files, past the limit of ${maxFileCount}.`,
     );
   }
@@ -287,7 +306,7 @@ function keptLimitBreach(
       maxTotalSize,
       total,
       undefined,
-      ownerOf("maxTotalSize"),
+      ownerOf(limits, "maxTotalSize"),
       `The method tree at ${root} holds ${total} bytes in all, past the limit of ${maxTotalSize} bytes for a whole tree.`,
     );
   }
@@ -418,7 +437,7 @@ export function describeTreeRefusal(error: MethodTreeError, fallback: string): T
           : `more than ${error.maximum} bytes in all`;
     const whose =
       error instanceof FolderLimitError && error.owner === "workshop"
-        ? `That bound is the workshop's own scan limit, not the Pipelex deployment's, which announced none for it: the workshop lists no folder holding ${what}.`
+        ? `That bound is the workshop's own scan limit, set where the Pipelex deployment announced none or could not be asked: the workshop lists no folder holding ${what}.`
         : `The Pipelex deployment this workshop talks to takes no method holding ${what}.`;
     return {
       message: `${error.message} ${whose}`,
