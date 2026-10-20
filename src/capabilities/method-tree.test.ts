@@ -183,6 +183,16 @@ describe("listFolderTree", () => {
     });
   });
 
+  it("refuses a folder holding nothing but what the workshop leaves out as an empty tree", async () => {
+    await place("inputs.json", "{}");
+    await place("method-graph.html", `<head>${GRAPH_PAGE_MARK}</head>`);
+
+    const error = await refusal();
+
+    expect(error.code).toBe("empty_tree");
+    expect(error.message).toContain("holds no file once a run's inputs files");
+  });
+
   it("leaves out the workshop's own graph page at the folder's top, and keeps any other file of that name", async () => {
     await place("main.mthds");
     await place("method-graph.html", `<!doctype html><html><head>${GRAPH_PAGE_MARK}</head></html>`);

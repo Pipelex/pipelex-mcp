@@ -182,6 +182,19 @@ export async function listFolderTree(
     kept.push({ path: file.path, size: file.size, sha256: file.sha256 });
   }
 
+  if (kept.length === 0) {
+    // What the workshop leaves out was all the folder held: a tree holds at
+    // least one file, and a digest of nothing names no tree.
+    return {
+      ok: false,
+      error: new MethodTreeError(
+        "empty_tree",
+        `The method tree at ${root} holds no file once a run's inputs files and the workshop's graph page are left out; a tree holds at least one.`,
+        { names: [] },
+      ),
+    };
+  }
+
   const breach = keptLimitBreach(root, kept, limits);
   if (breach !== undefined) return { ok: false, error: breach };
 
@@ -192,7 +205,7 @@ export async function listFolderTree(
     tree: {
       root,
       files: kept,
-      digest: dropped ? (kept.length === 0 ? "" : treeDigest(kept)) : tree.digest,
+      digest: dropped ? treeDigest(kept) : tree.digest,
       totalSize: kept.reduce((total, file) => total + file.size, 0),
       runInputs,
       ...(graphPage === undefined ? {} : { graphPage }),
