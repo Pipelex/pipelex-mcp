@@ -768,9 +768,10 @@ describe("localBundleFileResolver", () => {
         if (!resolution.ok) throw new Error(resolution.refusals.map((r) => r.message).join("; "));
         expect(Object.keys(resolution.resources)).toEqual([named]);
         expect(resolution.resources[named]).toEqual(TEMPLATE_BYTES);
+        // A tree path is in NFC whatever the disk holds, as the standard lists it.
         expect(resolution.sent).toEqual([
           path.join("methods", "invoice", "invoice.mthds"),
-          path.join("methods", "invoice", "templates", stored),
+          path.join("methods", "invoice", "templates", `modèle.html`.normalize("NFC")),
         ]);
       },
     );
@@ -858,9 +859,7 @@ describe("localBundleFileResolver", () => {
       );
 
       const refusal = await refusalOf("methods/invoice");
-      expect(refusal.message).toBe(
-        `The method's folder holds a symbolic link: ${path.join("methods", "invoice", "templates", "alias.xlsx")}.`,
-      );
+      expect(refusal.message).toContain("holds a symbolic link, 'templates/alias.xlsx'");
       expect(refusal.hint).toContain("never followed");
 
       await fs.writeFile(path.join(rootDir, "methods", "invoice", ".gitignore"), "alias.xlsx\n");

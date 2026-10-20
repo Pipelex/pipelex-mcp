@@ -1,8 +1,20 @@
-import { constants as fsConstants, promises as fs } from "node:fs";
+import { promises as fs } from "node:fs";
 import path from "node:path";
 
+import type { MethodTreeLimits } from "mthds";
+
+import { describeTreeRefusal, listFolderTree } from "./capabilities/method-tree.js";
+import type { FolderTree, ListedFile } from "./capabilities/method-tree.js";
 import { MAX_FOLDER_MTHDS_FILE_BYTES, MAX_FOLDER_MTHDS_FILES } from "./capabilities/shared.js";
-import type { FileResolution, FileResolver, MethodDirResolution } from "./capabilities/shared.js";
+import type {
+  FileResolution,
+  FileResolver,
+  LocatedMethodDir,
+  MethodDirLocation,
+  MethodDirOptions,
+  MethodDirResolution,
+  MethodTreeRead,
+} from "./capabilities/shared.js";
 import {
   MAX_TEMPLATE_FILE_BYTES,
   TEMPLATE_FILE_EXTENSIONS,
@@ -26,8 +38,7 @@ import {
   isInsideRoot,
   isMissingPathError,
 } from "./capabilities/workspace-boundary.js";
-import { MAX_METHOD_TREE_ENTRIES, listMethodTree } from "./method-tree.js";
-import type { MethodTreeFile } from "./method-tree.js";
+import { FALLBACK_MAX_FILE_COUNT } from "./capabilities/tree-limits.js";
 
 const MTHDS_EXTENSION = ".mthds";
 const INLINE_FALLBACK = "or inline the contents as { content, uri? }.";
@@ -67,12 +78,12 @@ export interface LocalFileResolverOptions {
  * the seam turns them into `input_domain` errors at `files[i].path`.
  *
  * `extension` is the ONE thing a caller chooses, and it is chosen per argument
- * rather than per call: every bundle argument is `.mthds`, and
- * `mthds_save_method`'s `python` is `.py`. It is deliberately not reachable
- * from the MCP surface — a tool input that named the extension would turn the
- * read boundary into something the model picks, which is the opposite of what
- * it is for. `mthds_run` and `mthds_prepare_inputs`'s `inputs_path` is the
- * third arm, `.json`, built with its own fallback wording and a size cap. The
+ * rather than per call: every bundle argument is `.mthds`. It is deliberately
+ * not reachable from the MCP surface — a tool input that named the extension
+ * would turn the read boundary into something the model picks, which is the
+ * opposite of what it is for. `mthds_run` and `mthds_prepare_inputs`'s
+ * `inputs_path` is the other arm, `.json`, built with its own fallback wording
+ * and a size cap. The
  * method-taking tools' `files` is {@link localBundleFileResolver}, this
  * resolver plus a second, byte-reading arm for a bundle's template files.
  */
@@ -86,12 +97,12 @@ export function localFileResolver(
   return {
     async resolve(submitted: string): Promise<FileResolution> {
       // Each `{ path }` arm is contracted to one extension — `.mthds` for every
-      // bundle argument, `.py` for `mthds_save_method`'s `python`. Enforce it
+      // bundle argument, `.json` for `inputs_path`. Enforce it
       // before any filesystem access, so a path pointing at an unrelated local
       // file — a prompt-injected `.env`, `.git/config`, key material — is refused
       // without ever being opened. Containment below only bounds *where* we read;
       // this bounds *what* we read, and a caller that could choose the extension
-      // would have neither bound. `inputs_path` is gated on `.json` the same way.
+      // would have neither bound.
       if (path.extname(submitted).toLowerCase() !== extension) {
         return failure(
           `Path is not a ${extension} file: ${submitted}`,
@@ -143,11 +154,40 @@ export function localBundleFileResolver(rootDir: string = process.cwd()): FileRe
     resolve: (submitted) => text.resolve(submitted),
     resolveTemplates: (templates, bundle, requestBytes) =>
       resolveTemplateFiles(rootDir, templates, bundle, requestBytes),
-    resolveMethodDir: (methodDir) => resolveMethodFolder(rootDir, methodDir),
+    resolveMethodDir: (methodDir, options = {}) => resolveMethodFolder(rootDir, methodDir, options),
+    locateMethodDir: (methodDir) => locateMethodFolder(rootDir, methodDir, SAVE_FALLBACK),
+    readMethodTree: (location, options) => readMethodFolderTree(location, options.limits),
   };
 }
 
-const FOLDER_FALLBACK = "or list the method's files in files.";
+/**
+ * How a refusal of a method folder ends: what else the caller can do. The
+ * method-taking tools also take `files`, so their hints offer it; the save
+ * takes a folder and nothing else, so offering `files` there would send the
+ * caller to an argument the tool does not have.
+ */
+interface FolderFallback {
+  /** Closes a hint's last clause: "Check the path, <clause>". */
+  readonly clause: string;
+  /** A sentence of its own, or nothing. */
+  readonly sentence: string;
+  /** The hint for a `method_dir` that is not a directory. */
+  readonly notADirectory: string;
+}
+
+const FOLDER_FALLBACK: FolderFallback = {
+  clause: "or list the method's files in files.",
+  sentence: " Or list the method's files in files.",
+  notADirectory:
+    "Pass the folder holding the method's .mthds files, or give a single .mthds file in files as { path }.",
+};
+
+const SAVE_FALLBACK: FolderFallback = {
+  clause: "then save the folder again.",
+  sentence: "",
+  notADirectory:
+    "Pass the folder holding the method's .mthds files: its whole tree is what a save stores.",
+};
 
 const FOLDER_COUNT_HINT =
   "The folder sends every template file its PipeDocGen steps name, and they name more than one request takes: have the steps share template files, or split the method.";
@@ -155,22 +195,170 @@ const FOLDER_COUNT_HINT =
 /** Refusals of a method folder shown by name, the rest counted. */
 const MAX_LISTED_PATHS = 5;
 
+type Refusals = { message: string; hint: string }[];
+
+function refusedWith(message: string, hint: string): { ok: false; refusals: Refusals } {
+  return { ok: false, refusals: [{ message, hint }] };
+}
+
 /**
- * Read a method folder, `method_dir`, whole: the `.mthds` files the membership
- * rule keeps (`listMethodTree` in `src/method-tree.ts`) and the template files
- * their `PipeDocGen` steps name, and nothing else of it, since the runner
- * refuses a file no step names. Everything is decided before a byte is read.
+ * Where a method folder is: `method_dir` resolved against the working
+ * directory, inside it on its real path, as every read must be, and a
+ * directory. Nothing under it is read.
+ */
+async function locateMethodFolder(
+  rootDir: string,
+  methodDir: string,
+  fallback: FolderFallback,
+): Promise<MethodDirLocation> {
+  const root = await workingDirectory(rootDir);
+  if (!root.ok) return refusedWith(root.message, root.hint);
+
+  let folder: string;
+  try {
+    folder = await fs.realpath(path.resolve(rootDir, methodDir));
+  } catch (err) {
+    return isMissingPathError(err)
+      ? refusedWith(
+          `Folder not found: ${methodDir}`,
+          `method_dir is resolved against the MCP server's working directory (${rootDir}). Check the path, ${fallback.clause}`,
+        )
+      : refusedWith(
+          `Could not read folder ${methodDir}: ${errorMessage(err)}`,
+          `Check the folder and its permissions, ${fallback.clause}`,
+        );
+  }
+  if (!isInsideRoot(root.real, folder)) {
+    return refusedWith(
+      `method_dir resolves outside the server's working directory: ${methodDir}`,
+      `The local workshop only reads folders inside the directory it was started in (${rootDir}). Move the method into the workspace, ${fallback.clause}`,
+    );
+  }
+  try {
+    if (!(await fs.stat(folder)).isDirectory()) {
+      return refusedWith(`method_dir is not a directory: ${methodDir}`, fallback.notADirectory);
+    }
+  } catch (err) {
+    return refusedWith(
+      `Could not read folder ${methodDir}: ${errorMessage(err)}`,
+      `Check the folder and its permissions, ${fallback.clause}`,
+    );
+  }
+  return { ok: true, folder, methodDir };
+}
+
+/**
+ * List a located method folder's tree under `limits` (`listFolderTree` in
+ * `capabilities/method-tree.ts`, the MTHDS standard's membership rule), and
+ * refuse what is no method's folder: one that is itself a Python virtual
+ * environment, and one with no `.mthds` file at its top.
+ */
+async function listMethodFolder(
+  location: LocatedMethodDir,
+  limits: MethodTreeLimits,
+  fallback: FolderFallback,
+): Promise<{ ok: true; tree: FolderTree } | { ok: false; refusals: Refusals }> {
+  const { folder, methodDir } = location;
+  if (await holdsVirtualEnvironmentMarker(folder)) {
+    return refusedWith(
+      `${methodDir} holds a pyvenv.cfg file, which makes it a Python virtual environment, and nothing in one is part of a method's folder.`,
+      `Pass the folder holding the method's .mthds files, outside the virtual environment, ${fallback.clause}`,
+    );
+  }
+  const listed = await listFolderTree(folder, limits);
+  if (!listed.ok && listed.error.code !== "empty_tree") {
+    const text = describeTreeRefusal(listed.error, fallback.clause);
+    return refusedWith(text.message, text.hint);
+  }
+  const shown = shownUnder(methodDir);
+  const mthds = listed.ok ? listed.tree.files.filter((file) => isMthdsPath(file.path)) : [];
+  if (!listed.ok || !mthds.some((file) => !file.path.includes("/"))) {
+    const deeper = mthds.map((file) => shown(file.path));
+    return refusedWith(
+      `${methodDir} holds no .mthds file at its top${deeper.length > 0 ? `; it holds ${listed_(deeper)} further down` : ""}.`,
+      `Pass the folder whose top holds the method's .mthds file. Files whose names start with a dot, and what the folder's .gitignore files exclude, are not part of it; ${fallback.clause}`,
+    );
+  }
+  return { ok: true, tree: listed.tree };
+}
+
+/** Whether the folder's top holds a `pyvenv.cfg` that is not a directory, PEP 405's mark of a virtual environment. */
+async function holdsVirtualEnvironmentMarker(folder: string): Promise<boolean> {
+  try {
+    return !(await fs.lstat(path.join(folder, "pyvenv.cfg"))).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read a method folder, `method_dir`, for a method-taking tool: the `.mthds`
+ * files of its tree and the template files their `PipeDocGen` steps name, and
+ * nothing else of it, since the runner refuses a file no step names (see
+ * {@link folderRequestFrom}). The tree is listed under the limits the
+ * deployment announces, asked only once the folder is found.
+ */
+async function resolveMethodFolder(
+  rootDir: string,
+  methodDir: string,
+  options: MethodDirOptions,
+): Promise<MethodDirResolution> {
+  const located = await locateMethodFolder(rootDir, methodDir, FOLDER_FALLBACK);
+  if (!located.ok) return located;
+  const limits = (await options.limits?.()) ?? { maxFileCount: FALLBACK_MAX_FILE_COUNT };
+  const listed = await listMethodFolder(located, limits, FOLDER_FALLBACK);
+  if (!listed.ok) return listed;
+  return folderRequestFrom(listed.tree, methodDir, (treePath) => listed.tree.readFile(treePath));
+}
+
+/**
+ * Read a located method folder's whole tree for `mthds_save_method`: list it
+ * under `limits` and read every file once, each to at most one byte past its
+ * listed size and checked against its listed SHA-256. The request the folder
+ * makes for a validation is built from those same bytes, never read again, so
+ * what the save validates is what it sends.
+ */
+async function readMethodFolderTree(
+  location: LocatedMethodDir,
+  limits: MethodTreeLimits,
+): Promise<MethodTreeRead> {
+  const listed = await listMethodFolder(location, limits, SAVE_FALLBACK);
+  if (!listed.ok) return listed;
+  const { tree } = listed;
+  const shown = shownUnder(location.methodDir);
+  const bytes = new Map<string, Uint8Array>();
+  for (const file of tree.files) {
+    try {
+      bytes.set(file.path, await tree.readFile(file.path));
+    } catch (err) {
+      return refusedWith(...memberReadFailure(shown(file.path), errorMessage(err), SAVE_FALLBACK));
+    }
+  }
+  return {
+    ok: true,
+    files: tree.files,
+    digest: tree.digest,
+    runInputs: tree.runInputs,
+    ...(tree.graphPage === undefined ? {} : { graphPage: tree.graphPage }),
+    bytes,
+    folderRequest: () =>
+      folderRequestFrom(tree, location.methodDir, async (treePath) => {
+        const read = bytes.get(treePath);
+        if (read === undefined) throw new Error(`${treePath} is not a file of the method tree`);
+        return read;
+      }),
+  };
+}
+
+/**
+ * The request a method folder makes: the `.mthds` files of its tree and the
+ * template files their `PipeDocGen` steps name, read through `read`.
+ * Everything is decided before a byte is read.
  *
- * - **Where.** The folder is resolved against the working directory and must
- *   lie inside it on its real path, as every read must, and be a directory
- *   holding a `.mthds` member at its top.
  * - **What.** Only `.mthds` members and template files are read, and a
  *   template file only when a step names it, by the suffix of the name the
  *   step writes, so no step can make the workshop read a `.env` or a key: the
- *   read side's extension gate, applied to names the folder supplies. A
- *   symbolic link the rule does not exclude refuses the folder, so every file
- *   read is a regular file under it, opened without following a link that
- *   appeared since the walk.
+ *   read side's extension gate, applied to names the folder supplies.
  * - **The templates** are looked up as `lookUpNamedTemplates` looks them up,
  *   where each step's `template_file` leads from the directory of the
  *   `.mthds` file naming it, but among the tree's members rather than on disk:
@@ -179,99 +367,26 @@ const MAX_LISTED_PATHS = 5;
  *   the step naming it (`planTemplateFiles`), so a bundle in a subfolder keys
  *   its templates as with the file list.
  * - **How much.** The template files are held to the request's bounds
- *   (`templateBudgetRefusals`) on their sizes in the walk and again on the
- *   bytes read, and the `.mthds` files to the runner's count and per-file
- *   size, since a folder can hold more of them than the agent thought of.
+ *   (`templateBudgetRefusals`) on their listed sizes and again on the bytes
+ *   read, and the `.mthds` files to the runner's count and per-file size,
+ *   since a folder can hold more of them than the agent thought of.
  *
  * The `.mthds` files are sent top level first, then by tree path, so the
  * folder's own bundle leads, the one whose `main_pipe` a run defaults to when
  * several declare one. `sent` lists them, then the template files.
  */
-async function resolveMethodFolder(
-  rootDir: string,
+async function folderRequestFrom(
+  tree: FolderTree,
   methodDir: string,
+  read: (treePath: string) => Promise<Uint8Array>,
 ): Promise<MethodDirResolution> {
-  const refuse = (message: string, hint: string): MethodDirResolution => ({
-    ok: false,
-    refusals: [{ message, hint }],
-  });
-  const shown = (treePath: string): string => path.join(methodDir, ...treePath.split("/"));
-
-  const root = await workingDirectory(rootDir);
-  if (!root.ok) return refuse(root.message, root.hint);
-
-  let folder: string;
-  try {
-    folder = await fs.realpath(path.resolve(rootDir, methodDir));
-  } catch (err) {
-    return isMissingPathError(err)
-      ? refuse(
-          `Folder not found: ${methodDir}`,
-          `method_dir is resolved against the MCP server's working directory (${rootDir}). Check the path, ${FOLDER_FALLBACK}`,
-        )
-      : refuse(
-          `Could not read folder ${methodDir}: ${errorMessage(err)}`,
-          `Check the folder and its permissions, ${FOLDER_FALLBACK}`,
-        );
-  }
-  if (!isInsideRoot(root.real, folder)) {
-    return refuse(
-      `method_dir resolves outside the server's working directory: ${methodDir}`,
-      `The local workshop only reads folders inside the directory it was started in (${rootDir}). Move the method into the workspace, ${FOLDER_FALLBACK}`,
-    );
-  }
-  try {
-    if (!(await fs.stat(folder)).isDirectory()) {
-      return refuse(
-        `method_dir is not a directory: ${methodDir}`,
-        "Pass the folder holding the method's .mthds files, or give a single .mthds file in files as { path }.",
-      );
-    }
-  } catch (err) {
-    return refuse(
-      `Could not read folder ${methodDir}: ${errorMessage(err)}`,
-      `Check the folder and its permissions, ${FOLDER_FALLBACK}`,
-    );
-  }
-
-  const tree = await listMethodTree(folder);
-  if (!tree.ok) {
-    return refuse(
-      `Could not read ${shown(tree.path)} in the method's folder: ${tree.message}`,
-      `Check its permissions, or keep it out of the method with a .gitignore inside the folder; ${FOLDER_FALLBACK}`,
-    );
-  }
-  const { files, symlinks, nestedRepositories, truncated, rootIsVirtualEnvironment } = tree.listing;
-  if (rootIsVirtualEnvironment) {
-    return refuse(
-      `${methodDir} holds a pyvenv.cfg file, which makes it a Python virtual environment, and nothing in one is part of a method's folder.`,
-      `Pass the folder holding the method's .mthds files, outside the virtual environment, ${FOLDER_FALLBACK}`,
-    );
-  }
+  const shown = shownUnder(methodDir);
+  const files = tree.files;
   const mthds = files.filter((file) => isMthdsPath(file.path)).sort(topLevelFirst);
 
-  if (!mthds.some((file) => !file.path.includes("/")) && !truncated) {
-    const deeper = mthds.map((file) => shown(file.path));
-    return refuse(
-      `${methodDir} holds no .mthds file at its top${deeper.length > 0 ? `; it holds ${listed(deeper)} further down` : ""}.`,
-      `Pass the folder whose top holds the method's .mthds file. Files whose names start with a dot, and what the folder's .gitignore files exclude, are not part of it; ${FOLDER_FALLBACK}`,
-    );
-  }
-  if (truncated) {
-    return refuse(
-      `${methodDir} holds more than ${MAX_METHOD_TREE_ENTRIES} files and folders besides what it excludes, more than a method's folder holds.`,
-      `Point method_dir at the method's own folder, or keep the rest out with a .gitignore inside the folder; ${FOLDER_FALLBACK}`,
-    );
-  }
-  if (symlinks.length > 0) {
-    return refuse(
-      `The method's folder holds ${symlinks.length === 1 ? "a symbolic link" : `${symlinks.length} symbolic links`}: ${listed(symlinks.map(shown))}.`,
-      "A link in a method's folder is refused, never followed: replace it with the file it points at, or keep it out with a name starting with a dot or a .gitignore line inside the folder, written without a trailing slash (node_modules, not node_modules/), since git matches a link as a file.",
-    );
-  }
   if (mthds.length > MAX_FOLDER_MTHDS_FILES) {
-    return refuse(
-      `${methodDir} holds ${mthds.length} .mthds files, over the ${MAX_FOLDER_MTHDS_FILES} one request takes: ${listed(mthds.map((file) => shown(file.path)))}.`,
+    return refusedWith(
+      `${methodDir} holds ${mthds.length} .mthds files, over the ${MAX_FOLDER_MTHDS_FILES} one request takes: ${listed_(mthds.map((file) => shown(file.path)))}.`,
       "Keep the .mthds files that are not part of the method out with a .gitignore inside the folder, or point method_dir at the method's own folder.",
     );
   }
@@ -286,14 +401,18 @@ async function resolveMethodFolder(
   // The .mthds files, read as text in the order they are sent.
   const bundle: { treePath: string; path: string; content: string }[] = [];
   for (const file of mthds) {
-    const read = await readMember(folder, file.path);
-    if (!read.ok) return refuse(...memberReadFailure(shown(file.path), read.message));
-    if (read.bytes.byteLength > MAX_FOLDER_MTHDS_FILE_BYTES) {
-      return { ok: false, refusals: [mthdsTooLarge(shown(file.path), read.bytes.byteLength)] };
+    let bytes: Uint8Array;
+    try {
+      bytes = await read(file.path);
+    } catch (err) {
+      return refusedWith(...memberReadFailure(shown(file.path), errorMessage(err)));
     }
-    const content = Buffer.from(read.bytes).toString("utf8");
+    if (bytes.byteLength > MAX_FOLDER_MTHDS_FILE_BYTES) {
+      return { ok: false, refusals: [mthdsTooLarge(shown(file.path), bytes.byteLength)] };
+    }
+    const content = Buffer.from(bytes).toString("utf8");
     if (content.trim() === "") {
-      return refuse(
+      return refusedWith(
         `${shown(file.path)} is empty.`,
         "Write the bundle into the .mthds file, or keep it out of the method with a .gitignore inside the folder.",
       );
@@ -303,48 +422,45 @@ async function resolveMethodFolder(
 
   // The template files the steps name, among the tree's members. The lookup
   // is case-sensitive, as on the runner's filesystem, whatever this one does,
-  // but blind to Unicode normalization: a name is compared in NFC, as git
-  // records a macOS file whose name the disk holds decomposed, and as a path
-  // in files reaches the same file on such a disk. A member is read by its
-  // name on disk and sent under the step's key, as files does.
-  const members = new Map<string, MethodTreeFile>();
+  // and the standard's tree paths are in NFC already, so a name the step
+  // writes is compared in NFC too.
+  const members = new Map<string, ListedFile>();
   const membersByFoldedPath = new Map<string, string>();
   for (const file of files) {
-    const composed = file.path.normalize("NFC");
-    if (!members.has(composed)) members.set(composed, file);
-    const folded = composed.toLowerCase();
+    members.set(file.path, file);
+    const folded = file.path.toLowerCase();
     if (!membersByFoldedPath.has(folded)) membersByFoldedPath.set(folded, file.path);
   }
   const named: NamedTemplate[] = [];
   const located = new Map<string, LocatedTemplate>();
-  const treePathByReal = new Map<string, string>();
   const lookupRefusals = new Map<string, { message: string; hint: string }>();
   for (const file of bundle) {
     const dir = path.posix.dirname(file.treePath);
     for (const templateFile of templateFilesNamedBy(file.content)) {
       const key = templateKeyOf(templateFile);
       if (key === undefined) continue;
-      const treePath = dir === "." ? key : `${dir}/${key}`;
-      const member = isTemplateFilePath(key) ? members.get(treePath.normalize("NFC")) : undefined;
+      const treePath = (dir === "." ? key : `${dir}/${key}`).normalize("NFC");
+      const member = isTemplateFilePath(key) ? members.get(treePath) : undefined;
       if (member === undefined && isTemplateFilePath(key)) {
-        const refusal = missedTemplateRefusal(
+        const refusal = await missedTemplateRefusal(
+          tree,
           shown,
           file.treePath,
           templateFile,
           treePath,
-          nestedRepositories,
           membersByFoldedPath,
         );
         if (refusal !== undefined) lookupRefusals.set(`${file.treePath}\0${treePath}`, refusal);
       }
-      const real = member === undefined ? null : path.join(folder, ...member.path.split("/"));
+      // A member's tree path stands for its real path in the planner, which
+      // matches files by real path: one member is one file.
+      const real = member === undefined ? null : member.path;
       named.push({ key, mthdsPath: file.path, real, escapes: false });
-      if (member !== undefined && real !== null && !located.has(member.path)) {
-        treePathByReal.set(real, member.path);
+      if (member !== undefined && !located.has(member.path)) {
         located.set(member.path, {
           index: located.size,
           path: shown(member.path),
-          real,
+          real: member.path,
           size: member.size,
         });
       }
@@ -363,25 +479,27 @@ async function resolveMethodFolder(
 
   // Each template file read once, whatever number of keys it is sent under,
   // and the request held to its bounds again on what was read.
-  const bytesByReal = new Map<string, Uint8Array>();
-  const read: { key: string; index: number; path: string; size: number; bytes: Uint8Array }[] = [];
+  const bytesByPath = new Map<string, Uint8Array>();
+  const read_: { key: string; index: number; path: string; size: number; bytes: Uint8Array }[] = [];
   for (const entry of plan.planned) {
-    let bytes = bytesByReal.get(entry.real);
+    let bytes = bytesByPath.get(entry.real);
     if (bytes === undefined) {
-      const outcome = await readMember(folder, treePathByReal.get(entry.real) ?? "");
-      if (!outcome.ok) return refuse(...memberReadFailure(entry.path, outcome.message));
-      bytes = outcome.bytes;
-      bytesByReal.set(entry.real, bytes);
+      try {
+        bytes = await read(entry.real);
+      } catch (err) {
+        return refusedWith(...memberReadFailure(entry.path, errorMessage(err)));
+      }
+      bytesByPath.set(entry.real, bytes);
     }
-    read.push({ ...entry, size: bytes.byteLength, bytes });
+    read_.push({ ...entry, size: bytes.byteLength, bytes });
   }
-  const overRead = templateBudgetRefusals(read, requestBytes, { countHint: FOLDER_COUNT_HINT });
+  const overRead = templateBudgetRefusals(read_, requestBytes, { countHint: FOLDER_COUNT_HINT });
   if (overRead.length > 0) return { ok: false, refusals: overRead.map(asFolderRefusal) };
 
   const resources: TemplateFiles = {};
-  for (const entry of read) resources[entry.key] = entry.bytes;
+  for (const entry of read_) resources[entry.key] = entry.bytes;
   const sentTemplates = templates
-    .filter((template) => bytesByReal.has(template.real))
+    .filter((template) => bytesByPath.has(template.real))
     .map((template) => template.path);
   return {
     ok: true,
@@ -396,34 +514,34 @@ async function resolveMethodFolder(
  * rather than left for the runner to report as not supplied; `undefined` when
  * it is simply missing. Two cases are the author's mistake and say so: the
  * path leads into a nested repository, which is out of the folder with
- * everything under it, or the folder holds the file spelled in another case,
- * which a case-insensitive filesystem would open here and a case-sensitive
- * runner would not. Names are compared in NFC, so a case near-miss is one of
- * case alone.
+ * everything under it (the standard's reference resolution says so), or the
+ * folder holds the file spelled in another case, which a case-insensitive
+ * filesystem would open here and a case-sensitive runner would not.
  */
-function missedTemplateRefusal(
+async function missedTemplateRefusal(
+  tree: FolderTree,
   shown: (treePath: string) => string,
   mthdsTreePath: string,
   templateFile: string,
   treePath: string,
-  nestedRepositories: readonly string[],
   membersByFoldedPath: ReadonlyMap<string, string>,
-): { message: string; hint: string } | undefined {
+): Promise<{ message: string; hint: string } | undefined> {
   const step = `A PipeDocGen step of ${shown(mthdsTreePath)} names the template_file "${templateFile}"`;
-  const composed = treePath.normalize("NFC");
-  const repository = nestedRepositories.find((repo) =>
-    composed.startsWith(`${repo.normalize("NFC")}/`),
-  );
-  if (repository !== undefined) {
+  const resolution = await tree
+    .resolveReference({ holder: mthdsTreePath, reference: templateFile, context: "path" })
+    .catch(() => undefined);
+  if (
+    resolution?.kind === "refused" &&
+    resolution.refusal.excludedBy === "nested_repository" &&
+    resolution.refusal.excludedDirectory !== undefined
+  ) {
     return {
-      message: `${step}, which leads into ${shown(repository)}, a nested git repository: a directory holding a .git entry is not part of the method's folder.`,
+      message: `${step}, which leads into ${shown(resolution.refusal.excludedDirectory)}, a nested git repository: a directory holding a .git entry is not part of the method's folder.`,
       hint: "Move the template file out of the nested repository into the method's folder, or pass method_dir for a folder that is not a repository's parent.",
     };
   }
-  // Only a difference of case is refused: the lookup already reads both
-  // Unicode normalizations of a name as one.
-  const spelled = membersByFoldedPath.get(composed.toLowerCase());
-  if (spelled !== undefined && spelled.normalize("NFC") !== composed) {
+  const spelled = membersByFoldedPath.get(treePath.toLowerCase());
+  if (spelled !== undefined && spelled !== treePath) {
     return {
       message: `${step}, which leads to ${shown(treePath)}, and the folder holds ${shown(spelled)}, spelled in another case.`,
       hint: "Template files are matched case-sensitively, as the runner reads them: make the step's template_file and the file's name agree letter for letter.",
@@ -432,41 +550,14 @@ function missedTemplateRefusal(
   return undefined;
 }
 
-/**
- * Read one member of a method folder by its tree path, refusing to follow a
- * symbolic link that took the place of the regular file the walk saw. A link
- * swapped into a directory component in between is the residual SPEC.md's
- * read side accepts.
- */
-async function readMember(
-  folder: string,
-  treePath: string,
-): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; message: string }> {
-  let handle;
-  try {
-    handle = await fs.open(path.join(folder, ...treePath.split("/")), READ_NO_FOLLOW);
-  } catch (err) {
-    return { ok: false, message: errorMessage(err) };
-  }
-  try {
-    if (!(await handle.stat()).isFile()) return { ok: false, message: "not a regular file" };
-    const buffer = await handle.readFile();
-    return { ok: true, bytes: new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength) };
-  } catch (err) {
-    return { ok: false, message: errorMessage(err) };
-  } finally {
-    await handle.close();
-  }
-}
-
-/** Open for reading without following a final symbolic link; Windows has no such flag. */
-const READ_NO_FOLLOW =
-  fsConstants.O_RDONLY | ((fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0);
-
-function memberReadFailure(shownPath: string, message: string): [string, string] {
+function memberReadFailure(
+  shownPath: string,
+  message: string,
+  fallback: FolderFallback = FOLDER_FALLBACK,
+): [string, string] {
   return [
     `Could not read ${shownPath}: ${message}`,
-    `Check the file and its permissions; a file that changed while the folder was read can be sent again. ${FOLDER_FALLBACK.replace(/^or /, "Or ")}`,
+    `Check the file and its permissions; a file that changed while the folder was read can be sent again.${fallback.sentence}`,
   ];
 }
 
@@ -482,8 +573,13 @@ function asFolderRefusal(refusal: TemplateRefusal): { message: string; hint: str
   return { message: refusal.message, hint: refusal.hint };
 }
 
+/** A tree path as the caller can open it: `method_dir` joined with it. */
+function shownUnder(methodDir: string): (treePath: string) => string {
+  return (treePath) => path.join(methodDir, ...treePath.split("/"));
+}
+
 /** A few paths by name, the rest counted. */
-function listed(paths: readonly string[]): string {
+function listed_(paths: readonly string[]): string {
   const head = paths.slice(0, MAX_LISTED_PATHS).join(", ");
   return paths.length > MAX_LISTED_PATHS
     ? `${head}, and ${paths.length - MAX_LISTED_PATHS} more`
@@ -495,8 +591,8 @@ function isMthdsPath(treePath: string): boolean {
 }
 
 /** The files at the folder's top first, then every file by tree path byte for byte. */
-function topLevelFirst(a: MethodTreeFile, b: MethodTreeFile): number {
-  const nested = (file: MethodTreeFile) => (file.path.includes("/") ? 1 : 0);
+function topLevelFirst(a: ListedFile, b: ListedFile): number {
+  const nested = (file: ListedFile) => (file.path.includes("/") ? 1 : 0);
   return nested(a) - nested(b) || byteOrder(a.path, b.path);
 }
 

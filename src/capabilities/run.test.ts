@@ -270,7 +270,7 @@ describe("run-route error classification", () => {
         undefined, // validationErrors
         "forbidden",
         {
-          problem: {
+          details: {
             errorDomain: "input",
             retryable: false,
             title: "File belongs to another organization",
@@ -1909,7 +1909,7 @@ describe("startMthdsRun by method_ref", () => {
           undefined,
           undefined,
           // The runner tags this refusal `error_domain: input` (raise_forbidden).
-          { problem: { errorDomain: "input" } },
+          { details: { errorDomain: "input" } },
         ),
       );
 
@@ -2998,7 +2998,7 @@ describe("startMthdsRun by method_id, on both platforms", () => {
               undefined,
               "validation_failed",
               {
-                problem: {
+                details: {
                   status: 422,
                   code: "validation_failed",
                   errors: [{ field: "method_id", code: "string_pattern_mismatch" }],
@@ -3033,7 +3033,7 @@ describe("startMthdsRun by method_id, on both platforms", () => {
               undefined,
               "role_not_permitted",
               {
-                problem: { title: "Forbidden", errorDomain: "config", retryable: false },
+                details: { title: "Forbidden", errorDomain: "config", retryable: false },
                 mayStartRun: true,
               },
             ),

@@ -50,6 +50,15 @@ import {
   liveClient,
 } from "../src/capabilities/e2e-support.js";
 
+/**
+ * The bundle's path in each fixture's tree: the name the catalog's rewrite of
+ * stored methods gave a method saved as one bundle, and the one the hosted
+ * console's seed script writes for the fixture row both repositories share, so
+ * a fixture seeded before methods were trees re-seeds to the very tree it
+ * already holds, and its publish answers `unchanged`.
+ */
+const FIXTURE_TREE_PATH = "main.mthds";
+
 function write(text: string): void {
   process.stdout.write(`${text}\n`);
 }
@@ -65,21 +74,24 @@ function write(text: string): void {
  * the platform makes admin-only to delete, after which every later run writes
  * whichever of the two the server lists first.
  *
- * The write arm sends the draft's `mthds` alone. `PUT /v1/methods/{id}/draft`
- * keeps `python` and `input_data` on omission, so form inputs saved against
- * the fixture from the webapp survive a re-seed, and it is a compare-and-swap
- * on the token just read, so a concurrent edit is refused rather than
- * overwritten.
+ * Each fixture is a method tree of one file, the bundle at
+ * {@link FIXTURE_TREE_PATH}. The write arm writes the draft alone, and a draft
+ * write replaces the whole tree, so the stored tree is exactly that one file
+ * after a re-run. It omits `input_data`, which keeps the stored form inputs, so
+ * any saved against the fixture from the webapp survive a re-seed, and it is a
+ * compare-and-swap on the token just read, so a concurrent edit is refused
+ * rather than overwritten.
  */
-async function seed(name: string, mthds: string): Promise<void> {
+async function seed(name: string, bundle: string): Promise<void> {
   const client = liveClient();
   const existing = await catalogRowNamed(name);
+  const contents = { [FIXTURE_TREE_PATH]: bundle };
 
   const method =
     existing === undefined
-      ? await client.createMethod({ name, mthds })
+      ? await client.createMethod({ name, contents })
       : await client.writeDraft(existing, {
-          mthds,
+          contents,
           expected_updated_at: (await client.getMethod(existing)).updated_at,
         });
 

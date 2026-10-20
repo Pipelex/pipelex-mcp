@@ -227,8 +227,16 @@ async function readAdvertisedExtensions(): Promise<Set<string>> {
  * any deployment that is not sandbox-hosted. Those legs take
  * {@link PYTHON_FREE_METHOD_REF} instead. The legs that resolve through
  * `/v1/pipe-io`, which applies no gate, may take either.
+ *
+ * The tag is one whose `PipeFunc` names its function by its import path from
+ * the root of the method tree (`text_stats_funcs.text_stats_report`), the only
+ * form a runner from pipelex 0.87.0 on accepts; the tags before it name the
+ * function flat, which such a runner refuses as invalid.
  */
-export const PUBLISHED_METHOD_REF = "github.com/Pipelex/methods/text_stats@v0.1.1";
+export const PUBLISHED_METHOD_TAG = "v0.2.0";
+
+/** The published address of {@link PUBLISHED_METHOD_TAG}'s `text_stats` package. */
+export const PUBLISHED_METHOD_REF = `github.com/Pipelex/methods/text_stats@${PUBLISHED_METHOD_TAG}`;
 
 /**
  * The published package the by-address legs that resolve through
@@ -250,8 +258,8 @@ export const PUBLISHED_METHOD_REF = "github.com/Pipelex/methods/text_stats@v0.1.
  */
 export const PYTHON_FREE_METHOD_REF = "github.com/Pipelex/methods/documents@v0.1.0";
 
-/** The commit `v0.1.1` points at — a tag resolves to it, and a run says so. */
-export const PUBLISHED_METHOD_COMMIT = "af0da07ac83e30e58443c88ec9ed4174131800a1";
+/** The commit {@link PUBLISHED_METHOD_TAG} points at — a tag resolves to it, and a run says so. */
+export const PUBLISHED_METHOD_COMMIT = "e849588af7423a1847ef0931a1c18b4436ad109d";
 
 /** The pipe this package's bundle declares, qualified. */
 export const PUBLISHED_METHOD_PIPE_REF = "text_stats.analyze_text";
@@ -350,8 +358,12 @@ export const CATALOG_WRITE_BUNDLE = FIXTURE_BUNDLE.replace(
   "mcp_e2e_catalog_write",
 );
 
-/** The file name the write suite submits the bundle under. */
-export const CATALOG_WRITE_BUNDLE_FILE = "mcp_e2e_catalog_write.mthds";
+/**
+ * The path the write suite keeps the bundle at in its folder: the path
+ * `make seed-e2e-fixture` writes it at, so a save from the suite leaves the
+ * draft's tree, and its digest, as the seed left them.
+ */
+export const CATALOG_WRITE_BUNDLE_FILE = "main.mthds";
 
 /**
  * A bundle that must NOT validate — it names a pipe type that does not exist,

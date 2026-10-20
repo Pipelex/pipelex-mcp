@@ -411,7 +411,7 @@ describe("noteSelectorRefusal", () => {
       "refused",
       undefined,
       code,
-      errors === undefined ? undefined : { problem: { status, code, errors } as never },
+      errors === undefined ? undefined : { details: { status, code, errors } as never },
     );
   }
   /** How the run route of a platform that does not resolve suffixes refuses the `@`. */

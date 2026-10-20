@@ -3,10 +3,10 @@ import {
   ApiUnreachableError,
   ArtifactAuthenticationError,
   ArtifactOperationError,
-  EmptyMethodSourceError,
   InputPreparationError,
   InvalidInputValueError,
   InvalidLocalSourceError,
+  MethodFileTransferError,
   MethodLoadError,
   MissingMainStuffError,
   PIPELEX_STORAGE_SCHEME,
@@ -24,6 +24,7 @@ import {
   errorVerdictOf,
 } from "@pipelex/sdk";
 import type { ErrorDomain, ErrorVerdict, PipelexApiClientOptions } from "@pipelex/sdk";
+import type { MethodTreeLimits } from "mthds";
 import { z } from "zod";
 
 import { BARE_APP_INFO } from "./client-identification.js";
@@ -115,8 +116,8 @@ export const bundleFilesInputSchema = z
 
 /**
  * `method_dir`, the folder arm of the method-taking tools: the method's folder
- * on disk, from which the workshop finds the `.mthds` files under the
- * membership rule (`src/method-tree.ts`) and the template files their
+ * on disk, from which the workshop finds the `.mthds` files under the MTHDS
+ * standard's membership rule (`method-tree.ts`) and the template files their
  * `PipeDocGen` steps name, and sends those, nothing else. It is a top-level
  * field beside `files`, `method_ref` and `method_id` rather than a third arm of
  * the files union, since a folder is not a file and a folder beside listed
@@ -135,7 +136,7 @@ export function methodDirInputSchema(rule: SelectorRule) {
     .describe(
       "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. " +
         "The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. " +
-        "It skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, a run's inputs file (inputs.json or inputs.toml, at any depth, a link included), and what the .gitignore files inside the folder exclude, and refuses a folder holding a symbolic link it does not skip. " +
+        "Its files are the MTHDS standard's method tree: it skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, virtual environments, nested repositories, a run's inputs file (inputs.json or inputs.toml, at any depth), and what the .gitignore files inside the folder and its METHODS.toml exclude, and refuses a folder holding a symbolic link it does not skip or past the limits the Pipelex deployment announces. " +
         `Its template files are held to the limits files states, and its .mthds files to the runner's: at most ${MAX_FOLDER_MTHDS_FILES}, of ${MAX_FOLDER_MTHDS_FILE_BYTES / (1024 * 1024)} MiB each. ` +
         `Prefer it to files for a method on disk; the result's files_sent lists every file sent. ${pairing}`,
     );
@@ -206,6 +207,12 @@ export type FileResolution =
  * `resolveMethodDir` is what makes a tool take `method_dir`: it reads a method
  * folder whole, its `.mthds` files and the template files their steps name,
  * and holds them to the request's bounds. Absent, `method_dir` is refused.
+ *
+ * `locateMethodDir` and `readMethodTree` are what make `mthds_save_method`
+ * take a folder: the first finds it on its real path before anything is read,
+ * so the save reads the folder's link first, and the second lists its whole
+ * tree and reads every file of it once, so the bytes the save checks,
+ * validates and sends are one read.
  */
 export interface FileResolver {
   resolve(path: string): Promise<FileResolution>;
@@ -214,8 +221,51 @@ export interface FileResolver {
     bundle: readonly BundleFileOnDisk[],
     requestBytes: number,
   ): Promise<TemplateFilesResolution>;
-  resolveMethodDir?(methodDir: string): Promise<MethodDirResolution>;
+  resolveMethodDir?(methodDir: string, options?: MethodDirOptions): Promise<MethodDirResolution>;
+  locateMethodDir?(methodDir: string): Promise<MethodDirLocation>;
+  readMethodTree?(
+    location: LocatedMethodDir,
+    options: { limits: MethodTreeLimits },
+  ): Promise<MethodTreeRead>;
 }
+
+/** What a folder's listing may be told by the tool that reads it. */
+export interface MethodDirOptions {
+  /**
+   * The limits the deployment holds a method's tree to (`tree-limits.ts`),
+   * asked only once a folder is listed. Absent, the listing holds to the
+   * file count alone.
+   */
+  limits?: () => Promise<MethodTreeLimits>;
+}
+
+/** A method folder found on disk: its real path, and `method_dir` as the caller wrote it. */
+export interface LocatedMethodDir {
+  folder: string;
+  methodDir: string;
+}
+
+export type MethodDirLocation =
+  | ({ ok: true } & LocatedMethodDir)
+  | { ok: false; refusals: { message: string; hint: string }[] };
+
+/**
+ * A method folder's whole tree, every file read once: the listing, its digest,
+ * the run's inputs files and the workshop's graph page it left out, the bytes,
+ * and the request `mthds_validate` would build from the folder, built from
+ * those same bytes. Failures are values, all located at `method_dir`.
+ */
+export type MethodTreeRead =
+  | {
+      ok: true;
+      files: readonly { path: string; size: number; sha256: string }[];
+      digest: string;
+      runInputs: readonly string[];
+      graphPage?: string;
+      bytes: ReadonlyMap<string, Uint8Array>;
+      folderRequest(): Promise<MethodDirResolution>;
+    }
+  | { ok: false; refusals: { message: string; hint: string }[] };
 
 /**
  * Outcome of reading a method folder. On success, `files` are its `.mthds`
@@ -271,6 +321,7 @@ export async function resolveMethodFiles(
   source: MethodSourceInput,
   resolver: FileResolver | undefined,
   rule: SelectorRule,
+  options: MethodDirOptions = {},
 ): Promise<ResolvedMethodFiles> {
   if (source.method_dir === undefined) {
     return resolveSubmittedFiles(source.files ?? [], resolver);
@@ -297,7 +348,7 @@ export async function resolveMethodFiles(
     ]);
   }
 
-  const outcome = await resolver.resolveMethodDir(source.method_dir);
+  const outcome = await resolver.resolveMethodDir(source.method_dir, options);
   if (!outcome.ok) {
     return refused(
       outcome.refusals.map((refusal) => ({
@@ -494,8 +545,7 @@ export async function resolveSubmittedFiles(
         location: `files[${index}].path`,
         message: "File path must not be empty.",
         // Extension-neutral: this routine serves every files-taking argument,
-        // and `mthds_save_method`'s `python` arm reads `.py`. Naming `.mthds`
-        // here told that caller to submit the one thing the argument refuses.
+        // whatever extension its resolver reads.
         hint: "Submit a file path, or inline the contents as { content, uri? }.",
         retryable: false,
       });
@@ -1578,6 +1628,22 @@ function classifyFailure(err: unknown, options: ClassifyErrorOptions): ToolError
  * failure, by its class. Ordered most specific first: each family's subclasses
  * before its base.
  */
+/** What a caller can do about a file of a method's tree that did not move, by which way and why. */
+function methodFileTransferHint(err: MethodFileTransferError): string {
+  if (err.operation === "upload") {
+    return err.code === "refused"
+      ? "The platform's storage refused the upload, so nothing was saved. Save again; if it is refused again, the platform's storage needs looking at."
+      : "The platform's storage did not take the file, so nothing was saved. Save again in a moment: a file the organization already holds is never uploaded twice.";
+  }
+  if (err.code === "refused") {
+    return "Storage refused the download, most often because the file's link expired, and nothing was written. Pull again, which reads the method afresh with new links.";
+  }
+  if (err.code === "mismatch") {
+    return "The bytes storage served are not the file the method lists, so nothing was written. Pull again; if it happens again, the platform's storage needs looking at.";
+  }
+  return "Storage did not serve the file, so nothing was written. Pull again in a moment.";
+}
+
 function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions): ToolTexture {
   const message = err.message;
 
@@ -1595,6 +1661,18 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
       location: BASE_URL_LOCATION,
       message,
       hint: "Start pipelex-api locally or set PIPELEX_BASE_URL to a reachable host-only API base URL.",
+    };
+  }
+
+  // A file of a method's tree that did not move between this machine and the
+  // platform's storage: an upload of a save, located at the folder it read, or
+  // a download of a pull, located at where it was writing. Neither the message
+  // nor any field carries the file's signed link.
+  if (err instanceof MethodFileTransferError) {
+    return {
+      location: err.operation === "upload" ? "method_dir" : "output_dir",
+      message,
+      hint: methodFileTransferHint(err),
     };
   }
 
@@ -1618,17 +1696,6 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
   }
 
   // ── Input-preparation family (mthds_prepare_inputs) ──
-
-  // Normally caught by its caller (`mthds_get_method` composes its own
-  // refusal); mapped defensively so a stray one still locates at method_id,
-  // not pipe_ref.
-  if (err instanceof EmptyMethodSourceError) {
-    return {
-      location: "method_id",
-      message,
-      hint: "The stored method has no MTHDS source yet. Add MTHDS content to it, or submit files instead.",
-    };
-  }
 
   // A missing/unreadable local path or an asset the storage service refused
   // (413): the caller's input value is the problem.

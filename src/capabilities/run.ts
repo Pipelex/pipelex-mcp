@@ -35,6 +35,8 @@ import {
   selectorFailure,
 } from "./method-versions.js";
 import type { MethodVersionsAware, RunContentReport, SelectorPlan } from "./method-versions.js";
+import { methodTreeLimitsOf } from "./tree-limits.js";
+import type { TreeLimitsAware } from "./tree-limits.js";
 import {
   MAX_IMAGE_CANDIDATE_ENTRIES,
   METHOD_REF_GRAMMAR,
@@ -552,7 +554,7 @@ interface RunClient {
   version?(): Promise<unknown>;
 }
 
-export interface RunContext extends ApiConfig, MethodVersionsAware {
+export interface RunContext extends ApiConfig, MethodVersionsAware, TreeLimitsAware {
   client?: RunClient;
   /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
@@ -1397,7 +1399,9 @@ export async function startMthdsRun(
   input: MthdsRunInput,
   context: RunContext = buildRunContext(),
 ): Promise<RunStartResult> {
-  const resolution = await resolveMethodFiles(input, context.resolver, "run_source");
+  const resolution = await resolveMethodFiles(input, context.resolver, "run_source", {
+    limits: () => methodTreeLimitsOf(context, () => runClient(context)),
+  });
   const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
     required: false,
   });

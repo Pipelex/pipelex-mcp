@@ -18,6 +18,8 @@ import {
   withMethodContent,
 } from "./method-versions.js";
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
+import { methodTreeLimitsOf } from "./tree-limits.js";
+import type { TreeLimitsAware } from "./tree-limits.js";
 import {
   METHOD_REF_GRAMMAR,
   buildApiConfig,
@@ -182,7 +184,7 @@ interface InputsClient {
   version?(): Promise<unknown>;
 }
 
-export interface InputsContext extends ApiConfig, MethodVersionsAware {
+export interface InputsContext extends ApiConfig, MethodVersionsAware, TreeLimitsAware {
   client?: InputsClient;
   /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
@@ -291,7 +293,9 @@ export async function buildMthdsInputs(
   input: MthdsInputsInput,
   context: InputsContext = buildInputsContext(),
 ): Promise<InputsResult> {
-  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector");
+  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector", {
+    limits: () => methodTreeLimitsOf(context, () => inputsClient(context)),
+  });
   if (resolution.errors.length > 0) {
     return errorResult("Inputs template was not run: request input is invalid.", resolution.errors);
   }

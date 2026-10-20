@@ -79,6 +79,7 @@ import {
 } from "./capabilities/models.js";
 import type { ModelsContext, MthdsModelsInput } from "./capabilities/models.js";
 import { createMethodVersionsMemories } from "./capabilities/method-versions.js";
+import { createTreeLimitsMemories } from "./capabilities/tree-limits.js";
 import {
   buildPrepareContext,
   mthdsPrepareInputsInputSchema,
@@ -141,13 +142,10 @@ export function buildLocalToolContexts(
 ): LocalToolContexts {
   // The method-taking tools' `files` reads `.mthds` files and, as bytes, the
   // template files their PipeDocGen steps name, and their `method_dir` reads a
-  // method folder through the same resolver. mthds_save_method's `files`
-  // reads `.mthds` alone, since the catalog stores no template file, and its
-  // `python` reads `.py` alone. The extension IS the read boundary, so one
-  // resolver serving two arguments would let each read the other's files.
+  // method folder through the same resolver, as mthds_save_method's
+  // `method_dir` does: a saved method is its folder's whole tree, listed by
+  // the MTHDS standard's membership rule (`capabilities/method-tree.ts`).
   const bundleResolver = localBundleFileResolver(rootDir);
-  const resolver = localFileResolver(rootDir);
-  const pythonResolver = localFileResolver(rootDir, ".py");
   // A third, for mthds_run and mthds_prepare_inputs's `inputs_path`: `.json`
   // only, capped, and worded to fall back on inline `inputs`. The bundle
   // directory gate does not apply — inputs are not part of the bundle — but the
@@ -167,6 +165,9 @@ export function buildLocalToolContexts(
   // `GET /v1/version` once rather than once per tool. It keeps one answer per
   // base URL, since each tool call resolves its own (`method-versions.ts`).
   const methodVersions = createMethodVersionsMemories();
+  // One memory of the limits each platform holds a method's tree to, shared
+  // the same way by every tool that lists a method folder (`tree-limits.ts`).
+  const treeLimits = createTreeLimitsMemories();
 
   // The save's validation leg sends the contents it already read, so this
   // base's resolver serves mthds_validate alone.
@@ -174,6 +175,7 @@ export function buildLocalToolContexts(
     ...buildValidationContext(env),
     resolver: bundleResolver,
     methodVersions,
+    treeLimits,
   };
 
   return {
@@ -181,14 +183,14 @@ export function buildLocalToolContexts(
     models: buildModelsContext(env),
     catalogWrite: {
       ...buildCatalogWriteContext(env),
-      resolver,
-      pythonResolver,
+      resolver: bundleResolver,
       validation,
       saveRoot: rootDir,
       methodVersions,
+      treeLimits,
     },
     validation: { ...validation, saveRoot: rootDir },
-    inputs: { ...buildInputsContext(env), resolver: bundleResolver, methodVersions },
+    inputs: { ...buildInputsContext(env), resolver: bundleResolver, methodVersions, treeLimits },
     // `saveRoot` is the working directory on every writer: codegen resolves
     // `output_dir` against it, as the download tool resolves `dir`.
     codegen: {
@@ -196,6 +198,7 @@ export function buildLocalToolContexts(
       resolver: bundleResolver,
       saveRoot: rootDir,
       methodVersions,
+      treeLimits,
     },
     // The workshop is co-located with the user's files, so its prepare tool
     // uploads file-bearing inputs (local paths, data: URLs, bytes).
@@ -203,9 +206,16 @@ export function buildLocalToolContexts(
       ...buildPrepareContext(env),
       resolver: bundleResolver,
       methodVersions,
+      treeLimits,
       inputsResolver,
     },
-    run: { ...buildRunContext(env), resolver: bundleResolver, methodVersions, inputsResolver },
+    run: {
+      ...buildRunContext(env),
+      resolver: bundleResolver,
+      methodVersions,
+      treeLimits,
+      inputsResolver,
+    },
     images: buildImagesContext(env),
     artifacts: { ...buildArtifactsContext(env), saveRoot: rootDir },
   };
@@ -548,35 +558,34 @@ export const mthdsDownloadArtifactsTool = defineTool({
 });
 
 /**
- * Like the pull below, the save needs the working directory: it submits the
- * bundle in the `{ path }` form and finishes by writing the link file that
- * makes the next save an update rather than a duplicate.
+ * Like the pull below, the save needs the working directory: it reads the
+ * method's folder whole and finishes by writing the link file that makes the
+ * next save an update rather than a duplicate.
  *
- * The order rule is the load-bearing part of this description, and it is stated
- * rather than inferred: the platform derives a method's LISTED description from
- * the first file, so a bundle sent root-file-last is saved with a sub-file's
- * description and reads wrong in every catalog listing afterwards. The tool does
- * not reorder and does not guess which file is the root, because guessing would
- * be wrong silently; the caller orders them and the description says so.
+ * The first load-bearing sentence is what a saved method now is: the folder's
+ * whole tree, not a list of `.mthds` files, so a model does not go looking
+ * for the files to name. The platform derives the listed description from the
+ * first `.mthds` file in path order that declares one, so no order rule is
+ * left for the caller to keep.
  *
- * The second load-bearing sentence is the `method_id` discriminator. Without it
- * a model that means to update calls without the id, and a create is the one
- * gesture here that cannot be taken back by calling again.
+ * The second is the `method_id` discriminator. Without it a model that means
+ * to update calls without the id, and a create is the one gesture here that
+ * cannot be taken back by calling again.
  *
- * The last says a save is not a publish, because that is what changed: a save
- * used to be the deployment, and a model that still read it so would either
- * refuse to save without asking or treat a save as releasing the method. What
- * matters only after the call — the link file to commit, the `@draft` id to
- * run what was saved, what callers of the bare id run now on this platform —
- * is said by the result summary, which is where the model is when it needs it.
+ * The secret guard is stated because it refuses, and a model told why it was
+ * refused fixes the folder instead of retrying. The last says a save is not a
+ * publish. What matters only after the call — the link file to commit, the
+ * `@draft` id to run what was saved, what callers of the bare id run now on
+ * this platform — is said by the result summary, which is where the model is
+ * when it needs it.
  */
 const SAVE_METHOD_DESCRIPTION = [
-  "Save an MTHDS bundle from disk as a saved method's DRAFT in the organization's catalog — one call validates the files and saves those same bytes, valid or not.",
-  "files is the bundle's .mthds files with the ROOT FILE FIRST (the one carrying the bundle's `domain`): the platform derives the method's listed description from the first file, and this tool neither reorders them nor guesses which is the root.",
-  "method_id is the discriminator: absent CREATES a new method, present writes THAT method's draft. There is no create/update flag. Read it from pipelex-method.json in the bundle's directory when that file is there — it is what makes a second save an update instead of a duplicate.",
+  "Save a method's folder as a saved method's DRAFT in the organization's catalog — one call validates the folder and saves those same bytes, valid or not.",
+  "method_dir is the folder, with a .mthds file at its top; its whole tree is saved, .mthds files, Python modules, templates and data alike, as the MTHDS standard's membership rule keeps them.",
+  "method_id is the discriminator: absent CREATES a new method, present writes THAT method's draft. There is no create/update flag. Read it from the folder's .pipelex/method.json when that file is there — it is what makes a second save an update instead of a duplicate.",
   "name is required on a create; on an update omit it to keep the name, and a different one renames the method.",
-  "python replaces the bundle's custom-PipeFunc .py files as a SET — omit it to preserve what is stored, send [] to clear it. It is never merged.",
-  "From a linked directory the save sends pipelex-method.json's synced_updated_at as its token, so the platform refuses it if the draft changed since this directory synced; pass expected_updated_at with the draft's current updated_at only to replace it knowingly, after asking the user.",
+  "From a linked folder the save sends .pipelex/method.json's synced_updated_at as its token, so the platform refuses it if the draft changed since this folder synced; pass expected_updated_at with the draft's current updated_at only to replace it knowingly, after asking the user.",
+  "A folder holding a key file or a well-known key format is refused before anything is sent.",
   "A save never publishes; the validation verdict comes back beside it, and an invalid draft is saved all the same.",
 ].join(" ");
 
@@ -588,10 +597,9 @@ export const mthdsSaveMethodTool = defineTool({
   annotations: {
     title: "Save an MTHDS method to the catalog",
     readOnlyHint: false,
-    // A save REPLACES the method's draft — the bundle, and `python` when it is
-    // sent — so a save aimed at the wrong method_id, or one from an unlinked
-    // directory, which sends no token, overwrites somebody's work, the webapp's
-    // autosaved draft included.
+    // A save REPLACES the method's draft, its whole tree, so a save aimed at
+    // the wrong method_id, or one from an unlinked folder, which sends no
+    // token, overwrites somebody's work, the webapp's autosaved draft included.
     // That is what this annotation is for: it is the one thing a host reads to
     // decide whether to confirm before calling.
     destructiveHint: true,
@@ -603,12 +611,12 @@ export const mthdsSaveMethodTool = defineTool({
 });
 
 const GET_METHOD_DESCRIPTION = [
-  "Bring a saved method's source files back from the organization's catalog: its draft (what the last save holds) for a bare mt_… id, or published version n for mt_…@<n>.",
-  "Pass output_dir (a directory of its own, relative to the working directory) to write the .mthds and .py files to disk with pipelex-method.json beside them — no source passes through the conversation, and the directory is then linked, so a later mthds_save_method from it writes this same method's draft.",
-  "Without output_dir the sources come back inline. Use that arm only to READ a method you cannot see on disk; to work on one, write it out.",
-  "It refuses rather than overwrite: a directory holding .mthds files that is not linked to this method is somebody else's bundle, and a linked directory whose files differ is only overwritten after you have asked the user and passed overwrite: true. Every refusal writes nothing at all.",
-  "Pulling a version into the method's linked directory, then saving from there with expected_updated_at, is how a version is restored as the draft; without it that save is refused.",
-  "A method that exists but has no MTHDS source yet is reported as such — a different answer from an unknown id.",
+  "Bring a saved method's tree back from the organization's catalog: its draft (what the last save holds) for a bare mt_… id, or published version n for mt_…@<n>.",
+  "Pass output_dir (a folder of its own, relative to the working directory) to write every file of the tree to disk at its path, with .pipelex/method.json linking the folder — no file passes through the conversation, and a later mthds_save_method from it writes this same method's draft.",
+  "Without output_dir the text files come back inline. Use that arm only to READ a method you cannot see on disk; to work on one, write it out.",
+  "It refuses rather than overwrite: a folder holding .mthds files that is not linked to this method is somebody else's method, and a linked folder whose files differ is only overwritten after you have asked the user and passed overwrite: true. Every refusal writes nothing at all.",
+  "Pulling a version into the method's linked folder, then saving from there with expected_updated_at, is how a version is restored as the draft; without it that save is refused.",
+  "A method that exists but holds no file yet is reported as such — a different answer from an unknown id.",
 ].join(" ");
 
 export const mthdsGetMethodTool = defineTool({
@@ -642,7 +650,7 @@ export const mthdsGetMethodTool = defineTool({
 const PUBLISH_METHOD_DESCRIPTION = [
   "Publish a saved method's draft as its next immutable version. Callers of the method's bare id (mt_…) run its latest published version, so this is the deployment gesture; mt_…@<n> pins one version.",
   "Call it ONLY when the user asks for a publish. Saving a draft with mthds_save_method is never a reason to publish.",
-  "Pass expected_draft_updated_at, the draft token you last saw (the updated_at of your last save of this method or your last pull of its draft, or pipelex-method.json's synced_updated_at when it records no synced_version; a pull of mt_…@<n> reports the draft's token without its content, so never publish under it): a draft that changed since is refused, so you never publish one you have not seen.",
+  "Pass expected_draft_updated_at, the draft token you last saw (the updated_at of your last save of this method or your last pull of its draft, or .pipelex/method.json's synced_updated_at when it records no synced_version; a pull of mt_…@<n> reports the draft's token without its content, so never publish under it): a draft that changed since is refused, so you never publish one you have not seen.",
   "The answer is a verdict on outcome: published with the new version number, unchanged when the draft already equals the latest version, or refused with the validation errors when the draft does not validate or does not run yet.",
 ].join(" ");
 

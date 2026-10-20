@@ -11,6 +11,8 @@ import {
   withMethodContent,
 } from "./method-versions.js";
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
+import { methodTreeLimitsOf } from "./tree-limits.js";
+import type { TreeLimitsAware } from "./tree-limits.js";
 import {
   METHOD_REF_GRAMMAR,
   buildApiConfig,
@@ -158,7 +160,7 @@ interface PrepareClient {
  * `mthds_prepare_inputs` always uploads: the workshop is co-located with the
  * user's files.
  */
-export interface PrepareContext extends ApiConfig, MethodVersionsAware {
+export interface PrepareContext extends ApiConfig, MethodVersionsAware, TreeLimitsAware {
   client?: PrepareClient;
   /** Fills `{ path }` closure items from disk (local workshop). */
   resolver?: FileResolver;
@@ -285,7 +287,9 @@ export async function prepareMthdsInputs(
   input: MthdsPrepareInputsInput,
   context: PrepareContext = buildPrepareContext(),
 ): Promise<PrepareResult> {
-  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector");
+  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector", {
+    limits: () => methodTreeLimitsOf(context, () => prepareClient(context)),
+  });
   const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
     required: true,
   });

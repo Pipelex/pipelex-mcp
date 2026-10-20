@@ -9,7 +9,7 @@
         "listChanged": true
       }
     },
-    "instructions": "This is the Pipelex plugin's local workshop for executable AI methods written in MTHDS (.mthds). The usual flow: `mthds_list_methods` to find a saved method, `mthds_validate`, `mthds_inputs_template` and fill it, `mthds_prepare_inputs`, `mthds_run`, then `mthds_run_status` and `mthds_run_results` with the run id, and `mthds_show_images` to see a picture it produced or `mthds_download_artifacts` to save its output and files. A method only turns the inputs it is given into results; fetching from mail, drives or business systems, running on a schedule and writing back are up to whatever calls it. When the Pipelex connector's `pipelex_*` tools are also present, use these `mthds_*` tools for all method work and never mix the two, which can be signed in to different organizations. `mthds_codegen` turns a method into typed code, `mthds_models` lists and checks model references, `mthds_save_method` saves a bundle as a draft, `mthds_get_method` pulls one back, and `mthds_publish_method` publishes it, only when the user asks. Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`, `mthds_run`) takes its method as its folder on disk (method_dir, preferred), files (`{ path }` over inline), a published address (method_ref) or a catalog id (mt_…, method_id); a bare id names the latest published version, mt_…@draft the draft, and a path resolves against the working directory. Call `mthds_list_methods` when the user asks what saved methods exist or names one without its mt_ id; choose by name and description and pass its id. `mthds_run` spends inference credit. A picture from `mthds_show_images` stays in the conversation, so show one when asked, never by reflex. This workshop has no views; report each result to the user yourself."
+    "instructions": "This is the Pipelex plugin's local workshop for executable AI methods written in MTHDS (.mthds). The usual flow: `mthds_list_methods` to find a saved method, `mthds_validate`, `mthds_inputs_template` and fill it, `mthds_prepare_inputs`, `mthds_run`, then `mthds_run_status` and `mthds_run_results` with the run id, and `mthds_show_images` to see a picture it produced or `mthds_download_artifacts` to save its output and files. A method only turns the inputs it is given into results; fetching from mail, drives or business systems, running on a schedule and writing back are up to whatever calls it. When the Pipelex connector's `pipelex_*` tools are also present, use these `mthds_*` tools for all method work and never mix the two, which can be signed in to different organizations. `mthds_codegen` turns a method into typed code, `mthds_models` lists and checks model references, `mthds_save_method` saves a folder as a draft, `mthds_get_method` pulls one back, and `mthds_publish_method` publishes it, only when the user asks. Every method-taking tool (`mthds_validate`, `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`, `mthds_run`) takes its method as its folder on disk (method_dir, preferred), files (`{ path }` over inline), a published address (method_ref) or a catalog id (mt_…, method_id); a bare id names the latest published version, mt_…@draft the draft, and a path resolves against the working directory. Call `mthds_list_methods` when the user asks what saved methods exist or names one without its mt_ id; choose by name and description and pass its id. `mthds_run` spends inference credit. A picture from `mthds_show_images` stays in the conversation, so show one when asked, never by reflex. This workshop has no views; report each result to the user yourself."
   },
   "tools": [
     {
@@ -419,7 +419,7 @@
         "type": "object",
         "properties": {
           "method_dir": {
-            "description": "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. It skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, a run's inputs file (inputs.json or inputs.toml, at any depth, a link included), and what the .gitignore files inside the folder exclude, and refuses a folder holding a symbolic link it does not skip. Its template files are held to the limits files states, and its .mthds files to the runner's: at most 16, of 1 MiB each. Prefer it to files for a method on disk; the result's files_sent lists every file sent. Supply exactly ONE of method_dir / files / method_ref / method_id.",
+            "description": "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. Its files are the MTHDS standard's method tree: it skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, virtual environments, nested repositories, a run's inputs file (inputs.json or inputs.toml, at any depth), and what the .gitignore files inside the folder and its METHODS.toml exclude, and refuses a folder holding a symbolic link it does not skip or past the limits the Pipelex deployment announces. Its template files are held to the limits files states, and its .mthds files to the runner's: at most 16, of 1 MiB each. Prefer it to files for a method on disk; the result's files_sent lists every file sent. Supply exactly ONE of method_dir / files / method_ref / method_id.",
             "type": "string"
           },
           "files": {
@@ -772,7 +772,7 @@
         "type": "object",
         "properties": {
           "method_dir": {
-            "description": "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. It skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, a run's inputs file (inputs.json or inputs.toml, at any depth, a link included), and what the .gitignore files inside the folder exclude, and refuses a folder holding a symbolic link it does not skip. Its template files are held to the limits files states, and its .mthds files to the runner's: at most 16, of 1 MiB each. Prefer it to files for a method on disk; the result's files_sent lists every file sent. Supply exactly ONE of method_dir / files / method_ref / method_id.",
+            "description": "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. Its files are the MTHDS standard's method tree: it skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, virtual environments, nested repositories, a run's inputs file (inputs.json or inputs.toml, at any depth), and what the .gitignore files inside the folder and its METHODS.toml exclude, and refuses a folder holding a symbolic link it does not skip or past the limits the Pipelex deployment announces. Its template files are held to the limits files states, and its .mthds files to the runner's: at most 16, of 1 MiB each. Prefer it to files for a method on disk; the result's files_sent lists every file sent. Supply exactly ONE of method_dir / files / method_ref / method_id.",
             "type": "string"
           },
           "files": {
@@ -977,7 +977,7 @@
         "type": "object",
         "properties": {
           "method_dir": {
-            "description": "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. It skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, a run's inputs file (inputs.json or inputs.toml, at any depth, a link included), and what the .gitignore files inside the folder exclude, and refuses a folder holding a symbolic link it does not skip. Its template files are held to the limits files states, and its .mthds files to the runner's: at most 16, of 1 MiB each. Prefer it to files for a method on disk; the result's files_sent lists every file sent. Supply exactly ONE of method_dir / files / method_ref / method_id.",
+            "description": "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. Its files are the MTHDS standard's method tree: it skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, virtual environments, nested repositories, a run's inputs file (inputs.json or inputs.toml, at any depth), and what the .gitignore files inside the folder and its METHODS.toml exclude, and refuses a folder holding a symbolic link it does not skip or past the limits the Pipelex deployment announces. Its template files are held to the limits files states, and its .mthds files to the runner's: at most 16, of 1 MiB each. Prefer it to files for a method on disk; the result's files_sent lists every file sent. Supply exactly ONE of method_dir / files / method_ref / method_id.",
             "type": "string"
           },
           "files": {
@@ -1263,7 +1263,7 @@
         "type": "object",
         "properties": {
           "method_dir": {
-            "description": "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. It skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, a run's inputs file (inputs.json or inputs.toml, at any depth, a link included), and what the .gitignore files inside the folder exclude, and refuses a folder holding a symbolic link it does not skip. Its template files are held to the limits files states, and its .mthds files to the runner's: at most 16, of 1 MiB each. Prefer it to files for a method on disk; the result's files_sent lists every file sent. Supply exactly ONE of method_dir / files / method_ref / method_id.",
+            "description": "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. Its files are the MTHDS standard's method tree: it skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, virtual environments, nested repositories, a run's inputs file (inputs.json or inputs.toml, at any depth), and what the .gitignore files inside the folder and its METHODS.toml exclude, and refuses a folder holding a symbolic link it does not skip or past the limits the Pipelex deployment announces. Its template files are held to the limits files states, and its .mthds files to the runner's: at most 16, of 1 MiB each. Prefer it to files for a method on disk; the result's files_sent lists every file sent. Supply exactly ONE of method_dir / files / method_ref / method_id.",
             "type": "string"
           },
           "files": {
@@ -1457,7 +1457,7 @@
         "type": "object",
         "properties": {
           "method_dir": {
-            "description": "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. It skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, a run's inputs file (inputs.json or inputs.toml, at any depth, a link included), and what the .gitignore files inside the folder exclude, and refuses a folder holding a symbolic link it does not skip. Its template files are held to the limits files states, and its .mthds files to the runner's: at most 16, of 1 MiB each. Prefer it to files for a method on disk; the result's files_sent lists every file sent. It pairs as files do: never with files or method_ref, and with a bare method_id the folder runs and the id only files the run under its method.",
+            "description": "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. Its files are the MTHDS standard's method tree: it skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, virtual environments, nested repositories, a run's inputs file (inputs.json or inputs.toml, at any depth), and what the .gitignore files inside the folder and its METHODS.toml exclude, and refuses a folder holding a symbolic link it does not skip or past the limits the Pipelex deployment announces. Its template files are held to the limits files states, and its .mthds files to the runner's: at most 16, of 1 MiB each. Prefer it to files for a method on disk; the result's files_sent lists every file sent. It pairs as files do: never with files or method_ref, and with a bare method_id the folder runs and the id only files the run under its method.",
             "type": "string"
           },
           "files": {
@@ -3025,48 +3025,14 @@
     },
     {
       "name": "mthds_save_method",
-      "description": "Save an MTHDS bundle from disk as a saved method's DRAFT in the organization's catalog — one call validates the files and saves those same bytes, valid or not. files is the bundle's .mthds files with the ROOT FILE FIRST (the one carrying the bundle's `domain`): the platform derives the method's listed description from the first file, and this tool neither reorders them nor guesses which is the root. method_id is the discriminator: absent CREATES a new method, present writes THAT method's draft. There is no create/update flag. Read it from pipelex-method.json in the bundle's directory when that file is there — it is what makes a second save an update instead of a duplicate. name is required on a create; on an update omit it to keep the name, and a different one renames the method. python replaces the bundle's custom-PipeFunc .py files as a SET — omit it to preserve what is stored, send [] to clear it. It is never merged. From a linked directory the save sends pipelex-method.json's synced_updated_at as its token, so the platform refuses it if the draft changed since this directory synced; pass expected_updated_at with the draft's current updated_at only to replace it knowingly, after asking the user. A save never publishes; the validation verdict comes back beside it, and an invalid draft is saved all the same.",
+      "description": "Save a method's folder as a saved method's DRAFT in the organization's catalog — one call validates the folder and saves those same bytes, valid or not. method_dir is the folder, with a .mthds file at its top; its whole tree is saved, .mthds files, Python modules, templates and data alike, as the MTHDS standard's membership rule keeps them. method_id is the discriminator: absent CREATES a new method, present writes THAT method's draft. There is no create/update flag. Read it from the folder's .pipelex/method.json when that file is there — it is what makes a second save an update instead of a duplicate. name is required on a create; on an update omit it to keep the name, and a different one renames the method. From a linked folder the save sends .pipelex/method.json's synced_updated_at as its token, so the platform refuses it if the draft changed since this folder synced; pass expected_updated_at with the draft's current updated_at only to replace it knowingly, after asking the user. A folder holding a key file or a well-known key format is refused before anything is sent. A save never publishes; the validation verdict comes back beside it, and an invalid draft is saved all the same.",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "files": {
-            "type": "array",
-            "items": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "properties": {
-                    "content": {
-                      "type": "string",
-                      "description": "The full .mthds file contents."
-                    },
-                    "uri": {
-                      "description": "Optional provenance URI for diagnostics.",
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "content"
-                  ]
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "path": {
-                      "type": "string",
-                      "description": "Filesystem path to a .mthds file, resolved relative to this server's working directory."
-                    }
-                  },
-                  "required": [
-                    "path"
-                  ]
-                }
-              ]
-            },
-            "description": "The bundle's .mthds files, ROOT FILE FIRST — the one carrying the bundle's `domain`. The platform derives the method's listed description from the first file, so the order is load-bearing and this tool does not reorder or guess."
+          "method_dir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The method's folder, relative to the working directory and inside it, with a .mthds file at its top. Its whole tree is saved, every file the MTHDS standard's membership rule keeps: it skips paths with a segment starting with a dot, __pycache__/ and node_modules/, virtual environments, nested repositories, a run's inputs.json or inputs.toml, the workshop's own method-graph.html, and what the folder's .gitignore files and METHODS.toml exclude. The folder's .pipelex/method.json links it to the saved method."
           },
           "name": {
             "description": "The catalog name. Required on a create. On an update, omit it to keep the method's name; a name different from the stored one renames the method, which changes the name alone.",
@@ -3078,58 +3044,14 @@
             "type": "string",
             "minLength": 1
           },
-          "python": {
-            "type": "array",
-            "items": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "properties": {
-                    "content": {
-                      "type": "string",
-                      "description": "The full .py file contents."
-                    },
-                    "uri": {
-                      "description": "Optional provenance URI for diagnostics.",
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "content"
-                  ]
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "path": {
-                      "type": "string",
-                      "description": "Filesystem path to a .py file, resolved by the local workshop server relative to its working directory."
-                    }
-                  },
-                  "required": [
-                    "path"
-                  ]
-                }
-              ]
-            },
-            "description": "The bundle's custom-PipeFunc .py files, REPLACED as a set. Omit to preserve whatever Python is stored; send [] to clear it."
-          },
           "expected_updated_at": {
-            "description": "The draft token this save believes it is replacing; the platform refuses the save when the draft has moved since, atomically, and nothing is written. Omitted, the linked directory's pipelex-method.json synced_updated_at is used, and only a save from an unlinked directory replaces whatever the draft holds. Pass the draft's current updated_at only to replace a draft that moved, after the user said to. Ignored on a create.",
-            "type": "string",
-            "minLength": 1
-          },
-          "link_dir": {
-            "description": "Where to write pipelex-method.json, relative to the working directory. Omitted, it goes beside the root file. An inline-only submission with no link_dir writes no link file.",
+            "description": "The draft token this save believes it is replacing; the platform refuses the save when the draft has moved since, atomically, and nothing is written. Omitted, the folder's .pipelex/method.json synced_updated_at is used, and only a save from an unlinked folder replaces whatever the draft holds. Pass the draft's current updated_at only to replace a draft that moved, after the user said to. Ignored on a create.",
             "type": "string",
             "minLength": 1
           }
         },
         "required": [
-          "files"
+          "method_dir"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
@@ -3170,7 +3092,7 @@
             ]
           },
           "updated_at": {
-            "description": "The draft's new token — what pipelex-method.json now records, and what the next save sends as expected_updated_at and a publish as expected_draft_updated_at.",
+            "description": "The draft's new token — what .pipelex/method.json now records, and what the next save sends as expected_updated_at and a publish as expected_draft_updated_at.",
             "type": "string"
           },
           "latest_version": {
@@ -3193,7 +3115,7 @@
               "draft_unchanged",
               "draft_ahead"
             ],
-            "description": "never_published: the method has no published version. draft_unchanged: the draft is identical to the latest published version. draft_ahead: the draft differs from it, so a publish would add a version."
+            "description": "never_published: the method has no published version. draft_unchanged: the draft's tree is the latest published version's. draft_ahead: the draft differs from it, so a publish would add a version."
           },
           "api_host": {
             "type": "string"
@@ -3216,6 +3138,13 @@
               "written"
             ],
             "additionalProperties": false
+          },
+          "files_sent": {
+            "description": "Every file of the tree this save sent, each as method_dir joined with its path inside the folder.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "rename_error": {
             "description": "Present when the draft was saved but the requested rename failed: the name is unchanged.",
@@ -3326,7 +3255,7 @@
     },
     {
       "name": "mthds_get_method",
-      "description": "Bring a saved method's source files back from the organization's catalog: its draft (what the last save holds) for a bare mt_… id, or published version n for mt_…@<n>. Pass output_dir (a directory of its own, relative to the working directory) to write the .mthds and .py files to disk with pipelex-method.json beside them — no source passes through the conversation, and the directory is then linked, so a later mthds_save_method from it writes this same method's draft. Without output_dir the sources come back inline. Use that arm only to READ a method you cannot see on disk; to work on one, write it out. It refuses rather than overwrite: a directory holding .mthds files that is not linked to this method is somebody else's bundle, and a linked directory whose files differ is only overwritten after you have asked the user and passed overwrite: true. Every refusal writes nothing at all. Pulling a version into the method's linked directory, then saving from there with expected_updated_at, is how a version is restored as the draft; without it that save is refused. A method that exists but has no MTHDS source yet is reported as such — a different answer from an unknown id.",
+      "description": "Bring a saved method's tree back from the organization's catalog: its draft (what the last save holds) for a bare mt_… id, or published version n for mt_…@<n>. Pass output_dir (a folder of its own, relative to the working directory) to write every file of the tree to disk at its path, with .pipelex/method.json linking the folder — no file passes through the conversation, and a later mthds_save_method from it writes this same method's draft. Without output_dir the text files come back inline. Use that arm only to READ a method you cannot see on disk; to work on one, write it out. It refuses rather than overwrite: a folder holding .mthds files that is not linked to this method is somebody else's method, and a linked folder whose files differ is only overwritten after you have asked the user and passed overwrite: true. Every refusal writes nothing at all. Pulling a version into the method's linked folder, then saving from there with expected_updated_at, is how a version is restored as the draft; without it that save is refused. A method that exists but holds no file yet is reported as such — a different answer from an unknown id.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3336,12 +3265,12 @@
             "description": "The registered method's catalog id. A bare mt_… (or mt_…@draft) reads its draft, what the last save holds; mt_…@<n> reads published version n."
           },
           "output_dir": {
-            "description": "Write the method's sources here, relative to the working directory, with the link file beside them — no source passes through the conversation. Omitted, the sources come back inline.",
+            "description": "Write the method's whole tree here, relative to the working directory, every file at its path, with .pipelex/method.json linking the folder — no file passes through the conversation. Omitted, the text files come back inline.",
             "type": "string",
             "minLength": 1
           },
           "overwrite": {
-            "description": "Only meaningful with output_dir, and only for a directory already linked to THIS method whose files differ after the stored method has moved. Send it after asking the user, never by reflex.",
+            "description": "Only meaningful with output_dir, and only for a folder already linked to THIS method whose files differ after the stored method has moved. Send it after asking the user, never by reflex.",
             "type": "boolean"
           }
         },
@@ -3381,7 +3310,7 @@
             ]
           },
           "updated_at": {
-            "description": "The draft's token as of this read, whichever content was read — what pipelex-method.json records and what a later save sends. After a read of a version it is for a restore only, never a publish: the draft's content was not read.",
+            "description": "The draft's token as of this read, whichever content was read — what .pipelex/method.json records and what a later save sends. After a read of a version it is for a restore only, never a publish: the draft's content was not read.",
             "type": "string"
           },
           "latest_version": {
@@ -3404,7 +3333,7 @@
               "draft_unchanged",
               "draft_ahead"
             ],
-            "description": "never_published: the method has no published version. draft_unchanged: the draft is identical to the latest published version. draft_ahead: the draft differs from it, so a publish would add a version."
+            "description": "never_published: the method has no published version. draft_unchanged: the draft's tree is the latest published version's. draft_ahead: the draft differs from it, so a publish would add a version."
           },
           "api_host": {
             "type": "string"
@@ -3414,8 +3343,9 @@
             "items": {
               "type": "object",
               "properties": {
-                "name": {
-                  "type": "string"
+                "path": {
+                  "type": "string",
+                  "description": "The file's path in the method's tree."
                 },
                 "bytes": {
                   "type": "integer",
@@ -3425,39 +3355,16 @@
                 "content": {
                   "type": "string"
                 },
-                "written_to": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "name",
-                "bytes"
-              ],
-              "additionalProperties": false
-            }
-          },
-          "python": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "name": {
-                  "type": "string"
-                },
-                "bytes": {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 9007199254740991
-                },
-                "content": {
-                  "type": "string"
+                "binary": {
+                  "description": "Inline arm: true for a file that is not UTF-8 text, which carries no content.",
+                  "type": "boolean"
                 },
                 "written_to": {
                   "type": "string"
                 }
               },
               "required": [
-                "name",
+                "path",
                 "bytes"
               ],
               "additionalProperties": false
@@ -3560,7 +3467,7 @@
     },
     {
       "name": "mthds_publish_method",
-      "description": "Publish a saved method's draft as its next immutable version. Callers of the method's bare id (mt_…) run its latest published version, so this is the deployment gesture; mt_…@<n> pins one version. Call it ONLY when the user asks for a publish. Saving a draft with mthds_save_method is never a reason to publish. Pass expected_draft_updated_at, the draft token you last saw (the updated_at of your last save of this method or your last pull of its draft, or pipelex-method.json's synced_updated_at when it records no synced_version; a pull of mt_…@<n> reports the draft's token without its content, so never publish under it): a draft that changed since is refused, so you never publish one you have not seen. The answer is a verdict on outcome: published with the new version number, unchanged when the draft already equals the latest version, or refused with the validation errors when the draft does not validate or does not run yet.",
+      "description": "Publish a saved method's draft as its next immutable version. Callers of the method's bare id (mt_…) run its latest published version, so this is the deployment gesture; mt_…@<n> pins one version. Call it ONLY when the user asks for a publish. Saving a draft with mthds_save_method is never a reason to publish. Pass expected_draft_updated_at, the draft token you last saw (the updated_at of your last save of this method or your last pull of its draft, or .pipelex/method.json's synced_updated_at when it records no synced_version; a pull of mt_…@<n> reports the draft's token without its content, so never publish under it): a draft that changed since is refused, so you never publish one you have not seen. The answer is a verdict on outcome: published with the new version number, unchanged when the draft already equals the latest version, or refused with the validation errors when the draft does not validate or does not run yet.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3572,7 +3479,7 @@
           "expected_draft_updated_at": {
             "type": "string",
             "minLength": 1,
-            "description": "The draft token you last saw: the updated_at your last mthds_save_method of this method, or your last mthds_get_method of its draft, reported, or pipelex-method.json's synced_updated_at when it records no synced_version. A read of a version reports the draft's token without its content, so never publish under that one. A draft that moved since is refused and nothing is published."
+            "description": "The draft token you last saw: the updated_at your last mthds_save_method of this method, or your last mthds_get_method of its draft, reported, or .pipelex/method.json's synced_updated_at when it records no synced_version. A read of a version reports the draft's token without its content, so never publish under that one. A draft that moved since is refused and nothing is published."
           }
         },
         "required": [
@@ -3672,7 +3579,7 @@
               "draft_unchanged",
               "draft_ahead"
             ],
-            "description": "never_published: the method has no published version. draft_unchanged: the draft is identical to the latest published version. draft_ahead: the draft differs from it, so a publish would add a version."
+            "description": "never_published: the method has no published version. draft_unchanged: the draft's tree is the latest published version's. draft_ahead: the draft differs from it, so a publish would add a version."
           },
           "api_host": {
             "type": "string"
