@@ -22,8 +22,6 @@ import {
   withMethodContent,
 } from "./method-versions.js";
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
-import { methodTreeLimitsOf } from "./tree-limits.js";
-import type { TreeLimitsAware } from "./tree-limits.js";
 import {
   DEFAULT_AUTH_HINT,
   METHOD_REF_GRAMMAR,
@@ -335,7 +333,7 @@ export interface CodegenClient {
   version?(): Promise<unknown>;
 }
 
-export interface CodegenContext extends ApiConfig, MethodVersionsAware, TreeLimitsAware {
+export interface CodegenContext extends ApiConfig, MethodVersionsAware {
   client?: CodegenClient;
   /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
@@ -510,9 +508,7 @@ export async function generateMthdsCode(
   input: MthdsCodegenInput,
   context: CodegenContext = buildCodegenContext(),
 ): Promise<CodegenResult> {
-  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector", {
-    limits: () => methodTreeLimitsOf(context, () => codegenClient(context)),
-  });
+  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector");
   if (resolution.errors.length > 0) {
     return errorResult(INVALID_REQUEST_SUMMARY, resolution.errors);
   }

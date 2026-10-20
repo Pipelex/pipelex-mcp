@@ -623,6 +623,20 @@ describe("localBundleFileResolver", () => {
       ]);
     });
 
+    it("reads a method beside a file past the storage limits, judging bytes only on what it sends", async () => {
+      // A validation or a run sends the .mthds files and the templates their
+      // steps name, never a sample PDF the folder also holds, so the limits a
+      // save stores a tree under are no reason to refuse it.
+      await placeBundle("methods/invoice/invoice.mthds", []);
+      const sample = path.join(rootDir, "methods", "invoice", "sample.pdf");
+      await fs.writeFile(sample, "");
+      await fs.truncate(sample, 40 * 1024 * 1024);
+
+      expect(await sent("methods/invoice")).toEqual([
+        path.join("methods", "invoice", "invoice.mthds"),
+      ]);
+    });
+
     it("sends the folder's top-level .mthds files first, then the rest by tree path", async () => {
       await placeBundle("methods/invoice/a/first.mthds", []);
       await placeBundle("methods/invoice/zeta.mthds", []);

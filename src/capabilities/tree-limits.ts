@@ -5,10 +5,12 @@ import type { MethodTreeLimits, TreeLimit } from "mthds";
  * learns them: `GET /v1/version`'s `limits.method_tree`, read through the
  * SDK's `methodTreeLimits()`, so a folder the platform would refuse is refused
  * while it is listed (`method-tree.ts`), before a file is hashed, and no limit
- * is hardcoded here (the design's open question 7).
+ * is hardcoded here (the design's open question 7). Only `mthds_save_method`
+ * holds a folder to them, since only a save sends the whole tree: the
+ * method-taking tools list under {@link READING_TREE_LIMITS} alone.
  *
- * One answer is kept per base URL, for ten minutes, in a memory every tool of
- * one server shares (`createTreeLimitsMemories`), since the workshop decides
+ * One answer is kept per base URL, for ten minutes, in a memory the server's
+ * save keeps (`createTreeLimitsMemories`), since the workshop decides
  * its base URL on every call and one platform's limits never stand for
  * another's. Only an answer is kept: a handshake that failed, or took more
  * than three seconds, is asked again by the next call. A failure never fails
@@ -19,7 +21,7 @@ import type { MethodTreeLimits, TreeLimit } from "mthds";
  * **Every limit is always bounded.** A limit the deployment does not announce
  * (a bare runner announces none), or every limit when the handshake failed or
  * timed out, takes the workshop's own value ({@link FALLBACK_TREE_LIMITS}), so
- * pointing a tool at a home directory costs a refusal rather than a long scan,
+ * pointing a save at a home directory costs a refusal rather than a long scan,
  * and a save never reads an unbounded tree into memory. The byte limits are
  * the runner's defaults, which the hosted platform takes as its own (pipelex's
  * `api/pipelex_api/limits.py`, pipelex-server's `platform/docs/blob-store.md`),
@@ -56,6 +58,20 @@ export const FALLBACK_TREE_LIMITS: FolderLimits = {
   maxFileSize: FALLBACK_MAX_FILE_SIZE,
   maxTotalSize: FALLBACK_MAX_TOTAL_SIZE,
   workshopSet: ALL_LIMITS,
+};
+
+/**
+ * The one bound a method-taking tool lists a folder under: the workshop's
+ * file count, a scan bound. Those tools send only a folder's `.mthds` files
+ * and the template files their steps name, judged on their own bounds, so the
+ * limits a deployment stores a whole tree under, which only a save sends,
+ * never refuse their folder, and no handshake is asked for them.
+ */
+export const READING_TREE_LIMITS: MethodTreeLimits & {
+  readonly workshopSet: readonly TreeLimit[];
+} = {
+  maxFileCount: FALLBACK_MAX_FILE_COUNT,
+  workshopSet: ["maxFileCount"],
 };
 
 /** How long an announced answer is believed. */

@@ -493,18 +493,17 @@ describe("the workshop's contexts and dispatch", () => {
       ok: true,
       content: 'domain = "demo"',
     });
-    // One memory of each platform's tree limits, shared by every tool that
-    // lists a folder, as the versions memory is.
+    // The tree limits a platform stores a method under are the save's alone:
+    // the method-taking tools list a folder under the workshop's scan bound.
+    expect(contexts.catalogWrite.treeLimits).toBeDefined();
     for (const context of [
-      contexts.catalogWrite,
       contexts.validation,
       contexts.inputs,
       contexts.codegen,
       contexts.prepare,
       contexts.run,
     ]) {
-      expect(context.treeLimits).toBeDefined();
-      expect(context.treeLimits).toBe(contexts.validation.treeLimits);
+      expect("treeLimits" in context).toBe(false);
     }
 
     const { client, close } = await connectClient(createLocalServer({ contexts }));

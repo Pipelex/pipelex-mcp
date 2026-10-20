@@ -20,10 +20,11 @@ import { errorMessage } from "./workspace-boundary.js";
  * held to the standard's conformance corpus), and the few things the workshop
  * adds on top of it, each of which this module owns.
  *
- * - **The deployment's limits.** The tree is listed under the limits the
+ * - **The limits it is handed.** A save lists the tree under the limits the
  *   Pipelex deployment announces (`tree-limits.ts`), so a folder the platform
  *   would refuse is refused while it is listed, from the sizes the walk reads,
- *   before any file is hashed. The two files the workshop leaves out (below)
+ *   before any file is hashed; a method-taking tool lists it under the
+ *   workshop's file count alone, since it sends only part of the tree. The two files the workshop leaves out (below)
  *   never count against them: `mthds` 0.32 has no way to leave a file out of
  *   its walk, so the walk takes each limit widened by an allowance for them
  *   ({@link SCAN_ALLOWANCE_FILES}, {@link SCAN_ALLOWANCE_BYTES}), and the

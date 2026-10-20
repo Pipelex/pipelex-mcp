@@ -221,22 +221,12 @@ export interface FileResolver {
     bundle: readonly BundleFileOnDisk[],
     requestBytes: number,
   ): Promise<TemplateFilesResolution>;
-  resolveMethodDir?(methodDir: string, options?: MethodDirOptions): Promise<MethodDirResolution>;
+  resolveMethodDir?(methodDir: string): Promise<MethodDirResolution>;
   locateMethodDir?(methodDir: string): Promise<MethodDirLocation>;
   readMethodTree?(
     location: LocatedMethodDir,
     options: { limits: ListingLimits },
   ): Promise<MethodTreeRead>;
-}
-
-/** What a folder's listing may be told by the tool that reads it. */
-export interface MethodDirOptions {
-  /**
-   * The limits the deployment holds a method's tree to (`tree-limits.ts`),
-   * asked only once a folder is listed. Absent, the listing holds to the
-   * workshop's own limits (`FALLBACK_TREE_LIMITS`).
-   */
-  limits?: () => Promise<ListingLimits>;
 }
 
 /** A method folder found on disk: its real path, and `method_dir` as the caller wrote it. */
@@ -321,7 +311,6 @@ export async function resolveMethodFiles(
   source: MethodSourceInput,
   resolver: FileResolver | undefined,
   rule: SelectorRule,
-  options: MethodDirOptions = {},
 ): Promise<ResolvedMethodFiles> {
   if (source.method_dir === undefined) {
     return resolveSubmittedFiles(source.files ?? [], resolver);
@@ -348,7 +337,7 @@ export async function resolveMethodFiles(
     ]);
   }
 
-  const outcome = await resolver.resolveMethodDir(source.method_dir, options);
+  const outcome = await resolver.resolveMethodDir(source.method_dir);
   if (!outcome.ok) {
     return refused(
       outcome.refusals.map((refusal) => ({

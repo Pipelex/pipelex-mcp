@@ -22,8 +22,6 @@ import {
   withMethodContent,
 } from "./method-versions.js";
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
-import { methodTreeLimitsOf } from "./tree-limits.js";
-import type { TreeLimitsAware } from "./tree-limits.js";
 import type { GraphPageFile, GraphPageOutcome } from "./graph-page.js";
 import {
   METHOD_REF_GRAMMAR,
@@ -383,7 +381,7 @@ export interface ValidationClient {
   ): Promise<PipelexValidationResult>;
 }
 
-export interface ValidationContext extends ApiConfig, MethodVersionsAware, TreeLimitsAware {
+export interface ValidationContext extends ApiConfig, MethodVersionsAware {
   client?: ValidationClient;
   /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
@@ -471,9 +469,7 @@ export async function validateMthds(
   input: MthdsValidateInput,
   context: ValidationContext = buildValidationContext(),
 ): Promise<ValidationResult> {
-  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector", {
-    limits: () => methodTreeLimitsOf(context, () => validationClient(context)),
-  });
+  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector");
   if (resolution.errors.length > 0) {
     return errorResult("Validation was not run: request input is invalid.", resolution.errors);
   }

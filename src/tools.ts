@@ -165,8 +165,9 @@ export function buildLocalToolContexts(
   // `GET /v1/version` once rather than once per tool. It keeps one answer per
   // base URL, since each tool call resolves its own (`method-versions.ts`).
   const methodVersions = createMethodVersionsMemories();
-  // One memory of the limits each platform holds a method's tree to, shared
-  // the same way by every tool that lists a method folder (`tree-limits.ts`).
+  // One memory of the limits each platform stores a method's tree under,
+  // which only the save holds a folder to (`tree-limits.ts`): the
+  // method-taking tools list a folder under the workshop's scan bound alone.
   const treeLimits = createTreeLimitsMemories();
 
   // The save's validation leg sends the contents it already read, so this
@@ -175,7 +176,6 @@ export function buildLocalToolContexts(
     ...buildValidationContext(env),
     resolver: bundleResolver,
     methodVersions,
-    treeLimits,
   };
 
   return {
@@ -190,7 +190,7 @@ export function buildLocalToolContexts(
       treeLimits,
     },
     validation: { ...validation, saveRoot: rootDir },
-    inputs: { ...buildInputsContext(env), resolver: bundleResolver, methodVersions, treeLimits },
+    inputs: { ...buildInputsContext(env), resolver: bundleResolver, methodVersions },
     // `saveRoot` is the working directory on every writer: codegen resolves
     // `output_dir` against it, as the download tool resolves `dir`.
     codegen: {
@@ -198,7 +198,6 @@ export function buildLocalToolContexts(
       resolver: bundleResolver,
       saveRoot: rootDir,
       methodVersions,
-      treeLimits,
     },
     // The workshop is co-located with the user's files, so its prepare tool
     // uploads file-bearing inputs (local paths, data: URLs, bytes).
@@ -206,14 +205,12 @@ export function buildLocalToolContexts(
       ...buildPrepareContext(env),
       resolver: bundleResolver,
       methodVersions,
-      treeLimits,
       inputsResolver,
     },
     run: {
       ...buildRunContext(env),
       resolver: bundleResolver,
       methodVersions,
-      treeLimits,
       inputsResolver,
     },
     images: buildImagesContext(env),

@@ -10,7 +10,6 @@ import type {
   FileResolver,
   LocatedMethodDir,
   MethodDirLocation,
-  MethodDirOptions,
   MethodDirResolution,
   MethodTreeRead,
 } from "./capabilities/shared.js";
@@ -37,7 +36,7 @@ import {
   isInsideRoot,
   isMissingPathError,
 } from "./capabilities/workspace-boundary.js";
-import { FALLBACK_TREE_LIMITS } from "./capabilities/tree-limits.js";
+import { READING_TREE_LIMITS } from "./capabilities/tree-limits.js";
 
 const MTHDS_EXTENSION = ".mthds";
 const INLINE_FALLBACK = "or inline the contents as { content, uri? }.";
@@ -153,7 +152,7 @@ export function localBundleFileResolver(rootDir: string = process.cwd()): FileRe
     resolve: (submitted) => text.resolve(submitted),
     resolveTemplates: (templates, bundle, requestBytes) =>
       resolveTemplateFiles(rootDir, templates, bundle, requestBytes),
-    resolveMethodDir: (methodDir, options = {}) => resolveMethodFolder(rootDir, methodDir, options),
+    resolveMethodDir: (methodDir) => resolveMethodFolder(rootDir, methodDir),
     locateMethodDir: (methodDir) => locateMethodFolder(rootDir, methodDir, SAVE_FALLBACK),
     readMethodTree: (location, options) => readMethodFolderTree(location, options.limits),
   };
@@ -294,18 +293,24 @@ async function holdsVirtualEnvironmentMarker(folder: string): Promise<boolean> {
  * Read a method folder, `method_dir`, for a method-taking tool: the `.mthds`
  * files of its tree and the template files their `PipeDocGen` steps name, and
  * nothing else of it, since the runner refuses a file no step names (see
- * {@link folderRequestFrom}). The tree is listed under the limits the
- * deployment announces, asked only once the folder is found.
+ * {@link folderRequestFrom}).
+ *
+ * The tree is listed under the workshop's scan bound alone
+ * (`READING_TREE_LIMITS`), never under the limits a deployment stores a tree
+ * under: those are about the whole tree, which only a save sends, and a
+ * `main.mthds` beside a large sample PDF is a method these tools read and
+ * send like any other. Bytes are judged on what is sent, by
+ * {@link folderRequestFrom}. `mthds` 0.32 has no way to list a tree without
+ * hashing every member, so the walk still reads each file once, streamed,
+ * and the file count is what bounds it.
  */
 async function resolveMethodFolder(
   rootDir: string,
   methodDir: string,
-  options: MethodDirOptions,
 ): Promise<MethodDirResolution> {
   const located = await locateMethodFolder(rootDir, methodDir, FOLDER_FALLBACK);
   if (!located.ok) return located;
-  const limits = (await options.limits?.()) ?? FALLBACK_TREE_LIMITS;
-  const listed = await listMethodFolder(located, limits, FOLDER_FALLBACK);
+  const listed = await listMethodFolder(located, READING_TREE_LIMITS, FOLDER_FALLBACK);
   if (!listed.ok) return listed;
   return folderRequestFrom(listed.tree, methodDir, (treePath) => listed.tree.readFile(treePath));
 }
