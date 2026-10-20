@@ -6,6 +6,7 @@ import {
   FALLBACK_MAX_FILE_SIZE,
   FALLBACK_MAX_TOTAL_SIZE,
   FALLBACK_TREE_LIMITS,
+  TREE_LIMITS_FAILURE_TTL_MS,
   TREE_LIMITS_HANDSHAKE_MS,
   TREE_LIMITS_TTL_MS,
   createTreeLimitsMemories,
@@ -116,7 +117,8 @@ describe("methodTreeLimitsOf", () => {
     expect(client.asks).toBe(3);
   });
 
-  it("keeps only answers, so a failed handshake is asked again by the next call", async () => {
+  it("remembers a failed handshake for a minute, so a call does not wait on it again, then asks again", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     const treeLimits = createTreeLimitsMemories();
     let fail = true;
     const client = announcing(async () => {
@@ -128,10 +130,45 @@ describe("methodTreeLimitsOf", () => {
       FALLBACK_TREE_LIMITS,
     );
     fail = false;
+    expect(await methodTreeLimitsOf({ baseUrl: BASE, treeLimits }, () => client)).toEqual(
+      FALLBACK_TREE_LIMITS,
+    );
+    expect(client.asks).toBe(1);
+
+    vi.setSystemTime(Date.now() + TREE_LIMITS_FAILURE_TTL_MS + 1);
     expect(await methodTreeLimitsOf({ baseUrl: BASE, treeLimits }, () => client)).toMatchObject({
       maxFileCount: 7,
     });
     expect(client.asks).toBe(2);
+  });
+
+  it("remembers a timed-out handshake as failed, and takes its answer if it arrives later", async () => {
+    vi.useFakeTimers();
+    const treeLimits = createTreeLimitsMemories();
+    let arrive: (limits: MethodTreeLimits) => void = () => undefined;
+    const client = announcing(
+      () =>
+        new Promise<MethodTreeLimits>((resolve) => {
+          arrive = resolve;
+        }),
+    );
+
+    const first = methodTreeLimitsOf({ baseUrl: BASE, treeLimits }, () => client);
+    await vi.advanceTimersByTimeAsync(TREE_LIMITS_HANDSHAKE_MS);
+    expect(await first).toEqual(FALLBACK_TREE_LIMITS);
+
+    // Within the minute: the workshop's own limits at once, with no new ask.
+    expect(await methodTreeLimitsOf({ baseUrl: BASE, treeLimits }, () => client)).toEqual(
+      FALLBACK_TREE_LIMITS,
+    );
+    expect(client.asks).toBe(1);
+
+    arrive({ maxFileCount: 7 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await methodTreeLimitsOf({ baseUrl: BASE, treeLimits }, () => client)).toMatchObject({
+      maxFileCount: 7,
+    });
+    expect(client.asks).toBe(1);
   });
 
   it("stops waiting on a slow handshake and lists under the workshop's own limits", async () => {

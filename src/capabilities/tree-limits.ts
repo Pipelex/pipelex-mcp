@@ -12,9 +12,10 @@ import type { MethodTreeLimits, TreeLimit } from "mthds";
  * One answer is kept per base URL, for ten minutes, in a memory the server's
  * save keeps (`createTreeLimitsMemories`), since the workshop decides
  * its base URL on every call and one platform's limits never stand for
- * another's. Only an answer is kept: a handshake that failed, or took more
- * than three seconds, is asked again by the next call. A failure never fails
- * the call: the listing then holds to the workshop's own limits, and the
+ * another's. A handshake that failed, or took more than three seconds, is
+ * remembered for a minute, so the calls that follow list at once under the
+ * workshop's own limits rather than each wait the three seconds again, and an
+ * answer arriving late is still kept. A failure never fails the call: the listing then holds to the workshop's own limits, and the
  * platform, which enforces its limits whatever a sender read, refuses what is
  * too large for it.
  *
@@ -80,8 +81,13 @@ export const TREE_LIMITS_TTL_MS = 10 * 60_000;
 /** How long a call waits on the handshake before listing under the workshop's own limits. */
 export const TREE_LIMITS_HANDSHAKE_MS = 3_000;
 
+/** How long a handshake that failed or timed out is remembered, so no call waits on it again meanwhile. */
+export const TREE_LIMITS_FAILURE_TTL_MS = 60_000;
+
 interface TreeLimitsMemory {
   cached?: { limits: MethodTreeLimits; expiresAt: number };
+  /** Until when a failed or timed-out handshake answers for the platform: no answer. */
+  failedUntil?: number;
   inFlight?: Promise<MethodTreeLimits | undefined>;
 }
 
@@ -152,8 +158,12 @@ async function announcedLimits(
   }
   if (read === undefined) return undefined;
   if (memory === undefined) return withinDeadline(ask(read, undefined));
+  if (memory.failedUntil !== undefined && memory.failedUntil > Date.now()) return undefined;
   if (memory.inFlight === undefined) {
-    const answer = withinDeadline(ask(read, memory));
+    const answer = withinDeadline(ask(read, memory)).then((limits) => {
+      if (limits === undefined) memory.failedUntil = Date.now() + TREE_LIMITS_FAILURE_TTL_MS;
+      return limits;
+    });
     memory.inFlight = answer;
     void answer.finally(() => {
       if (memory.inFlight === answer) memory.inFlight = undefined;
