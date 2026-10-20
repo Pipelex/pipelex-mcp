@@ -3192,6 +3192,26 @@
             "type": "array",
             "items": {}
           },
+          "not_validated": {
+            "description": "Present, with no is_valid, when the draft was saved unvalidated because the folder makes no request mthds_validate can send: each entry names the rule that stopped it.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "message": {
+                  "type": "string"
+                },
+                "hint": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message",
+                "hint"
+              ],
+              "additionalProperties": false
+            }
+          },
           "errors": {
             "type": "array",
             "items": {

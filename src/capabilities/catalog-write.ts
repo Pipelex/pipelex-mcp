@@ -73,7 +73,7 @@ import type {
 import { type FolderLimits, methodTreeLimitsOf } from "./tree-limits.js";
 import type { TreeLimitsAware } from "./tree-limits.js";
 import { validateMthds } from "./validate.js";
-import type { ValidationContext } from "./validate.js";
+import type { ValidationContext, ValidationStructuredContent } from "./validate.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 import {
   containedPath,
@@ -268,6 +268,12 @@ export const mthdsSaveMethodOutputSchema = z.object({
       "Present when the draft was saved but the requested rename failed: the name is unchanged.",
     ),
   validation_errors: z.array(z.unknown()).optional(),
+  not_validated: z
+    .array(z.object({ message: z.string(), hint: z.string() }))
+    .optional()
+    .describe(
+      `Present, with no is_valid, when the draft was saved unvalidated because the folder makes no request ${WORKSHOP_TOOL_NAMES.validate} can send: each entry names the rule that stopped it.`,
+    ),
   errors: z.array(toolErrorSchema).optional(),
 });
 
@@ -334,7 +340,8 @@ export interface TreeFile {
 
 export interface SaveMethodSuccess {
   status: "ok";
-  is_valid: boolean;
+  /** Absent when the save could not be validated ({@link SaveMethodSuccess.not_validated}). */
+  is_valid?: boolean;
   is_runnable?: boolean;
   pending_signatures?: string[];
   method_id?: string;
@@ -348,6 +355,8 @@ export interface SaveMethodSuccess {
   files_sent?: string[];
   rename_error?: ToolError;
   validation_errors?: unknown[];
+  /** Why the save could not be validated: the rules of a validation request the folder breaks. */
+  not_validated?: { message: string; hint: string }[];
 }
 
 export interface SaveMethodFailure {
@@ -836,26 +845,38 @@ async function saveToCatalog(
   // rides beside the save and no longer gates it: a draft may be invalid, an
   // agent's work in progress often is, and the verdict is what tells it so. A
   // publish is where validity is required.
-  const verdict = await validateMthds(
-    { method_dir: location.methodDir },
-    {
-      ...context.validation,
-      resolver: {
-        resolve: async () => ({
-          ok: false,
-          message: "This save reads its method from method_dir alone.",
-          hint: "Pass method_dir.",
-        }),
-        resolveMethodDir: () => tree.folderRequest(),
+  //
+  // A folder can be a tree the platform stores and still make no request
+  // mthds_validate can send: an empty nested .mthds file, more .mthds files
+  // than one request takes, one over its size. Those are rules of the
+  // validation request, not of the draft, so the save goes ahead unvalidated
+  // and says which rule stopped the validation. Only a validation that was
+  // sent and produced no verdict, an unreachable API or a refused credential,
+  // refuses the save, since the tool could not say what it saved.
+  const request = await tree.folderRequest();
+  let validation: ValidationStructuredContent | undefined;
+  if (request.ok) {
+    const verdict = await validateMthds(
+      { method_dir: location.methodDir },
+      {
+        ...context.validation,
+        resolver: {
+          resolve: async () => ({
+            ok: false,
+            message: "This save reads its method from method_dir alone.",
+            hint: "Pass method_dir.",
+          }),
+          resolveMethodDir: async () => request,
+        },
       },
-    },
-  );
-  const validation = verdict.structuredContent;
-  if (validation.status === "error") {
-    return saveError(
-      "The method was not saved: the method produced no validation verdict.",
-      validation.errors ?? [],
     );
+    validation = verdict.structuredContent;
+    if (validation.status === "error") {
+      return saveError(
+        "The method was not saved: the method produced no validation verdict.",
+        validation.errors ?? [],
+      );
+    }
   }
 
   // The tree the SDK sends, inline or by hash, from the bytes already read.
@@ -986,9 +1007,13 @@ async function saveToCatalog(
   const publishState = publishStateOf(stored);
   const structuredContent: SaveMethodSuccess = {
     status: "ok",
-    is_valid: validation.is_valid,
-    is_runnable: validation.is_runnable,
-    pending_signatures: validation.pending_signatures,
+    ...(validation === undefined
+      ? {}
+      : {
+          is_valid: validation.is_valid,
+          is_runnable: validation.is_runnable,
+          pending_signatures: validation.pending_signatures,
+        }),
     method_id: stored.method_id,
     name: stored.name,
     saved,
@@ -999,9 +1024,10 @@ async function saveToCatalog(
     link_file: linkFile,
     files_sent: tree.files.map((file) => shownIn(location.methodDir, file.path)),
     ...(renameError === undefined ? {} : { rename_error: renameError }),
-    ...(validation.validation_errors === undefined
+    ...(validation?.validation_errors === undefined
       ? {}
       : { validation_errors: validation.validation_errors }),
+    ...(request.ok ? {} : { not_validated: request.refusals }),
   };
 
   const answer = await support;
@@ -1430,7 +1456,11 @@ function saveSummary(
     );
   }
 
-  if (!result.is_valid) {
+  if (result.not_validated !== undefined) {
+    lines.push(
+      `The method was NOT validated: the folder makes no request ${WORKSHOP_TOOL_NAMES.validate} can send — ${result.not_validated.map((reason) => reason.message).join(" ")} The draft was saved anyway, as an invalid one would be, and a publish validates it again; fix that to see a verdict: ${result.not_validated[0]?.hint ?? ""}`,
+    );
+  } else if (!result.is_valid) {
     lines.push(
       "The method is NOT valid. It was saved anyway, as a draft may be, and a publish refuses it until it validates: fix the validation errors and save again.",
     );

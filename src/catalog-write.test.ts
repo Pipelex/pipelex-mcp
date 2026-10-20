@@ -30,7 +30,11 @@ import {
   saveMethodToolResult,
   saveMthdsMethod,
 } from "./capabilities/catalog-write.js";
-import type { CatalogWriteClient, CatalogWriteContext } from "./capabilities/catalog-write.js";
+import type {
+  CatalogWriteClient,
+  CatalogWriteContext,
+  SaveMethodSuccess,
+} from "./capabilities/catalog-write.js";
 import { DEFAULT_API_URL, createPipelexApiClient } from "./capabilities/shared.js";
 import type { ToolError } from "./capabilities/shared.js";
 import { GRAPH_PAGE_MARK } from "./capabilities/graph-page.js";
@@ -509,6 +513,50 @@ describe("saveMthdsMethod", () => {
     expect(result.structuredContent).toHaveProperty("validation_errors");
     expect(result.summary).toContain("NOT valid");
     expect(result.summary).toContain("a publish refuses it");
+  });
+
+  it("saves a folder validation cannot build a request from, saying why there is no verdict", async () => {
+    // An empty nested .mthds file is a rule of the request mthds_validate
+    // sends, not of the tree a save stores: the draft is saved, unvalidated.
+    await writeBundle("methods/demo", {
+      "bundle.mthds": 'domain = "demo"',
+      "drafts/next.mthds": "",
+    });
+    let sent: MethodWriteInput | undefined;
+    const notCalled = {
+      baseUrl: DEFAULT_API_URL,
+      client: {
+        async validateFiles(): Promise<never> {
+          throw new Error("no validation request can be built, so none is sent");
+        },
+      },
+    } as unknown as CatalogWriteContext["validation"];
+
+    const result = await saveMthdsMethod(
+      { method_dir: "methods/demo", name: "Demo" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async createMethod(input) {
+            sent = input;
+            return storedMethod({ name: "Demo" });
+          },
+        },
+        notCalled,
+      ),
+    );
+
+    expect(result.structuredContent).toMatchObject({ status: "ok", saved: "created" });
+    expect(result.structuredContent).not.toHaveProperty("is_valid");
+    const [reason] = (result.structuredContent as SaveMethodSuccess).not_validated ?? [];
+    expect(reason!.message).toContain(path.join("methods/demo", "drafts", "next.mthds"));
+    expect(reason!.message).toContain("is empty");
+    expect(sent?.tree?.files.map((file) => file.path)).toEqual([
+      "bundle.mthds",
+      "drafts/next.mthds",
+    ]);
+    expect(result.summary).toContain("NOT validated");
+    expect(result.summary).toContain("is empty");
   });
 
   it("refuses the save when validation produces no verdict", async () => {
