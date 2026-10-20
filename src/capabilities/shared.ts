@@ -234,7 +234,7 @@ export interface MethodDirOptions {
   /**
    * The limits the deployment holds a method's tree to (`tree-limits.ts`),
    * asked only once a folder is listed. Absent, the listing holds to the
-   * file count alone.
+   * workshop's own limits (`FALLBACK_TREE_LIMITS`).
    */
   limits?: () => Promise<MethodTreeLimits>;
 }

@@ -38,7 +38,7 @@ import {
   isInsideRoot,
   isMissingPathError,
 } from "./capabilities/workspace-boundary.js";
-import { FALLBACK_MAX_FILE_COUNT } from "./capabilities/tree-limits.js";
+import { FALLBACK_TREE_LIMITS } from "./capabilities/tree-limits.js";
 
 const MTHDS_EXTENSION = ".mthds";
 const INLINE_FALLBACK = "or inline the contents as { content, uri? }.";
@@ -305,7 +305,7 @@ async function resolveMethodFolder(
 ): Promise<MethodDirResolution> {
   const located = await locateMethodFolder(rootDir, methodDir, FOLDER_FALLBACK);
   if (!located.ok) return located;
-  const limits = (await options.limits?.()) ?? { maxFileCount: FALLBACK_MAX_FILE_COUNT };
+  const limits = (await options.limits?.()) ?? FALLBACK_TREE_LIMITS;
   const listed = await listMethodFolder(located, limits, FOLDER_FALLBACK);
   if (!listed.ok) return listed;
   return folderRequestFrom(listed.tree, methodDir, (treePath) => listed.tree.readFile(treePath));

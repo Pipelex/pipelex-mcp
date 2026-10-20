@@ -12,22 +12,42 @@ import type { MethodTreeLimits } from "mthds";
  * its base URL on every call and one platform's limits never stand for
  * another's. Only an answer is kept: a handshake that failed, or took more
  * than three seconds, is asked again by the next call. A failure never fails
- * the call: the listing then holds to the file count alone, and the platform,
- * which enforces its limits whatever a sender read, refuses what is too large.
+ * the call: the listing then holds to the workshop's own limits, and the
+ * platform, which enforces its limits whatever a sender read, refuses what is
+ * too large for it.
  *
- * **The file count is always bounded.** A deployment that announces no file
- * count (a bare runner announces no limit at all), or a handshake that failed,
- * still lists at most {@link FALLBACK_MAX_FILE_COUNT} files, so pointing a
- * tool at a home directory costs a refusal rather than a long scan.
+ * **Every limit is always bounded.** A limit the deployment does not announce
+ * (a bare runner announces none), or every limit when the handshake failed or
+ * timed out, takes the workshop's own value ({@link FALLBACK_TREE_LIMITS}), so
+ * pointing a tool at a home directory costs a refusal rather than a long scan,
+ * and a save never reads an unbounded tree into memory. The byte limits are
+ * the runner's defaults, which the hosted platform takes as its own (pipelex's
+ * `api/pipelex_api/limits.py`, pipelex-server's `platform/docs/blob-store.md`),
+ * so the workshop refuses nothing a default deployment takes. The file count
+ * is a scan bound, above the runner's default of 1,000, since a count costs a
+ * walk and not memory.
  */
 
 /** The most files a listing takes when the deployment announces no file count. */
 export const FALLBACK_MAX_FILE_COUNT = 10_000;
 
+/** The largest file a listing takes when the deployment announces no file size: the runner's default, 32 MiB. */
+export const FALLBACK_MAX_FILE_SIZE = 32 * 1024 * 1024;
+
+/** The most bytes a listing takes in all when the deployment announces no total: the runner's default, 64 MiB. */
+export const FALLBACK_MAX_TOTAL_SIZE = 64 * 1024 * 1024;
+
+/** The workshop's own limits, each standing for one the deployment did not announce. */
+export const FALLBACK_TREE_LIMITS: Required<MethodTreeLimits> = {
+  maxFileCount: FALLBACK_MAX_FILE_COUNT,
+  maxFileSize: FALLBACK_MAX_FILE_SIZE,
+  maxTotalSize: FALLBACK_MAX_TOTAL_SIZE,
+};
+
 /** How long an announced answer is believed. */
 export const TREE_LIMITS_TTL_MS = 10 * 60_000;
 
-/** How long a call waits on the handshake before listing with the file count alone. */
+/** How long a call waits on the handshake before listing under the workshop's own limits. */
 export const TREE_LIMITS_HANDSHAKE_MS = 3_000;
 
 interface TreeLimitsMemory {
@@ -66,19 +86,23 @@ function limitsReaderOf(client: unknown): LimitsReader | undefined {
 
 /**
  * The limits a listing of a method folder is held to on the platform this
- * context reaches: the announced ones, with the file count bounded whatever
- * was announced. `client` builds the context's client, called only when no
- * fresh answer is remembered. Never throws.
+ * context reaches: the announced ones, and the workshop's own for each limit
+ * the deployment did not announce. `client` builds the context's client,
+ * called only when no fresh answer is remembered. Never throws.
  */
 export async function methodTreeLimitsOf(
   context: TreeLimitsAware & { baseUrl: string },
   client: () => unknown,
-): Promise<MethodTreeLimits> {
+): Promise<Required<MethodTreeLimits>> {
   return bounded(await announcedLimits(context, client));
 }
 
-function bounded(announced: MethodTreeLimits | undefined): MethodTreeLimits {
-  return { ...announced, maxFileCount: announced?.maxFileCount ?? FALLBACK_MAX_FILE_COUNT };
+function bounded(announced: MethodTreeLimits | undefined): Required<MethodTreeLimits> {
+  return {
+    maxFileCount: announced?.maxFileCount ?? FALLBACK_TREE_LIMITS.maxFileCount,
+    maxFileSize: announced?.maxFileSize ?? FALLBACK_TREE_LIMITS.maxFileSize,
+    maxTotalSize: announced?.maxTotalSize ?? FALLBACK_TREE_LIMITS.maxTotalSize,
+  };
 }
 
 async function announcedLimits(

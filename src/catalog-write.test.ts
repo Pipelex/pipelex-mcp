@@ -1597,7 +1597,7 @@ describe("saveMthdsMethod", () => {
     expect(error.message).toContain("takes no method holding more than 2 files");
   });
 
-  it("works without the limits handshake, holding the listing to the file count alone", async () => {
+  it("works without the limits handshake, holding the listing to the workshop's own limits", async () => {
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
 
     const result = await saveMthdsMethod(

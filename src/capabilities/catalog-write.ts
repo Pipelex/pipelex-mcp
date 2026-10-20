@@ -397,7 +397,7 @@ export interface GetMethodResult {
  * version yet, which only shapes a result's sentences, and a fake without it
  * reads as "could not tell" without sending anything. `methodTreeLimits` is
  * optional for the same reason: a fake without it lists a folder under the
- * file count alone.
+ * workshop's own limits.
  */
 export interface CatalogWriteClient {
   getMethod(methodId: string): Promise<MethodDetail>;
