@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { TreeLimitExceededError, treeDigest } from "mthds";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GRAPH_PAGE_MARK } from "./graph-page.js";
 import {
@@ -558,6 +558,53 @@ describe("listFolderTree", () => {
       await expect(tree.readFile("main.mthds")).rejects.toThrow(
         /changed since the method tree was listed/,
       );
+    });
+
+    it("reads a member found only under its on-disk spelling to at most one byte past its listed size", async () => {
+      // A file system that keeps names byte for byte, as Linux's do, finds no
+      // file under the NFC spelling the listing records for a name written in
+      // NFD; macOS's find it either way, so the miss is simulated on its open.
+      const decomposed = "dir\u00e9/cafe\u0301.mthds".normalize("NFD");
+      await place(decomposed, "x".repeat(10));
+      const tree = await listing();
+      const listed = decomposed.normalize("NFC");
+      expect(tree.has(listed)).toBe(true);
+
+      const nfcAbsolute = path.join(root, ...listed.split("/"));
+      const realOpen = fs.open.bind(fs);
+      const probe = await realOpen(path.join(root, decomposed), "r");
+      const handlePrototype = Object.getPrototypeOf(probe) as {
+        read: (...args: unknown[]) => Promise<{ bytesRead: number }>;
+      };
+      await probe.close();
+      const realRead = handlePrototype.read;
+      let bytesRead = 0;
+      const openSpy = vi.spyOn(fs, "open").mockImplementation(async (target, ...rest) => {
+        if (target === nfcAbsolute) {
+          throw Object.assign(new Error(`ENOENT: no such file, open '${nfcAbsolute}'`), {
+            code: "ENOENT",
+          });
+        }
+        return realOpen(target, ...rest);
+      });
+      const readSpy = vi.spyOn(handlePrototype, "read").mockImplementation(async function (
+        this: unknown,
+        ...args: unknown[]
+      ) {
+        const result = await realRead.apply(this, args);
+        bytesRead += result.bytesRead;
+        return result;
+      });
+      try {
+        expect(Buffer.from(await tree.readFile(listed)).toString("utf8")).toBe("x".repeat(10));
+        await fs.appendFile(path.join(root, decomposed), Buffer.alloc(4 * 1024 * 1024));
+        bytesRead = 0;
+        await expect(tree.readFile(listed)).rejects.toThrow(/changed since/);
+      } finally {
+        openSpy.mockRestore();
+        readSpy.mockRestore();
+      }
+      expect(bytesRead).toBeLessThanOrEqual(11);
     });
 
     it("refuses a member whose bytes changed at the same size", async () => {

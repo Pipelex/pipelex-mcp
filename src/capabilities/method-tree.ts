@@ -52,7 +52,8 @@ import { errorMessage } from "./workspace-boundary.js";
  *   {@link FolderTree.readFile}: opened without following a link, read to at
  *   most one byte past the size the listing recorded, and checked against the
  *   listing's SHA-256, so a file that grew or changed since the listing is
- *   refused rather than read whole. `mthds`'s own `readFile` checks the hash
+ *   refused rather than read whole, a name held in another Unicode
+ *   normalization on disk included. `mthds`'s own `readFile` checks the hash
  *   but reads the whole file first.
  */
 
@@ -211,7 +212,7 @@ export async function listFolderTree(
             },
           );
         }
-        return readListedFile(root, file, () => tree.readFile(treePath));
+        return readListedFile(root, file);
       },
       resolveReference: (input) => tree.resolveReference(input),
     },
@@ -332,31 +333,48 @@ const READ_FLAGS =
  * Read a listed file to at most one byte past its listed size, never through
  * a link, and check it against the listing. A name the listing recorded in
  * NFC, which a normalization-sensitive file system holds decomposed, is not
- * found under that spelling: it is read through `mthds`'s own reader instead,
- * which knows the name on disk and checks the hash, and held to the listed
- * size after.
+ * found under that spelling: its on-disk spelling is found
+ * ({@link onDiskPath}) and read with the same bounded reader, since `mthds`'s
+ * own reader, which knows the name on disk, reads the whole file before it
+ * checks anything.
  */
-async function readListedFile(
-  root: string,
+async function readListedFile(root: string, file: ListedFile): Promise<Uint8Array> {
+  const listed = path.join(root, ...file.path.split("/"));
+  const read = await readBounded(listed, file);
+  if (read !== MISSING) return read;
+  const onDisk = await onDiskPath(root, file.path);
+  if (onDisk === undefined || onDisk === listed) throw changedSinceListing(file);
+  const reread = await readBounded(onDisk, file);
+  if (reread === MISSING) throw changedSinceListing(file);
+  return reread;
+}
+
+/** What {@link readBounded} answers for a path that names no file. */
+const MISSING = Symbol("missing");
+
+function changedSinceListing(file: ListedFile): MethodTreeError {
+  return new MethodTreeError(
+    "not_listable",
+    `'${file.path}' changed since the method tree was listed; list it again.`,
+    { names: [file.path] },
+  );
+}
+
+/**
+ * The bytes at `absolute`, opened without following a link, read to at most
+ * one byte past `file`'s listed size and checked against its SHA-256, or
+ * {@link MISSING} when nothing is there.
+ */
+async function readBounded(
+  absolute: string,
   file: ListedFile,
-  byStoredName: () => Promise<Uint8Array>,
-): Promise<Uint8Array> {
-  const changed = () =>
-    new MethodTreeError(
-      "not_listable",
-      `'${file.path}' changed since the method tree was listed; list it again.`,
-      { names: [file.path] },
-    );
+): Promise<Uint8Array | typeof MISSING> {
   let handle;
   try {
-    handle = await fs.open(path.join(root, ...file.path.split("/")), READ_FLAGS);
+    handle = await fs.open(absolute, READ_FLAGS);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      const bytes = await byStoredName();
-      if (bytes.byteLength !== file.size) throw changed();
-      return bytes;
-    }
+    if (code === "ENOENT") return MISSING;
     if (code === "ELOOP" || code === "EMLINK") {
       throw new MethodTreeError(
         "symbolic_link",
@@ -369,7 +387,7 @@ async function readListedFile(
     });
   }
   try {
-    if (!(await handle.stat()).isFile()) throw changed();
+    if (!(await handle.stat()).isFile()) throw changedSinceListing(file);
     const buffer = Buffer.alloc(file.size + 1);
     let filled = 0;
     while (filled < buffer.length) {
@@ -378,7 +396,7 @@ async function readListedFile(
       filled += bytesRead;
     }
     const bytes = buffer.subarray(0, filled);
-    if (filled !== file.size || sha256Hex(bytes) !== file.sha256) throw changed();
+    if (filled !== file.size || sha256Hex(bytes) !== file.sha256) throw changedSinceListing(file);
     return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   } catch (err) {
     if (err instanceof MethodTreeError) throw err;
@@ -388,6 +406,29 @@ async function readListedFile(
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * Where a tree path is spelled on disk: each segment matched, in its parent
+ * directory, against the one entry whose NFC spelling it is, which the
+ * listing guarantees is unique, since two names that collide once normalized
+ * refuse the tree. `undefined` when a segment matches no entry, or more than
+ * one.
+ */
+async function onDiskPath(root: string, treePath: string): Promise<string | undefined> {
+  let current = root;
+  for (const segment of treePath.split("/")) {
+    let names: string[];
+    try {
+      names = await fs.readdir(current);
+    } catch {
+      return undefined;
+    }
+    const matches = names.filter((name) => name.normalize("NFC") === segment);
+    if (matches.length !== 1) return undefined;
+    current = path.join(current, matches[0]!);
+  }
+  return current;
 }
 
 /** How much of a graph page is read to find the workshop's mark, which sits at the top of its head. */
