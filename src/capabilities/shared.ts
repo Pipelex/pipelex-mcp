@@ -24,7 +24,6 @@ import {
   errorVerdictOf,
 } from "@pipelex/sdk";
 import type { ErrorDomain, ErrorVerdict, PipelexApiClientOptions } from "@pipelex/sdk";
-import type { MethodTreeLimits } from "mthds";
 import { z } from "zod";
 
 import { BARE_APP_INFO } from "./client-identification.js";
@@ -42,6 +41,7 @@ import type {
   TemplateFiles,
   TemplateFilesResolution,
 } from "./template-files.js";
+import type { ListingLimits } from "./method-tree.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 
 export const DEFAULT_API_URL = "https://api.pipelex.com";
@@ -225,7 +225,7 @@ export interface FileResolver {
   locateMethodDir?(methodDir: string): Promise<MethodDirLocation>;
   readMethodTree?(
     location: LocatedMethodDir,
-    options: { limits: MethodTreeLimits },
+    options: { limits: ListingLimits },
   ): Promise<MethodTreeRead>;
 }
 
@@ -236,7 +236,7 @@ export interface MethodDirOptions {
    * asked only once a folder is listed. Absent, the listing holds to the
    * workshop's own limits (`FALLBACK_TREE_LIMITS`).
    */
-  limits?: () => Promise<MethodTreeLimits>;
+  limits?: () => Promise<ListingLimits>;
 }
 
 /** A method folder found on disk: its real path, and `method_dir` as the caller wrote it. */

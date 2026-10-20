@@ -8,6 +8,7 @@ import type {
   MethodTreeLimits,
   ReferenceResolution,
   ResolveReferenceInput,
+  TreeLimit,
 } from "mthds";
 
 import { GRAPH_PAGE_FILENAME, GRAPH_PAGE_MARK } from "./graph-page.js";
@@ -22,7 +23,9 @@ import { errorMessage } from "./workspace-boundary.js";
  * - **The deployment's limits.** The tree is listed under the limits the
  *   Pipelex deployment announces (`tree-limits.ts`), so a folder the platform
  *   would refuse is refused while it is listed, from the sizes the walk reads,
- *   before any file is hashed. The listing is rooted at the folder handed over
+ *   before any file is hashed. A refusal says whose limit it was
+ *   ({@link FolderLimitError}): the deployment's, or the workshop's own scan
+ *   limit standing for one the deployment did not announce. The listing is rooted at the folder handed over
  *   (`discover: false`), never at a `METHODS.toml` found above it: the folder
  *   the caller named is the method.
  * - **A run's inputs files.** `inputs.json` and `inputs.toml`, at any depth,
@@ -91,19 +94,61 @@ export type FolderTreeListing =
   | { ok: true; tree: FolderTree }
   | { ok: false; error: MethodTreeError };
 
+/** Whose limit refused a folder: the one the deployment announced, or the workshop's own. */
+export type LimitOwner = "deployment" | "workshop";
+
+/**
+ * A limit that refused a folder, with whose limit it was, so the refusal
+ * blames the deployment only for a limit the deployment announced.
+ */
+export class FolderLimitError extends TreeLimitExceededError {
+  readonly owner: LimitOwner;
+
+  constructor(
+    root: string,
+    limit: TreeLimit,
+    maximum: number,
+    reached: number,
+    path: string | undefined,
+    owner: LimitOwner,
+  ) {
+    super(root, limit, maximum, reached, path);
+    this.name = "FolderLimitError";
+    this.owner = owner;
+  }
+}
+
+/** The limits a listing takes: `mthds`'s, and which of them the workshop set itself (`tree-limits.ts`). */
+export type ListingLimits = MethodTreeLimits & { readonly workshopSet?: readonly TreeLimit[] };
+
 /**
  * List the tree of `folder`, an absolute path to an existing directory, under
  * `limits`. Every refusal, a limit passed included, comes back as the
- * `MethodTreeError` that names it, never as a throw.
+ * `MethodTreeError` that names it, never as a throw; a limit passed is a
+ * {@link FolderLimitError} saying whose limit it was.
  */
 export async function listFolderTree(
   folder: string,
-  limits: MethodTreeLimits,
+  limits: ListingLimits,
 ): Promise<FolderTreeListing> {
   let tree: MethodTree;
   try {
-    tree = await listMethodTree(folder, { discover: false, limits });
+    tree = await listMethodTree(folder, { discover: false, limits: mthdsLimitsOf(limits) });
   } catch (err) {
+    if (err instanceof TreeLimitExceededError) {
+      const owner = limits.workshopSet?.includes(err.limit) === true ? "workshop" : "deployment";
+      return {
+        ok: false,
+        error: new FolderLimitError(
+          err.root,
+          err.limit,
+          err.maximum,
+          err.reached,
+          err.names[0],
+          owner,
+        ),
+      };
+    }
     return { ok: false, error: asTreeError(err, folder) };
   }
   const root = tree.root ?? folder;
@@ -150,6 +195,16 @@ export async function listFolderTree(
       },
       resolveReference: (input) => tree.resolveReference(input),
     },
+  };
+}
+
+/** The limits as `mthds` takes them, and nothing else. */
+function mthdsLimitsOf(limits: ListingLimits): MethodTreeLimits {
+  const { maxFileCount, maxFileSize, maxTotalSize } = limits;
+  return {
+    ...(maxFileCount === undefined ? {} : { maxFileCount }),
+    ...(maxFileSize === undefined ? {} : { maxFileSize }),
+    ...(maxTotalSize === undefined ? {} : { maxTotalSize }),
   };
 }
 
@@ -275,8 +330,12 @@ export function describeTreeRefusal(error: MethodTreeError, fallback: string): T
         : error.limit === "maxFileSize"
           ? `a file over ${error.maximum} bytes`
           : `more than ${error.maximum} bytes in all`;
+    const whose =
+      error instanceof FolderLimitError && error.owner === "workshop"
+        ? `That bound is the workshop's own scan limit, not the Pipelex deployment's, which announced none for it: the workshop lists no folder holding ${what}.`
+        : `The Pipelex deployment this workshop talks to takes no method holding ${what}.`;
     return {
-      message: `${error.message} The Pipelex deployment this workshop talks to takes no method holding ${what}.`,
+      message: `${error.message} ${whose}`,
       hint: `Point at the method's own folder, or keep what is not part of the method out with a .gitignore inside the folder or METHODS.toml's [package] exclude; ${fallback}`,
     };
   }

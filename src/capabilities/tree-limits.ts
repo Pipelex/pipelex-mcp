@@ -1,4 +1,4 @@
-import type { MethodTreeLimits } from "mthds";
+import type { MethodTreeLimits, TreeLimit } from "mthds";
 
 /**
  * The limits a Pipelex deployment holds a method's tree to, as the workshop
@@ -26,6 +26,11 @@ import type { MethodTreeLimits } from "mthds";
  * so the workshop refuses nothing a default deployment takes. The file count
  * is a scan bound, above the runner's default of 1,000, since a count costs a
  * walk and not memory.
+ *
+ * **Whose each limit is, is recorded** (`FolderLimits.workshopSet`), so a
+ * refusal names the right party: one the deployment announced is the
+ * deployment's, and one the workshop set is the workshop's own scan limit,
+ * which no deployment asked for.
  */
 
 /** The most files a listing takes when the deployment announces no file count. */
@@ -37,11 +42,20 @@ export const FALLBACK_MAX_FILE_SIZE = 32 * 1024 * 1024;
 /** The most bytes a listing takes in all when the deployment announces no total: the runner's default, 64 MiB. */
 export const FALLBACK_MAX_TOTAL_SIZE = 64 * 1024 * 1024;
 
+/** The limits a listing of a method folder is held to, and which of them the workshop set itself. */
+export interface FolderLimits extends Required<MethodTreeLimits> {
+  /** The limits the deployment announced none for, which the workshop set to its own value. */
+  readonly workshopSet: readonly TreeLimit[];
+}
+
+const ALL_LIMITS: readonly TreeLimit[] = ["maxFileCount", "maxFileSize", "maxTotalSize"];
+
 /** The workshop's own limits, each standing for one the deployment did not announce. */
-export const FALLBACK_TREE_LIMITS: Required<MethodTreeLimits> = {
+export const FALLBACK_TREE_LIMITS: FolderLimits = {
   maxFileCount: FALLBACK_MAX_FILE_COUNT,
   maxFileSize: FALLBACK_MAX_FILE_SIZE,
   maxTotalSize: FALLBACK_MAX_TOTAL_SIZE,
+  workshopSet: ALL_LIMITS,
 };
 
 /** How long an announced answer is believed. */
@@ -93,15 +107,16 @@ function limitsReaderOf(client: unknown): LimitsReader | undefined {
 export async function methodTreeLimitsOf(
   context: TreeLimitsAware & { baseUrl: string },
   client: () => unknown,
-): Promise<Required<MethodTreeLimits>> {
+): Promise<FolderLimits> {
   return bounded(await announcedLimits(context, client));
 }
 
-function bounded(announced: MethodTreeLimits | undefined): Required<MethodTreeLimits> {
+function bounded(announced: MethodTreeLimits | undefined): FolderLimits {
   return {
     maxFileCount: announced?.maxFileCount ?? FALLBACK_TREE_LIMITS.maxFileCount,
     maxFileSize: announced?.maxFileSize ?? FALLBACK_TREE_LIMITS.maxFileSize,
     maxTotalSize: announced?.maxTotalSize ?? FALLBACK_TREE_LIMITS.maxTotalSize,
+    workshopSet: ALL_LIMITS.filter((limit) => announced?.[limit] === undefined),
   };
 }
 

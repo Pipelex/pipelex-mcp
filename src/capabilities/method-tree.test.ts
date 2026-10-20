@@ -7,7 +7,12 @@ import { TreeLimitExceededError, treeDigest } from "mthds";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { GRAPH_PAGE_MARK } from "./graph-page.js";
-import { describeTreeRefusal, isRunInputsPath, listFolderTree } from "./method-tree.js";
+import {
+  FolderLimitError,
+  describeTreeRefusal,
+  isRunInputsPath,
+  listFolderTree,
+} from "./method-tree.js";
 import type { FolderTree } from "./method-tree.js";
 
 /**
@@ -437,6 +442,25 @@ describe("listFolderTree", () => {
       expect(text.hint.endsWith("or list the method's files in files.")).toBe(true);
 
       expect((await listing({ maxFileCount: 3 })).files).toHaveLength(3);
+    });
+
+    it("blames the deployment only for a limit it announced, and names the workshop's own scan limit as such", async () => {
+      await place("a.mthds");
+      await place("b.mthds");
+      await place("c.mthds");
+
+      const announced = await refusal({ maxFileCount: 2 });
+      expect(announced).toBeInstanceOf(FolderLimitError);
+      expect((announced as FolderLimitError).owner).toBe("deployment");
+      expect(describeTreeRefusal(announced, "").message).toContain(
+        "The Pipelex deployment this workshop talks to takes no method holding more than 2 files",
+      );
+
+      const ownBound = await refusal({ maxFileCount: 2, workshopSet: ["maxFileCount"] });
+      expect((ownBound as FolderLimitError).owner).toBe("workshop");
+      const text = describeTreeRefusal(ownBound, "");
+      expect(text.message).toContain("the workshop's own scan limit");
+      expect(text.message).not.toContain("The Pipelex deployment this workshop talks to takes");
     });
 
     it("refuses a file past the size limit and a folder past the total", async () => {

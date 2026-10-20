@@ -42,6 +42,7 @@ describe("methodTreeLimitsOf", () => {
       maxFileCount: 1000,
       maxFileSize: 32 * 1024 * 1024,
       maxTotalSize: 64 * 1024 * 1024,
+      workshopSet: [],
     });
   });
 
@@ -52,6 +53,7 @@ describe("methodTreeLimitsOf", () => {
       maxFileSize: 1024,
       maxTotalSize: 4096,
       maxFileCount: FALLBACK_MAX_FILE_COUNT,
+      workshopSet: ["maxFileCount"],
     });
   });
 
@@ -62,7 +64,16 @@ describe("methodTreeLimitsOf", () => {
       maxFileCount: 1000,
       maxFileSize: FALLBACK_MAX_FILE_SIZE,
       maxTotalSize: FALLBACK_MAX_TOTAL_SIZE,
+      workshopSet: ["maxFileSize", "maxTotalSize"],
     });
+  });
+
+  it("records every limit as the workshop's own when the handshake failed", () => {
+    expect(FALLBACK_TREE_LIMITS.workshopSet).toEqual([
+      "maxFileCount",
+      "maxFileSize",
+      "maxTotalSize",
+    ]);
   });
 
   it("takes the runner's default byte limits as its own", () => {

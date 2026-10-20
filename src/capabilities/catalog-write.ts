@@ -35,6 +35,7 @@ import {
 } from "./catalog-link.js";
 import type { LinkFileReport, LinkRead, LinkReplacement, MethodLink } from "./catalog-link.js";
 import { listFolderTree } from "./method-tree.js";
+import type { ListingLimits } from "./method-tree.js";
 import {
   methodVersionsOf,
   methodVersionsSupport,
@@ -1060,7 +1061,7 @@ async function readSaveSources(
     data: z.infer<typeof mthdsSaveMethodInputObjectSchema>;
     targetId: string | undefined;
     location: LocatedMethodDir;
-    limits: MethodTreeLimits;
+    limits: ListingLimits;
   },
 ): Promise<SaveSources> {
   const { data, targetId, location, limits } = request;

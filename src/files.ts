@@ -1,9 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import type { MethodTreeLimits } from "mthds";
-
 import { describeTreeRefusal, listFolderTree } from "./capabilities/method-tree.js";
+import type { ListingLimits } from "./capabilities/method-tree.js";
 import type { FolderTree, ListedFile } from "./capabilities/method-tree.js";
 import { MAX_FOLDER_MTHDS_FILE_BYTES, MAX_FOLDER_MTHDS_FILES } from "./capabilities/shared.js";
 import type {
@@ -255,7 +254,7 @@ async function locateMethodFolder(
  */
 async function listMethodFolder(
   location: LocatedMethodDir,
-  limits: MethodTreeLimits,
+  limits: ListingLimits,
   fallback: FolderFallback,
 ): Promise<{ ok: true; tree: FolderTree } | { ok: false; refusals: Refusals }> {
   const { folder, methodDir } = location;
@@ -320,7 +319,7 @@ async function resolveMethodFolder(
  */
 async function readMethodFolderTree(
   location: LocatedMethodDir,
-  limits: MethodTreeLimits,
+  limits: ListingLimits,
 ): Promise<MethodTreeRead> {
   const listed = await listMethodFolder(location, limits, SAVE_FALLBACK);
   if (!listed.ok) return listed;
