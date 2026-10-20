@@ -26,7 +26,6 @@ import {
   LinkLockError,
   apiHostOf,
   buildMethodLink,
-  bundleFilesIn,
   existingDestinations,
   foreignEntryReason,
   holdsLegacyLink,
@@ -1909,7 +1908,6 @@ async function writtenResult(
   const limits = await methodTreeLimitsOf(context, () => client);
   const othersHere = () => unmanagedFiles(dir, limits, content.files);
   const plan = await planPull(
-    dir,
     stored,
     destinations,
     observed,
@@ -2560,9 +2558,10 @@ interface StoredElsewhere {
  *
  *  - no link, and nothing in the folder's tree but what this pull lands:
  *    written, since the link then claims the whole folder and the next save
- *    from it sends its whole tree;
- *  - a bundle with no link, or a link naming another method: refused outright,
- *    because it is somebody else's work;
+ *    from it sends its whole tree; anything else in it, a stranger's bundle
+ *    included, refuses the pull;
+ *  - a link naming another method: refused outright, because it is somebody
+ *    else's work;
  *  - a link naming THIS method: compared destination by destination —
  *    identical writes nothing and only refreshes the link; different while the
  *    draft has NOT moved means the local files are work this folder never
@@ -2581,7 +2580,6 @@ interface StoredElsewhere {
  * Every refusal is `input_domain` at `output_dir` and writes nothing at all.
  */
 async function planPull(
-  dir: string,
   stored: MethodData,
   destinations: readonly Destination[],
   observed: readonly ObservedFile[],
@@ -2609,22 +2607,12 @@ async function planPull(
         "Point output_dir at an empty or dedicated folder. A folder becomes linked by being saved from, or pulled into, by these tools.",
       );
     }
-    // And the other half of the same question: a folder holding a bundle of
-    // its OWN, under names this method does not use, is still somebody else's
-    // work. Landing beside a stranger's `their_bundle.mthds` and then claiming
-    // the whole folder with a link file is exactly what the link file exists
-    // to stop.
-    const foreign = await bundleFilesIn(dir);
-    if (foreign.length > 0) {
-      return refusePull(
-        `it already holds ${foreign.map((name) => `\`${name}\``).join(", ")} and no ${LINK_FILE_NAME}, so it is somebody else's bundle.`,
-        "Point output_dir at an empty or dedicated folder. Writing this method here would leave two bundles in one folder and link it to only one of them.",
-      );
-    }
     // The link this pull writes claims the WHOLE folder: the next save from it
     // sends every file of its tree. So a folder whose tree holds anything this
-    // pull does not land, a project's own files above all with output_dir
-    // ".", is refused rather than turned into a method that holds them.
+    // pull does not land is refused rather than turned into a method that
+    // holds them: a project's own files above all with output_dir ".", and a
+    // stranger's `their_bundle.mthds` beside which the pull would land and
+    // then claim both bundles with one link.
     const refusal = unlinkedOthersRefusal(await othersHere());
     return refusal === undefined ? { kind: "write" } : { kind: "refuse", error: refusal };
   }
