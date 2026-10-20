@@ -70,7 +70,7 @@ import type {
   MethodTreeRead,
   ToolError,
 } from "./shared.js";
-import { methodTreeLimitsOf } from "./tree-limits.js";
+import { type FolderLimits, methodTreeLimitsOf } from "./tree-limits.js";
 import type { TreeLimitsAware } from "./tree-limits.js";
 import { validateMthds } from "./validate.js";
 import type { ValidationContext } from "./validate.js";
@@ -1873,6 +1873,11 @@ async function writtenResult(
   const versionIsDraft = content.version !== "draft" && sameListing(content.files, stored.files);
   const link = linkBefore ?? (await readMethodLink(dir));
   const observed = await observeDestinations(destinations);
+  // The limits are asked for once, before the landing's turn, which holds no
+  // call to the platform: the folder is listed against them before planning,
+  // again inside the turn when it holds no link, and after the landing.
+  const limits = await methodTreeLimitsOf(context, () => client);
+  const othersHere = () => unmanagedFiles(dir, limits, content.files);
   const plan = await planPull(
     dir,
     stored,
@@ -1888,7 +1893,7 @@ async function writtenResult(
       ...(content.version === "draft" ? {} : { draft: hashesByPath(stored.files) }),
       readVersion: (number) => readVersionHashes(client, stored, number),
     },
-    () => unmanagedFiles(context, client, dir, content.files),
+    othersHere,
   );
   if (plan.kind === "refuse") {
     return getError("The method was not written: output_dir holds work this pull would lose.", [
@@ -1915,6 +1920,7 @@ async function writtenResult(
           versionIsDraft,
           apiHost,
           staged,
+          othersHere,
         }),
       ),
     );
@@ -1974,12 +1980,7 @@ async function writtenResult(
   // one thing it must not do. So it names them and says which two things they
   // might be: the files of the folder's tree, as a save from here would send
   // them, that the method does not hold.
-  const { names: unmanaged, complete: unmanagedComplete } = await unmanagedFiles(
-    context,
-    client,
-    dir,
-    content.files,
-  );
+  const { names: unmanaged, complete: unmanagedComplete } = await othersHere();
 
   const relativeDir = path.relative(root, dir) === "" ? "." : path.relative(root, dir);
   const structuredContent: GetMethodSuccess = {
@@ -2083,6 +2084,8 @@ async function landPull(landing: {
   apiHost: string;
   /** The staged tree the files are copied from; absent on a link-only refresh. */
   staged: string | undefined;
+  /** The files of the folder's tree the pull does not land, listed now. */
+  othersHere: () => Promise<{ names: string[]; complete: boolean }>;
 }): Promise<PullLanding> {
   const {
     root,
@@ -2096,6 +2099,7 @@ async function landPull(landing: {
     versionIsDraft,
     apiHost,
     staged,
+    othersHere,
   } = landing;
   const linkFields = { apiHost, methodId: stored.method_id, name: stored.name };
   const moved = (report: LinkFileReport): PullLanding => ({
@@ -2147,6 +2151,24 @@ async function landPull(landing: {
           },
         ]),
       };
+    }
+
+    // A folder with no link was found holding nothing but this method before
+    // the download, outside this turn: a file landing in it meanwhile would be
+    // claimed by the link written next, and sent by the next save from here
+    // as the method's own. So its tree is listed again here, where nothing of
+    // this process writes it, and the planned refusal is made on what it holds now.
+    if (link.kind === "none") {
+      const refusal = unlinkedOthersRefusal(await othersHere());
+      if (refusal !== undefined) {
+        return {
+          ok: false,
+          result: getError(
+            "The method was not written: output_dir holds work this pull would lose.",
+            [refusal],
+          ),
+        };
+      }
     }
 
     // The link goes down BEFORE the files, marked `partial_pull`, so that a
@@ -2387,12 +2409,10 @@ async function readVersionHashes(
  * refuses too.
  */
 async function unmanagedFiles(
-  context: CatalogWriteContext,
-  client: CatalogWriteClient,
   dir: string,
+  limits: FolderLimits,
   stored: readonly SavedMethodFile[],
 ): Promise<{ names: string[]; complete: boolean }> {
-  const limits = await methodTreeLimitsOf(context, () => client);
   const listed = await listFolderTree(dir, limits);
   if (!listed.ok) {
     // A folder holding no file of a tree beside the pulled ones holds nothing
@@ -2575,20 +2595,8 @@ async function planPull(
     // sends every file of its tree. So a folder whose tree holds anything this
     // pull does not land, a project's own files above all with output_dir
     // ".", is refused rather than turned into a method that holds them.
-    const others = await othersHere();
-    if (!others.complete) {
-      return refusePull(
-        `it holds no ${LINK_FILE_NAME}, and what else its tree holds could not be listed (it is past the limits, or holds a file no method tree takes), so this pull cannot tell that the folder holds nothing but this method.`,
-        "Pull into a fresh folder of its own: a pull links the whole folder, and the next save from it sends every file of its tree.",
-      );
-    }
-    if (others.names.length > 0) {
-      return refusePull(
-        `it holds no ${LINK_FILE_NAME} and its tree holds files this method does not have: ${listedNames(others.names)}. A pull links the whole folder, so the next save from it would send those files as the method's own.`,
-        "Pull into a fresh folder of its own, such as a new subfolder, or move those files out first.",
-      );
-    }
-    return { kind: "write" };
+    const refusal = unlinkedOthersRefusal(await othersHere());
+    return refusal === undefined ? { kind: "write" } : { kind: "refuse", error: refusal };
   }
 
   // Compared bare: a link records the bare id, and the pull of `mt_x@3` is a
@@ -2699,6 +2707,30 @@ function listedNames(names: readonly string[]): string {
   const shown = names.slice(0, 5).map((name) => `\`${name}\``);
   const rest = names.length - shown.length;
   return rest > 0 ? `${shown.join(", ")} and ${rest} more` : shown.join(", ");
+}
+
+/**
+ * The refusal of a pull into a folder with no link whose tree holds files the
+ * pull does not land, or cannot be listed, or `undefined` when it holds none.
+ * Asked when the pull plans and again inside the landing's turn.
+ */
+function unlinkedOthersRefusal(others: {
+  names: readonly string[];
+  complete: boolean;
+}): ToolError | undefined {
+  if (!others.complete) {
+    return refuseOutputDir(
+      `it holds no ${LINK_FILE_NAME}, and what else its tree holds could not be listed (it is past the limits, or holds a file no method tree takes), so this pull cannot tell that the folder holds nothing but this method.`,
+      "Pull into a fresh folder of its own: a pull links the whole folder, and the next save from it sends every file of its tree.",
+    );
+  }
+  if (others.names.length > 0) {
+    return refuseOutputDir(
+      `it holds no ${LINK_FILE_NAME} and its tree holds files this method does not have: ${listedNames(others.names)}. A pull links the whole folder, so the next save from it would send those files as the method's own.`,
+      "Pull into a fresh folder of its own, such as a new subfolder, or move those files out first.",
+    );
+  }
+  return undefined;
 }
 
 function refusePull(message: string, hint: string): PullPlan {

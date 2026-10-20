@@ -2441,6 +2441,34 @@ describe("the pull writes only what it may", () => {
     await expect(fs.access(path.join(root, LINK_FILE_NAME))).rejects.toThrow();
   });
 
+  it("refuses an unlinked folder whose tree gained a file while the pull downloaded, writing nothing", async () => {
+    // The plan listed the folder before the download and outside the lock; a
+    // file landing meanwhile would have been claimed by the link, and sent by
+    // the next save as the method's own.
+    await fs.mkdir(path.join(root, "fresh"), { recursive: true });
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "fresh" },
+      contextFor(
+        {
+          ...reading(storedMethod()),
+          async writeMethodTree(files, options) {
+            await fs.writeFile(path.join(root, "fresh", "notes.md"), "mine", "utf8");
+            return writeFromBlobs(files, options);
+          },
+        },
+        validationAnswering(validReport),
+      ),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "output_dir" });
+    expect(error.message).toContain("`notes.md`");
+    await expect(fs.access(path.join(root, "fresh", "bundle.mthds"))).rejects.toThrow();
+    await expect(fs.access(path.join(root, "fresh", LINK_FILE_NAME))).rejects.toThrow();
+    expect(await fs.readFile(path.join(root, "fresh", "notes.md"), "utf8")).toBe("mine");
+  });
+
   it("pulls into an unlinked folder whose tree holds nothing else, dotfiles and run inputs aside", async () => {
     await writeBundle("fresh", { ".git/config": "[core]", "inputs.json": "{}" });
 
