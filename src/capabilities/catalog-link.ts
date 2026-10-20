@@ -61,6 +61,27 @@ export function linkFileOf(dir: string): string {
   return path.join(dir, LINK_DIRECTORY_NAME, LINK_BASENAME);
 }
 
+/**
+ * The name the link had up to `@pipelex/mcp` 0.25.0, at the top of the folder.
+ * It is never read as a link: the workshop keeps no backward compatibility.
+ * It is only looked for, because a folder still holding it reads as unlinked
+ * and its whole tree, the old file included, would be saved as the method.
+ */
+export const LEGACY_LINK_FILE_NAME = "pipelex-method.json";
+
+/** The command that moves a legacy link into place, as every refusal names it. */
+export const LEGACY_LINK_MOVE = `mkdir -p ${LINK_DIRECTORY_NAME} && git mv ${LEGACY_LINK_FILE_NAME} ${LINK_FILE_NAME}`;
+
+/** Whether the folder `dir` still holds a legacy link at its top, whatever kind of entry it is. */
+export async function holdsLegacyLink(dir: string): Promise<boolean> {
+  try {
+    await fs.lstat(path.join(dir, LEGACY_LINK_FILE_NAME));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const LINK_COMMENT =
   "Written by the Pipelex workshop (@pipelex/mcp). This directory is saved on Pipelex as the method below. " +
   "Commit this file so that a teammate updates the same method instead of creating a second one. Do not hand-edit it.";

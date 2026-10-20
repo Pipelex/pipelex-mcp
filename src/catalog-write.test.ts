@@ -1884,6 +1884,23 @@ describe("getMthdsMethod", () => {
     expect(await fs.readFile(path.join(root, "theirs/bundle.mthds"), "utf8")).toBe("theirs");
   });
 
+  it("refuses a pull into a folder still holding the old pipelex-method.json, writing nothing", async () => {
+    const oldLink = JSON.stringify({ method_id: "mt_one", name: "Summarize PDF" });
+    await writeBundle("old", { "pipelex-method.json": oldLink });
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "old" },
+      contextFor(readingClient(storedMethod()), validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "output_dir" });
+    expect(error.hint).toContain(
+      "mkdir -p .pipelex && git mv pipelex-method.json .pipelex/method.json",
+    );
+    expect(await fs.readdir(path.join(root, "old"))).toEqual(["pipelex-method.json"]);
+  });
+
   it("refuses a directory linked to a different method", async () => {
     await writeBundle("other", { "bundle.mthds": "other" });
     await writeLinkFile(
@@ -2182,6 +2199,35 @@ describe("the link file", () => {
   it("reads an absent link as none", async () => {
     await fs.mkdir(path.join(root, "empty"), { recursive: true });
     expect(await readMethodLink(path.join(root, "empty"))).toEqual({ kind: "none" });
+  });
+
+  it("refuses a save from a folder still holding the old pipelex-method.json, sending nothing", async () => {
+    const oldLink = JSON.stringify({ method_id: "mt_one", name: "Summarize PDF" });
+    await writeBundle("methods/old", {
+      "bundle.mthds": 'domain = "demo"',
+      "pipelex-method.json": oldLink,
+    });
+
+    const result = await saveMthdsMethod(
+      { method_dir: "methods/old", method_id: "mt_one" },
+      contextFor(clientNotCalled, validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({
+      class: "input_domain",
+      location: "method_dir",
+      retryable: false,
+    });
+    expect(error.message).toContain("pipelex-method.json");
+    expect(error.hint).toContain(
+      "mkdir -p .pipelex && git mv pipelex-method.json .pipelex/method.json",
+    );
+    // No link was written beside it: the folder is exactly as it was.
+    expect((await fs.readdir(path.join(root, "methods/old"))).sort()).toEqual([
+      "bundle.mthds",
+      "pipelex-method.json",
+    ]);
   });
 });
 

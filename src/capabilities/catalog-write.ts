@@ -20,6 +20,8 @@ import type {
 import { z } from "zod";
 
 import {
+  LEGACY_LINK_FILE_NAME,
+  LEGACY_LINK_MOVE,
   LINK_FILE_NAME,
   LinkLockError,
   apiHostOf,
@@ -27,6 +29,7 @@ import {
   bundleFilesIn,
   existingDestinations,
   foreignEntryReason,
+  holdsLegacyLink,
   inLinkTurn,
   readMethodLink,
   replaceMethodLink,
@@ -708,6 +711,21 @@ export async function saveMthdsMethod(
   const located = await resolver.locateMethodDir(data.method_dir);
   if (!located.ok) {
     return saveError(INVALID_SAVE, located.refusals.map(atMethodDir));
+  }
+
+  // A folder still holding the link an earlier release wrote reads as
+  // unlinked here, and its whole tree, the old link included, would be
+  // uploaded as the method: refused before anything is asked or sent.
+  if (await holdsLegacyLink(located.folder)) {
+    return saveError(INVALID_SAVE, [
+      {
+        class: "input_domain",
+        location: "method_dir",
+        message: `${data.method_dir} holds ${LEGACY_LINK_FILE_NAME}, the link file an earlier release of the workshop wrote, which it now reads only at ${LINK_FILE_NAME}: saved as it is, the folder would read as unlinked and the old file would be uploaded as one of the method's files. Nothing was sent.`,
+        hint: `Move it into place from inside the folder, then save again: ${LEGACY_LINK_MOVE} (plain mv outside git), and commit the move.`,
+        retryable: false,
+      },
+    ]);
   }
 
   // Built inside a try, as the pull and the publish build theirs: the SDK's
@@ -1792,6 +1810,18 @@ async function writtenResult(
     return getError("The method was not written: output_dir cannot be used.", [target.error]);
   }
   const { root, dir } = target;
+
+  // A folder still holding the link an earlier release wrote reads as
+  // unlinked, so the pull would judge it as somebody else's folder and write
+  // a second link beside the old one: refused before anything is planned.
+  if (await holdsLegacyLink(dir)) {
+    return getError("The method was not written: output_dir holds an old link file.", [
+      refuseOutputDir(
+        `${input.output_dir} holds ${LEGACY_LINK_FILE_NAME}, the link file an earlier release of the workshop wrote, which it now reads only at ${LINK_FILE_NAME}: pulled into as it is, the folder would read as unlinked.`,
+        `Move it into place from inside the folder, then pull again: ${LEGACY_LINK_MOVE} (plain mv outside git), and commit the move.`,
+      ),
+    ]);
+  }
 
   // ── the write set, computed ONCE ──────────────────────────────────
   //
