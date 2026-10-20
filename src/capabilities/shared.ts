@@ -1612,11 +1612,6 @@ function classifyFailure(err: unknown, options: ClassifyErrorOptions): ToolError
   );
 }
 
-/**
- * The texture of an SDK error other than a refused request or a wrapped upload
- * failure, by its class. Ordered most specific first: each family's subclasses
- * before its base.
- */
 /** What a caller can do about a file of a method's tree that did not move, by which way and why. */
 function methodFileTransferHint(err: MethodFileTransferError): string {
   if (err.operation === "upload") {
@@ -1633,6 +1628,11 @@ function methodFileTransferHint(err: MethodFileTransferError): string {
   return "Storage did not serve the file, so nothing was written. Pull again in a moment.";
 }
 
+/**
+ * The texture of an SDK error other than a refused request or a wrapped upload
+ * failure, by its class. Ordered most specific first: each family's subclasses
+ * before its base.
+ */
 function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions): ToolTexture {
   const message = err.message;
 
