@@ -1198,7 +1198,7 @@ async function readSaveSources(
         message: `The method's tree holds what looks like a secret, so nothing was sent: ${findings
           .map((finding) => `${shownIn(location.methodDir, finding.path)} (${finding.reason})`)
           .join("; ")}.`,
-        hint: "A key belongs in the environment, never in a method, which the organization's catalog stores and every member can read. Move the secret out of the folder, or keep the file out of the method with a .gitignore line inside the folder or a name starting with a dot, then save again.",
+        hint: "A key belongs in the environment, never in a method, which the organization's catalog stores and every member can read. Move the secret out of the folder, or keep the file out of the method with a .gitignore line inside the folder or a name starting with a dot, then save again. A file refused for its name alone that is no key, a .key file that is not a Keynote deck for one, can be renamed.",
         retryable: false,
       },
     ]);

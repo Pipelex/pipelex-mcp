@@ -1787,9 +1787,10 @@ describe("the secret guard", () => {
   });
 
   it("refuses a key file by its name, on an update too, and leaves the draft alone", async () => {
+    // A DER key is binary and holds no PEM block, so only its name gives it away.
     await writeBundle("methods/demo", {
       "bundle.mthds": 'domain = "demo"',
-      "certs/server.pem": fakePem,
+      "certs/server.key": new Uint8Array([0x30, 0x82, 0x04, 0xa4, 0x02, 0x01, 0x00, 0x02]),
     });
     const calls: string[] = [];
 
@@ -1800,7 +1801,7 @@ describe("the secret guard", () => {
 
     expect(calls).toEqual(["methodTreeLimits"]);
     const [error] = errorsOf(result.structuredContent);
-    expect(error.message).toContain(path.join("methods/demo", "certs", "server.pem"));
+    expect(error.message).toContain(path.join("methods/demo", "certs", "server.key"));
     expect(error.message).toContain("named like a key file");
     expect(error.hint).toContain(".gitignore");
   });

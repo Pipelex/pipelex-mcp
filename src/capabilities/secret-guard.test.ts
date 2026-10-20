@@ -26,7 +26,6 @@ describe("secretFindings", () => {
   it("refuses a known secret file by its name, whatever its content, ignoring case", () => {
     const findings = secretFindings(
       [
-        "certs/server.pem",
         "deploy/Signing.KEY",
         "store.p12",
         "keys/id_rsa",
@@ -38,7 +37,6 @@ describe("secretFindings", () => {
     );
 
     expect(findings.map((finding) => finding.path)).toEqual([
-      "certs/server.pem",
       "deploy/Signing.KEY",
       "store.p12",
       "keys/id_rsa",
@@ -47,7 +45,36 @@ describe("secretFindings", () => {
       "client_secret_123.apps.googleusercontent.com.json",
       "vault.kdbx",
     ]);
-    expect(findings[0]?.reason).toBe("it is named like a key file (.pem or .key)");
+    expect(findings[0]?.reason).toBe(
+      "it is named like a key file (.key), and is no zip archive as a Keynote deck is",
+    );
+  });
+
+  it("judges a .pem file by what it holds: a certificate goes, a private key is refused", () => {
+    const certificate = ["-----BEGIN ", "CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"].join(
+      "",
+    );
+
+    const findings = secretFindings([
+      { path: "certs/ca.pem", bytes: text(certificate) },
+      { path: "certs/server.pem", bytes: text(fake.pem) },
+    ]);
+
+    expect(findings).toEqual([
+      { path: "certs/server.pem", reason: "it holds a private key block (PEM)" },
+    ]);
+  });
+
+  it("lets a .key file that is a zip archive go, as a Keynote deck is, and refuses a binary key", () => {
+    const keynote = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00]);
+    const der = new Uint8Array([0x30, 0x82, 0x04, 0xa4, 0x02, 0x01, 0x00, 0x02]);
+
+    const findings = secretFindings([
+      { path: "decks/pitch.key", bytes: keynote },
+      { path: "deploy/signing.key", bytes: der },
+    ]);
+
+    expect(findings.map((finding) => finding.path)).toEqual(["deploy/signing.key"]);
   });
 
   it("refuses a text file holding a well-known key format, naming the format and never the key", () => {

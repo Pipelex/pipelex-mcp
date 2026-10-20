@@ -28,13 +28,34 @@ export interface SecretFinding {
   reason: string;
 }
 
+/** Whether the bytes open with a zip archive's local file header, `PK\x03\x04`. */
+function isZipArchive(bytes: Uint8Array): boolean {
+  return bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
+}
+
 /**
  * Secret file names, matched on the last segment of a tree path, ignoring
  * case: key and certificate stores, SSH private keys under their default
- * names, and the credential exports of the cloud consoles.
+ * names, and the credential exports of the cloud consoles. A rule with
+ * `unless` lets a file of that name go when its bytes show it is something
+ * else.
+ *
+ * `.pem` is no name rule: a `.pem` file is as often a certificate, which is
+ * public, and a private key in one is a PEM block, which the text search
+ * finds. A `.key` file is a Keynote deck as often as a key, and a deck is a
+ * zip archive, so only a `.key` file that is no zip is refused by name, which
+ * still catches a DER key, binary and holding no PEM block.
  */
-const SECRET_NAMES: readonly { pattern: RegExp; reason: string }[] = [
-  { pattern: /\.(pem|key)$/i, reason: "a key file (.pem or .key)" },
+const SECRET_NAMES: readonly {
+  pattern: RegExp;
+  reason: string;
+  unless?: (bytes: Uint8Array) => boolean;
+}[] = [
+  {
+    pattern: /\.key$/i,
+    reason: "a key file (.key), and is no zip archive as a Keynote deck is",
+    unless: isZipArchive,
+  },
   { pattern: /\.(p12|pfx|jks|keystore)$/i, reason: "a certificate or key store" },
   { pattern: /\.ppk$/i, reason: "a PuTTY private key" },
   { pattern: /\.kdbx$/i, reason: "a KeePass password database" },
@@ -86,7 +107,8 @@ function searchableTexts(bytes: Uint8Array): string[] {
 
 /**
  * The files of a tree the guard refuses, in the order given. A file whose name
- * is a secret file's is refused on the name alone; every other file, text in
+ * is a secret file's is refused on the name alone, unless its rule's `unless`
+ * says its bytes are something else; every other file, text in
  * any encoding or binary, is searched for every key format in the texts
  * {@link searchableTexts} reads from its bytes.
  */
@@ -96,7 +118,9 @@ export function secretFindings(
   const findings: SecretFinding[] = [];
   for (const file of files) {
     const name = file.path.slice(file.path.lastIndexOf("/") + 1);
-    const byName = SECRET_NAMES.find((rule) => rule.pattern.test(name));
+    const byName = SECRET_NAMES.find(
+      (rule) => rule.pattern.test(name) && rule.unless?.(file.bytes) !== true,
+    );
     if (byName !== undefined) {
       findings.push({ path: file.path, reason: `it is named like ${byName.reason}` });
       continue;
