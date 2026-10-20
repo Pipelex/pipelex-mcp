@@ -1872,14 +1872,23 @@ async function writtenResult(
   const versionIsDraft = content.version !== "draft" && sameListing(content.files, stored.files);
   const link = linkBefore ?? (await readMethodLink(dir));
   const observed = await observeDestinations(destinations);
-  const plan = await planPull(dir, stored, destinations, observed, input.overwrite === true, link, {
-    target: content.version,
-    // A version pull may land over the draft's own files, which are stored,
-    // so writing over them loses nothing. For a draft pull the target IS the
-    // draft, and a file differing from it is by definition not the draft.
-    ...(content.version === "draft" ? {} : { draft: hashesByPath(stored.files) }),
-    readVersion: (number) => readVersionHashes(client, stored, number),
-  });
+  const plan = await planPull(
+    dir,
+    stored,
+    destinations,
+    observed,
+    input.overwrite === true,
+    link,
+    {
+      target: content.version,
+      // A version pull may land over the draft's own files, which are stored,
+      // so writing over them loses nothing. For a draft pull the target IS the
+      // draft, and a file differing from it is by definition not the draft.
+      ...(content.version === "draft" ? {} : { draft: hashesByPath(stored.files) }),
+      readVersion: (number) => readVersionHashes(client, stored, number),
+    },
+    () => unmanagedFiles(context, client, dir, content.files),
+  );
   if (plan.kind === "refuse") {
     return getError("The method was not written: output_dir holds work this pull would lose.", [
       plan.error,
@@ -2441,7 +2450,9 @@ interface StoredElsewhere {
  * those filenames. A method's files are the USER's and carry no stamp, so the
  * only evidence of ownership is the link file. Hence:
  *
- *  - nothing of this method here and no bundle of anyone else's: written;
+ *  - no link, and nothing in the folder's tree but what this pull lands:
+ *    written, since the link then claims the whole folder and the next save
+ *    from it sends its whole tree;
  *  - a bundle with no link, or a link naming another method: refused outright,
  *    because it is somebody else's work;
  *  - a link naming THIS method: compared destination by destination —
@@ -2469,6 +2480,9 @@ async function planPull(
   overwrite: boolean,
   link: LinkRead,
   elsewhere: StoredElsewhere,
+  // The files of the folder's tree that the pull does not land, listed as a
+  // save from the folder would list them.
+  othersHere: () => Promise<{ names: string[]; complete: boolean }>,
 ): Promise<PullPlan> {
   if (link.kind === "unreadable") {
     return refusePull(
@@ -2497,6 +2511,23 @@ async function planPull(
       return refusePull(
         `it already holds ${foreign.map((name) => `\`${name}\``).join(", ")} and no ${LINK_FILE_NAME}, so it is somebody else's bundle.`,
         "Point output_dir at an empty or dedicated folder. Writing this method here would leave two bundles in one folder and link it to only one of them.",
+      );
+    }
+    // The link this pull writes claims the WHOLE folder: the next save from it
+    // sends every file of its tree. So a folder whose tree holds anything this
+    // pull does not land, a project's own files above all with output_dir
+    // ".", is refused rather than turned into a method that holds them.
+    const others = await othersHere();
+    if (!others.complete) {
+      return refusePull(
+        `it holds no ${LINK_FILE_NAME}, and what else its tree holds could not be listed (it is past the limits, or holds a file no method tree takes), so this pull cannot tell that the folder holds nothing but this method.`,
+        "Pull into a fresh folder of its own: a pull links the whole folder, and the next save from it sends every file of its tree.",
+      );
+    }
+    if (others.names.length > 0) {
+      return refusePull(
+        `it holds no ${LINK_FILE_NAME} and its tree holds files this method does not have: ${listedNames(others.names)}. A pull links the whole folder, so the next save from it would send those files as the method's own.`,
+        "Pull into a fresh folder of its own, such as a new subfolder, or move those files out first.",
       );
     }
     return { kind: "write" };
@@ -2603,6 +2634,13 @@ async function storedElsewhere(
     }
   }
   return remaining.map((file) => file.name);
+}
+
+/** Names shown by name up to a handful, the rest counted. */
+function listedNames(names: readonly string[]): string {
+  const shown = names.slice(0, 5).map((name) => `\`${name}\``);
+  const rest = names.length - shown.length;
+  return rest > 0 ? `${shown.join(", ")} and ${rest} more` : shown.join(", ");
 }
 
 function refusePull(message: string, hint: string): PullPlan {

@@ -2379,6 +2379,58 @@ describe("the pull writes only what it may", () => {
     await fs.rm(outside, { recursive: true, force: true });
   });
 
+  it("refuses a pull that would link a whole project, naming the files it does not have", async () => {
+    // output_dir "." at a project's root: no link, no .mthds of its own, and
+    // none of the method's paths taken, which the older guards all let
+    // through; the link would then claim the project, and the next save send it.
+    await writeBundle(".", {
+      "package.json": "{}",
+      "src/index.ts": "export {};",
+    });
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "." },
+      contextFor(reading(storedMethod()), validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "output_dir" });
+    expect(error.message).toContain("`package.json`");
+    expect(error.message).toContain("`src/index.ts`");
+    expect(error.hint).toContain("fresh folder");
+    await expect(fs.access(path.join(root, "bundle.mthds"))).rejects.toThrow();
+    await expect(fs.access(path.join(root, LINK_FILE_NAME))).rejects.toThrow();
+  });
+
+  it("pulls into an unlinked folder whose tree holds nothing else, dotfiles and run inputs aside", async () => {
+    await writeBundle("fresh", { ".git/config": "[core]", "inputs.json": "{}" });
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "fresh" },
+      contextFor(reading(storedMethod()), validationAnswering(validReport)),
+    );
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(await fs.readFile(path.join(root, "fresh", "bundle.mthds"), "utf8")).toBe(
+      'domain = "demo"',
+    );
+  });
+
+  it("refuses a pull into an unlinked folder it cannot list, since it cannot tell it holds nothing else", async () => {
+    await writeBundle("tangled", { "notes.md": "mine" });
+    await fs.symlink("notes.md", path.join(root, "tangled", "alias.md"));
+
+    const result = await getMthdsMethod(
+      { method_id: "mt_one", output_dir: "tangled" },
+      contextFor(reading(storedMethod()), validationAnswering(validReport)),
+    );
+
+    const [error] = errorsOf(result.structuredContent);
+    expect(error).toMatchObject({ class: "input_domain", location: "output_dir" });
+    expect(error.message).toContain("could not be listed");
+    await expect(fs.access(path.join(root, "tangled", "bundle.mthds"))).rejects.toThrow();
+  });
+
   it("refuses a symlinked link file rather than overwriting what it points at", async () => {
     const outside = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), "catalog-linkfile-")));
     const victim = path.join(outside, "theirs.json");
@@ -2399,17 +2451,18 @@ describe("the pull writes only what it may", () => {
   });
 
   it("leaves an interrupted pull owned, so the retry it advertises is permitted", async () => {
-    // The second file needs a `sub/` directory and `sub` is an ordinary file,
-    // so its creation fails after the first file has landed. (A destination
-    // that merely exists would be refused by the occupancy guard before the
-    // loop, which is the point of that guard.) The link went down first,
-    // marked `partial_pull`, which is what lets the retry through instead of
-    // reading as somebody else's bundle.
+    // The second file goes into `sub/`, an empty directory nobody may write
+    // in, so its creation fails after the first file has landed. (A
+    // destination that merely exists would be refused by the occupancy guard
+    // before the loop, which is the point of that guard, and a file in the
+    // way would be refused as a file the method does not have.) The link went
+    // down first, marked `partial_pull`, which is what lets the retry through
+    // instead of reading as somebody else's bundle.
     const stored = storedMethod({
       files: treeOf({ "bundle.mthds": 'domain = "demo"', "sub/second.mthds": "second" }),
     });
-    await fs.mkdir(path.join(root, "partial"), { recursive: true });
-    await fs.writeFile(path.join(root, "partial", "sub"), "in the way", "utf8");
+    await fs.mkdir(path.join(root, "partial", "sub"), { recursive: true });
+    await fs.chmod(path.join(root, "partial", "sub"), 0o555);
 
     const failed = await getMthdsMethod(
       { method_id: "mt_one", output_dir: "partial" },
@@ -2421,7 +2474,7 @@ describe("the pull writes only what it may", () => {
     const link = await readMethodLink(path.join(root, "partial"));
     expect(link.kind === "link" && link.link.partial_pull).toBe(true);
 
-    await fs.rm(path.join(root, "partial", "sub"));
+    await fs.chmod(path.join(root, "partial", "sub"), 0o755);
     const retried = await getMthdsMethod(
       { method_id: "mt_one", output_dir: "partial" },
       contextFor(reading(stored), validationAnswering(validReport)),
