@@ -23,9 +23,14 @@ import { errorMessage } from "./workspace-boundary.js";
  * - **The deployment's limits.** The tree is listed under the limits the
  *   Pipelex deployment announces (`tree-limits.ts`), so a folder the platform
  *   would refuse is refused while it is listed, from the sizes the walk reads,
- *   before any file is hashed. A refusal says whose limit it was
- *   ({@link FolderLimitError}): the deployment's, or the workshop's own scan
- *   limit standing for one the deployment did not announce. The listing is rooted at the folder handed over
+ *   before any file is hashed. The two files the workshop leaves out (below)
+ *   never count against them: `mthds` 0.32 has no way to leave a file out of
+ *   its walk, so the walk takes each limit widened by an allowance for them
+ *   ({@link SCAN_ALLOWANCE_FILES}, {@link SCAN_ALLOWANCE_BYTES}), and the
+ *   limits themselves are held exactly on the files kept. A refusal says whose
+ *   limit it was ({@link FolderLimitError}): the deployment's, or the
+ *   workshop's own scan limit, which a widened bound always is, as is one
+ *   standing for a limit the deployment did not announce. The listing is rooted at the folder handed over
  *   (`discover: false`), never at a `METHODS.toml` found above it: the folder
  *   the caller named is the method.
  * - **A run's inputs files.** `inputs.json` and `inputs.toml`, at any depth,
@@ -94,6 +99,12 @@ export type FolderTreeListing =
   | { ok: true; tree: FolderTree }
   | { ok: false; error: MethodTreeError };
 
+/** How many files beyond the file count the walk takes, for the run inputs files and the graph page it leaves out. */
+export const SCAN_ALLOWANCE_FILES = 1_000;
+
+/** How many bytes beyond each size limit the walk takes, for the files it leaves out. */
+export const SCAN_ALLOWANCE_BYTES = 64 * 1024 * 1024;
+
 /** Whose limit refused a folder: the one the deployment announced, or the workshop's own. */
 export type LimitOwner = "deployment" | "workshop";
 
@@ -111,10 +122,12 @@ export class FolderLimitError extends TreeLimitExceededError {
     reached: number,
     path: string | undefined,
     owner: LimitOwner,
+    message?: string,
   ) {
     super(root, limit, maximum, reached, path);
     this.name = "FolderLimitError";
     this.owner = owner;
+    if (message !== undefined) this.message = message;
   }
 }
 
@@ -133,10 +146,11 @@ export async function listFolderTree(
 ): Promise<FolderTreeListing> {
   let tree: MethodTree;
   try {
-    tree = await listMethodTree(folder, { discover: false, limits: mthdsLimitsOf(limits) });
+    tree = await listMethodTree(folder, { discover: false, limits: walkLimitsOf(limits) });
   } catch (err) {
     if (err instanceof TreeLimitExceededError) {
-      const owner = limits.workshopSet?.includes(err.limit) === true ? "workshop" : "deployment";
+      // A widened bound: the workshop's own scan limit, whoever set the limit under it.
+      const owner: LimitOwner = "workshop";
       return {
         ok: false,
         error: new FolderLimitError(
@@ -168,6 +182,9 @@ export async function listFolderTree(
     kept.push({ path: file.path, size: file.size, sha256: file.sha256 });
   }
 
+  const breach = keptLimitBreach(root, kept, limits);
+  if (breach !== undefined) return { ok: false, error: breach };
+
   const byPath = new Map(kept.map((file) => [file.path, file]));
   const dropped = runInputs.length > 0 || graphPage !== undefined;
   return {
@@ -198,14 +215,70 @@ export async function listFolderTree(
   };
 }
 
-/** The limits as `mthds` takes them, and nothing else. */
-function mthdsLimitsOf(limits: ListingLimits): MethodTreeLimits {
+/**
+ * The bounds `mthds`'s walk takes: each limit widened by its allowance, since
+ * the walk counts the files the workshop leaves out after it, which no limit
+ * is about.
+ */
+function walkLimitsOf(limits: ListingLimits): MethodTreeLimits {
   const { maxFileCount, maxFileSize, maxTotalSize } = limits;
   return {
-    ...(maxFileCount === undefined ? {} : { maxFileCount }),
-    ...(maxFileSize === undefined ? {} : { maxFileSize }),
-    ...(maxTotalSize === undefined ? {} : { maxTotalSize }),
+    ...(maxFileCount === undefined ? {} : { maxFileCount: maxFileCount + SCAN_ALLOWANCE_FILES }),
+    ...(maxFileSize === undefined ? {} : { maxFileSize: maxFileSize + SCAN_ALLOWANCE_BYTES }),
+    ...(maxTotalSize === undefined ? {} : { maxTotalSize: maxTotalSize + SCAN_ALLOWANCE_BYTES }),
   };
+}
+
+/**
+ * The first limit the kept files pass, exactly, or nothing: what the
+ * workshop leaves out never counts, since it is never sent.
+ */
+function keptLimitBreach(
+  root: string,
+  kept: readonly ListedFile[],
+  limits: ListingLimits,
+): FolderLimitError | undefined {
+  const ownerOf = (limit: TreeLimit): LimitOwner =>
+    limits.workshopSet?.includes(limit) === true ? "workshop" : "deployment";
+  const { maxFileCount, maxFileSize, maxTotalSize } = limits;
+  if (maxFileSize !== undefined) {
+    const big = kept.find((file) => file.size > maxFileSize);
+    if (big !== undefined) {
+      return new FolderLimitError(
+        root,
+        "maxFileSize",
+        maxFileSize,
+        big.size,
+        big.path,
+        ownerOf("maxFileSize"),
+        `The method tree at ${root} holds ${big.path}, of ${big.size} bytes, past the limit of ${maxFileSize} bytes for one file.`,
+      );
+    }
+  }
+  if (maxFileCount !== undefined && kept.length > maxFileCount) {
+    return new FolderLimitError(
+      root,
+      "maxFileCount",
+      maxFileCount,
+      kept.length,
+      undefined,
+      ownerOf("maxFileCount"),
+      `The method tree at ${root} holds ${kept.length} files, past the limit of ${maxFileCount}.`,
+    );
+  }
+  const total = kept.reduce((sum, file) => sum + file.size, 0);
+  if (maxTotalSize !== undefined && total > maxTotalSize) {
+    return new FolderLimitError(
+      root,
+      "maxTotalSize",
+      maxTotalSize,
+      total,
+      undefined,
+      ownerOf("maxTotalSize"),
+      `The method tree at ${root} holds ${total} bytes in all, past the limit of ${maxTotalSize} bytes for a whole tree.`,
+    );
+  }
+  return undefined;
 }
 
 /** Any failure of a listing as the `MethodTreeError` it reports; an unexpected one as `not_listable`. */

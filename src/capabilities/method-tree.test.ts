@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { GRAPH_PAGE_MARK } from "./graph-page.js";
 import {
   FolderLimitError,
+  SCAN_ALLOWANCE_FILES,
   describeTreeRefusal,
   isRunInputsPath,
   listFolderTree,
@@ -461,6 +462,32 @@ describe("listFolderTree", () => {
       const text = describeTreeRefusal(ownBound, "");
       expect(text.message).toContain("the workshop's own scan limit");
       expect(text.message).not.toContain("The Pipelex deployment this workshop talks to takes");
+    });
+
+    it("never counts the files it leaves out against the limits, since they are never sent", async () => {
+      await place("a.mthds", "x".repeat(10));
+      await place("b.mthds", "y".repeat(10));
+      await place("inputs.json", JSON.stringify({ text: "z".repeat(200) }));
+      await place("nested/inputs.toml", `text = "${"w".repeat(200)}"`);
+      await place("method-graph.html", `<head>${GRAPH_PAGE_MARK}</head>${"v".repeat(200)}`);
+
+      const tree = await listing({ maxFileCount: 2, maxFileSize: 10, maxTotalSize: 20 });
+
+      expect(tree.files.map((file) => file.path)).toEqual(["a.mthds", "b.mthds"]);
+      expect(tree.totalSize).toBe(20);
+    });
+
+    it("stops a walk past its widened bound under the workshop's own scan limit", async () => {
+      for (let index = 0; index < SCAN_ALLOWANCE_FILES + 2; index += 1) {
+        await place(`f${index}.mthds`);
+      }
+
+      const error = await refusal({ maxFileCount: 1 });
+
+      expect(error).toBeInstanceOf(FolderLimitError);
+      expect((error as FolderLimitError).owner).toBe("workshop");
+      expect((error as FolderLimitError).maximum).toBe(1 + SCAN_ALLOWANCE_FILES);
+      expect(describeTreeRefusal(error, "").message).toContain("the workshop's own scan limit");
     });
 
     it("refuses a file past the size limit and a folder past the total", async () => {
