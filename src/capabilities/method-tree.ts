@@ -11,7 +11,7 @@ import type {
   TreeLimit,
 } from "mthds";
 
-import { GRAPH_PAGE_FILENAME, GRAPH_PAGE_MARK } from "./graph-page.js";
+import { GRAPH_PAGE_FILENAME, carriesGraphPageMark } from "./graph-page.js";
 import { errorMessage } from "./workspace-boundary.js";
 
 /**
@@ -166,7 +166,10 @@ export async function listFolderTree(
       runInputs.push(file.path);
       continue;
     }
-    if (file.path === GRAPH_PAGE_FILENAME && (await carriesGraphPageMark(root, file))) {
+    if (
+      file.path === GRAPH_PAGE_FILENAME &&
+      (await carriesGraphPageMark(path.join(root, file.path)).catch(() => false))
+    ) {
       graphPage = file.path;
       continue;
     }
@@ -429,28 +432,6 @@ async function onDiskPath(root: string, treePath: string): Promise<string | unde
     current = path.join(current, matches[0]!);
   }
   return current;
-}
-
-/** How much of a graph page is read to find the workshop's mark, which sits at the top of its head. */
-const GRAPH_PAGE_HEAD_BYTES = 1024;
-
-/** Whether the file at the folder's top named like the graph page carries the workshop's mark. */
-async function carriesGraphPageMark(root: string, file: ListedFile): Promise<boolean> {
-  let handle;
-  try {
-    handle = await fs.open(path.join(root, file.path), READ_FLAGS);
-  } catch {
-    return false;
-  }
-  try {
-    const head = Buffer.alloc(GRAPH_PAGE_HEAD_BYTES);
-    const { bytesRead } = await handle.read(head, 0, head.length, 0);
-    return head.subarray(0, bytesRead).toString("utf8").includes(GRAPH_PAGE_MARK);
-  } catch {
-    return false;
-  } finally {
-    await handle.close();
-  }
 }
 
 function sha256Hex(bytes: Uint8Array): string {

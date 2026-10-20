@@ -1,4 +1,4 @@
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs } from "node:fs";
 import type { Stats } from "node:fs";
 import path from "node:path";
 
@@ -323,13 +323,13 @@ async function inspectPage(absolute: string): Promise<Inspection> {
     return { kind: "foreign", reason: "it is not a regular file" };
   }
 
-  let head: string;
+  let owned: boolean;
   try {
-    head = await readHead(absolute);
+    owned = await carriesGraphPageMark(absolute);
   } catch (err) {
     return { kind: "error", error: inspectionError(absolute, err) };
   }
-  return head.includes(GRAPH_PAGE_MARK)
+  return owned
     ? { kind: "owned" }
     : { kind: "foreign", reason: "it does not carry this tool's generator mark" };
 }
@@ -344,13 +344,26 @@ function inspectionError(absolute: string, err: unknown): ToolError {
   };
 }
 
-/** Decoded leniently: the test is a substring match, so a binary file simply fails to match. */
-async function readHead(absolute: string): Promise<string> {
-  const handle = await fs.open(absolute, "r");
+// Neither flag exists on Windows, where the caller's own `lstat` is the only guard.
+const HEAD_READ_FLAGS =
+  fsConstants.O_RDONLY |
+  ((fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0) |
+  ((fsConstants as { O_NONBLOCK?: number }).O_NONBLOCK ?? 0);
+
+/**
+ * Whether the file at `absolute` is this tool's page: whether its head
+ * carries {@link GRAPH_PAGE_MARK}. The one ownership test, asked by the writer
+ * before it replaces a page and by `method-tree.ts` before it leaves a page
+ * out of a method's tree. The file is opened without following a link, and
+ * only its first {@link HEAD_BYTES} are read, decoded leniently, so a binary
+ * file simply fails to match. Throws when the file cannot be read.
+ */
+export async function carriesGraphPageMark(absolute: string): Promise<boolean> {
+  const handle = await fs.open(absolute, HEAD_READ_FLAGS);
   try {
     const buffer = Buffer.alloc(HEAD_BYTES);
     const { bytesRead } = await handle.read(buffer, 0, HEAD_BYTES, 0);
-    return buffer.subarray(0, bytesRead).toString("utf8");
+    return buffer.subarray(0, bytesRead).toString("utf8").includes(GRAPH_PAGE_MARK);
   } finally {
     await handle.close();
   }
