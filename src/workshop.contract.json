@@ -459,7 +459,7 @@
                 }
               ]
             },
-            "description": "The method's files, sent as one tree. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). For a method whose folder is on disk, pass method_dir instead, which sends the folder's whole tree. The { path } items keep where they sit relative to one another: the tree is rooted at the deepest directory holding them all, and each file is sent under its path from there, the path diagnostics name and a step's template_file leads to, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. An inline item is sent at the tree's top, under its uri's file name when that is a .mthds file's, else bundle.mthds. A file that looks like it holds a secret, a key file or a well-known key format, is refused before anything is sent; the result's files_sent lists every file sent."
+            "description": "The method's files, sent as one tree. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). For a method whose folder is on disk, pass method_dir instead, which sends the folder's whole tree. The { path } items keep where they sit relative to one another: listed alone, the tree is rooted at the deepest directory holding them all, and each file is sent under its path from there, the path diagnostics name and a step's template_file leads to, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. An inline item is sent at the tree's top, under its uri's file name when that is a .mthds file's, else bundle.mthds; beside one, each { path } item is sent under its path from the working directory. A file that looks like it holds a secret, a key file or a well-known key format, is refused before anything is sent; the result's files_sent lists every file sent."
           },
           "method_ref": {
             "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side: the repository is fetched at the tag and the package's own file names label the diagnostics; no bundle enters the conversation. Supply exactly ONE of method_dir / files / method_ref / method_id.",
@@ -812,7 +812,7 @@
                 }
               ]
             },
-            "description": "The method's files, sent as one tree. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). For a method whose folder is on disk, pass method_dir instead, which sends the folder's whole tree. The { path } items keep where they sit relative to one another: the tree is rooted at the deepest directory holding them all, and each file is sent under its path from there, the path diagnostics name and a step's template_file leads to, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. An inline item is sent at the tree's top, under its uri's file name when that is a .mthds file's, else bundle.mthds. A file that looks like it holds a secret, a key file or a well-known key format, is refused before anything is sent; the result's files_sent lists every file sent."
+            "description": "The method's files, sent as one tree. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). For a method whose folder is on disk, pass method_dir instead, which sends the folder's whole tree. The { path } items keep where they sit relative to one another: listed alone, the tree is rooted at the deepest directory holding them all, and each file is sent under its path from there, the path diagnostics name and a step's template_file leads to, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. An inline item is sent at the tree's top, under its uri's file name when that is a .mthds file's, else bundle.mthds; beside one, each { path } item is sent under its path from the working directory. A file that looks like it holds a secret, a key file or a well-known key format, is refused before anything is sent; the result's files_sent lists every file sent."
           },
           "method_ref": {
             "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of method_dir / files / method_ref / method_id.",
@@ -1017,7 +1017,7 @@
                 }
               ]
             },
-            "description": "The method's files, sent as one tree. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). For a method whose folder is on disk, pass method_dir instead, which sends the folder's whole tree. The { path } items keep where they sit relative to one another: the tree is rooted at the deepest directory holding them all, and each file is sent under its path from there, the path diagnostics name and a step's template_file leads to, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. An inline item is sent at the tree's top, under its uri's file name when that is a .mthds file's, else bundle.mthds. A file that looks like it holds a secret, a key file or a well-known key format, is refused before anything is sent; the result's files_sent lists every file sent."
+            "description": "The method's files, sent as one tree. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). For a method whose folder is on disk, pass method_dir instead, which sends the folder's whole tree. The { path } items keep where they sit relative to one another: listed alone, the tree is rooted at the deepest directory holding them all, and each file is sent under its path from there, the path diagnostics name and a step's template_file leads to, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. An inline item is sent at the tree's top, under its uri's file name when that is a .mthds file's, else bundle.mthds; beside one, each { path } item is sent under its path from the working directory. A file that looks like it holds a secret, a key file or a well-known key format, is refused before anything is sent; the result's files_sent lists every file sent."
           },
           "method_ref": {
             "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of method_dir / files / method_ref / method_id.",
@@ -1303,7 +1303,7 @@
                 }
               ]
             },
-            "description": "The method's files, sent as one tree. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). For a method whose folder is on disk, pass method_dir instead, which sends the folder's whole tree. The { path } items keep where they sit relative to one another: the tree is rooted at the deepest directory holding them all, and each file is sent under its path from there, the path diagnostics name and a step's template_file leads to, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. An inline item is sent at the tree's top, under its uri's file name when that is a .mthds file's, else bundle.mthds. A file that looks like it holds a secret, a key file or a well-known key format, is refused before anything is sent; the result's files_sent lists every file sent."
+            "description": "The method's files, sent as one tree. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). For a method whose folder is on disk, pass method_dir instead, which sends the folder's whole tree. The { path } items keep where they sit relative to one another: listed alone, the tree is rooted at the deepest directory holding them all, and each file is sent under its path from there, the path diagnostics name and a step's template_file leads to, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. An inline item is sent at the tree's top, under its uri's file name when that is a .mthds file's, else bundle.mthds; beside one, each { path } item is sent under its path from the working directory. A file that looks like it holds a secret, a key file or a well-known key format, is refused before anything is sent; the result's files_sent lists every file sent."
           },
           "method_ref": {
             "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0 — the signature source. Resolved server-side (the repository is fetched at the tag); no bundle enters the conversation. Supply exactly ONE of method_dir / files / method_ref / method_id.",
@@ -1497,7 +1497,7 @@
                 }
               ]
             },
-            "description": "The method's files, sent as one tree. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). For a method whose folder is on disk, pass method_dir instead, which sends the folder's whole tree. The { path } items keep where they sit relative to one another: the tree is rooted at the deepest directory holding them all, and each file is sent under its path from there, the path diagnostics name and a step's template_file leads to, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. An inline item is sent at the tree's top, under its uri's file name when that is a .mthds file's, else bundle.mthds. A file that looks like it holds a secret, a key file or a well-known key format, is refused before anything is sent; the result's files_sent lists every file sent."
+            "description": "The method's files, sent as one tree. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). For a method whose folder is on disk, pass method_dir instead, which sends the folder's whole tree. The { path } items keep where they sit relative to one another: listed alone, the tree is rooted at the deepest directory holding them all, and each file is sent under its path from there, the path diagnostics name and a step's template_file leads to, so [{ path: \"invoice.mthds\" }, { path: \"templates/invoice.xlsx\" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. An inline item is sent at the tree's top, under its uri's file name when that is a .mthds file's, else bundle.mthds; beside one, each { path } item is sent under its path from the working directory. A file that looks like it holds a secret, a key file or a well-known key format, is refused before anything is sent; the result's files_sent lists every file sent."
           },
           "method_ref": {
             "description": "Published method address — github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0. Resolved server-side: the repository is fetched at the tag and the resolved commit SHA comes back as provenance. A complete run source of its own — it pairs with NOTHING (not method_dir, not files, not method_id).",
@@ -3191,6 +3191,48 @@
           "validation_errors": {
             "type": "array",
             "items": {}
+          },
+          "validation_refused": {
+            "description": "Present, with no is_valid, is_runnable or pending_signatures, when the deployment refused to load the method for the Python it holds, so it gave no verdict: the draft was saved unvalidated, and this is the refusal, whose hint says where the method validates.",
+            "type": "object",
+            "properties": {
+              "class": {
+                "type": "string",
+                "enum": [
+                  "input_domain",
+                  "config",
+                  "runtime"
+                ]
+              },
+              "kind": {
+                "description": "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
+                "type": "string",
+                "enum": [
+                  "paywall",
+                  "auth",
+                  "role"
+                ]
+              },
+              "location": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "hint": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean",
+                "description": "True when retrying the same call may succeed; false for permanent conditions."
+              }
+            },
+            "required": [
+              "class",
+              "message",
+              "retryable"
+            ],
+            "additionalProperties": false
           },
           "errors": {
             "type": "array",

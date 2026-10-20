@@ -1,8 +1,11 @@
+import path from "node:path";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ApiResponseError,
   ApiUnreachableError,
+  INLINE_TREE_MAX_BYTES,
   ArtifactAuthenticationError,
   ArtifactOperationError,
   InputPreparationError,
@@ -37,6 +40,7 @@ import {
   DEFAULT_AUTH_HINT,
   ROLE_REFUSAL_HINT,
   imageCandidatesOf,
+  isExecutionLocusRefusal,
   itemToolError,
   looksLikeImageKey,
   methodFilesInputSchema,
@@ -45,6 +49,7 @@ import {
   storageKeyOf,
   summaryForToolError,
   toolResultContent,
+  treeSentInlineHeavy,
   validateMethodSelectorRequest,
   validateRunIdRequest,
   withFilesSent,
@@ -55,6 +60,7 @@ import type {
   ErrorSummaries,
   FileResolver,
   MethodSourceInput,
+  MethodTreeToSend,
   ResolvedMethodSource,
   ToolError,
 } from "./shared.js";
@@ -143,27 +149,55 @@ function limitsReader(limits: ListingLimits = LIMITS): (() => Promise<ListingLim
 }
 
 /**
- * A resolver reading `{ path }` items from `files`, by path as submitted, each
- * at `/w/<path>`: the working directory the fake stands for.
+ * A resolver reading `{ path }` items from `files`, each at `/w/<path>`: the
+ * working directory the fake stands for. A path is looked up the way the
+ * workshop resolves it, so `./a.mthds` and `a.mthds` name one file. `grown`
+ * holds the bytes a read finds in place of `files`', a file that grew between
+ * its stat and its read.
  */
-function fakeFileResolver(files: Record<string, string | Uint8Array>): FileResolver & {
+function fakeFileResolver(
+  files: Record<string, string | Uint8Array>,
+  options: { grown?: Record<string, string | Uint8Array> } = {},
+): FileResolver & {
+  stats: string[];
   reads: { path: string; maxBytes: number }[];
 } {
+  const stats: string[] = [];
   const reads: { path: string; maxBytes: number }[] = [];
+  const keyOf = (submitted: string) =>
+    path.posix.relative("/w", path.posix.resolve("/w", submitted));
+  const bytesOf = (content: string | Uint8Array) =>
+    typeof content === "string" ? encode(content) : content;
   return {
+    stats,
     reads,
     resolve: () => Promise.reject(new Error("a method's files are read as bytes")),
-    async readMethodFile(path, { maxBytes }) {
-      reads.push({ path, maxBytes });
-      const content = files[path.replace(/^\.\//, "")];
+    async statMethodFile(submitted) {
+      stats.push(submitted);
+      const key = keyOf(submitted);
+      const content = files[key];
       if (content === undefined) {
-        return { ok: false, message: `File not found: ${path}`, hint: "Check the path." };
+        return { ok: false, message: `File not found: ${submitted}`, hint: "Check the path." };
       }
       return {
         ok: true,
-        absolute: `/w/${path.replace(/^\.\//, "")}`,
-        bytes: typeof content === "string" ? encode(content) : content,
+        absolute: `/w/${key}`,
+        relative: key,
+        size: bytesOf(content).byteLength,
       };
+    },
+    async readMethodFile(submitted, { maxBytes }) {
+      reads.push({ path: submitted, maxBytes });
+      const key = keyOf(submitted);
+      const content = options.grown?.[key] ?? files[key];
+      if (content === undefined) {
+        return { ok: false, message: `File not found: ${submitted}`, hint: "Check the path." };
+      }
+      const bytes = bytesOf(content);
+      if (bytes.byteLength > maxBytes) {
+        return { ok: false, message: `${submitted} is too large.`, hint: "Shrink it." };
+      }
+      return { ok: true, bytes };
     },
   };
 }
@@ -179,7 +213,7 @@ function sentFiles(resolution: ResolvedMethodSource) {
 }
 
 describe("resolveMethodSource on files", () => {
-  it("sends inline items at the tree's top, under their uri's file name or bundle.mthds, asking no limits", async () => {
+  it("sends inline items at the tree's top, under their uri's file name or bundle.mthds, held to the limits", async () => {
     const limits = limitsReader();
     const resolution = await resolveMethodSource(
       {
@@ -203,7 +237,39 @@ describe("resolveMethodSource on files", () => {
       { treePath: "bundle.mthds", shown: "bundle.mthds", onDisk: false, text: 'domain = "b"' },
     ]);
     expect(resolution.tree?.fromFolder).toBe(false);
-    expect(limits.calls).toBe(0);
+    // An inline-only list is held to the limits like any other.
+    expect(limits.calls).toBe(1);
+  });
+
+  it("holds inline items to the limit on one file, at the item, and to the count and the total", async () => {
+    const big = await resolveMethodSource(
+      { files: [{ content: 'domain = "a"' }, { content: "x".repeat(20) }] },
+      undefined,
+      "one_selector",
+      limitsReader({ ...LIMITS, maxFileSize: 16 }),
+    );
+    expect(big.errors).toEqual([
+      expect.objectContaining({ location: "files[1].content", class: "input_domain" }),
+    ]);
+    expect(big.errors[0]?.message).toContain("20 bytes, past the limit of 16 bytes");
+
+    const many = await resolveMethodSource(
+      { files: [{ content: "a" }, { content: "b" }, { content: "c" }] },
+      undefined,
+      "one_selector",
+      limitsReader({ ...LIMITS, maxFileCount: 2 }),
+    );
+    expect(many.errors).toEqual([expect.objectContaining({ location: "files" })]);
+    expect(many.errors[0]?.message).toContain("3 files, past the limit of 2");
+
+    const heavy = await resolveMethodSource(
+      { files: [{ content: "aaaa" }, { content: "bbbb" }] },
+      undefined,
+      "one_selector",
+      limitsReader({ ...LIMITS, maxTotalSize: 7, workshopSet: ["maxTotalSize"] }),
+    );
+    expect(heavy.errors).toEqual([expect.objectContaining({ location: "files" })]);
+    expect(heavy.errors[0]?.message).toContain("the workshop's own limit of 7 bytes");
   });
 
   it("roots the { path } items at the deepest directory holding them all, each shown as given", async () => {
@@ -232,12 +298,12 @@ describe("resolveMethodSource on files", () => {
       { treePath: "invoice.mthds", shown: "methods/invoice/invoice.mthds" },
       { treePath: "templates/invoice.xlsx", shown: "methods/invoice/templates/invoice.xlsx" },
     ]);
-    // Held to the deployment's limit on one file, asked once.
+    // Asked once, every file held to the deployment's limit on one file, and
+    // the path given twice read once.
     expect(limits.calls).toBe(1);
-    expect(resolver.reads.map((read) => read.maxBytes)).toEqual([
-      LIMITS.maxFileSize,
-      LIMITS.maxFileSize,
-      LIMITS.maxFileSize,
+    expect(resolver.reads).toEqual([
+      { path: "methods/invoice/templates/invoice.xlsx", maxBytes: LIMITS.maxFileSize },
+      { path: "methods/invoice/invoice.mthds", maxBytes: LIMITS.maxFileSize },
     ]);
 
     // The SDK's tree, built from the same bytes.
@@ -245,19 +311,71 @@ describe("resolveMethodSource on files", () => {
     const listing = [
       { path: "invoice.mthds", bytes: encode('domain = "invoice"') },
       { path: "templates/invoice.xlsx", bytes: XLSX },
-    ].map(({ path, bytes }) => ({ path, size: bytes.byteLength, sha256: sha256Hex(bytes) }));
+    ].map(({ path: treePath, bytes }) => ({
+      path: treePath,
+      size: bytes.byteLength,
+      sha256: sha256Hex(bytes),
+    }));
     expect(source.files).toEqual(listing);
     expect(source.digest).toBe(treeDigest(listing));
     expect(await source.readFile("templates/invoice.xlsx")).toEqual(XLSX);
     await expect(source.readFile("absent.mthds")).rejects.toThrow("not a file");
   });
 
+  it("roots the tree at the working directory beside an inline item, so a lone { path } keeps its path", async () => {
+    const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    const resolution = await resolveMethodSource(
+      {
+        files: [
+          { content: 'domain = "invoice"', uri: "invoice.mthds" },
+          { path: "templates/invoice.xlsx" },
+        ],
+      },
+      fakeFileResolver({ "templates/invoice.xlsx": XLSX }),
+      "one_selector",
+      limitsReader(),
+    );
+
+    expect(resolution.errors).toEqual([]);
+    expect(
+      resolution.tree?.files.map(({ treePath, shown, onDisk }) => ({ treePath, shown, onDisk })),
+    ).toEqual([
+      { treePath: "invoice.mthds", shown: "invoice.mthds", onDisk: false },
+      { treePath: "templates/invoice.xlsx", shown: "templates/invoice.xlsx", onDisk: true },
+    ]);
+  });
+
+  it("refuses, beside an inline item, a { path } item outside the working directory", async () => {
+    const resolver: FileResolver = {
+      resolve: () => Promise.reject(new Error("a method's files are read as bytes")),
+      statMethodFile: () =>
+        Promise.resolve({
+          ok: true,
+          absolute: "/elsewhere/a.xlsx",
+          relative: "../elsewhere/a.xlsx",
+          size: 4,
+        }),
+      readMethodFile: () => Promise.reject(new Error("nothing is read once a check refuses")),
+    };
+    const resolution = await resolveMethodSource(
+      { files: [{ content: 'domain = "a"' }, { path: "/elsewhere/a.xlsx" }] },
+      resolver,
+      "one_selector",
+      limitsReader(),
+    );
+
+    expect(resolution.errors).toEqual([
+      expect.objectContaining({ location: "files[1].path", class: "input_domain" }),
+    ]);
+    expect(resolution.errors[0]?.hint).toContain("Beside an inline item");
+  });
+
   it("gives an inline item another name when a { path } item takes its uri's", async () => {
     const resolution = await resolveMethodSource(
       {
-        files: [{ path: "m/main.mthds" }, { content: 'domain = "x"', uri: "elsewhere/MAIN.mthds" }],
+        files: [{ path: "main.mthds" }, { content: 'domain = "x"', uri: "elsewhere/MAIN.mthds" }],
       },
-      fakeFileResolver({ "m/main.mthds": 'domain = "m"' }),
+      fakeFileResolver({ "main.mthds": 'domain = "m"' }),
       "one_selector",
       limitsReader(),
     );
@@ -302,28 +420,41 @@ describe("resolveMethodSource on files", () => {
       ["files[1].content", "File content must not be empty."],
       ["files[2].uri", "File uri must not be empty when supplied."],
     ]);
+    expect(resolver.stats).toEqual([]);
     expect(resolver.reads).toEqual([]);
     expect(resolution.tree).toBeUndefined();
   });
 
-  it("maps resolver failures to input_domain errors at the item's path", async () => {
+  it("maps resolver failures to input_domain errors at the item's path, reading nothing", async () => {
+    const resolver = fakeFileResolver({ "present.mthds": 'domain = "p"' });
+    const limits = limitsReader();
     const resolution = await resolveMethodSource(
-      { files: [{ path: "missing.mthds" }, { path: "also-missing.mthds" }] },
-      fakeFileResolver({}),
+      {
+        files: [
+          { path: "present.mthds" },
+          { path: "missing.mthds" },
+          { path: "also-missing.mthds" },
+        ],
+      },
+      resolver,
       "one_selector",
-      limitsReader(),
+      limits,
     );
 
     expect(resolution.errors).toEqual([
       {
         class: "input_domain",
-        location: "files[0].path",
+        location: "files[1].path",
         message: "File not found: missing.mthds",
         hint: "Check the path.",
         retryable: false,
       },
-      expect.objectContaining({ location: "files[1].path" }),
+      expect.objectContaining({ location: "files[2].path" }),
     ]);
+    // Every item was checked, and no byte read nor limit asked before they all passed.
+    expect(resolver.stats).toEqual(["present.mthds", "missing.mthds", "also-missing.mthds"]);
+    expect(resolver.reads).toEqual([]);
+    expect(limits.calls).toBe(0);
   });
 
   it("refuses a name no tree holds, and two names that collide, at their items", async () => {
@@ -351,25 +482,75 @@ describe("resolveMethodSource on files", () => {
     expect(colliding.errors[0]?.hint).toContain("case-insensitive");
   });
 
-  it("holds the tree to the deployment's file count and total size", async () => {
+  it("refuses two spellings of one name once Unicode-normalized, at the second", async () => {
+    const decomposed = "m/cafe\u0301.mthds";
+    const composed = "m/caf\u00e9.mthds";
+    const resolver = fakeFileResolver({ [decomposed]: "a", [composed]: "b" });
+    const resolution = await resolveMethodSource(
+      { files: [{ path: decomposed }, { path: composed }] },
+      resolver,
+      "one_selector",
+      limitsReader(),
+    );
+
+    expect(resolution.errors).toEqual([
+      expect.objectContaining({ location: "files[1].path", class: "input_domain" }),
+    ]);
+    expect(resolution.errors[0]?.message).toContain("two spellings of one name");
+    expect(resolver.reads).toEqual([]);
+  });
+
+  it("holds the tree to the deployment's file count and total size, before reading", async () => {
     const files = { "a.mthds": "aaaa", "b.mthds": "bbbb" };
+    const counting = fakeFileResolver(files);
     const counted = await resolveMethodSource(
       { files: [{ path: "a.mthds" }, { path: "b.mthds" }] },
-      fakeFileResolver(files),
+      counting,
       "one_selector",
       limitsReader({ ...LIMITS, maxFileCount: 1 }),
     );
     expect(counted.errors).toEqual([expect.objectContaining({ location: "files" })]);
     expect(counted.errors[0]?.message).toContain("past the limit of 1");
+    expect(counting.reads).toEqual([]);
 
+    const weighing = fakeFileResolver(files);
     const weighed = await resolveMethodSource(
       { files: [{ path: "a.mthds" }, { content: "cccc" }] },
-      fakeFileResolver(files),
+      weighing,
       "one_selector",
       limitsReader({ ...LIMITS, maxTotalSize: 7 }),
     );
     expect(weighed.errors).toEqual([expect.objectContaining({ location: "files" })]);
-    expect(weighed.errors[0]?.message).toContain("8 bytes");
+    expect(weighed.errors[0]?.message).toContain("more than 7 bytes in all");
+    expect(weighing.reads).toEqual([]);
+
+    const sizing = fakeFileResolver({ "a.mthds": "a".repeat(10) });
+    const sized = await resolveMethodSource(
+      { files: [{ path: "a.mthds" }] },
+      sizing,
+      "one_selector",
+      limitsReader({ ...LIMITS, maxFileSize: 8 }),
+    );
+    expect(sized.errors).toEqual([expect.objectContaining({ location: "files[0].path" })]);
+    expect(sized.errors[0]?.message).toContain("10 bytes, past the limit of 8 bytes");
+    expect(sizing.reads).toEqual([]);
+  });
+
+  it("stops reading at the total when a file grew between its stat and its read", async () => {
+    const resolver = fakeFileResolver(
+      { "a.mthds": "aaaa", "b.mthds": "bbbb", "c.mthds": "cccc" },
+      { grown: { "a.mthds": "a".repeat(12) } },
+    );
+    const resolution = await resolveMethodSource(
+      { files: [{ path: "a.mthds" }, { path: "b.mthds" }, { path: "c.mthds" }] },
+      resolver,
+      "one_selector",
+      limitsReader({ ...LIMITS, maxTotalSize: 14 }),
+    );
+
+    expect(resolution.errors).toEqual([expect.objectContaining({ location: "files" })]);
+    expect(resolution.errors[0]?.message).toContain("more than 14 bytes in all");
+    expect(resolver.reads.map((read) => read.path)).toEqual(["a.mthds", "b.mthds"]);
   });
 
   it("refuses a file holding what looks like a secret at its item, quoting nothing of it", async () => {
@@ -394,6 +575,9 @@ describe("resolveMethodSource on files", () => {
     expect(resolution.errors[0]?.message).toContain(
       "m/templates/notes.html (it holds an AWS access key id)",
     );
+    // A listed file is kept out by leaving it off the list, not by a folder's rule.
+    expect(resolution.errors[0]?.hint).toContain("leave the file off the list of files");
+    expect(resolution.errors[0]?.hint).not.toContain(".gitignore");
     expect(resolution.errors[0]?.hint).toContain("call the tool again");
     for (const error of resolution.errors) {
       expect(JSON.stringify(error)).not.toContain(key);
@@ -1507,6 +1691,64 @@ describe("classifyError", () => {
       });
     });
 
+    it("classifies the runner's 501 custom_code_requires_sandbox at the method, ahead of the not-implemented arm", async () => {
+      const refusal = await refused(501, {
+        code: "pipelex.deployment.custom_code_requires_sandbox",
+        detail: "This method ships custom Python (.py); it needs a sandbox-hosted deployment.",
+      });
+
+      const error = classifyError(refusal, {
+        methodLocation: "method_ref",
+        // The texture that would otherwise win: a route this deployment lacks.
+        notImplemented: { hint: "This deployment does not implement the route." },
+      });
+
+      expect(error).toMatchObject({
+        class: "input_domain",
+        location: "method_ref",
+        message: "This method ships custom Python (.py); it needs a sandbox-hosted deployment.",
+        retryable: false,
+      });
+      expect(error.hint).toMatch(/sandbox-hosted/);
+      expect(error.hint).not.toContain("does not implement");
+      // On a request that sent a tree and named no other locator, at files.
+      expect(classifyError(refusal, { methodTree: true }).location).toBe("files");
+      expect(isExecutionLocusRefusal(refusal)).toBe(true);
+    });
+
+    it("classifies the runner's 422 python_structures_refused at the method, not the request shape", async () => {
+      const refusal = await refused(422, {
+        code: "pipelex.deployment.python_structures_refused",
+        detail: "Structure classes refused.",
+      });
+
+      const error = classifyError(refusal, {
+        methodLocation: "files",
+        badRequest: { location: "inputs", hint: "Fix the inputs." },
+      });
+
+      expect(error).toMatchObject({ class: "input_domain", location: "files", retryable: false });
+      expect(error.hint).toContain("concepts");
+      expect(isExecutionLocusRefusal(refusal)).toBe(true);
+    });
+
+    it("reads no other refusal as the execution-locus gate's", async () => {
+      expect(isExecutionLocusRefusal(await refused(501, { detail: "Not implemented" }))).toBe(
+        false,
+      );
+      expect(
+        isExecutionLocusRefusal(
+          await refused(401, runnerProblem("CustomCodeRequiresSandbox", "Missing key", "input")),
+        ),
+      ).toBe(false);
+      expect(
+        isExecutionLocusRefusal(
+          await refused(403, runnerProblem("CustomCodeRequiresSandbox", "Ships .py", "input")),
+        ),
+      ).toBe(true);
+      expect(isExecutionLocusRefusal(new Error("boom"))).toBe(false);
+    });
+
     it("never applies the sandbox arm to a 401 carrying the same error_type", async () => {
       const error = classifyError(
         await refused(401, runnerProblem("CustomCodeRequiresSandbox", "Missing key", "input")),
@@ -1983,15 +2225,28 @@ describe("classifyError on the refusals of a method's tree", () => {
     expect(missing).toMatchObject({ class: "runtime", location: "files", retryable: true });
   });
 
-  it("reads a request too large for the deployment as the tree's, at files", async () => {
-    const error = classifyError(await refused(413, { detail: "Request Entity Too Large" }), {
+  it("reads a request too large as the tree's only when the tree travelled inline and heavy", async () => {
+    const tooLarge = await refused(413, { detail: "Request Entity Too Large" });
+    const START = {
       ...TREE_SHAPE,
       route: "/v1/start",
-    });
+      tooLarge: { location: "inputs", hint: "Upload the large inputs." },
+    };
 
-    expect(error).toMatchObject({ class: "input_domain", location: "files", retryable: false });
-    expect(error.hint).toContain("without a blob store");
-    expect(error.hint).toContain(".gitignore");
+    const inline = classifyError(tooLarge, { ...START, treeInline: true });
+    expect(inline).toMatchObject({ class: "input_domain", location: "files", retryable: false });
+    expect(inline.hint).toContain("without a blob store");
+    expect(inline.hint).toContain(".gitignore");
+
+    // A small tree, or one sent by hash, made nothing too large: the route's
+    // own texture names what did, a run's inputs.
+    const byHash = classifyError(tooLarge, START);
+    expect(byHash).toMatchObject({ location: "inputs", hint: "Upload the large inputs." });
+
+    // A route without a size texture keeps the unexpected-status arm.
+    const unblamed = classifyError(tooLarge, TREE_SHAPE);
+    expect(unblamed.location).not.toBe("files");
+    expect(unblamed.hint).not.toContain("without a blob store");
   });
 
   it("leaves the tree refusals to the route on a request that sent no tree", async () => {
@@ -2016,6 +2271,73 @@ describe("classifyError on the refusals of a method's tree", () => {
     expect(onTool.hint).toContain("the request was not sent");
 
     expect(classifyError(failure, {}).location).toBe("method_dir");
+  });
+});
+
+describe("treeSentInlineHeavy", () => {
+  /** A tree whose one file weighs `bytes`. */
+  function treeOf(bytes: number): MethodTreeToSend {
+    return {
+      source: { files: [], digest: "", readFile: () => Promise.reject(new Error("unread")) },
+      files: [
+        {
+          treePath: "main.mthds",
+          shown: "main.mthds",
+          onDisk: false,
+          bytes: new Uint8Array(bytes),
+        },
+      ],
+      fromFolder: false,
+    };
+  }
+
+  /** A client whose `version()` answers `info`, counting its calls. */
+  function versionClient(info: () => Promise<unknown>) {
+    const client = {
+      calls: 0,
+      version() {
+        client.calls += 1;
+        return info();
+      },
+    };
+    return client;
+  }
+
+  const HEAVY = INLINE_TREE_MAX_BYTES + 1;
+
+  it("blames a 413 on a heavy tree a deployment without a blob store took inline", async () => {
+    const tooLarge = await refused(413, { detail: "Request Entity Too Large" });
+    const client = versionClient(() => Promise.resolve({ blob_store: false }));
+
+    expect(await treeSentInlineHeavy(tooLarge, treeOf(HEAVY), client)).toBe(true);
+    expect(client.calls).toBe(1);
+  });
+
+  it("never blames a small tree, a tree sent by hash, or a handshake that says nothing", async () => {
+    const tooLarge = await refused(413, { detail: "Request Entity Too Large" });
+
+    const asked = versionClient(() => Promise.resolve({ blob_store: false }));
+    expect(await treeSentInlineHeavy(tooLarge, treeOf(INLINE_TREE_MAX_BYTES), asked)).toBe(false);
+    // A tree within the inline threshold costs no handshake.
+    expect(asked.calls).toBe(0);
+
+    const byHash = versionClient(() => Promise.resolve({ blob_store: true }));
+    expect(await treeSentInlineHeavy(tooLarge, treeOf(HEAVY), byHash)).toBe(false);
+
+    const failing = versionClient(() => Promise.reject(new Error("down")));
+    expect(await treeSentInlineHeavy(tooLarge, treeOf(HEAVY), failing)).toBe(false);
+
+    expect(await treeSentInlineHeavy(tooLarge, treeOf(HEAVY), {})).toBe(false);
+    expect(await treeSentInlineHeavy(tooLarge, undefined, asked)).toBe(false);
+  });
+
+  it("asks nothing on another status", async () => {
+    const client = versionClient(() => Promise.resolve({ blob_store: false }));
+
+    expect(
+      await treeSentInlineHeavy(await refused(422, { detail: "Bad" }), treeOf(HEAVY), client),
+    ).toBe(false);
+    expect(client.calls).toBe(0);
   });
 });
 

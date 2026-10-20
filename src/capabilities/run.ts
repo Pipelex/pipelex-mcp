@@ -55,6 +55,7 @@ import {
   validateRunIdRequest,
   withFilesSent,
   failedBeforeSending,
+  treeSentInlineHeavy,
   markUnsent,
 } from "./shared.js";
 import type {
@@ -574,6 +575,16 @@ const START_SERVER_ERROR = {
   hint: "The hosted API reports start-time rejections (e.g. an invalid bundle or bad inputs) as a generic server error. Validate the bundle with mthds_validate and check the inputs against mthds_inputs_template; if both pass, the platform itself may be having trouble.",
 };
 
+/**
+ * A start refused as too large, a `413`, when the method's tree is not what
+ * made it so: it travelled by hash, or inline at a weight too small to matter
+ * (see `treeSentInlineHeavy`), so the inputs riding the same body did.
+ */
+const RUN_INPUTS_TOO_LARGE = {
+  location: "inputs",
+  hint: `The run's request is larger than the Pipelex API takes in one request, and the method's files are not what made it so: its inputs did. Upload large file inputs with ${WORKSHOP_TOOL_NAMES.prepareInputs}, which replaces them with pipelex-storage:// references, or pass them as URLs.`,
+};
+
 export const RUN_START_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/start",
   methodLocation: "files",
@@ -581,6 +592,7 @@ export const RUN_START_ERROR_OPTIONS: ClassifyErrorOptions = {
     location: "files",
     hint: "Check files, pipe_code, and inputs; validate the bundle with mthds_validate and fill the template from mthds_inputs_template first.",
   },
+  tooLarge: RUN_INPUTS_TOO_LARGE,
   serverError: START_SERVER_ERROR,
 };
 
@@ -603,6 +615,7 @@ export const RUN_START_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
     location: "method_id",
     hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.",
   },
+  tooLarge: RUN_INPUTS_TOO_LARGE,
   serverError: START_SERVER_ERROR,
 };
 
@@ -619,6 +632,7 @@ export const RUN_START_MIXED_ERROR_OPTIONS: ClassifyErrorOptions = {
   methodLocation: "files",
   badRequest: RUN_START_ERROR_OPTIONS.badRequest,
   notFound: RUN_START_BY_ID_ERROR_OPTIONS.notFound,
+  tooLarge: RUN_INPUTS_TOO_LARGE,
   serverError: START_SERVER_ERROR,
 };
 
@@ -646,6 +660,7 @@ export const RUN_START_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
     location: "method_ref",
     hint: `Only address-form refs are supported (${METHOD_REF_GRAMMAR}); registry references are reserved until a method registry exists.`,
   },
+  tooLarge: RUN_INPUTS_TOO_LARGE,
   serverError: START_SERVER_ERROR,
 };
 
@@ -1489,6 +1504,7 @@ async function requestRunStart(
       auth: context.authError,
       baseUrlSource: context.baseUrlSource,
       methodTree: request.tree !== undefined,
+      treeInline: await treeSentInlineHeavy(err, request.tree, client),
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     const failed = startErrorResult(startSummaryForError(error), [error]);

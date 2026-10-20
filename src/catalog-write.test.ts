@@ -576,7 +576,77 @@ describe("saveMthdsMethod", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.summary).toContain("no validation verdict");
+    // The summary quotes why no verdict came, not only that none did.
+    const [first] = errorsOf(result.structuredContent);
+    expect(first).toBeDefined();
+    expect(result.summary).toBe(
+      `The method was not saved, because validating it produced no verdict: ${first?.message}`,
+    );
+  });
+
+  it("saves a method holding Python unvalidated when the deployment refuses to load it", async () => {
+    await writeBundle("methods/demo", {
+      "bundle.mthds": 'domain = "demo"',
+      "tools/helpers.py": "def helper():\n    return 1\n",
+    });
+    const sandboxOnly = {
+      baseUrl: DEFAULT_API_URL,
+      client: {
+        async validate(): Promise<PipelexValidationResult> {
+          throw new ApiResponseError(
+            "HTTP 501",
+            `${DEFAULT_API_URL}/v1/validate`,
+            501,
+            "Not Implemented",
+            "{}",
+            undefined,
+            "This method ships custom Python (.py); it needs a sandbox-hosted deployment",
+            undefined,
+            "pipelex.deployment.custom_code_requires_sandbox",
+          );
+        },
+      },
+    } as unknown as CatalogWriteContext["validation"];
+    let sent: MethodWriteInput | undefined;
+
+    const result = await saveMthdsMethod(
+      { method_dir: "methods/demo", name: "Demo" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async createMethod(input) {
+            sent = input;
+            return storedMethod({ name: "Demo" });
+          },
+        },
+        sandboxOnly,
+      ),
+    );
+
+    // Saved, the refusal beside it and no verdict claimed either way.
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      saved: "created",
+      method_id: "mt_one",
+      validation_refused: {
+        class: "input_domain",
+        message: "This method ships custom Python (.py); it needs a sandbox-hosted deployment",
+        retryable: false,
+      },
+      files_sent: [
+        path.join("methods/demo", "bundle.mthds"),
+        path.join("methods/demo", "tools", "helpers.py"),
+      ],
+    });
+    expect(result.structuredContent).not.toHaveProperty("is_valid");
+    expect(result.structuredContent).not.toHaveProperty("is_runnable");
+    expect(sent?.tree?.files.map((file) => file.path)).toEqual([
+      "bundle.mthds",
+      "tools/helpers.py",
+    ]);
+    expect(result.summary).toContain("NOT validated");
+    expect(result.summary).toContain("sandbox-hosted deployment.");
+    expect(result.summary).not.toContain("NOT valid.");
   });
 
   it("requires a name to create", async () => {

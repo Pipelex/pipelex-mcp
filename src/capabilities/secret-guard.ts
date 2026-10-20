@@ -137,20 +137,33 @@ export function secretFindings(
 }
 
 /**
+ * How the caller keeps a refused file out of what is sent: a folder's file by
+ * the folder's own rule, a `.gitignore` line inside it or a name starting with
+ * a dot, and a file of a list by leaving it off the list, since the list names
+ * each file it sends and a name starting with a dot is refused there.
+ */
+export type SecretRefusalArm = "folder" | "files";
+
+/**
  * The words of a refusal for what the guard found, naming each file as the
  * caller can find it (`shown`) and what it matched, never the matched text.
- * `again` closes the hint with what the caller does once the file is dealt
- * with, such as "save again".
+ * `arm` says how the caller sent the files, which decides how a file is kept
+ * out of the method, and `again` closes the hint with what the caller does
+ * once the file is dealt with, such as "save again".
  */
 export function secretRefusalText(
   findings: readonly SecretFinding[],
   shown: (treePath: string) => string,
-  again: string,
+  options: { arm: SecretRefusalArm; again: string },
 ): { message: string; hint: string } {
+  const keepOut =
+    options.arm === "folder"
+      ? "keep the file out of the method with a .gitignore line inside its folder or a name starting with a dot"
+      : "leave the file off the list of files";
   return {
     message: `The method's files hold what looks like a secret, so nothing was sent: ${findings
       .map((finding) => `${shown(finding.path)} (${finding.reason})`)
       .join("; ")}.`,
-    hint: `A key belongs in the environment, never in a method: a method's files leave this machine for the Pipelex API, which keeps them in the organization's storage, where every member can read them. Move the secret out of the file, or keep the file out of the method with a .gitignore line inside its folder or a name starting with a dot, then ${again}. A file refused for its name alone that is no key, a .key file that is not a Keynote deck for one, can be renamed.`,
+    hint: `A key belongs in the environment, never in a method: a method's files leave this machine for the Pipelex API, which keeps them in the organization's storage, where every member can read them. Move the secret out of the file, or ${keepOut}, then ${options.again}. A file refused for its name alone that is no key, a .key file that is not a Keynote deck for one, can be renamed.`,
   };
 }

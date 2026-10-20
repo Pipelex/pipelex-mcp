@@ -201,31 +201,34 @@ describe("localMethodFileResolver", () => {
   it("is not how the plain resolver reads: it reads no method file and no folder", () => {
     const plain = localFileResolver(rootDir);
 
+    expect(plain.statMethodFile).toBeUndefined();
     expect(plain.readMethodFile).toBeUndefined();
     expect(plain.locateMethodDir).toBeUndefined();
     expect(plain.readMethodTree).toBeUndefined();
   });
 
-  describe("readMethodFile", () => {
-    function read(submitted: string, maxBytes = MAX_BYTES) {
-      return localMethodFileResolver(rootDir).readMethodFile!(submitted, { maxBytes });
+  describe("statMethodFile", () => {
+    function stat(submitted: string) {
+      return localMethodFileResolver(rootDir).statMethodFile!(submitted);
     }
 
-    it("reads a .mthds file and a template file as their exact bytes, answering the path as written", async () => {
+    it("answers a file's path as written, resolved and relative to the working directory, and its size", async () => {
       await place("methods/invoice/templates/invoice.xlsx", TEMPLATE_BYTES);
 
-      const mthds = await read("methods/invoice/invoice.mthds");
-      const template = await read(path.join(rootDir, "methods/invoice/templates/invoice.xlsx"));
+      const mthds = await stat("./methods/invoice/invoice.mthds");
+      const template = await stat(path.join(rootDir, "methods/invoice/templates/invoice.xlsx"));
 
       expect(mthds).toEqual({
         ok: true,
         absolute: path.join(rootDir, "methods", "invoice", "invoice.mthds"),
-        bytes: new TextEncoder().encode(BUNDLE),
+        relative: path.join("methods", "invoice", "invoice.mthds"),
+        size: new TextEncoder().encode(BUNDLE).byteLength,
       });
       expect(template).toEqual({
         ok: true,
         absolute: path.join(rootDir, "methods", "invoice", "templates", "invoice.xlsx"),
-        bytes: TEMPLATE_BYTES,
+        relative: path.join("methods", "invoice", "templates", "invoice.xlsx"),
+        size: TEMPLATE_BYTES.byteLength,
       });
     });
 
@@ -235,9 +238,65 @@ describe("localMethodFileResolver", () => {
         path.join(rootDir, "alias.mthds"),
       );
 
-      const resolution = await read("alias.mthds");
+      expect(await stat("alias.mthds")).toMatchObject({
+        ok: true,
+        absolute: path.join(rootDir, "alias.mthds"),
+        relative: "alias.mthds",
+      });
+    });
 
-      expect(resolution).toMatchObject({ ok: true, absolute: path.join(rootDir, "alias.mthds") });
+    it("refuses what a read refuses, a suffix, a path outside, a directory, without reading a byte", async () => {
+      await fs.writeFile(path.join(outsideDir, "secret.mthds"), BUNDLE);
+      await fs.mkdir(path.join(rootDir, "methods", "invoice", "report.html"));
+
+      const suffix = await stat(".env");
+      const outside = await stat(path.join(outsideDir, "secret.mthds"));
+      const directory = await stat("methods/invoice/report.html");
+
+      expect(suffix.ok === false && suffix.message).toBe(
+        "Path is not a .mthds file or a template file: .env",
+      );
+      expect(outside.ok === false && outside.message).toContain(
+        "Path resolves outside the server's working directory",
+      );
+      expect(directory.ok === false && directory.message).toMatch(/not a regular file/);
+    });
+
+    it("holds no file to a size, which the tree's limits do once every item is stated", async () => {
+      await placeSparse("methods/invoice/templates/huge.docx", MAX_BYTES + 1);
+
+      expect(await stat("methods/invoice/templates/huge.docx")).toMatchObject({
+        ok: true,
+        size: MAX_BYTES + 1,
+      });
+    });
+  });
+
+  describe("readMethodFile", () => {
+    function read(submitted: string, maxBytes = MAX_BYTES) {
+      return localMethodFileResolver(rootDir).readMethodFile!(submitted, { maxBytes });
+    }
+
+    it("reads a .mthds file and a template file as their exact bytes", async () => {
+      await place("methods/invoice/templates/invoice.xlsx", TEMPLATE_BYTES);
+
+      const mthds = await read("methods/invoice/invoice.mthds");
+      const template = await read(path.join(rootDir, "methods/invoice/templates/invoice.xlsx"));
+
+      expect(mthds).toEqual({ ok: true, bytes: new TextEncoder().encode(BUNDLE) });
+      expect(template).toEqual({ ok: true, bytes: TEMPLATE_BYTES });
+    });
+
+    it("reads a link inside the working directory", async () => {
+      await fs.symlink(
+        path.join(rootDir, "methods", "invoice", "invoice.mthds"),
+        path.join(rootDir, "alias.mthds"),
+      );
+
+      expect(await read("alias.mthds")).toEqual({
+        ok: true,
+        bytes: new TextEncoder().encode(BUNDLE),
+      });
     });
 
     it.each([".env", "notes.txt", "id_rsa", "invoice.pdf"])(

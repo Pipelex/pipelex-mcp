@@ -39,6 +39,8 @@ import {
   validateMethodSelectorRequest,
   withFilesSent,
   failedBeforeSending,
+  isExecutionLocusRefusal,
+  treeSentInlineHeavy,
   markUnsent,
 } from "./shared.js";
 import type {
@@ -359,6 +361,15 @@ export interface ValidationResult {
    * settled an entry pipe.
    */
   mainPipeRef?: string;
+  /**
+   * Set on a no-verdict result whose request the deployment refused for the
+   * Python the method holds, the execution-locus gate
+   * (`isExecutionLocusRefusal`): the deployment will not load the method, so
+   * it can give no verdict about it, while nothing is wrong with the request.
+   * `mthds_save_method` reads it to store the draft unvalidated rather than
+   * refuse to save it.
+   */
+  refusedForPython?: boolean;
 }
 
 export interface ValidationClient {
@@ -536,6 +547,19 @@ function graphPageContentOf(outcome: GraphPageOutcome): GraphPageStructuredConte
   return content;
 }
 
+/**
+ * Validate a method's tree already read and checked, as `mthds_save_method`
+ * does with the folder it saves: the tree goes to the route as it is, with no
+ * second read, no second pass of the secret guard, no second wait on the
+ * limits handshake, and no graph page, which the save's result never reports.
+ */
+export async function validateMethodTree(
+  tree: MethodTreeToSend,
+  context: ValidationContext,
+): Promise<ValidationResult> {
+  return withFilesSent(await validateRequest({ tree }, context), tree);
+}
+
 async function validateRequest(
   request: ResolvedValidateRequest,
   context: ValidationContext,
@@ -588,9 +612,13 @@ async function validateRequest(
       auth: context.authError,
       baseUrlSource: context.baseUrlSource,
       methodTree: request.tree !== undefined,
+      treeInline: await treeSentInlineHeavy(err, request.tree, client),
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
-    const failed = errorResult(summaryForError(error), [error]);
+    const failed: ValidationResult = {
+      ...errorResult(summaryForError(error), [error]),
+      ...(isExecutionLocusRefusal(err) ? { refusedForPython: true } : {}),
+    };
     // A client that could not be built, or an argument refused before
     // sending, sent no file of the tree.
     return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;

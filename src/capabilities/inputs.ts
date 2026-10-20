@@ -32,6 +32,7 @@ import {
   validateMethodSelectorRequest,
   withFilesSent,
   failedBeforeSending,
+  treeSentInlineHeavy,
   markUnsent,
 } from "./shared.js";
 import type {
@@ -336,6 +337,7 @@ async function requestInputsTemplate(
       auth: context.authError,
       baseUrlSource: context.baseUrlSource,
       methodTree: request.tree !== undefined,
+      treeInline: await treeSentInlineHeavy(err, request.tree, client),
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     const failed = errorResult(summaryForError(error), [error]);

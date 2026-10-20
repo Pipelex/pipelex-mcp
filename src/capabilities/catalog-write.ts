@@ -51,9 +51,11 @@ import type {
 } from "./method-versions.js";
 import { secretFindings, secretRefusalText } from "./secret-guard.js";
 import {
+  asOneLine,
   buildApiConfig,
   classifyError,
   createPipelexApiClient,
+  folderTreeToSend,
   shownIn,
   summaryForToolError,
   toolErrorSchema,
@@ -72,7 +74,7 @@ import type {
 } from "./shared.js";
 import { type FolderLimits, methodTreeLimitsOf } from "./tree-limits.js";
 import type { TreeLimitsAware } from "./tree-limits.js";
-import { validateMthds } from "./validate.js";
+import { validateMethodTree } from "./validate.js";
 import type { ValidationContext, ValidationStructuredContent } from "./validate.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 import {
@@ -268,6 +270,11 @@ export const mthdsSaveMethodOutputSchema = z.object({
       "Present when the draft was saved but the requested rename failed: the name is unchanged.",
     ),
   validation_errors: z.array(z.unknown()).optional(),
+  validation_refused: toolErrorSchema
+    .optional()
+    .describe(
+      "Present, with no is_valid, is_runnable or pending_signatures, when the deployment refused to load the method for the Python it holds, so it gave no verdict: the draft was saved unvalidated, and this is the refusal, whose hint says where the method validates.",
+    ),
   errors: z.array(toolErrorSchema).optional(),
 });
 
@@ -348,6 +355,7 @@ export interface SaveMethodSuccess {
   files_sent?: string[];
   rename_error?: ToolError;
   validation_errors?: unknown[];
+  validation_refused?: ToolError;
 }
 
 export interface SaveMethodFailure {
@@ -830,47 +838,37 @@ async function saveToCatalog(
   }
   const { claim, claimRead, token, namingLink, tree } = sources;
 
-  // Validate through the same capability mthds_validate uses, on the tree
-  // already read: its resolver hands back the folder as located and the tree
-  // as read, so the validate leg re-reads nothing and the verdict is about the
-  // bytes saved. The verdict rides beside the save and does not gate it: a
-  // draft may be invalid, an agent's work in progress often is, and the
-  // verdict is what tells it so. A publish is where validity is required. Only
-  // a validation that produced no verdict, an unreachable API or a refused
-  // credential, refuses the save, since the tool could not say what it saved.
-  const verdict = await validateMthds(
-    { method_dir: location.methodDir },
-    {
-      ...context.validation,
-      resolver: {
-        resolve: async () => ({
-          ok: false,
-          message: "This save reads its method from method_dir alone.",
-          hint: "Pass method_dir.",
-        }),
-        locateMethodDir: async () => ({ ok: true, ...location }),
-        readMethodTree: async () => tree,
-      },
-    },
-  );
-  const validation: ValidationStructuredContent = verdict.structuredContent;
-  if (validation.status === "error") {
-    return saveError(
-      "The method was not saved: the method produced no validation verdict.",
-      validation.errors ?? [],
-    );
-  }
+  // The tree as read, in the form both requests send: the validation and the
+  // catalog write carry the same bytes, which the secret guard has passed.
+  const toSend = folderTreeToSend(location.methodDir, tree);
+  const source: MethodTreeSource = toSend.source;
 
-  // The tree the SDK sends, inline or by hash, from the bytes already read.
-  const source: MethodTreeSource = {
-    files: tree.files,
-    digest: tree.digest,
-    readFile: async (treePath) => {
-      const bytes = tree.bytes.get(treePath);
-      if (bytes === undefined) throw new Error(`${treePath} is not a file of this method's tree`);
-      return bytes;
-    },
-  };
+  // Validate through the same capability mthds_validate uses, on the tree
+  // already read and checked, so the validate leg re-reads nothing, scans
+  // nothing again and asks no limits again, and the verdict is about the bytes
+  // saved. The verdict rides beside the save and does not gate it: a draft may
+  // be invalid, an agent's work in progress often is, and the verdict is what
+  // tells it so. A publish is where validity is required. A deployment that
+  // refuses the method for the Python it holds, the execution-locus gate,
+  // will load it on no request, so it can give no verdict while nothing is
+  // wrong with the draft: the save goes ahead unvalidated and says why. Any
+  // other validation that produced no verdict, an unreachable API or a refused
+  // credential, refuses the save, since the tool could not say what it saved.
+  const verdict = await validateMethodTree(toSend, context.validation);
+  const validation: ValidationStructuredContent = verdict.structuredContent;
+  let validationRefused: ToolError | undefined;
+  if (validation.status === "error") {
+    const errors = validation.errors ?? [];
+    const [first] = errors;
+    if (verdict.refusedForPython === true && first !== undefined) {
+      validationRefused = first;
+    } else {
+      return saveError(
+        `The method was not saved, because validating it produced no verdict${first === undefined ? "." : `: ${asOneLine(first.message)}`}`,
+        errors,
+      );
+    }
+  }
 
   // Asked beside the catalog calls rather than after them: it never rejects,
   // and only the summary's sentence about callers waits on it.
@@ -989,9 +987,13 @@ async function saveToCatalog(
   const publishState = publishStateOf(stored);
   const structuredContent: SaveMethodSuccess = {
     status: "ok",
-    is_valid: validation.is_valid,
-    is_runnable: validation.is_runnable,
-    pending_signatures: validation.pending_signatures,
+    ...(validationRefused === undefined
+      ? {
+          is_valid: validation.is_valid,
+          is_runnable: validation.is_runnable,
+          pending_signatures: validation.pending_signatures,
+        }
+      : { validation_refused: validationRefused }),
     method_id: stored.method_id,
     name: stored.name,
     saved,
@@ -1000,7 +1002,7 @@ async function saveToCatalog(
     ...(publishState === undefined ? {} : { publish_state: publishState }),
     api_host: apiHost,
     link_file: linkFile,
-    files_sent: tree.files.map((file) => shownIn(location.methodDir, file.path)),
+    files_sent: toSend.files.map((file) => file.shown),
     ...(renameError === undefined ? {} : { rename_error: renameError }),
     ...(validation.validation_errors === undefined
       ? {}
@@ -1160,11 +1162,10 @@ async function readSaveSources(
     })),
   );
   if (findings.length > 0) {
-    const text = secretRefusalText(
-      findings,
-      (treePath) => shownIn(location.methodDir, treePath),
-      "save again",
-    );
+    const text = secretRefusalText(findings, (treePath) => shownIn(location.methodDir, treePath), {
+      arm: "folder",
+      again: "save again",
+    });
     return refuse("The method was not saved: its folder holds what looks like a secret.", [
       { class: "input_domain", location: "method_dir", ...text, retryable: false },
     ]);
@@ -1422,7 +1423,13 @@ function saveSummary(
     );
   }
 
-  if (!result.is_valid) {
+  if (result.validation_refused !== undefined) {
+    const refused = result.validation_refused;
+    const said = asOneLine(refused.message);
+    lines.push(
+      `The method was NOT validated, so whether it is valid is unknown: this deployment refuses to load it for the Python it holds — ${said}${/[.!?]$/.test(said) ? "" : "."} It was saved anyway, as a draft may be, and a publish validates it before publishing anything.${refused.hint === undefined ? "" : ` ${refused.hint}`}`,
+    );
+  } else if (!result.is_valid) {
     lines.push(
       "The method is NOT valid. It was saved anyway, as a draft may be, and a publish refuses it until it validates: fix the validation errors and save again.",
     );

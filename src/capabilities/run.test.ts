@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiResponseError,
   ApiUnreachableError,
+  INLINE_TREE_MAX_BYTES,
   MissingMainStuffError,
   RequestArgumentError,
   RunLifecycleUnavailableError,
@@ -2837,8 +2838,9 @@ describe("startMthdsRun path submissions", () => {
     expect(JSON.stringify(result)).not.toContain(fakeKey);
   });
 
-  it("reads a 413 on a start carrying a tree as the tree's, at files", async () => {
-    const tooLarge = new ApiResponseError(
+  /** The 413 a deployment answers a start too large for it with. */
+  const tooLarge = () =>
+    new ApiResponseError(
       "HTTP 413",
       `${DEFAULT_API_URL}/v1/start`,
       413,
@@ -2850,16 +2852,51 @@ describe("startMthdsRun path submissions", () => {
       undefined,
     );
 
+  it("reads a 413 on a start carrying a small tree as its inputs', at inputs", async () => {
+    let versionCalls = 0;
     const result = await startMthdsRun(
       { files: [{ content: 'domain = "invoice"' }] },
-      contextWith({ start: () => Promise.reject(tooLarge) }),
+      contextWith({
+        start: () => Promise.reject(tooLarge()),
+        version: () => {
+          versionCalls += 1;
+          return Promise.resolve({ version: "1.0.0", blob_store: false });
+        },
+      }),
     );
 
     expect(result.structuredContent.errors?.[0]).toMatchObject({
       class: "input_domain",
+      location: "inputs",
+    });
+    expect(result.structuredContent.errors?.[0]?.hint).toContain("mthds_prepare_inputs");
+    // A tree within the inline threshold made nothing too large: no handshake asks.
+    expect(versionCalls).toBe(0);
+  });
+
+  it("reads a 413 on a heavy tree a deployment without a blob store took inline as the tree's", async () => {
+    const heavy = "x".repeat(INLINE_TREE_MAX_BYTES + 1);
+    const context = (blobStore: boolean): RunContext => ({
+      ...contextWith({
+        start: () => Promise.reject(tooLarge()),
+        version: () => Promise.resolve({ version: "1.0.0", blob_store: blobStore }),
+      }),
+      resolver: fakeMethodResolver({
+        files: { "methods/invoice.mthds": 'domain = "invoice"', "methods/report.html": heavy },
+      }),
+    });
+    const files = [{ path: "methods/invoice.mthds" }, { path: "methods/report.html" }];
+
+    const inline = await startMthdsRun({ files }, context(false));
+    expect(inline.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
       location: "files",
     });
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("without a blob store");
+    expect(inline.structuredContent.errors?.[0]?.hint).toContain("without a blob store");
+
+    // The same tree went by hash to a deployment keeping a blob store.
+    const byHash = await startMthdsRun({ files }, context(true));
+    expect(byHash.structuredContent.errors?.[0]?.location).toBe("inputs");
   });
 
   it("rejects { path } items instructively without a resolver (hosted)", async () => {
@@ -3230,19 +3267,19 @@ describe("startMthdsRun from a method folder", () => {
 
   it("locates a refusal of what it sent at method_dir, the field the caller passed", async () => {
     const root = await methodFolder();
-    const tooLarge = new ApiResponseError(
-      "HTTP 413",
+    const refusedTree = new ApiResponseError(
+      "HTTP 422",
       `${DEFAULT_API_URL}/v1/start`,
-      413,
-      "Content Too Large",
+      422,
+      "Unprocessable Content",
       "{}",
       undefined,
+      "'a//b.mthds' is not a tree path",
       undefined,
-      undefined,
-      undefined,
+      "invalid_method_files",
     );
     const context: RunContext = {
-      ...contextWith({ start: () => Promise.reject(tooLarge) }),
+      ...contextWith({ start: () => Promise.reject(refusedTree) }),
       resolver: localMethodFileResolver(root),
     };
 

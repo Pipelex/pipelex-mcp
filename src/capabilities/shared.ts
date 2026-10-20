@@ -20,6 +20,7 @@ import {
   UnsupportedUploadCapabilityError,
   UploadAuthenticationError,
   UploadTransportError,
+  INLINE_TREE_MAX_BYTES,
   collectArtifacts,
   errorVerdictOf,
 } from "@pipelex/sdk";
@@ -38,6 +39,7 @@ import {
   treeDigest,
   treePathViolation,
 } from "mthds";
+import type { TreeLimit } from "mthds";
 import path from "node:path";
 import { z } from "zod";
 
@@ -105,9 +107,9 @@ export const methodFilesInputSchema = z
   .describe(
     "The method's files, sent as one tree. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). " +
       "For a method whose folder is on disk, pass method_dir instead, which sends the folder's whole tree. " +
-      "The { path } items keep where they sit relative to one another: the tree is rooted at the deepest directory holding them all, and each file is sent under its path from there, the path diagnostics name and a step's template_file leads to, " +
+      "The { path } items keep where they sit relative to one another: listed alone, the tree is rooted at the deepest directory holding them all, and each file is sent under its path from there, the path diagnostics name and a step's template_file leads to, " +
       'so [{ path: "invoice.mthds" }, { path: "templates/invoice.xlsx" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. ' +
-      "An inline item is sent at the tree's top, under its uri's file name when that is a .mthds file's, else bundle.mthds. " +
+      "An inline item is sent at the tree's top, under its uri's file name when that is a .mthds file's, else bundle.mthds; beside one, each { path } item is sent under its path from the working directory. " +
       "A file that looks like it holds a secret, a key file or a well-known key format, is refused before anything is sent; the result's files_sent lists every file sent.",
   );
 
@@ -174,13 +176,23 @@ export type FileResolution =
   | { ok: false; message: string; hint: string };
 
 /**
+ * What one `{ path }` item of a method's `files` is on disk
+ * (`statMethodFile`), known before a byte of it is read: its absolute path as
+ * the caller wrote it, resolved against the working directory without
+ * following a link, the same path relative to the working directory, and its
+ * size. The tree path is made from the first or the second. Failures are
+ * values, at `files[i].path`.
+ */
+export type MethodFileStat =
+  | { ok: true; absolute: string; relative: string; size: number }
+  | { ok: false; message: string; hint: string };
+
+/**
  * Outcome of reading one `{ path }` item of a method's `files`
- * (`readMethodFile`): its bytes, and its absolute path as the caller wrote it,
- * resolved against the working directory without following a link, from which
- * the tree path is made. Failures are values, at `files[i].path`.
+ * (`readMethodFile`): its bytes. Failures are values, at `files[i].path`.
  */
 export type MethodFileRead =
-  | { ok: true; absolute: string; bytes: Uint8Array }
+  | { ok: true; bytes: Uint8Array }
   | { ok: false; message: string; hint: string };
 
 /**
@@ -191,16 +203,20 @@ export type MethodFileRead =
  * instructive rejection.
  *
  * `resolve` reads one text file of the argument's one extension, as
- * `inputs_path` does. `readMethodFile` is what makes an argument take a
- * method's `{ path }` items: it reads one, a `.mthds` file or a template file,
- * as bytes, held to `maxBytes`. `locateMethodDir` and `readMethodTree` are
- * what make a tool take `method_dir`: the first finds the folder on its real
- * path before anything is read, and the second lists its whole tree and reads
- * every file of it once, so the bytes the workshop checks and sends are one
- * read. Absent, `method_dir` is refused.
+ * `inputs_path` does. `statMethodFile` and `readMethodFile` are what make an
+ * argument take a method's `{ path }` items, a `.mthds` file or a template
+ * file each: the first makes every check that reads no byte of the file, its
+ * extension, where it lies, that it is a regular file and its size, so every
+ * item is checked, and the list held to the deployment's limits, before any is
+ * read; the second reads one as bytes, held to `maxBytes`. `locateMethodDir`
+ * and `readMethodTree` are what make a tool take `method_dir`: the first finds
+ * the folder on its real path before anything is read, and the second lists
+ * its whole tree and reads every file of it once, so the bytes the workshop
+ * checks and sends are one read. Absent, `method_dir` is refused.
  */
 export interface FileResolver {
   resolve(path: string): Promise<FileResolution>;
+  statMethodFile?(path: string): Promise<MethodFileStat>;
   readMethodFile?(path: string, options: { maxBytes: number }): Promise<MethodFileRead>;
   locateMethodDir?(methodDir: string): Promise<MethodDirLocation>;
   readMethodTree?(
@@ -332,31 +348,49 @@ async function resolveFolderTree(
   const read = await resolver.readMethodTree(located, { limits: await limits() });
   if (!read.ok) return { errors: read.refusals.map(atMethodDirRefusal) };
 
-  const files: SentFile[] = read.files.map((file) => ({
-    treePath: file.path,
-    shown: shownIn(methodDir, file.path),
-    onDisk: true,
-    bytes: read.bytes.get(file.path) ?? new Uint8Array(),
-  }));
+  const tree = folderTreeToSend(methodDir, read);
   const findings = secretFindings(
-    files.map((file) => ({ path: file.treePath, bytes: file.bytes })),
+    tree.files.map((file) => ({ path: file.treePath, bytes: file.bytes })),
   );
   if (findings.length > 0) {
     return {
       errors: [
         atMethodDirRefusal(
-          secretRefusalText(findings, (treePath) => shownIn(methodDir, treePath), SEND_AGAIN),
+          secretRefusalText(findings, (treePath) => shownIn(methodDir, treePath), {
+            arm: "folder",
+            again: SEND_AGAIN,
+          }),
         ),
       ],
     };
   }
+  return { errors: [], tree };
+}
+
+/**
+ * A method folder's tree as read, every file of it once, in the form a tool
+ * sends: the SDK's tree over the bytes in hand, and every file as the caller
+ * finds it, `method_dir` joined with its tree path. The save builds the tree
+ * it validates and stores with it too, so the bytes it checked are the bytes
+ * both requests send.
+ */
+export function folderTreeToSend(
+  methodDir: string,
+  read: {
+    files: readonly { path: string; size: number; sha256: string }[];
+    digest: string;
+    bytes: ReadonlyMap<string, Uint8Array>;
+  },
+): MethodTreeToSend {
   return {
-    errors: [],
-    tree: {
-      source: treeSourceOf(read.files, read.digest, read.bytes),
-      files,
-      fromFolder: true,
-    },
+    source: treeSourceOf(read.files, read.digest, read.bytes),
+    files: read.files.map((file) => ({
+      treePath: file.path,
+      shown: shownIn(methodDir, file.path),
+      onDisk: true,
+      bytes: read.bytes.get(file.path) ?? new Uint8Array(),
+    })),
+    fromFolder: true,
   };
 }
 
@@ -431,26 +465,43 @@ interface ItemFile {
   location: string;
   treePath: string;
   shown: string;
-  onDisk: boolean;
-  bytes: Uint8Array;
+  /** The `{ path }` item as submitted, read once every check has passed; absent for an inline item. */
+  submitted?: string;
+  /** Its size: on the stat for a `{ path }` item, of its text for an inline one. */
+  size: number;
+  /** Its bytes: an inline item's from the start, a `{ path }` item's once read. */
+  bytes?: Uint8Array;
 }
 
 /** The name an inline item is sent under when its uri gives none. */
 const INLINE_STEM = "bundle";
 
 /**
- * `files`, as one tree. Each `{ path }` item is read as bytes through the
- * resolver's `readMethodFile`, held to the deployment's limit on one file, and
- * keeps where it sits relative to the others: the tree is rooted at the
- * deepest directory holding them all, and each file's tree path is its path
- * from there, which the step naming a template file resolves its
- * `template_file` against. A path given twice is one file. Each inline item is
- * a `.mthds` file at the tree's top, under its uri's file name when that names
- * a `.mthds` file no other file of the tree takes, else `bundle.mthds`,
- * `bundle-2.mthds` and on. A tree path the standard refuses, a name it never
- * admits to a tree, two paths that collide, a tree past the deployment's
- * limits, and a file the secret guard refuses are refused at the item, before
- * anything is sent.
+ * `files`, as one tree, made in an order that reads no byte of a file before
+ * the whole list has passed every check that needs none.
+ *
+ * 1. Each item's shape, and each `{ path }` item's stat through the
+ *    resolver's `statMethodFile`: its extension, where it lies, that it is a
+ *    regular file, its size.
+ * 2. Each file's tree path. Without inline items, the tree is rooted at the
+ *    deepest directory holding every `{ path }` item, and each is sent under
+ *    its path from there. Beside an inline item, which has no directory, the
+ *    tree is rooted at the working directory and each `{ path }` item is sent
+ *    under its path from there, as the caller wrote it, so a template listed
+ *    as `templates/invoice.xlsx` keeps the path a step of the inline `.mthds`
+ *    file names. A path given twice is one file; two different paths that
+ *    name one tree path once Unicode-normalized are refused, as are a tree
+ *    path the standard refuses, a name it never admits to a tree and two
+ *    paths that collide. Each inline item is a `.mthds` file at the tree's
+ *    top, under its uri's file name when that names a `.mthds` file no other
+ *    file of the tree takes, else `bundle.mthds`, `bundle-2.mthds` and on.
+ * 3. The deployment's limits, asked for every list, an inline-only one
+ *    included: one file's size at its item, the file count and the total at
+ *    `files`, on the sizes the stat gave.
+ * 4. The reads, one file at a time, each held to the limit on one file and
+ *    the running total held to the limit on all, so a file that grew since
+ *    its stat stops the reads at the limit rather than past it.
+ * 5. The secret guard, over every byte in hand, before anything is sent.
  */
 async function resolveFilesTree(
   items: SubmittedFileInput[],
@@ -461,11 +512,15 @@ async function resolveFilesTree(
   const refuse = (location: string, message: string, hint: string) =>
     errors.push({ class: "input_domain", location, message, hint, retryable: false });
 
-  const hasPaths = items.some((item) => !("content" in item));
-  const bounds = hasPaths ? await limits() : undefined;
-
+  // 1. Every item's shape, and what each { path } item is on disk.
   const inline: { index: number; item: SubmittedFile }[] = [];
-  const read: { index: number; submitted: string; absolute: string; bytes: Uint8Array }[] = [];
+  const stated: {
+    index: number;
+    submitted: string;
+    absolute: string;
+    relative: string;
+    size: number;
+  }[] = [];
   for (const [index, item] of items.entries()) {
     // First-match union semantics: a pathological { content, path } item is
     // the content arm, and its path is ignored.
@@ -495,7 +550,7 @@ async function resolveFilesTree(
       );
       continue;
     }
-    if (resolver?.readMethodFile === undefined || bounds === undefined) {
+    if (resolver?.statMethodFile === undefined || resolver.readMethodFile === undefined) {
       refuse(
         `files[${index}].path`,
         "This deployment cannot read files from disk; submit the file contents instead.",
@@ -503,31 +558,37 @@ async function resolveFilesTree(
       );
       continue;
     }
-    const outcome = await resolver.readMethodFile(item.path, {
-      maxBytes: bounds.maxFileSize ?? Number.MAX_SAFE_INTEGER,
-    });
-    if (!outcome.ok) {
-      refuse(`files[${index}].path`, outcome.message, outcome.hint);
+    const stat = await resolver.statMethodFile(item.path);
+    if (!stat.ok) {
+      refuse(`files[${index}].path`, stat.message, stat.hint);
       continue;
     }
-    read.push({ index, submitted: item.path, absolute: outcome.absolute, bytes: outcome.bytes });
+    stated.push({ index, submitted: item.path, ...stat });
   }
   if (errors.length > 0) return { errors };
 
-  // The { path } items, each under its path from the deepest directory
-  // holding them all; a path given twice is one file of the tree.
+  // 2. Each file's tree path: from the deepest directory holding every
+  // { path } item, or from the working directory beside an inline item.
   const files: ItemFile[] = [];
-  const root = deepestCommonDirectory(read.map((file) => path.dirname(file.absolute)));
+  const fromWorkingDirectory = inline.length > 0;
+  const root = deepestCommonDirectory(stated.map((file) => path.dirname(file.absolute)));
+  const byAbsolute = new Set<string>();
   const byTreePath = new Map<string, ItemFile>();
-  for (const file of read) {
-    const treePath = path.relative(root, file.absolute).split(path.sep).join("/").normalize("NFC");
+  for (const file of stated) {
+    // The same path given twice, under any spelling that resolves alike, is one file.
+    if (byAbsolute.has(file.absolute)) continue;
+    byAbsolute.add(file.absolute);
+    const fromRoot = fromWorkingDirectory ? file.relative : path.relative(root, file.absolute);
+    const treePath = fromRoot.split(path.sep).join("/").normalize("NFC");
     const location = `files[${file.index}].path`;
     const violation = treePathViolation(treePath);
     if (violation !== null) {
       refuse(
         location,
         `${file.submitted} cannot be sent under the name ${treePath}: ${violation}.`,
-        "Rename the file so its name is one every machine keeps, or pass the method's folder as method_dir.",
+        fromWorkingDirectory
+          ? "Beside an inline item, a { path } item is sent under its path from the working directory. List a file inside the working directory, rename it so its name is one every machine keeps, or pass the method's folder as method_dir."
+          : "Rename the file so its name is one every machine keeps, or pass the method's folder as method_dir.",
       );
       continue;
     }
@@ -539,14 +600,22 @@ async function resolveFilesTree(
       );
       continue;
     }
-    if (byTreePath.has(treePath)) continue;
+    const other = byTreePath.get(treePath);
+    if (other !== undefined) {
+      refuse(
+        location,
+        `${file.submitted} and ${other.shown} are two spellings of one name, ${treePath}, once Unicode-normalized, so they cannot both be sent.`,
+        "List the file once, under one spelling. Two files whose names differ only in their Unicode normalization cannot both belong to a method: every machine reads them as one name.",
+      );
+      continue;
+    }
     const entry: ItemFile = {
       index: file.index,
       location,
       treePath,
       shown: file.submitted,
-      onDisk: true,
-      bytes: file.bytes,
+      submitted: file.submitted,
+      size: file.size,
     };
     byTreePath.set(treePath, entry);
     files.push(entry);
@@ -568,46 +637,66 @@ async function resolveFilesTree(
   for (const { index, item } of inline) {
     const treePath = inlineTreePath(item.uri, taken);
     taken.push(treePath);
+    const bytes = new TextEncoder().encode(item.content);
     files.push({
       index,
       location: `files[${index}].content`,
       treePath,
       shown: treePath,
-      onDisk: false,
-      bytes: new TextEncoder().encode(item.content),
+      size: bytes.byteLength,
+      bytes,
     });
   }
 
-  if (bounds !== undefined) {
-    const total = files.reduce((sum, file) => sum + file.bytes.byteLength, 0);
-    if (bounds.maxFileCount !== undefined && files.length > bounds.maxFileCount) {
+  // 3. The deployment's limits, on the sizes known before any read.
+  const bounds = await limits();
+  const maxFileSize = bounds.maxFileSize ?? Number.MAX_SAFE_INTEGER;
+  for (const file of files) {
+    if (file.size > maxFileSize) {
       refuse(
-        "files",
-        `The files make a tree of ${files.length} files, past the limit of ${bounds.maxFileCount} the Pipelex deployment takes.`,
-        "Send only the method's own files, or pass the method's folder as method_dir.",
-      );
-    } else if (bounds.maxTotalSize !== undefined && total > bounds.maxTotalSize) {
-      refuse(
-        "files",
-        `The files hold ${total} bytes in all, past the limit of ${bounds.maxTotalSize} bytes the Pipelex deployment takes for a method's tree.`,
-        "Send only the method's own files, or make them smaller.",
+        file.location,
+        `${file.shown} is ${file.size} bytes, past ${limitWords(bounds, "maxFileSize", maxFileSize)} for one file of a method.`,
+        "Make the file smaller, or leave it off the list if the method does not need it.",
       );
     }
-    if (errors.length > 0) return { errors };
+  }
+  if (errors.length > 0) return { errors };
+  const tooMany = treeTotalRefusal(bounds, { count: files.length });
+  if (tooMany !== undefined) return { errors: [tooMany] };
+  const tooLarge = treeTotalRefusal(bounds, {
+    total: files.reduce((sum, file) => sum + file.size, 0),
+  });
+  if (tooLarge !== undefined) return { errors: [tooLarge] };
+
+  // 4. The reads, one file at a time, the running total held to the limit.
+  let total = files.reduce((sum, file) => sum + (file.bytes?.byteLength ?? 0), 0);
+  for (const file of files) {
+    if (file.submitted === undefined || resolver?.readMethodFile === undefined) continue;
+    const outcome = await resolver.readMethodFile(file.submitted, { maxBytes: maxFileSize });
+    if (!outcome.ok) return { errors: [itemRefusal(file.location, outcome)] };
+    file.bytes = outcome.bytes;
+    total += outcome.bytes.byteLength;
+    const over = treeTotalRefusal(bounds, { total });
+    if (over !== undefined) return { errors: [over] };
   }
 
+  // 5. The secret guard, over every byte about to be sent.
+  const read = files.map((file) => ({ ...file, bytes: file.bytes ?? new Uint8Array() }));
   for (const finding of secretFindings(
-    files.map((file) => ({ path: file.treePath, bytes: file.bytes })),
+    read.map((file) => ({ path: file.treePath, bytes: file.bytes })),
   )) {
-    const file = files.find((candidate) => candidate.treePath === finding.path);
+    const file = read.find((candidate) => candidate.treePath === finding.path);
     if (file === undefined) continue;
-    const text = secretRefusalText([finding], () => file.shown, SEND_AGAIN);
+    const text = secretRefusalText([finding], () => file.shown, {
+      arm: "files",
+      again: SEND_AGAIN,
+    });
     refuse(file.location, text.message, text.hint);
   }
   if (errors.length > 0) return { errors };
 
-  files.sort((left, right) => compareUtf8(left.treePath, right.treePath));
-  const listing = files.map((file) => ({
+  read.sort((left, right) => compareUtf8(left.treePath, right.treePath));
+  const listing = read.map((file) => ({
     path: file.treePath,
     size: file.bytes.byteLength,
     sha256: sha256Hex(file.bytes),
@@ -618,17 +707,55 @@ async function resolveFilesTree(
       source: treeSourceOf(
         listing,
         treeDigest(listing),
-        new Map(files.map((file) => [file.treePath, file.bytes])),
+        new Map(read.map((file) => [file.treePath, file.bytes])),
       ),
-      files: files.map(({ treePath, shown, onDisk, bytes }) => ({
+      files: read.map(({ treePath, shown, submitted, bytes }) => ({
         treePath,
         shown,
-        onDisk,
+        onDisk: submitted !== undefined,
         bytes,
       })),
       fromFolder: false,
     },
   };
+}
+
+function itemRefusal(location: string, refusal: { message: string; hint: string }): ToolError {
+  return {
+    class: "input_domain",
+    location,
+    message: refusal.message,
+    hint: refusal.hint,
+    retryable: false,
+  };
+}
+
+/** A limit with its number, and whose it is: the deployment's, or the workshop's own when the deployment announced none. */
+function limitWords(bounds: ListingLimits, limit: TreeLimit, maximum: number): string {
+  return bounds.workshopSet?.includes(limit) === true
+    ? `the workshop's own limit of ${maximum}${limit === "maxFileCount" ? "" : " bytes"}`
+    : `the limit of ${maximum}${limit === "maxFileCount" ? "" : " bytes"} the Pipelex deployment takes`;
+}
+
+/** The refusal, at `files`, of a list past the limit on the file count or on the total, or nothing. */
+function treeTotalRefusal(
+  bounds: ListingLimits,
+  measured: { count?: number; total?: number },
+): ToolError | undefined {
+  const { maxFileCount, maxTotalSize } = bounds;
+  if (measured.count !== undefined && maxFileCount !== undefined && measured.count > maxFileCount) {
+    return itemRefusal("files", {
+      message: `The files make a tree of ${measured.count} files, past ${limitWords(bounds, "maxFileCount", maxFileCount)}.`,
+      hint: "Send only the method's own files, or pass the method's folder as method_dir.",
+    });
+  }
+  if (measured.total !== undefined && maxTotalSize !== undefined && measured.total > maxTotalSize) {
+    return itemRefusal("files", {
+      message: `The files hold more than ${maxTotalSize} bytes in all, past ${limitWords(bounds, "maxTotalSize", maxTotalSize)} for a method's tree; nothing was sent.`,
+      hint: "Send only the method's own files, or make them smaller.",
+    });
+  }
+  return undefined;
 }
 
 /**
@@ -705,6 +832,36 @@ export function failedBeforeSending(err: unknown): boolean {
 }
 
 /**
+ * Whether a request that sent `tree` and was refused as too large, a `413`,
+ * carried the tree inline at a weight that can have made it so. A tree within
+ * the SDK's inline threshold (`INLINE_TREE_MAX_BYTES`) travels inline
+ * everywhere but weighs too little to make a request too large on its own; a
+ * heavier one travels by hash to a deployment keeping a blob store, and inline
+ * only to one keeping none. So the deployment is asked, through the client's
+ * `version()` (`GET /v1/version`'s `blob_store`), only for a heavier tree
+ * after a `413`. A client without `version()`, or a handshake that fails,
+ * says nothing, and the tree is not blamed.
+ */
+export async function treeSentInlineHeavy(
+  err: unknown,
+  tree: MethodTreeToSend | undefined,
+  client: unknown,
+): Promise<boolean> {
+  if (tree === undefined || !(err instanceof ApiResponseError) || err.status !== 413) return false;
+  const weight = tree.files.reduce((sum, file) => sum + file.bytes.byteLength, 0);
+  if (weight <= INLINE_TREE_MAX_BYTES) return false;
+  if (typeof client !== "object" || client === null) return false;
+  const version = (client as { version?: unknown }).version;
+  if (typeof version !== "function") return false;
+  try {
+    const info: unknown = await (version as () => Promise<unknown>).call(client);
+    return asRecord(info)?.blob_store !== true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Put a tree's listing on a result produced once its request was sent, a
  * no-verdict error included, since its files left the machine either way. A
  * result {@link markUnsent} marked, whose request never left, gets no listing.
@@ -770,8 +927,8 @@ export interface ResolvedInputs {
 
 /**
  * Settle `inputs` / `inputs_path` into the one inputs object the capability
- * sends, ahead of the request-shape checks, as {@link resolveSubmittedFiles}
- * does for `files`. Both supplied is refused at `inputs_path`; `required`
+ * sends, ahead of the request-shape checks, as {@link resolveMethodSource}
+ * does for `method_dir` and `files`. Both supplied is refused at `inputs_path`; `required`
  * refuses neither at `inputs`. The file arm reads through the context's
  * `.json` resolver — the workshop's `localFileResolver`, under the same
  * extension and working-directory gates as a `{ path }` item — and a context
@@ -1432,6 +1589,14 @@ export interface ClassifyErrorOptions {
    */
   methodTree?: boolean;
   /**
+   * Set when the request carried its tree inline at a weight that can have
+   * made it too large ({@link treeSentInlineHeavy}). Only then is a `413` read
+   * as about the method's files; otherwise it keeps the route's own
+   * {@link tooLarge} texture, or the unexpected-status arm, since what made the
+   * request too large was something else it carried, a run's inputs.
+   */
+  treeInline?: boolean;
+  /**
    * Per-route 5xx hint override. Use it when a route is known to report
    * request-caused failures as a generic server error (the hosted `/v1/start`
    * answers 503 "Failed to start pipeline" for an invalid bundle), so the
@@ -1940,6 +2105,46 @@ function classifyUploadTransportError(
   });
 }
 
+/** The hint of the execution-locus gate's refusal of a method's own Python. */
+const CUSTOM_CODE_REFUSED_HINT =
+  "This deployment is not sandbox-hosted, so it refuses a method that ships custom Python (.py) — the credential is not the problem. Run the method on a sandbox-hosted deployment, or name one whose pipes are all MTHDS; a .py file the method does not need belongs outside its folder, or behind a .gitignore line inside it.";
+
+/** The runner's registry code for a method's own Python on a deployment that is not sandbox-hosted. */
+const CUSTOM_CODE_REQUIRES_SANDBOX_CODE = "pipelex.deployment.custom_code_requires_sandbox";
+
+/** The runner's registry code for a method declaring its structures as Python classes. */
+const PYTHON_STRUCTURES_REFUSED_CODE = "pipelex.deployment.python_structures_refused";
+
+type ExecutionLocusRefusal =
+  | "custom_code"
+  | "custom_code_by_code"
+  | "structures"
+  | "structures_by_code";
+
+/**
+ * Which of the execution-locus gate's refusals `err` is, if any: the runner's
+ * registry code (`custom_code_requires_sandbox`, a `501`, and
+ * `python_structures_refused`, a `422`), or the `403` and `error_type` an
+ * older runner sent.
+ */
+function executionLocusRefusalOf(err: ApiResponseError): ExecutionLocusRefusal | undefined {
+  if (err.code === CUSTOM_CODE_REQUIRES_SANDBOX_CODE) return "custom_code_by_code";
+  if (err.code === PYTHON_STRUCTURES_REFUSED_CODE) return "structures_by_code";
+  if (err.status === 403 && err.errorType === "CustomCodeRequiresSandbox") return "custom_code";
+  if (err.status === 403 && err.errorType === "MethodStructuresRefusedError") return "structures";
+  return undefined;
+}
+
+/**
+ * Whether `err` is the execution-locus gate refusing a method for the Python it
+ * holds: the deployment will not load the method at all, so no verdict about
+ * it can be had there, while nothing is wrong with the request. The save reads
+ * it to store a draft unvalidated rather than refuse it.
+ */
+export function isExecutionLocusRefusal(err: unknown): boolean {
+  return err instanceof ApiResponseError && executionLocusRefusalOf(err) !== undefined;
+}
+
 function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorOptions): ToolError {
   const message = err.serverMessage ?? err.message;
   const verdict = toolVerdictOf(err);
@@ -1957,12 +2162,37 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     });
   }
 
+  // The execution-locus gate as the runner states it now, by its registry
+  // code: a method shipping Python (`.py`) on a deployment that is not
+  // sandbox-hosted, a `501`, and on one that is, a method declaring its
+  // structures as Python classes, a `422`. Both are about the method and the
+  // deployment together, never the credential nor the deployment's routes, so
+  // both are the caller's, located at whatever named the method; they are
+  // read ahead of the tree's refusals and the 400/422 and 5xx arms, which
+  // would call the first a route the deployment does not implement.
+  const locus = executionLocusRefusalOf(err);
+  if (locus === "custom_code_by_code" || locus === "structures_by_code") {
+    return toolError(
+      { ...verdict, class: "input_domain", retryable: false },
+      {
+        location: options.methodLocation ?? (options.methodTree ? "files" : undefined),
+        message,
+        hint:
+          locus === "custom_code_by_code"
+            ? CUSTOM_CODE_REFUSED_HINT
+            : "This deployment imports no Python structure classes: the method declares its structures as Python classes. Declare them as concepts in the method instead, or run it on a self-hosted runner that imports them.",
+      },
+    );
+  }
+
   // The refusals of a method's tree, by the platform's `code` or the runner's
   // `error_type`, and read so only on a request that sent one: elsewhere the
   // same refusal is about files this server never sent, and the route's own
   // texture says more. Ahead of the generic 400/422 arm, whose locator follows
   // the route's selector and whose hint says nothing about a tree.
-  const treeRefusal = options.methodTree ? treeRefusalTexture(err) : undefined;
+  const treeRefusal = options.methodTree
+    ? treeRefusalTexture(err, options.treeInline === true)
+    : undefined;
   if (treeRefusal !== undefined) {
     return toolError(
       {
@@ -1982,19 +2212,20 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     );
   }
 
-  // The execution-locus gate's two refusals, each a 403 whose `error_type`
-  // names the policy: a fetched package declaring in-process Python structure
-  // classes, and a method shipping custom Python (`.py`) on a deployment that
-  // is not sandbox-hosted. Both are about the method, not the credential, so
-  // both override the SDK's class to `input_domain`: the runner sends the
-  // second with `error_domain: input` but the first with no domain at all
+  // The execution-locus gate's two refusals as a runner before the registry
+  // codes sent them, each a 403 whose `error_type` names the policy: a
+  // fetched package declaring in-process Python structure classes, and a
+  // method shipping custom Python (`.py`) on a deployment that is not
+  // sandbox-hosted. Both are about the method, not the credential, so both
+  // override the SDK's class to `input_domain`: that runner sent the second
+  // with `error_domain: input` but the first with no domain at all
   // (L-261007-31dea6), and the SDK's own reading of a bare 403 is
   // `config`. They must be caught ahead of the generic 401/403 arm, whose
   // texture sends a caller whose credential is perfectly good to go and mint a
   // new key. The second is a property of the PAIR — the method and the
   // deployment — and the method is not malformed: the very same method runs on
   // a sandbox-hosted deployment, which is where PipeFunc Python belongs.
-  if (err.status === 403 && err.errorType === "MethodStructuresRefusedError") {
+  if (locus === "structures") {
     return toolError(
       { ...verdict, class: "input_domain" },
       {
@@ -2005,13 +2236,13 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     );
   }
 
-  if (err.status === 403 && err.errorType === "CustomCodeRequiresSandbox") {
+  if (locus === "custom_code") {
     return toolError(
       { ...verdict, class: "input_domain" },
       {
         location: options.methodLocation,
         message,
-        hint: "This deployment is not sandbox-hosted, so it refuses a method that ships custom Python (.py) — the credential is not the problem. Run the method on a sandbox-hosted deployment, or name one whose pipes are all MTHDS.",
+        hint: CUSTOM_CODE_REFUSED_HINT,
       },
     );
   }
@@ -2213,20 +2444,25 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
  *   The same call asks the blob route afresh and uploads what is missing, so
  *   it is overridden to `runtime` and retryable, where the SDK reads a `422`
  *   as the caller's and final.
- * - A `413`: the request carrying the tree was larger than a server or
- *   gateway in front of the route takes. The SDK sends a tree by hash past a
- *   small threshold to a deployment that keeps a blob store, so this is a
- *   deployment sending everything inline, a bare runner; the caller sends a
- *   smaller tree. The class is the caller's, whatever the SDK reads.
+ * - A `413`, only when `inline` says the tree travelled inline at a weight
+ *   that can have made the request too large ({@link treeSentInlineHeavy}):
+ *   the SDK sends a tree past its inline threshold by hash to a deployment
+ *   that keeps a blob store, so this is a deployment taking every file
+ *   inline, a bare runner; the caller sends a smaller tree. The class is the
+ *   caller's, whatever the SDK reads. Any other `413` keeps the route's own
+ *   handling: the tree went by hash or was small, and something else the
+ *   request carried, a run's inputs, made it too large.
  */
 function treeRefusalTexture(
   err: ApiResponseError,
+  inline: boolean,
 ): { class?: ErrorClass; retryable?: boolean; hint: string } | undefined {
   if (err.status === 413) {
+    if (!inline) return undefined;
     return {
       class: "input_domain",
       retryable: false,
-      hint: "The request carrying the method's tree was larger than the Pipelex deployment takes in one request; a deployment without a blob store takes every file inline. Keep what is not part of the method out of its folder with a .gitignore inside it or METHODS.toml's [package] exclude, or send fewer or smaller files.",
+      hint: "The request carrying the method's tree inline was larger than the Pipelex deployment takes in one request: a deployment without a blob store takes every file of a tree inline. Keep what is not part of the method out of its folder with a .gitignore inside it or METHODS.toml's [package] exclude, or send fewer or smaller files; a run's inputs ride the same request, so large ones belong in uploaded files.",
     };
   }
   if (err.status !== 422) return undefined;

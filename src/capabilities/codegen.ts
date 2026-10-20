@@ -37,6 +37,7 @@ import {
   validateMethodSelectorRequest,
   withFilesSent,
   failedBeforeSending,
+  treeSentInlineHeavy,
   markUnsent,
 } from "./shared.js";
 import type {
@@ -572,6 +573,7 @@ async function requestCodegen(
       baseUrlSource: context.baseUrlSource,
       forbidden: forbiddenTexture(context.authError),
       methodTree: request.tree !== undefined,
+      treeInline: await treeSentInlineHeavy(err, request.tree, client),
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     const failed = errorResult(summaryForError(error), [error]);

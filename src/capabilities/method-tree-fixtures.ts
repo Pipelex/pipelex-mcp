@@ -1,5 +1,6 @@
 import type { MethodTreeSource } from "@pipelex/sdk";
 import { sha256Hex, treeDigest } from "mthds";
+import path from "node:path";
 
 import type { FileResolver } from "./shared.js";
 
@@ -17,8 +18,9 @@ export function bytesOf(content: string | Uint8Array): Uint8Array {
 
 /**
  * A resolver over two fixed maps, by path: `files`, the `{ path }` items it
- * reads, each found at `/w/<path>`, and `folder`, the tree every `method_dir`
- * lists, found at `/w/<method_dir>`. A path in neither is missing.
+ * reads, each found at `/w/<path>` with `/w` the working directory, and
+ * `folder`, the tree every `method_dir` lists, found at `/w/<method_dir>`. A
+ * path in neither is missing. Paths are POSIX, whatever the platform.
  */
 export function fakeMethodResolver(
   options: {
@@ -29,12 +31,29 @@ export function fakeMethodResolver(
   const { files = {}, folder = {} } = options;
   return {
     resolve: () => Promise.reject(new Error("a method's files are read as bytes, never as text")),
-    async readMethodFile(submitted) {
+    async statMethodFile(submitted) {
       const content = files[submitted];
       if (content === undefined) {
         return { ok: false, message: `File not found: ${submitted}`, hint: "Check the path." };
       }
-      return { ok: true, absolute: `/w/${submitted}`, bytes: bytesOf(content) };
+      const absolute = path.posix.resolve("/w", submitted);
+      return {
+        ok: true,
+        absolute,
+        relative: path.posix.relative("/w", absolute),
+        size: bytesOf(content).byteLength,
+      };
+    },
+    async readMethodFile(submitted, options) {
+      const content = files[submitted];
+      if (content === undefined) {
+        return { ok: false, message: `File not found: ${submitted}`, hint: "Check the path." };
+      }
+      const bytes = bytesOf(content);
+      if (bytes.byteLength > options.maxBytes) {
+        return { ok: false, message: `File is too large: ${submitted}`, hint: "Shrink it." };
+      }
+      return { ok: true, bytes };
     },
     async locateMethodDir(methodDir) {
       return { ok: true, folder: `/w/${methodDir}`, methodDir };

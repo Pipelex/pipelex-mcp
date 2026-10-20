@@ -10,6 +10,7 @@ import type {
   LocatedMethodDir,
   MethodDirLocation,
   MethodFileRead,
+  MethodFileStat,
   MethodTreeRead,
 } from "./capabilities/shared.js";
 import {
@@ -107,14 +108,16 @@ export function localFileResolver(
  * `method_dir`, and `mthds_save_method`'s `method_dir` (`save`, which words
  * its refusals for a tool that takes a folder alone).
  *
- * `readMethodFile` reads one `{ path }` item as bytes, past the read side's
- * gates: its extension is `.mthds` or a template file's
+ * `statMethodFile` makes every check of one `{ path }` item that reads no
+ * byte of it: its extension is `.mthds` or a template file's
  * (`METHOD_FILE_EXTENSIONS`), checked on the submitted name before the
  * filesystem is touched, so a `.env` or a key is never opened; its real path
- * lies inside the working directory; it is a regular file within `maxBytes`,
- * the deployment's limit on one file of a method, on its stat and again on
- * the bytes read. It answers the path as the caller wrote it, resolved against
- * the working directory, from which the tree path is made.
+ * lies inside the working directory; it is a regular file. It answers the
+ * path as the caller wrote it, resolved against the working directory and
+ * relative to it, from which the tree path is made, and the size the stat
+ * gave. `readMethodFile` makes the same checks again and reads the file as
+ * bytes, within `maxBytes`, the deployment's limit on one file of a method,
+ * on its stat and again on the bytes read.
  *
  * `locateMethodDir` finds a folder on its real path before anything under it
  * is read, and `readMethodTree` lists its whole tree under the deployment's
@@ -128,10 +131,19 @@ export function localMethodFileResolver(
   const fallback = options.save === true ? SAVE_FALLBACK : FOLDER_FALLBACK;
   return {
     resolve: (submitted) => text.resolve(submitted),
+    statMethodFile: (submitted) => statMethodFile(rootDir, submitted),
     readMethodFile: (submitted, read) => readMethodFile(rootDir, submitted, read.maxBytes),
     locateMethodDir: (methodDir) => locateMethodFolder(rootDir, methodDir, fallback),
     readMethodTree: (location, read) => readMethodFolderTree(location, read.limits, fallback),
   };
+}
+
+/** One `{ path }` item of a method's `files`, past every gate that reads no byte of it. */
+async function statMethodFile(rootDir: string, submitted: string): Promise<MethodFileStat> {
+  const target = await methodFileTarget(rootDir, submitted);
+  if (!target.ok) return target;
+  const absolute = path.resolve(rootDir, submitted);
+  return { ok: true, absolute, relative: path.relative(rootDir, absolute), size: target.size };
 }
 
 /** One `{ path }` item of a method's `files`, read as bytes past the read side's gates. */
@@ -140,21 +152,7 @@ async function readMethodFile(
   submitted: string,
   maxBytes: number,
 ): Promise<MethodFileRead> {
-  const extension = path.extname(submitted).toLowerCase();
-  if (!(METHOD_FILE_EXTENSIONS as readonly string[]).includes(extension)) {
-    return failure(
-      `Path is not a .mthds file or a template file: ${submitted}`,
-      `This argument reads .mthds files and the template files their PipeDocGen steps name (${METHOD_FILE_EXTENSIONS.slice(1).join(", ")}). Point at one, ${METHOD_FILE_FALLBACK}`,
-    );
-  }
-  const root = await workingDirectory(rootDir);
-  if (!root.ok) return root;
-  const target = await containedTarget(rootDir, root.real, submitted, {
-    kind: "a .mthds file or a template file",
-    fallback: METHOD_FILE_FALLBACK,
-    maxBytes,
-    limit: `the limit of ${maxBytes} bytes the Pipelex deployment takes for one file of a method`,
-  });
+  const target = await methodFileTarget(rootDir, submitted, maxBytes);
   if (!target.ok) return target;
   let bytes: Uint8Array;
   try {
@@ -168,7 +166,38 @@ async function readMethodFile(
       `Send it again once nothing is writing to it, ${METHOD_FILE_FALLBACK}`,
     );
   }
-  return { ok: true, absolute: path.resolve(rootDir, submitted), bytes };
+  return { ok: true, bytes };
+}
+
+/**
+ * The gates of a method file before any byte of it is read: the extension on
+ * the submitted name, before the filesystem is touched, then the working
+ * directory's containment, a regular file, and `maxBytes` when one is given.
+ */
+async function methodFileTarget(
+  rootDir: string,
+  submitted: string,
+  maxBytes?: number,
+): Promise<ContainedTarget> {
+  const extension = path.extname(submitted).toLowerCase();
+  if (!(METHOD_FILE_EXTENSIONS as readonly string[]).includes(extension)) {
+    return failure(
+      `Path is not a .mthds file or a template file: ${submitted}`,
+      `This argument reads .mthds files and the template files their PipeDocGen steps name (${METHOD_FILE_EXTENSIONS.slice(1).join(", ")}). Point at one, ${METHOD_FILE_FALLBACK}`,
+    );
+  }
+  const root = await workingDirectory(rootDir);
+  if (!root.ok) return root;
+  return containedTarget(rootDir, root.real, submitted, {
+    kind: "a .mthds file or a template file",
+    fallback: METHOD_FILE_FALLBACK,
+    ...(maxBytes === undefined
+      ? {}
+      : {
+          maxBytes,
+          limit: `the limit of ${maxBytes} bytes the Pipelex deployment takes for one file of a method`,
+        }),
+  });
 }
 
 /**

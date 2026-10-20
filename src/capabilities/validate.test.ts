@@ -1224,13 +1224,15 @@ describe("validateMthds path submissions", () => {
     async resolve() {
       throw new Error("a { path } item is read as bytes, never as text");
     },
+    async statMethodFile(path) {
+      if (path === "methods/bundle.mthds") {
+        return { ok: true, absolute: `/work/${path}`, relative: path, size: 15 };
+      }
+      return { ok: false, message: `File not found: ${path}`, hint: "Check the path." };
+    },
     async readMethodFile(path) {
       if (path === "methods/bundle.mthds") {
-        return {
-          ok: true,
-          absolute: `/work/${path}`,
-          bytes: new TextEncoder().encode('domain = "demo"'),
-        };
+        return { ok: true, bytes: new TextEncoder().encode('domain = "demo"') };
       }
       return { ok: false, message: `File not found: ${path}`, hint: "Check the path." };
     },
