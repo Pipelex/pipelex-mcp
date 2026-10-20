@@ -6,7 +6,6 @@ import type {
   CodegenResponse,
   CodegenTarget,
   CodegenValidReport,
-  MthdsFileItem,
   ValidationErrorItem,
 } from "@pipelex/sdk";
 import { z } from "zod";
@@ -26,14 +25,12 @@ import {
   DEFAULT_AUTH_HINT,
   METHOD_REF_GRAMMAR,
   buildApiConfig,
-  bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
   filesSentSchema,
-  hasTemplateFiles,
   methodDirInputSchema,
-  resolveMethodFiles,
-  resourcesOption,
+  methodFilesInputSchema,
+  resolveMethodSource,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
@@ -49,11 +46,12 @@ import type {
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
-  SubmittedFile,
+  MethodTreeToSend,
   SubmittedFileInput,
   ToolError,
 } from "./shared.js";
-import type { TemplateFiles } from "./template-files.js";
+import { methodTreeLimitsOf } from "./tree-limits.js";
+import type { TreeLimitsAware } from "./tree-limits.js";
 
 /**
  * The one projection kind this tool asks for. Concept-set-wide `types` is the
@@ -140,7 +138,7 @@ const codegenTargetSchema = z.enum(CODEGEN_TARGETS);
 
 export const mthdsCodegenInputSchema = {
   method_dir: methodDirInputSchema("one_selector"),
-  files: bundleFilesInputSchema.optional(),
+  files: methodFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
@@ -269,15 +267,14 @@ export interface MthdsCodegenInput {
   output_dir?: string;
 }
 
-/** The codegen request after `{ path }` resolution — what the checks and the API call consume. */
+/** The codegen request once its method is resolved — what the checks and the API call consume. */
 interface ResolvedCodegenRequest {
-  files: SubmittedFile[];
   /**
-   * The bundle's template files, keyed by the path a step names; sent beside
-   * `files` only. The generated code does not depend on them, but the route
-   * loads the bundle, and a step whose template file was not sent fails it.
+   * The method's tree, from `method_dir` or `files`. The generated code
+   * depends on its `.mthds` files alone, but the route loads the method, and a
+   * step whose template file the tree lacks fails it.
    */
-  resources?: TemplateFiles;
+  tree?: MethodTreeToSend;
   method_ref?: string;
   method_id?: string;
   target: CodegenTarget;
@@ -333,7 +330,7 @@ export interface CodegenClient {
   version?(): Promise<unknown>;
 }
 
-export interface CodegenContext extends ApiConfig, MethodVersionsAware {
+export interface CodegenContext extends ApiConfig, MethodVersionsAware, TreeLimitsAware {
   client?: CodegenClient;
   /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
@@ -371,9 +368,10 @@ const TARGET_LIST = CODEGEN_TARGETS.join(", ");
 
 const CODEGEN_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/codegen",
-  // An unresolvable closure is a produced 200 verdict on this route, so a
-  // 400/422 on a files request is the projection axes — and this client always
-  // sends `kind: "types"` and never a `pipe_ref`, which leaves `target`.
+  // An unresolvable closure is a produced 200 verdict on this route, and the
+  // refusals of the tree itself are read by `classifyError`, so a 400/422 on a
+  // tree request is the projection axes — and this client always sends
+  // `kind: "types"` and never a `pipe_ref`, which leaves `target`.
   badRequest: {
     location: "target",
     hint: `Pass target as one of ${TARGET_LIST}. If the target is right, the configured Pipelex API may predate it — check its version.`,
@@ -456,7 +454,7 @@ const WRITE_ARM_FALLBACK =
 
 /**
  * The `output_dir` request-shape checks, kept beside the selector checks
- * rather than inside `resolveSubmittedFiles` (which only ever sees files).
+ * rather than inside `resolveMethodSource` (which only ever sees the method).
  * The "no write root" refusal mirrors the `{ path }` one for a context without
  * a resolver: an affordance the contract advertises and this context cannot
  * serve, refused instructively with the server that can.
@@ -508,25 +506,29 @@ export async function generateMthdsCode(
   input: MthdsCodegenInput,
   context: CodegenContext = buildCodegenContext(),
 ): Promise<CodegenResult> {
-  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector");
+  const resolution = await resolveMethodSource(input, context.resolver, "one_selector", () =>
+    methodTreeLimitsOf(context, () => codegenClient(context)),
+  );
   if (resolution.errors.length > 0) {
     return errorResult(INVALID_REQUEST_SUMMARY, resolution.errors);
   }
 
+  const { method_dir: _methodDir, files: _files, ...selection } = input;
   const request: ResolvedCodegenRequest = {
-    ...input,
-    files: resolution.files,
-    resources: resolution.resources,
+    ...selection,
+    ...(resolution.tree === undefined ? {} : { tree: resolution.tree }),
   };
   const inputErrors = [
-    ...validateMethodSelectorRequest(request.files, request, { rule: "one_selector" }),
+    ...validateMethodSelectorRequest(request.tree !== undefined, request, {
+      rule: "one_selector",
+    }),
     ...validateCodegenWriteRequest(request.output_dir, context.saveRoot),
   ];
   if (inputErrors.length > 0) {
     return errorResult(INVALID_REQUEST_SUMMARY, inputErrors);
   }
 
-  return withFilesSent(await requestCodegen(request, context), resolution.sent);
+  return withFilesSent(await requestCodegen(request, context), request.tree);
 }
 
 /**
@@ -540,7 +542,7 @@ async function requestCodegen(
   // Classify options follow the request's selector shape — each failure
   // locates at the field that caused it.
   const classifyOptions =
-    request.files.length > 0
+    request.tree !== undefined
       ? CODEGEN_ERROR_OPTIONS
       : request.method_ref !== undefined
         ? CODEGEN_BY_REF_ERROR_OPTIONS
@@ -569,12 +571,12 @@ async function requestCodegen(
       auth: context.authError,
       baseUrlSource: context.baseUrlSource,
       forbidden: forbiddenTexture(context.authError),
-      bundleResources: hasTemplateFiles(request.resources),
+      methodTree: request.tree !== undefined,
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     const failed = errorResult(summaryForError(error), [error]);
     // A client that could not be built, or an argument refused before
-    // sending, sent no file of a folder.
+    // sending, sent no file of the tree.
     return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
 
@@ -1076,9 +1078,9 @@ function languageFor(artifactPath: string): string {
 // ignoring it. Every selector is a server pass-through — the runner resolves
 // an address, the hosted platform resolves an id; nothing is expanded here.
 function toCodegenRequest(request: ResolvedCodegenRequest): CodegenRequest {
-  const selector: Pick<CodegenRequest, "files" | "method_ref" | "method_id" | "resources"> =
-    request.files.length > 0
-      ? { files: toMthdsFileItems(request.files), ...resourcesOption(request.resources) }
+  const selector: Pick<CodegenRequest, "tree" | "method_ref" | "method_id"> =
+    request.tree !== undefined
+      ? { tree: request.tree.source }
       : request.method_ref !== undefined
         ? { method_ref: request.method_ref }
         : request.method_id !== undefined
@@ -1090,17 +1092,6 @@ function toCodegenRequest(request: ResolvedCodegenRequest): CodegenRequest {
 function unreachableSelector(): never {
   // The selector checks above guarantee a source.
   throw new Error("No method selector survived request validation.");
-}
-
-// The MCP surface spells the provenance label `uri` (mirroring mthds_validate);
-// the SDK's crate envelope spells it `source` (`MthdsFileItem`). Adapt here.
-function toMthdsFileItems(files: SubmittedFile[]): MthdsFileItem[] {
-  return files.map((file) => {
-    if (file.uri === undefined || file.uri === null) {
-      return { content: file.content };
-    }
-    return { content: file.content, source: file.uri };
-  });
 }
 
 function errorResult(summary: string, errors: ToolError[]): CodegenResult {

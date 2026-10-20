@@ -16,8 +16,8 @@
  * since a refusal is shown to a model and may be logged.
  *
  * Pure: it reads the bytes it is handed and nothing else, so every tool that
- * sends a tree (`L-261015-3a7958` extends it to the run tools) asks the same
- * question.
+ * sends a method's files, the save and every method-taking tool alike, asks
+ * the same question of the bytes it is about to send.
  */
 
 /** One file the guard refuses, and why, in words that quote nothing of the file. */
@@ -134,4 +134,23 @@ export function secretFindings(
     }
   }
   return findings;
+}
+
+/**
+ * The words of a refusal for what the guard found, naming each file as the
+ * caller can find it (`shown`) and what it matched, never the matched text.
+ * `again` closes the hint with what the caller does once the file is dealt
+ * with, such as "save again".
+ */
+export function secretRefusalText(
+  findings: readonly SecretFinding[],
+  shown: (treePath: string) => string,
+  again: string,
+): { message: string; hint: string } {
+  return {
+    message: `The method's files hold what looks like a secret, so nothing was sent: ${findings
+      .map((finding) => `${shown(finding.path)} (${finding.reason})`)
+      .join("; ")}.`,
+    hint: `A key belongs in the environment, never in a method: a method's files leave this machine for the Pipelex API, which keeps them in the organization's storage, where every member can read them. Move the secret out of the file, or keep the file out of the method with a .gitignore line inside its folder or a name starting with a dot, then ${again}. A file refused for its name alone that is no key, a .key file that is not a Keynote deck for one, can be renamed.`,
+  };
 }

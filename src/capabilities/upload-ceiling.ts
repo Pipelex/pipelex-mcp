@@ -14,8 +14,7 @@ import type { UploadInput, UploadedFile } from "@pipelex/sdk";
 
 /**
  * AWS API Gateway's hard HTTP API request quota. Every request to the hosted
- * API crosses it as JSON, so it bounds a bundle's template files too, which
- * ride a request base64-encoded (`template-files.ts`).
+ * API crosses it as JSON, an upload's base64 payload included.
  */
 export const GATEWAY_REQUEST_LIMIT_BYTES = 10 * 1024 * 1024;
 
@@ -53,11 +52,6 @@ export function formatSizeOverLimit(size: number, limit: number): { size: string
 /** A byte count in full, its thousands grouped: `7,864,321 bytes`. */
 function formatExactBytes(bytes: number): string {
   return `${String(bytes).replace(/\B(?=(\d{3})+(?!\d))/g, ",")} bytes`;
-}
-
-/** The length of `bytes` bytes once encoded in standard padded base64, as the SDK sends them. */
-export function base64EncodedLength(bytes: number): number {
-  return 4 * Math.ceil(bytes / 3);
 }
 
 /**

@@ -115,7 +115,7 @@ import {
 } from "./capabilities/validate.js";
 import type { MthdsValidateInput, ValidationContext } from "./capabilities/validate.js";
 import { defineTool } from "./tool-definition.js";
-import { localBundleFileResolver, localFileResolver } from "./files.js";
+import { localFileResolver, localMethodFileResolver } from "./files.js";
 
 /** The capability contexts the workshop's tools run over — one per capability it registers. */
 export interface LocalToolContexts {
@@ -140,16 +140,18 @@ export function buildLocalToolContexts(
   env: NodeJS.ProcessEnv = process.env,
   rootDir: string = process.cwd(),
 ): LocalToolContexts {
-  // The method-taking tools' `files` reads `.mthds` files and, as bytes, the
-  // template files their PipeDocGen steps name, and their `method_dir` reads a
-  // method folder through the same resolver, as mthds_save_method's
-  // `method_dir` does: a saved method is its folder's whole tree, listed by
-  // the MTHDS standard's membership rule (`capabilities/method-tree.ts`).
-  const bundleResolver = localBundleFileResolver(rootDir);
-  // A third, for mthds_run and mthds_prepare_inputs's `inputs_path`: `.json`
-  // only, capped, and worded to fall back on inline `inputs`. The bundle
-  // directory gate does not apply — inputs are not part of the bundle — but the
-  // working-directory containment does, as it does for every read.
+  // The method-taking tools' `files` reads `.mthds` files and the template
+  // files their PipeDocGen steps name as bytes, and their `method_dir` reads a
+  // method folder's whole tree, listed by the MTHDS standard's membership rule
+  // (`capabilities/method-tree.ts`), as mthds_save_method's `method_dir` does
+  // through its own copy, which words its refusals for a tool that takes a
+  // folder alone.
+  const methodResolver = localMethodFileResolver(rootDir);
+  const saveResolver = localMethodFileResolver(rootDir, { save: true });
+  // Another, for mthds_run and mthds_prepare_inputs's `inputs_path`: `.json`
+  // only, capped, and worded to fall back on inline `inputs`. Inputs are no
+  // part of a method's tree, but the working-directory containment holds, as
+  // it does for every read.
   const inputsResolver = localFileResolver(rootDir, ".json", {
     fallback: "or pass the inputs inline as inputs.",
     maxBytes: MAX_INPUTS_FILE_BYTES,
@@ -165,17 +167,18 @@ export function buildLocalToolContexts(
   // `GET /v1/version` once rather than once per tool. It keeps one answer per
   // base URL, since each tool call resolves its own (`method-versions.ts`).
   const methodVersions = createMethodVersionsMemories();
-  // One memory of the limits each platform stores a method's tree under,
-  // which only the save holds a folder to (`tree-limits.ts`): the
-  // method-taking tools list a folder under the workshop's scan bound alone.
+  // One memory of the limits each platform holds a method's tree to, shared
+  // by every tool that sends a tree (`tree-limits.ts`), so the workshop asks
+  // `GET /v1/version` once per platform rather than once per tool.
   const treeLimits = createTreeLimitsMemories();
 
-  // The save's validation leg sends the contents it already read, so this
-  // base's resolver serves mthds_validate alone.
+  // The save's validation leg sends the tree it already read, so this base's
+  // resolver serves mthds_validate alone.
   const validation: ValidationContext = {
     ...buildValidationContext(env),
-    resolver: bundleResolver,
+    resolver: methodResolver,
     methodVersions,
+    treeLimits,
   };
 
   return {
@@ -183,34 +186,37 @@ export function buildLocalToolContexts(
     models: buildModelsContext(env),
     catalogWrite: {
       ...buildCatalogWriteContext(env),
-      resolver: bundleResolver,
+      resolver: saveResolver,
       validation,
       saveRoot: rootDir,
       methodVersions,
       treeLimits,
     },
     validation: { ...validation, saveRoot: rootDir },
-    inputs: { ...buildInputsContext(env), resolver: bundleResolver, methodVersions },
+    inputs: { ...buildInputsContext(env), resolver: methodResolver, methodVersions, treeLimits },
     // `saveRoot` is the working directory on every writer: codegen resolves
     // `output_dir` against it, as the download tool resolves `dir`.
     codegen: {
       ...buildCodegenContext(env),
-      resolver: bundleResolver,
+      resolver: methodResolver,
       saveRoot: rootDir,
       methodVersions,
+      treeLimits,
     },
     // The workshop is co-located with the user's files, so its prepare tool
     // uploads file-bearing inputs (local paths, data: URLs, bytes).
     prepare: {
       ...buildPrepareContext(env),
-      resolver: bundleResolver,
+      resolver: methodResolver,
       methodVersions,
+      treeLimits,
       inputsResolver,
     },
     run: {
       ...buildRunContext(env),
-      resolver: bundleResolver,
+      resolver: methodResolver,
       methodVersions,
+      treeLimits,
       inputsResolver,
     },
     images: buildImagesContext(env),
@@ -316,11 +322,11 @@ export const mthdsValidateTool = defineTool({
   description:
     "Validate an MTHDS method with the Pipelex API — from its folder on disk passed as method_dir, from submitted files, from a published method's address passed as method_ref, " +
     "or from a registered method's catalog id (mt_…) passed as method_id. " +
-    "Supply exactly ONE of method_dir / files / method_ref / method_id — never several; for a method on disk, prefer method_dir, which finds its .mthds files and templates itself. " +
+    "Supply exactly ONE of method_dir / files / method_ref / method_id — never several; for a method on disk, prefer method_dir, which sends the folder's whole tree. " +
     "Addresses and ids are resolved server-side, so no bundle enters the conversation. A bare id validates the method's latest published version, mt_…@draft its draft (what mthds_save_method wrote) and mt_…@<n> version n; the result says which. " +
     "A valid verdict carries the main pipe's typed signature (main_pipe): its ref, each declared input with the concept it expects and how many items, and the concept it produces — " +
     "type a call site from that instead of guessing the shapes of a method you cannot read. " +
-    "A bundle whose PipeDocGen steps fill templates needs those template files: method_dir sends them, files takes them as { path } items, and a valid verdict's warnings carry what the template check found in them. " +
+    "A PipeDocGen step finds its template file in the tree sent: method_dir sends it with the rest of the folder, files takes it as a { path } item beside the .mthds file, and a valid verdict's warnings carry what the template check found in it. " +
     `A method_dir, or files given as { path }, also gets the method's flowchart written beside its files as ${GRAPH_PAGE_FILENAME}, a standalone page the user can open in a browser (graph_page: false skips it); the result says where.`,
   inputSchema: mthdsValidateInputSchema,
   outputSchema: mthdsValidateOutputSchema,
@@ -426,7 +432,7 @@ export const mthdsPrepareInputsTool = defineTool({
 export const mthdsRunTool = defineTool({
   name: "mthds_run",
   description:
-    "Start a durable run of a MTHDS method — from its folder on disk passed as method_dir (preferred for a method on disk: it sends the .mthds files and the templates its steps name), from submitted files, from a published method's address passed as method_ref " +
+    "Start a durable run of a MTHDS method — from its folder on disk passed as method_dir (preferred for a method on disk: it sends the folder's whole tree), from submitted files, from a published method's address passed as method_ref " +
     "(resolved server-side at the tag, with the fetched commit returned as provenance), " +
     "or from a registered method's catalog id (mt_…) passed as method_id. " +
     "method_ref is a complete run source and pairs with NOTHING; method_dir or files + method_id together is legal — the folder or files run and method_id is recorded as run-history linkage. " +

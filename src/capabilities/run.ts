@@ -39,17 +39,15 @@ import {
   MAX_IMAGE_CANDIDATE_ENTRIES,
   METHOD_REF_GRAMMAR,
   buildApiConfig,
-  bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
   filesSentSchema,
   imageCandidatesOf,
   inputsPathSchema,
   methodDirInputSchema,
+  methodFilesInputSchema,
   resolveInputsSource,
-  hasTemplateFiles,
-  resolveMethodFiles,
-  resourcesOption,
+  resolveMethodSource,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
@@ -66,11 +64,12 @@ import type {
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
-  SubmittedFile,
+  MethodTreeToSend,
   SubmittedFileInput,
   ToolError,
 } from "./shared.js";
-import type { TemplateFiles } from "./template-files.js";
+import { methodTreeLimitsOf } from "./tree-limits.js";
+import type { TreeLimitsAware } from "./tree-limits.js";
 import {
   START_MAY_HAVE_RUN_HINT,
   START_MAY_HAVE_RUN_SUMMARY,
@@ -115,7 +114,7 @@ export const runStatusSchema = z.enum(Object.keys(RUN_STATUS_SET) as [RunStatus,
 
 export const mthdsRunInputSchema = {
   method_dir: methodDirInputSchema("run_source"),
-  files: bundleFilesInputSchema.optional(),
+  files: methodFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
@@ -414,11 +413,10 @@ export interface MthdsRunInput {
   inputs_path?: string;
 }
 
-/** The run request after `{ path }` and `inputs_path` resolution — what the checks and the API call consume. */
+/** The run request once its method and `inputs_path` are resolved — what the checks and the API call consume. */
 interface ResolvedRunRequest {
-  files: SubmittedFile[];
-  /** The bundle's template files, keyed by the path a step names; sent beside `files` only. */
-  resources?: TemplateFiles;
+  /** The method's tree, from `method_dir` or `files`. */
+  tree?: MethodTreeToSend;
   method_ref?: string;
   method_id?: string;
   pipe_code?: string;
@@ -552,9 +550,9 @@ interface RunClient {
   version?(): Promise<unknown>;
 }
 
-export interface RunContext extends ApiConfig, MethodVersionsAware {
+export interface RunContext extends ApiConfig, MethodVersionsAware, TreeLimitsAware {
   client?: RunClient;
-  /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
+  /** Reads `{ path }` items and `method_dir` from disk; the workshop always sets it, and without one both are refused. */
   resolver?: FileResolver;
   /** Reads `inputs_path` from disk (local workshop, `.json` only); without one `inputs_path` is refused. */
   inputsResolver?: FileResolver;
@@ -678,7 +676,9 @@ export const RUN_RESULTS_ERROR_OPTIONS: ClassifyErrorOptions = {
 export function validateRunRequest(input: ResolvedRunRequest): ToolError[] {
   // The run rule: files + method_id is a legal pair (linkage), while
   // method_ref pairs with nothing — see SPEC.md → Method Selectors.
-  const errors = validateMethodSelectorRequest(input.files, input, { rule: "run_source" });
+  const errors = validateMethodSelectorRequest(input.tree !== undefined, input, {
+    rule: "run_source",
+  });
 
   if (input.pipe_code !== undefined && input.pipe_code.trim() === "") {
     errors.push({
@@ -1397,7 +1397,9 @@ export async function startMthdsRun(
   input: MthdsRunInput,
   context: RunContext = buildRunContext(),
 ): Promise<RunStartResult> {
-  const resolution = await resolveMethodFiles(input, context.resolver, "run_source");
+  const resolution = await resolveMethodSource(input, context.resolver, "run_source", () =>
+    methodTreeLimitsOf(context, () => runClient(context)),
+  );
   const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
     required: false,
   });
@@ -1408,11 +1410,16 @@ export async function startMthdsRun(
 
   // `inputs_path` is settled into `inputs` here and goes no further: the start
   // request cannot tell a loaded file from an inline object.
-  const { inputs_path: _inputsPath, inputs: _inlineInputs, ...selection } = input;
+  const {
+    inputs_path: _inputsPath,
+    inputs: _inlineInputs,
+    method_dir: _methodDir,
+    files: _files,
+    ...selection
+  } = input;
   const request: ResolvedRunRequest = {
     ...selection,
-    files: resolution.files,
-    resources: resolution.resources,
+    ...(resolution.tree === undefined ? {} : { tree: resolution.tree }),
     ...(inputsResolution.inputs === undefined ? {} : { inputs: inputsResolution.inputs }),
   };
   const inputErrors = validateRunRequest(request);
@@ -1429,14 +1436,14 @@ export async function startMthdsRun(
       ? RUN_START_BY_REF_ERROR_OPTIONS
       : request.method_id === undefined
         ? RUN_START_ERROR_OPTIONS
-        : request.files.length === 0
+        : request.tree === undefined
           ? RUN_START_BY_ID_ERROR_OPTIONS
           : RUN_START_MIXED_ERROR_OPTIONS;
 
   // Beside files, method_id is linkage only and must be bare; alone, it names
   // what runs, and its selector is planned against the platform's answer
   // (`method-versions.ts`).
-  if (request.method_id !== undefined && request.files.length > 0) {
+  if (request.method_id !== undefined && request.tree !== undefined) {
     const linkageError = linkageSuffixError(
       request.method_id,
       input.method_dir === undefined ? "files" : "method_dir",
@@ -1446,7 +1453,7 @@ export async function startMthdsRun(
     }
   }
 
-  return withFilesSent(await requestRunStart(request, classifyOptions, context), resolution.sent);
+  return withFilesSent(await requestRunStart(request, classifyOptions, context), request.tree);
 }
 
 /** One `POST /v1/start` for a request that passed its checks, and its acknowledgement's projection. */
@@ -1460,7 +1467,7 @@ async function requestRunStart(
   try {
     client = runClient(context);
     let sent = request;
-    if (request.method_id !== undefined && request.files.length === 0) {
+    if (request.method_id !== undefined && request.tree === undefined) {
       plan = planById(request.method_id, methodVersionsOf(context), client, {
         needBareReport: false,
       });
@@ -1481,12 +1488,12 @@ async function requestRunStart(
       ...classifyOptions,
       auth: context.authError,
       baseUrlSource: context.baseUrlSource,
-      bundleResources: hasTemplateFiles(request.resources),
+      methodTree: request.tree !== undefined,
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     const failed = startErrorResult(startSummaryForError(error), [error]);
     // A client that could not be built, or an argument refused before
-    // sending, sent no file of a folder.
+    // sending, sent no file of the tree.
     return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
 }
@@ -1607,26 +1614,19 @@ export async function getMthdsRunResults(
   }
 }
 
-// `/v1/start` takes no source labels — the MCP surface's `uri` feeds only our
-// own request-shape errors, so only the contents cross the wire. `method_id` is
-// a NAMED option (`PipelexStartOptions`), not an `extra` extension arg: since
+// The method's tree travels whole, inline or by hash, the files the
+// organization's storage lacks uploaded first by the SDK. `method_id` is a
+// NAMED option (`PipelexStartOptions`), not an `extra` extension arg: since
 // @pipelex/sdk 0.14.0 the client names it itself and refuses it on `extra`,
 // which merges last into the body and would let one argument arrive by two
 // paths with different validation. That refusal is a runtime throw rather than
 // a type error, so the old `extra: { method_id }` shape compiled and failed
 // only against the live API. The meaning is unchanged: alone it resolves the
-// stored method server-side; beside files it becomes the run-history linkage
-// while the inline contents are what runs.
+// stored method server-side; beside a tree it becomes the run-history linkage
+// while the tree is what runs.
 function toStartOptions(input: ResolvedRunRequest): PipelexStartOptions {
   return {
-    ...(input.files.length === 0
-      ? {}
-      : {
-          mthds_contents: input.files.map((file) => file.content),
-          // The template files the bundle's steps read, which the runner
-          // loads with the contents; they never travel without them.
-          ...resourcesOption(input.resources),
-        }),
+    ...(input.tree === undefined ? {} : { tree: input.tree.source }),
     ...(input.pipe_code === undefined ? {} : { pipe_code: input.pipe_code }),
     ...(input.inputs === undefined ? {} : { inputs: input.inputs }),
     // `method_ref` is the SDK's named Pipelex-API run-source extension

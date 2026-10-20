@@ -7,6 +7,7 @@ import {
   ArtifactOperationError,
   InputPreparationError,
   InvalidLocalSourceError,
+  MethodFileTransferError,
   MissingMainStuffError,
   PagingNotTerminatingError,
   PipelineRequestError,
@@ -20,11 +21,12 @@ import {
   UploadTransportError,
 } from "@pipelex/sdk";
 
+import { sha256Hex, treeDigest } from "mthds";
+
+import type { ListingLimits } from "./method-tree.js";
 import {
   ALLOW_HTTP_ENV,
   BULK_RESOLVE_ERROR_OPTIONS,
-  FILES_TOO_LARGE,
-  bundleFilesInputSchema,
   allowsPlainHttp,
   blueprintMainPipeRefOf,
   buildApiConfig,
@@ -34,13 +36,12 @@ import {
   DEFAULT_API_URL,
   DEFAULT_AUTH_HINT,
   ROLE_REFUSAL_HINT,
-  filesInputSchema,
   imageCandidatesOf,
   itemToolError,
   looksLikeImageKey,
+  methodFilesInputSchema,
   parseAllowHttpOverride,
-  resolveMethodFiles,
-  resolveSubmittedFiles,
+  resolveMethodSource,
   storageKeyOf,
   summaryForToolError,
   toolResultContent,
@@ -50,12 +51,13 @@ import {
   failedBeforeSending,
   markUnsent,
 } from "./shared.js";
-import type { ErrorSummaries, FileResolver, ToolError } from "./shared.js";
 import type {
-  BundleFileOnDisk,
-  SubmittedTemplate,
-  TemplateFilesResolution,
-} from "./template-files.js";
+  ErrorSummaries,
+  FileResolver,
+  MethodSourceInput,
+  ResolvedMethodSource,
+  ToolError,
+} from "./shared.js";
 
 describe("buildApiConfig", () => {
   it("defaults to the hosted API with no key", () => {
@@ -88,21 +90,23 @@ describe("buildApiConfig", () => {
   });
 });
 
-describe("filesInputSchema", () => {
-  it("accepts the content arm and the path arm", () => {
-    const parsed = filesInputSchema.parse([
+describe("methodFilesInputSchema", () => {
+  it("accepts the content arm and the path arm, a template path being a path item", () => {
+    const parsed = methodFilesInputSchema.parse([
       { content: 'domain = "demo"', uri: "bundle.mthds" },
       { path: "methods/bundle.mthds" },
+      { path: "methods/templates/invoice.xlsx" },
     ]);
 
     expect(parsed).toEqual([
       { content: 'domain = "demo"', uri: "bundle.mthds" },
       { path: "methods/bundle.mthds" },
+      { path: "methods/templates/invoice.xlsx" },
     ]);
   });
 
   it("parses a pathological both-keys item as the content arm, ignoring path", () => {
-    const parsed = filesInputSchema.parse([
+    const parsed = methodFilesInputSchema.parse([
       { content: 'domain = "demo"', path: "methods/bundle.mthds" },
     ]);
 
@@ -110,40 +114,167 @@ describe("filesInputSchema", () => {
   });
 
   it("rejects an item matching neither arm", () => {
-    expect(filesInputSchema.safeParse([{ uri: "bundle.mthds" }]).success).toBe(false);
+    expect(methodFilesInputSchema.safeParse([{ uri: "bundle.mthds" }]).success).toBe(false);
   });
 });
 
-function fakeResolver(contents: Record<string, string>): FileResolver {
+const encode = (text: string) => new TextEncoder().encode(text);
+const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
+
+/** The limits a deployment announces, the workshop's own standing in for none. */
+const LIMITS: ListingLimits = {
+  maxFileCount: 1_000,
+  maxFileSize: 32 * 1024 * 1024,
+  maxTotalSize: 64 * 1024 * 1024,
+};
+
+/** A limits reader that counts how often it was asked. */
+function limitsReader(limits: ListingLimits = LIMITS): (() => Promise<ListingLimits>) & {
+  calls: number;
+} {
+  const read = Object.assign(
+    () => {
+      read.calls += 1;
+      return Promise.resolve(limits);
+    },
+    { calls: 0 },
+  );
+  return read;
+}
+
+/**
+ * A resolver reading `{ path }` items from `files`, by path as submitted, each
+ * at `/w/<path>`: the working directory the fake stands for.
+ */
+function fakeFileResolver(files: Record<string, string | Uint8Array>): FileResolver & {
+  reads: { path: string; maxBytes: number }[];
+} {
+  const reads: { path: string; maxBytes: number }[] = [];
   return {
-    async resolve(path) {
-      const content = contents[path];
+    reads,
+    resolve: () => Promise.reject(new Error("a method's files are read as bytes")),
+    async readMethodFile(path, { maxBytes }) {
+      reads.push({ path, maxBytes });
+      const content = files[path.replace(/^\.\//, "")];
       if (content === undefined) {
         return { ok: false, message: `File not found: ${path}`, hint: "Check the path." };
       }
-      return { ok: true, content };
+      return {
+        ok: true,
+        absolute: `/w/${path.replace(/^\.\//, "")}`,
+        bytes: typeof content === "string" ? encode(content) : content,
+      };
     },
   };
 }
 
-describe("resolveSubmittedFiles", () => {
-  it("passes content items through untouched", async () => {
-    const files = [
-      { content: 'domain = "demo"', uri: "bundle.mthds" },
-      { content: 'main_pipe = "main"' },
-    ];
+/** The tree a resolution sends, file by file: tree path, where the caller finds it, and its text. */
+function sentFiles(resolution: ResolvedMethodSource) {
+  return resolution.tree?.files.map((file) => ({
+    treePath: file.treePath,
+    shown: file.shown,
+    onDisk: file.onDisk,
+    text: decode(file.bytes),
+  }));
+}
 
-    const resolution = await resolveSubmittedFiles(files);
+describe("resolveMethodSource on files", () => {
+  it("sends inline items at the tree's top, under their uri's file name or bundle.mthds, asking no limits", async () => {
+    const limits = limitsReader();
+    const resolution = await resolveMethodSource(
+      {
+        files: [
+          { content: 'domain = "a"', uri: "methods/a.mthds" },
+          { content: 'domain = "b"' },
+          { content: 'domain = "c"', uri: "https://example.com/x/report.html" },
+          { content: 'domain = "d"', uri: "C:\\work\\a.mthds" },
+        ],
+      },
+      undefined,
+      "one_selector",
+      limits,
+    );
 
     expect(resolution.errors).toEqual([]);
-    expect(resolution.files).toEqual(files);
+    expect(sentFiles(resolution)).toEqual([
+      { treePath: "a.mthds", shown: "a.mthds", onDisk: false, text: 'domain = "a"' },
+      { treePath: "bundle-2.mthds", shown: "bundle-2.mthds", onDisk: false, text: 'domain = "c"' },
+      { treePath: "bundle-3.mthds", shown: "bundle-3.mthds", onDisk: false, text: 'domain = "d"' },
+      { treePath: "bundle.mthds", shown: "bundle.mthds", onDisk: false, text: 'domain = "b"' },
+    ]);
+    expect(resolution.tree?.fromFolder).toBe(false);
+    expect(limits.calls).toBe(0);
   });
 
-  it("rejects path items instructively when no resolver is provided (hosted)", async () => {
-    const resolution = await resolveSubmittedFiles([
-      { content: 'domain = "demo"' },
-      { path: "methods/bundle.mthds" },
+  it("roots the { path } items at the deepest directory holding them all, each shown as given", async () => {
+    const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    const resolver = fakeFileResolver({
+      "methods/invoice/invoice.mthds": 'domain = "invoice"',
+      "methods/invoice/templates/invoice.xlsx": XLSX,
+    });
+    const limits = limitsReader();
+
+    const resolution = await resolveMethodSource(
+      {
+        files: [
+          { path: "methods/invoice/templates/invoice.xlsx" },
+          { path: "methods/invoice/invoice.mthds" },
+          { path: "./methods/invoice/invoice.mthds" },
+        ],
+      },
+      resolver,
+      "one_selector",
+      limits,
+    );
+
+    expect(resolution.errors).toEqual([]);
+    expect(resolution.tree?.files.map(({ treePath, shown }) => ({ treePath, shown }))).toEqual([
+      { treePath: "invoice.mthds", shown: "methods/invoice/invoice.mthds" },
+      { treePath: "templates/invoice.xlsx", shown: "methods/invoice/templates/invoice.xlsx" },
     ]);
+    // Held to the deployment's limit on one file, asked once.
+    expect(limits.calls).toBe(1);
+    expect(resolver.reads.map((read) => read.maxBytes)).toEqual([
+      LIMITS.maxFileSize,
+      LIMITS.maxFileSize,
+      LIMITS.maxFileSize,
+    ]);
+
+    // The SDK's tree, built from the same bytes.
+    const source = resolution.tree!.source;
+    const listing = [
+      { path: "invoice.mthds", bytes: encode('domain = "invoice"') },
+      { path: "templates/invoice.xlsx", bytes: XLSX },
+    ].map(({ path, bytes }) => ({ path, size: bytes.byteLength, sha256: sha256Hex(bytes) }));
+    expect(source.files).toEqual(listing);
+    expect(source.digest).toBe(treeDigest(listing));
+    expect(await source.readFile("templates/invoice.xlsx")).toEqual(XLSX);
+    await expect(source.readFile("absent.mthds")).rejects.toThrow("not a file");
+  });
+
+  it("gives an inline item another name when a { path } item takes its uri's", async () => {
+    const resolution = await resolveMethodSource(
+      {
+        files: [{ path: "m/main.mthds" }, { content: 'domain = "x"', uri: "elsewhere/MAIN.mthds" }],
+      },
+      fakeFileResolver({ "m/main.mthds": 'domain = "m"' }),
+      "one_selector",
+      limitsReader(),
+    );
+
+    expect(resolution.tree?.files.map((file) => file.treePath)).toEqual([
+      "bundle.mthds",
+      "main.mthds",
+    ]);
+  });
+
+  it("refuses path items instructively when no resolver is provided (hosted)", async () => {
+    const resolution = await resolveMethodSource(
+      { files: [{ content: 'domain = "demo"' }, { path: "methods/bundle.mthds" }] },
+      undefined,
+      "one_selector",
+      limitsReader(),
+    );
 
     expect(resolution.errors).toHaveLength(1);
     const error = resolution.errors[0];
@@ -157,310 +288,195 @@ describe("resolveSubmittedFiles", () => {
     expect(error?.retryable).toBe(false);
   });
 
-  it("rejects a blank path on both deployments, before the resolver runs", async () => {
-    let resolverCalled = false;
-    const resolver: FileResolver = {
-      async resolve() {
-        resolverCalled = true;
-        return { ok: true, content: "x" };
-      },
-    };
-
-    for (const activeResolver of [undefined, resolver]) {
-      const resolution = await resolveSubmittedFiles([{ path: "  " }], activeResolver);
-
-      expect(resolution.errors).toHaveLength(1);
-      expect(resolution.errors[0]?.class).toBe("input_domain");
-      expect(resolution.errors[0]?.location).toBe("files[0].path");
-      expect(resolution.errors[0]?.message).toMatch(/must not be empty/);
-    }
-    expect(resolverCalled).toBe(false);
-  });
-
-  it("resolves path items through the resolver, carrying the path as uri", async () => {
-    const resolution = await resolveSubmittedFiles(
-      [{ content: 'domain = "demo"', uri: "inline.mthds" }, { path: "methods/bundle.mthds" }],
-      fakeResolver({ "methods/bundle.mthds": 'main_pipe = "main"' }),
+  it("refuses a blank path, an empty content and a blank uri, before the resolver runs", async () => {
+    const resolver = fakeFileResolver({});
+    const resolution = await resolveMethodSource(
+      { files: [{ path: "  " }, { content: " " }, { content: "x", uri: "" }] },
+      resolver,
+      "run_source",
+      limitsReader(),
     );
 
-    expect(resolution.errors).toEqual([]);
-    expect(resolution.files).toEqual([
-      { content: 'domain = "demo"', uri: "inline.mthds" },
-      { content: 'main_pipe = "main"', uri: "methods/bundle.mthds" },
+    expect(resolution.errors.map((error) => [error.location, error.message])).toEqual([
+      ["files[0].path", "File path must not be empty."],
+      ["files[1].content", "File content must not be empty."],
+      ["files[2].uri", "File uri must not be empty when supplied."],
     ]);
+    expect(resolver.reads).toEqual([]);
+    expect(resolution.tree).toBeUndefined();
   });
 
   it("maps resolver failures to input_domain errors at the item's path", async () => {
-    const resolution = await resolveSubmittedFiles(
-      [{ path: "missing.mthds" }, { path: "also-missing.mthds" }],
-      fakeResolver({}),
+    const resolution = await resolveMethodSource(
+      { files: [{ path: "missing.mthds" }, { path: "also-missing.mthds" }] },
+      fakeFileResolver({}),
+      "one_selector",
+      limitsReader(),
     );
 
-    expect(resolution.errors).toHaveLength(2);
-    expect(resolution.errors.map((error) => error.location)).toEqual([
-      "files[0].path",
-      "files[1].path",
-    ]);
-    expect(resolution.errors[0]?.class).toBe("input_domain");
-    expect(resolution.errors[0]?.message).toBe("File not found: missing.mthds");
-    expect(resolution.errors[0]?.hint).toBe("Check the path.");
-    expect(resolution.errors[0]?.retryable).toBe(false);
-  });
-});
-
-/** A `.mthds` file holding one `PipeDocGen` step that fills `templateFile`. */
-function docGenBundle(templateFile: string): string {
-  return [
-    'domain = "invoice"',
-    "",
-    "[pipe.render_invoice]",
-    'type = "PipeDocGen"',
-    'description = "Fill the invoice workbook"',
-    'inputs = { invoice = "Invoice" }',
-    'output = "Document"',
-    `template_file = "${templateFile}"`,
-    "",
-  ].join("\n");
-}
-
-/**
- * A resolver with the template arm over in-memory `.mthds` files: it records
- * what the core hands it and answers with `outcome`.
- */
-function fakeBundleResolver(
-  contents: Record<string, string>,
-  outcome: TemplateFilesResolution,
-): FileResolver & {
-  calls: {
-    templates: readonly SubmittedTemplate[];
-    bundle: readonly BundleFileOnDisk[];
-    requestBytes: number;
-  }[];
-} {
-  const calls: {
-    templates: readonly SubmittedTemplate[];
-    bundle: readonly BundleFileOnDisk[];
-    requestBytes: number;
-  }[] = [];
-  return {
-    ...fakeResolver(contents),
-    calls,
-    async resolveTemplates(templates, bundle, requestBytes) {
-      calls.push({ templates, bundle, requestBytes });
-      return outcome;
-    },
-  };
-}
-
-describe("bundleFilesInputSchema", () => {
-  it("takes the shape of the plain files schema, a template path being a path item", () => {
-    const parsed = bundleFilesInputSchema.parse([
-      { content: 'domain = "demo"', uri: "bundle.mthds" },
-      { path: "methods/bundle.mthds" },
-      { path: "methods/templates/invoice.xlsx" },
-    ]);
-
-    expect(parsed).toEqual([
-      { content: 'domain = "demo"', uri: "bundle.mthds" },
-      { path: "methods/bundle.mthds" },
-      { path: "methods/templates/invoice.xlsx" },
-    ]);
-  });
-});
-
-describe("resolveSubmittedFiles with template files", () => {
-  const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
-  const BUNDLE = docGenBundle("templates/invoice.xlsx");
-
-  it("hands the templates over last, with what each .mthds file's steps name, and sends what comes back", async () => {
-    const resolver = fakeBundleResolver(
-      { "methods/invoice.mthds": BUNDLE },
-      { ok: true, resources: { "templates/invoice.xlsx": XLSX } },
-    );
-
-    const resolution = await resolveSubmittedFiles(
-      [
-        { path: "methods/templates/invoice.xlsx" },
-        { path: "methods/invoice.mthds" },
-        { content: 'domain = "é"' },
-      ],
-      resolver,
-    );
-
-    expect(resolution.errors).toEqual([]);
-    expect(resolution.files).toEqual([
-      { content: BUNDLE, uri: "methods/invoice.mthds" },
-      { content: 'domain = "é"' },
-    ]);
-    expect(resolution.resources).toEqual({ "templates/invoice.xlsx": XLSX });
-    expect(resolver.calls).toEqual([
-      {
-        templates: [{ index: 0, path: "methods/templates/invoice.xlsx" }],
-        bundle: [{ path: "methods/invoice.mthds", named: ["templates/invoice.xlsx"] }],
-        // The method's text rides the same request, inline files and multibyte characters included.
-        requestBytes: Buffer.byteLength(BUNDLE) + Buffer.byteLength('domain = "é"'),
-      },
-    ]);
-  });
-
-  it("sends no template files when none was submitted, and never asks for them", async () => {
-    const resolver = fakeBundleResolver(
-      { "methods/invoice.mthds": BUNDLE },
-      { ok: true, resources: {} },
-    );
-
-    const resolution = await resolveSubmittedFiles([{ path: "methods/invoice.mthds" }], resolver);
-
-    expect(resolution.errors).toEqual([]);
-    expect(resolution.resources).toEqual({});
-    expect(resolver.calls).toEqual([]);
-  });
-
-  it("reads no template file when another item is refused", async () => {
-    // Which step names a template depends on the .mthds files, so a request
-    // with a refused item is refused for it alone, and nothing more is read.
-    const resolver = fakeBundleResolver(
-      { "methods/invoice.mthds": BUNDLE },
-      { ok: true, resources: { "templates/invoice.xlsx": XLSX } },
-    );
-
-    const resolution = await resolveSubmittedFiles(
-      [
-        { path: "methods/invoice.mthds" },
-        { path: "methods/missing.mthds" },
-        { path: "methods/templates/invoice.xlsx" },
-      ],
-      resolver,
-    );
-
-    expect(resolution.errors.map((error) => error.location)).toEqual(["files[1].path"]);
-    expect(resolver.calls).toEqual([]);
-  });
-
-  it("refuses a template file with no .mthds path to be named from, without asking for it", async () => {
-    const resolver = fakeBundleResolver({}, { ok: true, resources: {} });
-
-    const resolution = await resolveSubmittedFiles(
-      [{ content: BUNDLE }, { path: "invoice.xlsx" }],
-      resolver,
-    );
-
-    expect(resolution.errors).toHaveLength(1);
-    expect(resolution.errors[0]).toMatchObject({
-      class: "input_domain",
-      location: "files[1].path",
-      retryable: false,
-    });
-    expect(resolution.errors[0]?.hint).toContain("{ path }");
-    expect(resolver.calls).toEqual([]);
-  });
-
-  it("refuses an inline item labelled as a template file", async () => {
-    const resolution = await resolveSubmittedFiles(
-      [{ content: "<p>x</p>", uri: "templates/Report.HTML" }],
-      fakeBundleResolver({}, { ok: true, resources: {} }),
-    );
-
-    expect(resolution.errors).toHaveLength(1);
-    expect(resolution.errors[0]).toMatchObject({
-      class: "input_domain",
-      location: "files[0].uri",
-    });
-    expect(resolution.errors[0]?.hint).toContain("{ path }");
-  });
-
-  it("locates the resolver's refusals at their item, or at files as a whole", async () => {
-    const resolution = await resolveSubmittedFiles(
-      [{ path: "m/invoice.mthds" }, { path: "m/method-graph.html" }],
-      fakeBundleResolver(
-        { "m/invoice.mthds": BUNDLE },
-        {
-          ok: false,
-          refusals: [
-            { message: "33 template files would be sent.", hint: "Send fewer." },
-            { index: 1, message: "Named by no step.", hint: "Drop it." },
-          ],
-        },
-      ),
-    );
-
-    expect(resolution.resources).toEqual({});
     expect(resolution.errors).toEqual([
       {
         class: "input_domain",
-        location: "files",
-        message: "33 template files would be sent.",
-        hint: "Send fewer.",
+        location: "files[0].path",
+        message: "File not found: missing.mthds",
+        hint: "Check the path.",
         retryable: false,
       },
-      {
-        class: "input_domain",
-        location: "files[1].path",
-        message: "Named by no step.",
-        hint: "Drop it.",
-        retryable: false,
-      },
+      expect.objectContaining({ location: "files[1].path" }),
     ]);
   });
 
-  it("leaves a template path to the text arm on a resolver without the template arm", async () => {
-    // mthds_save_method's `files`: the catalog stores no template file, so
-    // its resolver's own extension gate refuses one, and an inline item
-    // labelled with a template suffix is only a label.
-    const resolution = await resolveSubmittedFiles(
-      [{ content: 'domain = "m"', uri: "m/bundle.html" }, { path: "m/invoice.xlsx" }],
-      fakeResolver({}),
+  it("refuses a name no tree holds, and two names that collide, at their items", async () => {
+    const hidden = await resolveMethodSource(
+      { files: [{ path: "m/main.mthds" }, { path: "m/.drafts/old.mthds" }] },
+      fakeFileResolver({ "m/main.mthds": "a", "m/.drafts/old.mthds": "b" }),
+      "one_selector",
+      limitsReader(),
+    );
+    expect(hidden.errors).toEqual([
+      expect.objectContaining({ location: "files[1].path", class: "input_domain" }),
+    ]);
+    expect(hidden.errors[0]?.message).toContain(".drafts/old.mthds");
+
+    const colliding = await resolveMethodSource(
+      { files: [{ path: "m/Main.mthds" }, { path: "m/main.mthds" }] },
+      fakeFileResolver({ "m/Main.mthds": "a", "m/main.mthds": "b" }),
+      "one_selector",
+      limitsReader(),
+    );
+    expect(colliding.errors.map((error) => error.location)).toEqual([
+      "files[0].path",
+      "files[1].path",
+    ]);
+    expect(colliding.errors[0]?.hint).toContain("case-insensitive");
+  });
+
+  it("holds the tree to the deployment's file count and total size", async () => {
+    const files = { "a.mthds": "aaaa", "b.mthds": "bbbb" };
+    const counted = await resolveMethodSource(
+      { files: [{ path: "a.mthds" }, { path: "b.mthds" }] },
+      fakeFileResolver(files),
+      "one_selector",
+      limitsReader({ ...LIMITS, maxFileCount: 1 }),
+    );
+    expect(counted.errors).toEqual([expect.objectContaining({ location: "files" })]);
+    expect(counted.errors[0]?.message).toContain("past the limit of 1");
+
+    const weighed = await resolveMethodSource(
+      { files: [{ path: "a.mthds" }, { content: "cccc" }] },
+      fakeFileResolver(files),
+      "one_selector",
+      limitsReader({ ...LIMITS, maxTotalSize: 7 }),
+    );
+    expect(weighed.errors).toEqual([expect.objectContaining({ location: "files" })]);
+    expect(weighed.errors[0]?.message).toContain("8 bytes");
+  });
+
+  it("refuses a file holding what looks like a secret at its item, quoting nothing of it", async () => {
+    const key = "AKIA" + "ABCDEFGHIJKLMNOP";
+    const resolution = await resolveMethodSource(
+      {
+        files: [
+          { path: "m/main.mthds" },
+          { path: "m/templates/notes.html" },
+          { content: `api_key = "${key}"` },
+        ],
+      },
+      fakeFileResolver({ "m/main.mthds": 'domain = "m"', "m/templates/notes.html": key }),
+      "one_selector",
+      limitsReader(),
     );
 
-    expect(resolution.files).toEqual([{ content: 'domain = "m"', uri: "m/bundle.html" }]);
-    expect(resolution.resources).toEqual({});
-    expect(resolution.errors.map((error) => error.location)).toEqual(["files[1].path"]);
+    expect(resolution.errors.map((error) => error.location)).toEqual([
+      "files[1].path",
+      "files[2].content",
+    ]);
+    expect(resolution.errors[0]?.message).toContain(
+      "m/templates/notes.html (it holds an AWS access key id)",
+    );
+    expect(resolution.errors[0]?.hint).toContain("call the tool again");
+    for (const error of resolution.errors) {
+      expect(JSON.stringify(error)).not.toContain(key);
+    }
+    expect(resolution.tree).toBeUndefined();
   });
 });
 
-describe("resolveMethodFiles", () => {
-  const SENT = ["m/main.mthds", "m/templates/a.html"];
-  const folderResolver: FileResolver = {
+/** A folder resolver over in-memory files, recording the limits each read was held to. */
+function fakeFolderResolver(
+  files: Record<string, string | Uint8Array>,
+  overrides: Partial<FileResolver> = {},
+): FileResolver & { limits: ListingLimits[] } {
+  const limits: ListingLimits[] = [];
+  return {
+    limits,
     resolve: () => Promise.reject(new Error("a folder is not read file by file")),
-    resolveMethodDir: (methodDir) =>
-      Promise.resolve({
-        ok: true,
-        files: [{ path: `${methodDir}/main.mthds`, content: 'domain = "demo"' }],
-        resources: { "templates/a.html": new Uint8Array([60, 112, 62]) },
-        sent: SENT,
-      }),
+    locateMethodDir: (methodDir) =>
+      Promise.resolve({ ok: true, folder: `/w/${methodDir}`, methodDir }),
+    readMethodTree: (_location, options) => {
+      limits.push(options.limits);
+      const bytes = new Map(
+        Object.entries(files).map(([path, content]) => [
+          path,
+          typeof content === "string" ? encode(content) : content,
+        ]),
+      );
+      const listing = [...bytes].map(([path, read]) => ({
+        path,
+        size: read.byteLength,
+        sha256: sha256Hex(read),
+      }));
+      return Promise.resolve({ ok: true, files: listing, digest: treeDigest(listing), bytes });
+    },
+    ...overrides,
   };
+}
 
-  it("resolves the files union as before when no folder is passed", async () => {
-    const resolution = await resolveMethodFiles(
-      { files: [{ content: 'domain = "demo"' }] },
-      folderResolver,
+describe("resolveMethodSource on method_dir", () => {
+  const FOLDER = { "main.mthds": 'domain = "demo"', "templates/a.html": "<p>{{ x }}</p>" };
+
+  it("resolves nothing when the method is named by a selector", async () => {
+    const limits = limitsReader();
+    const resolution = await resolveMethodSource(
+      { method_ref: "github.com/acme/methods/invoice" },
+      fakeFolderResolver(FOLDER),
       "one_selector",
+      limits,
     );
 
-    expect(resolution).toEqual({
-      files: [{ content: 'domain = "demo"' }],
-      resources: {},
-      errors: [],
-    });
+    expect(resolution).toEqual({ errors: [] });
+    expect(limits.calls).toBe(0);
   });
 
-  it("hands a folder's files, templates and listing on, each file labelled by its path", async () => {
-    const resolution = await resolveMethodFiles({ method_dir: "m" }, folderResolver, "run_source");
+  it("sends the folder's whole tree under the deployment's limits, each file shown under method_dir", async () => {
+    const resolver = fakeFolderResolver(FOLDER);
+    const resolution = await resolveMethodSource(
+      { method_dir: "m" },
+      resolver,
+      "run_source",
+      limitsReader(),
+    );
 
-    expect(resolution).toEqual({
-      files: [{ content: 'domain = "demo"', uri: "m/main.mthds" }],
-      resources: { "templates/a.html": new Uint8Array([60, 112, 62]) },
-      errors: [],
-      sent: SENT,
-    });
+    expect(resolution.errors).toEqual([]);
+    expect(resolution.tree?.fromFolder).toBe(true);
+    expect(resolution.tree?.files.map(({ treePath, shown }) => ({ treePath, shown }))).toEqual([
+      { treePath: "main.mthds", shown: "m/main.mthds" },
+      { treePath: "templates/a.html", shown: "m/templates/a.html" },
+    ]);
+    expect(resolution.tree?.source.files.map((file) => file.path)).toEqual([
+      "main.mthds",
+      "templates/a.html",
+    ]);
+    expect(resolver.limits).toEqual([LIMITS]);
   });
 
   it("refuses a blank folder before reading anything", async () => {
-    const resolution = await resolveMethodFiles(
+    const resolver = fakeFolderResolver(FOLDER);
+    const resolution = await resolveMethodSource(
       { method_dir: "  " },
-      { resolve: () => Promise.reject(new Error("never")) },
+      resolver,
       "one_selector",
+      limitsReader(),
     );
 
     expect(resolution.errors).toEqual([
@@ -470,18 +486,20 @@ describe("resolveMethodFiles", () => {
         message: "method_dir must not be empty when supplied.",
       }),
     ]);
+    expect(resolver.limits).toEqual([]);
   });
 
   it("refuses a folder beside files or an address on every tool, at the second field", async () => {
     for (const rule of ["one_selector", "run_source"] as const) {
-      const resolution = await resolveMethodFiles(
+      const resolution = await resolveMethodSource(
         {
           method_dir: "m",
           files: [{ content: 'domain = "demo"' }],
           method_ref: "github.com/acme/methods/invoice",
         },
-        folderResolver,
+        fakeFolderResolver(FOLDER),
         rule,
+        limitsReader(),
       );
 
       expect(resolution.errors.map((error) => error.location)).toEqual([
@@ -491,31 +509,38 @@ describe("resolveMethodFiles", () => {
       expect(resolution.errors[0]?.message).toContain(
         "method_dir and files are mutually exclusive",
       );
-      expect(resolution.sent).toBeUndefined();
+      expect(resolution.tree).toBeUndefined();
     }
   });
 
   it("refuses a folder beside a method_id on the tooling tools, and pairs them on a run", async () => {
-    const tooling = await resolveMethodFiles(
+    const tooling = await resolveMethodSource(
       { method_dir: "m", method_id: "mt_abc123" },
-      folderResolver,
+      fakeFolderResolver(FOLDER),
       "one_selector",
+      limitsReader(),
     );
     expect(tooling.errors).toEqual([
       expect.objectContaining({ location: "method_id", retryable: false }),
     ]);
 
-    const run = await resolveMethodFiles(
+    const run = await resolveMethodSource(
       { method_dir: "m", method_id: "mt_abc123" },
-      folderResolver,
+      fakeFolderResolver(FOLDER),
       "run_source",
+      limitsReader(),
     );
     expect(run.errors).toEqual([]);
-    expect(run.sent).toEqual(SENT);
+    expect(run.tree?.files).toHaveLength(2);
   });
 
   it("says when a deployment cannot read a folder", async () => {
-    const resolution = await resolveMethodFiles({ method_dir: "m" }, undefined, "one_selector");
+    const resolution = await resolveMethodSource(
+      { method_dir: "m" },
+      undefined,
+      "one_selector",
+      limitsReader(),
+    );
 
     expect(resolution.errors).toEqual([
       expect.objectContaining({
@@ -527,37 +552,63 @@ describe("resolveMethodFiles", () => {
     ]);
   });
 
-  it("locates every refusal of the folder at method_dir", async () => {
-    const refusing: FileResolver = {
-      resolve: () => Promise.reject(new Error("never")),
-      resolveMethodDir: () =>
-        Promise.resolve({
-          ok: false,
-          refusals: [
-            { message: "first", hint: "one" },
-            { message: "second", hint: "two" },
-          ],
+  it("locates every refusal of the folder at method_dir, the locating and the reading", async () => {
+    const unlocated = await resolveMethodSource(
+      { method_dir: "m" },
+      fakeFolderResolver(FOLDER, {
+        locateMethodDir: () =>
+          Promise.resolve({ ok: false, refusals: [{ message: "first", hint: "one" }] }),
+      }),
+      "one_selector",
+      limitsReader(),
+    );
+    const unread = await resolveMethodSource(
+      { method_dir: "m" },
+      fakeFolderResolver(FOLDER, {
+        readMethodTree: () =>
+          Promise.resolve({
+            ok: false,
+            refusals: [
+              { message: "second", hint: "two" },
+              { message: "third", hint: "three" },
+            ],
+          }),
+      }),
+      "one_selector",
+      limitsReader(),
+    );
+
+    expect([...unlocated.errors, ...unread.errors]).toEqual(
+      ["first", "second", "third"].map((message) =>
+        expect.objectContaining({
+          class: "input_domain",
+          location: "method_dir",
+          message,
+          retryable: false,
         }),
-    };
+      ),
+    );
+  });
 
-    const resolution = await resolveMethodFiles({ method_dir: "m" }, refusing, "one_selector");
+  it("refuses a folder holding what looks like a secret, naming each file under method_dir", async () => {
+    const resolution = await resolveMethodSource(
+      { method_dir: "m" },
+      fakeFolderResolver({
+        ...FOLDER,
+        "keys/deploy.key": "not a zip",
+        "notes.md": "token ghp_" + "a".repeat(36),
+      }),
+      "one_selector",
+      limitsReader(),
+    );
 
-    expect(resolution.errors).toEqual([
-      {
-        class: "input_domain",
-        location: "method_dir",
-        message: "first",
-        hint: "one",
-        retryable: false,
-      },
-      {
-        class: "input_domain",
-        location: "method_dir",
-        message: "second",
-        hint: "two",
-        retryable: false,
-      },
-    ]);
+    expect(resolution.errors).toHaveLength(1);
+    expect(resolution.errors[0]).toMatchObject({ class: "input_domain", location: "method_dir" });
+    expect(resolution.errors[0]?.message).toContain(
+      "m/keys/deploy.key (it is named like a key file",
+    );
+    expect(resolution.errors[0]?.message).toContain("m/notes.md (it holds a GitHub token)");
+    expect(resolution.tree).toBeUndefined();
   });
 });
 
@@ -570,13 +621,18 @@ describe("withFilesSent", () => {
     retryable: false,
   });
 
-  it("returns a result whose method came from files unchanged", () => {
+  async function treeOf(source: MethodSourceInput, resolver?: FileResolver) {
+    const resolution = await resolveMethodSource(source, resolver, "one_selector", limitsReader());
+    return resolution.tree!;
+  }
+
+  it("returns a result that sent no tree unchanged", () => {
     const result = { structuredContent: { status: "error", errors: [error("files")] } };
 
     expect(withFilesSent(result, undefined)).toBe(result);
   });
 
-  it("lists the files sent and relocates the errors that named files to method_dir", () => {
+  it("lists a folder's files and relocates the errors that named files to method_dir", async () => {
     const result: {
       structuredContent: { status: string; errors?: ToolError[]; files_sent?: string[] };
     } = {
@@ -586,7 +642,10 @@ describe("withFilesSent", () => {
       },
     };
 
-    const listed = withFilesSent(result, ["m/main.mthds"]);
+    const listed = withFilesSent(
+      result,
+      await treeOf({ method_dir: "m" }, fakeFolderResolver({ "main.mthds": "x" })),
+    );
 
     expect(listed.structuredContent.files_sent).toEqual(["m/main.mthds"]);
     expect(listed.structuredContent.errors?.map((item) => item.location)).toEqual([
@@ -597,12 +656,32 @@ describe("withFilesSent", () => {
     ]);
   });
 
-  it("lists no file on a result marked unsent, and still relocates its errors", () => {
+  it("lists the files given and leaves their errors where they are", async () => {
+    const result: {
+      structuredContent: { status: string; errors?: ToolError[]; files_sent?: string[] };
+    } = { structuredContent: { status: "error", errors: [error("files")] } };
+
+    const listed = withFilesSent(
+      result,
+      await treeOf(
+        { files: [{ path: "m/main.mthds" }, { content: "y" }] },
+        fakeFileResolver({ "m/main.mthds": "x" }),
+      ),
+    );
+
+    expect(listed.structuredContent.files_sent).toEqual(["bundle.mthds", "m/main.mthds"]);
+    expect(listed.structuredContent.errors?.[0]?.location).toBe("files");
+  });
+
+  it("lists no file on a result marked unsent, and still relocates its errors", async () => {
     const result: {
       structuredContent: { status: string; errors?: ToolError[]; files_sent?: string[] };
     } = markUnsent({ structuredContent: { status: "error", errors: [error("files")] } });
 
-    const bare = withFilesSent(result, ["m/main.mthds"]);
+    const bare = withFilesSent(
+      result,
+      await treeOf({ method_dir: "m" }, fakeFolderResolver({ "main.mthds": "x" })),
+    );
 
     expect(bare.structuredContent).not.toHaveProperty("files_sent");
     expect(bare.structuredContent.errors?.[0]?.location).toBe("method_dir");
@@ -616,19 +695,22 @@ describe("withFilesSent", () => {
     expect(failedBeforeSending(new Error("anything else"))).toBe(false);
   });
 
-  it("lists the files sent on a produced verdict, which carries no errors", () => {
+  it("lists the files sent on a produced verdict, which carries no errors", async () => {
     const result: { structuredContent: { status: string; files_sent?: string[] } } = {
       structuredContent: { status: "ok" },
     };
 
-    const listed = withFilesSent(result, ["m/main.mthds"]);
+    const listed = withFilesSent(
+      result,
+      await treeOf({ method_dir: "m" }, fakeFolderResolver({ "main.mthds": "x" })),
+    );
 
     expect(listed.structuredContent).toEqual({ status: "ok", files_sent: ["m/main.mthds"] });
   });
 });
 
 describe("toolResultContent", () => {
-  it("closes the summary with every file a folder sent, after the errors", () => {
+  it("closes the summary with every file a tree sent, after the errors", () => {
     const [content] = toolResultContent(
       "Validation was not run.",
       [error()],
@@ -644,7 +726,7 @@ describe("toolResultContent", () => {
         "",
         "## Files sent",
         "",
-        "Read from the method's folder and sent, and nothing else from it:",
+        "The method's tree, every file this call sent and nothing else:",
         "",
         "- `m/main.mthds`",
         // A backtick in a path cannot close the span it is shown in.
@@ -663,7 +745,7 @@ describe("toolResultContent", () => {
     }
   });
 
-  it("adds no files-sent section when no folder was read", () => {
+  it("adds no files-sent section when no tree was sent", () => {
     expect(toolResultContent("Done.", [], [])[0].text).toBe("Done.");
     expect(toolResultContent("Done.")[0].text).toBe("Done.");
   });
@@ -748,19 +830,22 @@ describe("toolResultContent", () => {
 });
 
 describe("validateMethodSelectorRequest", () => {
-  const files = [{ content: 'domain = "demo"' }];
+  // Whether `method_dir` or `files` resolved into a tree.
+  const files = true;
   const ADDRESS = "github.com/Pipelex/methods/documents@v0.1.0";
 
   it("accepts each selector alone, under both rules", () => {
     for (const rule of ["one_selector", "run_source"] as const) {
       expect(validateMethodSelectorRequest(files, {}, { rule })).toEqual([]);
-      expect(validateMethodSelectorRequest([], { method_ref: ADDRESS }, { rule })).toEqual([]);
-      expect(validateMethodSelectorRequest([], { method_id: "mt_abc123" }, { rule })).toEqual([]);
+      expect(validateMethodSelectorRequest(false, { method_ref: ADDRESS }, { rule })).toEqual([]);
+      expect(validateMethodSelectorRequest(false, { method_id: "mt_abc123" }, { rule })).toEqual(
+        [],
+      );
     }
   });
 
   it("rejects a request with no selector at all, naming the accepted forms", () => {
-    const errors = validateMethodSelectorRequest([], {}, { rule: "one_selector" });
+    const errors = validateMethodSelectorRequest(false, {}, { rule: "one_selector" });
 
     expect(errors).toHaveLength(1);
     expect(errors[0]?.class).toBe("input_domain");
@@ -772,7 +857,7 @@ describe("validateMethodSelectorRequest", () => {
   });
 
   it("rejects a blank method_id at method_id, with or without files", () => {
-    for (const presentFiles of [[], files]) {
+    for (const presentFiles of [false, files]) {
       const errors = validateMethodSelectorRequest(
         presentFiles,
         { method_id: "  " },
@@ -788,7 +873,7 @@ describe("validateMethodSelectorRequest", () => {
 
   it("rejects a blank method_ref at method_ref", () => {
     const errors = validateMethodSelectorRequest(
-      [],
+      false,
       { method_ref: "  " },
       { rule: "one_selector" },
     );
@@ -800,10 +885,14 @@ describe("validateMethodSelectorRequest", () => {
 
   it("accepts any non-blank selector — format stays server-owned", () => {
     expect(
-      validateMethodSelectorRequest([], { method_id: "not-an-mt-id" }, { rule: "one_selector" }),
+      validateMethodSelectorRequest(false, { method_id: "not-an-mt-id" }, { rule: "one_selector" }),
     ).toEqual([]);
     expect(
-      validateMethodSelectorRequest([], { method_ref: "not-an-address" }, { rule: "one_selector" }),
+      validateMethodSelectorRequest(
+        false,
+        { method_ref: "not-an-address" },
+        { rule: "one_selector" },
+      ),
     ).toEqual([]);
   });
 
@@ -826,7 +915,7 @@ describe("validateMethodSelectorRequest", () => {
     expect(filesAndRef[0]?.location).toBe("method_ref");
 
     const refAndId = validateMethodSelectorRequest(
-      [],
+      false,
       { method_ref: ADDRESS, method_id: "mt_abc123" },
       { rule: "one_selector" },
     );
@@ -850,7 +939,7 @@ describe("validateMethodSelectorRequest", () => {
     expect(filesAndRef[0]?.location).toBe("method_ref");
 
     const refAndId = validateMethodSelectorRequest(
-      [],
+      false,
       { method_ref: ADDRESS, method_id: "mt_abc123" },
       { rule: "run_source" },
     );
@@ -884,16 +973,6 @@ describe("validateMethodSelectorRequest", () => {
 
     expect(errors).toHaveLength(1);
     expect(errors[0]?.message).toContain("must not be empty");
-  });
-
-  it("still applies the per-file checks when files are present", () => {
-    const errors = validateMethodSelectorRequest(
-      [{ content: "" }, { content: "x", uri: "" }],
-      {},
-      { rule: "run_source" },
-    );
-
-    expect(errors.map((error) => error.location)).toEqual(["files[0].content", "files[1].uri"]);
   });
 });
 
@@ -987,7 +1066,8 @@ async function uploadFailure(answer: () => Promise<Response>): Promise<unknown> 
   );
   return createPipelexApiClient({ baseUrl: DEFAULT_API_URL })
     .prepareInputs({
-      files: [{ content: 'domain = "demo"' }],
+      // The protocol's map, sent as given: no handshake, no blob route.
+      files: { "main.mthds": 'domain = "demo"' },
       inputs: { photo: "data:image/png;base64,AQ==" },
     })
     .then(
@@ -1862,93 +1942,80 @@ describe("classifyError on the method-version codes", () => {
   });
 });
 
-describe("classifyError on the refusals of a bundle's template files", () => {
-  // Codegen's files shape points a bare 400/422 at `target`: a refusal of the
-  // template files must not follow it there.
-  const FILES_SHAPE = {
+describe("classifyError on the refusals of a method's tree", () => {
+  // Codegen's tree shape points a bare 400/422 at `target`: a refusal of the
+  // tree must not follow it there.
+  const TREE_SHAPE = {
     route: "/v1/codegen",
     badRequest: { location: "target", hint: "Pass a known target." },
-    bundleResources: true,
+    methodTree: true,
   };
-  // The same route on a request that carried no template file.
-  const NO_TEMPLATES = { ...FILES_SHAPE, bundleResources: false };
+  // The same route on a request that sent no tree.
+  const NO_TREE = { ...TREE_SHAPE, methodTree: false };
 
-  it("locates a key the runner refuses, or a file no step names, at files", async () => {
-    for (const errorType of ["InvalidResourcePath", "BundleResourceNotNamedError"]) {
-      const error = classifyError(
-        await refused(422, runnerProblem(errorType, "The bundle never names: x.docx", "input")),
-        FILES_SHAPE,
-      );
-
-      expect(error).toMatchObject({
-        class: "input_domain",
-        location: "files",
-        message: "The bundle never names: x.docx",
-        retryable: false,
-      });
-      expect(error.hint).toContain("template_file");
-    }
-  });
-
-  it("reads an undecodable value as this server's fault, since it encoded every value", async () => {
-    const error = classifyError(
-      await refused(400, runnerProblem("InvalidBase64", "resources['a.docx'] is not base64")),
-      FILES_SHAPE,
-    );
-
-    expect(error).toMatchObject({ class: "runtime", retryable: false });
-    // No argument fixes it, so it names none.
-    expect(error.location).toBeUndefined();
-  });
-
-  it("locates a 413 at files with the limits, typed by the runner or bare from the gateway", async () => {
+  it("locates a tree the standard's rules or the deployment's limits refuse at files", async () => {
     for (const problem of [
-      runnerProblem("PayloadTooLarge", "Too many bytes in resources", "input"),
-      runnerProblem("BundleResourcesTooLargeError", "The .html files exceed 512 KiB", "input"),
-      {},
+      { code: "invalid_method_files", detail: "'a//b.mthds' is not a tree path" },
+      runnerProblem("InvalidMethodFiles", "'a//b.mthds' is not a tree path", "input"),
+      { code: "method_tree_too_large", detail: "The tree holds more than 1000 files" },
+      runnerProblem("MethodTreeTooLarge", "The tree holds more than 1000 files", "input"),
     ]) {
-      const error = classifyError(await refused(413, problem), FILES_SHAPE);
+      const error = classifyError(await refused(422, problem), TREE_SHAPE);
 
       expect(error).toMatchObject({ class: "input_domain", location: "files", retryable: false });
-      expect(error.hint).toBe(FILES_TOO_LARGE.hint);
-      expect(error.hint).toContain("10 MiB");
-      expect(error.hint).toContain("512 KiB");
+      expect(error.message).toBe(problem.detail);
+      expect(error.hint).not.toBe("Pass a known target.");
     }
   });
 
-  it("keeps a 413 on a request that carried no template file an unexpected status", async () => {
-    // Nothing the request sent is known to be at fault, so the size texture,
-    // which blames the template files, stays out of it.
-    for (const problem of [runnerProblem("PayloadTooLarge", "Body too large", "input"), {}]) {
-      const error = classifyError(await refused(413, problem), NO_TEMPLATES);
+  it("reads a blob the platform holds otherwise, or lost, as no argument's fault", async () => {
+    const mismatch = classifyError(
+      await refused(422, { code: "blob_mismatch", detail: "Size mismatch" }),
+      TREE_SHAPE,
+    );
+    expect(mismatch).toMatchObject({ class: "runtime", location: "files", retryable: false });
 
-      expect(error.hint).toBe("The Pipelex API returned HTTP 413.");
-      expect(error.location).toBeUndefined();
-    }
+    const missing = classifyError(
+      await refused(422, { code: "missing_blobs", detail: "Missing blobs" }),
+      TREE_SHAPE,
+    );
+    // Sending the same call again uploads what is missing.
+    expect(missing).toMatchObject({ class: "runtime", location: "files", retryable: true });
   });
 
-  it("leaves the template refusal types to the route on a request that carried none", async () => {
-    // A resource type on a request without template files is not about
-    // anything this server sent: the route's own 400/422 texture takes it.
+  it("reads a request too large for the deployment as the tree's, at files", async () => {
+    const error = classifyError(await refused(413, { detail: "Request Entity Too Large" }), {
+      ...TREE_SHAPE,
+      route: "/v1/start",
+    });
+
+    expect(error).toMatchObject({ class: "input_domain", location: "files", retryable: false });
+    expect(error.hint).toContain("without a blob store");
+    expect(error.hint).toContain(".gitignore");
+  });
+
+  it("leaves the tree refusals to the route on a request that sent no tree", async () => {
     const error = classifyError(
-      await refused(
-        422,
-        runnerProblem("BundleResourceNotNamedError", "The bundle never names: x.docx", "input"),
-      ),
-      NO_TEMPLATES,
+      await refused(422, { code: "invalid_method_files", detail: "Bad map" }),
+      NO_TREE,
     );
 
     expect(error).toMatchObject({ class: "input_domain", location: "target" });
     expect(error.hint).toBe("Pass a known target.");
+  });
 
-    const undecodable = classifyError(
-      await refused(
-        400,
-        runnerProblem("InvalidBase64", "resources['a.docx'] is not base64", "input"),
-      ),
-      NO_TEMPLATES,
-    );
-    expect(undecodable.class).not.toBe("runtime");
+  it("locates a file that did not upload at files on a tool, and at method_dir on a save", () => {
+    const failure = new MethodFileTransferError("The upload of main.mthds failed.", {
+      operation: "upload",
+      code: "unreachable",
+      path: "main.mthds",
+    });
+
+    const onTool = classifyError(failure, TREE_SHAPE);
+    expect(onTool.location).toBe("files");
+    expect(onTool.hint).toContain("the request was not sent");
+
+    expect(classifyError(failure, {}).location).toBe("method_dir");
   });
 });
 

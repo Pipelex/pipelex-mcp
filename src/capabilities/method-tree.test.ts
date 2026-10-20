@@ -12,7 +12,6 @@ import {
   SCAN_ALLOWANCE_BYTES,
   SCAN_ALLOWANCE_FILES,
   describeTreeRefusal,
-  isRunInputsPath,
   listFolderTree,
 } from "./method-tree.js";
 import type { FolderTree } from "./method-tree.js";
@@ -20,8 +19,8 @@ import type { FolderTree } from "./method-tree.js";
 /**
  * The workshop's listing of a method folder. The membership rule itself is
  * `mthds`'s, held to the conformance corpus there; what this suite pins is
- * what the workshop puts on top of it — the run-inputs shim, the graph page,
- * the limits, the bounded read and the refusals' words — and the cases the
+ * what the workshop puts on top of it — the graph page, the limits, the
+ * bounded read and the refusals' words — and the cases the
  * provisional lister it replaced was tested on, restated against the standard.
  */
 describe("listFolderTree", () => {
@@ -106,7 +105,7 @@ describe("listFolderTree", () => {
   });
 
   describe("a run's inputs file", () => {
-    it("leaves out inputs.json and inputs.toml at any depth, reports them, and digests what is left", async () => {
+    it("leaves out inputs.json and inputs.toml at any depth, as the standard's run_inputs default", async () => {
       await place("main.mthds");
       await place("inputs.json", '{"invoice": "invoice-1.pdf"}');
       await place("inputs.toml", 'invoice = "invoice-2.pdf"');
@@ -122,12 +121,6 @@ describe("listFolderTree", () => {
         "examples/invoice-inputs.json",
         "main.mthds",
       ]);
-      expect(tree.runInputs).toEqual([
-        "examples/inputs.json",
-        "inputs.json",
-        "inputs.toml",
-        "runs/2026/inputs.json",
-      ]);
       expect(tree.digest).toBe(treeDigest(tree.files));
       expect(tree.has("inputs.json")).toBe(false);
       await expect(tree.readFile("inputs.json")).rejects.toThrow(/not a file of the method tree/);
@@ -139,14 +132,11 @@ describe("listFolderTree", () => {
       await place("inputs.json/inputs.json");
       await place("docs/inputs.toml/notes.md");
 
-      const tree = await listing();
-
-      expect(tree.files.map((file) => file.path)).toEqual([
+      expect(await members()).toEqual([
         "docs/inputs.toml/notes.md",
         "inputs.json/sample.json",
         "main.mthds",
       ]);
-      expect(tree.runInputs).toEqual(["inputs.json/inputs.json"]);
     });
 
     it("matches the names byte for byte, letter case included", async () => {
@@ -156,31 +146,21 @@ describe("listFolderTree", () => {
       await place("inputs.json.bak");
       await place("examples/my-inputs.json");
 
-      const tree = await listing();
-
-      expect(tree.files.map((file) => file.path)).toEqual([
+      expect(await members()).toEqual([
         "Inputs.json",
         "examples/my-inputs.json",
         "inputs.json.bak",
         "inputs.jsonc",
         "main.mthds",
       ]);
-      expect(tree.runInputs).toEqual([]);
-      expect(isRunInputsPath("a/inputs.toml")).toBe(true);
-      expect(isRunInputsPath("a/INPUTS.TOML")).toBe(false);
     });
 
-    it("refuses a symbolic link of either name, as the 0.32 standard refuses every link", async () => {
-      // mthds 0.33 leaves such a link out unfollowed; the provisional lister did
-      // too. Under 0.32 it is a link like any other, refused by name.
+    it("leaves out a symbolic link of either name unfollowed, rather than refusing it", async () => {
       await place("main.mthds");
       await place("data/sample.json", "{}");
       await fs.symlink(path.join(root, "data", "sample.json"), path.join(root, "inputs.json"));
 
-      const error = await refusal();
-
-      expect(error.code).toBe("symbolic_link");
-      expect(error.names).toEqual(["inputs.json"]);
+      expect(await members()).toEqual(["data/sample.json", "main.mthds"]);
     });
   });
 
@@ -191,7 +171,7 @@ describe("listFolderTree", () => {
     const error = await refusal();
 
     expect(error.code).toBe("empty_tree");
-    expect(error.message).toContain("holds no file once a run's inputs files");
+    expect(error.message).toContain("holds no file once the workshop's graph page is left out");
   });
 
   it("leaves out the workshop's own graph page at the folder's top, and keeps any other file of that name", async () => {

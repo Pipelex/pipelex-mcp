@@ -23,79 +23,75 @@ import {
   collectArtifacts,
   errorVerdictOf,
 } from "@pipelex/sdk";
-import type { ErrorDomain, ErrorVerdict, PipelexApiClientOptions } from "@pipelex/sdk";
+import type {
+  ErrorDomain,
+  ErrorVerdict,
+  MethodTreeSource,
+  PipelexApiClientOptions,
+} from "@pipelex/sdk";
+import {
+  compareUtf8,
+  isExcludedName,
+  isTreePath,
+  pathCollisions,
+  sha256Hex,
+  treeDigest,
+  treePathViolation,
+} from "mthds";
+import path from "node:path";
 import { z } from "zod";
 
 import { BARE_APP_INFO } from "./client-identification.js";
 import type { AppInfoSource } from "./client-identification.js";
-import {
-  MAX_TEMPLATE_FILES,
-  MAX_TEMPLATE_FILE_BYTES,
-  TEMPLATE_FILE_EXTENSIONS,
-  isTemplateFilePath,
-  templateFilesNamedBy,
-} from "./template-files.js";
-import type {
-  BundleFileOnDisk,
-  SubmittedTemplate,
-  TemplateFiles,
-  TemplateFilesResolution,
-} from "./template-files.js";
 import type { ListingLimits } from "./method-tree.js";
+import { secretFindings, secretRefusalText } from "./secret-guard.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
+import { deepestCommonDirectory } from "./workspace-boundary.js";
 
 export const DEFAULT_API_URL = "https://api.pipelex.com";
 
 /**
- * The submitted-files shape every capability shares on its MCP input. Each
- * item is one of two arms: inline contents (`{ content, uri? }`) or a file
- * path (`{ path }`, resolved from disk through the context's resolver). The
- * arms are deliberately non-strict with first-match semantics: a pathological
- * item carrying both keys parses as the content arm and `path` is ignored.
- *
- * The API routes spell the provenance label differently (`uri` on
- * `/v1/validate`, `source` on the `/v1/build/*` envelope); the MCP surface
- * always says `uri` and each capability adapts at its own boundary.
+ * The suffixes of the template files a `PipeDocGen` step reads from its
+ * method's tree: an HTML template for a PDF, the office file itself for a
+ * workbook, a document or a deck. The runner's own list is
+ * `DocGenFormat.template_file_suffix` in pipelex
+ * (`pipelex/cogt/doc_gen/doc_gen_format.py`), one suffix per format. The
+ * `{ path }` arm of the method-taking tools' `files` reads these, and only
+ * these, besides `.mthds`: it is the extension gate of the read side, widened
+ * on purpose, so a suffix a new format brings is added here deliberately. A
+ * method needing any other file sends its folder, `method_dir`.
  */
-export const filesInputSchema = z
-  .array(
-    z.union([
-      z.object({
-        content: z.string().describe("The full .mthds file contents."),
-        uri: z.string().nullable().optional().describe("Optional provenance URI for diagnostics."),
-      }),
-      z.object({
-        path: z
-          .string()
-          .describe(
-            "Filesystem path to a .mthds file, resolved relative to this server's working directory.",
-          ),
-      }),
-    ]),
-  )
-  .describe(
-    "One or more submitted MTHDS files forming the method closure. Each item is either inline contents ({ content, uri? }) or a file path ({ path }).",
-  );
+export const TEMPLATE_FILE_EXTENSIONS = [".html", ".xlsx", ".docx", ".pptx"] as const;
+
+/** The extensions the `{ path }` arm of `files` reads: `.mthds`, and the template files. */
+export const METHOD_FILE_EXTENSIONS = [".mthds", ...TEMPLATE_FILE_EXTENSIONS] as const;
 
 /**
  * The `files` argument of the method-taking tools (`mthds_validate`,
  * `mthds_inputs_template`, `mthds_codegen`, `mthds_prepare_inputs`,
- * `mthds_run`): the shape of {@link filesInputSchema}, whose `{ path }` arm
- * also takes the template files a bundle's `PipeDocGen` steps name, read as
- * bytes and sent as the request's `resources`. `mthds_save_method` keeps
- * {@link filesInputSchema}, since the catalog stores `.mthds` and `.py` files
- * only. A template file is given by path alone: an inline item is always a
- * `.mthds` file's text, so a binary file never travels through the
- * conversation, and the key a template is sent under is the step's own
- * `template_file`, found from where the file sits on disk rather than from a
- * label (`template-files.ts`).
+ * `mthds_run`). Each item is one of two arms: inline `.mthds` contents
+ * (`{ content, uri? }`) or a file path (`{ path }`, a `.mthds` file or a
+ * template file, read as bytes from disk through the context's resolver). The
+ * arms are deliberately non-strict with first-match semantics: a pathological
+ * item carrying both keys parses as the content arm and `path` is ignored.
+ *
+ * The items are sent as one method tree ({@link resolveMethodSource}): a
+ * template file is a file of the tree like any other, found by the step naming
+ * it where its `template_file` leads from the step's `.mthds` file, so the tree
+ * keeps the files where they sit relative to one another.
  */
-export const bundleFilesInputSchema = z
+export const methodFilesInputSchema = z
   .array(
     z.union([
       z.object({
         content: z.string().describe("The full .mthds file contents."),
-        uri: z.string().nullable().optional().describe("Optional provenance URI for diagnostics."),
+        uri: z
+          .string()
+          .nullable()
+          .optional()
+          .describe(
+            "Optional provenance URI; its file name, when it is a .mthds file's, is the name the contents are sent under.",
+          ),
       }),
       z.object({
         path: z
@@ -107,23 +103,23 @@ export const bundleFilesInputSchema = z
     ]),
   )
   .describe(
-    "The method's MTHDS files, plus the template files its PipeDocGen steps name. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). " +
-      "For a method whose folder is on disk, pass method_dir instead, which finds these files itself. " +
-      "A template file is given only as { path }, and only with the .mthds file naming it given as { path } too: it is sent under the step's template_file, where that path leads from the .mthds file's directory, " +
-      'so [{ path: "invoice.mthds" }, { path: "templates/invoice.xlsx" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. A file no step names is refused. ' +
-      `At most ${MAX_TEMPLATE_FILES} template files, ${MAX_TEMPLATE_FILE_BYTES / (1024 * 1024)} MiB each, and about 7.4 MiB in all on the hosted API, where they travel base64-encoded.`,
+    "The method's files, sent as one tree. Each item is inline .mthds contents ({ content, uri? }) or a file path ({ path }). " +
+      "For a method whose folder is on disk, pass method_dir instead, which sends the folder's whole tree. " +
+      "The { path } items keep where they sit relative to one another: the tree is rooted at the deepest directory holding them all, and each file is sent under its path from there, the path diagnostics name and a step's template_file leads to, " +
+      'so [{ path: "invoice.mthds" }, { path: "templates/invoice.xlsx" }] sends templates/invoice.xlsx for a step whose template_file is templates/invoice.xlsx. ' +
+      "An inline item is sent at the tree's top, under its uri's file name when that is a .mthds file's, else bundle.mthds. " +
+      "A file that looks like it holds a secret, a key file or a well-known key format, is refused before anything is sent; the result's files_sent lists every file sent.",
   );
 
 /**
  * `method_dir`, the folder arm of the method-taking tools: the method's folder
- * on disk, from which the workshop finds the `.mthds` files under the MTHDS
- * standard's membership rule (`method-tree.ts`) and the template files their
- * `PipeDocGen` steps name, and sends those, nothing else. It is a top-level
- * field beside `files`, `method_ref` and `method_id` rather than a third arm of
- * the files union, since a folder is not a file and a folder beside listed
- * files would suggest merging the two. It composes as `files` does: alone on
- * the tooling tools, and beside a bare `method_id` as run-history linkage on
- * `mthds_run` ({@link SelectorRule}).
+ * on disk, whose whole tree under the MTHDS standard's membership rule
+ * (`method-tree.ts`) the workshop sends. It is a top-level field beside
+ * `files`, `method_ref` and `method_id` rather than a third arm of the files
+ * union, since a folder is not a file and a folder beside listed files would
+ * suggest merging the two. It composes as `files` does: alone on the tooling
+ * tools, and beside a bare `method_id` as run-history linkage on `mthds_run`
+ * ({@link SelectorRule}).
  */
 export function methodDirInputSchema(rule: SelectorRule) {
   const pairing =
@@ -135,36 +131,25 @@ export function methodDirInputSchema(rule: SelectorRule) {
     .optional()
     .describe(
       "The method's folder, resolved against this server's working directory and required to stay inside it, with a .mthds file at its top. " +
-        "The workshop sends the folder's .mthds files and the template files their PipeDocGen steps name, each found where its step's template_file leads, and nothing else. " +
-        "Its files are the MTHDS standard's method tree: it skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, virtual environments, nested repositories, a run's inputs file (inputs.json or inputs.toml, at any depth), and what the .gitignore files inside the folder and its METHODS.toml exclude, and refuses a folder holding a symbolic link it does not skip or past the limits the Pipelex deployment announces. " +
-        `Its template files are held to the limits files states, and its .mthds files to the runner's: at most ${MAX_FOLDER_MTHDS_FILES}, of ${MAX_FOLDER_MTHDS_FILE_BYTES / (1024 * 1024)} MiB each. ` +
+        "The workshop sends the folder's whole tree, every file the MTHDS standard's membership rule keeps: it skips every path with a segment starting with a dot, __pycache__/ and node_modules/ directories, virtual environments, nested repositories, a run's inputs file (inputs.json or inputs.toml, at any depth), and what the .gitignore files inside the folder and its METHODS.toml exclude. " +
+        "It refuses a folder holding a symbolic link it does not skip, one past the limits the Pipelex deployment announces, and one holding a file that looks like a secret, a key file or a well-known key format, before anything is sent. " +
         `Prefer it to files for a method on disk; the result's files_sent lists every file sent. ${pairing}`,
     );
 }
 
 /**
- * The runner's default bounds on a request's `.mthds` files (`pipelex-api`'s
- * `limits.py`: `MAX_MTHDS_FILES_PER_REQUEST` and `MAX_MTHDS_FILE_KIB`), which
- * the workshop holds a method folder to before reading it, since a folder can
- * hold more `.mthds` files than the agent thought of. A deployment configured
- * with larger limits is not seen, as with the template files' limits.
- */
-export const MAX_FOLDER_MTHDS_FILES = 16;
-export const MAX_FOLDER_MTHDS_FILE_BYTES = 1024 * 1024;
-
-/**
- * `files_sent`, the listing every method-taking tool's result carries when its
- * method came from `method_dir`: what left the machine, so a stray `.mthds`
- * file the folder held is seen rather than sent silently.
+ * `files_sent`, the listing every method-taking tool's result carries when it
+ * sent a method's tree: what left the machine, so a stray file the folder held
+ * is seen rather than sent silently.
  */
 export const filesSentSchema = z
   .array(z.string())
   .optional()
   .describe(
-    "Every file this call read from method_dir and sent, each as method_dir joined with its path inside the folder: the .mthds files, then the template files their PipeDocGen steps name. Present only when the method came from method_dir.",
+    "Every file this call sent, as you can find it: from method_dir, method_dir joined with the file's path inside the folder; from files, each { path } item as given, and each inline item under the name it was sent as. Absent when the method was named by method_ref or method_id, or when nothing was sent.",
   );
 
-/** A submitted file resolved to its contents — what the capabilities consume. */
+/** A submitted inline file: a `.mthds` file's contents, and an optional label. */
 export interface SubmittedFile {
   content: string;
   uri?: string | null;
@@ -175,53 +160,48 @@ export interface SubmittedFilePath {
   path: string;
 }
 
-/** What the MCP surface accepts per files item — see {@link filesInputSchema}. */
+/** What the MCP surface accepts per files item — see {@link methodFilesInputSchema}. */
 export type SubmittedFileInput = SubmittedFile | SubmittedFilePath;
 
 /**
- * Outcome of resolving one `{ path }` item. Resolvers report failures as
- * values (never throw): every failure is an `input_domain` no-verdict at
- * `files[i].path`, so the resolver supplies only the message and hint — the
- * class, locator, and retryable verdict are fixed by
- * {@link resolveSubmittedFiles}.
+ * Outcome of resolving a text file from disk (`resolve`, which `inputs_path`
+ * reads). Resolvers report failures as values (never throw): every failure is
+ * an `input_domain` no-verdict at the argument's own field, so the resolver
+ * supplies only the message and hint.
  */
 export type FileResolution =
   | { ok: true; content: string }
   | { ok: false; message: string; hint: string };
 
 /**
+ * Outcome of reading one `{ path }` item of a method's `files`
+ * (`readMethodFile`): its bytes, and its absolute path as the caller wrote it,
+ * resolved against the working directory without following a link, from which
+ * the tree path is made. Failures are values, at `files[i].path`.
+ */
+export type MethodFileRead =
+  | { ok: true; absolute: string; bytes: Uint8Array }
+  | { ok: false; message: string; hint: string };
+
+/**
  * The seam the workshop fills with a filesystem-backed resolver
- * (`localFileResolver` and `localBundleFileResolver` in its `src/files.ts`). A
+ * (`localFileResolver` and `localMethodFileResolver` in its `src/files.ts`). A
  * context built without one — the core's own `build…Context`, as the live
- * suite uses — turns every `{ path }` item into an instructive rejection.
+ * suite uses — turns every `{ path }` item and every `method_dir` into an
+ * instructive rejection.
  *
- * `resolveTemplates` is what makes an argument take a bundle's template files.
- * Present, the `{ path }` items carrying a template suffix
- * ({@link isTemplateFilePath}) are handed to it together, once every other
- * item resolved, with the `.mthds` files read from disk and the
- * `template_file` each of their `PipeDocGen` steps names, and the size of
- * those files' text, which the same request carries. Absent, such an item goes
- * to `resolve` like any other, whose extension gate refuses it:
- * `mthds_save_method`'s `files` reads `.mthds` alone.
- *
- * `resolveMethodDir` is what makes a tool take `method_dir`: it reads a method
- * folder whole, its `.mthds` files and the template files their steps name,
- * and holds them to the request's bounds. Absent, `method_dir` is refused.
- *
- * `locateMethodDir` and `readMethodTree` are what make `mthds_save_method`
- * take a folder: the first finds it on its real path before anything is read,
- * so the save reads the folder's link first, and the second lists its whole
- * tree and reads every file of it once, so the bytes the save checks,
- * validates and sends are one read.
+ * `resolve` reads one text file of the argument's one extension, as
+ * `inputs_path` does. `readMethodFile` is what makes an argument take a
+ * method's `{ path }` items: it reads one, a `.mthds` file or a template file,
+ * as bytes, held to `maxBytes`. `locateMethodDir` and `readMethodTree` are
+ * what make a tool take `method_dir`: the first finds the folder on its real
+ * path before anything is read, and the second lists its whole tree and reads
+ * every file of it once, so the bytes the workshop checks and sends are one
+ * read. Absent, `method_dir` is refused.
  */
 export interface FileResolver {
   resolve(path: string): Promise<FileResolution>;
-  resolveTemplates?(
-    templates: readonly SubmittedTemplate[],
-    bundle: readonly BundleFileOnDisk[],
-    requestBytes: number,
-  ): Promise<TemplateFilesResolution>;
-  resolveMethodDir?(methodDir: string): Promise<MethodDirResolution>;
+  readMethodFile?(path: string, options: { maxBytes: number }): Promise<MethodFileRead>;
   locateMethodDir?(methodDir: string): Promise<MethodDirLocation>;
   readMethodTree?(
     location: LocatedMethodDir,
@@ -241,43 +221,40 @@ export type MethodDirLocation =
 
 /**
  * A method folder's whole tree, every file read once: the listing, its digest,
- * the run's inputs files and the workshop's graph page it left out, the bytes,
- * and the request `mthds_validate` would build from the folder, built from
- * those same bytes. Failures are values, all located at `method_dir`.
+ * the workshop's graph page it left out, and the bytes. Failures are values,
+ * all located at `method_dir`.
  */
 export type MethodTreeRead =
   | {
       ok: true;
       files: readonly { path: string; size: number; sha256: string }[];
       digest: string;
-      runInputs: readonly string[];
       graphPage?: string;
       bytes: ReadonlyMap<string, Uint8Array>;
-      folderRequest(): Promise<MethodDirResolution>;
     }
   | { ok: false; refusals: { message: string; hint: string }[] };
+
+/** A file of a method's tree as a tool sends it. */
+export interface SentFile {
+  /** Its path inside the tree, the name the runner's diagnostics give it. */
+  readonly treePath: string;
+  /** Where the caller finds it: `method_dir` joined with its tree path, a `{ path }` as given, an inline item's tree path. */
+  readonly shown: string;
+  /** Whether it was read from disk, which an inline item was not. */
+  readonly onDisk: boolean;
+  readonly bytes: Uint8Array;
+}
 
 /**
- * Outcome of reading a method folder. On success, `files` are its `.mthds`
- * files in the order they are sent, each under the path the caller can open
- * (`method_dir` joined with its path inside the folder), `resources` the
- * template files keyed by the step naming each, and `sent` every file sent,
- * the `.mthds` files first. Failures are values, all located at `method_dir`.
+ * A method's tree, read whole and through the secret guard, ready to send: the
+ * tree in the SDK's form, built from the bytes in hand, so what was checked is
+ * what is sent, and every file of it, in tree path order.
  */
-export type MethodDirResolution =
-  | {
-      ok: true;
-      files: { path: string; content: string }[];
-      resources: TemplateFiles;
-      sent: string[];
-    }
-  | { ok: false; refusals: { message: string; hint: string }[] };
-
-export interface ResolvedFiles {
-  files: SubmittedFile[];
-  /** The bundle's template files; empty when none was submitted. */
-  resources: TemplateFiles;
-  errors: ToolError[];
+export interface MethodTreeToSend {
+  readonly source: MethodTreeSource;
+  readonly files: readonly SentFile[];
+  /** Whether it came from `method_dir`, which is where every refusal of it then locates. */
+  readonly fromFolder: boolean;
 }
 
 /** What a method-taking request names its method by, before anything is read. */
@@ -286,74 +263,113 @@ export interface MethodSourceInput extends MethodSelectors {
   method_dir?: string;
 }
 
-export interface ResolvedMethodFiles extends ResolvedFiles {
-  /**
-   * Every file read from `method_dir` and sent, as the caller can open it;
-   * absent when the method did not come from a folder. A capability puts it
-   * on its result through {@link withFilesSent}.
-   */
-  sent?: string[];
+/**
+ * A method-taking request's source, resolved: the tree it sends when it names
+ * its method by `method_dir` or `files`, or no tree when it names it by
+ * `method_ref` or `method_id`. `tree` is meaningful only when `errors` is
+ * empty.
+ */
+export interface ResolvedMethodSource {
+  tree?: MethodTreeToSend;
+  errors: ToolError[];
 }
 
 /**
- * Resolve a method-taking request's source into the `{ content, uri? }` items
- * and template files every check and route already takes: `files` through
- * {@link resolveSubmittedFiles}, or `method_dir` through the resolver's
- * `resolveMethodDir`. The folder's pairings are refused before it is read, at
- * the field that came second in the order method_dir, files, method_ref,
- * method_id, as the other pairs are: `files` beside it at `method_dir`,
- * `method_ref` at `method_ref`, and `method_id` at `method_id` on the tooling
- * tools, while on `mthds_run` a folder takes a `method_id` beside it as files
- * do. The selector checks that follow ({@link validateMethodSelectorRequest})
- * see the folder's files as they see listed ones.
+ * Resolve a method-taking request's source into the tree it sends: `files`
+ * through {@link resolveFilesTree}, or `method_dir` through the resolver's
+ * `locateMethodDir` and `readMethodTree`, listed under the limits `limits`
+ * reads, which is called only when something is to be read from disk. The
+ * folder's pairings are refused before it is read, at the field that came
+ * second in the order method_dir, files, method_ref, method_id, as the other
+ * pairs are: `files` beside it at `method_dir`, `method_ref` at `method_ref`,
+ * and `method_id` at `method_id` on the tooling tools, while on `mthds_run` a
+ * folder takes a `method_id` beside it as files do. Either way the secret
+ * guard reads every byte before any is sent, and the selector checks that
+ * follow ({@link validateMethodSelectorRequest}) see a tree as a method named.
  */
-export async function resolveMethodFiles(
+export async function resolveMethodSource(
   source: MethodSourceInput,
   resolver: FileResolver | undefined,
   rule: SelectorRule,
-): Promise<ResolvedMethodFiles> {
-  if (source.method_dir === undefined) {
-    return resolveSubmittedFiles(source.files ?? [], resolver);
+  limits: () => Promise<ListingLimits>,
+): Promise<ResolvedMethodSource> {
+  if (source.method_dir !== undefined) {
+    return resolveFolderTree(source, source.method_dir, resolver, rule, limits);
   }
-  const refused = (errors: ToolError[]): ResolvedMethodFiles => ({
-    files: [],
-    resources: {},
-    errors,
-  });
+  const files = source.files ?? [];
+  if (files.length === 0) return { errors: [] };
+  return resolveFilesTree(files, resolver, limits);
+}
 
-  const pairingErrors = methodDirPairingErrors(source, source.method_dir, rule);
-  if (pairingErrors.length > 0) return refused(pairingErrors);
+/** `method_dir`: located, listed and read whole, then through the secret guard. */
+async function resolveFolderTree(
+  source: MethodSourceInput,
+  methodDir: string,
+  resolver: FileResolver | undefined,
+  rule: SelectorRule,
+  limits: () => Promise<ListingLimits>,
+): Promise<ResolvedMethodSource> {
+  const pairingErrors = methodDirPairingErrors(source, methodDir, rule);
+  if (pairingErrors.length > 0) return { errors: pairingErrors };
 
-  if (resolver?.resolveMethodDir === undefined) {
-    return refused([
-      {
-        class: "input_domain",
-        location: "method_dir",
-        message:
-          "This deployment cannot read a folder from disk; submit the method's files instead.",
-        hint: "Resubmit the method's .mthds files inline as files [{ content, uri? }], or use the local workshop server (npx @pipelex/mcp), which reads method_dir.",
-        retryable: false,
-      },
-    ]);
+  if (resolver?.locateMethodDir === undefined || resolver.readMethodTree === undefined) {
+    return {
+      errors: [
+        {
+          class: "input_domain",
+          location: "method_dir",
+          message:
+            "This deployment cannot read a folder from disk; submit the method's files instead.",
+          hint: "Resubmit the method's .mthds files inline as files [{ content, uri? }], or use the local workshop server (npx @pipelex/mcp), which reads method_dir.",
+          retryable: false,
+        },
+      ],
+    };
   }
 
-  const outcome = await resolver.resolveMethodDir(source.method_dir);
-  if (!outcome.ok) {
-    return refused(
-      outcome.refusals.map((refusal) => ({
-        class: "input_domain" as const,
-        location: "method_dir",
-        message: refusal.message,
-        hint: refusal.hint,
-        retryable: false,
-      })),
-    );
+  const located = await resolver.locateMethodDir(methodDir);
+  if (!located.ok) return { errors: located.refusals.map(atMethodDirRefusal) };
+  const read = await resolver.readMethodTree(located, { limits: await limits() });
+  if (!read.ok) return { errors: read.refusals.map(atMethodDirRefusal) };
+
+  const files: SentFile[] = read.files.map((file) => ({
+    treePath: file.path,
+    shown: shownIn(methodDir, file.path),
+    onDisk: true,
+    bytes: read.bytes.get(file.path) ?? new Uint8Array(),
+  }));
+  const findings = secretFindings(
+    files.map((file) => ({ path: file.treePath, bytes: file.bytes })),
+  );
+  if (findings.length > 0) {
+    return {
+      errors: [
+        atMethodDirRefusal(
+          secretRefusalText(findings, (treePath) => shownIn(methodDir, treePath), SEND_AGAIN),
+        ),
+      ],
+    };
   }
   return {
-    files: outcome.files.map((file) => ({ content: file.content, uri: file.path })),
-    resources: outcome.resources,
     errors: [],
-    sent: outcome.sent,
+    tree: {
+      source: treeSourceOf(read.files, read.digest, read.bytes),
+      files,
+      fromFolder: true,
+    },
+  };
+}
+
+/** What a caller does once a refused file is dealt with, closing the secret guard's hint. */
+const SEND_AGAIN = "call the tool again";
+
+function atMethodDirRefusal(refusal: { message: string; hint: string }): ToolError {
+  return {
+    class: "input_domain",
+    location: "method_dir",
+    message: refusal.message,
+    hint: refusal.hint,
+    retryable: false,
   };
 }
 
@@ -381,7 +397,7 @@ function methodDirPairingErrors(
       location: "method_dir",
       message:
         "method_dir and files are mutually exclusive — pass the method's folder or list its files, never both.",
-      hint: "method_dir finds the .mthds files and the template files their steps name by itself; drop files to send the folder, or drop method_dir to send exactly the files listed.",
+      hint: "method_dir sends the folder's whole tree by itself; drop files to send the folder, or drop method_dir to send exactly the files listed.",
       retryable: false,
     });
   }
@@ -408,6 +424,259 @@ function methodDirPairingErrors(
   return errors;
 }
 
+/** One `files` item on its way into the tree, with the item it came from. */
+interface ItemFile {
+  index: number;
+  /** Where the item's refusals locate: `files[i].path` or `files[i].content`. */
+  location: string;
+  treePath: string;
+  shown: string;
+  onDisk: boolean;
+  bytes: Uint8Array;
+}
+
+/** The name an inline item is sent under when its uri gives none. */
+const INLINE_STEM = "bundle";
+
+/**
+ * `files`, as one tree. Each `{ path }` item is read as bytes through the
+ * resolver's `readMethodFile`, held to the deployment's limit on one file, and
+ * keeps where it sits relative to the others: the tree is rooted at the
+ * deepest directory holding them all, and each file's tree path is its path
+ * from there, which the step naming a template file resolves its
+ * `template_file` against. A path given twice is one file. Each inline item is
+ * a `.mthds` file at the tree's top, under its uri's file name when that names
+ * a `.mthds` file no other file of the tree takes, else `bundle.mthds`,
+ * `bundle-2.mthds` and on. A tree path the standard refuses, a name it never
+ * admits to a tree, two paths that collide, a tree past the deployment's
+ * limits, and a file the secret guard refuses are refused at the item, before
+ * anything is sent.
+ */
+async function resolveFilesTree(
+  items: SubmittedFileInput[],
+  resolver: FileResolver | undefined,
+  limits: () => Promise<ListingLimits>,
+): Promise<ResolvedMethodSource> {
+  const errors: ToolError[] = [];
+  const refuse = (location: string, message: string, hint: string) =>
+    errors.push({ class: "input_domain", location, message, hint, retryable: false });
+
+  const hasPaths = items.some((item) => !("content" in item));
+  const bounds = hasPaths ? await limits() : undefined;
+
+  const inline: { index: number; item: SubmittedFile }[] = [];
+  const read: { index: number; submitted: string; absolute: string; bytes: Uint8Array }[] = [];
+  for (const [index, item] of items.entries()) {
+    // First-match union semantics: a pathological { content, path } item is
+    // the content arm, and its path is ignored.
+    if ("content" in item) {
+      if (item.content.trim() === "") {
+        refuse(
+          `files[${index}].content`,
+          "File content must not be empty.",
+          "Submit the full .mthds file contents.",
+        );
+      }
+      if (item.uri !== undefined && item.uri !== null && item.uri.trim() === "") {
+        refuse(
+          `files[${index}].uri`,
+          "File uri must not be empty when supplied.",
+          "Omit uri for inline content or provide a stable path or URI.",
+        );
+      }
+      inline.push({ index, item });
+      continue;
+    }
+    if (item.path.trim() === "") {
+      refuse(
+        `files[${index}].path`,
+        "File path must not be empty.",
+        "Submit a file path, or inline the contents as { content, uri? }.",
+      );
+      continue;
+    }
+    if (resolver?.readMethodFile === undefined || bounds === undefined) {
+      refuse(
+        `files[${index}].path`,
+        "This deployment cannot read files from disk; submit the file contents instead.",
+        "Resubmit this item as { content, uri? } with the file contents inline, or use the local workshop server (npx @pipelex/mcp), which resolves paths.",
+      );
+      continue;
+    }
+    const outcome = await resolver.readMethodFile(item.path, {
+      maxBytes: bounds.maxFileSize ?? Number.MAX_SAFE_INTEGER,
+    });
+    if (!outcome.ok) {
+      refuse(`files[${index}].path`, outcome.message, outcome.hint);
+      continue;
+    }
+    read.push({ index, submitted: item.path, absolute: outcome.absolute, bytes: outcome.bytes });
+  }
+  if (errors.length > 0) return { errors };
+
+  // The { path } items, each under its path from the deepest directory
+  // holding them all; a path given twice is one file of the tree.
+  const files: ItemFile[] = [];
+  const root = deepestCommonDirectory(read.map((file) => path.dirname(file.absolute)));
+  const byTreePath = new Map<string, ItemFile>();
+  for (const file of read) {
+    const treePath = path.relative(root, file.absolute).split(path.sep).join("/").normalize("NFC");
+    const location = `files[${file.index}].path`;
+    const violation = treePathViolation(treePath);
+    if (violation !== null) {
+      refuse(
+        location,
+        `${file.submitted} cannot be sent under the name ${treePath}: ${violation}.`,
+        "Rename the file so its name is one every machine keeps, or pass the method's folder as method_dir.",
+      );
+      continue;
+    }
+    if (isExcludedName(treePath)) {
+      refuse(
+        location,
+        `${file.submitted} would be sent as ${treePath}, a name no method's tree holds: a segment starting with a dot, a __pycache__ or node_modules directory, or a run's inputs file.`,
+        "Move or rename the file, or list it beside the files it belongs with so the tree is rooted where they sit.",
+      );
+      continue;
+    }
+    if (byTreePath.has(treePath)) continue;
+    const entry: ItemFile = {
+      index: file.index,
+      location,
+      treePath,
+      shown: file.submitted,
+      onDisk: true,
+      bytes: file.bytes,
+    };
+    byTreePath.set(treePath, entry);
+    files.push(entry);
+  }
+  const colliding = new Set(pathCollisions(files.map((file) => file.treePath)));
+  for (const file of files) {
+    if (colliding.has(file.treePath)) {
+      refuse(
+        file.location,
+        `${file.shown} collides with another file listed, by its name once case is ignored, or by naming one's directory: ${[...colliding].join(", ")}.`,
+        "A method's files must keep their names on every machine, case-insensitive file systems included: rename one of them.",
+      );
+    }
+  }
+  if (errors.length > 0) return { errors };
+
+  // The inline items, each a .mthds file at the tree's top.
+  const taken = files.map((file) => file.treePath);
+  for (const { index, item } of inline) {
+    const treePath = inlineTreePath(item.uri, taken);
+    taken.push(treePath);
+    files.push({
+      index,
+      location: `files[${index}].content`,
+      treePath,
+      shown: treePath,
+      onDisk: false,
+      bytes: new TextEncoder().encode(item.content),
+    });
+  }
+
+  if (bounds !== undefined) {
+    const total = files.reduce((sum, file) => sum + file.bytes.byteLength, 0);
+    if (bounds.maxFileCount !== undefined && files.length > bounds.maxFileCount) {
+      refuse(
+        "files",
+        `The files make a tree of ${files.length} files, past the limit of ${bounds.maxFileCount} the Pipelex deployment takes.`,
+        "Send only the method's own files, or pass the method's folder as method_dir.",
+      );
+    } else if (bounds.maxTotalSize !== undefined && total > bounds.maxTotalSize) {
+      refuse(
+        "files",
+        `The files hold ${total} bytes in all, past the limit of ${bounds.maxTotalSize} bytes the Pipelex deployment takes for a method's tree.`,
+        "Send only the method's own files, or make them smaller.",
+      );
+    }
+    if (errors.length > 0) return { errors };
+  }
+
+  for (const finding of secretFindings(
+    files.map((file) => ({ path: file.treePath, bytes: file.bytes })),
+  )) {
+    const file = files.find((candidate) => candidate.treePath === finding.path);
+    if (file === undefined) continue;
+    const text = secretRefusalText([finding], () => file.shown, SEND_AGAIN);
+    refuse(file.location, text.message, text.hint);
+  }
+  if (errors.length > 0) return { errors };
+
+  files.sort((left, right) => compareUtf8(left.treePath, right.treePath));
+  const listing = files.map((file) => ({
+    path: file.treePath,
+    size: file.bytes.byteLength,
+    sha256: sha256Hex(file.bytes),
+  }));
+  return {
+    errors: [],
+    tree: {
+      source: treeSourceOf(
+        listing,
+        treeDigest(listing),
+        new Map(files.map((file) => [file.treePath, file.bytes])),
+      ),
+      files: files.map(({ treePath, shown, onDisk, bytes }) => ({
+        treePath,
+        shown,
+        onDisk,
+        bytes,
+      })),
+      fromFolder: false,
+    },
+  };
+}
+
+/**
+ * The tree path an inline item is sent under: its uri's last segment when that
+ * names a `.mthds` file a tree may hold and no file of `taken` collides with,
+ * else the first of `bundle.mthds`, `bundle-2.mthds` and on that none does.
+ */
+function inlineTreePath(uri: string | null | undefined, taken: readonly string[]): string {
+  const free = (candidate: string) =>
+    !taken.includes(candidate) && pathCollisions([...taken, candidate]).length === 0;
+  const named = uri?.split(/[\\/]/).pop()?.normalize("NFC");
+  if (
+    named !== undefined &&
+    named.toLowerCase().endsWith(".mthds") &&
+    isTreePath(named) &&
+    !isExcludedName(named) &&
+    free(named)
+  ) {
+    return named;
+  }
+  for (let ordinal = 1; ; ordinal += 1) {
+    const candidate = `${INLINE_STEM}${ordinal === 1 ? "" : `-${ordinal}`}.mthds`;
+    if (free(candidate)) return candidate;
+  }
+}
+
+/** The tree the SDK sends, inline or by hash, from bytes already read and checked. */
+function treeSourceOf(
+  files: readonly { path: string; size: number; sha256: string }[],
+  digest: string,
+  bytes: ReadonlyMap<string, Uint8Array>,
+): MethodTreeSource {
+  return {
+    files,
+    digest,
+    readFile: async (treePath) => {
+      const read = bytes.get(treePath);
+      if (read === undefined) throw new Error(`${treePath} is not a file of this method's tree`);
+      return read;
+    },
+  };
+}
+
+/** A tree path as the caller can open it: `method_dir` joined with it. */
+export function shownIn(methodDir: string, treePath: string): string {
+  return path.join(methodDir, ...treePath.split("/"));
+}
+
 /**
  * The no-verdict results whose request never left the machine, held by
  * identity so the mark rides no field a host could see.
@@ -428,32 +697,33 @@ export function markUnsent<R extends object>(result: R): R {
  * Whether a call failed before its request left the machine. The SDK raises
  * `RequestArgumentError` for an argument it refuses before sending anything,
  * the base URL its client is built with among them; every other failure of a
- * call may have come after the request was sent, so it counts as sent.
+ * call may have come after the request, or a file of its tree, was sent, so it
+ * counts as sent.
  */
 export function failedBeforeSending(err: unknown): boolean {
   return err instanceof RequestArgumentError;
 }
 
 /**
- * Put a folder's listing on a result produced once its request was sent, a
+ * Put a tree's listing on a result produced once its request was sent, a
  * no-verdict error included, since its files left the machine either way. A
  * result {@link markUnsent} marked, whose request never left, gets no listing.
- * Each error located at `files` or at one of its items is relocated to
- * `method_dir` either way: the route's textures name `files`, which this
- * caller never passed. A request whose method did not come from a folder
- * (`sent` undefined) is returned as it was.
+ * When the tree came from `method_dir`, each error located at `files` or at
+ * one of its items is relocated to `method_dir`: the route's textures name
+ * `files`, which this caller never passed. A request that sent no tree
+ * (`tree` undefined) is returned as it was.
  */
 export function withFilesSent<
   R extends { structuredContent: { errors?: ToolError[]; files_sent?: string[] } },
->(result: R, sent: string[] | undefined): R {
-  if (sent === undefined) return result;
+>(result: R, tree: MethodTreeToSend | undefined): R {
+  if (tree === undefined) return result;
   const { errors } = result.structuredContent;
   return {
     ...result,
     structuredContent: {
       ...result.structuredContent,
-      ...(unsentResults.has(result) ? {} : { files_sent: sent }),
-      ...(errors === undefined ? {} : { errors: errors.map(atMethodDir) }),
+      ...(unsentResults.has(result) ? {} : { files_sent: tree.files.map((file) => file.shown) }),
+      ...(errors === undefined || !tree.fromFolder ? {} : { errors: errors.map(atMethodDir) }),
     },
   };
 }
@@ -463,156 +733,6 @@ function atMethodDir(error: ToolError): ToolError {
   return location === "files" || location?.startsWith("files[") === true
     ? { ...error, location: "method_dir" }
     : error;
-}
-
-/**
- * `{ resources }` when there are template files to send, and nothing
- * otherwise, so a request without them is the one it always was.
- */
-export function resourcesOption(resources: TemplateFiles | undefined): {
-  resources?: TemplateFiles;
-} {
-  return hasTemplateFiles(resources) ? { resources } : {};
-}
-
-/** Whether a request carries template files: what decides how its refusals read (`bundleResources`). */
-export function hasTemplateFiles(resources: TemplateFiles | undefined): resources is TemplateFiles {
-  return resources !== undefined && Object.keys(resources).length > 0;
-}
-
-/**
- * Resolve the submitted-files union into plain `{ content, uri? }` items and
- * the bundle's template files, ahead of the request-shape checks
- * ({@link validateMethodSelectorRequest}). `{ path }` items go through the
- * resolver when one is provided; a resolved item carries `uri` = the
- * submitted path, so diagnostics locate to files the agent can open. Without
- * a resolver a `{ path }` item is rejected instructively, the rejection naming
- * the local workshop that resolves paths. `files` and `resources` are only
- * meaningful when `errors` is empty.
- *
- * On a resolver that reads template files (`resolveTemplates`), the `{ path }`
- * items with a template suffix are set aside and resolved last, against the
- * `.mthds` files that resolved from disk: every other item is resolved and
- * refused first, and a request with any refusal reads no template file, since
- * which step names a template depends on the very files refused. Each
- * template's key is the `template_file` of the step naming it
- * (`template-files.ts`). A template file has no inline form, so an inline item
- * labelled with a template suffix is refused rather than sent as a `.mthds`
- * file's text.
- */
-export async function resolveSubmittedFiles(
-  files: SubmittedFileInput[],
-  resolver?: FileResolver,
-): Promise<ResolvedFiles> {
-  const resolved: SubmittedFile[] = [];
-  const onDisk: { path: string; content: string }[] = [];
-  const templates: SubmittedTemplate[] = [];
-  const errors: ToolError[] = [];
-  const takesTemplates = resolver?.resolveTemplates !== undefined;
-
-  for (const [index, file] of files.entries()) {
-    // First-match union semantics: a pathological { content, path } item is
-    // the content arm, and its path is ignored.
-    if ("content" in file) {
-      if (takesTemplates && file.uri != null && isTemplateFilePath(file.uri)) {
-        errors.push({
-          class: "input_domain",
-          location: `files[${index}].uri`,
-          message: `An inline item carries a .mthds file's text, and this one is labelled as a template file: ${file.uri}.`,
-          hint: "Give a template file as { path }, so its bytes are read from disk and sent under the path its step names; a template file never travels inline.",
-          retryable: false,
-        });
-        continue;
-      }
-      resolved.push(file);
-      continue;
-    }
-
-    if (file.path.trim() === "") {
-      errors.push({
-        class: "input_domain",
-        location: `files[${index}].path`,
-        message: "File path must not be empty.",
-        // Extension-neutral: this routine serves every files-taking argument,
-        // whatever extension its resolver reads.
-        hint: "Submit a file path, or inline the contents as { content, uri? }.",
-        retryable: false,
-      });
-      continue;
-    }
-
-    if (resolver === undefined) {
-      errors.push({
-        class: "input_domain",
-        location: `files[${index}].path`,
-        message: "This deployment cannot read files from disk; submit the file contents instead.",
-        hint: "Resubmit this item as { content, uri? } with the file contents inline, or use the local workshop server (npx @pipelex/mcp), which resolves paths.",
-        retryable: false,
-      });
-      continue;
-    }
-
-    if (takesTemplates && isTemplateFilePath(file.path)) {
-      templates.push({ index, path: file.path });
-      continue;
-    }
-
-    const resolution = await resolver.resolve(file.path);
-    if (resolution.ok) {
-      resolved.push({ content: resolution.content, uri: file.path });
-      onDisk.push({ path: file.path, content: resolution.content });
-    } else {
-      errors.push({
-        class: "input_domain",
-        location: `files[${index}].path`,
-        message: resolution.message,
-        hint: resolution.hint,
-        retryable: false,
-      });
-    }
-  }
-
-  const resources: TemplateFiles = {};
-  if (errors.length > 0 || templates.length === 0 || resolver?.resolveTemplates === undefined) {
-    return { files: resolved, resources, errors };
-  }
-
-  if (onDisk.length === 0) {
-    for (const template of templates) {
-      errors.push({
-        class: "input_domain",
-        location: `files[${template.index}].path`,
-        message: `${template.path} is a template file, and no .mthds file was given as { path } for a step of it to name it.`,
-        hint: "A template file is sent under the template_file of the step naming it, found from the directory of that step's .mthds file: give the .mthds files as { path } too.",
-        retryable: false,
-      });
-    }
-    return { files: resolved, resources, errors };
-  }
-
-  const bundle: BundleFileOnDisk[] = onDisk.map((file) => ({
-    path: file.path,
-    named: templateFilesNamedBy(file.content),
-  }));
-  // The method's text rides the same request, every inline file included.
-  const requestBytes = resolved.reduce(
-    (total, file) => total + Buffer.byteLength(file.content, "utf8"),
-    0,
-  );
-  const outcome = await resolver.resolveTemplates(templates, bundle, requestBytes);
-  if (outcome.ok) {
-    return { files: resolved, resources: outcome.resources, errors };
-  }
-  for (const refusal of outcome.refusals) {
-    errors.push({
-      class: "input_domain",
-      location: refusal.index === undefined ? "files" : `files[${refusal.index}].path`,
-      message: refusal.message,
-      hint: refusal.hint,
-      retryable: false,
-    });
-  }
-  return { files: resolved, resources, errors };
 }
 
 /**
@@ -857,9 +977,9 @@ export type ContentImage = {
  * actually actionable (the workspace "format follows consumer" rule), while
  * `structuredContent.errors` stays the untouched contract.
  *
- * `filesSent`, a method folder's `files_sent`, closes the text with the list
- * of what the call sent ({@link filesSentSection}), after the error list,
- * which belongs right under the headline it details.
+ * `filesSent`, a tree's `files_sent`, closes the text with the list of what
+ * the call sent ({@link filesSentSection}), after the error list, which
+ * belongs right under the headline it details.
  */
 export function toolResultContent(
   summary: string,
@@ -877,14 +997,14 @@ export function toolResultContent(
 }
 
 /**
- * The summary's account of what a method folder sent: every file, so the
- * reader sees a `.mthds` file the folder held without anyone listing it.
+ * The summary's account of what a method's tree sent: every file, so the
+ * reader sees a file the folder held without anyone listing it.
  */
 export function filesSentSection(paths: readonly string[]): string {
   return [
     "## Files sent",
     "",
-    "Read from the method's folder and sent, and nothing else from it:",
+    "The method's tree, every file this call sent and nothing else:",
     "",
     ...paths.map((sent) => `- ${codeSpan(asOneLine(sent))}`),
   ].join("\n");
@@ -1056,10 +1176,11 @@ export const METHOD_REF_GRAMMAR =
 
 /**
  * The selectors a method-taking request may carry beside its (already
- * resolved) inline files. `undefined` means "not supplied"; a supplied-but-
- * blank value is rejected loudly rather than treated as absent. A method
- * folder (`method_dir`) has resolved into those files by the time these are
- * checked, its own pairings refused first ({@link resolveMethodFiles}).
+ * resolved) tree. `undefined` means "not supplied"; a supplied-but-blank value
+ * is rejected loudly rather than treated as absent. A method folder
+ * (`method_dir`) or `files` has resolved into that tree by the time these are
+ * checked, the folder's own pairings refused first
+ * ({@link resolveMethodSource}).
  */
 export interface MethodSelectors {
   method_ref?: string;
@@ -1083,7 +1204,8 @@ export type SelectorRule = "one_selector" | "run_source";
 
 /**
  * Request-shape checks for every method-taking tool: at least one method
- * selector must be supplied, blank selectors are rejected at their own field,
+ * selector must be supplied (`hasTree` says whether `method_dir` or `files`
+ * resolved into a tree), blank selectors are rejected at their own field,
  * and the illegal pairings for the given {@link SelectorRule} are rejected
  * before anything reaches the wire (mirroring the API's own 422s). Selector
  * format beyond non-blank stays server-owned (the `run_id` stance).
@@ -1096,7 +1218,7 @@ export type SelectorRule = "one_selector" | "run_source";
  * a parameter with one reachable value.
  */
 export function validateMethodSelectorRequest(
-  files: SubmittedFile[],
+  hasTree: boolean,
   selectors: MethodSelectors,
   options: { rule: SelectorRule },
 ): ToolError[] {
@@ -1122,11 +1244,7 @@ export function validateMethodSelectorRequest(
     });
   }
 
-  if (
-    files.length === 0 &&
-    selectors.method_ref === undefined &&
-    selectors.method_id === undefined
-  ) {
+  if (!hasTree && selectors.method_ref === undefined && selectors.method_id === undefined) {
     errors.push({
       class: "input_domain",
       location: "files",
@@ -1136,8 +1254,7 @@ export function validateMethodSelectorRequest(
     });
   }
 
-  errors.push(...validateSelectorExclusivity(files, selectors, options.rule));
-  errors.push(...validateFileItems(files));
+  errors.push(...validateSelectorExclusivity(hasTree, selectors, options.rule));
   return errors;
 }
 
@@ -1148,12 +1265,11 @@ export function validateMethodSelectorRequest(
  * offenses instead of one.
  */
 function validateSelectorExclusivity(
-  files: SubmittedFile[],
+  hasFiles: boolean,
   selectors: MethodSelectors,
   rule: SelectorRule,
 ): ToolError[] {
   const errors: ToolError[] = [];
-  const hasFiles = files.length > 0;
   const hasRef = selectors.method_ref !== undefined && selectors.method_ref.trim() !== "";
   const hasId = selectors.method_id !== undefined && selectors.method_id.trim() !== "";
 
@@ -1190,34 +1306,6 @@ function validateSelectorExclusivity(
       hint: "This operation is stateless, so there is no run-history linkage for an extra id to feed; drop method_id to operate on the submitted files, or drop files to operate on the registered method.",
       retryable: false,
     });
-  }
-
-  return errors;
-}
-
-function validateFileItems(files: SubmittedFile[]): ToolError[] {
-  const errors: ToolError[] = [];
-
-  for (const [index, file] of files.entries()) {
-    if (file.content.trim() === "") {
-      errors.push({
-        class: "input_domain",
-        location: `files[${index}].content`,
-        message: "File content must not be empty.",
-        hint: "Submit the full .mthds file contents.",
-        retryable: false,
-      });
-    }
-
-    if (file.uri !== undefined && file.uri !== null && file.uri.trim() === "") {
-      errors.push({
-        class: "input_domain",
-        location: `files[${index}].uri`,
-        message: "File uri must not be empty when supplied.",
-        hint: "Omit uri for inline content or provide a stable path or URI.",
-        retryable: false,
-      });
-    }
   }
 
   return errors;
@@ -1307,10 +1395,7 @@ export interface ClassifyErrorOptions {
    * costs nothing to keep right.
    *
    * It IS set on every shape of a gated route, including `/v1/validate`'s
-   * files shape, where the gate happens to be unreachable today because inline
-   * contents travel as `mthds_contents` and carry no `.py`. That is the
-   * route's current wiring rather than a rule, and a locator costs nothing to
-   * keep right.
+   * tree shape, where a folder's tree may carry a `.py` file of its own.
    */
   methodLocation?: string;
   /**
@@ -1338,13 +1423,14 @@ export interface ClassifyErrorOptions {
     hint: string;
   };
   /**
-   * Set by a capability when the request carried a bundle's template files
-   * (its `resources`). Only then are the runner's refusals of those files
-   * (`bundleResourceRefusalTexture`) and a `413` read as about them
-   * ({@link FILES_TOO_LARGE}); a request that sent none keeps the route's own
-   * handling, since the same type there is not about anything it sent.
+   * Set by a capability when the request carried a method's tree, from
+   * `method_dir` or `files`. Only then are the refusals of a tree
+   * (`treeRefusalTexture`) read as about the files it sent, located at
+   * `files`, which a folder's result relocates to `method_dir`; a request that
+   * named its method by `method_ref` or `method_id` keeps the route's own
+   * handling, since the same refusal there is about files it never sent.
    */
-  bundleResources?: boolean;
+  methodTree?: boolean;
   /**
    * Per-route 5xx hint override. Use it when a route is known to report
    * request-caused failures as a generic server error (the hosted `/v1/start`
@@ -1616,8 +1702,8 @@ function classifyFailure(err: unknown, options: ClassifyErrorOptions): ToolError
 function methodFileTransferHint(err: MethodFileTransferError): string {
   if (err.operation === "upload") {
     return err.code === "refused"
-      ? "The platform's storage refused the upload, so nothing was saved. Save again; if it is refused again, the platform's storage needs looking at."
-      : "The platform's storage did not take the file, so nothing was saved. Save again in a moment: a file the organization already holds is never uploaded twice.";
+      ? "The platform's storage refused the upload, so the request was not sent and nothing was saved or run. Call again; if it is refused again, the platform's storage needs looking at."
+      : "The platform's storage did not take the file, so the request was not sent and nothing was saved or run. Call again in a moment: a file the organization already holds is never uploaded twice.";
   }
   if (err.code === "refused") {
     return "Storage refused the download, most often because the file's link expired, and nothing was written. Pull again, which reads the method afresh with new links.";
@@ -1654,12 +1740,15 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
   }
 
   // A file of a method's tree that did not move between this machine and the
-  // platform's storage: an upload of a save, located at the folder it read, or
-  // a download of a pull, located at where it was writing. Neither the message
-  // nor any field carries the file's signed link.
+  // platform's storage: an upload, located at the field that named the files
+  // it sent (`files` on a method-taking tool, which a folder's result relocates
+  // to `method_dir`, or a save's `method_dir`), or a download of a pull,
+  // located at where it was writing. Neither the message nor any field carries
+  // the file's signed link.
   if (err instanceof MethodFileTransferError) {
     return {
-      location: err.operation === "upload" ? "method_dir" : "output_dir",
+      location:
+        err.operation === "download" ? "output_dir" : options.methodTree ? "files" : "method_dir",
       message,
       hint: methodFileTransferHint(err),
     };
@@ -1868,19 +1957,19 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     });
   }
 
-  // The runner's refusals of the template files sent with a bundle, typed by
-  // their `error_type` on every route that takes them, and read so only on a
-  // request that carried some: elsewhere the same type is about files this
-  // server never sent, and the route's own texture says more. Ahead of the
-  // generic 400/422 arm, whose locator follows the route's selector (`target`
-  // on codegen's files shape) and whose hint says nothing about a template.
-  const resourceRefusal = options.bundleResources
-    ? bundleResourceRefusalTexture(err.errorType)
-    : undefined;
-  if (resourceRefusal !== undefined) {
+  // The refusals of a method's tree, by the platform's `code` or the runner's
+  // `error_type`, and read so only on a request that sent one: elsewhere the
+  // same refusal is about files this server never sent, and the route's own
+  // texture says more. Ahead of the generic 400/422 arm, whose locator follows
+  // the route's selector and whose hint says nothing about a tree.
+  const treeRefusal = options.methodTree ? treeRefusalTexture(err) : undefined;
+  if (treeRefusal !== undefined) {
     return toolError(
-      { ...verdict, class: resourceRefusal.class ?? verdict.class },
-      { location: resourceRefusal.location, message, hint: resourceRefusal.hint },
+      {
+        class: treeRefusal.class ?? verdict.class,
+        retryable: treeRefusal.retryable ?? verdict.retryable,
+      },
+      { location: "files", message, hint: treeRefusal.hint },
     );
   }
 
@@ -2061,10 +2150,9 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
     );
   }
 
-  // A route's own size texture first; a request that carried template files
-  // otherwise reads a `413` as about them, and one that carried none keeps
-  // the unexpected-status arm, since nothing it sent is known to be at fault.
-  const tooLarge = options.tooLarge ?? (options.bundleResources ? FILES_TOO_LARGE : undefined);
+  // A route's own size texture; a route without one keeps the
+  // unexpected-status arm, since nothing it sent is known to be at fault.
+  const tooLarge = options.tooLarge;
   if (err.status === 413 && tooLarge !== undefined) {
     return toolError(verdict, {
       location: tooLarge.location,
@@ -2105,69 +2193,68 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
   return toolError(verdict, { message, hint: `The Pipelex API returned HTTP ${err.status}.` });
 }
 
-/** Where a submitted template file is keyed, said once for every hint that needs it. */
-const TEMPLATE_KEY_RULE =
-  "A template file is sent under the template_file of the PipeDocGen step naming it, and found where that path leads from the directory of the step's .mthds file, given as { path }.";
-
 /**
- * The texture of the runner's refusal of the files sent with a bundle, the
- * request's `resources`, by its `error_type`, or `undefined` for any other
- * error. A refusal the caller can fix is located at `files`, which is where
- * the template files were submitted, whatever the route's selector texture
- * says.
+ * The texture of a refusal of the method's tree a request sent, or `undefined`
+ * for any other error. Each but the last is a `422`, which the SDK reads as
+ * the caller's.
  *
- * - `InvalidResourcePath` (422): a key that cannot name a file inside the
- *   bundle, or two files under one path.
- * - `BundleResourceNotNamedError` (422): a file no step of the bundle names,
- *   which is how a misplaced template file or a misspelled `template_file`
- *   shows; the runner's detail lists the unnamed paths.
- * - `InvalidBase64` (400): a value that is not base64. The SDK encodes every
- *   value this server sends and this server sends no `bundle_b64`, so no
- *   argument fixes it: the class is overridden to `runtime`, where the SDK
- *   reads a 400 as the caller's.
- *
- * The size refusals are `413`s, textured by {@link FILES_TOO_LARGE}. Both
- * apply only to a request that carried template files
- * (`ClassifyErrorOptions.bundleResources`).
+ * - `invalid_method_files`, or the runner's `InvalidMethodFiles`: a path that
+ *   is no tree path, or two that collide, which the problem names. The
+ *   workshop refuses both before sending, so this is a rule the receiver holds
+ *   that the workshop does not; the caller renames the file.
+ * - `method_tree_too_large`, or the runner's `MethodTreeTooLarge`: past one of
+ *   the deployment's limits, which the workshop holds a folder to when the
+ *   deployment announces them; the SDK has sent the request once more on a
+ *   fresh handshake already.
+ * - `blob_mismatch`: a hash entry states another size than the blob the
+ *   organization holds. The workshop states the sizes of the bytes it read, so
+ *   no argument fixes it: the class is overridden to `runtime`.
+ * - `missing_blobs`: a blob went missing between its upload and the request.
+ *   The same call asks the blob route afresh and uploads what is missing, so
+ *   it is overridden to `runtime` and retryable, where the SDK reads a `422`
+ *   as the caller's and final.
+ * - A `413`: the request carrying the tree was larger than a server or
+ *   gateway in front of the route takes. The SDK sends a tree by hash past a
+ *   small threshold to a deployment that keeps a blob store, so this is a
+ *   deployment sending everything inline, a bare runner; the caller sends a
+ *   smaller tree. The class is the caller's, whatever the SDK reads.
  */
-function bundleResourceRefusalTexture(
-  errorType: string | undefined,
-): { class?: ErrorClass; location?: string; hint: string } | undefined {
-  switch (errorType) {
-    case "InvalidResourcePath":
-      return {
-        location: "files",
-        hint: `${TEMPLATE_KEY_RULE} Check that template_file: it must be a relative path that stays inside the bundle.`,
-      };
-    case "BundleResourceNotNamedError":
-      return {
-        location: "files",
-        hint: `Every template file sent must be named by a PipeDocGen step of the bundle. ${TEMPLATE_KEY_RULE} Drop the files no step names.`,
-      };
-    case "InvalidBase64":
-      return {
-        class: "runtime",
-        hint: "The template files were encoded by this server, so no argument fixes this refusal; inspect the MCP server and the Pipelex API.",
-      };
-    default:
-      return undefined;
+function treeRefusalTexture(
+  err: ApiResponseError,
+): { class?: ErrorClass; retryable?: boolean; hint: string } | undefined {
+  if (err.status === 413) {
+    return {
+      class: "input_domain",
+      retryable: false,
+      hint: "The request carrying the method's tree was larger than the Pipelex deployment takes in one request; a deployment without a blob store takes every file inline. Keep what is not part of the method out of its folder with a .gitignore inside it or METHODS.toml's [package] exclude, or send fewer or smaller files.",
+    };
   }
+  if (err.status !== 422) return undefined;
+  if (err.code === "invalid_method_files" || err.errorType === "InvalidMethodFiles") {
+    return {
+      hint: "The method's files break the MTHDS standard's rules for a tree, which the message names: a name that is not one every machine keeps, or two names that collide. Rename the file it names, or keep it out of the method.",
+    };
+  }
+  if (err.code === "method_tree_too_large" || err.errorType === "MethodTreeTooLarge") {
+    return {
+      hint: "The method's tree is larger than the Pipelex deployment takes, by the limit the message names. Keep what is not part of the method out of its folder with a .gitignore inside it or METHODS.toml's [package] exclude, or make its files smaller.",
+    };
+  }
+  if (err.code === "blob_mismatch") {
+    return {
+      class: "runtime",
+      hint: "A file of the tree is stored under its hash with another size than the one this call sent, so the request was refused. No argument fixes it: call again, and if it persists, the platform's storage needs looking at.",
+    };
+  }
+  if (err.code === "missing_blobs") {
+    return {
+      class: "runtime",
+      retryable: true,
+      hint: "A file of the tree went missing from the platform's storage after it was uploaded, so the request was refused. Call again, which uploads what is missing.",
+    };
+  }
+  return undefined;
 }
-
-/**
- * The `413` texture of a request that carried template files. Every `413`
- * there is read as about them, since the workshop held them to the runner's
- * limits and the gateway's before sending: the runner's `PayloadTooLarge` (a
- * limit a deployment configured lower), its `BundleResourcesTooLargeError`
- * (the `.html` template files, which travel inline with the method wherever it
- * runs, over 512 KiB in all), and the hosted gateway's refusal of a request
- * over its 10 MiB quota, which carries no type, when a run's inputs filled the
- * room the template files left.
- */
-export const FILES_TOO_LARGE: NonNullable<ClassifyErrorOptions["tooLarge"]> = {
-  location: "files",
-  hint: `The request is larger than the API takes. A bundle's template files are held to ${MAX_TEMPLATE_FILES} files and ${MAX_TEMPLATE_FILE_BYTES / (1024 * 1024)} MiB each, its .html templates to 512 KiB in all, and on the hosted API a whole request, the template files base64-encoded and a run's inputs included, to 10 MiB. Send only the template files the steps name, make them smaller, or move large inputs into files.`,
-};
 
 /**
  * The texture of a `409` about a saved method, by the platform's `code`, or

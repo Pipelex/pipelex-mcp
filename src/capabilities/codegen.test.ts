@@ -18,8 +18,8 @@ import {
   fenced,
   generateMthdsCode,
 } from "./codegen.js";
+import { comparableRequest, contentsOf, fakeMethodResolver } from "./method-tree-fixtures.js";
 import { DEFAULT_API_URL } from "./shared.js";
-import type { FileResolver } from "./shared.js";
 
 /**
  * A REAL engine response, recorded from a live `ts-zod` call — the only kind
@@ -386,7 +386,7 @@ describe("codegenToolResult", () => {
 });
 
 describe("generateMthdsCode request mapping", () => {
-  it("sends the files selector with kind types, the target, and no pipe_ref key", async () => {
+  it("sends the files as one tree with kind types, the target, and no pipe_ref key", async () => {
     let captured: CodegenRequest | undefined;
 
     const result = await generateMthdsCode(
@@ -408,13 +408,10 @@ describe("generateMthdsCode request mapping", () => {
       },
     );
 
-    // The MCP surface spells provenance `uri`; the crate envelope spells it
-    // `source`. `pipe_ref` must be ABSENT — the route rejects it on `types`.
-    expect(captured).toEqual({
-      files: [
-        { content: 'domain = "demo"', source: "bundle.mthds" },
-        { content: 'main_pipe = "main"' },
-      ],
+    // The first file under its uri's name, the second under the next free
+    // one. `pipe_ref` must be ABSENT — the route rejects it on `types`.
+    expect(await comparableRequest(captured)).toEqual({
+      tree: { "bundle.mthds": 'domain = "demo"', "bundle-2.mthds": 'main_pipe = "main"' },
       kind: "types",
       target: "ts-zod",
     });
@@ -732,34 +729,7 @@ describe("generateMthdsCode error classification", () => {
 });
 
 describe("generateMthdsCode path submissions", () => {
-  it("resolves { path } items through the context resolver, with the path as source", async () => {
-    let captured: CodegenRequest | undefined;
-
-    const result = await generateMthdsCode(
-      { files: [{ path: "bundle.mthds" }], target: "ts-zod" },
-      {
-        baseUrl: DEFAULT_API_URL,
-        resolver: {
-          async resolve(path) {
-            return { ok: true, content: `# from ${path}\ndomain = "demo"` };
-          },
-        },
-        client: {
-          async codegen(request) {
-            captured = request;
-            return recordedReport;
-          },
-        },
-      },
-    );
-
-    expect(captured?.files).toEqual([
-      { content: '# from bundle.mthds\ndomain = "demo"', source: "bundle.mthds" },
-    ]);
-    expect(result.structuredContent.status).toBe("ok");
-  });
-
-  it("sends a bundle's template files as resources beside the files", async () => {
+  it("reads { path } items through the context resolver and sends them as one tree", async () => {
     const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
     let captured: CodegenRequest | undefined;
 
@@ -770,17 +740,12 @@ describe("generateMthdsCode path submissions", () => {
       },
       {
         baseUrl: DEFAULT_API_URL,
-        resolver: {
-          async resolve() {
-            return { ok: true, content: 'domain = "invoice"' };
+        resolver: fakeMethodResolver({
+          files: {
+            "methods/invoice.mthds": 'domain = "invoice"',
+            "methods/templates/invoice.xlsx": XLSX,
           },
-          async resolveTemplates(templates, bundle, requestBytes) {
-            expect(templates).toEqual([{ index: 1, path: "methods/templates/invoice.xlsx" }]);
-            expect(bundle).toEqual([{ path: "methods/invoice.mthds", named: [] }]);
-            expect(requestBytes).toBe('domain = "invoice"'.length);
-            return { ok: true, resources: { "templates/invoice.xlsx": XLSX } };
-          },
-        },
+        }),
         client: {
           async codegen(request) {
             captured = request;
@@ -790,34 +755,25 @@ describe("generateMthdsCode path submissions", () => {
       },
     );
 
-    expect(captured?.files).toEqual([
-      { content: 'domain = "invoice"', source: "methods/invoice.mthds" },
+    expect(captured?.tree?.files.map((file) => file.path)).toEqual([
+      "invoice.mthds",
+      "templates/invoice.xlsx",
     ]);
-    expect(captured?.resources).toEqual({ "templates/invoice.xlsx": XLSX });
-    expect(result.structuredContent.status).toBe("ok");
+    expect(await captured?.tree?.readFile("templates/invoice.xlsx")).toEqual(XLSX);
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      files_sent: ["methods/invoice.mthds", "methods/templates/invoice.xlsx"],
+    });
   });
 
   it("reads a method folder through the resolver and lists every file it sent", async () => {
-    const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
     let captured: CodegenRequest | undefined;
 
     const result = await generateMthdsCode(
       { method_dir: "methods", target: "ts-zod" },
       {
         baseUrl: DEFAULT_API_URL,
-        resolver: {
-          async resolve() {
-            throw new Error("a folder is not read file by file");
-          },
-          async resolveMethodDir(methodDir) {
-            return {
-              ok: true,
-              files: [{ path: `${methodDir}/invoice.mthds`, content: 'domain = "invoice"' }],
-              resources: { "templates/invoice.xlsx": XLSX },
-              sent: [`${methodDir}/invoice.mthds`, `${methodDir}/templates/invoice.xlsx`],
-            };
-          },
-        },
+        resolver: methodFolderResolver(),
         client: {
           async codegen(request) {
             captured = request;
@@ -827,15 +783,42 @@ describe("generateMthdsCode path submissions", () => {
       },
     );
 
-    expect(captured?.files).toEqual([
-      { content: 'domain = "invoice"', source: "methods/invoice.mthds" },
-    ]);
-    expect(captured?.resources).toEqual({ "templates/invoice.xlsx": XLSX });
+    expect(await contentsOf(captured?.tree)).toEqual({
+      "invoice.mthds": 'domain = "invoice"',
+      "templates/invoice.xlsx": "PK",
+    });
     expect(result.structuredContent.files_sent).toEqual([
       "methods/invoice.mthds",
       "methods/templates/invoice.xlsx",
     ]);
     expect(codegenToolResult(result).content[0].text).toContain("## Files sent");
+  });
+
+  it("refuses a folder holding a key before anything is sent", async () => {
+    const fakeKey = ["plx_sk_", "f".repeat(32)].join("");
+
+    const result = await generateMthdsCode(
+      { method_dir: "methods", target: "ts-zod" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: fakeMethodResolver({
+          folder: {
+            "invoice.mthds": 'domain = "invoice"',
+            "funcs/client.py": `KEY = "${fakeKey}"`,
+          },
+        }),
+        client: codegenNotCalled,
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "method_dir",
+    });
+    expect(result.structuredContent.errors?.[0]?.message).toContain("nothing was sent");
+    expect(result.structuredContent).not.toHaveProperty("files_sent");
+    expect(JSON.stringify(result)).not.toContain(fakeKey);
   });
 
   it("lists no file of a folder when the request never left the machine", async () => {
@@ -1203,19 +1186,9 @@ describe("generateMthdsCode report-shape rules", () => {
   });
 });
 
-/** A resolver reading a method folder as `methods/`, with one template file. */
-function methodFolderResolver(): FileResolver {
-  return {
-    async resolve() {
-      throw new Error("a folder is not read file by file");
-    },
-    async resolveMethodDir(methodDir) {
-      return {
-        ok: true,
-        files: [{ path: `${methodDir}/invoice.mthds`, content: 'domain = "invoice"' }],
-        resources: { "templates/invoice.xlsx": new Uint8Array([0x50, 0x4b, 0x03, 0x04]) },
-        sent: [`${methodDir}/invoice.mthds`, `${methodDir}/templates/invoice.xlsx`],
-      };
-    },
-  };
+/** A resolver reading every method folder as a bundle and one template file. */
+function methodFolderResolver() {
+  return fakeMethodResolver({
+    folder: { "invoice.mthds": 'domain = "invoice"', "templates/invoice.xlsx": "PK" },
+  });
 }
