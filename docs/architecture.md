@@ -62,7 +62,7 @@ The limits a deployment holds a method's tree to, learnt rather than hardcoded: 
 
 #### `capabilities/secret-guard.ts`
 
-The save's tripwire for a secret in a method's tree, run on the bytes the save read before anything is validated or sent. `secretFindings(files)`, over each file's path and bytes, reports a file whose last path segment is a known secret file's name, matched ignoring case, whatever it holds, and a UTF-8 text file holding a well-known key format, each format being a provider's documented prefix followed by enough of the key's body that prose naming the prefix does not match. A finding carries the path and what it matched, never the matched text, since the refusal is shown to a model and may be logged. It is a list of well-known shapes, not a secret scanner, and SPEC.md says so where the user reads it.
+The save's tripwire for a secret in a method's tree, run on the bytes the save read before anything is validated or sent. `secretFindings(files)`, over each file's path and bytes, reports a file whose last path segment is a known secret file's name, matched ignoring case, whatever it holds, and any other file whose bytes hold a well-known key format, read as Latin-1 so every encoding's ASCII runs are searched, and once more without NUL bytes for UTF-16, each format being a provider's documented prefix followed by enough of the key's body that prose naming the prefix does not match. A finding carries the path and what it matched, never the matched text, since the refusal is shown to a model and may be logged. It is a list of well-known shapes, not a secret scanner, and SPEC.md says so where the user reads it.
 
 ### The capability core: reading and listing
 

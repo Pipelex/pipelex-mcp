@@ -1,7 +1,7 @@
 /**
  * The workshop's secret guard: before a method's tree leaves the machine, it
  * refuses a file whose NAME is a known secret file, or whose TEXT holds a
- * well-known key format.
+ * well-known key format, in whatever encoding the file is written.
  *
  * The membership rule already keeps the commonest secret files out by
  * construction, since `.env`, `.ssh/`, `.aws/` and every other dotfile start
@@ -71,13 +71,24 @@ const KEY_FORMATS: readonly { pattern: RegExp; reason: string }[] = [
   { pattern: /\bplx_sk_[A-Za-z0-9_-]{16,}/, reason: "a Pipelex API key" },
 ];
 
-const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+/**
+ * The texts a file's bytes are searched in. Every key format is ASCII, so the
+ * bytes are read as Latin-1, one character per byte, which keeps every ASCII
+ * run of them whatever the file's encoding: UTF-8, Latin-1, cp1252, or a
+ * binary file with a key inside it. A file holding NUL bytes is searched once
+ * more with them removed, which is how an ASCII key reads in UTF-16, with or
+ * without its byte order mark, and in UTF-32.
+ */
+function searchableTexts(bytes: Uint8Array): string[] {
+  const latin1 = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("latin1");
+  return latin1.includes("\0") ? [latin1, latin1.replaceAll("\0", "")] : [latin1];
+}
 
 /**
  * The files of a tree the guard refuses, in the order given. A file whose name
- * is a secret file's is refused on the name alone; any other is read as text
- * when its bytes are UTF-8 and searched for every key format, and a file that
- * is not text is judged on its name alone.
+ * is a secret file's is refused on the name alone; every other file, text in
+ * any encoding or binary, is searched for every key format in the texts
+ * {@link searchableTexts} reads from its bytes.
  */
 export function secretFindings(
   files: Iterable<{ path: string; bytes: Uint8Array }>,
@@ -90,15 +101,10 @@ export function secretFindings(
       findings.push({ path: file.path, reason: `it is named like ${byName.reason}` });
       continue;
     }
-    let text: string;
-    try {
-      text = strictUtf8.decode(file.bytes);
-    } catch {
-      continue;
-    }
-    const held = KEY_FORMATS.filter((format) => format.pattern.test(text)).map(
-      (format) => format.reason,
-    );
+    const texts = searchableTexts(file.bytes);
+    const held = KEY_FORMATS.filter((format) =>
+      texts.some((text) => format.pattern.test(text)),
+    ).map((format) => format.reason);
     if (held.length > 0) {
       findings.push({ path: file.path, reason: `it holds ${[...new Set(held)].join(" and ")}` });
     }

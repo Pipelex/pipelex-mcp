@@ -100,8 +100,39 @@ describe("secretFindings", () => {
     expect(findings).toEqual([]);
   });
 
-  it("judges a file that is not UTF-8 on its name alone", () => {
-    const binary = new Uint8Array([0xff, 0xfe, 0x00, ...text(fake.aws)]);
+  it("finds a key in a file that is not UTF-8: Latin-1, cp1252, or bytes around it", () => {
+    // A Latin-1 or cp1252 file: an "é" as the single byte 0xe9, which no
+    // UTF-8 decoder accepts, beside a key.
+    const latin1 = new Uint8Array([...text("caf"), 0xe9, ...text(` key = "${fake.aws}"\n`)]);
+    // A binary file with a key inside it.
+    const binary = new Uint8Array([0xff, 0xd8, 0x00, 0x9f, ...text(fake.pipelex), 0x00, 0xc3]);
+
+    expect(secretFindings([{ path: "config/legacy.py", bytes: latin1 }])).toEqual([
+      { path: "config/legacy.py", reason: "it holds an AWS access key id" },
+    ]);
+    expect(secretFindings([{ path: "data/blob.bin", bytes: binary }])).toEqual([
+      { path: "data/blob.bin", reason: "it holds a Pipelex API key" },
+    ]);
+  });
+
+  it("finds a key in a UTF-16 file, with or without its byte order mark, either way round", () => {
+    const utf16le = Buffer.from(`token: ${fake.github}\n`, "utf16le");
+    const withBom = new Uint8Array([0xff, 0xfe, ...utf16le]);
+    const bigEndian = new Uint8Array(utf16le.length);
+    for (let index = 0; index < utf16le.length; index += 2) {
+      bigEndian[index] = utf16le[index + 1]!;
+      bigEndian[index + 1] = utf16le[index]!;
+    }
+
+    for (const bytes of [new Uint8Array(utf16le), withBom, bigEndian]) {
+      expect(secretFindings([{ path: "notes.txt", bytes }])).toEqual([
+        { path: "notes.txt", reason: "it holds a GitHub token" },
+      ]);
+    }
+  });
+
+  it("refuses a known secret file by name whatever its bytes, and lets a binary file without a key through", () => {
+    const binary = new Uint8Array([0xff, 0xfe, 0x00, 0x01, 0x9c, 0x00]);
 
     expect(secretFindings([{ path: "template.docx", bytes: binary }])).toEqual([]);
     expect(secretFindings([{ path: "release.pfx", bytes: binary }])).toHaveLength(1);
