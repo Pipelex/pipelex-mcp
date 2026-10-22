@@ -10,9 +10,8 @@ import { SDK_VERSION } from "@pipelex/sdk";
 import type {
   CodegenResponse,
   MethodPage,
-  MthdsFile,
+  PipelexValidateSource,
   PipelexValidationReport,
-  PipelexValidationResult,
 } from "@pipelex/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -473,29 +472,29 @@ describe("the workshop's contexts and dispatch", () => {
 
     const contexts = buildLocalToolContexts({ PIPELEX_BASE_URL: "http://127.0.0.1:8081" }, rootDir);
 
-    // Every method-taking tool reads the bundle's template files and its
-    // folder through one resolver, and so does the save, whose folder is the
-    // method's whole tree.
+    // Every method-taking tool reads a method's files and its folder through
+    // one resolver; the save reads its folder through its own, which words
+    // its refusals for a tool that takes a folder alone.
     for (const resolver of [
       contexts.inputs.resolver,
       contexts.codegen.resolver,
       contexts.prepare.resolver,
       contexts.run.resolver,
-      contexts.catalogWrite.resolver,
     ]) {
       expect(resolver).toBe(contexts.validation.resolver);
     }
-    expect(contexts.validation.resolver?.resolveTemplates).toBeDefined();
-    expect(contexts.validation.resolver?.resolveMethodDir).toBeDefined();
-    expect(contexts.catalogWrite.resolver?.locateMethodDir).toBeDefined();
-    expect(contexts.catalogWrite.resolver?.readMethodTree).toBeDefined();
+    expect(contexts.catalogWrite.resolver).not.toBe(contexts.validation.resolver);
+    for (const resolver of [contexts.validation.resolver, contexts.catalogWrite.resolver]) {
+      expect(resolver?.readMethodFile).toBeDefined();
+      expect(resolver?.locateMethodDir).toBeDefined();
+      expect(resolver?.readMethodTree).toBeDefined();
+    }
     await expect(contexts.validation.resolver?.resolve("bundle.mthds")).resolves.toEqual({
       ok: true,
       content: 'domain = "demo"',
     });
-    // The tree limits a platform stores a method under are the save's alone:
-    // the method-taking tools list a folder under the workshop's scan bound.
-    expect(contexts.catalogWrite.treeLimits).toBeDefined();
+    // Every tool that sends a method's tree holds it to the limits the
+    // platform announces, asked once per platform through one shared memory.
     for (const context of [
       contexts.validation,
       contexts.inputs,
@@ -503,8 +502,9 @@ describe("the workshop's contexts and dispatch", () => {
       contexts.prepare,
       contexts.run,
     ]) {
-      expect("treeLimits" in context).toBe(false);
+      expect(context.treeLimits).toBe(contexts.catalogWrite.treeLimits);
     }
+    expect(contexts.catalogWrite.treeLimits).toBeDefined();
 
     const { client, close } = await connectClient(createLocalServer({ contexts }));
     try {
@@ -522,14 +522,11 @@ describe("the workshop's contexts and dispatch", () => {
     const rootDir = await makeTempDir();
     await fs.writeFile(path.join(rootDir, "bundle.mthds"), 'domain = "demo"', "utf8");
 
-    let submittedFiles: MthdsFile[] | undefined;
+    let submitted: PipelexValidateSource | undefined;
     const contexts = buildLocalToolContexts({}, rootDir);
     contexts.validation.client = {
-      async validate(): Promise<PipelexValidationResult> {
-        throw new Error("validate (selector leg) must not be called in this test");
-      },
-      async validateFiles(files) {
-        submittedFiles = files;
+      async validate(source) {
+        submitted = source;
         return validReport;
       },
     };
@@ -541,7 +538,12 @@ describe("the workshop's contexts and dispatch", () => {
         arguments: { files: [{ path: "bundle.mthds" }] },
       });
 
-      expect(submittedFiles).toEqual([{ content: 'domain = "demo"', uri: "bundle.mthds" }]);
+      const tree = submitted !== undefined && "tree" in submitted ? submitted.tree : undefined;
+      expect(tree?.files.map((file) => file.path)).toEqual(["bundle.mthds"]);
+      expect(new TextDecoder().decode(await tree?.readFile("bundle.mthds"))).toBe(
+        'domain = "demo"',
+      );
+      expect(result.structuredContent).toMatchObject({ files_sent: ["bundle.mthds"] });
       expect(result.structuredContent).toMatchObject({
         status: "ok",
         is_valid: true,
@@ -556,7 +558,7 @@ describe("the workshop's contexts and dispatch", () => {
       // and the flowchart as a page on disk in place of the view.
       const [block] = result.content as { type: string; text: string }[];
       expect(block?.text).toMatch(
-        /^# Valid\n\n## Main pipe\n\n`demo\.main\(\) -> native\.Text`\n\n## Method graph\n\nWrote the method's flowchart to `method-graph\.html`/,
+        /^# Valid\n\n## Main pipe\n\n`demo\.main\(\) -> native\.Text`\n\n## Files sent\n\nThe method's tree, every file this call sent and nothing else:\n\n- `bundle\.mthds`\n\n## Method graph\n\nWrote the method's flowchart to `method-graph\.html`/,
       );
       expect(result._meta?.pipe_io_contracts).toBeUndefined();
       expect(result._meta?.input_form).toBeUndefined();

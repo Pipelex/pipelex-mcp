@@ -7,36 +7,64 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiResponseError, ApiUnreachableError, RequestArgumentError } from "@pipelex/sdk";
 import type {
   InputForm,
-  MthdsFile,
+  MethodTreeSource,
   OutputForm,
   PipeIOContracts,
   PipelexInvalidReport,
+  PipelexValidateSource,
   PipelexValidationReport,
   PipelexValidationResult,
-  ValidateFilesOptions,
-  ValidateMethodSelector,
+  ValidateOptions,
 } from "@pipelex/sdk";
 
-import { localBundleFileResolver } from "../files.js";
+import { localMethodFileResolver } from "../files.js";
 import { GRAPH_PAGE_FILENAME, GRAPH_PAGE_MARK } from "./graph-page.js";
 import { DEFAULT_API_URL } from "./shared.js";
 import type { FileResolver } from "./shared.js";
 import { imageFieldPaths, toolResult, validateMthds, validationResult } from "./validate.js";
 import type { ValidationClient, ValidationContext } from "./validate.js";
 
-/** Fake selector arm for tests whose request must never reach the selector leg. */
-const selectorValidateNotCalled = {
+/** A fake client for tests whose request must never reach the API. */
+const validateNotCalled: ValidationClient = {
   async validate(): Promise<PipelexValidationResult> {
-    throw new Error("validate (selector leg) must not be called in this test");
+    throw new Error("validate must not be called in this test");
   },
 };
 
-/** Fake validateFiles arm for tests whose request must never reach the inline-files leg. */
-const validateFilesNotCalled = {
-  async validateFiles(): Promise<PipelexValidationResult> {
-    throw new Error("validateFiles must not be called in this test");
-  },
-};
+/** The tree a validate call sent, when it sent one rather than a selector. */
+function treeOf(source: PipelexValidateSource): MethodTreeSource | undefined {
+  return "tree" in source && source.tree !== undefined && source.tree !== null
+    ? source.tree
+    : undefined;
+}
+
+/**
+ * A fake client answering a tree with `answer`, which gets the tree and the
+ * options it was sent with; a selector must never reach it.
+ */
+function onTree(
+  answer: (
+    tree: MethodTreeSource,
+    options: ValidateOptions | undefined,
+  ) => PipelexValidationResult | Promise<PipelexValidationResult>,
+): ValidationClient {
+  return {
+    async validate(source, _allowSignatures, options) {
+      const tree = treeOf(source);
+      if (tree === undefined) throw new Error("the selector leg must not be called in this test");
+      return answer(tree, options);
+    },
+  };
+}
+
+/** Every file of a tree sent, as text, by tree path. */
+async function contentsOf(tree: MethodTreeSource | undefined): Promise<Record<string, string>> {
+  const contents: Record<string, string> = {};
+  for (const file of tree?.files ?? []) {
+    contents[file.path] = new TextDecoder().decode(await tree!.readFile(file.path));
+  }
+  return contents;
+}
 
 // Since sdk 0.15.0 both per-pipe artifacts are the standard's own types, so the
 // fixtures state real minimal shapes rather than placeholders. The two are the
@@ -1060,9 +1088,9 @@ describe("toolResult", () => {
 });
 
 describe("validateMthds", () => {
-  it("maps MCP input to validateFiles and projects the response", async () => {
-    let capturedFiles: MthdsFile[] | undefined;
-    let capturedOptions: ValidateFilesOptions | undefined;
+  it("sends inline files as one tree and projects the response", async () => {
+    let captured: MethodTreeSource | undefined;
+    let capturedOptions: ValidateOptions | undefined;
 
     const result = await validateMthds(
       {
@@ -1073,29 +1101,28 @@ describe("validateMthds", () => {
       },
       {
         baseUrl: DEFAULT_API_URL,
-        client: {
-          ...selectorValidateNotCalled,
-          async validateFiles(files, options) {
-            capturedFiles = files;
-            capturedOptions = options;
-            return validReport;
-          },
-        },
+        client: onTree((tree, options) => {
+          captured = tree;
+          capturedOptions = options;
+          return validReport;
+        }),
       },
     );
 
-    expect(capturedFiles).toEqual([
-      { content: 'domain = "demo"', uri: "bundle.mthds" },
-      { content: 'main_pipe = "main"' },
-    ]);
+    // The first takes its uri's name; the second, with none, the next free one.
+    expect(await contentsOf(captured)).toEqual({
+      "bundle-2.mthds": 'main_pipe = "main"',
+      "bundle.mthds": 'domain = "demo"',
+    });
     // The `views` token is the descriptor opt-in — the spec keeps `input_form`
     // off the report unless the caller asks for it.
     expect(capturedOptions).toEqual({
-      allowSignatures: true,
       render: ["markdown"],
       views: ["input_form", "output_form"],
     });
     expect(result.structuredContent.status).toBe("ok");
+    // Listed in tree path order, the order the tree is sent in.
+    expect(result.structuredContent.files_sent).toEqual(["bundle-2.mthds", "bundle.mthds"]);
     // No views are advertised.
     expect(result.structuredContent.available_view_specs).toEqual([]);
     expect(result.structuredContent).not.toHaveProperty("graph_spec");
@@ -1110,13 +1137,10 @@ describe("validateMthds", () => {
       },
       {
         baseUrl: DEFAULT_API_URL,
-        client: {
-          ...selectorValidateNotCalled,
-          async validateFiles() {
-            called = true;
-            return validReport;
-          },
-        },
+        client: onTree(() => {
+          called = true;
+          return validReport;
+        }),
       },
     );
 
@@ -1137,12 +1161,7 @@ describe("validateMthds", () => {
       { files: [{ content: 'domain = "demo"' }] },
       {
         baseUrl: DEFAULT_API_URL,
-        client: {
-          ...selectorValidateNotCalled,
-          async validateFiles() {
-            return malformedReport;
-          },
-        },
+        client: onTree(() => malformedReport),
       },
     );
 
@@ -1157,12 +1176,9 @@ describe("validateMthds", () => {
       { files: [{ content: 'domain = "demo"' }] },
       {
         baseUrl: DEFAULT_API_URL,
-        client: {
-          ...selectorValidateNotCalled,
-          async validateFiles() {
-            throw new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED");
-          },
-        },
+        client: onTree(() => {
+          throw new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED");
+        }),
       },
     );
 
@@ -1176,22 +1192,19 @@ describe("validateMthds", () => {
       { files: [{ content: 'domain = "demo"' }] },
       {
         baseUrl: DEFAULT_API_URL,
-        client: {
-          ...selectorValidateNotCalled,
-          async validateFiles() {
-            throw new ApiResponseError(
-              "HTTP 401",
-              `${DEFAULT_API_URL}/v1/validate`,
-              401,
-              "Unauthorized",
-              "{}",
-              "unauthorized",
-              "Missing key",
-              undefined, // validationErrors
-              undefined, // code
-            );
-          },
-        },
+        client: onTree(() => {
+          throw new ApiResponseError(
+            "HTTP 401",
+            `${DEFAULT_API_URL}/v1/validate`,
+            401,
+            "Unauthorized",
+            "{}",
+            "unauthorized",
+            "Missing key",
+            undefined, // validationErrors
+            undefined, // code
+          );
+        }),
       },
     );
 
@@ -1208,34 +1221,69 @@ describe("validateMthds", () => {
 
 describe("validateMthds path submissions", () => {
   const resolver: FileResolver = {
-    async resolve(path) {
+    async resolve() {
+      throw new Error("a { path } item is read as bytes, never as text");
+    },
+    async statMethodFile(path) {
       if (path === "methods/bundle.mthds") {
-        return { ok: true, content: 'domain = "demo"' };
+        return { ok: true, absolute: `/work/${path}`, relative: path, size: 15 };
+      }
+      return { ok: false, message: `File not found: ${path}`, hint: "Check the path." };
+    },
+    async readMethodFile(path) {
+      if (path === "methods/bundle.mthds") {
+        return { ok: true, bytes: new TextEncoder().encode('domain = "demo"') };
       }
       return { ok: false, message: `File not found: ${path}`, hint: "Check the path." };
     },
   };
 
-  it("resolves { path } items through the context resolver, with the path as uri", async () => {
-    let capturedFiles: MthdsFile[] | undefined;
+  it("refuses a list of files holding no .mthds file without reading it or calling the API", async () => {
+    let touched = 0;
+    const untouchable: FileResolver = {
+      resolve: () => Promise.reject(new Error("never read")),
+      statMethodFile: () => {
+        touched += 1;
+        return Promise.reject(new Error("never stated"));
+      },
+      readMethodFile: () => {
+        touched += 1;
+        return Promise.reject(new Error("never read"));
+      },
+    };
+
+    const result = await validateMthds(
+      { files: [{ path: "finance/payroll.xlsx" }] },
+      { baseUrl: DEFAULT_API_URL, resolver: untouchable, client: validateNotCalled },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors).toEqual([
+      expect.objectContaining({ class: "input_domain", location: "files" }),
+    ]);
+    expect(result.structuredContent).not.toHaveProperty("files_sent");
+    expect(touched).toBe(0);
+  });
+  it("reads { path } items through the context resolver and sends them under their tree path", async () => {
+    let captured: MethodTreeSource | undefined;
 
     const result = await validateMthds(
       { files: [{ path: "methods/bundle.mthds" }] },
       {
         baseUrl: DEFAULT_API_URL,
         resolver,
-        client: {
-          ...selectorValidateNotCalled,
-          async validateFiles(files) {
-            capturedFiles = files;
-            return validReport;
-          },
-        },
+        client: onTree((tree) => {
+          captured = tree;
+          return validReport;
+        }),
       },
     );
 
-    expect(capturedFiles).toEqual([{ content: 'domain = "demo"', uri: "methods/bundle.mthds" }]);
-    expect(result.structuredContent.status).toBe("ok");
+    expect(await contentsOf(captured)).toEqual({ "bundle.mthds": 'domain = "demo"' });
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      files_sent: ["methods/bundle.mthds"],
+    });
   });
 
   it("rejects { path } items instructively without a resolver (hosted)", async () => {
@@ -1245,13 +1293,10 @@ describe("validateMthds path submissions", () => {
       { files: [{ path: "methods/bundle.mthds" }] },
       {
         baseUrl: DEFAULT_API_URL,
-        client: {
-          ...selectorValidateNotCalled,
-          async validateFiles() {
-            called = true;
-            return validReport;
-          },
-        },
+        client: onTree(() => {
+          called = true;
+          return validReport;
+        }),
       },
     );
 
@@ -1289,13 +1334,10 @@ describe("validateMthds path submissions", () => {
       {
         baseUrl: DEFAULT_API_URL,
         resolver,
-        client: {
-          ...selectorValidateNotCalled,
-          async validateFiles() {
-            called = true;
-            return validReport;
-          },
-        },
+        client: onTree(() => {
+          called = true;
+          return validReport;
+        }),
       },
     );
 
@@ -1306,7 +1348,7 @@ describe("validateMthds path submissions", () => {
   });
 });
 
-describe("validateMthds with a bundle's template files", () => {
+describe("validateMthds sends a method's tree", () => {
   const tempDirs: string[] = [];
   const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff]);
   const TEMPLATE_WARNING = {
@@ -1317,6 +1359,8 @@ describe("validateMthds with a bundle's template files", () => {
     template_file: "templates/invoice.xlsx",
     template_location: "sheet Invoice, cell B7",
   };
+  /** Key-shaped text assembled at run time, so no literal here looks like a key. None is real. */
+  const fakeKey = ["plx_sk_", "f".repeat(32)].join("");
 
   afterEach(async () => {
     await Promise.all(
@@ -1356,35 +1400,30 @@ describe("validateMthds with a bundle's template files", () => {
     ],
   };
 
-  it("sends the template files as resources beside the .mthds files, and relays the warnings", async () => {
+  it("sends { path } files as one tree, the template where its step's template_file leads, and relays the warnings", async () => {
     const root = await bundleWithTemplate();
-    let capturedFiles: MthdsFile[] | undefined;
-    let capturedOptions: ValidateFilesOptions | undefined;
+    let captured: MethodTreeSource | undefined;
 
     const result = await validateMthds(BY_PATH, {
       baseUrl: DEFAULT_API_URL,
-      resolver: localBundleFileResolver(root),
+      resolver: localMethodFileResolver(root),
       saveRoot: root,
-      client: {
-        ...selectorValidateNotCalled,
-        async validateFiles(files, options) {
-          capturedFiles = files;
-          capturedOptions = options;
-          return { ...validReport, warnings: [TEMPLATE_WARNING] };
-        },
-      },
+      client: onTree((tree) => {
+        captured = tree;
+        return { ...validReport, warnings: [TEMPLATE_WARNING] };
+      }),
     });
 
-    expect(capturedFiles).toEqual([
-      { content: INVOICE_BUNDLE, uri: "methods/invoice/invoice.mthds" },
+    expect(captured?.files.map((file) => file.path)).toEqual([
+      "invoice.mthds",
+      "templates/invoice.xlsx",
     ]);
-    const resources = capturedOptions?.resources as Record<string, Uint8Array> | undefined;
-    expect(Object.keys(resources ?? {})).toEqual(["templates/invoice.xlsx"]);
-    expect([...(resources?.["templates/invoice.xlsx"] ?? [])]).toEqual([...XLSX]);
+    expect(await captured?.readFile("templates/invoice.xlsx")).toEqual(XLSX);
     expect(result.structuredContent).toMatchObject({
       status: "ok",
       is_valid: true,
       warnings: [TEMPLATE_WARNING],
+      files_sent: BY_PATH.files.map((item) => item.path),
       graph_page: { written: true },
     });
     // The graph page draws the method's text, never the workbook.
@@ -1393,100 +1432,159 @@ describe("validateMthds with a bundle's template files", () => {
     expect(page).not.toMatch(/"name":"[^"]*invoice\.xlsx"/);
   });
 
-  it("omits warnings from a valid verdict that has none, and resources from a request with no template", async () => {
+  it("sends a folder's PipeFunc module with its bundle, so the runner finds the function its step names", async () => {
+    const root = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), "pipelex-validate-pipefunc-")),
+    );
+    tempDirs.push(root);
+    const module = "def capitalize(text):\n    return text.upper()\n";
+    await fs.mkdir(path.join(root, "methods/text/funcs"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "methods/text/text.mthds"),
+      [
+        'domain = "text"',
+        "",
+        "[pipe.shout]",
+        'type = "PipeFunc"',
+        'description = "Capitalize the text"',
+        'inputs = { text = "Text" }',
+        'output = "Text"',
+        'function_name = "funcs.text_utils.capitalize"',
+        "",
+      ].join("\n"),
+    );
+    await fs.writeFile(path.join(root, "methods/text/funcs/text_utils.py"), module);
+    let captured: MethodTreeSource | undefined;
+
+    const result = await validateMthds(
+      { method_dir: "methods/text", graph_page: false },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: localMethodFileResolver(root),
+        client: onTree((tree) => {
+          captured = tree;
+          return validReport;
+        }),
+      },
+    );
+
+    // The module rides the tree at the import path's file, where pipelex
+    // looks for the function a PipeFunc step names.
+    expect(captured?.files.map((file) => file.path)).toEqual(["funcs/text_utils.py", "text.mthds"]);
+    expect(new TextDecoder().decode(await captured?.readFile("funcs/text_utils.py"))).toBe(module);
+    expect(result.structuredContent.files_sent).toEqual([
+      path.join("methods", "text", "funcs", "text_utils.py"),
+      path.join("methods", "text", "text.mthds"),
+    ]);
+  });
+
+  it("omits warnings from a valid verdict that has none", async () => {
     const root = await bundleWithTemplate();
-    let capturedOptions: ValidateFilesOptions | undefined;
+    let captured: MethodTreeSource | undefined;
 
     const result = await validateMthds(
       { files: [{ path: "methods/invoice/invoice.mthds" }], graph_page: false },
       {
         baseUrl: DEFAULT_API_URL,
-        resolver: localBundleFileResolver(root),
-        client: {
-          ...selectorValidateNotCalled,
-          async validateFiles(_files, options) {
-            capturedOptions = options;
-            return validReport;
-          },
-        },
+        resolver: localMethodFileResolver(root),
+        client: onTree((tree) => {
+          captured = tree;
+          return validReport;
+        }),
       },
     );
 
-    expect(capturedOptions).not.toHaveProperty("resources");
+    expect(captured?.files.map((file) => file.path)).toEqual(["invoice.mthds"]);
     expect(result.structuredContent).not.toHaveProperty("warnings");
   });
 
-  it("refuses the flowchart page it wrote when it comes back among the files", async () => {
-    // A model globbing the bundle's directory picks up method-graph.html,
-    // which carries a template suffix and which no step names.
+  it("roots the tree at the deepest directory holding every listed file", async () => {
     const root = await bundleWithTemplate();
-    const client = {
-      ...selectorValidateNotCalled,
-      async validateFiles() {
-        return validReport;
-      },
-    };
-    const context = {
-      baseUrl: DEFAULT_API_URL,
-      resolver: localBundleFileResolver(root),
-      saveRoot: root,
-      client,
-    };
-    await validateMthds(BY_PATH, context);
-    let called = false;
+    await fs.mkdir(path.join(root, "shared"));
+    await fs.writeFile(path.join(root, "shared/invoice.xlsx"), XLSX);
+    let captured: MethodTreeSource | undefined;
 
     const result = await validateMthds(
-      { files: [...BY_PATH.files, { path: `methods/invoice/${GRAPH_PAGE_FILENAME}` }] },
+      { files: [{ path: "methods/invoice/invoice.mthds" }, { path: "shared/invoice.xlsx" }] },
       {
-        ...context,
-        client: {
-          ...client,
-          async validateFiles() {
-            called = true;
-            return validReport;
-          },
-        },
+        baseUrl: DEFAULT_API_URL,
+        resolver: localMethodFileResolver(root),
+        client: onTree((tree) => {
+          captured = tree;
+          return validReport;
+        }),
       },
     );
 
-    expect(called).toBe(false);
+    expect(captured?.files.map((file) => file.path)).toEqual([
+      "methods/invoice/invoice.mthds",
+      "shared/invoice.xlsx",
+    ]);
+    expect(result.structuredContent.files_sent).toEqual([
+      "methods/invoice/invoice.mthds",
+      "shared/invoice.xlsx",
+    ]);
+  });
+
+  it("refuses a listed file that is neither .mthds nor a template before calling the API", async () => {
+    const root = await bundleWithTemplate();
+    await fs.writeFile(path.join(root, "methods/invoice/notes.md"), "not readable here");
+
+    const result = await validateMthds(
+      { files: [...BY_PATH.files, { path: "methods/invoice/notes.md" }] },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: localMethodFileResolver(root),
+        client: validateNotCalled,
+      },
+    );
+
     expect(result.structuredContent.errors).toHaveLength(1);
     expect(result.structuredContent.errors?.[0]).toMatchObject({
       class: "input_domain",
       location: "files[2].path",
     });
-    expect(result.structuredContent.errors?.[0]?.message).toContain("named by no PipeDocGen step");
+    expect(result.structuredContent.errors?.[0]?.hint).toContain("method_dir");
+    expect(result.structuredContent).not.toHaveProperty("files_sent");
   });
 
   it("reads a method folder whole, lists what it sent, and draws the graph page into the folder", async () => {
     const root = await bundleWithTemplate();
-    await fs.writeFile(path.join(root, "methods/invoice/notes.md"), "not part of the method");
-    let capturedFiles: MthdsFile[] | undefined;
-    let capturedOptions: ValidateFilesOptions | undefined;
+    await fs.writeFile(path.join(root, "methods/invoice/notes.md"), "part of the method's tree");
+    await fs.writeFile(path.join(root, "methods/invoice/.env"), "LEFT=out\n");
+    let captured: MethodTreeSource | undefined;
+    let capturedOptions: ValidateOptions | undefined;
 
     const result = await validateMthds(
       { method_dir: "methods/invoice" },
       {
         baseUrl: DEFAULT_API_URL,
-        resolver: localBundleFileResolver(root),
+        resolver: localMethodFileResolver(root),
         saveRoot: root,
-        client: {
-          ...selectorValidateNotCalled,
-          async validateFiles(files, options) {
-            capturedFiles = files;
-            capturedOptions = options;
-            return validReport;
-          },
-        },
+        client: onTree((tree, options) => {
+          captured = tree;
+          capturedOptions = options;
+          return validReport;
+        }),
       },
     );
 
     const sent = [
       path.join("methods", "invoice", "invoice.mthds"),
+      path.join("methods", "invoice", "notes.md"),
       path.join("methods", "invoice", "templates", "invoice.xlsx"),
     ];
-    expect(capturedFiles).toEqual([{ content: INVOICE_BUNDLE, uri: sent[0] }]);
-    expect(Object.keys(capturedOptions?.resources ?? {})).toEqual(["templates/invoice.xlsx"]);
+    expect(await contentsOf(captured)).toMatchObject({
+      "invoice.mthds": INVOICE_BUNDLE,
+      "notes.md": "part of the method's tree",
+    });
+    expect(captured?.files.map((file) => file.path)).toEqual([
+      "invoice.mthds",
+      "notes.md",
+      "templates/invoice.xlsx",
+    ]);
+    expect(captured?.digest).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(capturedOptions).toEqual({ render: ["markdown"], views: ["input_form", "output_form"] });
     expect(result.structuredContent).toMatchObject({
       status: "ok",
       is_valid: true,
@@ -1503,8 +1601,8 @@ describe("validateMthds with a bundle's template files", () => {
       { method_dir: "methods/invoice", graph_page: false },
       {
         baseUrl: DEFAULT_API_URL,
-        resolver: localBundleFileResolver(root),
-        client: { ...selectorValidateNotCalled, validateFiles: async () => validReport },
+        resolver: localMethodFileResolver(root),
+        client: onTree(() => validReport),
       },
     );
     expect(again.structuredContent.files_sent).toEqual(sent);
@@ -1516,7 +1614,7 @@ describe("validateMthds with a bundle's template files", () => {
     // The client refuses the base URL as it is built.
     const unbuilt = await validateMthds(
       { method_dir: "methods/invoice", graph_page: false },
-      { baseUrl: "invalid-no-scheme", resolver: localBundleFileResolver(root) },
+      { baseUrl: "invalid-no-scheme", resolver: localMethodFileResolver(root) },
     );
     expect(unbuilt.structuredContent.status).toBe("error");
     expect(unbuilt.structuredContent.errors?.[0]?.class).toBe("config");
@@ -1528,11 +1626,8 @@ describe("validateMthds with a bundle's template files", () => {
       { method_dir: "methods/invoice", graph_page: false },
       {
         baseUrl: DEFAULT_API_URL,
-        resolver: localBundleFileResolver(root),
-        client: {
-          ...selectorValidateNotCalled,
-          validateFiles: () => Promise.reject(new RequestArgumentError("refused before sending")),
-        },
+        resolver: localMethodFileResolver(root),
+        client: onTree(() => Promise.reject(new RequestArgumentError("refused before sending"))),
       },
     );
     expect(refused.structuredContent.status).toBe("error");
@@ -1543,14 +1638,12 @@ describe("validateMthds with a bundle's template files", () => {
       { method_dir: "methods/invoice", graph_page: false },
       {
         baseUrl: DEFAULT_API_URL,
-        resolver: localBundleFileResolver(root),
-        client: {
-          ...selectorValidateNotCalled,
-          validateFiles: () =>
-            Promise.reject(
-              new ApiUnreachableError("connection reset", DEFAULT_API_URL, "ECONNRESET"),
-            ),
-        },
+        resolver: localMethodFileResolver(root),
+        client: onTree(() =>
+          Promise.reject(
+            new ApiUnreachableError("connection reset", DEFAULT_API_URL, "ECONNRESET"),
+          ),
+        ),
       },
     );
     expect(unreachable.structuredContent.files_sent).toHaveLength(2);
@@ -1563,8 +1656,8 @@ describe("validateMthds with a bundle's template files", () => {
       { method_dir: "methods" },
       {
         baseUrl: DEFAULT_API_URL,
-        resolver: localBundleFileResolver(root),
-        client: { ...selectorValidateNotCalled, ...validateFilesNotCalled },
+        resolver: localMethodFileResolver(root),
+        client: validateNotCalled,
       },
     );
 
@@ -1576,45 +1669,101 @@ describe("validateMthds with a bundle's template files", () => {
     expect(result.structuredContent).not.toHaveProperty("files_sent");
   });
 
+  it("refuses an empty .mthds file in a folder before calling the API, naming it", async () => {
+    const root = await bundleWithTemplate();
+    await fs.writeFile(path.join(root, "methods/invoice/blank.mthds"), "  \n");
+
+    const result = await validateMthds(
+      { method_dir: "methods/invoice", graph_page: false },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: localMethodFileResolver(root),
+        client: validateNotCalled,
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "method_dir",
+      message: `${path.join("methods", "invoice", "blank.mthds")} is empty.`,
+    });
+    expect(result.structuredContent).not.toHaveProperty("files_sent");
+  });
+
   it("refuses method_dir beside method_id, one selector on a tooling tool", async () => {
     const result = await validateMthds(
       { method_dir: "methods/invoice", method_id: "mt_abc123" },
       {
         baseUrl: DEFAULT_API_URL,
-        resolver: localBundleFileResolver("/nonexistent-root"),
-        client: { ...selectorValidateNotCalled, ...validateFilesNotCalled },
+        resolver: localMethodFileResolver("/nonexistent-root"),
+        client: validateNotCalled,
       },
     );
 
     expect(result.structuredContent.errors?.map((error) => error.location)).toEqual(["method_id"]);
   });
 
-  it("refuses a template file no step names before calling the API", async () => {
+  it("refuses a folder holding a key before anything is sent, naming the file and never the key", async () => {
     const root = await bundleWithTemplate();
-    await fs.mkdir(path.join(root, "shared"));
-    await fs.writeFile(path.join(root, "shared/invoice.xlsx"), XLSX);
-    let called = false;
+    await fs.mkdir(path.join(root, "methods/invoice/funcs"));
+    await fs.writeFile(path.join(root, "methods/invoice/funcs/client.py"), `KEY = "${fakeKey}"\n`);
+    let asked = false;
 
     const result = await validateMthds(
-      { files: [{ path: "methods/invoice/invoice.mthds" }, { path: "shared/invoice.xlsx" }] },
+      { method_dir: "methods/invoice" },
       {
         baseUrl: DEFAULT_API_URL,
-        resolver: localBundleFileResolver(root),
+        resolver: localMethodFileResolver(root),
+        saveRoot: root,
         client: {
-          ...selectorValidateNotCalled,
-          async validateFiles() {
-            called = true;
+          async validate() {
+            asked = true;
             return validReport;
           },
-        },
+          async methodTreeLimits() {
+            return { maxFileCount: 1000 };
+          },
+        } as ValidationClient,
       },
     );
 
-    expect(called).toBe(false);
+    expect(asked).toBe(false);
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors).toHaveLength(1);
     expect(result.structuredContent.errors?.[0]).toMatchObject({
       class: "input_domain",
-      location: "files[1].path",
+      location: "method_dir",
+      retryable: false,
     });
+    expect(result.structuredContent.errors?.[0]?.message).toContain(
+      path.join("methods", "invoice", "funcs", "client.py"),
+    );
+    expect(result.structuredContent.errors?.[0]?.message).toContain("nothing was sent");
+    expect(result.structuredContent).not.toHaveProperty("files_sent");
+    expect(JSON.stringify(result)).not.toContain(fakeKey);
+  });
+
+  it("refuses a listed file holding a key, at its item, before anything is sent", async () => {
+    const root = await bundleWithTemplate();
+    await fs.writeFile(path.join(root, "methods/invoice/templates/cert.html"), `${fakeKey}\n`);
+
+    const result = await validateMthds(
+      { files: [...BY_PATH.files, { path: "methods/invoice/templates/cert.html" }] },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: localMethodFileResolver(root),
+        client: validateNotCalled,
+      },
+    );
+
+    expect(result.structuredContent.errors?.map((error) => error.location)).toEqual([
+      "files[2].path",
+    ]);
+    expect(result.structuredContent.errors?.[0]?.message).toContain(
+      "methods/invoice/templates/cert.html",
+    );
+    expect(JSON.stringify(result)).not.toContain(fakeKey);
   });
 });
 
@@ -1643,7 +1792,7 @@ describe("validateMthds by selector (server pass-through)", () => {
   }
 
   it("forwards method_id to the validate route as a selector — nothing expanded client-side", async () => {
-    let capturedSource: ValidateMethodSelector | undefined;
+    let capturedSource: PipelexValidateSource | undefined;
     let capturedArgs: unknown[] | undefined;
 
     const result = await validateMthds(
@@ -1651,10 +1800,9 @@ describe("validateMthds by selector (server pass-through)", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...validateFilesNotCalled,
-          async validate(source, allowSignatures, mthdsSources, render, views) {
+          async validate(source, allowSignatures, options) {
             capturedSource = source;
-            capturedArgs = [allowSignatures, mthdsSources, render, views];
+            capturedArgs = [allowSignatures, options];
             return validReport;
           },
         },
@@ -1662,23 +1810,24 @@ describe("validateMthds by selector (server pass-through)", () => {
     );
 
     expect(capturedSource).toEqual({ method_id: "mt_123" });
-    // allowSignatures on; no client-side source labels (the server labels
-    // diagnostics from the stored method's real file names); the descriptor
-    // opt-in rides `views`. `render` stays undefined — the SDK always adds
-    // markdown itself.
-    expect(capturedArgs).toEqual([true, undefined, undefined, ["input_form", "output_form"]]);
+    // allowSignatures on; the server labels diagnostics from the stored
+    // method's real file names; the descriptor opt-in rides `views`, beside
+    // the markdown render every arm asks for.
+    expect(capturedArgs).toEqual([
+      true,
+      { render: ["markdown"], views: ["input_form", "output_form"] },
+    ]);
     expect(result.structuredContent.status).toBe("ok");
   });
 
   it("forwards method_ref to the validate route as a selector", async () => {
-    let capturedSource: ValidateMethodSelector | undefined;
+    let capturedSource: PipelexValidateSource | undefined;
 
     const result = await validateMthds(
       { method_ref: ADDRESS },
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...validateFilesNotCalled,
           async validate(source) {
             capturedSource = source;
             return validReport;
@@ -1696,7 +1845,7 @@ describe("validateMthds by selector (server pass-through)", () => {
       { files: [{ content: 'domain = "demo"' }], method_id: "mt_123" },
       {
         baseUrl: DEFAULT_API_URL,
-        client: { ...validateFilesNotCalled, ...selectorValidateNotCalled },
+        client: validateNotCalled,
       },
     );
 
@@ -1710,7 +1859,7 @@ describe("validateMthds by selector (server pass-through)", () => {
       { files: [{ content: 'domain = "demo"' }], method_ref: ADDRESS },
       {
         baseUrl: DEFAULT_API_URL,
-        client: { ...validateFilesNotCalled, ...selectorValidateNotCalled },
+        client: validateNotCalled,
       },
     );
 
@@ -1723,7 +1872,7 @@ describe("validateMthds by selector (server pass-through)", () => {
       { method_ref: ADDRESS, method_id: "mt_123" },
       {
         baseUrl: DEFAULT_API_URL,
-        client: { ...validateFilesNotCalled, ...selectorValidateNotCalled },
+        client: validateNotCalled,
       },
     );
 
@@ -1736,7 +1885,7 @@ describe("validateMthds by selector (server pass-through)", () => {
       { method_ref: "   " },
       {
         baseUrl: DEFAULT_API_URL,
-        client: { ...validateFilesNotCalled, ...selectorValidateNotCalled },
+        client: validateNotCalled,
       },
     );
 
@@ -1750,7 +1899,6 @@ describe("validateMthds by selector (server pass-through)", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...validateFilesNotCalled,
           async validate(): Promise<PipelexValidationResult> {
             throw apiError(404, "Not Found", "not_found", "Method not found");
           },
@@ -1770,7 +1918,6 @@ describe("validateMthds by selector (server pass-through)", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...validateFilesNotCalled,
           async validate(): Promise<PipelexValidationResult> {
             throw apiError(422, "Unprocessable Entity", "bad_request", "no MTHDS source");
           },
@@ -1794,7 +1941,6 @@ describe("validateMthds by selector (server pass-through)", () => {
         {
           baseUrl: DEFAULT_API_URL,
           client: {
-            ...validateFilesNotCalled,
             async validate(): Promise<PipelexValidationResult> {
               throw apiError(status, statusText, errorType, "resolution failed");
             },
@@ -1815,7 +1961,6 @@ describe("validateMthds by selector (server pass-through)", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...validateFilesNotCalled,
           async validate(): Promise<PipelexValidationResult> {
             throw apiError(
               403,
@@ -1843,7 +1988,6 @@ describe("validateMthds by selector (server pass-through)", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...validateFilesNotCalled,
           async validate(): Promise<PipelexValidationResult> {
             throw apiError(
               403,
@@ -1869,7 +2013,6 @@ describe("validateMthds by selector (server pass-through)", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...validateFilesNotCalled,
           async validate(): Promise<PipelexValidationResult> {
             throw apiError(501, "Not Implemented", "not_implemented", "registry refs are reserved");
           },
@@ -1889,7 +2032,6 @@ describe("validateMthds by selector (server pass-through)", () => {
       {
         baseUrl: DEFAULT_API_URL,
         client: {
-          ...validateFilesNotCalled,
           async validate(): Promise<PipelexValidationResult> {
             throw apiError(402, "Payment Required", "forbidden", "Subscription required");
           },
@@ -1924,7 +2066,7 @@ describe("validateMthds by selector (server pass-through)", () => {
       {},
       {
         baseUrl: DEFAULT_API_URL,
-        client: { ...validateFilesNotCalled, ...selectorValidateNotCalled },
+        client: validateNotCalled,
       },
     );
 
@@ -1952,29 +2094,19 @@ describe("the method graph page", () => {
     tempDirs.push(root);
     await fs.mkdir(path.join(root, "methods/demo"), { recursive: true });
     await fs.writeFile(path.join(root, "methods/demo/bundle.mthds"), 'domain = "demo"', "utf8");
-    const resolver: FileResolver = {
-      async resolve(submitted) {
-        return { ok: true, content: await fs.readFile(path.join(root, submitted), "utf8") };
-      },
-    };
     return {
       root,
       context: {
         baseUrl: DEFAULT_API_URL,
         client,
-        resolver,
+        resolver: localMethodFileResolver(root),
         saveRoot: root,
       },
     };
   }
 
   function answering(report: PipelexValidationResult): ValidationClient {
-    return {
-      ...selectorValidateNotCalled,
-      async validateFiles() {
-        return report;
-      },
-    };
+    return onTree(() => report);
   }
 
   const PAGE = path.join("methods", "demo", GRAPH_PAGE_FILENAME);
@@ -1999,8 +2131,9 @@ describe("the method graph page", () => {
     });
     expect(result.structuredContent.graph_page).not.toHaveProperty("created");
     const [block] = result.content;
-    expect(block.text.startsWith(`# Valid${MAIN_PIPE_NOTE}\n\n## Method graph\n\nWrote`)).toBe(
-      true,
+    // The files sent come before the page, which is the call's own output.
+    expect(block.text).toContain(
+      `# Valid${MAIN_PIPE_NOTE}\n\n## Files sent\n\nThe method's tree, every file this call sent and nothing else:\n\n- \`methods/demo/bundle.mthds\`\n\n## Method graph\n\nWrote`,
     );
     const page = await fs.readFile(path.join(root, PAGE), "utf8");
     expect(page).toContain(GRAPH_PAGE_MARK);
@@ -2031,8 +2164,7 @@ describe("the method graph page", () => {
 
   it("writes it when the API produced no verdict, and reports it after the errors", async () => {
     const { root, context } = await workshopContext({
-      ...selectorValidateNotCalled,
-      async validateFiles() {
+      async validate() {
         throw new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED");
       },
     });
@@ -2072,8 +2204,7 @@ describe("the method graph page", () => {
 
   it("claims no verdict when neither the API nor the page produced anything", async () => {
     const { root, context } = await workshopContext({
-      ...selectorValidateNotCalled,
-      async validateFiles() {
+      async validate() {
         throw new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED");
       },
     });
@@ -2126,10 +2257,7 @@ describe("the method graph page", () => {
   });
 
   it("writes nothing for a request refused before the API call", async () => {
-    const { root, context } = await workshopContext({
-      ...validateFilesNotCalled,
-      ...selectorValidateNotCalled,
-    });
+    const { root, context } = await workshopContext(validateNotCalled);
 
     const result = await validateMthds({ ...BY_PATH, method_id: "mt_demo" }, context);
 
@@ -2142,13 +2270,12 @@ describe("the method graph page", () => {
 describe("validateMthds by method_id, on both platforms", () => {
   function onPlatform(
     extensions: string[] | Error,
-    sent: ValidateMethodSelector[],
+    sent: PipelexValidateSource[],
     answer: PipelexValidationResult | Error = validReport,
   ): ValidationContext {
     return {
       baseUrl: DEFAULT_API_URL,
       client: {
-        ...validateFilesNotCalled,
         async validate(source) {
           sent.push(source);
           if (answer instanceof Error) throw answer;
@@ -2163,7 +2290,7 @@ describe("validateMthds by method_id, on both platforms", () => {
   }
 
   it("sends each selector as given where versions resolve, and says what it validated", async () => {
-    const sent: ValidateMethodSelector[] = [];
+    const sent: PipelexValidateSource[] = [];
     const supported = ["runs", "method_versions"];
 
     const bare = await validateMthds({ method_id: "mt_123" }, onPlatform(supported, sent));
@@ -2185,12 +2312,11 @@ describe("validateMthds by method_id, on both platforms", () => {
     // Nothing sent depends on the platform's answer. Awaited first, it cost
     // every bare-id call a handshake, up to its deadline where the platform
     // does not resolve versions and so never caches its answer.
-    const sent: ValidateMethodSelector[] = [];
+    const sent: PipelexValidateSource[] = [];
     let answer: (info: unknown) => void = () => undefined;
     const context: ValidationContext = {
       baseUrl: DEFAULT_API_URL,
       client: {
-        ...validateFilesNotCalled,
         async validate(source) {
           sent.push(source);
           return validReport;
@@ -2211,7 +2337,7 @@ describe("validateMthds by method_id, on both platforms", () => {
   });
 
   it("reads the draft for a bare id where they do not, and sends every suffix as given", async () => {
-    const sent: ValidateMethodSelector[] = [];
+    const sent: PipelexValidateSource[] = [];
 
     const bare = await validateMthds({ method_id: "mt_123" }, onPlatform(["runs"], sent));
     const drafted = await validateMthds({ method_id: "mt_123@draft" }, onPlatform(["runs"], sent));
@@ -2230,7 +2356,7 @@ describe("validateMthds by method_id, on both platforms", () => {
   });
 
   it("sends a suffix as given when it cannot ask, and reads a refusal of it as a platform that may not resolve it", async () => {
-    const sent: ValidateMethodSelector[] = [];
+    const sent: PipelexValidateSource[] = [];
     const notFound = new ApiResponseError(
       "HTTP 404",
       `${DEFAULT_API_URL}/v1/validate`,

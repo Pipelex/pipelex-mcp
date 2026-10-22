@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiResponseError,
   ApiUnreachableError,
+  INLINE_TREE_MAX_BYTES,
   MissingMainStuffError,
   RequestArgumentError,
   RunLifecycleUnavailableError,
@@ -57,7 +58,7 @@ import {
   validateRunRequest,
 } from "./run.js";
 import type { FailedRunState, RunContext } from "./run.js";
-import { localBundleFileResolver } from "../files.js";
+import { localMethodFileResolver } from "../files.js";
 import {
   CALLER_FACING_TIMEOUT_REPORT,
   RECORDED_FAILED_RUNS,
@@ -82,9 +83,17 @@ import {
   classifyError,
   createPipelexApiClient,
   DEFAULT_API_URL,
-  FILES_TOO_LARGE,
   MAX_IMAGE_CANDIDATE_ENTRIES,
 } from "./shared.js";
+import type { MethodTreeToSend } from "./shared.js";
+import { comparableRequest, contentsOf, fakeMethodResolver } from "./method-tree-fixtures.js";
+
+/** A tree in hand, for the request checks, which only ask whether one is there. */
+const A_TREE: MethodTreeToSend = {
+  source: { files: [], digest: "", readFile: () => Promise.reject(new Error("never read")) },
+  files: [],
+  fromFolder: false,
+};
 
 const RUN_ID = "01JRUN0000000000000000TEST";
 
@@ -125,8 +134,8 @@ const OUTPUT_FORM: OutputForm = {
 const INPUT_FORM: InputForm = { [FIXTURE_PIPE_REF]: { fields: [] } };
 
 describe("validateRunRequest", () => {
-  it("rejects an empty file list", () => {
-    const errors = validateRunRequest({ files: [] });
+  it("rejects a request naming no method", () => {
+    const errors = validateRunRequest({});
 
     expect(errors).toHaveLength(1);
     expect(errors[0]?.class).toBe("input_domain");
@@ -134,11 +143,11 @@ describe("validateRunRequest", () => {
   });
 
   it("accepts a method_id-only request", () => {
-    expect(validateRunRequest({ files: [], method_id: "mt_abc123" })).toEqual([]);
+    expect(validateRunRequest({ method_id: "mt_abc123" })).toEqual([]);
   });
 
   it("rejects a blank method_id at method_id", () => {
-    const errors = validateRunRequest({ files: [], method_id: "  " });
+    const errors = validateRunRequest({ method_id: "  " });
 
     expect(errors).toHaveLength(1);
     expect(errors[0]?.class).toBe("input_domain");
@@ -146,17 +155,14 @@ describe("validateRunRequest", () => {
   });
 
   it("rejects a blank pipe_code", () => {
-    const errors = validateRunRequest({
-      files: [{ content: 'domain = "demo"' }],
-      pipe_code: "  ",
-    });
+    const errors = validateRunRequest({ tree: A_TREE, pipe_code: "  " });
 
     expect(errors.map((error) => error.location)).toEqual(["pipe_code"]);
     expect(errors[0]?.class).toBe("input_domain");
   });
 
   it("accepts an omitted pipe_code", () => {
-    const errors = validateRunRequest({ files: [{ content: 'domain = "demo"' }] });
+    const errors = validateRunRequest({ tree: A_TREE });
 
     expect(errors).toEqual([]);
   });
@@ -1616,12 +1622,13 @@ describe("startMthdsRun", () => {
       context,
     );
 
-    // /v1/start takes no source labels — only the contents cross the wire.
-    expect(seen).toEqual({
-      mthds_contents: ['domain = "demo"'],
+    // The contents cross as a tree, under the uri's file name.
+    expect(await comparableRequest(seen)).toEqual({
+      tree: { "demo.mthds": 'domain = "demo"' },
       pipe_code: "main",
       inputs: { question: "why?" },
     });
+    expect(result.structuredContent.files_sent).toEqual(["demo.mthds"]);
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.run_id).toBe(RUN_ID);
   });
@@ -1637,7 +1644,7 @@ describe("startMthdsRun", () => {
 
     await startMthdsRun({ files: [{ content: 'domain = "demo"' }] }, context);
 
-    expect(seen).toEqual({ mthds_contents: ['domain = "demo"'] });
+    expect(await comparableRequest(seen)).toEqual({ tree: { "bundle.mthds": 'domain = "demo"' } });
     expect(seen).not.toHaveProperty("pipe_code");
     expect(seen).not.toHaveProperty("inputs");
   });
@@ -1677,7 +1684,7 @@ describe("startMthdsRun", () => {
     vi.stubGlobal("fetch", answer);
     try {
       await createPipelexApiClient({ baseUrl: DEFAULT_API_URL }).start({
-        mthds_contents: ['domain = "demo"'],
+        files: { "main.mthds": 'domain = "demo"' },
       });
     } catch (err) {
       return err;
@@ -1808,7 +1815,15 @@ describe("startMthdsRun", () => {
   it("says the run may exist when the start's acknowledgement came back unreadable", async () => {
     // A 2xx the SDK could not read is a start the server accepted, which the
     // SDK reports as a final ApiResponseError: the run exists all the same.
-    vi.stubGlobal("fetch", () => Promise.resolve(new Response("", { status: 202 })));
+    // The handshake that decides how the tree travels is answered first: a
+    // deployment with no blob store, which takes it inline.
+    vi.stubGlobal("fetch", (input: string | URL | Request) =>
+      Promise.resolve(
+        String(input instanceof Request ? input.url : input).endsWith("/v1/version")
+          ? Response.json({ version: "1.0.0" })
+          : new Response("", { status: 202 }),
+      ),
+    );
     try {
       const real = createPipelexApiClient({ baseUrl: DEFAULT_API_URL });
       const result = await startMthdsRun(
@@ -1972,7 +1987,7 @@ describe("startMthdsRun by method_id", () => {
     );
   }
 
-  it("starts by id alone — method_id crosses as a named option, no mthds_contents", async () => {
+  it("starts by id alone — method_id crosses as a named option, no tree", async () => {
     let seen: PipelexStartOptions | undefined;
     const context = contextWith({
       start: (options: PipelexStartOptions) => {
@@ -1987,7 +2002,7 @@ describe("startMthdsRun by method_id", () => {
     );
 
     expect(seen).toEqual({ method_id: "mt_abc123", inputs: { question: "why?" } });
-    expect(seen).not.toHaveProperty("mthds_contents");
+    expect(seen).not.toHaveProperty("tree");
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.run_id).toBe(RUN_ID);
   });
@@ -2006,8 +2021,8 @@ describe("startMthdsRun by method_id", () => {
       context,
     );
 
-    expect(seen).toEqual({
-      mthds_contents: ['domain = "demo"'],
+    expect(await comparableRequest(seen)).toEqual({
+      tree: { "bundle.mthds": 'domain = "demo"' },
       method_id: "mt_abc123",
     });
   });
@@ -2759,31 +2774,7 @@ describe("runResultsToolResult", () => {
 });
 
 describe("startMthdsRun path submissions", () => {
-  it("resolves { path } items through the context resolver before starting", async () => {
-    let seen: PipelexStartOptions | undefined;
-    const context: RunContext = {
-      ...contextWith({
-        start: (options: PipelexStartOptions) => {
-          seen = options;
-          return Promise.resolve({ pipeline_run_id: RUN_ID });
-        },
-      }),
-      resolver: {
-        async resolve() {
-          return { ok: true, content: 'domain = "demo"' };
-        },
-      },
-    };
-
-    const result = await startMthdsRun({ files: [{ path: "methods/bundle.mthds" }] }, context);
-
-    // /v1/start takes no source labels — only the resolved contents cross.
-    expect(seen).toEqual({ mthds_contents: ['domain = "demo"'] });
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.run_id).toBe(RUN_ID);
-  });
-
-  it("sends a bundle's template files as resources beside the contents", async () => {
+  it("reads { path } items through the context resolver and starts them as one tree", async () => {
     const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
     let seen: PipelexStartOptions | undefined;
     const context: RunContext = {
@@ -2793,17 +2784,12 @@ describe("startMthdsRun path submissions", () => {
           return Promise.resolve({ pipeline_run_id: RUN_ID });
         },
       }),
-      resolver: {
-        async resolve() {
-          return { ok: true, content: 'domain = "invoice"' };
+      resolver: fakeMethodResolver({
+        files: {
+          "methods/invoice.mthds": 'domain = "invoice"',
+          "methods/templates/invoice.xlsx": XLSX,
         },
-        async resolveTemplates(templates, bundle, requestBytes) {
-          expect(templates).toEqual([{ index: 1, path: "methods/templates/invoice.xlsx" }]);
-          expect(bundle).toEqual([{ path: "methods/invoice.mthds", named: [] }]);
-          expect(requestBytes).toBe('domain = "invoice"'.length);
-          return { ok: true, resources: { "templates/invoice.xlsx": XLSX } };
-        },
-      },
+      }),
     };
 
     const result = await startMthdsRun(
@@ -2811,15 +2797,50 @@ describe("startMthdsRun path submissions", () => {
       context,
     );
 
-    expect(seen).toEqual({
-      mthds_contents: ['domain = "invoice"'],
-      resources: { "templates/invoice.xlsx": XLSX },
+    // Each file under its path from the deepest directory holding them all.
+    expect(seen?.tree?.files.map((file) => file.path)).toEqual([
+      "invoice.mthds",
+      "templates/invoice.xlsx",
+    ]);
+    expect(await seen?.tree?.readFile("templates/invoice.xlsx")).toEqual(XLSX);
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      run_id: RUN_ID,
+      files_sent: ["methods/invoice.mthds", "methods/templates/invoice.xlsx"],
     });
-    expect(result.structuredContent.status).toBe("ok");
   });
 
-  it("reads a 413 as the template files only when the start carried some", async () => {
-    const tooLarge = new ApiResponseError(
+  it("refuses files holding a key before starting, naming the file and never the key", async () => {
+    const fakeKey = ["plx_sk_", "f".repeat(32)].join("");
+
+    const result = await startMthdsRun(
+      { files: [{ path: "methods/invoice.mthds" }, { path: "methods/report.html" }] },
+      {
+        ...contextWith({}),
+        resolver: fakeMethodResolver({
+          files: {
+            "methods/invoice.mthds": 'domain = "invoice"',
+            "methods/report.html": `<p>${fakeKey}</p>`,
+          },
+        }),
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "files[1].path",
+      retryable: false,
+    });
+    expect(result.structuredContent.errors?.[0]?.message).toContain("methods/report.html");
+    expect(result.structuredContent.errors?.[0]?.message).toContain("nothing was sent");
+    expect(result.structuredContent).not.toHaveProperty("files_sent");
+    expect(JSON.stringify(result)).not.toContain(fakeKey);
+  });
+
+  /** The 413 a deployment answers a start too large for it with. */
+  const tooLarge = () =>
+    new ApiResponseError(
       "HTTP 413",
       `${DEFAULT_API_URL}/v1/start`,
       413,
@@ -2830,35 +2851,143 @@ describe("startMthdsRun path submissions", () => {
       undefined,
       undefined,
     );
-    const resolver = {
-      async resolve() {
-        return { ok: true as const, content: 'domain = "invoice"' };
-      },
-      async resolveTemplates() {
-        return {
-          ok: true as const,
-          resources: { "templates/invoice.xlsx": new Uint8Array([0x50, 0x4b]) },
-        };
-      },
-    };
-    const context: RunContext = {
-      ...contextWith({ start: () => Promise.reject(tooLarge) }),
-      resolver,
-    };
 
-    const withTemplates = await startMthdsRun(
+  /** A context whose start answers a 413, its handshake counted and answering `version`. */
+  function refusingStart(
+    version: () => Promise<unknown>,
+    files: Record<string, string | Uint8Array> = {},
+  ): { context: RunContext; versionCalls: () => number } {
+    let calls = 0;
+    return {
+      context: {
+        ...contextWith({
+          start: () => Promise.reject(tooLarge()),
+          version: () => {
+            calls += 1;
+            return version();
+          },
+        }),
+        resolver: fakeMethodResolver({ files }),
+      },
+      versionCalls: () => calls,
+    };
+  }
+
+  const noBlobStore = () => Promise.resolve({ version: "1.0.0", blob_store: false });
+  const blobStore = () => Promise.resolve({ version: "1.0.0", blob_store: true });
+
+  it("names both causes of a 413 on a start carrying a small tree and no inputs, blaming neither", async () => {
+    const { context, versionCalls } = refusingStart(noBlobStore);
+
+    const result = await startMthdsRun({ files: [{ content: 'domain = "invoice"' }] }, context);
+
+    const error = result.structuredContent.errors?.[0];
+    expect(error).toMatchObject({ class: "input_domain" });
+    expect(error).not.toHaveProperty("location");
+    expect(error?.hint).toContain("cannot be told from here");
+    expect(error?.hint).toContain("mthds_prepare_inputs");
+    expect(error?.hint).toContain("the run carries no inputs");
+    expect(error?.hint).not.toContain("are not what made it so");
+    // A tree within the inline threshold rode inline wherever it went: no handshake asks.
+    expect(versionCalls()).toBe(0);
+  });
+
+  it("names both causes of a 413 on a start carrying inputs beside a small tree", async () => {
+    const { context } = refusingStart(noBlobStore);
+
+    const result = await startMthdsRun(
+      { files: [{ content: 'domain = "invoice"' }], inputs: { question: "why?" } },
+      context,
+    );
+
+    const error = result.structuredContent.errors?.[0];
+    expect(error).not.toHaveProperty("location");
+    expect(error?.hint).toContain("cannot be told from here");
+    expect(error?.hint).toMatch(/the method's files weigh \d+\.\d KiB inline/);
+    expect(error?.hint).toMatch(/its inputs weigh \d+\.\d KiB as JSON/);
+  });
+
+  it("reads a 413 on a start sending no tree, carrying inputs, as its inputs', at inputs", async () => {
+    const { context } = refusingStart(noBlobStore);
+
+    const result = await startMthdsRun(
+      { method_ref: "github.com/Pipelex/methods/documents@v0.1.0", inputs: { question: "why?" } },
+      context,
+    );
+
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "inputs",
+    });
+    expect(result.structuredContent.errors?.[0]?.hint).toContain("its inputs did");
+  });
+
+  it("reads a 413 on a heavy tree a deployment without a blob store took inline as the tree's", async () => {
+    const heavy = "x".repeat(INLINE_TREE_MAX_BYTES + 1);
+    const folder = { "methods/invoice.mthds": 'domain = "invoice"', "methods/report.html": heavy };
+    const files = [{ path: "methods/invoice.mthds" }, { path: "methods/report.html" }];
+
+    const inline = await startMthdsRun({ files }, refusingStart(noBlobStore, folder).context);
+    expect(inline.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "files",
+    });
+    expect(inline.structuredContent.errors?.[0]?.hint).toContain("without a blob store");
+
+    // The same tree went by hash to a deployment keeping a blob store, so the
+    // inputs riding the start take the blame, and with none, nothing does.
+    const withInputs = await startMthdsRun(
+      { files, inputs: { question: "why?" } },
+      refusingStart(blobStore, folder).context,
+    );
+    expect(withInputs.structuredContent.errors?.[0]?.location).toBe("inputs");
+    const withoutInputs = await startMthdsRun({ files }, refusingStart(blobStore, folder).context);
+    expect(withoutInputs.structuredContent.errors?.[0]).not.toHaveProperty("location");
+    expect(withoutInputs.structuredContent.errors?.[0]?.hint).toContain(
+      "the run carries no inputs",
+    );
+  });
+
+  it("weighs a binary file as the base64 it travels inline as", async () => {
+    // Raw, the workbook is under the inline threshold; as base64 it is over,
+    // so a deployment without a blob store took it inline at that weight.
+    const workbook = new Uint8Array(Math.floor(INLINE_TREE_MAX_BYTES * 0.9)).fill(0xff);
+    const { context, versionCalls } = refusingStart(noBlobStore, {
+      "methods/invoice.mthds": 'domain = "invoice"',
+      "methods/templates/invoice.xlsx": workbook,
+    });
+
+    const result = await startMthdsRun(
       { files: [{ path: "methods/invoice.mthds" }, { path: "methods/templates/invoice.xlsx" }] },
       context,
     );
-    expect(withTemplates.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "files",
-      hint: FILES_TOO_LARGE.hint,
-    });
 
-    const without = await startMthdsRun({ files: [{ path: "methods/invoice.mthds" }] }, context);
-    expect(without.structuredContent.errors?.[0]?.location).toBeUndefined();
-    expect(without.structuredContent.errors?.[0]?.hint).toBe("The Pipelex API returned HTTP 413.");
+    expect(versionCalls()).toBe(1);
+    expect(result.structuredContent.errors?.[0]?.location).toBe("files");
+  });
+
+  it("blames neither cause of a 413 when the handshake that would tell how a heavy tree went fails", async () => {
+    const heavy = "x".repeat(INLINE_TREE_MAX_BYTES + 1);
+    const { context, versionCalls } = refusingStart(
+      () =>
+        Promise.reject(new ApiUnreachableError("connection reset", DEFAULT_API_URL, "ECONNRESET")),
+      { "methods/invoice.mthds": 'domain = "invoice"', "methods/report.html": heavy },
+    );
+
+    const result = await startMthdsRun(
+      {
+        files: [{ path: "methods/invoice.mthds" }, { path: "methods/report.html" }],
+        inputs: { question: "why?" },
+      },
+      context,
+    );
+
+    expect(versionCalls()).toBe(1);
+    const error = result.structuredContent.errors?.[0];
+    expect(error).toMatchObject({ class: "input_domain" });
+    expect(error).not.toHaveProperty("location");
+    expect(error?.hint).toContain("cannot be told from here");
+    expect(error?.hint).not.toContain("are not what made it so");
   });
 
   it("rejects { path } items instructively without a resolver (hosted)", async () => {
@@ -3129,12 +3258,14 @@ describe("startMthdsRun from a method folder", () => {
     await fs.mkdir(path.join(root, "invoice", "templates"), { recursive: true });
     await fs.writeFile(path.join(root, "invoice", "invoice.mthds"), BUNDLE);
     await fs.writeFile(path.join(root, "invoice", "templates", "invoice.xlsx"), XLSX);
-    await fs.writeFile(path.join(root, "invoice", "notes.md"), "not part of the method");
+    await fs.writeFile(path.join(root, "invoice", "notes.md"), "part of the method's tree");
+    await fs.writeFile(path.join(root, "invoice", ".env"), "LEFT=out\n");
     return root;
   }
 
   const SENT = [
     path.join("invoice", "invoice.mthds"),
+    path.join("invoice", "notes.md"),
     path.join("invoice", "templates", "invoice.xlsx"),
   ];
 
@@ -3148,16 +3279,20 @@ describe("startMthdsRun from a method folder", () => {
           return Promise.resolve({ pipeline_run_id: RUN_ID });
         },
       }),
-      resolver: localBundleFileResolver(root),
+      resolver: localMethodFileResolver(root),
     };
 
     const result = await startMthdsRun({ method_dir: "invoice", method_id: "mt_abc123" }, context);
 
-    expect(seen).toEqual({
-      mthds_contents: [BUNDLE],
-      method_id: "mt_abc123",
-      resources: { "templates/invoice.xlsx": XLSX },
-    });
+    // The whole tree, notes included: a folder sends every file it holds.
+    expect(seen?.method_id).toBe("mt_abc123");
+    expect(seen?.tree?.files.map((file) => file.path)).toEqual([
+      "invoice.mthds",
+      "notes.md",
+      "templates/invoice.xlsx",
+    ]);
+    expect((await contentsOf(seen?.tree))["invoice.mthds"]).toBe(BUNDLE);
+    expect(await seen?.tree?.readFile("templates/invoice.xlsx")).toEqual(XLSX);
     expect(result.structuredContent).toMatchObject({
       status: "ok",
       run_id: RUN_ID,
@@ -3165,12 +3300,12 @@ describe("startMthdsRun from a method folder", () => {
     });
     const text = runToolResult(result).content[0].text;
     expect(text).toContain("## Files sent");
-    expect(text).toContain(`- \`${SENT[1]}\``);
+    expect(text).toContain(`- \`${SENT[2]}\``);
   });
 
   it("refuses a suffixed method_id beside a folder, in the folder's words, before starting", async () => {
     const root = await methodFolder();
-    const context: RunContext = { ...contextWith({}), resolver: localBundleFileResolver(root) };
+    const context: RunContext = { ...contextWith({}), resolver: localMethodFileResolver(root) };
 
     const result = await startMthdsRun(
       { method_dir: "invoice", method_id: "mt_abc123@draft" },
@@ -3193,7 +3328,7 @@ describe("startMthdsRun from a method folder", () => {
 
     const unbuilt = await startMthdsRun(
       { method_dir: "invoice" },
-      { baseUrl: "invalid-no-scheme", resolver: localBundleFileResolver(root) },
+      { baseUrl: "invalid-no-scheme", resolver: localMethodFileResolver(root) },
     );
     expect(unbuilt.structuredContent.status).toBe("error");
     expect(unbuilt.structuredContent).not.toHaveProperty("files_sent");
@@ -3205,7 +3340,7 @@ describe("startMthdsRun from a method folder", () => {
         ...contextWith({
           start: () => Promise.reject(new RequestArgumentError("refused before sending")),
         }),
-        resolver: localBundleFileResolver(root),
+        resolver: localMethodFileResolver(root),
       },
     );
     expect(refused.structuredContent.status).toBe("error");
@@ -3215,7 +3350,7 @@ describe("startMthdsRun from a method folder", () => {
   it("refuses a folder beside method_ref before reading it", async () => {
     const result = await startMthdsRun(
       { method_dir: "invoice", method_ref: "github.com/acme/methods/invoice" },
-      { ...contextWith({}), resolver: localBundleFileResolver("/nonexistent-root") },
+      { ...contextWith({}), resolver: localMethodFileResolver("/nonexistent-root") },
     );
 
     expect(result.structuredContent.errors?.map((error) => error.location)).toEqual(["method_ref"]);
@@ -3223,20 +3358,20 @@ describe("startMthdsRun from a method folder", () => {
 
   it("locates a refusal of what it sent at method_dir, the field the caller passed", async () => {
     const root = await methodFolder();
-    const tooLarge = new ApiResponseError(
-      "HTTP 413",
+    const refusedTree = new ApiResponseError(
+      "HTTP 422",
       `${DEFAULT_API_URL}/v1/start`,
-      413,
-      "Content Too Large",
+      422,
+      "Unprocessable Content",
       "{}",
       undefined,
+      "'a//b.mthds' is not a tree path",
       undefined,
-      undefined,
-      undefined,
+      "invalid_method_files",
     );
     const context: RunContext = {
-      ...contextWith({ start: () => Promise.reject(tooLarge) }),
-      resolver: localBundleFileResolver(root),
+      ...contextWith({ start: () => Promise.reject(refusedTree) }),
+      resolver: localMethodFileResolver(root),
     };
 
     const result = await startMthdsRun({ method_dir: "invoice" }, context);

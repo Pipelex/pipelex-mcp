@@ -2,46 +2,26 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import { describeTreeRefusal, listFolderTree } from "./capabilities/method-tree.js";
-import type { ListingLimits } from "./capabilities/method-tree.js";
-import type { FolderTree, ListedFile } from "./capabilities/method-tree.js";
-import { MAX_FOLDER_MTHDS_FILE_BYTES, MAX_FOLDER_MTHDS_FILES } from "./capabilities/shared.js";
+import type { FolderTree, ListingLimits } from "./capabilities/method-tree.js";
+import { METHOD_FILE_EXTENSIONS, shownIn } from "./capabilities/shared.js";
 import type {
   FileResolution,
   FileResolver,
   LocatedMethodDir,
   MethodDirLocation,
-  MethodDirResolution,
+  MethodFileRead,
+  MethodFileStat,
   MethodTreeRead,
 } from "./capabilities/shared.js";
-import {
-  MAX_TEMPLATE_FILE_BYTES,
-  TEMPLATE_FILE_EXTENSIONS,
-  isTemplateFilePath,
-  planTemplateFiles,
-  templateBudgetRefusals,
-  templateFilesNamedBy,
-  templateKeyOf,
-} from "./capabilities/template-files.js";
-import type {
-  BundleFileOnDisk,
-  LocatedTemplate,
-  NamedTemplate,
-  SubmittedTemplate,
-  TemplateFiles,
-  TemplateFilesResolution,
-  TemplateRefusal,
-} from "./capabilities/template-files.js";
 import {
   errorMessage,
   isInsideRoot,
   isMissingPathError,
 } from "./capabilities/workspace-boundary.js";
-import { READING_TREE_LIMITS } from "./capabilities/tree-limits.js";
 
 const MTHDS_EXTENSION = ".mthds";
 const INLINE_FALLBACK = "or inline the contents as { content, uri? }.";
-const TEMPLATE_SUFFIXES = TEMPLATE_FILE_EXTENSIONS.join(", ");
-const TEMPLATE_FALLBACK = "or move the file where the step's template_file leads.";
+const METHOD_FILE_FALLBACK = "or pass the method's folder as method_dir.";
 
 /**
  * What a resolver may vary besides its extension, each chosen where the
@@ -80,10 +60,9 @@ export interface LocalFileResolverOptions {
  * not reachable from the MCP surface — a tool input that named the extension
  * would turn the read boundary into something the model picks, which is the
  * opposite of what it is for. `mthds_run` and `mthds_prepare_inputs`'s
- * `inputs_path` is the other arm, `.json`, built with its own fallback wording
- * and a size cap. The
- * method-taking tools' `files` is {@link localBundleFileResolver}, this
- * resolver plus a second, byte-reading arm for a bundle's template files.
+ * `inputs_path` is the `.json` arm, built with its own fallback wording and a
+ * size cap. The method-taking tools' `files` and `method_dir` are
+ * {@link localMethodFileResolver}, which reads a method's files as bytes.
  */
 export function localFileResolver(
   rootDir: string = process.cwd(),
@@ -125,37 +104,120 @@ export function localFileResolver(
 }
 
 /**
- * The resolver of the method-taking tools' `files`: `.mthds` files read as
- * text, as {@link localFileResolver} reads them, and the template files a
- * bundle's `PipeDocGen` steps name read as bytes through `resolveTemplates`.
+ * The resolver of a method's files: the method-taking tools' `files` and
+ * `method_dir`, and `mthds_save_method`'s `method_dir` (`save`, which words
+ * its refusals for a tool that takes a folder alone).
  *
- * `resolveTemplates` takes the request's template files together, once the
- * `.mthds` files resolved, and decides everything before reading a byte of
- * any. Each submitted file passes the read side's gates: its suffix is one of
- * `TEMPLATE_FILE_EXTENSIONS`, checked on the submitted name before the
- * filesystem is touched, so the widened gate still never opens a `.env`; its
- * real path lies inside the working directory; it is a regular file within
- * `MAX_TEMPLATE_FILE_BYTES` on its stat. Then each step's `template_file` is
- * looked up beside the `.mthds` file naming it, and `planTemplateFiles`
- * matches the two by real path: a submitted file is sent under the key of the
- * step naming it, the same file submitted twice once, and a file no step names
- * is refused, as is one a step reaches only through a symlink out of its own
- * directory, which pipelex's loader refuses too. The request's bounds are held
- * on the stat sizes, and again on the bytes read. The working directory and
- * each `.mthds` file's directory are resolved once per request.
+ * `statMethodFile` makes every check of one `{ path }` item that reads no
+ * byte of it: its extension is `.mthds` or a template file's
+ * (`METHOD_FILE_EXTENSIONS`), checked on the submitted name before the
+ * filesystem is touched, so a `.env` or a key is never opened; its real path
+ * lies inside the working directory; it is a regular file. It answers the
+ * path as the caller wrote it, resolved against the working directory and
+ * relative to it, from which the tree path is made, and the size the stat
+ * gave. `readMethodFile` makes the same checks again and reads the file as
+ * bytes, within `maxBytes`, the deployment's limit on one file of a method,
+ * on its stat and again on the bytes read.
+ *
+ * `locateMethodDir` finds a folder on its real path before anything under it
+ * is read, and `readMethodTree` lists its whole tree under the deployment's
+ * limits and reads every file of it once (`readMethodFolderTree`).
  */
-export function localBundleFileResolver(rootDir: string = process.cwd()): FileResolver {
-  const text = localFileResolver(rootDir, MTHDS_EXTENSION, {
-    reads: `.mthds files, and the template files their PipeDocGen steps name (${TEMPLATE_SUFFIXES}) as { path }`,
-  });
+export function localMethodFileResolver(
+  rootDir: string = process.cwd(),
+  options: { save?: boolean } = {},
+): FileResolver {
+  const text = localFileResolver(rootDir, MTHDS_EXTENSION);
+  const fallback = options.save === true ? SAVE_FALLBACK : FOLDER_FALLBACK;
   return {
     resolve: (submitted) => text.resolve(submitted),
-    resolveTemplates: (templates, bundle, requestBytes) =>
-      resolveTemplateFiles(rootDir, templates, bundle, requestBytes),
-    resolveMethodDir: (methodDir) => resolveMethodFolder(rootDir, methodDir),
-    locateMethodDir: (methodDir) => locateMethodFolder(rootDir, methodDir, SAVE_FALLBACK),
-    readMethodTree: (location, options) => readMethodFolderTree(location, options.limits),
+    statMethodFile: (submitted) => statMethodFile(rootDir, submitted),
+    readMethodFile: (submitted, read) => readMethodFile(rootDir, submitted, read.maxBytes),
+    locateMethodDir: (methodDir) => locateMethodFolder(rootDir, methodDir, fallback),
+    readMethodTree: (location, read) => readMethodFolderTree(location, read.limits, fallback),
   };
+}
+
+/** One `{ path }` item of a method's `files`, past every gate that reads no byte of it. */
+async function statMethodFile(rootDir: string, submitted: string): Promise<MethodFileStat> {
+  const target = await methodFileTarget(rootDir, submitted);
+  if (!target.ok) return target;
+  const absolute = path.resolve(rootDir, submitted);
+  return { ok: true, absolute, relative: path.relative(rootDir, absolute), size: target.size };
+}
+
+/** One `{ path }` item of a method's `files`, read as bytes past the read side's gates. */
+async function readMethodFile(
+  rootDir: string,
+  submitted: string,
+  maxBytes: number,
+): Promise<MethodFileRead> {
+  const target = await methodFileTarget(rootDir, submitted, maxBytes);
+  if (!target.ok) return target;
+  let bytes: Uint8Array;
+  try {
+    bytes = await readUpTo(target.real, target.size);
+  } catch (err) {
+    return readFailure(submitted, err, METHOD_FILE_FALLBACK);
+  }
+  if (bytes.byteLength !== target.size) {
+    return failure(
+      `${submitted} changed while it was read.`,
+      `Send it again once nothing is writing to it, ${METHOD_FILE_FALLBACK}`,
+    );
+  }
+  return { ok: true, bytes };
+}
+
+/**
+ * The gates of a method file before any byte of it is read: the extension on
+ * the submitted name, before the filesystem is touched, then the working
+ * directory's containment, a regular file, and `maxBytes` when one is given.
+ */
+async function methodFileTarget(
+  rootDir: string,
+  submitted: string,
+  maxBytes?: number,
+): Promise<ContainedTarget> {
+  const extension = path.extname(submitted).toLowerCase();
+  if (!(METHOD_FILE_EXTENSIONS as readonly string[]).includes(extension)) {
+    return failure(
+      `Path is not a .mthds file or a template file: ${submitted}`,
+      `This argument reads .mthds files and the template files their PipeDocGen steps name (${METHOD_FILE_EXTENSIONS.slice(1).join(", ")}). Point at one, ${METHOD_FILE_FALLBACK}`,
+    );
+  }
+  const root = await workingDirectory(rootDir);
+  if (!root.ok) return root;
+  return containedTarget(rootDir, root.real, submitted, {
+    kind: "a .mthds file or a template file",
+    fallback: METHOD_FILE_FALLBACK,
+    ...(maxBytes === undefined
+      ? {}
+      : {
+          maxBytes,
+          limit: `the limit of ${maxBytes} bytes the Pipelex deployment takes for one file of a method`,
+        }),
+  });
+}
+
+/**
+ * A file's bytes, read to at most one byte past `size`, the size its stat gave
+ * and the limit held it to, so a file that grew since is never read whole.
+ */
+async function readUpTo(real: string, size: number): Promise<Uint8Array> {
+  const handle = await fs.open(real, "r");
+  try {
+    const buffer = Buffer.alloc(size + 1);
+    let filled = 0;
+    while (filled < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, null);
+      if (bytesRead === 0) break;
+      filled += bytesRead;
+    }
+    return new Uint8Array(buffer.buffer, buffer.byteOffset, filled);
+  } finally {
+    await handle.close();
+  }
 }
 
 /**
@@ -186,9 +248,6 @@ const SAVE_FALLBACK: FolderFallback = {
   notADirectory:
     "Pass the folder holding the method's .mthds files: its whole tree is what a save stores.",
 };
-
-const FOLDER_COUNT_HINT =
-  "The folder sends every template file its PipeDocGen steps name, and they name more than one request takes: have the steps share template files, or split the method.";
 
 /** Refusals of a method folder shown by name, the rest counted. */
 const MAX_LISTED_PATHS = 5;
@@ -268,7 +327,7 @@ async function listMethodFolder(
     const text = describeTreeRefusal(listed.error, fallback.clause);
     return refusedWith(text.message, text.hint);
   }
-  const shown = shownUnder(methodDir);
+  const shown = (treePath: string) => shownIn(methodDir, treePath);
   const mthds = listed.ok ? listed.tree.files.filter((file) => isMthdsPath(file.path)) : [];
   if (!listed.ok || !mthds.some((file) => !file.path.includes("/"))) {
     const deeper = mthds.map((file) => shown(file.path));
@@ -290,296 +349,47 @@ async function holdsVirtualEnvironmentMarker(folder: string): Promise<boolean> {
 }
 
 /**
- * Read a method folder, `method_dir`, for a method-taking tool: the `.mthds`
- * files of its tree and the template files their `PipeDocGen` steps name, and
- * nothing else of it, since the runner refuses a file no step names (see
- * {@link folderRequestFrom}).
- *
- * The tree is listed under the workshop's scan bound alone
- * (`READING_TREE_LIMITS`), never under the limits a deployment stores a tree
- * under: those are about the whole tree, which only a save sends, and a
- * `main.mthds` beside a large sample PDF is a method these tools read and
- * send like any other. Bytes are judged on what is sent, by
- * {@link folderRequestFrom}. `mthds` 0.32 has no way to list a tree without
- * hashing every member, so the walk still reads each file once, streamed,
- * and the file count is what bounds it.
- */
-async function resolveMethodFolder(
-  rootDir: string,
-  methodDir: string,
-): Promise<MethodDirResolution> {
-  const located = await locateMethodFolder(rootDir, methodDir, FOLDER_FALLBACK);
-  if (!located.ok) return located;
-  const listed = await listMethodFolder(located, READING_TREE_LIMITS, FOLDER_FALLBACK);
-  if (!listed.ok) return listed;
-  return folderRequestFrom(listed.tree, methodDir, (treePath) => listed.tree.readFile(treePath));
-}
-
-/**
- * Read a located method folder's whole tree for `mthds_save_method`: list it
- * under `limits` and read every file once, each to at most one byte past its
- * listed size and checked against its listed SHA-256. The request the folder
- * makes for a validation is built from those same bytes, never read again, so
- * what the save validates is what it sends.
+ * Read a located method folder's whole tree, for every tool that sends a
+ * folder: list it under `limits` and read every file once, each to at most one
+ * byte past its listed size and checked against its listed SHA-256. What the
+ * secret guard checks and the tool sends are these bytes, never read again.
  */
 async function readMethodFolderTree(
   location: LocatedMethodDir,
   limits: ListingLimits,
+  fallback: FolderFallback,
 ): Promise<MethodTreeRead> {
-  const listed = await listMethodFolder(location, limits, SAVE_FALLBACK);
+  const listed = await listMethodFolder(location, limits, fallback);
   if (!listed.ok) return listed;
   const { tree } = listed;
-  const shown = shownUnder(location.methodDir);
   const bytes = new Map<string, Uint8Array>();
   for (const file of tree.files) {
     try {
       bytes.set(file.path, await tree.readFile(file.path));
     } catch (err) {
-      return refusedWith(...memberReadFailure(shown(file.path), errorMessage(err), SAVE_FALLBACK));
+      return refusedWith(
+        ...memberReadFailure(shownIn(location.methodDir, file.path), errorMessage(err), fallback),
+      );
     }
   }
   return {
     ok: true,
     files: tree.files,
     digest: tree.digest,
-    runInputs: tree.runInputs,
     ...(tree.graphPage === undefined ? {} : { graphPage: tree.graphPage }),
     bytes,
-    folderRequest: () =>
-      folderRequestFrom(tree, location.methodDir, async (treePath) => {
-        const read = bytes.get(treePath);
-        if (read === undefined) throw new Error(`${treePath} is not a file of the method tree`);
-        return read;
-      }),
   };
-}
-
-/**
- * The request a method folder makes: the `.mthds` files of its tree and the
- * template files their `PipeDocGen` steps name, read through `read`.
- * Everything is decided before a byte is read.
- *
- * - **What.** Only `.mthds` members and template files are read, and a
- *   template file only when a step names it, by the suffix of the name the
- *   step writes, so no step can make the workshop read a `.env` or a key: the
- *   read side's extension gate, applied to names the folder supplies.
- * - **The templates** are looked up as `lookUpNamedTemplates` looks them up,
- *   where each step's `template_file` leads from the directory of the
- *   `.mthds` file naming it, but among the tree's members rather than on disk:
- *   a template the rule excludes is not in the method, and one that is not
- *   there is left for the runner to report as not supplied. Each is keyed by
- *   the step naming it (`planTemplateFiles`), so a bundle in a subfolder keys
- *   its templates as with the file list.
- * - **How much.** The template files are held to the request's bounds
- *   (`templateBudgetRefusals`) on their listed sizes and again on the bytes
- *   read, and the `.mthds` files to the runner's count and per-file size,
- *   since a folder can hold more of them than the agent thought of.
- *
- * The `.mthds` files are sent top level first, then by tree path, so the
- * folder's own bundle leads, the one whose `main_pipe` a run defaults to when
- * several declare one. `sent` lists them, then the template files.
- */
-async function folderRequestFrom(
-  tree: FolderTree,
-  methodDir: string,
-  read: (treePath: string) => Promise<Uint8Array>,
-): Promise<MethodDirResolution> {
-  const shown = shownUnder(methodDir);
-  const files = tree.files;
-  const mthds = files.filter((file) => isMthdsPath(file.path)).sort(topLevelFirst);
-
-  if (mthds.length > MAX_FOLDER_MTHDS_FILES) {
-    return refusedWith(
-      `${methodDir} holds ${mthds.length} .mthds files, over the ${MAX_FOLDER_MTHDS_FILES} one request takes: ${listed_(mthds.map((file) => shown(file.path)))}.`,
-      "Keep the .mthds files that are not part of the method out with a .gitignore inside the folder, or point method_dir at the method's own folder.",
-    );
-  }
-  const oversized = mthds.filter((file) => file.size > MAX_FOLDER_MTHDS_FILE_BYTES);
-  if (oversized.length > 0) {
-    return {
-      ok: false,
-      refusals: oversized.map((file) => mthdsTooLarge(shown(file.path), file.size)),
-    };
-  }
-
-  // The .mthds files, read as text in the order they are sent.
-  const bundle: { treePath: string; path: string; content: string }[] = [];
-  for (const file of mthds) {
-    let bytes: Uint8Array;
-    try {
-      bytes = await read(file.path);
-    } catch (err) {
-      return refusedWith(...memberReadFailure(shown(file.path), errorMessage(err)));
-    }
-    if (bytes.byteLength > MAX_FOLDER_MTHDS_FILE_BYTES) {
-      return { ok: false, refusals: [mthdsTooLarge(shown(file.path), bytes.byteLength)] };
-    }
-    const content = Buffer.from(bytes).toString("utf8");
-    if (content.trim() === "") {
-      return refusedWith(
-        `${shown(file.path)} is empty.`,
-        "Write the bundle into the .mthds file, or keep it out of the method with a .gitignore inside the folder.",
-      );
-    }
-    bundle.push({ treePath: file.path, path: shown(file.path), content });
-  }
-
-  // The template files the steps name, among the tree's members. The lookup
-  // is case-sensitive, as on the runner's filesystem, whatever this one does,
-  // and the standard's tree paths are in NFC already, so a name the step
-  // writes is compared in NFC too.
-  const members = new Map<string, ListedFile>();
-  const membersByFoldedPath = new Map<string, string>();
-  for (const file of files) {
-    members.set(file.path, file);
-    const folded = file.path.toLowerCase();
-    if (!membersByFoldedPath.has(folded)) membersByFoldedPath.set(folded, file.path);
-  }
-  const named: NamedTemplate[] = [];
-  const located = new Map<string, LocatedTemplate>();
-  const lookupRefusals = new Map<string, { message: string; hint: string }>();
-  for (const file of bundle) {
-    const dir = path.posix.dirname(file.treePath);
-    for (const templateFile of templateFilesNamedBy(file.content)) {
-      const key = templateKeyOf(templateFile);
-      if (key === undefined) continue;
-      const treePath = (dir === "." ? key : `${dir}/${key}`).normalize("NFC");
-      const member = isTemplateFilePath(key) ? members.get(treePath) : undefined;
-      if (member === undefined && isTemplateFilePath(key)) {
-        const refusal = await missedTemplateRefusal(
-          tree,
-          shown,
-          file.treePath,
-          templateFile,
-          treePath,
-          membersByFoldedPath,
-        );
-        if (refusal !== undefined) lookupRefusals.set(`${file.treePath}\0${treePath}`, refusal);
-      }
-      // A member's tree path stands for its real path in the planner, which
-      // matches files by real path: one member is one file.
-      const real = member === undefined ? null : member.path;
-      named.push({ key, mthdsPath: file.path, real, escapes: false });
-      if (member !== undefined && !located.has(member.path)) {
-        located.set(member.path, {
-          index: located.size,
-          path: shown(member.path),
-          real: member.path,
-          size: member.size,
-        });
-      }
-    }
-  }
-  if (lookupRefusals.size > 0) return { ok: false, refusals: [...lookupRefusals.values()] };
-  const templates = [...located.entries()]
-    .sort(([a], [b]) => byteOrder(a, b))
-    .map(([, template]) => template);
-  const requestBytes = bundle.reduce(
-    (total, file) => total + Buffer.byteLength(file.content, "utf8"),
-    0,
-  );
-  const plan = planTemplateFiles(templates, named, requestBytes, { countHint: FOLDER_COUNT_HINT });
-  if (plan.refusals.length > 0) return { ok: false, refusals: plan.refusals.map(asFolderRefusal) };
-
-  // Each template file read once, whatever number of keys it is sent under,
-  // and the request held to its bounds again on what was read.
-  const bytesByPath = new Map<string, Uint8Array>();
-  const read_: { key: string; index: number; path: string; size: number; bytes: Uint8Array }[] = [];
-  for (const entry of plan.planned) {
-    let bytes = bytesByPath.get(entry.real);
-    if (bytes === undefined) {
-      try {
-        bytes = await read(entry.real);
-      } catch (err) {
-        return refusedWith(...memberReadFailure(entry.path, errorMessage(err)));
-      }
-      bytesByPath.set(entry.real, bytes);
-    }
-    read_.push({ ...entry, size: bytes.byteLength, bytes });
-  }
-  const overRead = templateBudgetRefusals(read_, requestBytes, { countHint: FOLDER_COUNT_HINT });
-  if (overRead.length > 0) return { ok: false, refusals: overRead.map(asFolderRefusal) };
-
-  const resources: TemplateFiles = {};
-  for (const entry of read_) resources[entry.key] = entry.bytes;
-  const sentTemplates = templates
-    .filter((template) => bytesByPath.has(template.real))
-    .map((template) => template.path);
-  return {
-    ok: true,
-    files: bundle.map((file) => ({ path: file.path, content: file.content })),
-    resources,
-    sent: [...bundle.map((file) => file.path), ...sentTemplates],
-  };
-}
-
-/**
- * Why a template a step names, that is no member of the folder, is refused
- * rather than left for the runner to report as not supplied; `undefined` when
- * it is simply missing. Two cases are the author's mistake and say so: the
- * path leads into a nested repository, which is out of the folder with
- * everything under it (the standard's reference resolution says so), or the
- * folder holds the file spelled in another case, which a case-insensitive
- * filesystem would open here and a case-sensitive runner would not.
- */
-async function missedTemplateRefusal(
-  tree: FolderTree,
-  shown: (treePath: string) => string,
-  mthdsTreePath: string,
-  templateFile: string,
-  treePath: string,
-  membersByFoldedPath: ReadonlyMap<string, string>,
-): Promise<{ message: string; hint: string } | undefined> {
-  const step = `A PipeDocGen step of ${shown(mthdsTreePath)} names the template_file "${templateFile}"`;
-  const resolution = await tree
-    .resolveReference({ holder: mthdsTreePath, reference: templateFile, context: "path" })
-    .catch(() => undefined);
-  if (
-    resolution?.kind === "refused" &&
-    resolution.refusal.excludedBy === "nested_repository" &&
-    resolution.refusal.excludedDirectory !== undefined
-  ) {
-    return {
-      message: `${step}, which leads into ${shown(resolution.refusal.excludedDirectory)}, a nested git repository: a directory holding a .git entry is not part of the method's folder.`,
-      hint: "Move the template file out of the nested repository into the method's folder, or pass method_dir for a folder that is not a repository's parent.",
-    };
-  }
-  const spelled = membersByFoldedPath.get(treePath.toLowerCase());
-  if (spelled !== undefined && spelled !== treePath) {
-    return {
-      message: `${step}, which leads to ${shown(treePath)}, and the folder holds ${shown(spelled)}, spelled in another case.`,
-      hint: "Template files are matched case-sensitively, as the runner reads them: make the step's template_file and the file's name agree letter for letter.",
-    };
-  }
-  return undefined;
 }
 
 function memberReadFailure(
   shownPath: string,
   message: string,
-  fallback: FolderFallback = FOLDER_FALLBACK,
+  fallback: FolderFallback,
 ): [string, string] {
   return [
     `Could not read ${shownPath}: ${message}`,
     `Check the file and its permissions; a file that changed while the folder was read can be sent again.${fallback.sentence}`,
   ];
-}
-
-function mthdsTooLarge(shownPath: string, size: number): { message: string; hint: string } {
-  return {
-    message: `${shownPath} is ${size} bytes, over the ${MAX_FOLDER_MTHDS_FILE_BYTES} bytes one .mthds file may be.`,
-    hint: "Split the bundle into smaller .mthds files, or keep a file that is not part of the method out with a .gitignore inside the folder.",
-  };
-}
-
-/** A template refusal of the planner, at `method_dir` like every refusal of a folder. */
-function asFolderRefusal(refusal: TemplateRefusal): { message: string; hint: string } {
-  return { message: refusal.message, hint: refusal.hint };
-}
-
-/** A tree path as the caller can open it: `method_dir` joined with it. */
-function shownUnder(methodDir: string): (treePath: string) => string {
-  return (treePath) => path.join(methodDir, ...treePath.split("/"));
 }
 
 /** A few paths by name, the rest counted. */
@@ -592,137 +402,6 @@ function listed_(paths: readonly string[]): string {
 
 function isMthdsPath(treePath: string): boolean {
   return path.posix.extname(treePath).toLowerCase() === MTHDS_EXTENSION;
-}
-
-/** The files at the folder's top first, then every file by tree path byte for byte. */
-function topLevelFirst(a: ListedFile, b: ListedFile): number {
-  const nested = (file: ListedFile) => (file.path.includes("/") ? 1 : 0);
-  return nested(a) - nested(b) || byteOrder(a.path, b.path);
-}
-
-function byteOrder(a: string, b: string): number {
-  return Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
-}
-
-async function resolveTemplateFiles(
-  rootDir: string,
-  templates: readonly SubmittedTemplate[],
-  bundle: readonly BundleFileOnDisk[],
-  requestBytes: number,
-): Promise<TemplateFilesResolution> {
-  const root = await workingDirectory(rootDir);
-  if (!root.ok) return { ok: false, refusals: [{ message: root.message, hint: root.hint }] };
-
-  const refusals: TemplateRefusal[] = [];
-  const located: LocatedTemplate[] = [];
-  for (const template of templates) {
-    // The widened extension gate, still ahead of any filesystem access.
-    const extension = path.extname(template.path).toLowerCase();
-    if (!(TEMPLATE_FILE_EXTENSIONS as readonly string[]).includes(extension)) {
-      refusals.push({
-        index: template.index,
-        message: `Path is not a template file: ${template.path}`,
-        hint: `A template file is one of ${TEMPLATE_SUFFIXES}. Point at the file a PipeDocGen step names.`,
-      });
-      continue;
-    }
-    const target = await containedTarget(rootDir, root.real, template.path, {
-      kind: "a template file",
-      fallback: TEMPLATE_FALLBACK,
-      maxBytes: MAX_TEMPLATE_FILE_BYTES,
-    });
-    if (!target.ok) {
-      refusals.push({ index: template.index, message: target.message, hint: target.hint });
-      continue;
-    }
-    located.push({
-      index: template.index,
-      path: template.path,
-      real: target.real,
-      size: target.size,
-    });
-  }
-
-  const named = await lookUpNamedTemplates(rootDir, bundle);
-  const plan = planTemplateFiles(located, named, requestBytes);
-  refusals.push(...plan.refusals);
-  if (refusals.length > 0) return { ok: false, refusals: sortedByItem(refusals) };
-
-  // Read each file once, whatever number of keys it is sent under, and hold
-  // the request to its bounds again on what was read: a file can grow
-  // between its stat and its read.
-  const bytesByReal = new Map<string, Uint8Array>();
-  const read: { key: string; index: number; path: string; size: number; bytes: Uint8Array }[] = [];
-  for (const entry of plan.planned) {
-    let bytes = bytesByReal.get(entry.real);
-    if (bytes === undefined) {
-      try {
-        const buffer = await fs.readFile(entry.real);
-        bytes = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-      } catch (err) {
-        const failed = readFailure(entry.path, err, TEMPLATE_FALLBACK);
-        return {
-          ok: false,
-          refusals: [{ index: entry.index, message: failed.message, hint: failed.hint }],
-        };
-      }
-      bytesByReal.set(entry.real, bytes);
-    }
-    read.push({ ...entry, size: bytes.byteLength, bytes });
-  }
-  const overRead = templateBudgetRefusals(read, requestBytes);
-  if (overRead.length > 0) return { ok: false, refusals: overRead };
-
-  const resources: TemplateFiles = {};
-  for (const entry of read) resources[entry.key] = entry.bytes;
-  return { ok: true, resources };
-}
-
-/**
- * Each step's template file, looked up where its `template_file` leads from
- * the directory of the `.mthds` file naming it, by real path. A path the
- * runner refuses is skipped, so no file is sent under it; a missing file is
- * `null`, for the runner to say the step's file was not supplied.
- */
-async function lookUpNamedTemplates(
-  rootDir: string,
-  bundle: readonly BundleFileOnDisk[],
-): Promise<NamedTemplate[]> {
-  const realDirs = new Map<string, string | null>();
-  const named: NamedTemplate[] = [];
-  for (const file of bundle) {
-    const dir = path.dirname(path.resolve(rootDir, file.path));
-    if (!realDirs.has(dir)) realDirs.set(dir, await fs.realpath(dir).catch(() => null));
-    const realDir = realDirs.get(dir) ?? null;
-    if (realDir === null) continue;
-    for (const templateFile of file.named) {
-      const key = templateKeyOf(templateFile);
-      if (key === undefined) continue;
-      const real = await regularFileRealPath(path.join(dir, ...key.split("/")));
-      named.push({
-        key,
-        mthdsPath: file.path,
-        real,
-        escapes: real !== null && !isInsideRoot(realDir, real),
-      });
-    }
-  }
-  return named;
-}
-
-/** The real path of a regular file at `target`, or `null` when there is none. */
-async function regularFileRealPath(target: string): Promise<string | null> {
-  try {
-    const real = await fs.realpath(target);
-    return (await fs.stat(real)).isFile() ? real : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Refusals in the order of the items they are about, the whole-submission ones first. */
-function sortedByItem(refusals: TemplateRefusal[]): TemplateRefusal[] {
-  return [...refusals].sort((a, b) => (a.index ?? -1) - (b.index ?? -1));
 }
 
 /** The working directory's real path, resolved once per request. */
@@ -748,13 +427,13 @@ type ContainedTarget =
  * The checks every read makes after its extension gate: the target exists,
  * its real path lies inside the working directory (whose real path is
  * `rootReal`), it is a regular file, and it is within `maxBytes` when one is
- * set, all before a byte of it is read.
+ * set (worded by `limit`, which names it), all before a byte of it is read.
  */
 async function containedTarget(
   rootDir: string,
   rootReal: string,
   submitted: string,
-  options: { kind: string; fallback: string; maxBytes?: number },
+  options: { kind: string; fallback: string; maxBytes?: number; limit?: string },
 ): Promise<ContainedTarget> {
   const { kind, fallback, maxBytes } = options;
   const target = path.resolve(rootDir, submitted);
@@ -792,7 +471,7 @@ async function containedTarget(
     }
     if (maxBytes !== undefined && stats.size > maxBytes) {
       return failure(
-        `File is too large: ${submitted} is ${stats.size} bytes, over the ${maxBytes}-byte limit for this argument.`,
+        `File is too large: ${submitted} is ${stats.size} bytes, over ${options.limit ?? `the ${maxBytes}-byte limit for this argument`}.`,
         `Shrink the file, ${fallback}`,
       );
     }

@@ -1,5 +1,5 @@
 import { InputPreparationError } from "@pipelex/sdk";
-import type { MthdsFileItem, PrepareInputsRequest, PreparedInputs } from "@pipelex/sdk";
+import type { MethodTreeSource, PrepareInputsRequest, PreparedInputs } from "@pipelex/sdk";
 import { z } from "zod";
 
 import {
@@ -14,22 +14,21 @@ import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./m
 import {
   METHOD_REF_GRAMMAR,
   buildApiConfig,
-  bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
   filesSentSchema,
   inputsPathSchema,
   methodDirInputSchema,
+  methodFilesInputSchema,
   resolveInputsSource,
-  hasTemplateFiles,
-  resolveMethodFiles,
-  resourcesOption,
+  resolveMethodSource,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
   withFilesSent,
   failedBeforeSending,
+  treeSentInlineHeavy,
   markUnsent,
 } from "./shared.js";
 import type {
@@ -39,16 +38,17 @@ import type {
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
-  SubmittedFile,
+  MethodTreeToSend,
   SubmittedFileInput,
   ToolError,
 } from "./shared.js";
-import type { TemplateFiles } from "./template-files.js";
+import { methodTreeLimitsOf } from "./tree-limits.js";
+import type { TreeLimitsAware } from "./tree-limits.js";
 import { MAX_UPLOAD_BYTES, SizeGuardedPipelexApiClient, formatMib } from "./upload-ceiling.js";
 
 export const mthdsPrepareInputsInputSchema = {
   method_dir: methodDirInputSchema("one_selector"),
-  files: bundleFilesInputSchema.optional(),
+  files: methodFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
@@ -112,11 +112,10 @@ export interface MthdsPrepareInputsInput {
   inputs_path?: string;
 }
 
-/** The prepare request after `{ path }` and `inputs_path` resolution — what the checks and the prepare step consume. */
+/** The prepare request once its method and `inputs_path` are resolved — what the checks and the prepare step consume. */
 interface ResolvedPrepareRequest {
-  files: SubmittedFile[];
-  /** The bundle's template files, keyed by the path a step names; sent beside `files` only. */
-  resources?: TemplateFiles;
+  /** The method's tree, from `method_dir` or `files`. */
+  tree?: MethodTreeToSend;
   method_ref?: string;
   method_id?: string;
   pipe_ref?: string;
@@ -131,7 +130,7 @@ export interface PrepareStructuredContent {
   uploads?: string[];
   /** By-id calls only: the content whose signature the inputs were prepared against, when this server can tell. */
   method_version?: MethodVersionReport;
-  /** Calls on a method folder only: every file read from it and sent. */
+  /** Calls on a tree, from `method_dir` or `files`: every file sent. */
   files_sent?: string[];
   errors?: ToolError[];
 }
@@ -158,9 +157,9 @@ interface PrepareClient {
  * `mthds_prepare_inputs` always uploads: the workshop is co-located with the
  * user's files.
  */
-export interface PrepareContext extends ApiConfig, MethodVersionsAware {
+export interface PrepareContext extends ApiConfig, MethodVersionsAware, TreeLimitsAware {
   client?: PrepareClient;
-  /** Fills `{ path }` closure items from disk (local workshop). */
+  /** Reads `{ path }` items and `method_dir` from disk (local workshop). */
   resolver?: FileResolver;
   /** Reads `inputs_path` from disk (local workshop, `.json` only); without one `inputs_path` is refused. */
   inputsResolver?: FileResolver;
@@ -285,7 +284,9 @@ export async function prepareMthdsInputs(
   input: MthdsPrepareInputsInput,
   context: PrepareContext = buildPrepareContext(),
 ): Promise<PrepareResult> {
-  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector");
+  const resolution = await resolveMethodSource(input, context.resolver, "one_selector", () =>
+    methodTreeLimitsOf(context, () => prepareClient(context)),
+  );
   const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
     required: true,
   });
@@ -296,11 +297,10 @@ export async function prepareMthdsInputs(
 
   // `inputs_path` is settled into `inputs` here and goes no further: the rest
   // of the flow cannot tell a loaded file from an inline object.
-  const { inputs_path: _inputsPath, ...selection } = input;
+  const { inputs_path: _inputsPath, method_dir: _methodDir, files: _files, ...selection } = input;
   const request: ResolvedPrepareRequest = {
     ...selection,
-    files: resolution.files,
-    resources: resolution.resources,
+    ...(resolution.tree === undefined ? {} : { tree: resolution.tree }),
     inputs: inputsResolution.inputs ?? {},
   };
   const inputErrors = validatePrepareInputsRequest(request);
@@ -308,7 +308,7 @@ export async function prepareMthdsInputs(
     return errorResult("Inputs were not prepared: request input is invalid.", inputErrors);
   }
 
-  return withFilesSent(await requestPreparedInputs(request, context), resolution.sent);
+  return withFilesSent(await requestPreparedInputs(request, context), request.tree);
 }
 
 /** The SDK's `prepareInputs` for a request that passed its checks, and the projection of what it prepared. */
@@ -320,7 +320,7 @@ async function requestPreparedInputs(
   // mthds_validate and mthds_codegen do — each failure locates at the field
   // that caused it.
   const classifyOptions =
-    request.files.length > 0
+    request.tree !== undefined
       ? PREPARE_ERROR_OPTIONS
       : request.method_ref !== undefined
         ? PREPARE_BY_REF_ERROR_OPTIONS
@@ -353,19 +353,20 @@ async function requestPreparedInputs(
     };
     prepared = await prepareWithUpload(client, envelope);
   } catch (err) {
-    // A `413` from the pipe I/O read of a request carrying template files is
-    // about them; an input the storage service refuses as too large is a
-    // `RejectedAssetError`, which the `asset` texture takes either way.
+    // An input the storage service refuses as too large is a
+    // `RejectedAssetError`, which the `asset` texture takes whatever named the
+    // method; a refusal of the tree is read as about the files it sent.
     const classified = classifyError(err, {
       ...classifyOptions,
       auth: context.authError,
       baseUrlSource: context.baseUrlSource,
-      bundleResources: hasTemplateFiles(request.resources),
+      methodTree: request.tree !== undefined,
+      treeInline: await treeSentInlineHeavy(err, request.tree, client),
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     const failed = errorResult(summaryForError(error), [error]);
     // A client that could not be built, or an argument refused before
-    // sending, sent no file of a folder.
+    // sending, sent no file of the tree.
     return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
 
@@ -381,14 +382,11 @@ async function requestPreparedInputs(
  * to be exactly one by {@link validatePrepareInputsRequest}. The SDK takes it
  * as-is: nothing here resolves an address or an id, the route does.
  */
-type PrepareSelector =
-  | { files: MthdsFileItem[]; resources?: TemplateFiles }
-  | { method_ref: string }
-  | { method_id: string };
+type PrepareSelector = { tree: MethodTreeSource } | { method_ref: string } | { method_id: string };
 
 function prepareSelectorOf(request: ResolvedPrepareRequest): PrepareSelector {
-  if (request.files.length > 0) {
-    return { files: toMthdsFileItems(request.files), ...resourcesOption(request.resources) };
+  if (request.tree !== undefined) {
+    return { tree: request.tree.source };
   }
   if (request.method_ref !== undefined) {
     return { method_ref: request.method_ref };
@@ -415,10 +413,11 @@ interface PrepareEnvelope {
 
 /**
  * Hand the whole request to the SDK's `prepareInputs`, selector included. Since
- * `@pipelex/sdk` 0.17.0 that call takes `files`, `method_ref` or `method_id`,
- * and since 0.27.0 it resolves each, with the `pipe_ref` if one was named,
- * through one `POST /v1/pipe-io` for that one pipe, with no dry run — which is
- * why this repo does not expand a stored method into files before calling it.
+ * `@pipelex/sdk` 0.17.0 that call takes the method, a `method_ref` or a
+ * `method_id`, and since 0.27.0 it resolves each, with the `pipe_ref` if one
+ * was named, through one `POST /v1/pipe-io` for that one pipe, with no dry run
+ * — which is why this repo does not expand a stored method into files before
+ * calling it. The method travels as its tree, inline or by hash.
  */
 function prepareWithUpload(
   client: PrepareClient,
@@ -431,10 +430,8 @@ function prepareWithUpload(
     ...(envelope.pipe_ref === undefined ? {} : { pipe_ref: envelope.pipe_ref }),
     inputs: envelope.inputs,
   };
-  if ("files" in envelope.selector) {
-    const { files, resources } = envelope.selector;
-    // The template files ride the files arm alone, as the SDK's XOR types them.
-    return client.prepareInputs({ ...base, files, ...resourcesOption(resources) });
+  if ("tree" in envelope.selector) {
+    return client.prepareInputs({ ...base, tree: envelope.selector.tree });
   }
   if ("method_ref" in envelope.selector) {
     return client.prepareInputs({ ...base, method_ref: envelope.selector.method_ref });
@@ -443,7 +440,9 @@ function prepareWithUpload(
 }
 
 export function validatePrepareInputsRequest(input: ResolvedPrepareRequest): ToolError[] {
-  const errors = validateMethodSelectorRequest(input.files, input, { rule: "one_selector" });
+  const errors = validateMethodSelectorRequest(input.tree !== undefined, input, {
+    rule: "one_selector",
+  });
 
   if (input.pipe_ref !== undefined && input.pipe_ref.trim() === "") {
     errors.push({
@@ -556,17 +555,6 @@ export function prepareInputsToolResult(result: PrepareResult) {
     ),
     isError: result.structuredContent.status === "error",
   };
-}
-
-// The MCP surface spells the provenance label `uri` (mirroring mthds_validate);
-// the SDK's build envelope spells it `source` (`MthdsFileItem`). Adapt here.
-function toMthdsFileItems(files: SubmittedFile[]): MthdsFileItem[] {
-  return files.map((file) => {
-    if (file.uri === undefined || file.uri === null) {
-      return { content: file.content };
-    }
-    return { content: file.content, source: file.uri };
-  });
 }
 
 function errorResult(summary: string, errors: ToolError[]): PrepareResult {

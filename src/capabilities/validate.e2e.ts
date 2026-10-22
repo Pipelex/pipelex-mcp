@@ -145,15 +145,20 @@ describe("mthds_validate (live)", () => {
   // stand in for, and it needs an unseamed client because the capability
   // returns the projection, not the report.
   it("serves the effective entry pipe as its own report field", async () => {
-    const report = await liveClient().validateFiles(
-      [{ content: FIXTURE_BUNDLE, uri: FIXTURE_BUNDLE_URI }],
-      { allowSignatures: true, render: ["markdown"], views: ["input_form"] },
+    const report = await liveClient().validate(
+      { contents: { "main.mthds": FIXTURE_BUNDLE } },
+      true,
+      {
+        render: ["markdown"],
+        views: ["input_form"],
+      },
     );
 
     expect(report.is_valid).toBe(true);
-    // Inline files carry no manifest, so the effective entry is the closure's
-    // own `main_pipe`, qualified — the same value the blueprint derivation
-    // reaches. The point of the assertion is that the SERVER stated it.
+    // A tree without a manifest states no entry, so the effective entry is
+    // the closure's own `main_pipe`, qualified — the same value the blueprint
+    // derivation reaches. The point of the assertion is that the SERVER
+    // stated it.
     expect((report as PipelexValidationReport).default_pipe_ref).toBe(FIXTURE_PIPE_REF);
   });
 

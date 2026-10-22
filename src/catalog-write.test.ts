@@ -30,15 +30,11 @@ import {
   saveMethodToolResult,
   saveMthdsMethod,
 } from "./capabilities/catalog-write.js";
-import type {
-  CatalogWriteClient,
-  CatalogWriteContext,
-  SaveMethodSuccess,
-} from "./capabilities/catalog-write.js";
+import type { CatalogWriteClient, CatalogWriteContext } from "./capabilities/catalog-write.js";
 import { DEFAULT_API_URL, createPipelexApiClient } from "./capabilities/shared.js";
 import type { ToolError } from "./capabilities/shared.js";
 import { GRAPH_PAGE_MARK } from "./capabilities/graph-page.js";
-import { localBundleFileResolver } from "./files.js";
+import { localMethodFileResolver } from "./files.js";
 
 // ── fixtures ────────────────────────────────────────────────────────
 
@@ -66,17 +62,17 @@ const invalidReport = {
   rendered_markdown: "# Invalid",
 } as unknown as PipelexValidationResult;
 
-/** A validation context whose files arm answers `report` and whose selector arm must not fire. */
-function validationAnswering(report: PipelexValidationResult, capture?: { files?: unknown }) {
+/** A validation context answering `report`, which must be asked about a tree, never a selector. */
+function validationAnswering(report: PipelexValidationResult, capture?: { source?: unknown }) {
   return {
     baseUrl: DEFAULT_API_URL,
     client: {
-      async validate(): Promise<PipelexValidationResult> {
-        throw new Error("the selector leg must not be called by a save");
-      },
-      async validateFiles(files: unknown): Promise<PipelexValidationResult> {
+      async validate(source: unknown): Promise<PipelexValidationResult> {
+        if (typeof source !== "object" || source === null || !("tree" in source)) {
+          throw new Error("a save validates the tree it read, never a selector");
+        }
         if (capture !== undefined) {
-          capture.files = files;
+          capture.source = source;
         }
         return report;
       },
@@ -158,7 +154,9 @@ async function writeFromBlobs(
 }
 
 /** Every file of a tree a save sent, as text, read through the source the SDK reads. */
-async function sentContents(tree: MethodTreeSource | undefined): Promise<Record<string, string>> {
+async function sentContents(
+  tree: MethodTreeSource | null | undefined,
+): Promise<Record<string, string>> {
   const contents: Record<string, string> = {};
   for (const file of tree?.files ?? []) {
     contents[file.path] = new TextDecoder().decode(await tree!.readFile(file.path));
@@ -336,7 +334,7 @@ function contextFor(
   return {
     baseUrl: "https://api-dev.pipelex.com",
     client,
-    resolver: localBundleFileResolver(root),
+    resolver: localMethodFileResolver(root, { save: true }),
     saveRoot: root,
     validation,
   };
@@ -375,7 +373,7 @@ describe("saveMthdsMethod", () => {
     });
 
     let sent: MethodWriteInput | undefined;
-    const validated: { files?: unknown } = {};
+    const validated: { source?: unknown } = {};
     const result = await saveMthdsMethod(
       { method_dir: "methods/demo", name: "Demo" },
       contextFor(
@@ -418,12 +416,15 @@ describe("saveMthdsMethod", () => {
     // The bytes the SDK sends are the bytes on disk, binary ones included.
     expect(await sent?.tree?.readFile("templates/letter.docx")).toEqual(docx);
     expect((await sentContents(sent?.tree))["funcs/helpers.py"]).toContain("return sum(items)");
-    // The validation saw the same folder: its .mthds files, from the same read.
-    expect(JSON.stringify(validated.files)).toContain('pipe = \\"extra\\"');
+    // The validation saw the same tree, from the same read: every file, by hash.
+    const validatedTree = (validated.source as { tree: MethodTreeSource }).tree;
+    expect(validatedTree.files).toEqual(sent?.tree?.files);
+    expect(validatedTree.digest).toBe(sent?.tree?.digest);
+    expect(await validatedTree.readFile("templates/letter.docx")).toEqual(docx);
     expect(result.summary).toContain("5 files, listed in files_sent");
   });
 
-  it("leaves a run's inputs file and the workshop's graph page out of the saved tree", async () => {
+  it("leaves a run's inputs file and the workshop's graph page out of the saved tree, naming the page", async () => {
     await writeBundle("methods/demo", {
       "bundle.mthds": 'domain = "demo"',
       "inputs.json": '{"text": "one run\'s data"}',
@@ -449,9 +450,12 @@ describe("saveMthdsMethod", () => {
     expect(result.structuredContent).toMatchObject({
       files_sent: [path.join("methods/demo", "bundle.mthds")],
     });
-    expect(result.summary).toContain("Left out, as never part of a method");
-    expect(result.summary).toContain(path.join("methods/demo", "inputs.json"));
-    expect(result.summary).toContain(path.join("methods/demo", "method-graph.html"));
+    // The standard leaves the inputs file out, unlisted; the page is the
+    // workshop's own to leave out, so the summary names it.
+    expect(result.summary).toContain(
+      `Left out, as never part of a method: \`${path.join("methods/demo", "method-graph.html")}\`, the page mthds_validate regenerates.`,
+    );
+    expect(result.summary).not.toContain("inputs.json");
   });
 
   it("writes the link file beside the root file and reports it", async () => {
@@ -515,22 +519,13 @@ describe("saveMthdsMethod", () => {
     expect(result.summary).toContain("a publish refuses it");
   });
 
-  it("saves a folder validation cannot build a request from, saying why there is no verdict", async () => {
-    // An empty nested .mthds file is a rule of the request mthds_validate
-    // sends, not of the tree a save stores: the draft is saved, unvalidated.
+  it("validates the tree it saves, an empty nested .mthds file included, leaving the verdict to the runner", async () => {
     await writeBundle("methods/demo", {
       "bundle.mthds": 'domain = "demo"',
       "drafts/next.mthds": "",
     });
     let sent: MethodWriteInput | undefined;
-    const notCalled = {
-      baseUrl: DEFAULT_API_URL,
-      client: {
-        async validateFiles(): Promise<never> {
-          throw new Error("no validation request can be built, so none is sent");
-        },
-      },
-    } as unknown as CatalogWriteContext["validation"];
+    const validated: { source?: unknown } = {};
 
     const result = await saveMthdsMethod(
       { method_dir: "methods/demo", name: "Demo" },
@@ -542,21 +537,22 @@ describe("saveMthdsMethod", () => {
             return storedMethod({ name: "Demo" });
           },
         },
-        notCalled,
+        validationAnswering(invalidReport, validated),
       ),
     );
 
-    expect(result.structuredContent).toMatchObject({ status: "ok", saved: "created" });
-    expect(result.structuredContent).not.toHaveProperty("is_valid");
-    const [reason] = (result.structuredContent as SaveMethodSuccess).not_validated ?? [];
-    expect(reason!.message).toContain(path.join("methods/demo", "drafts", "next.mthds"));
-    expect(reason!.message).toContain("is empty");
-    expect(sent?.tree?.files.map((file) => file.path)).toEqual([
-      "bundle.mthds",
-      "drafts/next.mthds",
-    ]);
-    expect(result.summary).toContain("NOT validated");
-    expect(result.summary).toContain("is empty");
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      is_valid: false,
+      saved: "created",
+    });
+    expect(result.structuredContent).not.toHaveProperty("not_validated");
+    const paths = ["bundle.mthds", "drafts/next.mthds"];
+    expect(sent?.tree?.files.map((file) => file.path)).toEqual(paths);
+    expect(
+      (validated.source as { tree: MethodTreeSource }).tree.files.map((file) => file.path),
+    ).toEqual(paths);
+    expect(result.summary).toContain("NOT valid");
   });
 
   it("refuses the save when validation produces no verdict", async () => {
@@ -564,7 +560,7 @@ describe("saveMthdsMethod", () => {
     const unreachable = {
       baseUrl: DEFAULT_API_URL,
       client: {
-        async validateFiles(): Promise<PipelexValidationResult> {
+        async validate(): Promise<PipelexValidationResult> {
           throw new ApiUnreachableError(
             "down",
             "https://api-dev.pipelex.com/v1/validate",
@@ -580,7 +576,77 @@ describe("saveMthdsMethod", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.summary).toContain("no validation verdict");
+    // The summary quotes why no verdict came, not only that none did.
+    const [first] = errorsOf(result.structuredContent);
+    expect(first).toBeDefined();
+    expect(result.summary).toBe(
+      `The method was not saved, because validating it produced no verdict: ${first?.message}`,
+    );
+  });
+
+  it("saves a method holding Python unvalidated when the deployment refuses to load it", async () => {
+    await writeBundle("methods/demo", {
+      "bundle.mthds": 'domain = "demo"',
+      "tools/helpers.py": "def helper():\n    return 1\n",
+    });
+    const sandboxOnly = {
+      baseUrl: DEFAULT_API_URL,
+      client: {
+        async validate(): Promise<PipelexValidationResult> {
+          throw new ApiResponseError(
+            "HTTP 501",
+            `${DEFAULT_API_URL}/v1/validate`,
+            501,
+            "Not Implemented",
+            "{}",
+            undefined,
+            "This method ships custom Python (.py); it needs a sandbox-hosted deployment",
+            undefined,
+            "pipelex.deployment.custom_code_requires_sandbox",
+          );
+        },
+      },
+    } as unknown as CatalogWriteContext["validation"];
+    let sent: MethodWriteInput | undefined;
+
+    const result = await saveMthdsMethod(
+      { method_dir: "methods/demo", name: "Demo" },
+      contextFor(
+        {
+          ...clientNotCalled,
+          async createMethod(input) {
+            sent = input;
+            return storedMethod({ name: "Demo" });
+          },
+        },
+        sandboxOnly,
+      ),
+    );
+
+    // Saved, the refusal beside it and no verdict claimed either way.
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      saved: "created",
+      method_id: "mt_one",
+      validation_refused: {
+        class: "input_domain",
+        message: "This method ships custom Python (.py); it needs a sandbox-hosted deployment",
+        retryable: false,
+      },
+      files_sent: [
+        path.join("methods/demo", "bundle.mthds"),
+        path.join("methods/demo", "tools", "helpers.py"),
+      ],
+    });
+    expect(result.structuredContent).not.toHaveProperty("is_valid");
+    expect(result.structuredContent).not.toHaveProperty("is_runnable");
+    expect(sent?.tree?.files.map((file) => file.path)).toEqual([
+      "bundle.mthds",
+      "tools/helpers.py",
+    ]);
+    expect(result.summary).toContain("NOT validated");
+    expect(result.summary).toContain("sandbox-hosted deployment.");
+    expect(result.summary).not.toContain("NOT valid.");
   });
 
   it("requires a name to create", async () => {
@@ -722,13 +788,13 @@ describe("saveMthdsMethod", () => {
 
     // Saving a pulled version replaces the draft with it: a restore, which the
     // link's own token must not make silent.
-    const validated: { files?: unknown } = {};
+    const validated: { source?: unknown } = {};
     const refused = await saveMthdsMethod(
       { method_dir: "methods/demo", method_id: "mt_one" },
       contextFor(clientNotCalled, validationAnswering(validReport, validated)),
     );
     // The link alone refuses it, so nothing is read or validated first.
-    expect(validated.files).toBeUndefined();
+    expect(validated.source).toBeUndefined();
     const [error] = errorsOf(refused.structuredContent);
     expect(error).toMatchObject({
       class: "input_domain",
@@ -885,9 +951,6 @@ describe("saveMthdsMethod", () => {
       baseUrl: DEFAULT_API_URL,
       client: {
         async validate(): Promise<PipelexValidationResult> {
-          throw new Error("the selector leg must not be called by a save");
-        },
-        async validateFiles(): Promise<PipelexValidationResult> {
           counts.validations += 1;
           if (counts.validations === 1) await gate;
           return validReport;
@@ -994,7 +1057,7 @@ describe("saveMthdsMethod", () => {
         synced_updated_at: "T0",
       }),
     });
-    const local = localBundleFileResolver(root);
+    const local = localMethodFileResolver(root, { save: true });
     const context: CatalogWriteContext = {
       ...contextFor(clientNotCalled, validationAnswering(validReport)),
       resolver: {
@@ -1747,10 +1810,6 @@ describe("the secret guard", () => {
         async validate(): Promise<never> {
           calls.push("validate");
           throw new Error("validate must not be called once the guard refused");
-        },
-        async validateFiles(): Promise<never> {
-          calls.push("validateFiles");
-          throw new Error("validateFiles must not be called once the guard refused");
         },
       },
     } as unknown as CatalogWriteContext["validation"];

@@ -33,7 +33,7 @@ export function isInsideRoot(root: string, candidate: string): boolean {
 /**
  * The deepest directory that is, or holds, every one of `dirs` (absolute
  * paths, all real or all as submitted). The method graph page is written
- * there, and a bundle's template files are keyed against it.
+ * there, and a method's `{ path }` files are sent as a tree rooted at it.
  */
 export function deepestCommonDirectory(dirs: readonly string[]): string {
   let common = dirs[0] ?? path.sep;

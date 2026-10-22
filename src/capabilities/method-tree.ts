@@ -20,34 +20,29 @@ import { errorMessage } from "./workspace-boundary.js";
  * held to the standard's conformance corpus), and the few things the workshop
  * adds on top of it, each of which this module owns.
  *
- * - **The limits it is handed.** A save lists the tree under the limits the
- *   Pipelex deployment announces (`tree-limits.ts`), so a folder the platform
- *   would refuse is refused while it is listed, from the sizes the walk reads,
- *   before any file is hashed; a method-taking tool lists it under the
- *   workshop's file count alone, since it sends only part of the tree. The two files the workshop leaves out (below)
- *   never count against them: `mthds` 0.32 has no way to leave a file out of
- *   its walk, so the walk takes each limit widened by an allowance for them
+ * - **The limits it is handed.** Every tool that sends a folder lists it under
+ *   the limits the Pipelex deployment announces (`tree-limits.ts`), since each
+ *   sends the whole tree, so a folder the platform would refuse is refused
+ *   while it is listed, from the sizes the walk reads, before any file is
+ *   hashed. The graph page the workshop leaves out (below) never counts
+ *   against them: `mthds` has no way to leave a file out of its walk, so the
+ *   walk takes each limit widened by an allowance for it
  *   ({@link SCAN_ALLOWANCE_FILES}, {@link SCAN_ALLOWANCE_BYTES}), and the
  *   limits themselves are held exactly on the files kept. A refusal says whose
  *   limit it was ({@link FolderLimitError}): the deployment's, or the
  *   workshop's own scan limit, standing for one the deployment did not
  *   announce, and names that limit's own number, saying so when the walk
- *   stopped past it plus the allowance. The listing is rooted at the folder handed over
- *   (`discover: false`), never at a `METHODS.toml` found above it: the folder
- *   the caller named is the method.
- * - **A run's inputs files.** `inputs.json` and `inputs.toml`, at any depth,
- *   hold one run's real data and never travel with a method: the standard keeps
- *   them out of every tree as its `run_inputs` default from `mthds` 0.33 on.
- *   The 0.32 line this workshop is pinned to lists them as members, so they are
- *   taken out here and the digest recomputed over what is left; the shim goes
- *   with the move to 0.33. A symbolic link of either name is refused as every
- *   link is until then, where 0.33 leaves it out unfollowed.
+ *   stopped past it plus the allowance. The listing is rooted at the folder
+ *   handed over (`discover: false`), never at a `METHODS.toml` found above it:
+ *   the folder the caller named is the method. A run's inputs file
+ *   (`inputs.json`, `inputs.toml`, at any depth) is the standard's to leave
+ *   out, as its `run_inputs` default, so it is neither listed nor counted.
  * - **The workshop's own graph page.** `mthds_validate` writes
  *   `method-graph.html` beside the files it validated, so into a method's
  *   folder, and regenerates it on every validation. A page at the folder's top
  *   carrying the workshop's mark is the workshop's output, not the method: it is
- *   left out, so a validation never moves a saved draft. A file of that name
- *   without the mark is the user's, and stays.
+ *   left out, so a validation never moves what the folder sends or saves. A
+ *   file of that name without the mark is the user's, and stays.
  * - **A bounded, checked read.** A member is read again with
  *   {@link FolderTree.readFile}: opened without following a link, read to at
  *   most one byte past the size the listing recorded, and checked against the
@@ -56,14 +51,6 @@ import { errorMessage } from "./workspace-boundary.js";
  *   normalization on disk included. `mthds`'s own `readFile` checks the hash
  *   but reads the whole file first.
  */
-
-/** The names of a run's inputs file, which no method tree holds, at any depth. */
-export const RUN_INPUTS_NAMES: ReadonlySet<string> = new Set(["inputs.json", "inputs.toml"]);
-
-/** Whether a tree path names a run's inputs file: its last segment is one of {@link RUN_INPUTS_NAMES}, byte for byte. */
-export function isRunInputsPath(treePath: string): boolean {
-  return RUN_INPUTS_NAMES.has(treePath.slice(treePath.lastIndexOf("/") + 1));
-}
 
 /** A file of a listed folder: its tree path, its size and the SHA-256 of its bytes. */
 export interface ListedFile {
@@ -82,8 +69,6 @@ export interface FolderTree {
   readonly digest: string;
   /** The total of the files' sizes, in bytes. */
   readonly totalSize: number;
-  /** The run's inputs files left out, by tree path. */
-  readonly runInputs: readonly string[];
   /** The workshop's own graph page, when the folder's top holds one: left out. */
   readonly graphPage?: string;
   /** Whether `treePath` names a file of the tree. */
@@ -102,10 +87,10 @@ export type FolderTreeListing =
   | { ok: true; tree: FolderTree }
   | { ok: false; error: MethodTreeError };
 
-/** How many files beyond the file count the walk takes, for the run inputs files and the graph page it leaves out. */
+/** How many files beyond the file count the walk takes, for the graph page it leaves out. */
 export const SCAN_ALLOWANCE_FILES = 1_000;
 
-/** How many bytes beyond each size limit the walk takes, for the files it leaves out. */
+/** How many bytes beyond each size limit the walk takes, for the graph page it leaves out. */
 export const SCAN_ALLOWANCE_BYTES = 64 * 1024 * 1024;
 
 /** Whose limit refused a folder: the one the deployment announced, or the workshop's own. */
@@ -158,14 +143,9 @@ export async function listFolderTree(
   }
   const root = tree.root ?? folder;
 
-  const runInputs: string[] = [];
   let graphPage: string | undefined;
   const kept: ListedFile[] = [];
   for (const file of tree.files) {
-    if (isRunInputsPath(file.path)) {
-      runInputs.push(file.path);
-      continue;
-    }
     if (
       file.path === GRAPH_PAGE_FILENAME &&
       (await carriesGraphPageMark(path.join(root, file.path)).catch(() => false))
@@ -177,13 +157,13 @@ export async function listFolderTree(
   }
 
   if (kept.length === 0) {
-    // What the workshop leaves out was all the folder held: a tree holds at
-    // least one file, and a digest of nothing names no tree.
+    // The graph page was all the folder held: a tree holds at least one
+    // file, and a digest of nothing names no tree.
     return {
       ok: false,
       error: new MethodTreeError(
         "empty_tree",
-        `The method tree at ${root} holds no file once a run's inputs files and the workshop's graph page are left out; a tree holds at least one.`,
+        `The method tree at ${root} holds no file once the workshop's graph page is left out; a tree holds at least one.`,
         { names: [] },
       ),
     };
@@ -193,7 +173,7 @@ export async function listFolderTree(
   if (breach !== undefined) return { ok: false, error: breach };
 
   const byPath = new Map(kept.map((file) => [file.path, file]));
-  const dropped = runInputs.length > 0 || graphPage !== undefined;
+  const dropped = graphPage !== undefined;
   return {
     ok: true,
     tree: {
@@ -201,7 +181,6 @@ export async function listFolderTree(
       files: kept,
       digest: dropped ? treeDigest(kept) : tree.digest,
       totalSize: kept.reduce((total, file) => total + file.size, 0),
-      runInputs,
       ...(graphPage === undefined ? {} : { graphPage }),
       has: (treePath) => byPath.has(treePath),
       readFile: async (treePath) => {
