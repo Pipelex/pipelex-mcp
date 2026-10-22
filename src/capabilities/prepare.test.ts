@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ApiResponseError,
@@ -21,6 +25,7 @@ import {
   prepareMthdsInputs,
   validatePrepareInputsRequest,
 } from "./prepare.js";
+import { buildMethodLink, linkFileOf } from "./catalog-link.js";
 import { comparableRequest, fakeMethodResolver } from "./method-tree-fixtures.js";
 import { DEFAULT_API_URL } from "./shared.js";
 import type { MethodTreeToSend } from "./shared.js";
@@ -808,6 +813,195 @@ describe("prepareMthdsInputs — request shape and transport", () => {
     expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
   });
 });
+describe("prepareMthdsInputs — what the uploads are recorded as", () => {
+  const PREPARED: PreparedInputs = {
+    inputs: { invoice: { url: "pipelex-storage://up1" } },
+    uploads: [
+      { uri: "pipelex-storage://up1", filename: "a.pdf", contentType: "application/pdf", size: 3 },
+    ],
+  };
+  const API_HOST = new URL(DEFAULT_API_URL).host;
+  const folders: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(folders.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
+  /** A real method folder, since the link file is read from disk; `link` writes its `.pipelex/method.json`. */
+  async function methodFolder(link?: { apiHost: string; methodId: string } | "garbage") {
+    const dir = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), "pipelex-prepare-kind-")),
+    );
+    folders.push(dir);
+    if (link !== undefined) {
+      await fs.mkdir(path.dirname(linkFileOf(dir)), { recursive: true });
+      const content =
+        link === "garbage"
+          ? "{ not json"
+          : JSON.stringify(
+              buildMethodLink({
+                apiHost: link.apiHost,
+                methodId: link.methodId,
+                name: "Invoice extractor",
+                syncedUpdatedAt: "2026-10-22T08:00:00Z",
+              }),
+            );
+      await fs.writeFile(linkFileOf(dir), content, "utf8");
+    }
+    // The fake reads the tree, and only its folder is real, for the link file.
+    return {
+      ...methodFolderResolver(),
+      async locateMethodDir(methodDir: string) {
+        return { ok: true as const, folder: dir, methodDir };
+      },
+    };
+  }
+
+  function capturing() {
+    const captured: (PrepareInputsRequest & { upload?: unknown })[] = [];
+    return {
+      captured,
+      client: uploadWith(async (request) => {
+        captured.push(request);
+        return PREPARED;
+      }),
+    };
+  }
+
+  it("sends nothing for the default kind, and echoes it only when supplied", async () => {
+    for (const kind of [undefined, "uploaded"] as const) {
+      const { captured, client } = capturing();
+      const result = await prepareMthdsInputs(
+        { method_id: "mt_123", inputs: {}, ...(kind === undefined ? {} : { kind }) },
+        { baseUrl: DEFAULT_API_URL, client },
+      );
+
+      expect(captured[0], String(kind)).not.toHaveProperty("upload");
+      expect(result.structuredContent.status).toBe("ok");
+      expect(result.structuredContent.kind).toBe(kind);
+      expect(result.structuredContent).not.toHaveProperty("test_method_id");
+      expect(result.summary).not.toContain("test files");
+    }
+  });
+
+  it("records a test upload against the bare id of a method_id, its suffix dropped", async () => {
+    const { captured, client } = capturing();
+    const result = await prepareMthdsInputs(
+      { method_id: "mt_123@draft", inputs: {}, kind: "test" },
+      { baseUrl: DEFAULT_API_URL, client },
+    );
+
+    expect(captured[0]).toEqual({
+      method_id: "mt_123@draft",
+      inputs: {},
+      upload: { kind: "test", method_id: "mt_123" },
+    });
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      kind: "test",
+      test_method_id: "mt_123",
+    });
+    expect(result.summary).toContain("recorded as test files of `mt_123`");
+  });
+
+  it("records a test upload against the saved method a method_dir is linked to", async () => {
+    const { captured, client } = capturing();
+    const result = await prepareMthdsInputs(
+      { method_dir: "methods", inputs: {}, kind: "test" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: await methodFolder({ apiHost: API_HOST, methodId: "mt_linked" }),
+        client,
+      },
+    );
+
+    expect(captured[0]?.upload).toEqual({ kind: "test", method_id: "mt_linked" });
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      kind: "test",
+      test_method_id: "mt_linked",
+    });
+  });
+
+  it("refuses a test upload for a method_id with no bare id, at method_id", async () => {
+    const result = await prepareMthdsInputs(
+      { method_id: "@draft", inputs: {}, kind: "test" },
+      { baseUrl: DEFAULT_API_URL, client: prepareInputsNotCalled },
+    );
+
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "method_id",
+      retryable: false,
+    });
+  });
+
+  it.each([
+    ["a list of files", { files }],
+    ["a published address", { method_ref: PUBLISHED_REF }],
+  ])("refuses a test upload from %s at kind, before anything is sent", async (_label, selector) => {
+    const result = await prepareMthdsInputs(
+      { ...selector, inputs: {}, kind: "test" },
+      { baseUrl: DEFAULT_API_URL, client: prepareInputsNotCalled },
+    );
+
+    expect(result.structuredContent).toMatchObject({
+      status: "error",
+      errors: [{ class: "input_domain", location: "kind", retryable: false }],
+    });
+    expect(result.structuredContent.errors?.[0]?.hint).toContain("method_id");
+  });
+
+  it("refuses a test upload from a method_dir linked to no saved method", async () => {
+    const result = await prepareMthdsInputs(
+      { method_dir: "methods", inputs: {}, kind: "test" },
+      { baseUrl: DEFAULT_API_URL, resolver: await methodFolder(), client: prepareInputsNotCalled },
+    );
+
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "kind",
+    });
+    expect(result.structuredContent.errors?.[0]?.message).toContain(".pipelex/method.json");
+    expect(result.structuredContent.errors?.[0]?.hint).toContain("mthds_save_method");
+  });
+
+  it("refuses a test upload when the link file cannot be read", async () => {
+    const result = await prepareMthdsInputs(
+      { method_dir: "methods", inputs: {}, kind: "test" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: await methodFolder("garbage"),
+        client: prepareInputsNotCalled,
+      },
+    );
+
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "kind",
+    });
+    expect(result.structuredContent.errors?.[0]?.message).toContain("cannot be read");
+  });
+
+  it("refuses a test upload when the folder is linked to a method of another API", async () => {
+    const result = await prepareMthdsInputs(
+      { method_dir: "methods", inputs: {}, kind: "test" },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: await methodFolder({ apiHost: "api.example.test", methodId: "mt_elsewhere" }),
+        client: prepareInputsNotCalled,
+      },
+    );
+
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "kind",
+    });
+    expect(result.structuredContent.errors?.[0]?.message).toContain("api.example.test");
+    expect(result.structuredContent.errors?.[0]?.message).toContain(API_HOST);
+  });
+});
+
 /** A resolver reading every method folder as a bundle and one template file. */
 function methodFolderResolver() {
   return fakeMethodResolver({

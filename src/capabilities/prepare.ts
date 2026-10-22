@@ -2,6 +2,7 @@ import { InputPreparationError } from "@pipelex/sdk";
 import type { MethodTreeSource, PrepareInputsRequest, PreparedInputs } from "@pipelex/sdk";
 import { z } from "zod";
 
+import { LINK_FILE_NAME, apiHostOf, readMethodLink } from "./catalog-link.js";
 import {
   METHOD_ID_SELECTOR_SENTENCE,
   methodVersionReportSchema,
@@ -44,7 +45,23 @@ import type {
 } from "./shared.js";
 import { methodTreeLimitsOf } from "./tree-limits.js";
 import type { TreeLimitsAware } from "./tree-limits.js";
+import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 import { MAX_UPLOAD_BYTES, SizeGuardedPipelexApiClient, formatMib } from "./upload-ceiling.js";
+
+/** What an upload is recorded as: a member's file, or a test input made for one method. */
+export const UPLOAD_KINDS = ["uploaded", "test"] as const;
+export type UploadKind = (typeof UPLOAD_KINDS)[number];
+
+/**
+ * What every upload of one preparation is recorded as, in the shape of
+ * `@pipelex/sdk`'s `UploadKindOptions`: the prepare request's `upload` member,
+ * which the SDK sends with each `POST /v1/upload` of the walk. A test file
+ * names the bare id of the method it was made for.
+ */
+export interface UploadMarking {
+  kind: UploadKind;
+  method_id?: string;
+}
 
 export const mthdsPrepareInputsInputSchema = {
   method_dir: methodDirInputSchema("one_selector"),
@@ -74,6 +91,12 @@ export const mthdsPrepareInputsInputSchema = {
       "The caller's FILLED inputs (the mthds_inputs_template output, populated). File-bearing values are uploaded to Pipelex storage and rewritten to pipelex-storage://; http(s) URLs and existing pipelex-storage:// URIs pass through. An empty object uploads nothing. Supply exactly ONE of inputs / inputs_path.",
     ),
   inputs_path: inputsPathSchema,
+  kind: z
+    .enum(UPLOAD_KINDS)
+    .optional()
+    .describe(
+      `What the files this call uploads are recorded as in the organization's files: uploaded (the default, a member's file) or test (a test input made for this method, listed as its test file). test needs the method's saved id, so name the method by method_id, or by a method_dir that ${WORKSHOP_TOOL_NAMES.saveMethod} linked to its saved method (${LINK_FILE_NAME}). Values that pass through are not uploaded and keep what they are.`,
+    ),
 };
 
 const prepareStructuredContentSchema = z.object({
@@ -95,6 +118,16 @@ const prepareStructuredContentSchema = z.object({
     .describe(
       "The pipelex-storage:// uris of the assets uploaded this call; [] when all inputs pass through.",
     ),
+  kind: z
+    .enum(UPLOAD_KINDS)
+    .optional()
+    .describe("Echoed only when the caller supplied it: what the uploads were recorded as."),
+  test_method_id: z
+    .string()
+    .optional()
+    .describe(
+      "With kind test: the bare id of the method the uploads were recorded as test files of.",
+    ),
   method_version: methodVersionReportSchema,
   files_sent: filesSentSchema,
   errors: z.array(toolErrorSchema).optional(),
@@ -110,6 +143,7 @@ export interface MthdsPrepareInputsInput {
   pipe_ref?: string;
   inputs?: Record<string, unknown>;
   inputs_path?: string;
+  kind?: UploadKind;
 }
 
 /** The prepare request once its method and `inputs_path` are resolved — what the checks and the prepare step consume. */
@@ -120,6 +154,7 @@ interface ResolvedPrepareRequest {
   method_id?: string;
   pipe_ref?: string;
   inputs: Record<string, unknown>;
+  kind?: UploadKind;
 }
 
 export interface PrepareStructuredContent {
@@ -128,6 +163,10 @@ export interface PrepareStructuredContent {
   pipe_ref?: string;
   inputs?: Record<string, unknown>;
   uploads?: string[];
+  /** Echoed when the caller supplied it. */
+  kind?: UploadKind;
+  /** With `kind: "test"`: the bare id of the method the uploads are test files of. */
+  test_method_id?: string;
   /** By-id calls only: the content whose signature the inputs were prepared against, when this server can tell. */
   method_version?: MethodVersionReport;
   /** Calls on a tree, from `method_dir` or `files`: every file sent. */
@@ -148,7 +187,9 @@ export interface PrepareResult {
  * one `POST /v1/pipe-io` itself.
  */
 interface PrepareClient {
-  prepareInputs(request: PrepareInputsRequest): Promise<PreparedInputs>;
+  prepareInputs(
+    request: PrepareInputsRequest & { upload?: UploadMarking },
+  ): Promise<PreparedInputs>;
   /** `GET /v1/version`, read to learn whether a bare id names the draft or a version; optional on a test seam. */
   version?(): Promise<unknown>;
 }
@@ -307,13 +348,92 @@ export async function prepareMthdsInputs(
   if (inputErrors.length > 0) {
     return errorResult("Inputs were not prepared: request input is invalid.", inputErrors);
   }
+  const marking = await uploadMarkingOf(request, context);
+  if (!marking.ok) {
+    return errorResult("Inputs were not prepared: request input is invalid.", [marking.error]);
+  }
 
-  return withFilesSent(await requestPreparedInputs(request, context), request.tree);
+  return withFilesSent(await requestPreparedInputs(request, marking.upload, context), request.tree);
+}
+
+/**
+ * What the request's uploads are recorded as, decided before anything is sent.
+ *
+ * `uploaded` is what the platform records when told nothing, so it sends
+ * nothing. A test file names the method it was made for, by its bare id, and
+ * the method is the one the request names: a `method_id`, its version suffix
+ * dropped, since a test file is the method's whatever version it tests, or the
+ * saved method a `method_dir` is linked to, read from its link file. Neither a
+ * list of files nor a published address names a saved method, so a test
+ * upload from one is refused here, at `kind`, rather than by the platform
+ * after the method's signature was read.
+ *
+ * A link recorded against another API than the one this call goes to names a
+ * method of another plane, which the upload would answer as unknown, so it is
+ * refused too, naming both hosts.
+ */
+async function uploadMarkingOf(
+  request: ResolvedPrepareRequest,
+  context: PrepareContext,
+): Promise<{ ok: true; upload?: UploadMarking } | { ok: false; error: ToolError }> {
+  if (request.kind !== "test") return { ok: true };
+  const refuse = (message: string, hint: string) => ({
+    ok: false as const,
+    error: { class: "input_domain" as const, location: "kind", message, hint, retryable: false },
+  });
+  if (request.method_id !== undefined) {
+    const bare = request.method_id.trim().split("@")[0] ?? "";
+    if (!/^[A-Za-z0-9_-]+$/.test(bare)) {
+      return {
+        ok: false,
+        error: {
+          class: "input_domain",
+          location: "method_id",
+          message: `method_id ${JSON.stringify(request.method_id)} names no saved method that test files could belong to.`,
+          hint: `Pass a saved method's catalog id (mt_…), as ${WORKSHOP_TOOL_NAMES.listMethods} returns it.`,
+          retryable: false,
+        },
+      };
+    }
+    return { ok: true, upload: { kind: "test", method_id: bare } };
+  }
+  const folder = request.tree?.folder;
+  if (folder === undefined) {
+    return refuse(
+      "kind test records each upload as a test file of a saved method, and a list of files or a published address names none.",
+      `Name the method by its saved id as method_id, or by a method_dir linked to its saved method (${LINK_FILE_NAME}, which ${WORKSHOP_TOOL_NAMES.saveMethod} writes); or omit kind to upload the files as the organization's own.`,
+    );
+  }
+  const read = await readMethodLink(folder);
+  switch (read.kind) {
+    case "none":
+      return refuse(
+        "kind test records each upload as a test file of a saved method, and this method_dir is not linked to one: it holds no " +
+          `${LINK_FILE_NAME}.`,
+        `Save the method with ${WORKSHOP_TOOL_NAMES.saveMethod}, which links its folder, then prepare again; or omit kind to upload the files as the organization's own.`,
+      );
+    case "unreadable":
+      return refuse(
+        `The method_dir's ${LINK_FILE_NAME} cannot be read, so the saved method its test files belong to is unknown: ${read.reason}.`,
+        `Repair or remove ${LINK_FILE_NAME} (a save with ${WORKSHOP_TOOL_NAMES.saveMethod} writes it again), or name the method by its saved id as method_id.`,
+      );
+    case "link": {
+      const apiHost = apiHostOf(context.baseUrl);
+      if (read.link.api_host !== apiHost) {
+        return refuse(
+          `The method_dir is linked to \`${read.link.method_id}\` on ${read.link.api_host}, and this call goes to ${apiHost}, where that method does not exist.`,
+          `Prepare against the API the method was saved on, or save the method on ${apiHost} with ${WORKSHOP_TOOL_NAMES.saveMethod} first.`,
+        );
+      }
+      return { ok: true, upload: { kind: "test", method_id: read.link.method_id } };
+    }
+  }
 }
 
 /** The SDK's `prepareInputs` for a request that passed its checks, and the projection of what it prepared. */
 async function requestPreparedInputs(
   request: ResolvedPrepareRequest,
+  upload: UploadMarking | undefined,
   context: PrepareContext,
 ): Promise<PrepareResult> {
   // Classify options follow the request's selector shape, exactly as
@@ -350,6 +470,7 @@ async function requestPreparedInputs(
       selector: prepareSelectorOf(sent),
       ...(request.pipe_ref === undefined ? {} : { pipe_ref: request.pipe_ref }),
       inputs: request.inputs,
+      ...(upload === undefined ? {} : { upload }),
     };
     prepared = await prepareWithUpload(client, envelope);
   } catch (err) {
@@ -371,7 +492,7 @@ async function requestPreparedInputs(
   }
 
   return await withMethodContent(
-    prepareInputsResult(prepared, request.pipe_ref),
+    prepareInputsResult(prepared, request.pipe_ref, { kind: request.kind, upload }),
     plan,
     "prepared the inputs against the signature of",
   );
@@ -409,6 +530,8 @@ interface PrepareEnvelope {
   selector: PrepareSelector;
   pipe_ref?: string;
   inputs: Record<string, unknown>;
+  /** What the walk's uploads are recorded as, when not the platform's default. */
+  upload?: UploadMarking;
 }
 
 /**
@@ -429,6 +552,7 @@ function prepareWithUpload(
   const base = {
     ...(envelope.pipe_ref === undefined ? {} : { pipe_ref: envelope.pipe_ref }),
     inputs: envelope.inputs,
+    ...(envelope.upload === undefined ? {} : { upload: envelope.upload }),
   };
   if ("tree" in envelope.selector) {
     return client.prepareInputs({ ...base, tree: envelope.selector.tree });
@@ -494,8 +618,10 @@ function pipeRefRefusal(pipeRef: string): ToolError | undefined {
 export function prepareInputsResult(
   prepared: PreparedInputs,
   pipeRef: string | undefined,
+  marking: { kind?: UploadKind; upload?: UploadMarking } = {},
 ): PrepareResult {
   const uploads = prepared.uploads.map((record) => record.uri);
+  const testMethodId = marking.upload?.kind === "test" ? marking.upload.method_id : undefined;
   return {
     structuredContent: {
       status: "ok",
@@ -503,8 +629,10 @@ export function prepareInputsResult(
       ...(pipeRef === undefined ? {} : { pipe_ref: pipeRef }),
       inputs: prepared.inputs,
       uploads,
+      ...(marking.kind === undefined ? {} : { kind: marking.kind }),
+      ...(testMethodId === undefined ? {} : { test_method_id: testMethodId }),
     },
-    summary: prepareSummary(pipeRef, prepared.inputs, uploads),
+    summary: prepareSummary(pipeRef, prepared.inputs, uploads, testMethodId),
   };
 }
 
@@ -517,15 +645,18 @@ function prepareSummary(
   pipeRef: string | undefined,
   inputs: Record<string, unknown>,
   uploads: string[],
+  testMethodId: string | undefined,
 ): string {
   const parts = ["# Prepared inputs"];
   if (pipeRef !== undefined) {
     parts.push(`Resolved pipe: \`${pipeRef}\``);
   }
+  const recorded =
+    testMethodId === undefined ? "" : `, recorded as test files of \`${testMethodId}\``;
   parts.push(
     uploads.length === 0
       ? "No assets required uploading — all inputs pass through unchanged. Hand these inputs to `mthds_run`."
-      : `Uploaded ${uploads.length} asset(s) to Pipelex storage (rewritten to \`pipelex-storage://\` references). Hand these inputs to \`mthds_run\`.`,
+      : `Uploaded ${uploads.length} asset(s) to Pipelex storage${recorded} (rewritten to \`pipelex-storage://\` references). Hand these inputs to \`mthds_run\`.`,
   );
   parts.push("```json\n" + JSON.stringify(inputs, null, 2) + "\n```");
   return parts.join("\n\n");

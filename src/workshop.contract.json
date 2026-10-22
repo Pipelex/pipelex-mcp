@@ -1328,6 +1328,14 @@
           "inputs_path": {
             "description": "Path to a .json file holding the inputs as one JSON object, resolved relative to this server's working directory and read only inside it. Use it instead of inputs for a large or machine-produced inputs set, so it never passes through the conversation. Mutually exclusive with inputs. The loaded object is used exactly as inline inputs would be.",
             "type": "string"
+          },
+          "kind": {
+            "description": "What the files this call uploads are recorded as in the organization's files: uploaded (the default, a member's file) or test (a test input made for this method, listed as its test file). test needs the method's saved id, so name the method by method_id, or by a method_dir that mthds_save_method linked to its saved method (.pipelex/method.json). Values that pass through are not uploaded and keep what they are.",
+            "type": "string",
+            "enum": [
+              "uploaded",
+              "test"
+            ]
           }
         },
         "$schema": "http://json-schema.org/draft-07/schema#"
@@ -1363,6 +1371,18 @@
             "items": {
               "type": "string"
             }
+          },
+          "kind": {
+            "description": "Echoed only when the caller supplied it: what the uploads were recorded as.",
+            "type": "string",
+            "enum": [
+              "uploaded",
+              "test"
+            ]
+          },
+          "test_method_id": {
+            "description": "With kind test: the bare id of the method the uploads were recorded as test files of.",
+            "type": "string"
           },
           "method_version": {
             "description": "By-id calls only: the content read — a version number, \"draft\", or \"latest\" for a bare id the platform resolved to its latest published version without saying which number. Absent when this server could not tell; the summary then says so.",
