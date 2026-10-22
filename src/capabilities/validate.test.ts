@@ -1406,6 +1406,52 @@ describe("validateMthds sends a method's tree", () => {
     expect(page).not.toMatch(/"name":"[^"]*invoice\.xlsx"/);
   });
 
+  it("sends a folder's PipeFunc module with its bundle, so the runner finds the function its step names", async () => {
+    const root = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), "pipelex-validate-pipefunc-")),
+    );
+    tempDirs.push(root);
+    const module = "def capitalize(text):\n    return text.upper()\n";
+    await fs.mkdir(path.join(root, "methods/text/funcs"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "methods/text/text.mthds"),
+      [
+        'domain = "text"',
+        "",
+        "[pipe.shout]",
+        'type = "PipeFunc"',
+        'description = "Capitalize the text"',
+        'inputs = { text = "Text" }',
+        'output = "Text"',
+        'function_name = "funcs.text_utils.capitalize"',
+        "",
+      ].join("\n"),
+    );
+    await fs.writeFile(path.join(root, "methods/text/funcs/text_utils.py"), module);
+    let captured: MethodTreeSource | undefined;
+
+    const result = await validateMthds(
+      { method_dir: "methods/text", graph_page: false },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: localMethodFileResolver(root),
+        client: onTree((tree) => {
+          captured = tree;
+          return validReport;
+        }),
+      },
+    );
+
+    // The module rides the tree at the import path's file, where pipelex
+    // looks for the function a PipeFunc step names.
+    expect(captured?.files.map((file) => file.path)).toEqual(["funcs/text_utils.py", "text.mthds"]);
+    expect(new TextDecoder().decode(await captured?.readFile("funcs/text_utils.py"))).toBe(module);
+    expect(result.structuredContent.files_sent).toEqual([
+      path.join("methods", "text", "funcs", "text_utils.py"),
+      path.join("methods", "text", "text.mthds"),
+    ]);
+  });
+
   it("omits warnings from a valid verdict that has none", async () => {
     const root = await bundleWithTemplate();
     let captured: MethodTreeSource | undefined;
