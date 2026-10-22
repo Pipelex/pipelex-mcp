@@ -13,6 +13,7 @@ import {
   MethodLoadError,
   RejectedAssetError,
   RequestArgumentError,
+  TestFileRefusedError,
   UnsupportedUploadCapabilityError,
   UploadAuthenticationError,
   UploadTransportError,
@@ -922,6 +923,39 @@ describe("prepareMthdsInputs — what the uploads are recorded as", () => {
       test_method_id: "mt_linked",
     });
   });
+
+  it.each([
+    [403, "role_not_permitted"],
+    [404, "method_not_found"],
+    [409, "method_being_deleted"],
+  ] as const)(
+    "classifies the platform's refusal of a test upload (%i %s)",
+    async (status, code) => {
+      const result = await prepareMthdsInputs(
+        { method_id: "mt_123", inputs: { invoice: "/tmp/a.pdf" }, kind: "test" },
+        {
+          baseUrl: DEFAULT_API_URL,
+          client: uploadWith(async () => {
+            // No wrapped answer, so the verdict is the one the SDK reads off the code.
+            throw new TestFileRefusedError(
+              `Upload of "a.pdf" as a test file was refused (${status})`,
+              { status, code, filename: "a.pdf", methodId: "mt_123" },
+            );
+          }),
+        },
+      );
+
+      const error = result.structuredContent.errors?.[0];
+      if (code === "role_not_permitted") {
+        expect(error).toMatchObject({ class: "config", kind: "role", retryable: false });
+        expect(error).not.toHaveProperty("location");
+        expect(result.summary).toContain("your role in this organization does not allow this");
+      } else {
+        expect(error).toMatchObject({ class: "input_domain", location: "kind", retryable: false });
+        expect(error?.hint).toContain("omit kind");
+      }
+    },
+  );
 
   it("refuses a test upload for a method_id with no bare id, at method_id", async () => {
     const result = await prepareMthdsInputs(

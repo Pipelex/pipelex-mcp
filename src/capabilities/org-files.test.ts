@@ -475,11 +475,14 @@ describe("listMthdsFiles summary", () => {
 });
 
 describe("listMthdsFiles failures", () => {
-  it("answers a config error when this build has no files client", async () => {
-    const result = await listMthdsFiles({}, { baseUrl: DEFAULT_API_URL });
+  it("classifies malformed base URLs instead of rejecting the handler", async () => {
+    const result = await listMthdsFiles({}, { baseUrl: "not a url" });
 
-    expect(firstError(result)).toMatchObject({ class: "config", retryable: false });
-    expect(result.summary).toContain("no files client");
+    expect(firstError(result)).toMatchObject({
+      class: "config",
+      location: "PIPELEX_BASE_URL",
+      retryable: false,
+    });
   });
 
   it("maps unreachable API failures to retryable config", async () => {

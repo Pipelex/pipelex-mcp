@@ -4,6 +4,7 @@ import {
   asOneLine,
   buildApiConfig,
   classifyError,
+  createPipelexApiClient,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
@@ -230,11 +231,7 @@ export interface FilesClient {
 }
 
 export interface FilesContext extends ApiConfig {
-  /**
-   * The client the list calls. The published `@pipelex/sdk` has no files
-   * client yet, so a context without one answers that this build cannot list
-   * files.
-   */
+  /** A test seam; the SDK's client when absent. */
   client?: FilesClient;
   /** Deployment-specific auth-failure texture; env-var wording by default. */
   authError?: AuthErrorTexture;
@@ -265,24 +262,11 @@ export async function listMthdsFiles(
     return errorResult("Files were not listed: request input is invalid.", normalized.errors);
   }
 
-  const client = context.client;
-  if (client === undefined) {
-    return errorResult(
-      "Files could not be listed: this build of the workshop has no files client.",
-      [
-        {
-          class: "config",
-          message:
-            "The @pipelex/sdk this workshop is built on cannot list an organization's files.",
-          hint: "Update @pipelex/mcp to a release that lists files.",
-          retryable: false,
-        },
-      ],
-    );
-  }
-
   let page: FilesPage;
   try {
+    // The client is built inside the try, so a base URL it refuses is
+    // classified like any other failure rather than rejecting the handler.
+    const client = context.client ?? createPipelexApiClient(context);
     // Every filter and the paging are the SERVER's: filtering one page here
     // would search the rows one page happened to read and call it a search.
     page = await client.listFiles(queryOf(normalized.input));

@@ -1,5 +1,11 @@
 import { InputPreparationError } from "@pipelex/sdk";
-import type { MethodTreeSource, PrepareInputsRequest, PreparedInputs } from "@pipelex/sdk";
+import type {
+  MethodTreeSource,
+  PrepareInputsRequest,
+  PreparedInputs,
+  UploadKind,
+  UploadKindOptions,
+} from "@pipelex/sdk";
 import { z } from "zod";
 
 import { LINK_FILE_NAME, apiHostOf, readMethodLink } from "./catalog-link.js";
@@ -49,18 +55,15 @@ import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 import { MAX_UPLOAD_BYTES, SizeGuardedPipelexApiClient, formatMib } from "./upload-ceiling.js";
 
 /** What an upload is recorded as: a member's file, or a test input made for one method. */
-export const UPLOAD_KINDS = ["uploaded", "test"] as const;
-export type UploadKind = (typeof UPLOAD_KINDS)[number];
+export const UPLOAD_KINDS = ["uploaded", "test"] as const satisfies readonly UploadKind[];
 
 /**
- * What every upload of one preparation is recorded as, in the shape of
- * `@pipelex/sdk`'s `UploadKindOptions`: the prepare request's `upload` member,
- * which the SDK sends with each `POST /v1/upload` of the walk. A test file
- * names the bare id of the method it was made for.
+ * What every upload of one preparation is recorded as: the prepare request's
+ * `upload` member, which the SDK sends with each `POST /v1/upload` of the
+ * walk. A test file names the bare id of the method it was made for.
  */
-export interface UploadMarking {
+interface UploadMarking extends UploadKindOptions {
   kind: UploadKind;
-  method_id?: string;
 }
 
 export const mthdsPrepareInputsInputSchema = {
@@ -187,9 +190,7 @@ export interface PrepareResult {
  * one `POST /v1/pipe-io` itself.
  */
 interface PrepareClient {
-  prepareInputs(
-    request: PrepareInputsRequest & { upload?: UploadMarking },
-  ): Promise<PreparedInputs>;
+  prepareInputs(request: PrepareInputsRequest): Promise<PreparedInputs>;
   /** `GET /v1/version`, read to learn whether a bare id names the draft or a version; optional on a test seam. */
   version?(): Promise<unknown>;
 }

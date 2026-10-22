@@ -17,6 +17,7 @@ import {
   RequestArgumentError,
   RunLifecycleUnavailableError,
   ScopeUnavailableError,
+  TestFileRefusedError,
   UnsupportedUploadCapabilityError,
   UploadAuthenticationError,
   UploadTransportError,
@@ -2109,6 +2110,26 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
       location: options.auth?.location ?? "PIPELEX_API_KEY",
       message,
       hint: options.auth?.hint ?? DEFAULT_AUTH_HINT,
+    };
+  }
+
+  // A test file the upload route refused for what it claims, never for its
+  // bytes. It subclasses the base error below, so it is caught first. Only
+  // `mthds_prepare_inputs` uploads a test file, and it takes the kind at
+  // `kind`, which is where a method the platform will not take one for is
+  // located. A refusal by role is the role arm every tool shares: no
+  // location, since no argument changes a role. Its verdict stays the SDK's.
+  if (err instanceof TestFileRefusedError) {
+    if (err.code === "role_not_permitted") {
+      return { kind: "role", message, hint: ROLE_REFUSAL_HINT };
+    }
+    return {
+      location: "kind",
+      message,
+      hint:
+        err.code === "method_being_deleted"
+          ? "The method is being deleted, so it takes no new test file. Name another saved method, or omit kind to upload the files as the organization's own."
+          : `The organization holds no saved method by that id: a method_dir's link may name a method deleted since, or one saved through another organization. Save the method again with ${WORKSHOP_TOOL_NAMES.saveMethod}, name another by method_id, or omit kind to upload the files as the organization's own.`,
     };
   }
 
