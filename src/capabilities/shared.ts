@@ -271,6 +271,12 @@ export interface MethodTreeToSend {
   readonly files: readonly SentFile[];
   /** Whether it came from `method_dir`, which is where every refusal of it then locates. */
   readonly fromFolder: boolean;
+  /**
+   * The folder's real path, for a tree read from `method_dir`: where the files
+   * of the folder itself are read, such as the link file naming the saved
+   * method it holds. Absent for a list of files.
+   */
+  readonly folder?: string;
 }
 
 /** What a method-taking request names its method by, before anything is read. */
@@ -349,7 +355,7 @@ async function resolveFolderTree(
   const read = await resolver.readMethodTree(located, { limits: await limits() });
   if (!read.ok) return { errors: read.refusals.map(atMethodDirRefusal) };
 
-  const tree = folderTreeToSend(methodDir, read);
+  const tree = folderTreeToSend(located, read);
   const empty = tree.files.find(isEmptyBundle);
   if (empty !== undefined) {
     return {
@@ -387,7 +393,7 @@ async function resolveFolderTree(
  * both requests send.
  */
 export function folderTreeToSend(
-  methodDir: string,
+  location: LocatedMethodDir,
   read: {
     files: readonly { path: string; size: number; sha256: string }[];
     digest: string;
@@ -398,11 +404,12 @@ export function folderTreeToSend(
     source: treeSourceOf(read.files, read.digest, read.bytes),
     files: read.files.map((file) => ({
       treePath: file.path,
-      shown: shownIn(methodDir, file.path),
+      shown: shownIn(location.methodDir, file.path),
       onDisk: true,
       bytes: read.bytes.get(file.path) ?? new Uint8Array(),
     })),
     fromFolder: true,
+    folder: location.folder,
   };
 }
 
