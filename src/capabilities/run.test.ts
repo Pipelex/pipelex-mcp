@@ -2852,51 +2852,142 @@ describe("startMthdsRun path submissions", () => {
       undefined,
     );
 
-  it("reads a 413 on a start carrying a small tree as its inputs', at inputs", async () => {
-    let versionCalls = 0;
+  /** A context whose start answers a 413, its handshake counted and answering `version`. */
+  function refusingStart(
+    version: () => Promise<unknown>,
+    files: Record<string, string | Uint8Array> = {},
+  ): { context: RunContext; versionCalls: () => number } {
+    let calls = 0;
+    return {
+      context: {
+        ...contextWith({
+          start: () => Promise.reject(tooLarge()),
+          version: () => {
+            calls += 1;
+            return version();
+          },
+        }),
+        resolver: fakeMethodResolver({ files }),
+      },
+      versionCalls: () => calls,
+    };
+  }
+
+  const noBlobStore = () => Promise.resolve({ version: "1.0.0", blob_store: false });
+  const blobStore = () => Promise.resolve({ version: "1.0.0", blob_store: true });
+
+  it("names both causes of a 413 on a start carrying a small tree and no inputs, blaming neither", async () => {
+    const { context, versionCalls } = refusingStart(noBlobStore);
+
+    const result = await startMthdsRun({ files: [{ content: 'domain = "invoice"' }] }, context);
+
+    const error = result.structuredContent.errors?.[0];
+    expect(error).toMatchObject({ class: "input_domain" });
+    expect(error).not.toHaveProperty("location");
+    expect(error?.hint).toContain("cannot be told from here");
+    expect(error?.hint).toContain("mthds_prepare_inputs");
+    expect(error?.hint).toContain("the run carries no inputs");
+    expect(error?.hint).not.toContain("are not what made it so");
+    // A tree within the inline threshold rode inline wherever it went: no handshake asks.
+    expect(versionCalls()).toBe(0);
+  });
+
+  it("names both causes of a 413 on a start carrying inputs beside a small tree", async () => {
+    const { context } = refusingStart(noBlobStore);
+
     const result = await startMthdsRun(
-      { files: [{ content: 'domain = "invoice"' }] },
-      contextWith({
-        start: () => Promise.reject(tooLarge()),
-        version: () => {
-          versionCalls += 1;
-          return Promise.resolve({ version: "1.0.0", blob_store: false });
-        },
-      }),
+      { files: [{ content: 'domain = "invoice"' }], inputs: { question: "why?" } },
+      context,
+    );
+
+    const error = result.structuredContent.errors?.[0];
+    expect(error).not.toHaveProperty("location");
+    expect(error?.hint).toContain("cannot be told from here");
+    expect(error?.hint).toMatch(/the method's files weigh \d+\.\d KiB inline/);
+    expect(error?.hint).toMatch(/its inputs weigh \d+\.\d KiB as JSON/);
+  });
+
+  it("reads a 413 on a start sending no tree, carrying inputs, as its inputs', at inputs", async () => {
+    const { context } = refusingStart(noBlobStore);
+
+    const result = await startMthdsRun(
+      { method_ref: "github.com/Pipelex/methods/documents@v0.1.0", inputs: { question: "why?" } },
+      context,
     );
 
     expect(result.structuredContent.errors?.[0]).toMatchObject({
       class: "input_domain",
       location: "inputs",
     });
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("mthds_prepare_inputs");
-    // A tree within the inline threshold made nothing too large: no handshake asks.
-    expect(versionCalls).toBe(0);
+    expect(result.structuredContent.errors?.[0]?.hint).toContain("its inputs did");
   });
 
   it("reads a 413 on a heavy tree a deployment without a blob store took inline as the tree's", async () => {
     const heavy = "x".repeat(INLINE_TREE_MAX_BYTES + 1);
-    const context = (blobStore: boolean): RunContext => ({
-      ...contextWith({
-        start: () => Promise.reject(tooLarge()),
-        version: () => Promise.resolve({ version: "1.0.0", blob_store: blobStore }),
-      }),
-      resolver: fakeMethodResolver({
-        files: { "methods/invoice.mthds": 'domain = "invoice"', "methods/report.html": heavy },
-      }),
-    });
+    const folder = { "methods/invoice.mthds": 'domain = "invoice"', "methods/report.html": heavy };
     const files = [{ path: "methods/invoice.mthds" }, { path: "methods/report.html" }];
 
-    const inline = await startMthdsRun({ files }, context(false));
+    const inline = await startMthdsRun({ files }, refusingStart(noBlobStore, folder).context);
     expect(inline.structuredContent.errors?.[0]).toMatchObject({
       class: "input_domain",
       location: "files",
     });
     expect(inline.structuredContent.errors?.[0]?.hint).toContain("without a blob store");
 
-    // The same tree went by hash to a deployment keeping a blob store.
-    const byHash = await startMthdsRun({ files }, context(true));
-    expect(byHash.structuredContent.errors?.[0]?.location).toBe("inputs");
+    // The same tree went by hash to a deployment keeping a blob store, so the
+    // inputs riding the start take the blame, and with none, nothing does.
+    const withInputs = await startMthdsRun(
+      { files, inputs: { question: "why?" } },
+      refusingStart(blobStore, folder).context,
+    );
+    expect(withInputs.structuredContent.errors?.[0]?.location).toBe("inputs");
+    const withoutInputs = await startMthdsRun({ files }, refusingStart(blobStore, folder).context);
+    expect(withoutInputs.structuredContent.errors?.[0]).not.toHaveProperty("location");
+    expect(withoutInputs.structuredContent.errors?.[0]?.hint).toContain(
+      "the run carries no inputs",
+    );
+  });
+
+  it("weighs a binary file as the base64 it travels inline as", async () => {
+    // Raw, the workbook is under the inline threshold; as base64 it is over,
+    // so a deployment without a blob store took it inline at that weight.
+    const workbook = new Uint8Array(Math.floor(INLINE_TREE_MAX_BYTES * 0.9)).fill(0xff);
+    const { context, versionCalls } = refusingStart(noBlobStore, {
+      "methods/invoice.mthds": 'domain = "invoice"',
+      "methods/templates/invoice.xlsx": workbook,
+    });
+
+    const result = await startMthdsRun(
+      { files: [{ path: "methods/invoice.mthds" }, { path: "methods/templates/invoice.xlsx" }] },
+      context,
+    );
+
+    expect(versionCalls()).toBe(1);
+    expect(result.structuredContent.errors?.[0]?.location).toBe("files");
+  });
+
+  it("blames neither cause of a 413 when the handshake that would tell how a heavy tree went fails", async () => {
+    const heavy = "x".repeat(INLINE_TREE_MAX_BYTES + 1);
+    const { context, versionCalls } = refusingStart(
+      () =>
+        Promise.reject(new ApiUnreachableError("connection reset", DEFAULT_API_URL, "ECONNRESET")),
+      { "methods/invoice.mthds": 'domain = "invoice"', "methods/report.html": heavy },
+    );
+
+    const result = await startMthdsRun(
+      {
+        files: [{ path: "methods/invoice.mthds" }, { path: "methods/report.html" }],
+        inputs: { question: "why?" },
+      },
+      context,
+    );
+
+    expect(versionCalls()).toBe(1);
+    const error = result.structuredContent.errors?.[0];
+    expect(error).toMatchObject({ class: "input_domain" });
+    expect(error).not.toHaveProperty("location");
+    expect(error?.hint).toContain("cannot be told from here");
+    expect(error?.hint).not.toContain("are not what made it so");
   });
 
   it("rejects { path } items instructively without a resolver (hosted)", async () => {

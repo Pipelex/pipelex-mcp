@@ -49,7 +49,9 @@ import {
   storageKeyOf,
   summaryForToolError,
   toolResultContent,
+  inlineTreeWeight,
   treeSentInlineHeavy,
+  treeShareOfTooLarge,
   validateMethodSelectorRequest,
   validateRunIdRequest,
   withFilesSent,
@@ -2275,8 +2277,8 @@ describe("classifyError on the refusals of a method's tree", () => {
 });
 
 describe("treeSentInlineHeavy", () => {
-  /** A tree whose one file weighs `bytes`. */
-  function treeOf(bytes: number): MethodTreeToSend {
+  /** A tree whose one file holds `bytes` bytes of `fill`, an ASCII letter unless told otherwise. */
+  function treeOf(bytes: number, fill = 0x78): MethodTreeToSend {
     return {
       source: { files: [], digest: "", readFile: () => Promise.reject(new Error("unread")) },
       files: [
@@ -2284,7 +2286,7 @@ describe("treeSentInlineHeavy", () => {
           treePath: "main.mthds",
           shown: "main.mthds",
           onDisk: false,
-          bytes: new Uint8Array(bytes),
+          bytes: new Uint8Array(bytes).fill(fill),
         },
       ],
       fromFolder: false,
@@ -2317,7 +2319,9 @@ describe("treeSentInlineHeavy", () => {
     const tooLarge = await refused(413, { detail: "Request Entity Too Large" });
 
     const asked = versionClient(() => Promise.resolve({ blob_store: false }));
-    expect(await treeSentInlineHeavy(tooLarge, treeOf(INLINE_TREE_MAX_BYTES), asked)).toBe(false);
+    // Within the threshold once the inline map's own JSON is counted.
+    const within = INLINE_TREE_MAX_BYTES - 64;
+    expect(await treeSentInlineHeavy(tooLarge, treeOf(within), asked)).toBe(false);
     // A tree within the inline threshold costs no handshake.
     expect(asked.calls).toBe(0);
 
@@ -2338,6 +2342,32 @@ describe("treeSentInlineHeavy", () => {
       await treeSentInlineHeavy(await refused(422, { detail: "Bad" }), treeOf(HEAVY), client),
     ).toBe(false);
     expect(client.calls).toBe(0);
+  });
+
+  it("says how the tree shared in a 413: the tree's, not the tree's, or unknown", async () => {
+    const tooLarge = await refused(413, { detail: "Request Entity Too Large" });
+    const answering = (info: unknown) => versionClient(() => Promise.resolve(info));
+
+    expect(await treeShareOfTooLarge(tooLarge, treeOf(HEAVY), answering({}))).toBe("tree");
+    expect(
+      await treeShareOfTooLarge(tooLarge, treeOf(HEAVY), answering({ blob_store: true })),
+    ).toBe("not_tree");
+    expect(await treeShareOfTooLarge(tooLarge, undefined, answering({}))).toBe("not_tree");
+    // A small tree rode inline wherever it went, so it may have filled a lower limit.
+    expect(await treeShareOfTooLarge(tooLarge, treeOf(1024), answering({}))).toBe("unknown");
+    const failing = versionClient(() => Promise.reject(new Error("down")));
+    expect(await treeShareOfTooLarge(tooLarge, treeOf(HEAVY), failing)).toBe("unknown");
+    expect(await treeShareOfTooLarge(tooLarge, treeOf(HEAVY), {})).toBe("unknown");
+    expect(
+      await treeShareOfTooLarge(await refused(422, { detail: "Bad" }), treeOf(HEAVY), {}),
+    ).toBeUndefined();
+  });
+
+  it("weighs a tree as its inline map travels, a binary file as base64", () => {
+    // The map's own JSON, `{"main.mthds":"…"}`, around the text.
+    expect(inlineTreeWeight(treeOf(30))).toBe(30 + '{"main.mthds":""}'.length);
+    // 0xff is no UTF-8, so the file travels as base64: four bytes for every three.
+    expect(inlineTreeWeight(treeOf(30, 0xff))).toBe(40 + '{"main.mthds":{"base64":""}}'.length);
   });
 });
 

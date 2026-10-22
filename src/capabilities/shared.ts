@@ -832,33 +832,77 @@ export function failedBeforeSending(err: unknown): boolean {
 }
 
 /**
+ * What a method's tree had to do with a request refused as too large:
+ * `tree`, it travelled inline at a weight that can have made it so; `not_tree`,
+ * its bytes did not ride the request, since none was sent or it travelled by
+ * hash; `unknown`, it rode inline at a weight that may or may not have, or
+ * how it travelled cannot be told.
+ */
+export type TreeShareOfTooLarge = "tree" | "not_tree" | "unknown";
+
+/**
+ * What `tree` had to do with `err` when it is a `413`, or `undefined` for any
+ * other error. A tree within the SDK's inline threshold
+ * (`INLINE_TREE_MAX_BYTES`), weighed as the SDK weighs it ({@link
+ * inlineTreeWeight}), travels inline everywhere, so it rode the request and
+ * may have filled it to a limit lower than the threshold: `unknown`. A heavier
+ * one travels by hash to a deployment keeping a blob store and inline only to
+ * one keeping none, so the deployment is asked, through the client's
+ * `version()` (`GET /v1/version`'s `blob_store`), only then; a client without
+ * `version()`, or a handshake that fails, says nothing, which is `unknown` too.
+ */
+export async function treeShareOfTooLarge(
+  err: unknown,
+  tree: MethodTreeToSend | undefined,
+  client: unknown,
+): Promise<TreeShareOfTooLarge | undefined> {
+  if (!(err instanceof ApiResponseError) || err.status !== 413) return undefined;
+  if (tree === undefined) return "not_tree";
+  if (inlineTreeWeight(tree) <= INLINE_TREE_MAX_BYTES) return "unknown";
+  if (typeof client !== "object" || client === null) return "unknown";
+  const version = (client as { version?: unknown }).version;
+  if (typeof version !== "function") return "unknown";
+  try {
+    const info: unknown = await (version as () => Promise<unknown>).call(client);
+    return asRecord(info)?.blob_store === true ? "not_tree" : "tree";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
  * Whether a request that sent `tree` and was refused as too large, a `413`,
- * carried the tree inline at a weight that can have made it so. A tree within
- * the SDK's inline threshold (`INLINE_TREE_MAX_BYTES`) travels inline
- * everywhere but weighs too little to make a request too large on its own; a
- * heavier one travels by hash to a deployment keeping a blob store, and inline
- * only to one keeping none. So the deployment is asked, through the client's
- * `version()` (`GET /v1/version`'s `blob_store`), only for a heavier tree
- * after a `413`. A client without `version()`, or a handshake that fails,
- * says nothing, and the tree is not blamed.
+ * carried the tree inline at a weight that can have made it so
+ * ({@link treeShareOfTooLarge}); a tree that may not have is not blamed.
  */
 export async function treeSentInlineHeavy(
   err: unknown,
   tree: MethodTreeToSend | undefined,
   client: unknown,
 ): Promise<boolean> {
-  if (tree === undefined || !(err instanceof ApiResponseError) || err.status !== 413) return false;
-  const weight = tree.files.reduce((sum, file) => sum + file.bytes.byteLength, 0);
-  if (weight <= INLINE_TREE_MAX_BYTES) return false;
-  if (typeof client !== "object" || client === null) return false;
-  const version = (client as { version?: unknown }).version;
-  if (typeof version !== "function") return false;
-  try {
-    const info: unknown = await (version as () => Promise<unknown>).call(client);
-    return asRecord(info)?.blob_store !== true;
-  } catch {
-    return false;
+  return (await treeShareOfTooLarge(err, tree, client)) === "tree";
+}
+
+const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/**
+ * The weight of a tree's inline `files` map as the SDK measures it against
+ * its inline threshold: the map's JSON with no whitespace, in UTF-8 bytes,
+ * each file as its text, or as `{ base64 }` when it is not UTF-8 text, so a
+ * binary file weighs about four thirds of its bytes.
+ */
+export function inlineTreeWeight(tree: MethodTreeToSend): number {
+  const files: Record<string, string | { base64: string }> = {};
+  for (const file of tree.files) {
+    let entry: string | { base64: string };
+    try {
+      entry = STRICT_UTF8.decode(file.bytes);
+    } catch {
+      entry = { base64: Buffer.from(file.bytes).toString("base64") };
+    }
+    Object.defineProperty(files, file.treePath, { value: entry, enumerable: true });
   }
+  return Buffer.byteLength(JSON.stringify(files), "utf8");
 }
 
 /**

@@ -55,7 +55,8 @@ import {
   validateRunIdRequest,
   withFilesSent,
   failedBeforeSending,
-  treeSentInlineHeavy,
+  inlineTreeWeight,
+  treeShareOfTooLarge,
   markUnsent,
 } from "./shared.js";
 import type {
@@ -68,6 +69,7 @@ import type {
   MethodTreeToSend,
   SubmittedFileInput,
   ToolError,
+  TreeShareOfTooLarge,
 } from "./shared.js";
 import { methodTreeLimitsOf } from "./tree-limits.js";
 import type { TreeLimitsAware } from "./tree-limits.js";
@@ -576,14 +578,70 @@ const START_SERVER_ERROR = {
 };
 
 /**
- * A start refused as too large, a `413`, when the method's tree is not what
- * made it so: it travelled by hash, or inline at a weight too small to matter
- * (see `treeSentInlineHeavy`), so the inputs riding the same body did.
+ * A start refused as too large, a `413`, carrying inputs, when the method's
+ * tree is shown not to be what made it so: none was sent, or it travelled by
+ * hash ({@link treeShareOfTooLarge}), so the inputs riding the same body did.
+ * {@link runTooLargeTexture} picks it; it is never a route's static texture.
  */
 const RUN_INPUTS_TOO_LARGE = {
   location: "inputs",
   hint: `The run's request is larger than the Pipelex API takes in one request, and the method's files are not what made it so: its inputs did. Upload large file inputs with ${WORKSHOP_TOOL_NAMES.prepareInputs}, which replaces them with pipelex-storage:// references, or pass them as URLs.`,
 };
+
+/**
+ * A start refused as too large when which part of it made it so cannot be
+ * shown: a tree rode the request inline at a weight that may or may not have,
+ * how it travelled cannot be told, or the start carried no inputs. It names
+ * both possible causes and their cures, located at no field.
+ */
+const RUN_TOO_LARGE_HINT = `The run's request is larger than the Pipelex API takes in one request, and which part of it made it so cannot be told from here: the method's files, when they travel inline, or the run's inputs. Keep what is not part of the method out of its folder with a .gitignore inside it or METHODS.toml's [package] exclude, or send fewer or smaller files; upload large file inputs with ${WORKSHOP_TOOL_NAMES.prepareInputs}, which replaces them with pipelex-storage:// references, or pass them as URLs.`;
+
+const RUN_TOO_LARGE = { hint: RUN_TOO_LARGE_HINT };
+
+/**
+ * The texture of a `413` on a start, from what can be shown of its cause. The
+ * inputs are blamed only when the start carried some and the tree is shown not
+ * to have ridden the request (`share` is `not_tree`); a tree shown to have
+ * made it so is read ahead of this, as the tree's (`treeRefusalTexture`).
+ * Otherwise the refusal names both causes, and says what was measured here:
+ * the tree's weight as it travels inline, which the SDK compares with its
+ * inline threshold, and the inputs' as JSON.
+ */
+function runTooLargeTexture(
+  share: TreeShareOfTooLarge | undefined,
+  request: ResolvedRunRequest,
+): NonNullable<ClassifyErrorOptions["tooLarge"]> {
+  const inputs = request.inputs ?? {};
+  const carriesInputs = Object.keys(inputs).length > 0;
+  if (share === "not_tree" && carriesInputs) return RUN_INPUTS_TOO_LARGE;
+  const measured: string[] = [];
+  if (request.tree !== undefined && share !== "not_tree") {
+    measured.push(`the method's files weigh ${formatSize(inlineTreeWeight(request.tree))} inline`);
+  }
+  if (!carriesInputs) {
+    measured.push("the run carries no inputs");
+  } else {
+    const weight = jsonWeight(inputs);
+    if (weight !== undefined) measured.push(`its inputs weigh ${formatSize(weight)} as JSON`);
+  }
+  return { hint: `${RUN_TOO_LARGE_HINT} Measured here, ${measured.join(", and ")}.` };
+}
+
+/** A value's weight as a request carries it: its JSON, in UTF-8 bytes, or `undefined` when it has none. */
+function jsonWeight(value: unknown): number | undefined {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+/** A size in the unit that reads best: KiB below a mebibyte, MiB above. */
+function formatSize(bytes: number): string {
+  return bytes < 1024 * 1024
+    ? `${(bytes / 1024).toFixed(1)} KiB`
+    : `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
 
 export const RUN_START_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/start",
@@ -592,7 +650,7 @@ export const RUN_START_ERROR_OPTIONS: ClassifyErrorOptions = {
     location: "files",
     hint: "Check files, pipe_code, and inputs; validate the bundle with mthds_validate and fill the template from mthds_inputs_template first.",
   },
-  tooLarge: RUN_INPUTS_TOO_LARGE,
+  tooLarge: RUN_TOO_LARGE,
   serverError: START_SERVER_ERROR,
 };
 
@@ -615,7 +673,7 @@ export const RUN_START_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
     location: "method_id",
     hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.",
   },
-  tooLarge: RUN_INPUTS_TOO_LARGE,
+  tooLarge: RUN_TOO_LARGE,
   serverError: START_SERVER_ERROR,
 };
 
@@ -632,7 +690,7 @@ export const RUN_START_MIXED_ERROR_OPTIONS: ClassifyErrorOptions = {
   methodLocation: "files",
   badRequest: RUN_START_ERROR_OPTIONS.badRequest,
   notFound: RUN_START_BY_ID_ERROR_OPTIONS.notFound,
-  tooLarge: RUN_INPUTS_TOO_LARGE,
+  tooLarge: RUN_TOO_LARGE,
   serverError: START_SERVER_ERROR,
 };
 
@@ -660,7 +718,7 @@ export const RUN_START_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
     location: "method_ref",
     hint: `Only address-form refs are supported (${METHOD_REF_GRAMMAR}); registry references are reserved until a method registry exists.`,
   },
-  tooLarge: RUN_INPUTS_TOO_LARGE,
+  tooLarge: RUN_TOO_LARGE,
   serverError: START_SERVER_ERROR,
 };
 
@@ -1499,12 +1557,17 @@ async function requestRunStart(
     else if (content.disproved) forgetMethodVersionsSupported(methodVersionsOf(context));
     return startResult(ack, content);
   } catch (err) {
+    // What the tree had to do with a 413, asked once: a tree shown to have
+    // made the start too large is the tree's refusal, and only a tree shown
+    // not to have ridden it lets the inputs take the blame.
+    const share = await treeShareOfTooLarge(err, request.tree, client);
     const classified = classifyStartError(err, {
       ...classifyOptions,
+      ...(share === undefined ? {} : { tooLarge: runTooLargeTexture(share, request) }),
       auth: context.authError,
       baseUrlSource: context.baseUrlSource,
       methodTree: request.tree !== undefined,
-      treeInline: await treeSentInlineHeavy(err, request.tree, client),
+      treeInline: share === "tree",
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     const failed = startErrorResult(startSummaryForError(error), [error]);
