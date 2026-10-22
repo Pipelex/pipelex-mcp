@@ -9,6 +9,8 @@ import { generateMthdsCode } from "./codegen.js";
 import { buildMthdsInputs } from "./inputs.js";
 import { bytesOf, fakeMethodResolver } from "./method-tree-fixtures.js";
 import { prepareMthdsInputs } from "./prepare.js";
+import { startMthdsRun } from "./run.js";
+import { validateMthds } from "./validate.js";
 
 /**
  * The wire a method's tree leaves on, for the routes the workshop reaches
@@ -208,5 +210,84 @@ describe("the tree on the wire of the crate routes", () => {
         "templates/invoice.xlsx",
       ]);
     });
+  }
+});
+
+/**
+ * A blob gone missing between its upload and the request, under either code
+ * a receiver refuses it with: the Pipelex platform's `missing_blobs` and the
+ * MTHDS standard's `request.blobs_missing`. The SDK sends once more on the
+ * standard's code when it names the blobs, then hands a second such answer
+ * back unchanged, so every tool that sends a tree reads both alike: a
+ * retryable `runtime` error at `files`, never the route's own bad-request
+ * texture.
+ */
+describe("a blob gone missing, under either code, on every route that sends a tree", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const INLINE = { files: [{ content: BUNDLE }] };
+
+  const ROUTES = [
+    {
+      tool: "mthds_validate",
+      route: "/v1/validate",
+      call: (baseUrl: string) => validateMthds({ ...INLINE, graph_page: false }, { baseUrl }),
+    },
+    {
+      tool: "mthds_run",
+      route: "/v1/start",
+      call: (baseUrl: string) => startMthdsRun(INLINE, { baseUrl }),
+    },
+    {
+      tool: "mthds_codegen",
+      route: "/v1/codegen",
+      call: (baseUrl: string) => generateMthdsCode({ ...INLINE, target: "ts-zod" }, { baseUrl }),
+    },
+    {
+      tool: "mthds_inputs_template",
+      route: "/v1/pipe-io",
+      call: (baseUrl: string) => buildMthdsInputs(INLINE, { baseUrl }),
+    },
+    {
+      tool: "mthds_prepare_inputs",
+      route: "/v1/pipe-io",
+      call: (baseUrl: string) => prepareMthdsInputs({ ...INLINE, inputs: {} }, { baseUrl }),
+    },
+  ] as const;
+
+  for (const { tool, route, call } of ROUTES) {
+    for (const code of ["missing_blobs", "request.blobs_missing"]) {
+      it(`${tool} reads ${code} as a retryable runtime refusal of the tree, at files`, async () => {
+        const posted: string[] = [];
+        vi.stubGlobal("fetch", (input: string | URL | Request) => {
+          const url = new URL(input instanceof Request ? input.url : String(input));
+          if (url.pathname === "/v1/version") {
+            return Promise.resolve(Response.json({ version: "1.0.0", blob_store: false }));
+          }
+          posted.push(url.pathname);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                status: 422,
+                code,
+                title: "Blobs missing",
+                detail: "Blobs missing",
+              }),
+              { status: 422, headers: { "content-type": "application/problem+json" } },
+            ),
+          );
+        });
+
+        const result = await call(`https://${code}.${tool}.example`);
+
+        expect(posted).toContain(route);
+        expect(result.structuredContent.status).toBe("error");
+        const error = result.structuredContent.errors?.[0];
+        expect(error).toMatchObject({ class: "runtime", location: "files", retryable: true });
+        expect(error?.hint).toContain("went missing from the platform's storage");
+      });
+    }
   }
 });

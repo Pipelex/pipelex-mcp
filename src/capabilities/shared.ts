@@ -2551,10 +2551,14 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
  * - `blob_mismatch`: a hash entry states another size than the blob the
  *   organization holds. The workshop states the sizes of the bytes it read, so
  *   no argument fixes it: the class is overridden to `runtime`.
- * - `missing_blobs`: a blob went missing between its upload and the request.
- *   The same call asks the blob route afresh and uploads what is missing, so
- *   it is overridden to `runtime` and retryable, where the SDK reads a `422`
- *   as the caller's and final.
+ * - `missing_blobs`, or the MTHDS standard's `request.blobs_missing`: a blob
+ *   went missing between its upload and the request. The SDK uploads the
+ *   blobs a `request.blobs_missing` names and sends once more, then hands a
+ *   second such answer back unchanged; the same call asks the blob route
+ *   afresh and uploads what is missing, so it is overridden to `runtime` and
+ *   retryable, where the SDK reads a `422` as the caller's and final. Either
+ *   code is read, on the platform's `code` or the standard's reading of the
+ *   answer (`problem.code`), so a runner speaking the standard is read alike.
  * - A `413`, only when `inline` says the tree travelled inline at a weight
  *   that can have made the request too large ({@link treeSentInlineHeavy}):
  *   the SDK sends a tree past its inline threshold by hash to a deployment
@@ -2593,7 +2597,7 @@ function treeRefusalTexture(
       hint: "A file of the tree is stored under its hash with another size than the one this call sent, so the request was refused. No argument fixes it: call again, and if it persists, the platform's storage needs looking at.",
     };
   }
-  if (err.code === "missing_blobs") {
+  if (isMissingBlobsRefusal(err)) {
     return {
       class: "runtime",
       retryable: true,
@@ -2601,6 +2605,19 @@ function treeRefusalTexture(
     };
   }
   return undefined;
+}
+
+/** The codes a blob gone missing is refused under: the Pipelex platform's own, and the MTHDS standard's. */
+const MISSING_BLOBS_CODES: ReadonlySet<string> = new Set([
+  "missing_blobs",
+  "request.blobs_missing",
+]);
+
+function isMissingBlobsRefusal(err: ApiResponseError): boolean {
+  return (
+    (err.code !== undefined && MISSING_BLOBS_CODES.has(err.code)) ||
+    MISSING_BLOBS_CODES.has(err.problem.code)
+  );
 }
 
 /**
