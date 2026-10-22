@@ -274,6 +274,53 @@ describe("resolveMethodSource on files", () => {
     expect(heavy.errors[0]?.message).toContain("the workshop's own limit of 7 bytes");
   });
 
+  it("refuses a list holding no .mthds file at files, before stating, reading or hashing any item", async () => {
+    const XLSX = new Uint8Array(INLINE_TREE_MAX_BYTES + 1).fill(0xff);
+    const resolver = fakeFileResolver({
+      "finance/payroll.xlsx": XLSX,
+      "finance/report.html": "<p>{{ total }}</p>",
+    });
+    const limits = limitsReader();
+
+    const resolution = await resolveMethodSource(
+      { files: [{ path: "finance/payroll.xlsx" }, { path: "finance/report.html" }] },
+      resolver,
+      "one_selector",
+      limits,
+    );
+
+    expect(resolution.errors).toEqual([
+      expect.objectContaining({
+        class: "input_domain",
+        location: "files",
+        retryable: false,
+        message: "The files hold no .mthds file, so they make no method; nothing was read or sent.",
+      }),
+    ]);
+    expect(resolution.errors[0]?.hint).toContain("method_dir");
+    expect(resolution.tree).toBeUndefined();
+    expect(resolver.stats).toEqual([]);
+    expect(resolver.reads).toEqual([]);
+    expect(limits.calls).toBe(0);
+
+    // One .mthds file, by path in any letter case or inline, makes the list a method.
+    for (const files of [
+      [{ path: "finance/payroll.xlsx" }, { path: "finance/PAYROLL.MTHDS" }],
+      [{ path: "finance/payroll.xlsx" }, { content: 'domain = "payroll"' }],
+    ]) {
+      const named = await resolveMethodSource(
+        { files },
+        fakeFileResolver({
+          "finance/payroll.xlsx": "PK",
+          "finance/PAYROLL.MTHDS": 'domain = "payroll"',
+        }),
+        "one_selector",
+        limitsReader(),
+      );
+      expect(named.errors.map((error) => error.location)).not.toContain("files");
+    }
+  });
+
   it("refuses an empty .mthds file read from a { path } item at its item, naming it", async () => {
     const resolution = await resolveMethodSource(
       { files: [{ path: "m/main.mthds" }, { path: "m/blank.mthds" }] },

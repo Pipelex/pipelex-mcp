@@ -1238,6 +1238,32 @@ describe("validateMthds path submissions", () => {
     },
   };
 
+  it("refuses a list of files holding no .mthds file without reading it or calling the API", async () => {
+    let touched = 0;
+    const untouchable: FileResolver = {
+      resolve: () => Promise.reject(new Error("never read")),
+      statMethodFile: () => {
+        touched += 1;
+        return Promise.reject(new Error("never stated"));
+      },
+      readMethodFile: () => {
+        touched += 1;
+        return Promise.reject(new Error("never read"));
+      },
+    };
+
+    const result = await validateMthds(
+      { files: [{ path: "finance/payroll.xlsx" }] },
+      { baseUrl: DEFAULT_API_URL, resolver: untouchable, client: validateNotCalled },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors).toEqual([
+      expect.objectContaining({ class: "input_domain", location: "files" }),
+    ]);
+    expect(result.structuredContent).not.toHaveProperty("files_sent");
+    expect(touched).toBe(0);
+  });
   it("reads { path } items through the context resolver and sends them under their tree path", async () => {
     let captured: MethodTreeSource | undefined;
 

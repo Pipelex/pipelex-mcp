@@ -505,10 +505,21 @@ interface ItemFile {
 /** The name an inline item is sent under when its uri gives none. */
 const INLINE_STEM = "bundle";
 
+/** Whether a `files` item is a `.mthds` file: an inline item always is, a `{ path }` item by its extension. */
+function namesBundle(item: SubmittedFileInput): boolean {
+  return "content" in item || item.path.trim().toLowerCase().endsWith(".mthds");
+}
+
 /**
  * `files`, as one tree, made in an order that reads no byte of a file before
  * the whole list has passed every check that needs none.
  *
+ * 0. That the list names a method at all: one `.mthds` file, an inline item
+ *    or a `{ path }` item with that extension. A list of other files makes no
+ *    method, and the runner would refuse its tree only once the SDK had sent
+ *    it, uploading its files to the organization's storage first when they
+ *    weigh enough, so it is refused at `files` before any item is stated,
+ *    read or hashed.
  * 1. Each item's shape, and each `{ path }` item's stat through the
  *    resolver's `statMethodFile`: its extension, where it lies, that it is a
  *    regular file, its size.
@@ -541,6 +552,19 @@ async function resolveFilesTree(
   const errors: ToolError[] = [];
   const refuse = (location: string, message: string, hint: string) =>
     errors.push({ class: "input_domain", location, message, hint, retryable: false });
+
+  // 0. A method, before anything of the list is stated, read or hashed.
+  if (!items.some(namesBundle)) {
+    return {
+      errors: [
+        itemRefusal("files", {
+          message:
+            "The files hold no .mthds file, so they make no method; nothing was read or sent.",
+          hint: "List the method's .mthds files with the files they read, as { path } items or inline as { content }, or pass the method's folder as method_dir.",
+        }),
+      ],
+    };
+  }
 
   // 1. Every item's shape, and what each { path } item is on disk.
   const inline: { index: number; item: SubmittedFile }[] = [];
