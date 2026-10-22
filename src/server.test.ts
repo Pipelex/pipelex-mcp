@@ -364,6 +364,74 @@ describe("the workshop's contexts and dispatch", () => {
     }
   });
 
+  it("registers mthds_list_files as a read beside the method list and dispatches it to the files client", async () => {
+    const contexts = buildLocalToolContexts({ PIPELEX_API_KEY: "plx_sk_test" });
+    const queries: unknown[] = [];
+    contexts.files.client = {
+      async listFiles(query) {
+        queries.push(query);
+        return {
+          items: [
+            {
+              file_id: "fl_1",
+              uri: "pipelex-storage://org/uploads/fl_1/invoice.pdf",
+              name: "invoice.pdf",
+              media_type: "application/pdf",
+              format: "pdf",
+              size: 2048,
+              kind: "uploaded",
+              origin: { surface: "app", run_id: null, method_id: null, method_version: null },
+              created_by: "usr_secret",
+              created_at: "2026-10-22T08:15:00Z",
+            },
+          ],
+          nextCursor: null,
+        };
+      },
+    };
+
+    const { client, close } = await connectClient(createLocalServer({ contexts }));
+    try {
+      const tools = (await client.listTools()).tools;
+      const index = tools.findIndex((candidate) => candidate.name === "mthds_list_files");
+      const tool = tools[index];
+      const schema = tool?.inputSchema as { required?: string[]; properties?: object };
+
+      expect(tools[index - 1]?.name).toBe("mthds_list_methods");
+      expect(tool?.annotations).toMatchObject({
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      });
+      expect(schema.required ?? []).toEqual([]);
+      expect(Object.keys(schema.properties ?? {}).sort()).toEqual([
+        "cursor",
+        "format",
+        "kind",
+        "limit",
+        "method_id",
+        "query",
+      ]);
+
+      const result = await client.callTool({
+        name: "mthds_list_files",
+        arguments: { query: "invoice", format: ["PDF"] },
+      });
+
+      expect(queries).toEqual([{ q: "invoice", format: ["pdf"], limit: 20 }]);
+      expect(result.structuredContent).toMatchObject({
+        status: "ok",
+        returned_count: 1,
+        next_cursor: null,
+        files: [{ file_id: "fl_1", uri: "pipelex-storage://org/uploads/fl_1/invoice.pdf" }],
+      });
+      expect(JSON.stringify(result)).not.toContain("usr_secret");
+      expect(result._meta).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+
   it("registers mthds_models as a read with two optional arguments and dispatches a check to the runner", async () => {
     const contexts = buildLocalToolContexts({ PIPELEX_API_KEY: "plx_sk_test" });
     const listed: Array<string | undefined> = [];
