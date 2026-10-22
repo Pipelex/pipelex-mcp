@@ -299,8 +299,9 @@ export interface ResolvedMethodSource {
  * second in the order method_dir, files, method_ref, method_id, as the other
  * pairs are: `files` beside it at `method_dir`, `method_ref` at `method_ref`,
  * and `method_id` at `method_id` on the tooling tools, while on `mthds_run` a
- * folder takes a `method_id` beside it as files do. Either way the secret
- * guard reads every byte before any is sent, and the selector checks that
+ * folder takes a `method_id` beside it as files do. Either way an empty
+ * `.mthds` file is refused, and the secret guard reads every byte before any
+ * is sent, and the selector checks that
  * follow ({@link validateMethodSelectorRequest}) see a tree as a method named.
  */
 export async function resolveMethodSource(
@@ -349,6 +350,17 @@ async function resolveFolderTree(
   if (!read.ok) return { errors: read.refusals.map(atMethodDirRefusal) };
 
   const tree = folderTreeToSend(methodDir, read);
+  const empty = tree.files.find(isEmptyBundle);
+  if (empty !== undefined) {
+    return {
+      errors: [
+        atMethodDirRefusal({
+          message: emptyBundleMessage(empty.shown),
+          hint: "Write the bundle into the .mthds file, or keep it out of the method with a .gitignore inside the folder.",
+        }),
+      ],
+    };
+  }
   const findings = secretFindings(
     tree.files.map((file) => ({ path: file.treePath, bytes: file.bytes })),
   );
@@ -392,6 +404,23 @@ export function folderTreeToSend(
     })),
     fromFolder: true,
   };
+}
+
+/**
+ * Whether a file of a tree is a `.mthds` file holding nothing but whitespace,
+ * which no runner loads as a bundle: the method-taking tools refuse one before
+ * anything is sent, from `method_dir` or a `{ path }` item, as they refuse an
+ * inline item with no content.
+ */
+function isEmptyBundle(file: { treePath: string; bytes: Uint8Array }): boolean {
+  return (
+    file.treePath.toLowerCase().endsWith(".mthds") &&
+    Buffer.from(file.bytes).toString("utf8").trim() === ""
+  );
+}
+
+function emptyBundleMessage(shown: string): string {
+  return `${shown} is empty.`;
 }
 
 /** What a caller does once a refused file is dealt with, closing the secret guard's hint. */
@@ -500,7 +529,8 @@ const INLINE_STEM = "bundle";
  *    `files`, on the sizes the stat gave.
  * 4. The reads, one file at a time, each held to the limit on one file and
  *    the running total held to the limit on all, so a file that grew since
- *    its stat stops the reads at the limit rather than past it.
+ *    its stat stops the reads at the limit rather than past it; then a
+ *    `.mthds` file read empty is refused at its item.
  * 5. The secret guard, over every byte in hand, before anything is sent.
  */
 async function resolveFilesTree(
@@ -680,8 +710,21 @@ async function resolveFilesTree(
     if (over !== undefined) return { errors: [over] };
   }
 
-  // 5. The secret guard, over every byte about to be sent.
   const read = files.map((file) => ({ ...file, bytes: file.bytes ?? new Uint8Array() }));
+  // An empty .mthds file read from disk, as an inline item with no content was
+  // refused in step 1.
+  for (const file of read) {
+    if (file.submitted !== undefined && isEmptyBundle(file)) {
+      refuse(
+        file.location,
+        emptyBundleMessage(file.submitted),
+        "Write the bundle into the .mthds file, or leave it off the list.",
+      );
+    }
+  }
+  if (errors.length > 0) return { errors };
+
+  // 5. The secret guard, over every byte about to be sent.
   for (const finding of secretFindings(
     read.map((file) => ({ path: file.treePath, bytes: file.bytes })),
   )) {

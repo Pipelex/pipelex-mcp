@@ -1643,6 +1643,28 @@ describe("validateMthds sends a method's tree", () => {
     expect(result.structuredContent).not.toHaveProperty("files_sent");
   });
 
+  it("refuses an empty .mthds file in a folder before calling the API, naming it", async () => {
+    const root = await bundleWithTemplate();
+    await fs.writeFile(path.join(root, "methods/invoice/blank.mthds"), "  \n");
+
+    const result = await validateMthds(
+      { method_dir: "methods/invoice", graph_page: false },
+      {
+        baseUrl: DEFAULT_API_URL,
+        resolver: localMethodFileResolver(root),
+        client: validateNotCalled,
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "method_dir",
+      message: `${path.join("methods", "invoice", "blank.mthds")} is empty.`,
+    });
+    expect(result.structuredContent).not.toHaveProperty("files_sent");
+  });
+
   it("refuses method_dir beside method_id, one selector on a tooling tool", async () => {
     const result = await validateMthds(
       { method_dir: "methods/invoice", method_id: "mt_abc123" },

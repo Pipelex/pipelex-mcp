@@ -274,6 +274,24 @@ describe("resolveMethodSource on files", () => {
     expect(heavy.errors[0]?.message).toContain("the workshop's own limit of 7 bytes");
   });
 
+  it("refuses an empty .mthds file read from a { path } item at its item, naming it", async () => {
+    const resolution = await resolveMethodSource(
+      { files: [{ path: "m/main.mthds" }, { path: "m/blank.mthds" }] },
+      fakeFileResolver({ "m/main.mthds": 'domain = "demo"', "m/blank.mthds": " \n\t" }),
+      "one_selector",
+      limitsReader(),
+    );
+
+    expect(resolution.errors).toEqual([
+      expect.objectContaining({
+        class: "input_domain",
+        location: "files[1].path",
+        message: "m/blank.mthds is empty.",
+      }),
+    ]);
+    expect(resolution.tree).toBeUndefined();
+  });
+
   it("roots the { path } items at the deepest directory holding them all, each shown as given", async () => {
     const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
     const resolver = fakeFileResolver({
@@ -654,6 +672,31 @@ describe("resolveMethodSource on method_dir", () => {
       "templates/a.html",
     ]);
     expect(resolver.limits).toEqual([LIMITS]);
+  });
+
+  it("refuses an empty .mthds file before anything is sent, naming it, and keeps an empty file of another kind", async () => {
+    const refused = await resolveMethodSource(
+      { method_dir: "m" },
+      fakeFolderResolver({ ...FOLDER, "steps/blank.mthds": "  \n" }),
+      "one_selector",
+      limitsReader(),
+    );
+    expect(refused.errors).toEqual([
+      expect.objectContaining({
+        class: "input_domain",
+        location: "method_dir",
+        message: `${path.join("m", "steps", "blank.mthds")} is empty.`,
+      }),
+    ]);
+    expect(refused.tree).toBeUndefined();
+
+    const kept = await resolveMethodSource(
+      { method_dir: "m" },
+      fakeFolderResolver({ ...FOLDER, "notes.md": "" }),
+      "one_selector",
+      limitsReader(),
+    );
+    expect(kept.errors).toEqual([]);
   });
 
   it("refuses a blank folder before reading anything", async () => {
