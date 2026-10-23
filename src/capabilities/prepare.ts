@@ -1,7 +1,21 @@
-import { InputPreparationError } from "@pipelex/sdk";
-import type { MthdsFileItem, PrepareInputsRequest, PreparedInputs } from "@pipelex/sdk";
+import { InputPreparationError, UploadNotAllowedError } from "@pipelex/sdk";
+import type {
+  MethodTreeSource,
+  PrepareInputsRequest,
+  PreparedInputs,
+  UploadKind,
+  UploadKindOptions,
+} from "@pipelex/sdk";
 import { z } from "zod";
 
+import {
+  LEGACY_LINK_FILE_NAME,
+  LEGACY_LINK_MOVE,
+  LINK_FILE_NAME,
+  apiHostOf,
+  holdsLegacyLink,
+  readMethodLink,
+} from "./catalog-link.js";
 import {
   METHOD_ID_SELECTOR_SENTENCE,
   methodVersionReportSchema,
@@ -13,23 +27,24 @@ import {
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
 import {
   METHOD_REF_GRAMMAR,
+  bareMethodIdOf,
+  bareMethodIdRefusal,
   buildApiConfig,
-  bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
   filesSentSchema,
   inputsPathSchema,
   methodDirInputSchema,
+  methodFilesInputSchema,
   resolveInputsSource,
-  hasTemplateFiles,
-  resolveMethodFiles,
-  resourcesOption,
+  resolveMethodSource,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
   withFilesSent,
   failedBeforeSending,
+  treeSentInlineHeavy,
   markUnsent,
 } from "./shared.js";
 import type {
@@ -39,16 +54,30 @@ import type {
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
-  SubmittedFile,
+  MethodTreeToSend,
   SubmittedFileInput,
   ToolError,
 } from "./shared.js";
-import type { TemplateFiles } from "./template-files.js";
+import { methodTreeLimitsOf } from "./tree-limits.js";
+import type { TreeLimitsAware } from "./tree-limits.js";
+import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 import { MAX_UPLOAD_BYTES, SizeGuardedPipelexApiClient, formatMib } from "./upload-ceiling.js";
+
+/** What an upload is recorded as: a member's file, or a test input made for one method. */
+export const UPLOAD_KINDS = ["uploaded", "test"] as const satisfies readonly UploadKind[];
+
+/**
+ * What every upload of one preparation is recorded as: the prepare request's
+ * `upload` member, which the SDK sends with each `POST /v1/upload` of the
+ * walk. A test file names the bare id of the method it was made for.
+ */
+interface UploadMarking extends UploadKindOptions {
+  kind: UploadKind;
+}
 
 export const mthdsPrepareInputsInputSchema = {
   method_dir: methodDirInputSchema("one_selector"),
-  files: bundleFilesInputSchema.optional(),
+  files: methodFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
@@ -74,6 +103,12 @@ export const mthdsPrepareInputsInputSchema = {
       "The caller's FILLED inputs (the mthds_inputs_template output, populated). File-bearing values are uploaded to Pipelex storage and rewritten to pipelex-storage://; http(s) URLs and existing pipelex-storage:// URIs pass through. An empty object uploads nothing. Supply exactly ONE of inputs / inputs_path.",
     ),
   inputs_path: inputsPathSchema,
+  kind: z
+    .enum(UPLOAD_KINDS)
+    .optional()
+    .describe(
+      `What the files this call uploads are recorded as in the organization's files: uploaded (the default, a member's file) or test (a test input made for this method, listed as its test file). test needs the method's saved id, so name the method by its bare method_id (no @ suffix), or by a method_dir that ${WORKSHOP_TOOL_NAMES.saveMethod} linked to its saved method (${LINK_FILE_NAME}). Values that pass through are not uploaded and keep what they are.`,
+    ),
 };
 
 const prepareStructuredContentSchema = z.object({
@@ -95,6 +130,16 @@ const prepareStructuredContentSchema = z.object({
     .describe(
       "The pipelex-storage:// uris of the assets uploaded this call; [] when all inputs pass through.",
     ),
+  kind: z
+    .enum(UPLOAD_KINDS)
+    .optional()
+    .describe("Echoed only when the caller supplied it: what the uploads were recorded as."),
+  test_method_id: z
+    .string()
+    .optional()
+    .describe(
+      "With kind test, when something was uploaded: the bare id of the method the uploads were recorded as test files of.",
+    ),
   method_version: methodVersionReportSchema,
   files_sent: filesSentSchema,
   errors: z.array(toolErrorSchema).optional(),
@@ -110,17 +155,18 @@ export interface MthdsPrepareInputsInput {
   pipe_ref?: string;
   inputs?: Record<string, unknown>;
   inputs_path?: string;
+  kind?: UploadKind;
 }
 
-/** The prepare request after `{ path }` and `inputs_path` resolution — what the checks and the prepare step consume. */
+/** The prepare request once its method and `inputs_path` are resolved — what the checks and the prepare step consume. */
 interface ResolvedPrepareRequest {
-  files: SubmittedFile[];
-  /** The bundle's template files, keyed by the path a step names; sent beside `files` only. */
-  resources?: TemplateFiles;
+  /** The method's tree, from `method_dir` or `files`. */
+  tree?: MethodTreeToSend;
   method_ref?: string;
   method_id?: string;
   pipe_ref?: string;
   inputs: Record<string, unknown>;
+  kind?: UploadKind;
 }
 
 export interface PrepareStructuredContent {
@@ -129,9 +175,13 @@ export interface PrepareStructuredContent {
   pipe_ref?: string;
   inputs?: Record<string, unknown>;
   uploads?: string[];
+  /** Echoed when the caller supplied it. */
+  kind?: UploadKind;
+  /** With `kind: "test"`: the bare id of the method the uploads are test files of. */
+  test_method_id?: string;
   /** By-id calls only: the content whose signature the inputs were prepared against, when this server can tell. */
   method_version?: MethodVersionReport;
-  /** Calls on a method folder only: every file read from it and sent. */
+  /** Calls on a tree, from `method_dir` or `files`: every file sent. */
   files_sent?: string[];
   errors?: ToolError[];
 }
@@ -158,9 +208,9 @@ interface PrepareClient {
  * `mthds_prepare_inputs` always uploads: the workshop is co-located with the
  * user's files.
  */
-export interface PrepareContext extends ApiConfig, MethodVersionsAware {
+export interface PrepareContext extends ApiConfig, MethodVersionsAware, TreeLimitsAware {
   client?: PrepareClient;
-  /** Fills `{ path }` closure items from disk (local workshop). */
+  /** Reads `{ path }` items and `method_dir` from disk (local workshop). */
   resolver?: FileResolver;
   /** Reads `inputs_path` from disk (local workshop, `.json` only); without one `inputs_path` is refused. */
   inputsResolver?: FileResolver;
@@ -285,7 +335,9 @@ export async function prepareMthdsInputs(
   input: MthdsPrepareInputsInput,
   context: PrepareContext = buildPrepareContext(),
 ): Promise<PrepareResult> {
-  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector");
+  const resolution = await resolveMethodSource(input, context.resolver, "one_selector", () =>
+    methodTreeLimitsOf(context, () => prepareClient(context)),
+  );
   const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
     required: true,
   });
@@ -296,31 +348,143 @@ export async function prepareMthdsInputs(
 
   // `inputs_path` is settled into `inputs` here and goes no further: the rest
   // of the flow cannot tell a loaded file from an inline object.
-  const { inputs_path: _inputsPath, ...selection } = input;
+  const { inputs_path: _inputsPath, method_dir: _methodDir, files: _files, ...selection } = input;
   const request: ResolvedPrepareRequest = {
     ...selection,
-    files: resolution.files,
-    resources: resolution.resources,
+    ...(resolution.tree === undefined ? {} : { tree: resolution.tree }),
     inputs: inputsResolution.inputs ?? {},
   };
   const inputErrors = validatePrepareInputsRequest(request);
   if (inputErrors.length > 0) {
     return errorResult("Inputs were not prepared: request input is invalid.", inputErrors);
   }
+  const marking = await uploadMarkingOf(request, context);
+  if (!marking.ok) {
+    return errorResult("Inputs were not prepared: request input is invalid.", [marking.error]);
+  }
 
-  return withFilesSent(await requestPreparedInputs(request, context), resolution.sent);
+  return withFilesSent(await requestPreparedInputs(request, marking, context), request.tree);
 }
+
+/**
+ * What the request's uploads are recorded as, settled before anything is sent
+ * as far as it can be.
+ *
+ * `uploaded` is what the platform records when told nothing, so it sends
+ * nothing. A test file names the method it was made for, by its bare id,
+ * since a test file is the method's whatever version it tests: a `method_id`
+ * selector must therefore be bare, and a suffixed one is refused with the bare
+ * id to pass, as `mthds_list_files` refuses one (`bareMethodIdOf`). From a
+ * `method_dir`, the method is the saved one its link file names. A folder
+ * still holding the link an earlier release wrote is refused at once with the
+ * command that moves it, as the save and the pull refuse it.
+ *
+ * Every other way of not knowing the method, a list of files, a published
+ * address, a folder with no link, a link file that cannot be read, a link
+ * whose id is damaged and a link made against another API, matters only when
+ * something is uploaded: inputs that are all addresses record no file at all.
+ * Such a request goes out with uploads disallowed (`unmarkable`), and the
+ * refusal is answered only if the SDK's walk meets a value that needs one.
+ */
+async function uploadMarkingOf(
+  request: ResolvedPrepareRequest,
+  context: PrepareContext,
+): Promise<UploadMarkingResult> {
+  if (request.kind !== "test") return { ok: true };
+  const unmarkable = (message: string, hint: string): UploadMarkingResult => ({
+    ok: true,
+    unmarkable: { class: "input_domain", location: "kind", message, hint, retryable: false },
+  });
+
+  if (request.method_id !== undefined) {
+    const check = bareMethodIdOf(request.method_id);
+    if (!check.ok) {
+      return {
+        ok: false,
+        error: bareMethodIdRefusal(
+          request.method_id,
+          check,
+          "method_id",
+          "To prepare test files against the draft's signature, pass the method's linked folder as method_dir instead.",
+        ),
+      };
+    }
+    return { ok: true, upload: { kind: "test", method_id: check.methodId } };
+  }
+
+  const folder = request.tree?.folder;
+  if (folder === undefined) {
+    return unmarkable(
+      "kind test records each upload as a test file of a saved method, and a list of files or a published address names none.",
+      `Name the method by its saved id as method_id, or by a method_dir linked to its saved method (${LINK_FILE_NAME}, which ${WORKSHOP_TOOL_NAMES.saveMethod} writes); or omit kind to upload the files as the organization's own.`,
+    );
+  }
+  if (await holdsLegacyLink(folder)) {
+    return {
+      ok: false,
+      error: {
+        class: "input_domain",
+        location: "kind",
+        message: `The method_dir holds ${LEGACY_LINK_FILE_NAME}, the link file an earlier release of the workshop wrote, which it now reads only at ${LINK_FILE_NAME}: as it is, the folder reads as unlinked, and its test files would belong to no method. Nothing was sent.`,
+        hint: `Move it into place from inside the folder, then prepare again: ${LEGACY_LINK_MOVE} (plain mv outside git), and commit the move.`,
+        retryable: false,
+      },
+    };
+  }
+  const read = await readMethodLink(folder);
+  switch (read.kind) {
+    case "none":
+      return unmarkable(
+        "kind test records each upload as a test file of a saved method, and this method_dir is not linked to one: it holds no " +
+          `${LINK_FILE_NAME}.`,
+        `Save the method with ${WORKSHOP_TOOL_NAMES.saveMethod}, which links its folder, then prepare again; or omit kind to upload the files as the organization's own.`,
+      );
+    case "unreadable":
+      return unmarkable(
+        `The method_dir's ${LINK_FILE_NAME} cannot be read, so the saved method its test files belong to is unknown: ${read.reason}.`,
+        `Repair or remove ${LINK_FILE_NAME} (a save with ${WORKSHOP_TOOL_NAMES.saveMethod} writes it again), or name the method by its saved id as method_id.`,
+      );
+    case "link": {
+      const check = bareMethodIdOf(read.link.method_id);
+      if (!check.ok) {
+        return unmarkable(
+          `The method_dir's ${LINK_FILE_NAME} is damaged: its method_id ${JSON.stringify(read.link.method_id)} is not a saved method's bare id, so the method its test files belong to is unknown.`,
+          `Save the method again with ${WORKSHOP_TOOL_NAMES.saveMethod}, passing its id, which rewrites the link file; or name the method by its saved id as method_id. The link file is never edited by hand.`,
+        );
+      }
+      const apiHost = apiHostOf(context.baseUrl);
+      if (read.link.api_host !== apiHost) {
+        return unmarkable(
+          `The method_dir is linked to \`${check.methodId}\` on ${read.link.api_host}, and this call goes to ${apiHost}, where that method does not exist.`,
+          `Prepare against the API the method was saved on, or save the method on ${apiHost} with ${WORKSHOP_TOOL_NAMES.saveMethod} first.`,
+        );
+      }
+      return { ok: true, upload: { kind: "test", method_id: check.methodId } };
+    }
+  }
+}
+
+/**
+ * What {@link uploadMarkingOf} settled: a refusal before anything is sent, or
+ * the marking every upload carries, or, for a test upload whose method is
+ * unknown, the refusal to answer should the walk need to upload anything.
+ */
+type UploadMarkingResult =
+  | { ok: true; upload?: UploadMarking; unmarkable?: ToolError }
+  | { ok: false; error: ToolError };
 
 /** The SDK's `prepareInputs` for a request that passed its checks, and the projection of what it prepared. */
 async function requestPreparedInputs(
   request: ResolvedPrepareRequest,
+  marking: { upload?: UploadMarking; unmarkable?: ToolError },
   context: PrepareContext,
 ): Promise<PrepareResult> {
+  const { upload, unmarkable } = marking;
   // Classify options follow the request's selector shape, exactly as
   // mthds_validate and mthds_codegen do — each failure locates at the field
   // that caused it.
   const classifyOptions =
-    request.files.length > 0
+    request.tree !== undefined
       ? PREPARE_ERROR_OPTIONS
       : request.method_ref !== undefined
         ? PREPARE_BY_REF_ERROR_OPTIONS
@@ -350,27 +514,40 @@ async function requestPreparedInputs(
       selector: prepareSelectorOf(sent),
       ...(request.pipe_ref === undefined ? {} : { pipe_ref: request.pipe_ref }),
       inputs: request.inputs,
+      ...(upload === undefined ? {} : { upload }),
+      ...(unmarkable === undefined ? {} : { allowUploads: false as const }),
     };
     prepared = await prepareWithUpload(client, envelope);
   } catch (err) {
-    // A `413` from the pipe I/O read of a request carrying template files is
-    // about them; an input the storage service refuses as too large is a
-    // `RejectedAssetError`, which the `asset` texture takes either way.
+    // A test upload whose method is unknown, met by the first value of the
+    // walk that needs an upload: nothing was read or uploaded, and the
+    // refusal names that input.
+    if (unmarkable !== undefined && err instanceof UploadNotAllowedError) {
+      const error: ToolError = {
+        ...unmarkable,
+        message: `${unmarkable.message} The input ${err.inputPath} needs an upload, so a test file would be recorded.`,
+      };
+      return errorResult("Inputs were not prepared: request input is invalid.", [error]);
+    }
+    // An input the storage service refuses as too large is a
+    // `RejectedAssetError`, which the `asset` texture takes whatever named the
+    // method; a refusal of the tree is read as about the files it sent.
     const classified = classifyError(err, {
       ...classifyOptions,
       auth: context.authError,
       baseUrlSource: context.baseUrlSource,
-      bundleResources: hasTemplateFiles(request.resources),
+      methodTree: request.tree !== undefined,
+      treeInline: await treeSentInlineHeavy(err, request.tree, client),
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     const failed = errorResult(summaryForError(error), [error]);
     // A client that could not be built, or an argument refused before
-    // sending, sent no file of a folder.
+    // sending, sent no file of the tree.
     return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
 
   return await withMethodContent(
-    prepareInputsResult(prepared, request.pipe_ref),
+    prepareInputsResult(prepared, request.pipe_ref, { kind: request.kind, upload }),
     plan,
     "prepared the inputs against the signature of",
   );
@@ -381,14 +558,11 @@ async function requestPreparedInputs(
  * to be exactly one by {@link validatePrepareInputsRequest}. The SDK takes it
  * as-is: nothing here resolves an address or an id, the route does.
  */
-type PrepareSelector =
-  | { files: MthdsFileItem[]; resources?: TemplateFiles }
-  | { method_ref: string }
-  | { method_id: string };
+type PrepareSelector = { tree: MethodTreeSource } | { method_ref: string } | { method_id: string };
 
 function prepareSelectorOf(request: ResolvedPrepareRequest): PrepareSelector {
-  if (request.files.length > 0) {
-    return { files: toMthdsFileItems(request.files), ...resourcesOption(request.resources) };
+  if (request.tree !== undefined) {
+    return { tree: request.tree.source };
   }
   if (request.method_ref !== undefined) {
     return { method_ref: request.method_ref };
@@ -411,14 +585,19 @@ interface PrepareEnvelope {
   selector: PrepareSelector;
   pipe_ref?: string;
   inputs: Record<string, unknown>;
+  /** What the walk's uploads are recorded as, when not the platform's default. */
+  upload?: UploadMarking;
+  /** Set to `false` when a test upload's method is unknown: the walk then uploads nothing. */
+  allowUploads?: false;
 }
 
 /**
  * Hand the whole request to the SDK's `prepareInputs`, selector included. Since
- * `@pipelex/sdk` 0.17.0 that call takes `files`, `method_ref` or `method_id`,
- * and since 0.27.0 it resolves each, with the `pipe_ref` if one was named,
- * through one `POST /v1/pipe-io` for that one pipe, with no dry run — which is
- * why this repo does not expand a stored method into files before calling it.
+ * `@pipelex/sdk` 0.17.0 that call takes the method, a `method_ref` or a
+ * `method_id`, and since 0.27.0 it resolves each, with the `pipe_ref` if one
+ * was named, through one `POST /v1/pipe-io` for that one pipe, with no dry run
+ * — which is why this repo does not expand a stored method into files before
+ * calling it. The method travels as its tree, inline or by hash.
  */
 function prepareWithUpload(
   client: PrepareClient,
@@ -430,11 +609,11 @@ function prepareWithUpload(
   const base = {
     ...(envelope.pipe_ref === undefined ? {} : { pipe_ref: envelope.pipe_ref }),
     inputs: envelope.inputs,
+    ...(envelope.upload === undefined ? {} : { upload: envelope.upload }),
+    ...(envelope.allowUploads === undefined ? {} : { allowUploads: envelope.allowUploads }),
   };
-  if ("files" in envelope.selector) {
-    const { files, resources } = envelope.selector;
-    // The template files ride the files arm alone, as the SDK's XOR types them.
-    return client.prepareInputs({ ...base, files, ...resourcesOption(resources) });
+  if ("tree" in envelope.selector) {
+    return client.prepareInputs({ ...base, tree: envelope.selector.tree });
   }
   if ("method_ref" in envelope.selector) {
     return client.prepareInputs({ ...base, method_ref: envelope.selector.method_ref });
@@ -443,7 +622,9 @@ function prepareWithUpload(
 }
 
 export function validatePrepareInputsRequest(input: ResolvedPrepareRequest): ToolError[] {
-  const errors = validateMethodSelectorRequest(input.files, input, { rule: "one_selector" });
+  const errors = validateMethodSelectorRequest(input.tree !== undefined, input, {
+    rule: "one_selector",
+  });
 
   if (input.pipe_ref !== undefined && input.pipe_ref.trim() === "") {
     errors.push({
@@ -495,8 +676,13 @@ function pipeRefRefusal(pipeRef: string): ToolError | undefined {
 export function prepareInputsResult(
   prepared: PreparedInputs,
   pipeRef: string | undefined,
+  marking: { kind?: UploadKind; upload?: UploadMarking } = {},
 ): PrepareResult {
   const uploads = prepared.uploads.map((record) => record.uri);
+  // Named only when a test file was recorded: inputs that are all addresses
+  // upload nothing, and then no file belongs to the method.
+  const testMethodId =
+    marking.upload?.kind === "test" && uploads.length > 0 ? marking.upload.method_id : undefined;
   return {
     structuredContent: {
       status: "ok",
@@ -504,8 +690,10 @@ export function prepareInputsResult(
       ...(pipeRef === undefined ? {} : { pipe_ref: pipeRef }),
       inputs: prepared.inputs,
       uploads,
+      ...(marking.kind === undefined ? {} : { kind: marking.kind }),
+      ...(testMethodId === undefined ? {} : { test_method_id: testMethodId }),
     },
-    summary: prepareSummary(pipeRef, prepared.inputs, uploads),
+    summary: prepareSummary(pipeRef, prepared.inputs, uploads, testMethodId),
   };
 }
 
@@ -518,15 +706,18 @@ function prepareSummary(
   pipeRef: string | undefined,
   inputs: Record<string, unknown>,
   uploads: string[],
+  testMethodId: string | undefined,
 ): string {
   const parts = ["# Prepared inputs"];
   if (pipeRef !== undefined) {
     parts.push(`Resolved pipe: \`${pipeRef}\``);
   }
+  const recorded =
+    testMethodId === undefined ? "" : `, recorded as test files of \`${testMethodId}\``;
   parts.push(
     uploads.length === 0
       ? "No assets required uploading — all inputs pass through unchanged. Hand these inputs to `mthds_run`."
-      : `Uploaded ${uploads.length} asset(s) to Pipelex storage (rewritten to \`pipelex-storage://\` references). Hand these inputs to \`mthds_run\`.`,
+      : `Uploaded ${uploads.length} asset(s) to Pipelex storage${recorded} (rewritten to \`pipelex-storage://\` references). Hand these inputs to \`mthds_run\`.`,
   );
   parts.push("```json\n" + JSON.stringify(inputs, null, 2) + "\n```");
   return parts.join("\n\n");
@@ -539,6 +730,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   paywall:
     "Inputs could not be prepared: the organization's Pipelex plan does not cover this call.",
   auth: "Inputs could not be prepared: the Pipelex API key is missing or was refused.",
+  role: "Inputs could not be prepared: your role in this organization does not allow this.",
 };
 
 function summaryForError(error: ToolError): string {
@@ -555,17 +747,6 @@ export function prepareInputsToolResult(result: PrepareResult) {
     ),
     isError: result.structuredContent.status === "error",
   };
-}
-
-// The MCP surface spells the provenance label `uri` (mirroring mthds_validate);
-// the SDK's build envelope spells it `source` (`MthdsFileItem`). Adapt here.
-function toMthdsFileItems(files: SubmittedFile[]): MthdsFileItem[] {
-  return files.map((file) => {
-    if (file.uri === undefined || file.uri === null) {
-      return { content: file.content };
-    }
-    return { content: file.content, source: file.uri };
-  });
 }
 
 function errorResult(summary: string, errors: ToolError[]): PrepareResult {

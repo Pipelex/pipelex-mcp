@@ -8,7 +8,8 @@ paths:
   - "src/capabilities/catalog-write.ts"
   - "src/capabilities/catalog-link.ts"
   - "src/files.ts"
-  - "src/method-tree.ts"
+  - "src/capabilities/method-tree.ts"
+  - "src/capabilities/secret-guard.ts"
 ---
 
 # The workshop's filesystem boundaries
@@ -41,6 +42,6 @@ Above that the rules are **inverted, deliberately**, so never write one shared "
 
 `src/files.ts` rejects any path whose extension the argument is not contracted to **before touching the filesystem**, so a prompt-injected `.env`, `.git/config` or key path is never opened; it enforces real-path containment, and it reports every failure as a `FileResolution` value, never a throw. Keep all three gates on the submitted items, ahead of any read.
 
-A method folder is decided on `src/method-tree.ts`'s listing before any read, which stays self-contained for its swap to `mthds-js`.
+A method folder is decided on `capabilities/method-tree.ts`'s listing, the standard's rule through `mthds`, before any read.
 
 The writers have no injected write seam on purpose: a real `mkdtemp` directory is the better test double, so their tests run against real temp trees.

@@ -1,5 +1,4 @@
 import type {
-  MthdsFileItem,
   PipeIORequest,
   PipeIOResponse,
   PipeIOValidReport,
@@ -21,20 +20,19 @@ import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./m
 import {
   METHOD_REF_GRAMMAR,
   buildApiConfig,
-  bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
   filesSentSchema,
-  hasTemplateFiles,
   methodDirInputSchema,
-  resolveMethodFiles,
-  resourcesOption,
+  methodFilesInputSchema,
+  resolveMethodSource,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
   withFilesSent,
   failedBeforeSending,
+  treeSentInlineHeavy,
   markUnsent,
 } from "./shared.js";
 import type {
@@ -44,11 +42,12 @@ import type {
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
-  SubmittedFile,
+  MethodTreeToSend,
   SubmittedFileInput,
   ToolError,
 } from "./shared.js";
-import type { TemplateFiles } from "./template-files.js";
+import { methodTreeLimitsOf } from "./tree-limits.js";
+import type { TreeLimitsAware } from "./tree-limits.js";
 
 /**
  * `mthds_inputs_template` — the workshop's fill-in template for one pipe's
@@ -69,7 +68,7 @@ export type InputsTemplateFormat = z.infer<typeof inputsTemplateFormatSchema>;
 
 export const mthdsInputsInputSchema = {
   method_dir: methodDirInputSchema("one_selector"),
-  files: bundleFilesInputSchema.optional(),
+  files: methodFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
@@ -136,11 +135,10 @@ export interface MthdsInputsInput {
   format?: InputsTemplateFormat;
 }
 
-/** The inputs request after `{ path }` resolution — what the checks and the API call consume. */
+/** The inputs request once its method is resolved — what the checks and the API call consume. */
 interface ResolvedInputsRequest {
-  files: SubmittedFile[];
-  /** The bundle's template files, keyed by the path a step names; sent beside `files` only. */
-  resources?: TemplateFiles;
+  /** The method's tree, from `method_dir` or `files`. */
+  tree?: MethodTreeToSend;
   method_ref?: string;
   method_id?: string;
   pipe_ref?: string;
@@ -158,7 +156,7 @@ export interface InputsStructuredContent {
   inputs_toml?: string;
   /** By-id calls only: the content the template was projected from, when this server can tell. */
   method_version?: MethodVersionReport;
-  /** Calls on a method folder only: every file read from it and sent. */
+  /** Calls on a tree, from `method_dir` or `files`: every file sent. */
   files_sent?: string[];
   validation_errors?: unknown[];
   errors?: ToolError[];
@@ -182,7 +180,7 @@ interface InputsClient {
   version?(): Promise<unknown>;
 }
 
-export interface InputsContext extends ApiConfig, MethodVersionsAware {
+export interface InputsContext extends ApiConfig, MethodVersionsAware, TreeLimitsAware {
   client?: InputsClient;
   /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
@@ -211,16 +209,16 @@ const INPUTS_SELECTION_TEXTURE: NonNullable<ClassifyErrorOptions["selection"]> =
 };
 
 /**
- * Classify options for a files-shaped request. With the selection refusals
- * typed and located at `pipe_ref`, a bare `400`/`422` from the route is the
- * request itself: too many files, or one over the size limit.
+ * Classify options for a tree-shaped request. With the selection refusals
+ * typed and located at `pipe_ref`, and the refusals of the tree itself read
+ * by `classifyError`, a bare `400`/`422` from the route is the request's.
  */
 const INPUTS_BY_FILES_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: INPUTS_ROUTE,
   methodLocation: "files",
   badRequest: {
     location: "files",
-    hint: "Check the submitted files against the route's limits on their number and size, and pass pipe_ref, when you name one, as a qualified domain.pipe_code.",
+    hint: "Check the method's files, and pass pipe_ref, when you name one, as a qualified domain.pipe_code.",
   },
   selection: INPUTS_SELECTION_TEXTURE,
 };
@@ -291,22 +289,24 @@ export async function buildMthdsInputs(
   input: MthdsInputsInput,
   context: InputsContext = buildInputsContext(),
 ): Promise<InputsResult> {
-  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector");
+  const resolution = await resolveMethodSource(input, context.resolver, "one_selector", () =>
+    methodTreeLimitsOf(context, () => inputsClient(context)),
+  );
   if (resolution.errors.length > 0) {
     return errorResult("Inputs template was not run: request input is invalid.", resolution.errors);
   }
 
+  const { method_dir: _methodDir, files: _files, ...selection } = input;
   const request: ResolvedInputsRequest = {
-    ...input,
-    files: resolution.files,
-    resources: resolution.resources,
+    ...selection,
+    ...(resolution.tree === undefined ? {} : { tree: resolution.tree }),
   };
   const inputErrors = validateInputsRequest(request);
   if (inputErrors.length > 0) {
     return errorResult("Inputs template was not run: request input is invalid.", inputErrors);
   }
 
-  return withFilesSent(await requestInputsTemplate(request, context), resolution.sent);
+  return withFilesSent(await requestInputsTemplate(request, context), request.tree);
 }
 
 /** One `POST /v1/pipe-io` for a request that passed its checks, and the projection of its answer. */
@@ -336,12 +336,13 @@ async function requestInputsTemplate(
       ...inputsErrorOptions(request),
       auth: context.authError,
       baseUrlSource: context.baseUrlSource,
-      bundleResources: hasTemplateFiles(request.resources),
+      methodTree: request.tree !== undefined,
+      treeInline: await treeSentInlineHeavy(err, request.tree, client),
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     const failed = errorResult(summaryForError(error), [error]);
     // A client that could not be built, or an argument refused before
-    // sending, sent no file of a folder.
+    // sending, sent no file of the tree.
     return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
 
@@ -380,6 +381,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   paywall:
     "Inputs template could not start: the organization's Pipelex plan does not cover this call.",
   auth: "Inputs template could not start: the Pipelex API key is missing or was refused.",
+  role: "Inputs template could not start: your role in this organization does not allow this.",
 };
 
 function summaryForError(error: ToolError): string {
@@ -399,7 +401,9 @@ export function inputsToolResult(result: InputsResult) {
 }
 
 export function validateInputsRequest(input: ResolvedInputsRequest): ToolError[] {
-  const errors = validateMethodSelectorRequest(input.files, input, { rule: "one_selector" });
+  const errors = validateMethodSelectorRequest(input.tree !== undefined, input, {
+    rule: "one_selector",
+  });
 
   if (input.pipe_ref !== undefined && input.pipe_ref.trim() === "") {
     errors.push({
@@ -518,19 +522,8 @@ function toPipeIoRequest(input: ResolvedInputsRequest): PipeIORequest {
       ? { method_ref: input.method_ref }
       : input.method_id !== undefined
         ? { method_id: input.method_id }
-        : { files: toMthdsFileItems(input.files), ...resourcesOption(input.resources) };
+        : { tree: input.tree?.source };
   return input.pipe_ref === undefined ? selector : { ...selector, pipe_ref: input.pipe_ref };
-}
-
-// The MCP surface spells the provenance label `uri` (mirroring mthds_validate);
-// the SDK's crate envelope spells it `source` (`MthdsFileItem`). Adapt here.
-function toMthdsFileItems(files: SubmittedFile[]): MthdsFileItem[] {
-  return files.map((file) => {
-    if (file.uri === undefined || file.uri === null) {
-      return { content: file.content };
-    }
-    return { content: file.content, source: file.uri };
-  });
 }
 
 function errorResult(summary: string, errors: ToolError[]): InputsResult {

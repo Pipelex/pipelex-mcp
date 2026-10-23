@@ -13,6 +13,7 @@
 
 export const WORKSHOP_TOOL_NAMES = {
   listMethods: "mthds_list_methods",
+  listFiles: "mthds_list_files",
   validate: "mthds_validate",
   inputsTemplate: "mthds_inputs_template",
   codegen: "mthds_codegen",

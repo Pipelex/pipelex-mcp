@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import {
   asOneLine,
+  boundCodePoints,
   buildApiConfig,
   classifyError,
   createPipelexApiClient,
@@ -291,14 +292,6 @@ function projectRow(row: ValidatedRow): CatalogMethod {
   };
 }
 
-function boundCodePoints(value: string, limit: number): { value: string; truncated: boolean } {
-  const codePoints = Array.from(value);
-  return {
-    value: codePoints.slice(0, limit).join(""),
-    truncated: codePoints.length > limit,
-  };
-}
-
 /**
  * The listing's presentation is decided HERE, not by the model's taste.
  *
@@ -407,6 +400,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   paywall:
     "Method catalog could not be listed: the organization's Pipelex plan does not cover this call.",
   auth: "Method catalog could not be listed: the Pipelex API key is missing or was refused.",
+  role: "Method catalog could not be listed: your role in this organization does not allow this.",
 };
 
 function summaryForError(error: ToolError): string {

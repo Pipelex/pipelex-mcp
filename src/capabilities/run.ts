@@ -10,6 +10,7 @@ import type {
   PipelexRunResultStart,
   PipelexStartOptions,
   PipeUsageSummary,
+  RunProgress,
   RunRead,
   RunResultArtifact,
   RunResults,
@@ -38,17 +39,15 @@ import {
   MAX_IMAGE_CANDIDATE_ENTRIES,
   METHOD_REF_GRAMMAR,
   buildApiConfig,
-  bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
   filesSentSchema,
   imageCandidatesOf,
   inputsPathSchema,
   methodDirInputSchema,
+  methodFilesInputSchema,
   resolveInputsSource,
-  hasTemplateFiles,
-  resolveMethodFiles,
-  resourcesOption,
+  resolveMethodSource,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
@@ -56,6 +55,8 @@ import {
   validateRunIdRequest,
   withFilesSent,
   failedBeforeSending,
+  inlineTreeWeight,
+  treeShareOfTooLarge,
   markUnsent,
 } from "./shared.js";
 import type {
@@ -65,11 +66,13 @@ import type {
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
-  SubmittedFile,
+  MethodTreeToSend,
   SubmittedFileInput,
   ToolError,
+  TreeShareOfTooLarge,
 } from "./shared.js";
-import type { TemplateFiles } from "./template-files.js";
+import { methodTreeLimitsOf } from "./tree-limits.js";
+import type { TreeLimitsAware } from "./tree-limits.js";
 import {
   START_MAY_HAVE_RUN_HINT,
   START_MAY_HAVE_RUN_SUMMARY,
@@ -85,6 +88,13 @@ import {
   statusOnlyFailureMessage,
 } from "./run-failure.js";
 import type { RunFailure } from "./run-failure.js";
+import {
+  progressParagraph,
+  progressReportsStuck,
+  runProgressOf,
+  runProgressSchema,
+} from "./run-progress.js";
+import type { RunProgressProjection } from "./run-progress.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 
 /**
@@ -107,7 +117,7 @@ export const runStatusSchema = z.enum(Object.keys(RUN_STATUS_SET) as [RunStatus,
 
 export const mthdsRunInputSchema = {
   method_dir: methodDirInputSchema("run_source"),
-  files: bundleFilesInputSchema.optional(),
+  files: methodFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
@@ -285,6 +295,16 @@ const runStatusStructuredContentSchema = z.object({
   failure: runFailureSchema
     .optional()
     .describe(`Terminal statuses other than COMPLETED only. ${FAILURE_FIELD_DESCRIPTION}`),
+  progress: runProgressSchema
+    .optional()
+    .describe(
+      "The run's progress snapshot, when the platform serves one: which pipes have run, how far each batch has got, where the run is retrying or stuck, and a one-line summary.",
+    ),
+  progress_invocations_omitted: z
+    .number()
+    .int()
+    .optional()
+    .describe("How many of the snapshot's invocations progress.invocations leaves out."),
   errors: z.array(toolErrorSchema).optional(),
 });
 
@@ -396,11 +416,10 @@ export interface MthdsRunInput {
   inputs_path?: string;
 }
 
-/** The run request after `{ path }` and `inputs_path` resolution — what the checks and the API call consume. */
+/** The run request once its method and `inputs_path` are resolved — what the checks and the API call consume. */
 interface ResolvedRunRequest {
-  files: SubmittedFile[];
-  /** The bundle's template files, keyed by the path a step names; sent beside `files` only. */
-  resources?: TemplateFiles;
+  /** The method's tree, from `method_dir` or `files`. */
+  tree?: MethodTreeToSend;
   method_ref?: string;
   method_id?: string;
   pipe_code?: string;
@@ -442,6 +461,10 @@ export interface RunStatusStructuredContent {
   method_version?: number | "draft";
   /** Terminal statuses other than COMPLETED, when the run stored an error report. */
   failure?: RunFailure;
+  /** The run's progress snapshot, when the progress read that follows the status read answered. */
+  progress?: RunProgressProjection;
+  /** How many of the snapshot's invocations `progress.invocations` leaves out; absent when none. */
+  progress_invocations_omitted?: number;
   errors?: ToolError[];
 }
 
@@ -524,14 +547,15 @@ export interface RunResultsResult {
 interface RunClient {
   start(options: PipelexStartOptions): Promise<PipelexRunResultStart>;
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
+  getRunProgress(runId: string, options?: { signal?: AbortSignal }): Promise<RunProgress>;
   getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
   /** `GET /v1/version`, read only to word the hint of a refused suffix — a selector is always sent as given; optional on a test seam. */
   version?(): Promise<unknown>;
 }
 
-export interface RunContext extends ApiConfig, MethodVersionsAware {
+export interface RunContext extends ApiConfig, MethodVersionsAware, TreeLimitsAware {
   client?: RunClient;
-  /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
+  /** Reads `{ path }` items and `method_dir` from disk; the workshop always sets it, and without one both are refused. */
   resolver?: FileResolver;
   /** Reads `inputs_path` from disk (local workshop, `.json` only); without one `inputs_path` is refused. */
   inputsResolver?: FileResolver;
@@ -553,6 +577,72 @@ const START_SERVER_ERROR = {
   hint: "The hosted API reports start-time rejections (e.g. an invalid bundle or bad inputs) as a generic server error. Validate the bundle with mthds_validate and check the inputs against mthds_inputs_template; if both pass, the platform itself may be having trouble.",
 };
 
+/**
+ * A start refused as too large, a `413`, carrying inputs, when the method's
+ * tree is shown not to be what made it so: none was sent, or it travelled by
+ * hash ({@link treeShareOfTooLarge}), so the inputs riding the same body did.
+ * {@link runTooLargeTexture} picks it; it is never a route's static texture.
+ */
+const RUN_INPUTS_TOO_LARGE = {
+  location: "inputs",
+  hint: `The run's request is larger than the Pipelex API takes in one request, and the method's files are not what made it so: its inputs did. Upload large file inputs with ${WORKSHOP_TOOL_NAMES.prepareInputs}, which replaces them with pipelex-storage:// references, or pass them as URLs.`,
+};
+
+/**
+ * A start refused as too large when which part of it made it so cannot be
+ * shown: a tree rode the request inline at a weight that may or may not have,
+ * how it travelled cannot be told, or the start carried no inputs. It names
+ * both possible causes and their cures, located at no field.
+ */
+const RUN_TOO_LARGE_HINT = `The run's request is larger than the Pipelex API takes in one request, and which part of it made it so cannot be told from here: the method's files, when they travel inline, or the run's inputs. Keep what is not part of the method out of its folder with a .gitignore inside it or METHODS.toml's [package] exclude, or send fewer or smaller files; upload large file inputs with ${WORKSHOP_TOOL_NAMES.prepareInputs}, which replaces them with pipelex-storage:// references, or pass them as URLs.`;
+
+const RUN_TOO_LARGE = { hint: RUN_TOO_LARGE_HINT };
+
+/**
+ * The texture of a `413` on a start, from what can be shown of its cause. The
+ * inputs are blamed only when the start carried some and the tree is shown not
+ * to have ridden the request (`share` is `not_tree`); a tree shown to have
+ * made it so is read ahead of this, as the tree's (`treeRefusalTexture`).
+ * Otherwise the refusal names both causes, and says what was measured here:
+ * the tree's weight as it travels inline, which the SDK compares with its
+ * inline threshold, and the inputs' as JSON.
+ */
+function runTooLargeTexture(
+  share: TreeShareOfTooLarge | undefined,
+  request: ResolvedRunRequest,
+): NonNullable<ClassifyErrorOptions["tooLarge"]> {
+  const inputs = request.inputs ?? {};
+  const carriesInputs = Object.keys(inputs).length > 0;
+  if (share === "not_tree" && carriesInputs) return RUN_INPUTS_TOO_LARGE;
+  const measured: string[] = [];
+  if (request.tree !== undefined && share !== "not_tree") {
+    measured.push(`the method's files weigh ${formatSize(inlineTreeWeight(request.tree))} inline`);
+  }
+  if (!carriesInputs) {
+    measured.push("the run carries no inputs");
+  } else {
+    const weight = jsonWeight(inputs);
+    if (weight !== undefined) measured.push(`its inputs weigh ${formatSize(weight)} as JSON`);
+  }
+  return { hint: `${RUN_TOO_LARGE_HINT} Measured here, ${measured.join(", and ")}.` };
+}
+
+/** A value's weight as a request carries it: its JSON, in UTF-8 bytes, or `undefined` when it has none. */
+function jsonWeight(value: unknown): number | undefined {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+/** A size in the unit that reads best: KiB below a mebibyte, MiB above. */
+function formatSize(bytes: number): string {
+  return bytes < 1024 * 1024
+    ? `${(bytes / 1024).toFixed(1)} KiB`
+    : `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
 export const RUN_START_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/start",
   methodLocation: "files",
@@ -560,6 +650,7 @@ export const RUN_START_ERROR_OPTIONS: ClassifyErrorOptions = {
     location: "files",
     hint: "Check files, pipe_code, and inputs; validate the bundle with mthds_validate and fill the template from mthds_inputs_template first.",
   },
+  tooLarge: RUN_TOO_LARGE,
   serverError: START_SERVER_ERROR,
 };
 
@@ -582,6 +673,7 @@ export const RUN_START_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
     location: "method_id",
     hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.",
   },
+  tooLarge: RUN_TOO_LARGE,
   serverError: START_SERVER_ERROR,
 };
 
@@ -598,6 +690,7 @@ export const RUN_START_MIXED_ERROR_OPTIONS: ClassifyErrorOptions = {
   methodLocation: "files",
   badRequest: RUN_START_ERROR_OPTIONS.badRequest,
   notFound: RUN_START_BY_ID_ERROR_OPTIONS.notFound,
+  tooLarge: RUN_TOO_LARGE,
   serverError: START_SERVER_ERROR,
 };
 
@@ -625,6 +718,7 @@ export const RUN_START_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
     location: "method_ref",
     hint: `Only address-form refs are supported (${METHOD_REF_GRAMMAR}); registry references are reserved until a method registry exists.`,
   },
+  tooLarge: RUN_TOO_LARGE,
   serverError: START_SERVER_ERROR,
 };
 
@@ -655,7 +749,9 @@ export const RUN_RESULTS_ERROR_OPTIONS: ClassifyErrorOptions = {
 export function validateRunRequest(input: ResolvedRunRequest): ToolError[] {
   // The run rule: files + method_id is a legal pair (linkage), while
   // method_ref pairs with nothing — see SPEC.md → Method Selectors.
-  const errors = validateMethodSelectorRequest(input.files, input, { rule: "run_source" });
+  const errors = validateMethodSelectorRequest(input.tree !== undefined, input, {
+    rule: "run_source",
+  });
 
   if (input.pipe_code !== undefined && input.pipe_code.trim() === "") {
     errors.push({
@@ -917,18 +1013,24 @@ export function startResult(
 }
 
 /**
- * Project a self-healing status read. A terminal non-COMPLETED status is a
- * produced verdict, and it carries why the run ended: the status read is where
- * the platform serves the run's stored error report (`RunRead.error`), so the
+ * Project a self-healing status read, with the progress snapshot read after it
+ * when that read answered. A terminal non-COMPLETED status is a produced
+ * verdict, and it carries why the run ended: the status read is where the
+ * platform serves the run's stored error report (`RunRead.error`), so the
  * `failure` object and the summary's sentences come from it. A read whose report
- * is `null` or malformed carries the status alone, and the summary says so.
+ * is `null` or malformed carries the status alone, and the summary says so. The
+ * snapshot, when there is one the projection can read, rides as `progress` and
+ * its summary as a paragraph of its own right after the status (see
+ * `run-progress.ts`).
  */
-export function statusResult(read: RunRead): RunStatusResult {
+export function statusResult(read: RunRead, snapshot?: RunProgress): RunStatusResult {
   const isTerminal = isTerminalRunStatus(read.status);
   const ended = isTerminal && read.status !== "COMPLETED";
   const failure = ended
     ? runFailureOf(read.pipeline_run_id, read.error, read.finished_at)
     : undefined;
+  const projected = snapshot === undefined ? undefined : runProgressOf(snapshot);
+  const progress = projected?.progress;
   // A hosted extension, narrowed rather than trusted like the ack's.
   const methodVersion =
     read.method_version === "draft" ||
@@ -951,15 +1053,20 @@ export function statusResult(read: RunRead): RunStatusResult {
     ...(read.finished_at === undefined ? {} : { finished_at: read.finished_at }),
     ...(methodVersion === undefined ? {} : { method_version: methodVersion }),
     ...(failure === undefined ? {} : { failure }),
+    ...(progress === undefined ? {} : { progress }),
+    ...(projected === undefined || projected.omitted === 0
+      ? {}
+      : { progress_invocations_omitted: projected.omitted }),
   };
 
-  return { structuredContent, summary: statusSummary(read, isTerminal, failure) };
+  return { structuredContent, summary: statusSummary(read, isTerminal, failure, progress) };
 }
 
 function statusSummary(
   read: RunRead,
   isTerminal: boolean,
   failure: RunFailure | undefined,
+  progress: RunProgressProjection | undefined,
 ): string {
   const lines: string[] = [];
 
@@ -978,13 +1085,35 @@ function statusSummary(
     );
   }
 
-  if (read.degraded) {
+  if (progress !== undefined) lines.push(progressParagraph(progress));
+
+  if (reassuresDegradedRead(read, progress)) {
     lines.push(
       "Note: this status is the last-known value — the platform's live view was temporarily unreachable. The run itself is unaffected.",
     );
   }
 
   return lines.join("\n\n");
+}
+
+/**
+ * Whether a degraded read gets the reassurance that its status is the last one
+ * recorded and that the run itself is unaffected. That holds only when the
+ * platform could not read the run (`status_unavailable`, or no degradation, which
+ * is how a platform older than it says the same), and never beside a progress
+ * snapshot that reports the run stuck, which a read made a moment later can do.
+ * A run whose workflow task keeps failing (`workflow_task_failing`), or degraded
+ * for a reason this server does not know, is not reassured, since the progress
+ * paragraph's own clause says it is not progressing: whatever this summary says
+ * of a degradation must agree with that clause.
+ */
+function reassuresDegradedRead(
+  read: RunRead,
+  progress: RunProgressProjection | undefined,
+): boolean {
+  if (!read.degraded) return false;
+  const reason = read.degradation?.reason ?? "status_unavailable";
+  return reason === "status_unavailable" && !progressReportsStuck(progress);
 }
 
 /**
@@ -1276,6 +1405,43 @@ export async function readFailedRun(
   runId: string,
   timeoutMs: number = FAILED_RUN_READ_TIMEOUT_MS,
 ): Promise<RunRead | undefined> {
+  return readWithinDeadline((signal) => client.getRunStatus(runId, { signal }), timeoutMs);
+}
+
+/**
+ * How long the progress read after a status read may take before the status
+ * goes out without it. Far under the SDK's own 30 s poll timeout, since the
+ * progress only adds to a status already in hand.
+ */
+export const PROGRESS_READ_TIMEOUT_MS = 5_000;
+
+/**
+ * The one progress read that follows a status read, `GET /v1/runs/{id}/progress`.
+ * Best effort: a read that fails for any reason, a server older than the route
+ * (`RunLifecycleUnavailableError`) and an answer the SDK cannot read among them,
+ * or that takes longer than `timeoutMs`, gives no snapshot, and the status goes
+ * out without one, never as an error.
+ */
+export async function readRunProgress(
+  client: {
+    getRunProgress(runId: string, options?: { signal?: AbortSignal }): Promise<RunProgress>;
+  },
+  runId: string,
+  timeoutMs: number = PROGRESS_READ_TIMEOUT_MS,
+): Promise<RunProgress | undefined> {
+  return readWithinDeadline((signal) => client.getRunProgress(runId, { signal }), timeoutMs);
+}
+
+/**
+ * One read that adds to an answer already in hand: its value, or `undefined`
+ * when it fails or takes longer than `timeoutMs`. The deadline both aborts the
+ * request and stops waiting for it, so a client that ignores the signal cannot
+ * hold the answer either.
+ */
+async function readWithinDeadline<T>(
+  read: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+): Promise<T | undefined> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<undefined>((resolve) => {
@@ -1285,10 +1451,7 @@ export async function readFailedRun(
     }, timeoutMs);
   });
   try {
-    return await Promise.race([
-      client.getRunStatus(runId, { signal: controller.signal }),
-      deadline,
-    ]);
+    return await Promise.race([read(controller.signal), deadline]);
   } catch {
     return undefined;
   } finally {
@@ -1307,7 +1470,9 @@ export async function startMthdsRun(
   input: MthdsRunInput,
   context: RunContext = buildRunContext(),
 ): Promise<RunStartResult> {
-  const resolution = await resolveMethodFiles(input, context.resolver, "run_source");
+  const resolution = await resolveMethodSource(input, context.resolver, "run_source", () =>
+    methodTreeLimitsOf(context, () => runClient(context)),
+  );
   const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
     required: false,
   });
@@ -1318,11 +1483,16 @@ export async function startMthdsRun(
 
   // `inputs_path` is settled into `inputs` here and goes no further: the start
   // request cannot tell a loaded file from an inline object.
-  const { inputs_path: _inputsPath, inputs: _inlineInputs, ...selection } = input;
+  const {
+    inputs_path: _inputsPath,
+    inputs: _inlineInputs,
+    method_dir: _methodDir,
+    files: _files,
+    ...selection
+  } = input;
   const request: ResolvedRunRequest = {
     ...selection,
-    files: resolution.files,
-    resources: resolution.resources,
+    ...(resolution.tree === undefined ? {} : { tree: resolution.tree }),
     ...(inputsResolution.inputs === undefined ? {} : { inputs: inputsResolution.inputs }),
   };
   const inputErrors = validateRunRequest(request);
@@ -1339,14 +1509,14 @@ export async function startMthdsRun(
       ? RUN_START_BY_REF_ERROR_OPTIONS
       : request.method_id === undefined
         ? RUN_START_ERROR_OPTIONS
-        : request.files.length === 0
+        : request.tree === undefined
           ? RUN_START_BY_ID_ERROR_OPTIONS
           : RUN_START_MIXED_ERROR_OPTIONS;
 
   // Beside files, method_id is linkage only and must be bare; alone, it names
   // what runs, and its selector is planned against the platform's answer
   // (`method-versions.ts`).
-  if (request.method_id !== undefined && request.files.length > 0) {
+  if (request.method_id !== undefined && request.tree !== undefined) {
     const linkageError = linkageSuffixError(
       request.method_id,
       input.method_dir === undefined ? "files" : "method_dir",
@@ -1356,7 +1526,7 @@ export async function startMthdsRun(
     }
   }
 
-  return withFilesSent(await requestRunStart(request, classifyOptions, context), resolution.sent);
+  return withFilesSent(await requestRunStart(request, classifyOptions, context), request.tree);
 }
 
 /** One `POST /v1/start` for a request that passed its checks, and its acknowledgement's projection. */
@@ -1370,7 +1540,7 @@ async function requestRunStart(
   try {
     client = runClient(context);
     let sent = request;
-    if (request.method_id !== undefined && request.files.length === 0) {
+    if (request.method_id !== undefined && request.tree === undefined) {
       plan = planById(request.method_id, methodVersionsOf(context), client, {
         needBareReport: false,
       });
@@ -1387,16 +1557,22 @@ async function requestRunStart(
     else if (content.disproved) forgetMethodVersionsSupported(methodVersionsOf(context));
     return startResult(ack, content);
   } catch (err) {
+    // What the tree had to do with a 413, asked once: a tree shown to have
+    // made the start too large is the tree's refusal, and only a tree shown
+    // not to have ridden it lets the inputs take the blame.
+    const share = await treeShareOfTooLarge(err, request.tree, client);
     const classified = classifyStartError(err, {
       ...classifyOptions,
+      ...(share === undefined ? {} : { tooLarge: runTooLargeTexture(share, request) }),
       auth: context.authError,
       baseUrlSource: context.baseUrlSource,
-      bundleResources: hasTemplateFiles(request.resources),
+      methodTree: request.tree !== undefined,
+      treeInline: share === "tree",
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
     const failed = startErrorResult(startSummaryForError(error), [error]);
     // A client that could not be built, or an argument refused before
-    // sending, sent no file of a folder.
+    // sending, sent no file of the tree.
     return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
 }
@@ -1429,7 +1605,12 @@ export function classifyStartError(err: unknown, options: ClassifyErrorOptions):
   return { ...error, retryable: false, hint: START_MAY_HAVE_RUN_HINT };
 }
 
-/** One cheap self-healing status read — `GET /v1/runs/{id}/status`. */
+/**
+ * One cheap self-healing status read — `GET /v1/runs/{id}/status` — then one
+ * best-effort read of the run's progress, `GET /v1/runs/{id}/progress`, whatever
+ * the status: the progress only adds to the status, so its failure leaves the
+ * status to go out alone (`readRunProgress`).
+ */
 export async function getMthdsRunStatus(
   input: RunIdInput,
   context: RunContext = buildRunContext(),
@@ -1440,8 +1621,10 @@ export async function getMthdsRunStatus(
   }
 
   try {
-    const read = await runClient(context).getRunStatus(input.run_id);
-    return statusResult(read);
+    const client = runClient(context);
+    const read = await client.getRunStatus(input.run_id);
+    const progress = await readRunProgress(client, read.pipeline_run_id);
+    return statusResult(read, progress);
   } catch (err) {
     const error = classifyError(err, {
       ...RUN_STATUS_ERROR_OPTIONS,
@@ -1510,26 +1693,19 @@ export async function getMthdsRunResults(
   }
 }
 
-// `/v1/start` takes no source labels — the MCP surface's `uri` feeds only our
-// own request-shape errors, so only the contents cross the wire. `method_id` is
-// a NAMED option (`PipelexStartOptions`), not an `extra` extension arg: since
+// The method's tree travels whole, inline or by hash, the files the
+// organization's storage lacks uploaded first by the SDK. `method_id` is a
+// NAMED option (`PipelexStartOptions`), not an `extra` extension arg: since
 // @pipelex/sdk 0.14.0 the client names it itself and refuses it on `extra`,
 // which merges last into the body and would let one argument arrive by two
 // paths with different validation. That refusal is a runtime throw rather than
 // a type error, so the old `extra: { method_id }` shape compiled and failed
 // only against the live API. The meaning is unchanged: alone it resolves the
-// stored method server-side; beside files it becomes the run-history linkage
-// while the inline contents are what runs.
+// stored method server-side; beside a tree it becomes the run-history linkage
+// while the tree is what runs.
 function toStartOptions(input: ResolvedRunRequest): PipelexStartOptions {
   return {
-    ...(input.files.length === 0
-      ? {}
-      : {
-          mthds_contents: input.files.map((file) => file.content),
-          // The template files the bundle's steps read, which the runner
-          // loads with the contents; they never travel without them.
-          ...resourcesOption(input.resources),
-        }),
+    ...(input.tree === undefined ? {} : { tree: input.tree.source }),
     ...(input.pipe_code === undefined ? {} : { pipe_code: input.pipe_code }),
     ...(input.inputs === undefined ? {} : { inputs: input.inputs }),
     // `method_ref` is the SDK's named Pipelex-API run-source extension
@@ -1547,6 +1723,7 @@ const START_ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Run could not be started: the Pipelex API returned an error.",
   paywall: "Run could not start: the organization's Pipelex plan does not cover this call.",
   auth: "Run could not start: the Pipelex API key is missing or was refused.",
+  role: "Run could not start: your role in this organization does not allow this.",
 };
 
 const STATUS_ERROR_SUMMARIES: ErrorSummaries = {
@@ -1556,6 +1733,7 @@ const STATUS_ERROR_SUMMARIES: ErrorSummaries = {
   paywall:
     "Run status could not be read: the organization's Pipelex plan does not cover this call.",
   auth: "Run status could not be read: the Pipelex API key is missing or was refused.",
+  role: "Run status could not be read: your role in this organization does not allow this.",
 };
 
 const RESULTS_ERROR_SUMMARIES: ErrorSummaries = {
@@ -1565,6 +1743,7 @@ const RESULTS_ERROR_SUMMARIES: ErrorSummaries = {
   paywall:
     "Run results could not be read: the organization's Pipelex plan does not cover this call.",
   auth: "Run results could not be read: the Pipelex API key is missing or was refused.",
+  role: "Run results could not be read: your role in this organization does not allow this.",
 };
 
 function startSummaryForError(error: ToolError): string {

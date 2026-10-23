@@ -53,7 +53,7 @@ export const mthdsPublishMethodInputSchema = {
     .string()
     .min(1)
     .describe(
-      `The draft token you last saw: the updated_at your last ${WORKSHOP_TOOL_NAMES.saveMethod} of this method, or your last ${WORKSHOP_TOOL_NAMES.getMethod} of its draft, reported, or pipelex-method.json's synced_updated_at when it records no synced_version. A read of a version reports the draft's token without its content, so never publish under that one. A draft that moved since is refused and nothing is published.`,
+      `The draft token you last saw: the updated_at your last ${WORKSHOP_TOOL_NAMES.saveMethod} of this method, or your last ${WORKSHOP_TOOL_NAMES.getMethod} of its draft, reported, or .pipelex/method.json's synced_updated_at when it records no synced_version. A read of a version reports the draft's token without its content, so never publish under that one. A draft that moved since is refused and nothing is published.`,
     ),
 };
 
@@ -166,6 +166,7 @@ const PUBLISH_ERROR_SUMMARIES: ErrorSummaries = {
   paywall:
     "The method was not published: the organization's Pipelex plan does not cover this call.",
   auth: "The method was not published: the Pipelex API key is missing or was refused.",
+  role: "The method was not published: your role in this organization does not allow this.",
 };
 
 export async function publishMthdsMethod(

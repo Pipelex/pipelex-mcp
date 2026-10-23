@@ -16,8 +16,16 @@ import {
   validateInputsRequest,
 } from "./inputs.js";
 import type { InputsContext } from "./inputs.js";
+import { comparableRequest, contentsOf, fakeMethodResolver } from "./method-tree-fixtures.js";
 import { DEFAULT_API_URL } from "./shared.js";
-import type { FileResolver } from "./shared.js";
+import type { MethodTreeToSend } from "./shared.js";
+
+/** A tree in hand, for the request checks, which only ask whether one is there. */
+const A_TREE: MethodTreeToSend = {
+  source: { files: [], digest: "", readFile: () => Promise.reject(new Error("never read")) },
+  files: [],
+  fromFolder: false,
+};
 
 /** One declared input, a `Text` named `question`, on the pipe the route selected. */
 const demoInputForm: InputForm = {
@@ -245,17 +253,14 @@ describe("inputsToolResult", () => {
 });
 
 describe("validateInputsRequest", () => {
-  it("inherits the shared files checks", () => {
-    const errors = validateInputsRequest({ files: [] });
+  it("inherits the shared selector checks", () => {
+    const errors = validateInputsRequest({});
 
     expect(errors.map((error) => error.location)).toEqual(["files"]);
   });
 
   it("rejects a blank pipe_ref", () => {
-    const errors = validateInputsRequest({
-      files: [{ content: 'domain = "demo"' }],
-      pipe_ref: "  ",
-    });
+    const errors = validateInputsRequest({ tree: A_TREE, pipe_ref: "  " });
 
     expect(errors).toHaveLength(1);
     expect(errors[0]?.class).toBe("input_domain");
@@ -263,29 +268,26 @@ describe("validateInputsRequest", () => {
   });
 
   it("accepts a qualified pipe_ref", () => {
-    const errors = validateInputsRequest({
-      files: [{ content: 'domain = "demo"' }],
-      pipe_ref: "demo.main",
-    });
+    const errors = validateInputsRequest({ tree: A_TREE, pipe_ref: "demo.main" });
 
     expect(errors).toEqual([]);
   });
 
-  it("accepts a method_id with no files", () => {
-    const errors = validateInputsRequest({ files: [], method_id: "mt_123" });
+  it("accepts a method_id with no tree", () => {
+    const errors = validateInputsRequest({ method_id: "mt_123" });
 
     expect(errors).toEqual([]);
   });
 
   it("rejects a blank method_id", () => {
-    const errors = validateInputsRequest({ files: [], method_id: "  " });
+    const errors = validateInputsRequest({ method_id: "  " });
 
     expect(errors.map((error) => error.location)).toContain("method_id");
   });
 });
 
 describe("buildMthdsInputs by files", () => {
-  it("posts the files to pipe-io, adapting uri to source, and projects the template", async () => {
+  it("posts the files to pipe-io as one tree, and projects the template", async () => {
     const requests: PipeIORequest[] = [];
 
     const result = await buildMthdsInputs(
@@ -298,17 +300,15 @@ describe("buildMthdsInputs by files", () => {
       contextWith(validReport, requests),
     );
 
-    // One call. The MCP surface spells provenance `uri`; the crate envelope
-    // spells it `source`. No pipe_ref, so the route's selection chain decides,
-    // and nothing template-shaped travels: the projection is client-side.
-    expect(requests).toEqual([
-      {
-        files: [
-          { content: 'domain = "demo"', source: "bundle.mthds" },
-          { content: 'main_pipe = "main"' },
-        ],
-      },
-    ]);
+    // One call, with the files as a tree: the first under its uri's name, the
+    // second under the next free one. No pipe_ref, so the route's selection
+    // chain decides, and nothing template-shaped travels: the projection is
+    // client-side.
+    expect(requests).toHaveLength(1);
+    expect(await comparableRequest(requests[0])).toEqual({
+      tree: { "bundle.mthds": 'domain = "demo"', "bundle-2.mthds": 'main_pipe = "main"' },
+    });
+    expect(result.structuredContent.files_sent).toEqual(["bundle-2.mthds", "bundle.mthds"]);
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.format).toBe("json");
     expect(result.structuredContent.explicit).toBe(true);
@@ -330,7 +330,10 @@ describe("buildMthdsInputs by files", () => {
       contextWith(validReport, requests),
     );
 
-    expect(requests).toEqual([{ files: [{ content: 'domain = "demo"' }], pipe_ref: "demo.main" }]);
+    expect(await comparableRequest(requests[0])).toEqual({
+      tree: { "bundle.mthds": 'domain = "demo"' },
+      pipe_ref: "demo.main",
+    });
     expect(result.structuredContent.format).toBe("toml");
     expect(result.structuredContent.explicit).toBe(false);
     expect(result.structuredContent.inputs_toml).toContain('question = "text_value"');
@@ -458,30 +461,7 @@ describe("buildMthdsInputs refused pipe selections", () => {
 });
 
 describe("buildMthdsInputs path submissions", () => {
-  it("resolves { path } items through the context resolver, with the path as source", async () => {
-    const requests: PipeIORequest[] = [];
-
-    const result = await buildMthdsInputs(
-      { files: [{ path: "methods/bundle.mthds" }] },
-      {
-        ...contextWith(validReport, requests),
-        resolver: {
-          async resolve(path) {
-            return { ok: true, content: 'domain = "demo"' + `\n# ${path}` };
-          },
-        },
-      },
-    );
-
-    // The resolved uri (= the submitted path) crosses into the crate
-    // envelope's `source` label, so diagnostics locate to the real file.
-    expect(requests[0]?.files).toEqual([
-      { content: 'domain = "demo"\n# methods/bundle.mthds', source: "methods/bundle.mthds" },
-    ]);
-    expect(result.structuredContent.status).toBe("ok");
-  });
-
-  it("sends a bundle's template files as resources beside the files", async () => {
+  it("reads { path } items through the context resolver and sends them as one tree", async () => {
     const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
     const requests: PipeIORequest[] = [];
 
@@ -489,60 +469,71 @@ describe("buildMthdsInputs path submissions", () => {
       { files: [{ path: "methods/invoice.mthds" }, { path: "methods/templates/invoice.xlsx" }] },
       {
         ...contextWith(validReport, requests),
-        resolver: {
-          async resolve() {
-            return { ok: true, content: 'domain = "invoice"' };
+        resolver: fakeMethodResolver({
+          files: {
+            "methods/invoice.mthds": 'domain = "invoice"',
+            "methods/templates/invoice.xlsx": XLSX,
           },
-          async resolveTemplates(templates, bundle, requestBytes) {
-            expect(templates).toEqual([{ index: 1, path: "methods/templates/invoice.xlsx" }]);
-            expect(bundle).toEqual([{ path: "methods/invoice.mthds", named: [] }]);
-            expect(requestBytes).toBe('domain = "invoice"'.length);
-            return { ok: true, resources: { "templates/invoice.xlsx": XLSX } };
-          },
-        },
+        }),
       },
     );
 
-    expect(requests[0]?.files).toEqual([
-      { content: 'domain = "invoice"', source: "methods/invoice.mthds" },
+    // Each file under its path from the deepest directory holding them all,
+    // which is where the step's template_file leads.
+    expect(requests[0]?.tree?.files.map((file) => file.path)).toEqual([
+      "invoice.mthds",
+      "templates/invoice.xlsx",
     ]);
-    expect(requests[0]?.resources).toEqual({ "templates/invoice.xlsx": XLSX });
-    expect(result.structuredContent.status).toBe("ok");
+    expect(await requests[0]?.tree?.readFile("templates/invoice.xlsx")).toEqual(XLSX);
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      files_sent: ["methods/invoice.mthds", "methods/templates/invoice.xlsx"],
+    });
   });
 
   it("reads a method folder through the resolver and lists every file it sent", async () => {
-    const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
     const requests: PipeIORequest[] = [];
 
     const result = await buildMthdsInputs(
       { method_dir: "methods" },
-      {
-        ...contextWith(validReport, requests),
-        resolver: {
-          async resolve() {
-            throw new Error("a folder is not read file by file");
-          },
-          async resolveMethodDir(methodDir) {
-            return {
-              ok: true,
-              files: [{ path: `${methodDir}/invoice.mthds`, content: 'domain = "invoice"' }],
-              resources: { "templates/invoice.xlsx": XLSX },
-              sent: [`${methodDir}/invoice.mthds`, `${methodDir}/templates/invoice.xlsx`],
-            };
-          },
-        },
-      },
+      { ...contextWith(validReport, requests), resolver: methodFolderResolver() },
     );
 
-    expect(requests[0]?.files).toEqual([
-      { content: 'domain = "invoice"', source: "methods/invoice.mthds" },
-    ]);
-    expect(requests[0]?.resources).toEqual({ "templates/invoice.xlsx": XLSX });
+    expect(await contentsOf(requests[0]?.tree)).toEqual({
+      "invoice.mthds": 'domain = "invoice"',
+      "templates/invoice.xlsx": "PK",
+    });
     expect(result.structuredContent.files_sent).toEqual([
       "methods/invoice.mthds",
       "methods/templates/invoice.xlsx",
     ]);
     expect(inputsToolResult(result).content[0].text).toContain("- `methods/invoice.mthds`");
+  });
+
+  it("refuses a folder holding a key before anything is sent", async () => {
+    const fakeKey = ["plx_sk_", "f".repeat(32)].join("");
+
+    const result = await buildMthdsInputs(
+      { method_dir: "methods" },
+      {
+        ...contextNeverCalled(),
+        resolver: fakeMethodResolver({
+          folder: {
+            "invoice.mthds": 'domain = "invoice"',
+            "funcs/client.py": `KEY = "${fakeKey}"`,
+          },
+        }),
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "method_dir",
+    });
+    expect(result.structuredContent.errors?.[0]?.message).toContain("nothing was sent");
+    expect(result.structuredContent).not.toHaveProperty("files_sent");
+    expect(JSON.stringify(result)).not.toContain(fakeKey);
   });
 
   it("lists no file of a folder when the request never left the machine", async () => {
@@ -804,19 +795,9 @@ describe("buildMthdsInputs by method_id, on both platforms", () => {
   });
 });
 
-/** A resolver reading a method folder as `methods/`, with one template file. */
-function methodFolderResolver(): FileResolver {
-  return {
-    async resolve() {
-      throw new Error("a folder is not read file by file");
-    },
-    async resolveMethodDir(methodDir) {
-      return {
-        ok: true,
-        files: [{ path: `${methodDir}/invoice.mthds`, content: 'domain = "invoice"' }],
-        resources: { "templates/invoice.xlsx": new Uint8Array([0x50, 0x4b, 0x03, 0x04]) },
-        sent: [`${methodDir}/invoice.mthds`, `${methodDir}/templates/invoice.xlsx`],
-      };
-    },
-  };
+/** A resolver reading every method folder as a bundle and one template file. */
+function methodFolderResolver() {
+  return fakeMethodResolver({
+    folder: { "invoice.mthds": 'domain = "invoice"', "templates/invoice.xlsx": "PK" },
+  });
 }

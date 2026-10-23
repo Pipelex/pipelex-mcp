@@ -7,8 +7,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiResponseError,
   ApiUnreachableError,
+  INLINE_TREE_MAX_BYTES,
   MissingMainStuffError,
   RequestArgumentError,
+  RunLifecycleUnavailableError,
   runMayHaveStartedOf,
 } from "@pipelex/sdk";
 import type {
@@ -17,6 +19,7 @@ import type {
   MethodProvenance,
   OutputForm,
   PipeIOContracts,
+  RunProgress,
   RunRead,
   RunResultArtifact,
   RunResults,
@@ -37,9 +40,11 @@ import {
   getMthdsRunResults,
   getMthdsRunStatus,
   MAIN_STUFF_CAP,
+  PROGRESS_READ_TIMEOUT_MS,
   projectRunUsage,
   projectUsageByPipe,
   readFailedRun,
+  readRunProgress,
   resultsResult,
   RUN_RESULTS_ARTIFACTS,
   RUN_RESULTS_ERROR_OPTIONS,
@@ -53,13 +58,22 @@ import {
   validateRunRequest,
 } from "./run.js";
 import type { FailedRunState, RunContext } from "./run.js";
-import { localBundleFileResolver } from "../files.js";
+import { localMethodFileResolver } from "../files.js";
 import {
   CALLER_FACING_TIMEOUT_REPORT,
   RECORDED_FAILED_RUNS,
   STRICT_LLM_COMPLETION_REPORT,
   relayingArmOf,
 } from "./failed-run-fixtures.js";
+import { MAX_PROGRESS_INVOCATIONS } from "./run-progress.js";
+import {
+  FAILED_RUN_SNAPSHOT,
+  MID_RUN_SNAPSHOT,
+  MID_RUN_SUMMARY,
+  PENDING_SNAPSHOT,
+  STUCK_ITEM_DEGRADATION,
+  wideBatchSnapshot,
+} from "./run-progress-fixtures.js";
 import {
   createMethodVersionsMemories,
   methodVersionsOf,
@@ -69,9 +83,17 @@ import {
   classifyError,
   createPipelexApiClient,
   DEFAULT_API_URL,
-  FILES_TOO_LARGE,
   MAX_IMAGE_CANDIDATE_ENTRIES,
 } from "./shared.js";
+import type { MethodTreeToSend } from "./shared.js";
+import { comparableRequest, contentsOf, fakeMethodResolver } from "./method-tree-fixtures.js";
+
+/** A tree in hand, for the request checks, which only ask whether one is there. */
+const A_TREE: MethodTreeToSend = {
+  source: { files: [], digest: "", readFile: () => Promise.reject(new Error("never read")) },
+  files: [],
+  fromFolder: false,
+};
 
 const RUN_ID = "01JRUN0000000000000000TEST";
 
@@ -112,8 +134,8 @@ const OUTPUT_FORM: OutputForm = {
 const INPUT_FORM: InputForm = { [FIXTURE_PIPE_REF]: { fields: [] } };
 
 describe("validateRunRequest", () => {
-  it("rejects an empty file list", () => {
-    const errors = validateRunRequest({ files: [] });
+  it("rejects a request naming no method", () => {
+    const errors = validateRunRequest({});
 
     expect(errors).toHaveLength(1);
     expect(errors[0]?.class).toBe("input_domain");
@@ -121,11 +143,11 @@ describe("validateRunRequest", () => {
   });
 
   it("accepts a method_id-only request", () => {
-    expect(validateRunRequest({ files: [], method_id: "mt_abc123" })).toEqual([]);
+    expect(validateRunRequest({ method_id: "mt_abc123" })).toEqual([]);
   });
 
   it("rejects a blank method_id at method_id", () => {
-    const errors = validateRunRequest({ files: [], method_id: "  " });
+    const errors = validateRunRequest({ method_id: "  " });
 
     expect(errors).toHaveLength(1);
     expect(errors[0]?.class).toBe("input_domain");
@@ -133,17 +155,14 @@ describe("validateRunRequest", () => {
   });
 
   it("rejects a blank pipe_code", () => {
-    const errors = validateRunRequest({
-      files: [{ content: 'domain = "demo"' }],
-      pipe_code: "  ",
-    });
+    const errors = validateRunRequest({ tree: A_TREE, pipe_code: "  " });
 
     expect(errors.map((error) => error.location)).toEqual(["pipe_code"]);
     expect(errors[0]?.class).toBe("input_domain");
   });
 
   it("accepts an omitted pipe_code", () => {
-    const errors = validateRunRequest({ files: [{ content: 'domain = "demo"' }] });
+    const errors = validateRunRequest({ tree: A_TREE });
 
     expect(errors).toEqual([]);
   });
@@ -257,7 +276,7 @@ describe("run-route error classification", () => {
         undefined, // validationErrors
         "forbidden",
         {
-          problem: {
+          details: {
             errorDomain: "input",
             retryable: false,
             title: "File belongs to another organization",
@@ -583,6 +602,113 @@ describe("statusResult", () => {
     expect(result.structuredContent.degraded).toBe(true);
     expect(result.structuredContent.retry_after_seconds).toBe(10);
     expect(result.summary).toMatch(/last-known/i);
+  });
+
+  describe("with the run's progress", () => {
+    const REASSURANCE = "The run itself is unaffected.";
+
+    it("relays a running run's snapshot and gives its summary a paragraph right after the status", () => {
+      const result = statusResult(
+        runRead({ status: "RUNNING", retry_after_seconds: 5 }),
+        MID_RUN_SNAPSHOT,
+      );
+
+      expect(result.structuredContent.progress).toEqual(MID_RUN_SNAPSHOT);
+      expect(result.structuredContent).not.toHaveProperty("progress_invocations_omitted");
+      expect(result.summary).toBe(
+        [
+          `Run \`${RUN_ID}\` is RUNNING — not terminal yet. Check again in ~5s.`,
+          `Progress: ${MID_RUN_SUMMARY}`,
+        ].join("\n\n"),
+      );
+    });
+
+    it("relays a pending run's snapshot", () => {
+      const result = statusResult(runRead({ status: "PENDING" }), PENDING_SNAPSHOT);
+
+      expect(result.structuredContent.progress).toEqual(PENDING_SNAPSHOT);
+      expect(result.summary.split("\n\n")).toEqual([
+        expect.stringContaining("is PENDING — not terminal yet"),
+        "Progress: Waiting to start",
+      ]);
+    });
+
+    it("relays an ended run's snapshot after the whole account of why it ended", () => {
+      const { statusRead } = RECORDED_FAILED_RUNS.llmCompletion;
+
+      const result = statusResult(statusRead, FAILED_RUN_SNAPSHOT);
+      const paragraphs = result.summary.split("\n\n");
+
+      expect(result.structuredContent.failure).toMatchObject({ error_type: "LLMCompletionError" });
+      expect(result.structuredContent.progress?.status).toBe("failed");
+      expect(paragraphs).toHaveLength(2);
+      expect(paragraphs[0]).toContain("Why: LLM completion\n");
+      expect(paragraphs[0]).toContain(`For support: Run ${statusRead.pipeline_run_id}`);
+      expect(paragraphs[1]).toBe(
+        "Progress: Failed at condense_filing (step 3 of 4, item 2 of 3, step 2 of 2)",
+      );
+    });
+
+    it("counts the invocations a wide snapshot leaves out beside it", () => {
+      const snapshot = wideBatchSnapshot(40, 39);
+
+      const result = statusResult(runRead({ status: "RUNNING" }), snapshot);
+
+      expect(result.structuredContent.progress?.invocations).toHaveLength(MAX_PROGRESS_INVOCATIONS);
+      expect(result.structuredContent.progress_invocations_omitted).toBe(
+        snapshot.invocations.length - MAX_PROGRESS_INVOCATIONS,
+      );
+      expect(result.structuredContent.progress?.invocations.map((each) => each.path)).toContain(
+        "filings.review_filings/step_1/item_39/step_2",
+      );
+    });
+
+    it("answers the status alone from a snapshot it cannot read", () => {
+      const result = statusResult(runRead({ status: "RUNNING" }), {
+        ...MID_RUN_SNAPSHOT,
+        summary: undefined,
+      } as unknown as RunProgress);
+
+      expect(result.structuredContent.status).toBe("ok");
+      expect(result.structuredContent).not.toHaveProperty("progress");
+      expect(result.summary).not.toContain("Progress:");
+    });
+
+    it("never reassures a run whose workflow task keeps failing, which its progress says is not progressing", () => {
+      const result = statusResult(
+        runRead({ status: "RUNNING", degraded: true, degradation: STUCK_ITEM_DEGRADATION }),
+        MID_RUN_SNAPSHOT,
+      );
+
+      expect(result.structuredContent.degraded).toBe(true);
+      expect(result.summary).toContain("not progressing at summarize_filing");
+      expect(result.summary).not.toContain(REASSURANCE);
+    });
+
+    it("gives no reassurance for a degradation the status read cannot explain by the engine's absence", () => {
+      for (const reason of ["workflow_task_failing", "a_later_reason"]) {
+        const result = statusResult(
+          runRead({ status: "RUNNING", degraded: true, degradation: { reason } }),
+        );
+
+        expect(result.summary).not.toContain(REASSURANCE);
+      }
+    });
+
+    it("reassures a status the platform could not read, unless the progress read after it reports the run stuck", () => {
+      const unreadable = runRead({
+        status: "RUNNING",
+        degraded: true,
+        degradation: { reason: "status_unavailable" },
+      });
+
+      expect(statusResult(unreadable).summary).toContain(REASSURANCE);
+      expect(statusResult(unreadable, PENDING_SNAPSHOT).summary).toContain(REASSURANCE);
+      expect(statusResult(runRead({ status: "RUNNING", degraded: true })).summary).toContain(
+        REASSURANCE,
+      );
+      expect(statusResult(unreadable, MID_RUN_SNAPSHOT).summary).not.toContain(REASSURANCE);
+    });
   });
 });
 
@@ -1458,6 +1584,7 @@ describe("boundMainStuff", () => {
 interface FakeRunClient {
   start(options: PipelexStartOptions): Promise<RunResultStart>;
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
+  getRunProgress(runId: string, options?: { signal?: AbortSignal }): Promise<RunProgress>;
   getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
   version?(): Promise<unknown>;
 }
@@ -1465,6 +1592,7 @@ interface FakeRunClient {
 const NEVER_CLIENT: FakeRunClient = {
   start: () => Promise.reject(new Error("start must not be called")),
   getRunStatus: () => Promise.reject(new Error("getRunStatus must not be called")),
+  getRunProgress: () => Promise.reject(new Error("getRunProgress must not be called")),
   getRunResult: () => Promise.reject(new Error("getRunResult must not be called")),
 };
 
@@ -1494,12 +1622,13 @@ describe("startMthdsRun", () => {
       context,
     );
 
-    // /v1/start takes no source labels — only the contents cross the wire.
-    expect(seen).toEqual({
-      mthds_contents: ['domain = "demo"'],
+    // The contents cross as a tree, under the uri's file name.
+    expect(await comparableRequest(seen)).toEqual({
+      tree: { "demo.mthds": 'domain = "demo"' },
       pipe_code: "main",
       inputs: { question: "why?" },
     });
+    expect(result.structuredContent.files_sent).toEqual(["demo.mthds"]);
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.run_id).toBe(RUN_ID);
   });
@@ -1515,7 +1644,7 @@ describe("startMthdsRun", () => {
 
     await startMthdsRun({ files: [{ content: 'domain = "demo"' }] }, context);
 
-    expect(seen).toEqual({ mthds_contents: ['domain = "demo"'] });
+    expect(await comparableRequest(seen)).toEqual({ tree: { "bundle.mthds": 'domain = "demo"' } });
     expect(seen).not.toHaveProperty("pipe_code");
     expect(seen).not.toHaveProperty("inputs");
   });
@@ -1555,7 +1684,7 @@ describe("startMthdsRun", () => {
     vi.stubGlobal("fetch", answer);
     try {
       await createPipelexApiClient({ baseUrl: DEFAULT_API_URL }).start({
-        mthds_contents: ['domain = "demo"'],
+        files: { "main.mthds": 'domain = "demo"' },
       });
     } catch (err) {
       return err;
@@ -1686,7 +1815,15 @@ describe("startMthdsRun", () => {
   it("says the run may exist when the start's acknowledgement came back unreadable", async () => {
     // A 2xx the SDK could not read is a start the server accepted, which the
     // SDK reports as a final ApiResponseError: the run exists all the same.
-    vi.stubGlobal("fetch", () => Promise.resolve(new Response("", { status: 202 })));
+    // The handshake that decides how the tree travels is answered first: a
+    // deployment with no blob store, which takes it inline.
+    vi.stubGlobal("fetch", (input: string | URL | Request) =>
+      Promise.resolve(
+        String(input instanceof Request ? input.url : input).endsWith("/v1/version")
+          ? Response.json({ version: "1.0.0" })
+          : new Response("", { status: 202 }),
+      ),
+    );
     try {
       const real = createPipelexApiClient({ baseUrl: DEFAULT_API_URL });
       const result = await startMthdsRun(
@@ -1787,7 +1924,7 @@ describe("startMthdsRun by method_ref", () => {
           undefined,
           undefined,
           // The runner tags this refusal `error_domain: input` (raise_forbidden).
-          { problem: { errorDomain: "input" } },
+          { details: { errorDomain: "input" } },
         ),
       );
 
@@ -1850,7 +1987,7 @@ describe("startMthdsRun by method_id", () => {
     );
   }
 
-  it("starts by id alone — method_id crosses as a named option, no mthds_contents", async () => {
+  it("starts by id alone — method_id crosses as a named option, no tree", async () => {
     let seen: PipelexStartOptions | undefined;
     const context = contextWith({
       start: (options: PipelexStartOptions) => {
@@ -1865,7 +2002,7 @@ describe("startMthdsRun by method_id", () => {
     );
 
     expect(seen).toEqual({ method_id: "mt_abc123", inputs: { question: "why?" } });
-    expect(seen).not.toHaveProperty("mthds_contents");
+    expect(seen).not.toHaveProperty("tree");
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.run_id).toBe(RUN_ID);
   });
@@ -1884,8 +2021,8 @@ describe("startMthdsRun by method_id", () => {
       context,
     );
 
-    expect(seen).toEqual({
-      mthds_contents: ['domain = "demo"'],
+    expect(await comparableRequest(seen)).toEqual({
+      tree: { "bundle.mthds": 'domain = "demo"' },
       method_id: "mt_abc123",
     });
   });
@@ -2157,6 +2294,161 @@ describe("getMthdsRunStatus", () => {
     expect(result.summary).toBe(
       "Run status could not be read: the Pipelex API key is missing or was refused.",
     );
+  });
+
+  describe("the progress read after it", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** A context whose status read answers `read`, recording the order of the reads. */
+    function progressContext(
+      read: RunRead,
+      getRunProgress: (runId: string, options?: { signal?: AbortSignal }) => Promise<RunProgress>,
+    ): { context: RunContext; calls: string[] } {
+      const calls: string[] = [];
+      const context = contextWith({
+        getRunStatus: (runId: string) => {
+          calls.push(`status ${runId}`);
+          return Promise.resolve(read);
+        },
+        getRunProgress: (runId: string, options?: { signal?: AbortSignal }) => {
+          calls.push(`progress ${runId}`);
+          return getRunProgress(runId, options);
+        },
+      });
+      return { context, calls };
+    }
+
+    it("reads a running run's progress after its status and relays it", async () => {
+      const { context, calls } = progressContext(runRead({ status: "RUNNING" }), () =>
+        Promise.resolve(MID_RUN_SNAPSHOT),
+      );
+
+      const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
+
+      expect(calls).toEqual([`status ${RUN_ID}`, `progress ${RUN_ID}`]);
+      expect(result.structuredContent.status).toBe("ok");
+      expect(result.structuredContent.progress).toEqual(MID_RUN_SNAPSHOT);
+      expect(result.summary).toContain(`\n\nProgress: ${MID_RUN_SUMMARY}`);
+    });
+
+    it("reads a pending run's progress", async () => {
+      const { context, calls } = progressContext(runRead({ status: "PENDING" }), () =>
+        Promise.resolve(PENDING_SNAPSHOT),
+      );
+
+      const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
+
+      expect(calls).toHaveLength(2);
+      expect(result.structuredContent.progress?.status).toBe("pending");
+      expect(result.summary).toContain("Progress: Waiting to start");
+    });
+
+    it("reads an ended run's progress too, for where it stopped", async () => {
+      const { statusRead } = RECORDED_FAILED_RUNS.llmCompletion;
+      const { context, calls } = progressContext(statusRead, () =>
+        Promise.resolve(FAILED_RUN_SNAPSHOT),
+      );
+
+      const result = await getMthdsRunStatus({ run_id: statusRead.pipeline_run_id }, context);
+
+      expect(calls).toEqual([
+        `status ${statusRead.pipeline_run_id}`,
+        `progress ${statusRead.pipeline_run_id}`,
+      ]);
+      expect(result.structuredContent.run_status).toBe("FAILED");
+      expect(result.structuredContent.failure).toBeDefined();
+      expect(result.summary).toContain(
+        "Progress: Failed at condense_filing (step 3 of 4, item 2 of 3, step 2 of 2)",
+      );
+    });
+
+    it("answers the status without progress when the progress read fails, never as an error", async () => {
+      const failures = [
+        new ApiResponseError(
+          "HTTP 503",
+          `${DEFAULT_API_URL}/v1/runs/${RUN_ID}/progress`,
+          503,
+          "Service Unavailable",
+          "{}",
+          "service_unavailable",
+          "The run's progress events could not be read",
+          undefined, // validationErrors
+          undefined, // code
+        ),
+        new ApiUnreachableError("connection reset", DEFAULT_API_URL, "ECONNRESET"),
+        new Error("an answer the SDK could not read"),
+      ];
+      for (const failure of failures) {
+        const { context } = progressContext(runRead({ status: "RUNNING" }), () =>
+          Promise.reject(failure),
+        );
+
+        const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
+
+        expect(result.structuredContent.status).toBe("ok");
+        expect(result.structuredContent.run_status).toBe("RUNNING");
+        expect(result.structuredContent).not.toHaveProperty("progress");
+        expect(result.structuredContent).not.toHaveProperty("errors");
+        expect(result.summary).not.toContain("Progress");
+      }
+    });
+
+    it("answers the status without progress on a server older than the progress route", async () => {
+      const { context } = progressContext(runRead({ status: "RUNNING" }), () =>
+        Promise.reject(
+          new RunLifecycleUnavailableError(
+            "The progress route is not served: the server is a bare runner, or a hosted API older than the progress route.",
+            `${DEFAULT_API_URL}/v1/runs/${RUN_ID}/progress`,
+          ),
+        ),
+      );
+
+      const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
+
+      expect(result.structuredContent.status).toBe("ok");
+      expect(result.structuredContent).not.toHaveProperty("progress");
+      expect(result.structuredContent).not.toHaveProperty("errors");
+      expect(result.summary).toMatch(
+        /^Run `[^`]+` is RUNNING — not terminal yet\. Check again in ~\d+s\.$/,
+      );
+    });
+
+    it("sends the status without the progress once the deadline passes", async () => {
+      vi.useFakeTimers();
+      let signal: AbortSignal | undefined;
+      const { context } = progressContext(runRead({ status: "RUNNING" }), (_runId, options) => {
+        signal = options?.signal;
+        // A read that never answers and ignores its signal: the deadline must hold anyway.
+        return new Promise<RunProgress>(() => undefined);
+      });
+
+      const pending = getMthdsRunStatus({ run_id: RUN_ID }, context);
+      await vi.advanceTimersByTimeAsync(PROGRESS_READ_TIMEOUT_MS);
+      const result = await pending;
+
+      expect(signal?.aborted).toBe(true);
+      expect(result.structuredContent.run_status).toBe("RUNNING");
+      expect(result.structuredContent).not.toHaveProperty("progress");
+    });
+
+    it("returns the snapshot when it answers in time, and aborts nothing", async () => {
+      let signal: AbortSignal | undefined;
+
+      const progress = await readRunProgress(
+        {
+          getRunProgress: (_runId, options) => {
+            signal = options?.signal;
+            return Promise.resolve(MID_RUN_SNAPSHOT);
+          },
+        },
+        RUN_ID,
+      );
+
+      expect(progress).toBe(MID_RUN_SNAPSHOT);
+      expect(signal?.aborted).toBe(false);
+    });
   });
 });
 
@@ -2482,31 +2774,7 @@ describe("runResultsToolResult", () => {
 });
 
 describe("startMthdsRun path submissions", () => {
-  it("resolves { path } items through the context resolver before starting", async () => {
-    let seen: PipelexStartOptions | undefined;
-    const context: RunContext = {
-      ...contextWith({
-        start: (options: PipelexStartOptions) => {
-          seen = options;
-          return Promise.resolve({ pipeline_run_id: RUN_ID });
-        },
-      }),
-      resolver: {
-        async resolve() {
-          return { ok: true, content: 'domain = "demo"' };
-        },
-      },
-    };
-
-    const result = await startMthdsRun({ files: [{ path: "methods/bundle.mthds" }] }, context);
-
-    // /v1/start takes no source labels — only the resolved contents cross.
-    expect(seen).toEqual({ mthds_contents: ['domain = "demo"'] });
-    expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.run_id).toBe(RUN_ID);
-  });
-
-  it("sends a bundle's template files as resources beside the contents", async () => {
+  it("reads { path } items through the context resolver and starts them as one tree", async () => {
     const XLSX = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
     let seen: PipelexStartOptions | undefined;
     const context: RunContext = {
@@ -2516,17 +2784,12 @@ describe("startMthdsRun path submissions", () => {
           return Promise.resolve({ pipeline_run_id: RUN_ID });
         },
       }),
-      resolver: {
-        async resolve() {
-          return { ok: true, content: 'domain = "invoice"' };
+      resolver: fakeMethodResolver({
+        files: {
+          "methods/invoice.mthds": 'domain = "invoice"',
+          "methods/templates/invoice.xlsx": XLSX,
         },
-        async resolveTemplates(templates, bundle, requestBytes) {
-          expect(templates).toEqual([{ index: 1, path: "methods/templates/invoice.xlsx" }]);
-          expect(bundle).toEqual([{ path: "methods/invoice.mthds", named: [] }]);
-          expect(requestBytes).toBe('domain = "invoice"'.length);
-          return { ok: true, resources: { "templates/invoice.xlsx": XLSX } };
-        },
-      },
+      }),
     };
 
     const result = await startMthdsRun(
@@ -2534,15 +2797,50 @@ describe("startMthdsRun path submissions", () => {
       context,
     );
 
-    expect(seen).toEqual({
-      mthds_contents: ['domain = "invoice"'],
-      resources: { "templates/invoice.xlsx": XLSX },
+    // Each file under its path from the deepest directory holding them all.
+    expect(seen?.tree?.files.map((file) => file.path)).toEqual([
+      "invoice.mthds",
+      "templates/invoice.xlsx",
+    ]);
+    expect(await seen?.tree?.readFile("templates/invoice.xlsx")).toEqual(XLSX);
+    expect(result.structuredContent).toMatchObject({
+      status: "ok",
+      run_id: RUN_ID,
+      files_sent: ["methods/invoice.mthds", "methods/templates/invoice.xlsx"],
     });
-    expect(result.structuredContent.status).toBe("ok");
   });
 
-  it("reads a 413 as the template files only when the start carried some", async () => {
-    const tooLarge = new ApiResponseError(
+  it("refuses files holding a key before starting, naming the file and never the key", async () => {
+    const fakeKey = ["plx_sk_", "f".repeat(32)].join("");
+
+    const result = await startMthdsRun(
+      { files: [{ path: "methods/invoice.mthds" }, { path: "methods/report.html" }] },
+      {
+        ...contextWith({}),
+        resolver: fakeMethodResolver({
+          files: {
+            "methods/invoice.mthds": 'domain = "invoice"',
+            "methods/report.html": `<p>${fakeKey}</p>`,
+          },
+        }),
+      },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "files[1].path",
+      retryable: false,
+    });
+    expect(result.structuredContent.errors?.[0]?.message).toContain("methods/report.html");
+    expect(result.structuredContent.errors?.[0]?.message).toContain("nothing was sent");
+    expect(result.structuredContent).not.toHaveProperty("files_sent");
+    expect(JSON.stringify(result)).not.toContain(fakeKey);
+  });
+
+  /** The 413 a deployment answers a start too large for it with. */
+  const tooLarge = () =>
+    new ApiResponseError(
       "HTTP 413",
       `${DEFAULT_API_URL}/v1/start`,
       413,
@@ -2553,35 +2851,143 @@ describe("startMthdsRun path submissions", () => {
       undefined,
       undefined,
     );
-    const resolver = {
-      async resolve() {
-        return { ok: true as const, content: 'domain = "invoice"' };
-      },
-      async resolveTemplates() {
-        return {
-          ok: true as const,
-          resources: { "templates/invoice.xlsx": new Uint8Array([0x50, 0x4b]) },
-        };
-      },
-    };
-    const context: RunContext = {
-      ...contextWith({ start: () => Promise.reject(tooLarge) }),
-      resolver,
-    };
 
-    const withTemplates = await startMthdsRun(
+  /** A context whose start answers a 413, its handshake counted and answering `version`. */
+  function refusingStart(
+    version: () => Promise<unknown>,
+    files: Record<string, string | Uint8Array> = {},
+  ): { context: RunContext; versionCalls: () => number } {
+    let calls = 0;
+    return {
+      context: {
+        ...contextWith({
+          start: () => Promise.reject(tooLarge()),
+          version: () => {
+            calls += 1;
+            return version();
+          },
+        }),
+        resolver: fakeMethodResolver({ files }),
+      },
+      versionCalls: () => calls,
+    };
+  }
+
+  const noBlobStore = () => Promise.resolve({ version: "1.0.0", blob_store: false });
+  const blobStore = () => Promise.resolve({ version: "1.0.0", blob_store: true });
+
+  it("names both causes of a 413 on a start carrying a small tree and no inputs, blaming neither", async () => {
+    const { context, versionCalls } = refusingStart(noBlobStore);
+
+    const result = await startMthdsRun({ files: [{ content: 'domain = "invoice"' }] }, context);
+
+    const error = result.structuredContent.errors?.[0];
+    expect(error).toMatchObject({ class: "input_domain" });
+    expect(error).not.toHaveProperty("location");
+    expect(error?.hint).toContain("cannot be told from here");
+    expect(error?.hint).toContain("mthds_prepare_inputs");
+    expect(error?.hint).toContain("the run carries no inputs");
+    expect(error?.hint).not.toContain("are not what made it so");
+    // A tree within the inline threshold rode inline wherever it went: no handshake asks.
+    expect(versionCalls()).toBe(0);
+  });
+
+  it("names both causes of a 413 on a start carrying inputs beside a small tree", async () => {
+    const { context } = refusingStart(noBlobStore);
+
+    const result = await startMthdsRun(
+      { files: [{ content: 'domain = "invoice"' }], inputs: { question: "why?" } },
+      context,
+    );
+
+    const error = result.structuredContent.errors?.[0];
+    expect(error).not.toHaveProperty("location");
+    expect(error?.hint).toContain("cannot be told from here");
+    expect(error?.hint).toMatch(/the method's files weigh \d+\.\d KiB inline/);
+    expect(error?.hint).toMatch(/its inputs weigh \d+\.\d KiB as JSON/);
+  });
+
+  it("reads a 413 on a start sending no tree, carrying inputs, as its inputs', at inputs", async () => {
+    const { context } = refusingStart(noBlobStore);
+
+    const result = await startMthdsRun(
+      { method_ref: "github.com/Pipelex/methods/documents@v0.1.0", inputs: { question: "why?" } },
+      context,
+    );
+
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "inputs",
+    });
+    expect(result.structuredContent.errors?.[0]?.hint).toContain("its inputs did");
+  });
+
+  it("reads a 413 on a heavy tree a deployment without a blob store took inline as the tree's", async () => {
+    const heavy = "x".repeat(INLINE_TREE_MAX_BYTES + 1);
+    const folder = { "methods/invoice.mthds": 'domain = "invoice"', "methods/report.html": heavy };
+    const files = [{ path: "methods/invoice.mthds" }, { path: "methods/report.html" }];
+
+    const inline = await startMthdsRun({ files }, refusingStart(noBlobStore, folder).context);
+    expect(inline.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "files",
+    });
+    expect(inline.structuredContent.errors?.[0]?.hint).toContain("without a blob store");
+
+    // The same tree went by hash to a deployment keeping a blob store, so the
+    // inputs riding the start take the blame, and with none, nothing does.
+    const withInputs = await startMthdsRun(
+      { files, inputs: { question: "why?" } },
+      refusingStart(blobStore, folder).context,
+    );
+    expect(withInputs.structuredContent.errors?.[0]?.location).toBe("inputs");
+    const withoutInputs = await startMthdsRun({ files }, refusingStart(blobStore, folder).context);
+    expect(withoutInputs.structuredContent.errors?.[0]).not.toHaveProperty("location");
+    expect(withoutInputs.structuredContent.errors?.[0]?.hint).toContain(
+      "the run carries no inputs",
+    );
+  });
+
+  it("weighs a binary file as the base64 it travels inline as", async () => {
+    // Raw, the workbook is under the inline threshold; as base64 it is over,
+    // so a deployment without a blob store took it inline at that weight.
+    const workbook = new Uint8Array(Math.floor(INLINE_TREE_MAX_BYTES * 0.9)).fill(0xff);
+    const { context, versionCalls } = refusingStart(noBlobStore, {
+      "methods/invoice.mthds": 'domain = "invoice"',
+      "methods/templates/invoice.xlsx": workbook,
+    });
+
+    const result = await startMthdsRun(
       { files: [{ path: "methods/invoice.mthds" }, { path: "methods/templates/invoice.xlsx" }] },
       context,
     );
-    expect(withTemplates.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "files",
-      hint: FILES_TOO_LARGE.hint,
-    });
 
-    const without = await startMthdsRun({ files: [{ path: "methods/invoice.mthds" }] }, context);
-    expect(without.structuredContent.errors?.[0]?.location).toBeUndefined();
-    expect(without.structuredContent.errors?.[0]?.hint).toBe("The Pipelex API returned HTTP 413.");
+    expect(versionCalls()).toBe(1);
+    expect(result.structuredContent.errors?.[0]?.location).toBe("files");
+  });
+
+  it("blames neither cause of a 413 when the handshake that would tell how a heavy tree went fails", async () => {
+    const heavy = "x".repeat(INLINE_TREE_MAX_BYTES + 1);
+    const { context, versionCalls } = refusingStart(
+      () =>
+        Promise.reject(new ApiUnreachableError("connection reset", DEFAULT_API_URL, "ECONNRESET")),
+      { "methods/invoice.mthds": 'domain = "invoice"', "methods/report.html": heavy },
+    );
+
+    const result = await startMthdsRun(
+      {
+        files: [{ path: "methods/invoice.mthds" }, { path: "methods/report.html" }],
+        inputs: { question: "why?" },
+      },
+      context,
+    );
+
+    expect(versionCalls()).toBe(1);
+    const error = result.structuredContent.errors?.[0];
+    expect(error).toMatchObject({ class: "input_domain" });
+    expect(error).not.toHaveProperty("location");
+    expect(error?.hint).toContain("cannot be told from here");
+    expect(error?.hint).not.toContain("are not what made it so");
   });
 
   it("rejects { path } items instructively without a resolver (hosted)", async () => {
@@ -2721,7 +3127,7 @@ describe("startMthdsRun by method_id, on both platforms", () => {
               undefined,
               "validation_failed",
               {
-                problem: {
+                details: {
                   status: 422,
                   code: "validation_failed",
                   errors: [{ field: "method_id", code: "string_pattern_mismatch" }],
@@ -2735,6 +3141,51 @@ describe("startMthdsRun by method_id, on both platforms", () => {
     expect(result.structuredContent.errors?.[0]?.hint).toContain(
       "does not resolve version suffixes yet, so it refused `mt_abc123@draft`",
     );
+  });
+
+  it("headlines a run of the draft refused by role as the role, with the server's sentence", async () => {
+    const detail =
+      "Your role in this organization is runner: it runs the organization's published versions, mt_…@<n> or the bare id, and not a draft.";
+    const result = await startMthdsRun(
+      { method_id: "mt_abc123@draft" },
+      contextWith({
+        start: () =>
+          Promise.reject(
+            new ApiResponseError(
+              "HTTP 403",
+              `${DEFAULT_API_URL}/v1/start`,
+              403,
+              "Forbidden",
+              "{}",
+              undefined,
+              detail,
+              undefined,
+              "role_not_permitted",
+              {
+                details: { title: "Forbidden", errorDomain: "config", retryable: false },
+                mayStartRun: true,
+              },
+            ),
+          ),
+      }),
+    );
+
+    const error = result.structuredContent.errors?.[0];
+    expect(error).toMatchObject({
+      class: "config",
+      kind: "role",
+      message: detail,
+      retryable: false,
+    });
+    expect(error?.location).toBeUndefined();
+    // A refusal is an answer: nothing ran, so it is neither a may-have-run start
+    // nor a refused suffix.
+    expect(result.summary).toBe(
+      "Run could not start: your role in this organization does not allow this.",
+    );
+    const text = runToolResult(result).content[0].text;
+    expect(text).toContain(detail);
+    expect(text).not.toMatch(/PIPELEX_API_KEY|log ?in|version suffixes/i);
   });
 
   it("explains a never-published method's bare id", async () => {
@@ -2807,12 +3258,14 @@ describe("startMthdsRun from a method folder", () => {
     await fs.mkdir(path.join(root, "invoice", "templates"), { recursive: true });
     await fs.writeFile(path.join(root, "invoice", "invoice.mthds"), BUNDLE);
     await fs.writeFile(path.join(root, "invoice", "templates", "invoice.xlsx"), XLSX);
-    await fs.writeFile(path.join(root, "invoice", "notes.md"), "not part of the method");
+    await fs.writeFile(path.join(root, "invoice", "notes.md"), "part of the method's tree");
+    await fs.writeFile(path.join(root, "invoice", ".env"), "LEFT=out\n");
     return root;
   }
 
   const SENT = [
     path.join("invoice", "invoice.mthds"),
+    path.join("invoice", "notes.md"),
     path.join("invoice", "templates", "invoice.xlsx"),
   ];
 
@@ -2826,16 +3279,20 @@ describe("startMthdsRun from a method folder", () => {
           return Promise.resolve({ pipeline_run_id: RUN_ID });
         },
       }),
-      resolver: localBundleFileResolver(root),
+      resolver: localMethodFileResolver(root),
     };
 
     const result = await startMthdsRun({ method_dir: "invoice", method_id: "mt_abc123" }, context);
 
-    expect(seen).toEqual({
-      mthds_contents: [BUNDLE],
-      method_id: "mt_abc123",
-      resources: { "templates/invoice.xlsx": XLSX },
-    });
+    // The whole tree, notes included: a folder sends every file it holds.
+    expect(seen?.method_id).toBe("mt_abc123");
+    expect(seen?.tree?.files.map((file) => file.path)).toEqual([
+      "invoice.mthds",
+      "notes.md",
+      "templates/invoice.xlsx",
+    ]);
+    expect((await contentsOf(seen?.tree))["invoice.mthds"]).toBe(BUNDLE);
+    expect(await seen?.tree?.readFile("templates/invoice.xlsx")).toEqual(XLSX);
     expect(result.structuredContent).toMatchObject({
       status: "ok",
       run_id: RUN_ID,
@@ -2843,12 +3300,12 @@ describe("startMthdsRun from a method folder", () => {
     });
     const text = runToolResult(result).content[0].text;
     expect(text).toContain("## Files sent");
-    expect(text).toContain(`- \`${SENT[1]}\``);
+    expect(text).toContain(`- \`${SENT[2]}\``);
   });
 
   it("refuses a suffixed method_id beside a folder, in the folder's words, before starting", async () => {
     const root = await methodFolder();
-    const context: RunContext = { ...contextWith({}), resolver: localBundleFileResolver(root) };
+    const context: RunContext = { ...contextWith({}), resolver: localMethodFileResolver(root) };
 
     const result = await startMthdsRun(
       { method_dir: "invoice", method_id: "mt_abc123@draft" },
@@ -2871,7 +3328,7 @@ describe("startMthdsRun from a method folder", () => {
 
     const unbuilt = await startMthdsRun(
       { method_dir: "invoice" },
-      { baseUrl: "invalid-no-scheme", resolver: localBundleFileResolver(root) },
+      { baseUrl: "invalid-no-scheme", resolver: localMethodFileResolver(root) },
     );
     expect(unbuilt.structuredContent.status).toBe("error");
     expect(unbuilt.structuredContent).not.toHaveProperty("files_sent");
@@ -2883,7 +3340,7 @@ describe("startMthdsRun from a method folder", () => {
         ...contextWith({
           start: () => Promise.reject(new RequestArgumentError("refused before sending")),
         }),
-        resolver: localBundleFileResolver(root),
+        resolver: localMethodFileResolver(root),
       },
     );
     expect(refused.structuredContent.status).toBe("error");
@@ -2893,7 +3350,7 @@ describe("startMthdsRun from a method folder", () => {
   it("refuses a folder beside method_ref before reading it", async () => {
     const result = await startMthdsRun(
       { method_dir: "invoice", method_ref: "github.com/acme/methods/invoice" },
-      { ...contextWith({}), resolver: localBundleFileResolver("/nonexistent-root") },
+      { ...contextWith({}), resolver: localMethodFileResolver("/nonexistent-root") },
     );
 
     expect(result.structuredContent.errors?.map((error) => error.location)).toEqual(["method_ref"]);
@@ -2901,20 +3358,20 @@ describe("startMthdsRun from a method folder", () => {
 
   it("locates a refusal of what it sent at method_dir, the field the caller passed", async () => {
     const root = await methodFolder();
-    const tooLarge = new ApiResponseError(
-      "HTTP 413",
+    const refusedTree = new ApiResponseError(
+      "HTTP 422",
       `${DEFAULT_API_URL}/v1/start`,
-      413,
-      "Content Too Large",
+      422,
+      "Unprocessable Content",
       "{}",
       undefined,
+      "'a//b.mthds' is not a tree path",
       undefined,
-      undefined,
-      undefined,
+      "invalid_method_files",
     );
     const context: RunContext = {
-      ...contextWith({ start: () => Promise.reject(tooLarge) }),
-      resolver: localBundleFileResolver(root),
+      ...contextWith({ start: () => Promise.reject(refusedTree) }),
+      resolver: localMethodFileResolver(root),
     };
 
     const result = await startMthdsRun({ method_dir: "invoice" }, context);

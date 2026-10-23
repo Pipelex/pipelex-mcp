@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { PipelexStartOptions, PrepareInputsRequest, PreparedInputs } from "@pipelex/sdk";
 
+import { comparableRequest } from "./capabilities/method-tree-fixtures.js";
 import { buildPrepareContext, prepareMthdsInputs } from "./capabilities/prepare.js";
 import type { PrepareContext } from "./capabilities/prepare.js";
 import { buildRunContext, startMthdsRun } from "./capabilities/run.js";
@@ -50,6 +51,7 @@ describe("inputs_path on the workshop", () => {
           return Promise.resolve({ pipeline_run_id: RUN_ID, state: "STARTED" });
         },
         getRunStatus: () => Promise.reject(new Error("getRunStatus must not be called")),
+        getRunProgress: () => Promise.reject(new Error("getRunProgress must not be called")),
         getRunResult: () => Promise.reject(new Error("getRunResult must not be called")),
       },
     };
@@ -93,7 +95,59 @@ describe("inputs_path on the workshop", () => {
       );
 
       expect(result.structuredContent.status).toBe("ok");
-      expect(seen).toEqual([{ mthds_contents: ['domain = "demo"'], inputs: INPUTS }]);
+      expect(seen).toHaveLength(1);
+      expect(await comparableRequest(seen[0])).toEqual({
+        tree: { "bundle.mthds": 'domain = "demo"' },
+        inputs: INPUTS,
+      });
+    });
+
+    // The membership rule keeps a run's inputs file out of the method's
+    // folder; inputs_path reads it by its own path, so a folder's inputs.json
+    // still feeds the run while never travelling as part of the method.
+    it("runs a method folder with the inputs.json it holds, never sending that file", async () => {
+      await writeInputs("methods/invoice/invoice.mthds", 'domain = "invoice"\n');
+      await writeInputs("methods/invoice/inputs.json", JSON.stringify(INPUTS));
+      const { context, seen } = runContext();
+
+      const result = await startMthdsRun(
+        { method_dir: "methods/invoice", inputs_path: "methods/invoice/inputs.json" },
+        context,
+      );
+
+      expect(result.structuredContent.status).toBe("ok");
+      expect(seen).toHaveLength(1);
+      expect(await comparableRequest(seen[0])).toEqual({
+        tree: { "invoice.mthds": 'domain = "invoice"\n' },
+        inputs: INPUTS,
+      });
+      expect(result.structuredContent.files_sent).toEqual([
+        path.join("methods", "invoice", "invoice.mthds"),
+      ]);
+    });
+
+    // The standard's rule keeps a run's inputs file out of the tree even when
+    // it is a symbolic link, unfollowed, so the link is no refusal.
+    it("runs a method folder whose inputs.json is a symbolic link, leaving the link out", async () => {
+      await writeInputs("methods/invoice/invoice.mthds", 'domain = "invoice"\n');
+      await writeInputs("methods/invoice/data/run-1.json", JSON.stringify(INPUTS));
+      await fs.symlink(
+        path.join(rootDir, "methods", "invoice", "data", "run-1.json"),
+        path.join(rootDir, "methods", "invoice", "inputs.json"),
+      );
+      const { context, seen } = runContext();
+
+      const result = await startMthdsRun(
+        { method_dir: "methods/invoice", inputs_path: "methods/invoice/data/run-1.json" },
+        context,
+      );
+
+      expect(result.structuredContent.status).toBe("ok");
+      expect(seen).toHaveLength(1);
+      expect(result.structuredContent.files_sent).toEqual([
+        path.join("methods", "invoice", "data", "run-1.json"),
+        path.join("methods", "invoice", "invoice.mthds"),
+      ]);
     });
 
     it("reads an extension in any case", async () => {
@@ -274,7 +328,11 @@ describe("inputs_path on the workshop", () => {
       expect(result.structuredContent.inputs).toEqual(loaded);
       // The loaded object reaches the SDK's walk untouched, so a relative local
       // path inside it is read exactly as the same path given inline would be.
-      expect(seen).toEqual([{ files: [{ content: 'domain = "demo"' }], inputs: loaded }]);
+      expect(seen).toHaveLength(1);
+      expect(await comparableRequest(seen[0])).toEqual({
+        tree: { "bundle.mthds": 'domain = "demo"' },
+        inputs: loaded,
+      });
     });
 
     it("refuses neither inputs nor inputs_path, at inputs", async () => {
@@ -348,6 +406,7 @@ describe("inputs_path on the workshop", () => {
             return Promise.resolve({ pipeline_run_id: RUN_ID });
           },
           getRunStatus: () => Promise.reject(new Error("getRunStatus must not be called")),
+          getRunProgress: () => Promise.reject(new Error("getRunProgress must not be called")),
           getRunResult: () => Promise.reject(new Error("getRunResult must not be called")),
         },
       };

@@ -1,29 +1,34 @@
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
-import { ApiResponseError, EmptyMethodSourceError } from "@pipelex/sdk";
+import { ApiResponseError, MethodFileTransferError } from "@pipelex/sdk";
 import type {
   MethodData,
+  MethodDetail,
   MethodDraftInput,
   MethodPublishInput,
   MethodPublishResult,
   MethodRenameInput,
+  MethodTreeLimits,
+  MethodTreeSource,
   MethodVersion,
   MethodWriteInput,
+  SavedMethodFile,
 } from "@pipelex/sdk";
-import type { MethodFile } from "mthds/protocol";
-import { parseMethodFiles, serializeMethodFiles } from "mthds/protocol";
 import { z } from "zod";
 
 import {
+  LEGACY_LINK_FILE_NAME,
+  LEGACY_LINK_MOVE,
   LINK_FILE_NAME,
   LinkLockError,
-  NO_LINK,
   apiHostOf,
   buildMethodLink,
-  bundleFilesIn,
   existingDestinations,
   foreignEntryReason,
+  holdsLegacyLink,
   inLinkTurn,
   readMethodLink,
   replaceMethodLink,
@@ -31,6 +36,8 @@ import {
   withLinkLock,
 } from "./catalog-link.js";
 import type { LinkFileReport, LinkRead, LinkReplacement, MethodLink } from "./catalog-link.js";
+import { listFolderTree } from "./method-tree.js";
+import type { ListingLimits } from "./method-tree.js";
 import {
   methodVersionsOf,
   methodVersionsSupport,
@@ -42,13 +49,14 @@ import type {
   MethodVersionsMemories,
   MethodVersionsSupport,
 } from "./method-versions.js";
+import { secretFindings, secretRefusalText } from "./secret-guard.js";
 import {
-  PRUNED_DIRECTORIES,
+  asOneLine,
   buildApiConfig,
   classifyError,
   createPipelexApiClient,
-  filesInputSchema,
-  resolveSubmittedFiles,
+  folderTreeToSend,
+  shownIn,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
@@ -60,19 +68,19 @@ import type {
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
-  ResolvedFiles,
-  SubmittedFile,
-  SubmittedFileInput,
+  LocatedMethodDir,
+  MethodTreeRead,
   ToolError,
 } from "./shared.js";
-import { validateMthds } from "./validate.js";
-import type { ValidationContext } from "./validate.js";
+import { type FolderLimits, methodTreeLimitsOf } from "./tree-limits.js";
+import type { TreeLimitsAware } from "./tree-limits.js";
+import { validateMethodTree } from "./validate.js";
+import type { ValidationContext, ValidationStructuredContent } from "./validate.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 import {
   containedPath,
   createContainedSubdirectory,
   errorMessage,
-  escapedDirectoryError,
   isInsideRoot,
   isMissingPathError,
   resolveSaveDir,
@@ -84,16 +92,19 @@ import {
  *
  * They complete the loop `mthds_list_methods` opened: the listing says which
  * methods exist, and these two say what a method *is* and let a workshop
- * session change it. Unlike `mthds_codegen`, whose `output_dir` is optional,
- * both need the filesystem: a save without its files' directory would leave
- * no link file, so the next save would duplicate the method — a materially
- * different act under the same name.
+ * session change it. **A saved method is a method tree**: every file of its
+ * folder the MTHDS standard's membership rule keeps (`method-tree.ts`), its
+ * `.mthds` files, its Python modules, its templates, its data, each at its
+ * path. A save sends the folder's whole tree, and a pull writes a saved tree
+ * back to disk, file for file. Both need the filesystem: a save without its
+ * folder would leave no link file, so the next save would duplicate the
+ * method — a materially different act under the same name.
  *
  * **A save writes the method's DRAFT.** A saved method has a draft, replaced
  * by every save and never validated on write, and immutable published
  * versions numbered from 1, which only a publish adds. The draft write is a
  * compare-and-swap on the draft's token (`updated_at`), which the link file
- * records, so a save never replaces a draft that moved since this directory
+ * records, so a save never replaces a draft that moved since this folder
  * synced with it — the webapp autosaves the same draft. A pull reads the draft
  * by default and a published version on `mt_…@<n>`.
  *
@@ -104,70 +115,54 @@ import {
  *    the link that vouches for its bytes, read before them, so the platform
  *    refuses it when the draft moved since; a link recording a pulled version,
  *    an unfinished pull or no token refuses the save unless the caller passes
- *    `expected_updated_at`, which is that choice. The links are read again
- *    after the files, so bytes a concurrent pull was writing are never sent.
- * 2. A link file says truthfully what its directory holds. Every write of it
- *    is a compare-and-swap on the bytes the writer decided from
+ *    `expected_updated_at`, which is that choice. The link is read again after
+ *    the files, so bytes a concurrent pull was writing are never sent.
+ * 2. A link file says truthfully what its folder holds. Every write of it is a
+ *    compare-and-swap on the bytes the writer decided from
  *    (`replaceMethodLink`), so a save never records its token over a version
- *    a pull landed meanwhile, and a pull never lands on a directory whose link
+ *    a pull landed meanwhile, and a pull never lands on a folder whose link
  *    moved, or whose files changed, since it read them — the link before the
  *    method, so the link is never ahead of the content; a pull marks the link
- *    before its first file and finishes it after its last; and a save writes
- *    its link only beside the bundle it sent, or in a directory holding no
- *    bundle (`otherBundleAt`).
- * 3. No argument bypasses a guard. `link_dir` moves where the link is
- *    written, never which link vouches for the bytes (the one beside the files
- *    keeps its guards); `overwrite` opens only the two questions it answers;
- *    `mt_…@draft` is the bare id; and `expected_updated_at` is the one
- *    deliberate override, named in every refusal it lifts.
+ *    before its first file and finishes it after its last. The link lives in
+ *    the folder it describes, `.pipelex/method.json`, outside the tree it
+ *    names.
+ * 3. No argument bypasses a guard. `overwrite` opens only the two questions it
+ *    answers; `mt_…@draft` is the bare id; and `expected_updated_at` is the
+ *    one deliberate override, named in every refusal it lifts.
+ * 4. Nothing secret leaves by accident. Before a byte is sent, the save
+ *    refuses a tree holding a known secret file or a well-known key format
+ *    (`secret-guard.ts`); the validation and the catalog write come after.
  *
- * The local work — a save's read of its links and files, its link write, a
+ * The local work — a save's read of its link and files, its link write, a
  * pull's landing — takes turns across the process (`inLinkTurn`) and holds the
  * workshop's write lock across processes (`withLinkLock`), and neither is held
  * across a call to the platform but a create's turn: creates take turns among
  * themselves from claim read to link write (`inCreateTurn`), since the link
- * one writes last is what refuses a duplicate from the next. `catalog-link.ts`
- * says what the lock covers and what it does not.
+ * one writes last is what refuses a duplicate from the next. A pull downloads
+ * its tree into a private staging directory before its landing, so no
+ * download runs under the lock. `catalog-link.ts` says what the lock covers
+ * and what it does not.
  */
 
 // ── the inline budget ───────────────────────────────────────────────
 
 /**
  * The whole-set budget for the inline arm of `mthds_get_method`, applied by
- * WHOLE FILE in order — the codegen streams rule, for the same reason: half a
- * `.mthds` file is worse than none, because a truncated bundle reads as a
- * complete one that fails to parse.
+ * WHOLE FILE in order, on the sizes the method lists — the codegen streams
+ * rule, for the same reason: half a `.mthds` file is worse than none, because
+ * a truncated bundle reads as a complete one that fails to parse.
  */
 export const MAX_INLINE_SOURCE_BYTES = 256 * 1024;
 
-const utf8 = new TextEncoder();
-
 // ── input schemas ───────────────────────────────────────────────────
 
-const pythonFilesInputSchema = z
-  .array(
-    z.union([
-      z.object({
-        content: z.string().describe("The full .py file contents."),
-        uri: z.string().nullable().optional().describe("Optional provenance URI for diagnostics."),
-      }),
-      z.object({
-        path: z
-          .string()
-          .describe(
-            "Filesystem path to a .py file, resolved by the local workshop server relative to its working directory.",
-          ),
-      }),
-    ]),
-  )
-  .describe(
-    "The bundle's custom-PipeFunc .py files, REPLACED as a set. Omit to preserve whatever Python is stored; send [] to clear it.",
-  );
-
 export const mthdsSaveMethodInputSchema = {
-  files: filesInputSchema.describe(
-    "The bundle's .mthds files, ROOT FILE FIRST — the one carrying the bundle's `domain`. The platform derives the method's listed description from the first file, so the order is load-bearing and this tool does not reorder or guess.",
-  ),
+  method_dir: z
+    .string()
+    .min(1)
+    .describe(
+      "The method's folder, relative to the working directory and inside it, with a .mthds file at its top. Its whole tree is saved, every file the MTHDS standard's membership rule keeps: it skips paths with a segment starting with a dot, __pycache__/ and node_modules/, virtual environments, nested repositories, a run's inputs.json or inputs.toml, the workshop's own method-graph.html, and what the folder's .gitignore files and METHODS.toml exclude. The folder's .pipelex/method.json links it to the saved method.",
+    ),
   name: z
     .string()
     .min(1)
@@ -182,20 +177,12 @@ export const mthdsSaveMethodInputSchema = {
     .describe(
       "Absent creates a new method; present writes THAT method's draft. The bare id (mt_…); mt_…@draft is the same thing, and a version (mt_…@<n>) is refused, since a published version never changes.",
     ),
-  python: pythonFilesInputSchema.optional(),
   expected_updated_at: z
     .string()
     .min(1)
     .optional()
     .describe(
-      "The draft token this save believes it is replacing; the platform refuses the save when the draft has moved since, atomically, and nothing is written. Omitted, the linked directory's pipelex-method.json synced_updated_at is used, and only a save from an unlinked directory replaces whatever the draft holds. Pass the draft's current updated_at only to replace a draft that moved, after the user said to. Ignored on a create.",
-    ),
-  link_dir: z
-    .string()
-    .min(1)
-    .optional()
-    .describe(
-      "Where to write pipelex-method.json, relative to the working directory. Omitted, it goes beside the root file. An inline-only submission with no link_dir writes no link file.",
+      "The draft token this save believes it is replacing; the platform refuses the save when the draft has moved since, atomically, and nothing is written. Omitted, the folder's .pipelex/method.json synced_updated_at is used, and only a save from an unlinked folder replaces whatever the draft holds. Pass the draft's current updated_at only to replace a draft that moved, after the user said to. Ignored on a create.",
     ),
 };
 
@@ -213,13 +200,13 @@ export const mthdsGetMethodInputSchema = {
     .min(1)
     .optional()
     .describe(
-      "Write the method's sources here, relative to the working directory, with the link file beside them — no source passes through the conversation. Omitted, the sources come back inline.",
+      "Write the method's whole tree here, relative to the working directory, every file at its path, with .pipelex/method.json linking the folder — no file passes through the conversation. Omitted, the text files come back inline.",
     ),
   overwrite: z
     .boolean()
     .optional()
     .describe(
-      "Only meaningful with output_dir, and only for a directory already linked to THIS method whose files differ after the stored method has moved. Send it after asking the user, never by reflex.",
+      "Only meaningful with output_dir, and only for a folder already linked to THIS method whose files differ after the stored method has moved. Send it after asking the user, never by reflex.",
     ),
 };
 
@@ -240,7 +227,7 @@ const linkFileSchema = z.object({
 export const publishStateSchema = z
   .enum(["never_published", "draft_unchanged", "draft_ahead"])
   .describe(
-    "never_published: the method has no published version. draft_unchanged: the draft is identical to the latest published version. draft_ahead: the draft differs from it, so a publish would add a version.",
+    "never_published: the method has no published version. draft_unchanged: the draft's tree is the latest published version's. draft_ahead: the draft differs from it, so a publish would add a version.",
   );
 
 export type PublishState = z.infer<typeof publishStateSchema>;
@@ -265,25 +252,40 @@ export const mthdsSaveMethodOutputSchema = z.object({
     .string()
     .optional()
     .describe(
-      "The draft's new token — what pipelex-method.json now records, and what the next save sends as expected_updated_at and a publish as expected_draft_updated_at.",
+      "The draft's new token — what .pipelex/method.json now records, and what the next save sends as expected_updated_at and a publish as expected_draft_updated_at.",
     ),
   latest_version: latestVersionSchema.optional(),
   publish_state: publishStateSchema.optional(),
   api_host: z.string().optional(),
   link_file: linkFileSchema.optional(),
+  files_sent: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Every file of the tree this save sent, each as method_dir joined with its path inside the folder.",
+    ),
   rename_error: toolErrorSchema
     .optional()
     .describe(
       "Present when the draft was saved but the requested rename failed: the name is unchanged.",
     ),
   validation_errors: z.array(z.unknown()).optional(),
+  validation_refused: toolErrorSchema
+    .optional()
+    .describe(
+      "Present, with no is_valid, is_runnable or pending_signatures, when the deployment refused to load the method for the Python it holds, so it gave no verdict: the draft was saved unvalidated, and this is the refusal, whose hint says where the method validates.",
+    ),
   errors: z.array(toolErrorSchema).optional(),
 });
 
-const sourceFileSchema = z.object({
-  name: z.string(),
+const treeFileSchema = z.object({
+  path: z.string().describe("The file's path in the method's tree."),
   bytes: z.number().int().nonnegative(),
   content: z.string().optional(),
+  binary: z
+    .boolean()
+    .optional()
+    .describe("Inline arm: true for a file that is not UTF-8 text, which carries no content."),
   written_to: z.string().optional(),
 });
 
@@ -299,13 +301,12 @@ export const mthdsGetMethodOutputSchema = z.object({
     .string()
     .optional()
     .describe(
-      "The draft's token as of this read, whichever content was read — what pipelex-method.json records and what a later save sends. After a read of a version it is for a restore only, never a publish: the draft's content was not read.",
+      "The draft's token as of this read, whichever content was read — what .pipelex/method.json records and what a later save sends. After a read of a version it is for a restore only, never a publish: the draft's content was not read.",
     ),
   latest_version: latestVersionSchema.optional(),
   publish_state: publishStateSchema.optional(),
   api_host: z.string().optional(),
-  files: z.array(sourceFileSchema).optional(),
-  python: z.array(sourceFileSchema).optional(),
+  files: z.array(treeFileSchema).optional(),
   output_dir: z.string().optional(),
   link_file: linkFileSchema.optional(),
   unmanaged: z.array(z.string()).optional(),
@@ -317,12 +318,10 @@ export const mthdsGetMethodOutputSchema = z.object({
 // ── TypeScript surfaces ─────────────────────────────────────────────
 
 export interface MthdsSaveMethodInput {
-  files: SubmittedFileInput[];
+  method_dir: string;
   name?: string;
   method_id?: string;
-  python?: SubmittedFileInput[];
   expected_updated_at?: string;
-  link_dir?: string;
 }
 
 export interface MthdsGetMethodInput {
@@ -331,16 +330,18 @@ export interface MthdsGetMethodInput {
   overwrite?: boolean;
 }
 
-export interface SourceFile {
-  name: string;
+/** One file of a pulled tree, as a result reports it. */
+export interface TreeFile {
+  path: string;
   bytes: number;
   content?: string;
+  binary?: boolean;
   written_to?: string;
 }
 
 export interface SaveMethodSuccess {
   status: "ok";
-  is_valid: boolean;
+  is_valid?: boolean;
   is_runnable?: boolean;
   pending_signatures?: string[];
   method_id?: string;
@@ -351,8 +352,10 @@ export interface SaveMethodSuccess {
   publish_state?: PublishState;
   api_host?: string;
   link_file?: LinkFileReport;
+  files_sent?: string[];
   rename_error?: ToolError;
   validation_errors?: unknown[];
+  validation_refused?: ToolError;
 }
 
 export interface SaveMethodFailure {
@@ -376,13 +379,12 @@ export interface GetMethodSuccess {
   latest_version?: number | null;
   publish_state?: PublishState;
   api_host: string;
-  files: SourceFile[];
-  python: SourceFile[];
+  files: TreeFile[];
   output_dir?: string;
   link_file?: LinkFileReport;
   /**
-   * Source files in the directory that this method does not have — present
-   * only on the written arm, and only when there are any.
+   * Files of the folder's tree that this method does not have — present only
+   * on the written arm, and only when there are any.
    */
   unmanaged?: string[];
   unmanaged_truncated?: boolean;
@@ -405,26 +407,31 @@ export interface GetMethodResult {
  * The narrow SDK seam these tools call (test seam). `version` is optional: it
  * is the platform handshake that says whether bare ids resolve to a published
  * version yet, which only shapes a result's sentences, and a fake without it
- * reads as "could not tell" without sending anything.
+ * reads as "could not tell" without sending anything. `methodTreeLimits` is
+ * optional for the same reason: a fake without it lists a folder under the
+ * workshop's own limits.
  */
 export interface CatalogWriteClient {
-  getMethod(methodId: string): Promise<MethodData>;
+  getMethod(methodId: string): Promise<MethodDetail>;
   createMethod(input: MethodWriteInput): Promise<MethodData>;
   writeDraft(methodId: string, input: MethodDraftInput): Promise<MethodData>;
   renameMethod(methodId: string, input: MethodRenameInput): Promise<MethodData>;
   getMethodVersion(methodId: string, version: number): Promise<MethodVersion>;
   publishMethod(methodId: string, input: MethodPublishInput): Promise<MethodPublishResult>;
+  writeMethodTree(
+    files: readonly SavedMethodFile[],
+    options: { destination: string },
+  ): Promise<void>;
+  methodTreeLimits?(): Promise<MethodTreeLimits>;
   version?(): Promise<unknown>;
 }
 
-export interface CatalogWriteContext extends ApiConfig {
+export interface CatalogWriteContext extends ApiConfig, TreeLimitsAware {
   client?: CatalogWriteClient;
   /** The workshop's shared memory of whether each platform resolves version selectors. */
   methodVersions?: MethodVersionsMemories;
-  /** Fills `{ path }` items of `files` — `.mthds` only. */
+  /** Finds and reads `method_dir` (`locateMethodDir`, `readMethodTree`). */
   resolver?: FileResolver;
-  /** Fills `{ path }` items of `python` — `.py` only. */
-  pythonResolver?: FileResolver;
   /**
    * The workshop's working directory. Both tools are registered only where this
    * exists, so its absence is a deployment fault rather than a caller's.
@@ -456,17 +463,23 @@ export function catalogVersionsSupport(
 
 /**
  * How the draft stands against the latest published version, read from a
- * method the platform answered. `undefined` when the answer carries neither
- * field, as a platform that predates versions answers.
+ * method the platform answered: the draft's tree digest against the version's.
+ * `undefined` when the answer carries neither field, as a platform that
+ * predates versions answers, or when either digest is unknown.
  */
 export function publishStateOf(method: MethodData): PublishState | undefined {
   if (method.latest_version === null) return "never_published";
   if (typeof method.latest_version !== "number") return undefined;
   const latest = method.latest_published;
-  if (latest === null || latest === undefined || typeof method.draft_digest !== "string") {
+  if (
+    latest === null ||
+    latest === undefined ||
+    typeof method.draft_digest !== "string" ||
+    typeof latest.tree_digest !== "string"
+  ) {
     return undefined;
   }
-  return method.draft_digest === latest.source_digest ? "draft_unchanged" : "draft_ahead";
+  return method.draft_digest === latest.tree_digest ? "draft_unchanged" : "draft_ahead";
 }
 
 /** `latest_version` as the platform answered it, or `undefined` when it did not. */
@@ -505,17 +518,25 @@ export function bareIdCallersSentence(
 
 // ── error options ───────────────────────────────────────────────────
 
+/** What a tree the catalog refuses can be changed into, whichever save route refused it. */
+const TREE_REFUSED_HINT =
+  "The platform refused the method's tree: the message names the file or the limit. Rename or remove what it names, or keep it out of the method with a .gitignore inside the folder, then save again.";
+
 const CREATE_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/methods",
   badRequest: {
-    location: "files",
-    hint: "The API rejected the method payload. Check that name is non-empty and the files are the bundle's .mthds sources; if the error mentions organization context, mint a key in the intended organization.",
+    location: "method_dir",
+    hint: `${TREE_REFUSED_HINT} If the error mentions organization context, mint a key in the intended organization.`,
+  },
+  tooLarge: {
+    location: "method_dir",
+    hint: "The method is larger than the catalog stores in one method. Make the folder smaller, or keep what is not part of the method out with a .gitignore inside it.",
   },
 };
 
 const NOT_FOUND_ON_SAVE = {
   location: "method_id",
-  hint: "No registered method with this id is visible to the API key's organization. The catalog is org-scoped, so a method from another organization reads exactly like a miss — check the api_host recorded in pipelex-method.json against the API this server is configured for.",
+  hint: `No registered method with this id is visible to the API key's organization. The catalog is org-scoped, so a method from another organization reads exactly like a miss — check the api_host recorded in ${LINK_FILE_NAME} against the API this server is configured for.`,
 };
 
 /**
@@ -527,17 +548,17 @@ const NOT_FOUND_ON_SAVE = {
 const DRAFT_ERROR_OPTIONS: ClassifyErrorOptions = {
   route: "/v1/methods/{id}/draft",
   badRequest: {
-    location: "method_id",
-    hint: "The API rejected the draft. Check the method_id as the catalog returned it; if the error mentions organization context, mint a key in the intended organization.",
+    location: "method_dir",
+    hint: `${TREE_REFUSED_HINT} If the error mentions organization context, mint a key in the intended organization.`,
   },
   notFound: NOT_FOUND_ON_SAVE,
   conflict: {
     location: "expected_updated_at",
-    hint: `Somebody saved this method's draft since this directory synced with it — the webapp saves as it edits. Pull it with ${WORKSHOP_TOOL_NAMES.getMethod} into a directory of its own to compare, then decide with the user what to keep. To replace their draft knowingly, save again with expected_updated_at set to the draft's current updated_at. If that updated_at is your own last save's (one whose link write failed), pull the method into this directory to refresh the link.`,
+    hint: `Somebody saved this method's draft since this folder synced with it — the webapp saves as it edits. Pull it with ${WORKSHOP_TOOL_NAMES.getMethod} into a folder of its own to compare, then decide with the user what to keep. To replace their draft knowingly, save again with expected_updated_at set to the draft's current updated_at. If that updated_at is your own last save's (one whose link write failed), pull the method into this folder to refresh the link.`,
   },
   tooLarge: {
-    location: "files",
-    hint: "The draft is larger than the catalog stores in one method. Make the bundle smaller, or split it.",
+    location: "method_dir",
+    hint: "The draft is larger than the catalog stores in one method. Make the folder smaller, or keep what is not part of the method out with a .gitignore inside it.",
   },
 };
 
@@ -572,6 +593,7 @@ const SAVE_ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "The method was not saved: the Pipelex API returned an error.",
   paywall: "The method was not saved: the organization's Pipelex plan does not cover this call.",
   auth: "The method was not saved: the Pipelex API key is missing or was refused.",
+  role: "The method was not saved: your role in this organization does not allow this.",
 };
 
 const GET_ERROR_SUMMARIES: ErrorSummaries = {
@@ -580,7 +602,10 @@ const GET_ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "The method was not fetched: the Pipelex API returned an error.",
   paywall: "The method was not fetched: the organization's Pipelex plan does not cover this call.",
   auth: "The method was not fetched: the Pipelex API key is missing or was refused.",
+  role: "The method was not fetched: your role in this organization does not allow this.",
 };
+
+const INVALID_SAVE = "The method was not saved: request input is invalid.";
 
 /**
  * The bare id a method route takes, from a `method_id` the caller passed, or a
@@ -617,7 +642,7 @@ function malformedSuffixError(value: string, selector: MethodSelector): ToolErro
     class: "input_domain",
     location: "method_id",
     message: `\`${value}\` is not a method id: a catalog id is mt_… with at most one suffix, @<n> for a published version or @draft for the draft.`,
-    hint: `Pass the id as ${WORKSHOP_TOOL_NAMES.listMethods} or pipelex-method.json gives it.`,
+    hint: `Pass the id as ${WORKSHOP_TOOL_NAMES.listMethods} or ${LINK_FILE_NAME} gives it.`,
     retryable: false,
   };
 }
@@ -631,24 +656,25 @@ export async function saveMthdsMethod(
   const parsed = mthdsSaveMethodInputObjectSchema.safeParse(input);
   if (!parsed.success) {
     return saveError(
-      "The method was not saved: request input is invalid.",
+      INVALID_SAVE,
       parsed.error.issues.map((issue) => ({
         class: "input_domain" as const,
         ...(issue.path.length === 0 ? {} : { location: issue.path.join(".") }),
         message: issue.message,
-        hint: "Send files (root file first), and a name on a create; add method_id to save an existing method's draft.",
+        hint: "Send method_dir, the method's folder, and a name on a create; add method_id to save an existing method's draft.",
         retryable: false,
       })),
     );
   }
+  const data = parsed.data;
 
-  if (parsed.data.method_id === undefined && parsed.data.name === undefined) {
-    return saveError("The method was not saved: request input is invalid.", [
+  if (data.method_id === undefined && data.name === undefined) {
+    return saveError(INVALID_SAVE, [
       {
         class: "input_domain",
         location: "name",
         message: "name is required to create a method.",
-        hint: "Pass the name the method is listed under. To save an existing method's draft instead, pass its method_id (from pipelex-method.json beside the bundle).",
+        hint: `Pass the name the method is listed under. To save an existing method's draft instead, pass its method_id (from the folder's ${LINK_FILE_NAME}).`,
         retryable: false,
       },
     ]);
@@ -657,200 +683,58 @@ export async function saveMthdsMethod(
   // The id the method routes take. A version is immutable, so a save aimed at
   // one is refused rather than silently retargeted at the draft.
   let targetId: string | undefined;
-  if (parsed.data.method_id !== undefined) {
-    const routeId = methodRouteId(parsed.data.method_id, (selector) => ({
+  if (data.method_id !== undefined) {
+    const routeId = methodRouteId(data.method_id, (selector) => ({
       class: "input_domain",
       location: "method_id",
-      message: `\`${parsed.data.method_id}\` names published version ${selector.version}, which never changes: a save writes the method's draft.`,
-      hint: `Pass method_id "${selector.methodId}" to save these files as the draft of that method.`,
+      message: `\`${data.method_id}\` names published version ${selector.version}, which never changes: a save writes the method's draft.`,
+      hint: `Pass method_id "${selector.methodId}" to save this folder as the draft of that method.`,
       retryable: false,
     }));
     if (!routeId.ok) {
-      return saveError("The method was not saved: request input is invalid.", [routeId.error]);
+      return saveError(INVALID_SAVE, [routeId.error]);
     }
     targetId = routeId.methodId;
   }
 
-  // The bundle directory is read off the SUBMITTED items, before a single file
-  // is opened, because it is what bounds where the `{ path }` arms may read
-  // from — see {@link pathsOutsideBundle}.
-  const bundleDir = bundleDirectoryOf(parsed.data.files);
-  // The READ boundary is the directory a real `{ path }` item names, which is
-  // `linkDirectoryOf`'s question and not `bundleDirectoryOf`'s — see
-  // {@link pathsOutsideBundle} for why handing it to an inline `uri` published
-  // a workspace's secrets.
-  const readRoot = linkDirectoryOf(parsed.data.files);
-  const outside = [
-    ...(await pathsOutsideBundle(parsed.data.files, readRoot, "files", context.saveRoot)),
-    ...(await pathsOutsideBundle(parsed.data.python, readRoot, "python", context.saveRoot)),
-  ];
-  if (outside.length > 0) {
-    return saveError("The method was not saved: request input is invalid.", outside);
-  }
-
-  // Where the link file may go is a different question from what the files are
-  // NAMED relative to — see {@link linkDirectoryOf}.
-  const linkDir = linkDirectoryOf(parsed.data.files);
-  const linkTarget = parsed.data.link_dir ?? linkDir;
-
-  // The save reads a link, and lists a bundle, in link_dir and in the files'
-  // own directory, so each must REALLY be inside the working directory before
-  // anything reads it. Contained only as strings, a link_dir symlinked to a
-  // directory outside had its file names echoed in a refusal, and its link
-  // read and trusted, with the validation and the catalog write able to run
-  // before the link write refused it. The files' own directory would be
-  // refused by the resolver, but only after its link had been read.
-  if (context.saveRoot !== undefined) {
-    const escaped: ToolError[] = [];
-    for (const [dir, location] of [
-      [parsed.data.link_dir, "link_dir"],
-      [linkDir, "files"],
-    ] as const) {
-      if (dir === undefined) continue;
-      const error = await escapedDirectoryError(context.saveRoot, dir, location);
-      if (error !== undefined) escaped.push(error);
-    }
-    if (escaped.length > 0) {
-      return saveError("The method was not saved: request input is invalid.", escaped);
-    }
-  }
-
-  // A create holds a turn of its own across its whole flow — see inCreateTurn.
-  const run = () =>
-    saveToCatalog(context, parsed.data, { targetId, bundleDir, linkDir, linkTarget });
-  return targetId === undefined && linkTarget !== undefined ? inCreateTurn(run) : run();
-}
-
-/**
- * The tail of the queue a create that writes a link takes its turn in, from
- * its claim read to its link write, its calls to the platform included.
- *
- * A create is refused when its directory is already claimed, and what claims
- * it is the link the create before it writes last. Two creates from one
- * directory that overlapped both read it unclaimed and both minted a method,
- * and the second's link write then found the first's link and wrote nothing,
- * leaving a duplicate only an administrator can delete. Queued, the second
- * reads the first's link and is refused. One queue for the process rather
- * than one per directory, for the reasons {@link inLinkTurn} gives, and
- * holding remote calls costs little here: creates are rare and paced by a
- * person, only another create waits on one, and an update never does.
- * Another workshop process creating from the same directory at the same
- * moment is not covered.
- */
-let createTurn: Promise<unknown> = Promise.resolve();
-
-function inCreateTurn<T>(work: () => Promise<T>): Promise<T> {
-  const turn = createTurn.then(work);
-  createTurn = turn.catch(() => undefined);
-  return turn;
-}
-
-/** A save from its read of the links and files to its result. */
-async function saveToCatalog(
-  context: CatalogWriteContext,
-  data: z.infer<typeof mthdsSaveMethodInputObjectSchema>,
-  where: {
-    targetId: string | undefined;
-    bundleDir: string | undefined;
-    linkDir: string | undefined;
-    linkTarget: string | undefined;
-  },
-): Promise<SaveMethodResult> {
-  const { targetId, bundleDir, linkDir, linkTarget } = where;
-
-  // The links and the files are read in one local turn, holding the workshop's
-  // write lock and no call to the platform, and every refusal the links make
-  // is made there, before the validation and the catalog write: see
-  // readSaveSources. A lock that cannot be taken refuses the save before
-  // anything is sent, since a read it does not guard may mix two contents.
-  let sources: SaveSources;
-  try {
-    sources = await inLinkTurn(() =>
-      withLinkLock(() => readSaveSources(context, { data, targetId, linkDir, linkTarget })),
-    );
-  } catch (err) {
-    if (!(err instanceof LinkLockError)) throw err;
-    return saveError("The method was not saved: the workshop's write lock could not be taken.", [
+  const resolver = context.resolver;
+  if (
+    context.saveRoot === undefined ||
+    resolver?.locateMethodDir === undefined ||
+    resolver.readMethodTree === undefined
+  ) {
+    return saveError("The method was not saved: this deployment cannot read a method's folder.", [
       {
-        class: "runtime",
-        location: "link_dir",
-        message: `${err.message}, so this save read nothing and sent nothing.`,
-        hint: err.busy
-          ? "Save again in a moment: another workshop process on this machine is saving or pulling."
-          : "Fix what the message names, then save again: no save reads its files without that lock.",
-        retryable: err.busy,
+        class: "config",
+        location: "deployment",
+        message: "This deployment has no working directory to read a method's folder from.",
+        hint: "Use the local workshop server (npx @pipelex/mcp), which reads method_dir under the directory the host started it in.",
+        retryable: false,
       },
     ]);
   }
-  if (!sources.ok) {
-    return sources.result;
-  }
-  const { claim, claimRead, token, namingLink, bundle, python } = sources;
 
-  const named = nameFiles(bundle.files, bundleDir, "method", ".mthds", "files");
-  if (!named.ok) {
-    return saveError("The method was not saved: request input is invalid.", [named.error]);
-  }
-  // `serializeMethodFiles` drops whitespace-only entries, and an all-blank set
-  // serializes to `""` — which is the platform's CLEAR sentinel. So
-  // `python: [{ path: "empty.py" }]` reported "updated" and erased the stored
-  // Python, the exact hazard the omitted-versus-empty rule below exists to
-  // prevent. A blank `.mthds` is already refused in the validation leg; this is
-  // the same refusal for the arm nothing validates.
-  const blankPython = (python?.files ?? []).flatMap((file, index) =>
-    file.content.trim() === ""
-      ? [
-          {
-            class: "input_domain" as const,
-            location: `python[${index}].content`,
-            message: "File content must not be empty.",
-            hint: "An empty .py file is dropped on the way to the catalog, and a set of nothing but empty files would erase the stored Python. Remove it, or give it content.",
-            retryable: false,
-          },
-        ]
-      : [],
-  );
-  if (blankPython.length > 0) {
-    return saveError("The method was not saved: request input is invalid.", blankPython);
+  // Where the folder is, on its real path inside the working directory, before
+  // anything under it is read: its link is read first, from there.
+  const located = await resolver.locateMethodDir(data.method_dir);
+  if (!located.ok) {
+    return saveError(INVALID_SAVE, located.refusals.map(atMethodDir));
   }
 
-  const namedPython =
-    python === undefined ? undefined : nameFiles(python.files, bundleDir, "funcs", ".py", "python");
-  if (namedPython !== undefined && !namedPython.ok) {
-    return saveError("The method was not saved: request input is invalid.", [namedPython.error]);
+  // A folder still holding the link an earlier release wrote reads as
+  // unlinked here, and its whole tree, the old link included, would be
+  // uploaded as the method: refused before anything is asked or sent.
+  if (await holdsLegacyLink(located.folder)) {
+    return saveError(INVALID_SAVE, [
+      {
+        class: "input_domain",
+        location: "method_dir",
+        message: `${data.method_dir} holds ${LEGACY_LINK_FILE_NAME}, the link file an earlier release of the workshop wrote, which it now reads only at ${LINK_FILE_NAME}: saved as it is, the folder would read as unlinked and the old file would be uploaded as one of the method's files. Nothing was sent.`,
+        hint: `Move it into place from inside the folder, then save again: ${LEGACY_LINK_MOVE} (plain mv outside git), and commit the move.`,
+        retryable: false,
+      },
+    ]);
   }
-
-  // Across BOTH arms, because a name is a destination and the two arms write
-  // into one directory: an inline `files` item carrying `uri: "helper.py"` and
-  // a `python` item of the same name are two sources for one path.
-  const unwritable = unwritableNames([
-    ...named.files.map((file) => ({ file, location: "files" as const })),
-    ...(namedPython?.files ?? []).map((file) => ({ file, location: "python" as const })),
-  ]);
-  if (unwritable !== undefined) {
-    return saveError("The method was not saved: request input is invalid.", [unwritable]);
-  }
-
-  // Validate through the same capability mthds_validate uses, on the resolved
-  // bytes (already inline, so the validate leg re-reads nothing). The verdict
-  // rides beside the save and no longer gates it: a draft may be invalid, an
-  // agent's work in progress often is, and the verdict is what tells it so. A
-  // publish is where validity is required.
-  const verdict = await validateMthds({ files: bundle.files }, context.validation);
-  const validation = verdict.structuredContent;
-  if (validation.status === "error") {
-    return saveError(
-      "The method was not saved: the bundle produced no validation verdict.",
-      validation.errors ?? [],
-    );
-  }
-
-  const mthds = serializeMethodFiles(named.files);
-  // Omitted preserves the stored Python; [] clears it; a non-empty set replaces
-  // it. The tool never merges, and a bundle with no .py file sends nothing — so
-  // a save from a directory the user has not changed cannot silently erase
-  // stored Python.
-  const pythonField = namedPython === undefined ? {} : { python: namedPython.files };
 
   // Built inside a try, as the pull and the publish build theirs: the SDK's
   // constructor refuses a malformed base URL by throwing, and that must come
@@ -866,6 +750,126 @@ async function saveToCatalog(
     });
     return saveError(summaryForToolError(error, SAVE_ERROR_SUMMARIES), [error]);
   }
+
+  // A create holds a turn of its own across its whole flow — see inCreateTurn.
+  const run = () =>
+    saveToCatalog(context, data, client, {
+      targetId,
+      location: { folder: located.folder, methodDir: located.methodDir },
+    });
+  return targetId === undefined ? inCreateTurn(run) : run();
+}
+
+/** A refusal of the folder's resolver, at `method_dir`. */
+function atMethodDir(refusal: { message: string; hint: string }): ToolError {
+  return {
+    class: "input_domain",
+    location: "method_dir",
+    message: refusal.message,
+    hint: refusal.hint,
+    retryable: false,
+  };
+}
+
+/**
+ * The tail of the queue a create takes its turn in, from its claim read to its
+ * link write, its calls to the platform included.
+ *
+ * A create is refused when its folder is already claimed, and what claims it
+ * is the link the create before it writes last. Two creates from one folder
+ * that overlapped both read it unclaimed and both minted a method, and the
+ * second's link write then found the first's link and wrote nothing, leaving
+ * a duplicate only an administrator can delete. Queued, the second reads the
+ * first's link and is refused. One queue for the process rather than one per
+ * folder, for the reasons {@link inLinkTurn} gives, and holding remote calls
+ * costs little here: creates are rare and paced by a person, only another
+ * create waits on one, and an update never does. Another workshop process
+ * creating from the same folder at the same moment is not covered.
+ */
+let createTurn: Promise<unknown> = Promise.resolve();
+
+function inCreateTurn<T>(work: () => Promise<T>): Promise<T> {
+  const turn = createTurn.then(work);
+  createTurn = turn.catch(() => undefined);
+  return turn;
+}
+
+/** A save from its read of the link and the tree to its result. */
+async function saveToCatalog(
+  context: CatalogWriteContext,
+  data: z.infer<typeof mthdsSaveMethodInputObjectSchema>,
+  client: CatalogWriteClient,
+  where: { targetId: string | undefined; location: LocatedMethodDir },
+): Promise<SaveMethodResult> {
+  const { targetId, location } = where;
+
+  // The limits the deployment holds a tree to, so a folder it would refuse is
+  // refused while it is listed. Asked before the turn, never inside it: the
+  // turn holds local work alone.
+  const limits = await methodTreeLimitsOf(context, () => client);
+
+  // The link and the tree are read in one local turn, holding the workshop's
+  // write lock and no call to the platform, and every refusal the link and
+  // the secret guard make is made there, before the validation and the
+  // catalog write: see readSaveSources. A lock that cannot be taken refuses
+  // the save before anything is sent, since a read it does not guard may mix
+  // two contents.
+  let sources: SaveSources;
+  try {
+    sources = await inLinkTurn(() =>
+      withLinkLock(() => readSaveSources(context, { data, targetId, location, limits })),
+    );
+  } catch (err) {
+    if (!(err instanceof LinkLockError)) throw err;
+    return saveError("The method was not saved: the workshop's write lock could not be taken.", [
+      {
+        class: "runtime",
+        location: "method_dir",
+        message: `${err.message}, so this save read nothing and sent nothing.`,
+        hint: err.busy
+          ? "Save again in a moment: another workshop process on this machine is saving or pulling."
+          : "Fix what the message names, then save again: no save reads its files without that lock.",
+        retryable: err.busy,
+      },
+    ]);
+  }
+  if (!sources.ok) {
+    return sources.result;
+  }
+  const { claim, claimRead, token, namingLink, tree } = sources;
+
+  // The tree as read, in the form both requests send: the validation and the
+  // catalog write carry the same bytes, which the secret guard has passed.
+  const toSend = folderTreeToSend(location, tree);
+  const source: MethodTreeSource = toSend.source;
+
+  // Validate through the same capability mthds_validate uses, on the tree
+  // already read and checked, so the validate leg re-reads nothing, scans
+  // nothing again and asks no limits again, and the verdict is about the bytes
+  // saved. The verdict rides beside the save and does not gate it: a draft may
+  // be invalid, an agent's work in progress often is, and the verdict is what
+  // tells it so. A publish is where validity is required. A deployment that
+  // refuses the method for the Python it holds, the execution-locus gate,
+  // will load it on no request, so it can give no verdict while nothing is
+  // wrong with the draft: the save goes ahead unvalidated and says why. Any
+  // other validation that produced no verdict, an unreachable API or a refused
+  // credential, refuses the save, since the tool could not say what it saved.
+  const verdict = await validateMethodTree(toSend, context.validation);
+  const validation: ValidationStructuredContent = verdict.structuredContent;
+  let validationRefused: ToolError | undefined;
+  if (validation.status === "error") {
+    const errors = validation.errors ?? [];
+    const [first] = errors;
+    if (verdict.refusedForPython === true && first !== undefined) {
+      validationRefused = first;
+    } else {
+      return saveError(
+        `The method was not saved, because validating it produced no verdict${first === undefined ? "." : `: ${asOneLine(first.message)}`}`,
+        errors,
+      );
+    }
+  }
+
   // Asked beside the catalog calls rather than after them: it never rejects,
   // and only the summary's sentence about callers waits on it.
   const support = catalogVersionsSupport(context, client);
@@ -877,14 +881,9 @@ async function saveToCatalog(
   let draftMovedTo: string | undefined;
 
   if (targetId === undefined) {
-    const writeInput: MethodWriteInput = {
-      // Present: the create arm was refused above without one.
-      name: data.name ?? "",
-      mthds,
-      ...pythonField,
-    };
     try {
-      stored = await client.createMethod(writeInput);
+      // Present: the create arm was refused above without one.
+      stored = await client.createMethod({ name: data.name ?? "", tree: source });
     } catch (err) {
       const error = classifyError(err, {
         ...CREATE_ERROR_OPTIONS,
@@ -901,14 +900,13 @@ async function saveToCatalog(
     // moved since the token is refused atomically and nothing is written. The
     // token is the caller's when given, and otherwise the link file's — the
     // claim above already proved it names this method — so a save from a
-    // linked directory never replaces a draft somebody saved since this
-    // directory synced, the webapp's autosave included. Only a save from an
-    // unlinked directory, or an inline one, is last-writer-wins. `input_data`
-    // is omitted, which keeps the form inputs a webapp user saved, and so is
-    // the name: a rename is its own call below.
+    // linked folder never replaces a draft somebody saved since this folder
+    // synced, the webapp's autosave included. Only a save from an unlinked
+    // folder is last-writer-wins. `input_data` is omitted, which keeps the
+    // form inputs a webapp user saved, and so is the name: a rename is its own
+    // call below.
     const draftInput: MethodDraftInput = {
-      mthds,
-      ...pythonField,
+      tree: source,
       ...(token === undefined ? {} : { expected_updated_at: token }),
     };
     try {
@@ -944,9 +942,9 @@ async function saveToCatalog(
     // what this call saved, and a token that moved since is reported.
     //
     // A name that is the one the link recorded is not a rename asked for: it
-    // is what an agent reads back out of pipelex-method.json, and when the
-    // method was renamed elsewhere since — in the webapp, by a teammate — sending
-    // it would quietly undo that rename. The stored name is kept, and the link
+    // is what an agent reads back out of the link file, and when the method
+    // was renamed elsewhere since — in the webapp, by a teammate — sending it
+    // would quietly undo that rename. The stored name is kept, and the link
     // written below records it, so saving again with the old name is then a
     // rename the caller means.
     const name = data.name;
@@ -974,9 +972,9 @@ async function saveToCatalog(
   const apiHost = apiHostOf(context.baseUrl);
   // Written only while the link still holds what this save read before its
   // files: anything else describes what another save or a pull put in the
-  // directory since, which this save's token says nothing about.
+  // folder since, which this save's token says nothing about.
   const written = await inLinkTurn(() =>
-    writeLinkForSave(context, linkTarget, claimRead, {
+    writeLinkForSave(context, location.folder, claimRead, {
       apiHost,
       methodId: stored.method_id,
       name: stored.name,
@@ -989,9 +987,13 @@ async function saveToCatalog(
   const publishState = publishStateOf(stored);
   const structuredContent: SaveMethodSuccess = {
     status: "ok",
-    is_valid: validation.is_valid,
-    is_runnable: validation.is_runnable,
-    pending_signatures: validation.pending_signatures,
+    ...(validationRefused === undefined
+      ? {
+          is_valid: validation.is_valid,
+          is_runnable: validation.is_runnable,
+          pending_signatures: validation.pending_signatures,
+        }
+      : { validation_refused: validationRefused }),
     method_id: stored.method_id,
     name: stored.name,
     saved,
@@ -1000,6 +1002,7 @@ async function saveToCatalog(
     ...(publishState === undefined ? {} : { publish_state: publishState }),
     api_host: apiHost,
     link_file: linkFile,
+    files_sent: toSend.files.map((file) => file.shown),
     ...(renameError === undefined ? {} : { rename_error: renameError }),
     ...(validation.validation_errors === undefined
       ? {}
@@ -1018,6 +1021,7 @@ async function saveToCatalog(
       staleName,
       draftMovedTo,
       callers: bareIdCallersSentence(stored, answer),
+      leftOut: tree.graphPage === undefined ? [] : [shownIn(location.methodDir, tree.graphPage)],
     }),
   };
 }
@@ -1028,105 +1032,105 @@ type SaveSources =
   | {
       ok: true;
       claim: DirectoryClaim | undefined;
-      /** The link where this save writes its own, as read: what that write compares against. */
+      /** The folder's link as read: what this save's link write compares against. */
       claimRead: LinkRead;
       token?: string;
       /** The link that names the method this update writes, for the rename. */
       namingLink?: MethodLink;
-      bundle: ResolvedFiles;
-      python?: ResolvedFiles;
+      tree: Extract<MethodTreeRead, { ok: true }>;
     };
 
 /**
  * A save's local read, made in one turn ({@link inLinkTurn}) holding the
  * workshop's write lock ({@link withLinkLock}), with no call to the platform
- * in it: the link this save will write, the link beside the files when that is
- * another one, every refusal those links make, then the files.
+ * in it: the folder's link, every refusal it makes, then the folder's whole
+ * tree, every file read once, and the secret guard over those bytes.
  *
  * The lock keeps every workshop pull out of the read, in this process and in
  * every other: a pull landing while the save read would leave it a mix of two
  * contents, which a caller passing `expected_updated_at` sends past the
- * `partial_pull` refusal, and a pull into a directory nested in the bundle's
- * changes the bundle's files without touching its link.
+ * `partial_pull` refusal, and a pull into a folder nested in this one changes
+ * its files without touching its link.
  *
- * The links are read BEFORE the bytes they vouch for, because the token
+ * The link is read BEFORE the bytes it vouches for, because the token
  * certifies the state those bytes were read against. Read after them, a save
- * from the same directory landing in between could move the draft and refresh
+ * from the same folder landing in between could move the draft and refresh
  * the link, and this save would send that newer token with older bytes and
  * replace the newer draft without a conflict.
  *
- * They are read again AFTER the files, and the save is refused when either
- * moved: something wrote a link while the files were read, so the bytes in
- * hand may be its, or a mix, and no link vouches for them. The lock keeps
- * every workshop pull out, so this answers a writer that takes no lock: an
- * editor, a git checkout, a workshop too old to share this one's lock.
+ * It is read again AFTER the files, and the save is refused when it moved:
+ * something wrote the link while the files were read, so the bytes in hand
+ * may be its, or a mix, and no link vouches for them. The lock keeps every
+ * workshop pull out, so this answers a writer that takes no lock: an editor,
+ * a git checkout, a workshop too old to share this one's lock.
  *
  * Every refusal is made here, before the remote validation and the catalog
  * write, because both arms are irreversible in the same way: a create that
  * ran first left a duplicate, and a draft write that ran first left a
  * different method's draft replaced — delete is admin-only, and a replaced
- * draft is gone. A save the links refuse spends no validation and no
- * handshake.
+ * draft is gone. A save refused here sends nothing of the folder.
  */
 async function readSaveSources(
   context: CatalogWriteContext,
   request: {
     data: z.infer<typeof mthdsSaveMethodInputObjectSchema>;
     targetId: string | undefined;
-    linkDir: string | undefined;
-    linkTarget: string | undefined;
+    location: LocatedMethodDir;
+    limits: ListingLimits;
   },
 ): Promise<SaveSources> {
-  const { data, targetId, linkDir, linkTarget } = request;
+  const { data, targetId, location, limits } = request;
   const refuse = (summary: string, errors: ToolError[]): SaveSources => ({
     ok: false,
     result: saveError(summary, errors),
   });
 
-  const at = await linkAt(context, linkTarget);
+  const at: LinkAt = {
+    dir: location.methodDir,
+    absolute: location.folder,
+    read: await readMethodLink(location.folder),
+  };
   const claim = claimOf(at);
-  const claimRead = at?.read ?? NO_LINK;
+  const claimRead = at.read;
 
   let token: string | undefined;
   let namingLink: MethodLink | undefined;
   if (targetId === undefined) {
-    // Preventing a duplicate is the link file's whole purpose, and it was
-    // consulted too late to serve it: the create ran first, and only afterwards
-    // did the link write refuse to re-point — reporting `link_file.written:
-    // false` about a SECOND method that already existed.
+    // Preventing a duplicate is the link file's whole purpose: a create from a
+    // folder already linked would mint a SECOND method for the same files.
     if (claim !== undefined) {
-      return refuse("The method was not saved: that directory is already claimed.", [
+      return refuse("The method was not saved: that folder is already claimed.", [
         claim.kind === "link"
           ? {
               class: "input_domain",
               location: "method_id",
-              message: `\`${claim.dir}\` is linked to \`${claim.link.method_id}\` (${claim.link.name} on ${claim.link.api_host}), and this call names no method_id, so it would have created a SECOND method for the same directory.`,
-              hint: `Pass method_id: "${claim.link.method_id}" to save the draft of the method this directory is linked to, or point link_dir at a directory of its own to create a genuinely new method.`,
+              message: `\`${claim.dir}\` is linked to \`${claim.link.method_id}\` (${claim.link.name} on ${claim.link.api_host}), and this call names no method_id, so it would have created a SECOND method for the same folder.`,
+              hint: `Pass method_id: "${claim.link.method_id}" to save the draft of the method this folder is linked to. To make a genuinely new method from these files, copy the folder without its ${LINK_FILE_NAME} and save the copy.`,
               retryable: false,
             }
           : {
               class: "input_domain",
-              location: "link_dir",
-              message: `\`${claim.dir}\` holds a \`${LINK_FILE_NAME}\` that cannot be read (${claim.reason}), so something already claims this directory. Creating a method from here would leave a SECOND method that this tool cannot delete.`,
-              hint: `Repair or remove \`${LINK_FILE_NAME}\` in that directory — if it names the method you meant, pass its method_id — or point link_dir at a directory of its own to create a genuinely new method.`,
+              location: "method_dir",
+              message: `\`${claim.dir}\` holds a \`${LINK_FILE_NAME}\` that cannot be read (${claim.reason}), so something already claims this folder. Creating a method from here would leave a SECOND method that this tool cannot delete.`,
+              hint: `Repair or remove \`${LINK_FILE_NAME}\` in that folder — if it names the method you meant, pass its method_id — or copy the folder without it to create a genuinely new method.`,
               retryable: false,
             },
       ]);
     }
   } else {
     // A method_id read from the wrong place, or a stale one pasted by a user,
-    // would write THIS directory's bundle into that method's draft, and only
+    // would write THIS folder's tree into that method's draft, and only
     // afterwards would the link write report the mismatch — leaving the wrong
-    // draft replaced and the directory still linked to the right method. The
-    // ids are compared bare, since the link records the bare id and `@draft`
-    // names the same method.
+    // draft replaced and the folder still linked to the right method. The ids
+    // are compared bare, since the link records the bare id and `@draft` names
+    // the same method.
     if (claim?.kind === "link" && readMethodSelector(claim.link.method_id).methodId !== targetId) {
-      return refuse("The method was not saved: that directory is linked to another method.", [
+      return refuse("The method was not saved: that folder is linked to another method.", [
         {
           class: "input_domain",
           location: "method_id",
-          message: `\`${claim.dir}\` is linked to \`${claim.link.method_id}\` (${claim.link.name} on ${claim.link.api_host}), but this call names method_id \`${data.method_id}\`. Saving would have replaced a different method's draft with this directory's bundle, and a replaced draft cannot be given back.`,
-          hint: `Pass method_id: "${claim.link.method_id}" to save the draft of the method this directory is linked to. If you really mean to save this bundle as \`${targetId}\`, point link_dir at a directory of its own so the two stop sharing one link file.`,
+          message: `\`${claim.dir}\` is linked to \`${claim.link.method_id}\` (${claim.link.name} on ${claim.link.api_host}), but this call names method_id \`${data.method_id}\`. Saving would have replaced a different method's draft with this folder's files, and a replaced draft cannot be given back.`,
+          hint: `Pass method_id: "${claim.link.method_id}" to save the draft of the method this folder is linked to. If you really mean to save these files as \`${targetId}\`, copy the folder without its ${LINK_FILE_NAME} and save the copy, so the two methods stop sharing one link.`,
           retryable: false,
         },
       ]);
@@ -1141,113 +1145,44 @@ async function readSaveSources(
     }
   }
 
-  // The link says what the directory it sits in holds, so it goes only where
-  // the files being saved are: the files' own directory, or a directory
-  // holding no bundle at all — the fork link_dir exists for. Written beside
-  // another bundle, it would vouch for THAT bundle as this save's draft, and a
-  // save from there would replace the draft with it without a conflict.
-  const elsewhere = await otherBundleAt(context, linkTarget, linkDir);
-  if (elsewhere !== undefined) {
-    return refuse("The method was not saved: link_dir holds a bundle of its own.", [elsewhere]);
+  // Read ONCE. The bytes that are checked, validated and saved are one read:
+  // splitting them would read the files twice, and neither the guard nor the
+  // verdict would be provably about the saved bytes. `readMethodTree` is
+  // present: the caller refused a deployment without it.
+  const tree = await context.resolver!.readMethodTree!(location, { limits });
+  if (!tree.ok) {
+    return refuse(INVALID_SAVE, tree.refusals.map(atMethodDir));
   }
 
-  // An explicit link_dir moves where the link is WRITTEN, not where the files
-  // were read from. When the files' own directory is linked to this same
-  // method, its link describes the bytes being sent, so its guards hold too:
-  // read only at link_dir, a directory holding a pulled version, or an
-  // unfinished pull, saved with link_dir pointed at an empty directory went
-  // out with no token at all, replacing the draft without the restore guard.
-  // A source link naming ANOTHER method is left alone, since link_dir is the
-  // documented fork for exactly that directory, and so is one that cannot be
-  // read, which refuses only a save that writes its link there.
-  const sourceAt =
-    targetId !== undefined &&
-    linkDir !== undefined &&
-    !(await sameDirectory(context, linkTarget, linkDir))
-      ? await linkAt(context, linkDir)
-      : undefined;
-  const source = claimOf(sourceAt);
-  if (
-    targetId !== undefined &&
-    source?.kind === "link" &&
-    readMethodSelector(source.link.method_id).methodId === targetId
-  ) {
-    const fromSource = draftTokenOf(source, data.expected_updated_at, targetId);
-    if (!fromSource.ok) {
-      return refuse(fromSource.summary, [fromSource.error]);
-    }
-    if (token === undefined) {
-      // link_dir offers no token, and the source link describes these bytes.
-      token = fromSource.token;
-    } else if (fromSource.token !== undefined && fromSource.token !== token) {
-      return refuse(
-        "The method was not saved: the files' directory and link_dir record different syncs.",
-        [
-          {
-            class: "input_domain",
-            location: "link_dir",
-            message: `\`${source.dir}\`, where the files are, records a sync of \`${targetId}\` at ${fromSource.token}, while link_dir \`${claim?.dir ?? data.link_dir}\` records one at ${token}: the two directories record different syncs of the draft, so this save cannot tell which one its files were read against. Nothing was written.`,
-            hint: `Pull the method into the directory the files are in, so its link records the draft as it stands, then save again. To save these files as they stand, pass expected_updated_at with the draft's current updated_at (${WORKSHOP_TOOL_NAMES.getMethod} reports it) once the user has said to.`,
-            retryable: false,
-          },
-        ],
-      );
-    }
-    namingLink ??= source.link;
-  }
-
-  // Resolve ONCE. The bytes that are validated are the bytes that are saved:
-  // splitting the two — validate in the skill, save in a second call — would
-  // read the files twice and the verdict would not be provably about the saved
-  // bytes.
-  const bundle = await resolveSubmittedFiles(data.files, context.resolver);
-  if (bundle.errors.length > 0) {
-    return refuse("The method was not saved: request input is invalid.", bundle.errors);
-  }
-  if (bundle.files.length === 0) {
-    return refuse("The method was not saved: request input is invalid.", [
-      {
-        class: "input_domain",
-        location: "files",
-        message: "files must not be empty.",
-        hint: "Submit the bundle's .mthds files with the root file — the one carrying the bundle's `domain` — first.",
-        retryable: false,
-      },
+  // The secret guard, over the bytes in hand, before any of them is sent.
+  const findings = secretFindings(
+    tree.files.map((file) => ({
+      path: file.path,
+      bytes: tree.bytes.get(file.path) ?? new Uint8Array(),
+    })),
+  );
+  if (findings.length > 0) {
+    const text = secretRefusalText(findings, (treePath) => shownIn(location.methodDir, treePath), {
+      arm: "folder",
+      again: "save again",
+    });
+    return refuse("The method was not saved: its folder holds what looks like a secret.", [
+      { class: "input_domain", location: "method_dir", ...text, retryable: false },
     ]);
   }
 
-  const python =
-    data.python === undefined
-      ? undefined
-      : await resolveSubmittedFiles(data.python, context.pythonResolver);
-  if (python !== undefined && python.errors.length > 0) {
-    return refuse(
-      "The method was not saved: request input is invalid.",
-      python.errors.map((error) => ({
-        ...error,
-        // resolveSubmittedFiles locates at `files[i]`; this set is `python`.
-        ...(error.location === undefined
-          ? {}
-          : { location: error.location.replace(/^files\[/, "python[") }),
-      })),
-    );
-  }
-
-  // The second read of the links, now that the bytes are in hand.
-  for (const before of [at, sourceAt]) {
-    if (before === undefined) continue;
-    const after = await readMethodLink(before.absolute);
-    if (!sameLinkRead(before.read, after)) {
-      return refuse("The method was not saved: the directory changed while this save read it.", [
-        {
-          class: "runtime",
-          location: before === at ? "link_dir" : "files",
-          message: `\`${path.join(before.dir, LINK_FILE_NAME)}\` changed while this save read the files — something that does not take the workshop's write lock, an editor, a git checkout or an older workshop, wrote into \`${before.dir}\` meanwhile — so the bytes read may not be the ones its link vouches for. Nothing was written.`,
-          hint: "Look at what the directory holds now, then save again.",
-          retryable: true,
-        },
-      ]);
-    }
+  // The second read of the link, now that the bytes are in hand.
+  const after = await readMethodLink(location.folder);
+  if (!sameLinkRead(at.read, after)) {
+    return refuse("The method was not saved: the folder changed while this save read it.", [
+      {
+        class: "runtime",
+        location: "method_dir",
+        message: `\`${path.join(at.dir, LINK_FILE_NAME)}\` changed while this save read the files — something that does not take the workshop's write lock, an editor, a git checkout or an older workshop, wrote into \`${at.dir}\` meanwhile — so the bytes read may not be the ones its link vouches for. Nothing was sent.`,
+        hint: "Look at what the folder holds now, then save again.",
+        retryable: true,
+      },
+    ]);
   }
 
   return {
@@ -1256,13 +1191,12 @@ async function readSaveSources(
     claimRead,
     ...(token === undefined ? {} : { token }),
     ...(namingLink === undefined ? {} : { namingLink }),
-    bundle,
-    ...(python === undefined ? {} : { python }),
+    tree,
   };
 }
 
 /**
- * The draft token a save from this directory is held to: the caller's
+ * The draft token a save from this folder is held to: the caller's
  * `expected_updated_at` when given, and otherwise the link file's
  * `synced_updated_at` — but only when the link is a clean record of a sync
  * with the DRAFT. Each other state of the link is refused before anything is
@@ -1279,8 +1213,7 @@ async function readSaveSources(
  *   restoring the version and losing whatever the draft held beyond it, which
  *   the caller makes happen only on purpose, by passing the token.
  *
- * An unlinked directory, or an inline submission, has no token and is
- * last-writer-wins.
+ * An unlinked folder has no token and is last-writer-wins.
  */
 function draftTokenOf(
   claim: DirectoryClaim | undefined,
@@ -1293,12 +1226,12 @@ function draftTokenOf(
   if (claim.kind === "unreadable") {
     return {
       ok: false,
-      summary: "The method was not saved: the directory's link file cannot be read.",
+      summary: "The method was not saved: the folder's link file cannot be read.",
       error: {
         class: "input_domain",
-        location: "link_dir",
-        message: `\`${claim.dir}\` holds a \`${LINK_FILE_NAME}\` that cannot be read (${claim.reason}), so this save has no draft token to protect the draft with, and without one it would replace whatever the draft holds now. Nothing was written.`,
-        hint: `Repair it — a git merge conflict is the usual cause, and the side with the later synced_updated_at is the one to keep — or remove it and pull the method into the directory to relink it. ${toSaveAnyway}`,
+        location: "method_dir",
+        message: `\`${claim.dir}\` holds a \`${LINK_FILE_NAME}\` that cannot be read (${claim.reason}), so this save has no draft token to protect the draft with, and without one it would replace whatever the draft holds now. Nothing was sent.`,
+        hint: `Repair it — a git merge conflict is the usual cause, and the side with the later synced_updated_at is the one to keep — or remove it and pull the method into the folder to relink it. ${toSaveAnyway}`,
         retryable: false,
       },
     };
@@ -1307,12 +1240,12 @@ function draftTokenOf(
   if (link.partial_pull === true || link.synced_updated_at === "") {
     return {
       ok: false,
-      summary: "The method was not saved: an earlier pull into that directory never finished.",
+      summary: "The method was not saved: an earlier pull into that folder never finished.",
       error: {
         class: "input_domain",
-        location: "link_dir",
-        message: `An earlier pull of \`${methodId}\` into \`${claim.dir}\` was interrupted, so the directory may hold a mix of two contents, and its \`${LINK_FILE_NAME}\` records no sync that finished. Saving would replace the draft with that mix. Nothing was written.`,
-        hint: `Pull the method into the directory again, which finishes the interrupted pull, then save. ${toSaveAnyway}`,
+        location: "method_dir",
+        message: `An earlier pull of \`${methodId}\` into \`${claim.dir}\` was interrupted, so the folder may hold a mix of two contents, and its \`${LINK_FILE_NAME}\` records no sync that finished. Saving would replace the draft with that mix. Nothing was sent.`,
+        hint: `Pull the method into the folder again, which finishes the interrupted pull, then save. ${toSaveAnyway}`,
         retryable: false,
       },
     };
@@ -1320,12 +1253,12 @@ function draftTokenOf(
   if (link.synced_version !== undefined) {
     return {
       ok: false,
-      summary: "The method was not saved: the directory holds a published version, not the draft.",
+      summary: "The method was not saved: the folder holds a published version, not the draft.",
       error: {
         class: "input_domain",
         location: "expected_updated_at",
-        message: `\`${claim.dir}\` holds version ${link.synced_version} of \`${methodId}\`, pulled over the draft, so this save would replace the draft with that version's files and any edits made to them: that restores version ${link.synced_version} as the draft, and loses whatever the draft held beyond it. Nothing was written.`,
-        hint: `If the user wants version ${link.synced_version} restored as the draft, save again with expected_updated_at "${link.synced_updated_at}", and with python set to that version's .py files ([] when it has none), since an omitted python keeps the Python the draft holds. Otherwise pull the draft back into the directory (method_id "${methodId}") and work from it.`,
+        message: `\`${claim.dir}\` holds version ${link.synced_version} of \`${methodId}\`, pulled over the draft, so this save would replace the draft with that version's files and any edits made to them: that restores version ${link.synced_version} as the draft, and loses whatever the draft held beyond it. Nothing was sent.`,
+        hint: `If the user wants version ${link.synced_version} restored as the draft, save again with expected_updated_at "${link.synced_updated_at}". Otherwise pull the draft back into the folder (method_id "${methodId}") and work from it.`,
         retryable: false,
       },
     };
@@ -1354,7 +1287,7 @@ async function draftConflictError(
     return error;
   }
   const source = sent.fromLink
-    ? ` as this directory's ${LINK_FILE_NAME} records (synced_updated_at)`
+    ? ` as this folder's ${LINK_FILE_NAME} records (synced_updated_at)`
     : "";
   return {
     ...error,
@@ -1377,9 +1310,15 @@ async function draftConflictError(
  * final: the create was accepted and only its answer was lost, so the method
  * exists and a second save without its id would mint another.
  *
+ * A file that could not be uploaded is none of this: the upload comes before
+ * the create, which is never sent, so the SDK's verdict stands.
+ *
  * When the SDK gains the key, this function goes.
  */
 function notRetryableCreate(err: unknown, error: ToolError): ToolError {
+  if (err instanceof MethodFileTransferError) {
+    return error;
+  }
   const accepted = err instanceof ApiResponseError && err.status >= 200 && err.status < 300;
   if (!error.retryable && !accepted) {
     return error;
@@ -1403,58 +1342,27 @@ function notRetryableCreate(err: unknown, error: ToolError): ToolError {
  */
 async function writeLinkForSave(
   context: CatalogWriteContext,
-  requested: string | undefined,
+  folder: string,
   expected: LinkRead,
   fields: { apiHost: string; methodId: string; name: string; syncedUpdatedAt: string },
 ): Promise<{ report: LinkFileReport; changed: boolean }> {
-  if (requested === undefined) {
-    // An inline-only submission has no directory to put the link in. Say so:
-    // without a link the next save creates a second method unless the caller
-    // passes the id.
-    return {
-      report: {
-        path: LINK_FILE_NAME,
-        written: false,
-        reason:
-          "the submission was inline only and no link_dir was given, so there is no directory to link",
-      },
-      changed: false,
-    };
-  }
-  if (context.saveRoot === undefined) {
-    return {
-      report: {
-        path: LINK_FILE_NAME,
-        written: false,
-        reason: "this deployment has no working directory to write into",
-      },
-      changed: false,
-    };
-  }
-
-  const target = await resolveSaveDir(context.saveRoot, requested, "link_dir");
-  if (!target.ok) {
-    return {
-      report: { path: LINK_FILE_NAME, written: false, reason: target.error.message },
-      changed: false,
-    };
-  }
-
-  // A save makes the directory the draft, so the link records no published
+  // Present: the save refused a deployment without one.
+  const root = await fs.realpath(context.saveRoot ?? folder).catch(() => folder);
+  // A save makes the folder the draft, so the link records no published
   // version, whatever an earlier pull of one left there. The lock makes the
   // compare and the write one step for other workshop processes too; one that
   // cannot be taken leaves the link unwritten rather than written unguarded,
   // and never fails the save, whose draft is already stored.
   try {
     const replaced = await withLinkLock(() =>
-      replaceMethodLink(target.root, target.dir, expected, buildMethodLink(fields)),
+      replaceMethodLink(root, folder, expected, buildMethodLink(fields)),
     );
     return { report: replaced.report, changed: replaced.changed };
   } catch (err) {
     if (!(err instanceof LinkLockError)) throw err;
     return {
       report: {
-        path: path.relative(target.root, path.join(target.dir, LINK_FILE_NAME)),
+        path: path.relative(root, path.join(folder, LINK_FILE_NAME)),
         written: false,
         reason: `${err.message}, so it was not written`,
       },
@@ -1474,17 +1382,25 @@ function saveSummary(
     staleName?: string;
     draftMovedTo?: string;
     callers?: string;
+    leftOut: readonly string[];
   },
 ): string {
   const id = result.method_id ?? "";
   const lines: string[] = [];
+  const sent = result.files_sent ?? [];
+  const tree = `${sent.length} file${sent.length === 1 ? "" : "s"}, listed in files_sent`;
   if (result.saved === "created") {
     lines.push(
-      `Method **${result.name}** created on ${result.api_host} (method_id: \`${id}\`, updated_at ${result.updated_at}), holding this bundle as its draft.`,
+      `Method **${result.name}** created on ${result.api_host} (method_id: \`${id}\`, updated_at ${result.updated_at}), holding this folder's tree as its draft (${tree}).`,
     );
   } else {
     lines.push(
-      `The draft of **${result.name}** was saved on ${result.api_host} (method_id: \`${id}\`, updated_at ${result.updated_at})${result.saved === "renamed" && notes.previousName !== undefined ? `, and the method was renamed from **${notes.previousName}**` : ""}.`,
+      `The draft of **${result.name}** was saved on ${result.api_host} (method_id: \`${id}\`, updated_at ${result.updated_at}) from this folder's tree (${tree})${result.saved === "renamed" && notes.previousName !== undefined ? `, and the method was renamed from **${notes.previousName}**` : ""}.`,
+    );
+  }
+  if (notes.leftOut.length > 0) {
+    lines.push(
+      `Left out, as never part of a method: ${notes.leftOut.map((each) => `\`${each}\``).join(", ")}, the page ${WORKSHOP_TOOL_NAMES.validate} regenerates.`,
     );
   }
   if (result.rename_error !== undefined) {
@@ -1503,20 +1419,26 @@ function saveSummary(
   }
   if (notes.draftMovedTo !== undefined) {
     lines.push(
-      `The draft changed again right after this save: somebody saved it at ${notes.draftMovedTo}, so it no longer holds these files. The link records this save's updated_at, so the next save from here, and a publish under that token, are refused until the user decides what to keep — pull the method into a directory of its own to see what the draft holds now.`,
+      `The draft changed again right after this save: somebody saved it at ${notes.draftMovedTo}, so it no longer holds these files. The link records this save's updated_at, so the next save from here, and a publish under that token, are refused until the user decides what to keep — pull the method into a folder of its own to see what the draft holds now.`,
     );
   }
 
-  if (!result.is_valid) {
+  if (result.validation_refused !== undefined) {
+    const refused = result.validation_refused;
+    const said = asOneLine(refused.message);
     lines.push(
-      "The bundle is NOT valid. It was saved anyway, as a draft may be, and a publish refuses it until it validates: fix the validation errors and save again.",
+      `The method was NOT validated, so whether it is valid is unknown: this deployment refuses to load it for the Python it holds — ${said}${/[.!?]$/.test(said) ? "" : "."} It was saved anyway, as a draft may be, and a publish validates it before publishing anything.${refused.hint === undefined ? "" : ` ${refused.hint}`}`,
+    );
+  } else if (!result.is_valid) {
+    lines.push(
+      "The method is NOT valid. It was saved anyway, as a draft may be, and a publish refuses it until it validates: fix the validation errors and save again.",
     );
   } else if (result.is_runnable === false) {
     const pending = result.pending_signatures ?? [];
     lines.push(
       pending.length === 0
-        ? "The bundle is valid but does not run yet, and a publish refuses it until it does."
-        : `The bundle is valid but does not run yet — these signatures are still pending: ${pending.map((ref) => `\`${ref}\``).join(", ")}. A publish refuses it until they resolve.`,
+        ? "The method is valid but does not run yet, and a publish refuses it until it does."
+        : `The method is valid but does not run yet — these signatures are still pending: ${pending.map((ref) => `\`${ref}\``).join(", ")}. A publish refuses it until they resolve.`,
     );
   }
 
@@ -1535,22 +1457,20 @@ function saveSummary(
   if (result.link_file === undefined) {
     return lines.join("\n");
   }
-  // The pull path learned this first: saying "NOT linked" about a linked
-  // directory was the worst of the three answers, because it told the caller to
-  // pass a method_id they did not need — and the id it named was this method,
-  // about a directory whose surviving link names another. Following that advice
-  // overwrote the teammate's method. The save path kept the two-way version;
-  // this is the pull path's three-way answer, said here too.
+  // Saying "NOT linked" about a linked folder was the worst of the three
+  // answers, because it told the caller to pass a method_id they did not need
+  // — and the id it named was this method, about a folder whose surviving
+  // link names another. So the answer is three-way, as the pull's is.
   lines.push(
     result.link_file.written
       ? `Linked by \`${result.link_file.path}\` — commit it, so a teammate saves this same method instead of creating a second one.`
       : notes.linkChanged
-        ? `\`${result.link_file.path}\` was not refreshed: ${result.link_file.reason}. It no longer holds what this save read, so it does not describe the files this save sent: look at what the directory holds before saving from it again — a save from it is held to that link.`
+        ? `\`${result.link_file.path}\` was not refreshed: ${result.link_file.reason}. It no longer holds what this save read, so it does not describe the files this save sent: look at what the folder holds before saving from it again — a save from it is held to that link.`
         : notes.linkedAnyway
-          ? `The directory IS linked to this method, but \`${result.link_file.path}\` could not be refreshed (${result.link_file.reason}), so it still records an out-of-date synced_updated_at, and the next save from here will be refused as stale. Fix that and pull this method into the directory, which refreshes the link alone while the files match.`
+          ? `The folder IS linked to this method, but \`${result.link_file.path}\` could not be refreshed (${result.link_file.reason}), so it still records an out-of-date synced_updated_at, and the next save from here will be refused as stale. Fix that and pull this method into the folder, which refreshes the link alone while the files match.`
           : notes.claimUnreadable
-            ? `\`${result.link_file.path}\` cannot be read (${result.link_file.reason}), so it was not refreshed, and a save from here is refused until it is: repair or remove it, then pull this method into the directory to relink it.`
-            : `The directory is NOT linked (${result.link_file.reason}), so the next save would create a SECOND method unless it passes method_id \`${id}\`.`,
+            ? `\`${result.link_file.path}\` cannot be read (${result.link_file.reason}), so it was not refreshed, and a save from here is refused until it is: repair or remove it, then pull this method into the folder to relink it.`
+            : `The folder is NOT linked (${result.link_file.reason}), so the next save would create a SECOND method unless it passes method_id \`${id}\`.`,
   );
   return lines.join("\n");
 }
@@ -1563,16 +1483,14 @@ function saveError(summary: string, errors: ToolError[]): SaveMethodResult {
 
 /**
  * What a pull brings back: the method's draft, or one of its published
- * versions, as named files. A version carries no name of its own, so the
- * method's name always comes from the method read.
+ * versions, as a listing of its tree. A version carries no name of its own,
+ * so the method's name always comes from the method read.
  */
 interface PulledContent {
   /** `"draft"`, or the published version's number. */
   version: number | "draft";
-  sources: MethodFile[];
-  python: MethodFile[];
-  /** The single `.mthds` name is this tool's invention: the stored source predates the named form. */
-  synthesizedName: boolean;
+  /** The tree, each file with its SHA-256, its size and its link, in tree path order. */
+  files: readonly SavedMethodFile[];
   /** A version's publish instant, for the summary. */
   publishedAt?: string;
 }
@@ -1589,7 +1507,7 @@ export async function getMthdsMethod(
         class: "input_domain" as const,
         ...(issue.path.length === 0 ? {} : { location: issue.path.join(".") }),
         message: issue.message,
-        hint: "Pass method_id as the catalog returned it; add output_dir to write the sources to disk.",
+        hint: "Pass method_id as the catalog returned it; add output_dir to write the method's tree to disk.",
         retryable: false,
       })),
     );
@@ -1597,8 +1515,8 @@ export async function getMthdsMethod(
 
   // A bare id and `@draft` read the draft; `@<n>` reads that version. The
   // method read itself always takes the bare id, and it runs either way: it
-  // carries the name, the draft's token the link records, and the latest
-  // version's number.
+  // carries the name, the draft's token the link records, the draft's tree,
+  // and the latest version's number.
   const selector = readMethodSelector(parsed.data.method_id);
   const malformed = malformedSuffixError(parsed.data.method_id, selector);
   if (malformed !== undefined) {
@@ -1607,11 +1525,11 @@ export async function getMthdsMethod(
   const methodId = selector.methodId;
   const wanted: number | "draft" = selector.form === "version" ? selector.version : "draft";
 
-  // The output directory's link is read BEFORE the method, so the link the
-  // pull plans against never records a sync newer than the content it read.
-  // Read after it, a save landing in between — the draft written, the link
+  // The output folder's link is read BEFORE the method, so the link the pull
+  // plans against never records a sync newer than the content it read. Read
+  // after it, a save landing in between — the draft written, the link
   // refreshed — handed the pull a link ahead of its method: it called the
-  // draft moved when the directory was ahead, and under `overwrite` wrote the
+  // draft moved when the folder was ahead, and under `overwrite` wrote the
   // older content back. Read first, that save rewrote the link since, and the
   // landing's compare-and-swap refuses the pull.
   const linkBefore =
@@ -1621,7 +1539,7 @@ export async function getMthdsMethod(
 
   let client: CatalogWriteClient;
   let support: Promise<MethodVersionsSupport>;
-  let stored: MethodData;
+  let stored: MethodDetail;
   let version: MethodVersion | undefined;
   try {
     client = catalogWriteClient(context);
@@ -1647,9 +1565,6 @@ export async function getMthdsMethod(
       version = read.value;
     }
   } catch (err) {
-    if (err instanceof EmptyMethodSourceError) {
-      return emptySourceError();
-    }
     const error = classifyError(err, {
       ...GET_ERROR_OPTIONS,
       auth: context.authError,
@@ -1658,43 +1573,22 @@ export async function getMthdsMethod(
     return getError(summaryForToolError(error, GET_ERROR_SUMMARIES), [error]);
   }
 
-  const content = pulledContent(stored, version);
-  if (content.sources.length === 0) {
-    // The row exists but has no runnable source yet — a produced failure, and a
+  const content: PulledContent = {
+    version: version === undefined ? "draft" : version.version,
+    files: version === undefined ? stored.files : version.files,
+    ...(version === undefined ? {} : { publishedAt: version.published_at }),
+  };
+  if (content.files.length === 0) {
+    // The row exists but its draft holds no file — a produced failure, and a
     // different answer from "no such method", which is a 404 at the same field.
-    return emptySourceError();
+    return emptyTreeError(content.version);
   }
   const apiHost = apiHostOf(context.baseUrl);
 
   if (parsed.data.output_dir === undefined) {
-    return inlineResult(stored, content, apiHost, await support);
+    return inlineResult(context, client, stored, content, apiHost, support);
   }
   return writtenResult(context, client, parsed.data, stored, content, apiHost, support, linkBefore);
-}
-
-/**
- * What a restore of a pulled version must send as `python`. An omitted
- * `python` keeps the Python the draft holds, so a restore that leaves it out
- * carries the draft's Python into a version that never had it.
- */
-function restorePythonClause(python: MethodFile[]): string {
-  return python.length === 0
-    ? "python: [] (this version has no Python, and an omitted python keeps the draft's)"
-    : `python set to the version's ${python.map((file) => `\`${file.name}\``).join(", ")} (an omitted python keeps the draft's)`;
-}
-
-/** The draft's files, or the version's, as named files. */
-function pulledContent(stored: MethodData, version: MethodVersion | undefined): PulledContent {
-  const source = version ?? stored;
-  const sources = storedSourceFiles({ mthds: source.mthds, name: stored.name });
-  const python = (source.python ?? []).filter((file) => file.content.trim() !== "");
-  return {
-    version: version === undefined ? "draft" : version.version,
-    sources,
-    python,
-    synthesizedName: nameIsSynthesized(source.mthds),
-    ...(version === undefined ? {} : { publishedAt: version.published_at }),
-  };
 }
 
 /**
@@ -1729,39 +1623,6 @@ function versionReadError(
       hint: `Pull its draft with method_id "${stored.method_id}"${typeof latest === "number" ? `, or a version from 1 to ${latest} as "${stored.method_id}@<n>"` : ""}.`,
     },
   ]);
-}
-
-/**
- * The stored source, as NAMED files.
- *
- * `mthds` is polymorphic, on the draft and on a version alike: the named
- * `[{ name, content }]` array the webapp editor writes, or raw `.mthds` text
- * from before that form existed. `parseMethodFiles` reads the first and throws
- * on the second by design, and the SDK's `methodSourceToContents` reads both
- * but returns contents alone — so neither hands this tool a filename on the
- * legacy shape. A method saved from this workshop is always in the named form,
- * so the fallback below is reachable only for one written before the editor
- * existed. The method's `name` is what the fallback's filename is made from.
- */
-export function storedSourceFiles(stored: Pick<MethodData, "mthds" | "name">): MethodFile[] {
-  let named: MethodFile[];
-  try {
-    named = parseMethodFiles(stored.mthds);
-  } catch {
-    const raw = stored.mthds.trim();
-    return raw === "" ? [] : [{ name: `${slugify(stored.name)}.mthds`, content: stored.mthds }];
-  }
-  return named;
-}
-
-/** Whether the name the written arm used is one this tool invented rather than the method's. */
-function nameIsSynthesized(mthds: string): boolean {
-  try {
-    parseMethodFiles(mthds);
-    return false;
-  } catch {
-    return mthds.trim() !== "";
-  }
 }
 
 /** "The draft of **Name**" or "Version 3 of **Name**", to open a summary. */
@@ -1800,40 +1661,111 @@ function contentFields(
   };
 }
 
-function inlineResult(
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * A directory of this process's own under the system's temporary directory,
+ * created closed to everyone else, for a tree downloaded before it is used.
+ * `work` gets the destination `writeMethodTree` writes into, which must not
+ * exist yet; the directory is removed whatever happens.
+ */
+async function withStagedTree<T>(
+  client: CatalogWriteClient,
+  files: readonly SavedMethodFile[],
+  work: (staged: string) => Promise<T>,
+): Promise<T> {
+  const staging = await fs.mkdtemp(path.join(os.tmpdir(), "pipelex-mcp-pull-"));
+  try {
+    const destination = path.join(staging, "tree");
+    await client.writeMethodTree(files, { destination });
+    return await work(destination);
+  } finally {
+    await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function inlineResult(
+  context: CatalogWriteContext,
+  client: CatalogWriteClient,
   stored: MethodData,
   content: PulledContent,
   apiHost: string,
-  support: MethodVersionsSupport,
-): GetMethodResult {
-  // One budget over the whole set, spent by WHOLE FILE in order. A withheld
-  // file keeps its name and byte size and carries no content.
+  support: Promise<MethodVersionsSupport>,
+): Promise<GetMethodResult> {
+  // One budget over the whole tree, spent by WHOLE FILE in order, on the sizes
+  // the method lists: only the files that fit are downloaded. A withheld file
+  // keeps its path and size and carries no content, and so does a file that
+  // is not text.
   let spent = 0;
   let truncated = false;
-  const take = (file: MethodFile): SourceFile => {
-    const bytes = utf8.encode(file.content).length;
-    if (truncated || spent + bytes > MAX_INLINE_SOURCE_BYTES) {
+  const taken: SavedMethodFile[] = [];
+  for (const file of content.files) {
+    if (truncated || spent + file.size > MAX_INLINE_SOURCE_BYTES) {
       truncated = true;
-      return { name: file.name, bytes };
+      continue;
     }
-    spent += bytes;
-    return { name: file.name, bytes, content: file.content };
-  };
+    spent += file.size;
+    taken.push(file);
+  }
+
+  let files: TreeFile[];
+  try {
+    const texts =
+      taken.length === 0
+        ? new Map<string, string | undefined>()
+        : await withStagedTree(client, taken, async (staged) => {
+            const read = new Map<string, string | undefined>();
+            for (const file of taken) {
+              const bytes = await fs.readFile(path.join(staged, ...file.path.split("/")));
+              let text: string | undefined;
+              try {
+                text = strictUtf8.decode(bytes);
+              } catch {
+                text = undefined;
+              }
+              read.set(file.path, text);
+            }
+            return read;
+          });
+    files = content.files.map((file) => {
+      if (!texts.has(file.path)) return { path: file.path, bytes: file.size };
+      const text = texts.get(file.path);
+      return text === undefined
+        ? { path: file.path, bytes: file.size, binary: true }
+        : { path: file.path, bytes: file.size, content: text };
+    });
+  } catch (err) {
+    const classified = classifyError(err, {
+      ...GET_ERROR_OPTIONS,
+      auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
+    });
+    // This arm writes nowhere the caller named, so a download failure has no
+    // field to point at.
+    const { location: _unused, ...error } = classified;
+    return getError(summaryForToolError(error, GET_ERROR_SUMMARIES), [error]);
+  }
 
   const structuredContent: GetMethodSuccess = {
     status: "ok",
     ...contentFields(stored, content, apiHost),
-    files: content.sources.map(take),
-    python: content.python.map(take),
+    files,
     truncated,
   };
 
+  const count = content.files.length;
   const lines = [
-    `${contentTitle(stored, content)} (${contentCoordinates(stored, content, apiHost)}): ${content.sources.length} .mthds file(s)${content.python.length === 0 ? "" : ` and ${content.python.length} .py file(s)`}, returned inline.`,
+    `${contentTitle(stored, content)} (${contentCoordinates(stored, content, apiHost)}): ${count} file${count === 1 ? "" : "s"}, returned inline.`,
   ];
   if (content.version === "draft") {
-    const callers = bareIdCallersSentence(stored, support);
+    const callers = bareIdCallersSentence(stored, await support);
     if (callers !== undefined) lines.push(callers);
+  }
+  const binary = files.filter((file) => file.binary === true);
+  if (binary.length > 0) {
+    lines.push(
+      `${binary.map((file) => `\`${file.path}\``).join(", ")} ${binary.length === 1 ? "is" : "are"} not text and come${binary.length === 1 ? "s" : ""} back by size alone — call again with output_dir to write the whole tree to disk.`,
+    );
   }
   if (truncated) {
     lines.push(
@@ -1841,7 +1773,7 @@ function inlineResult(
     );
   }
   lines.push(
-    "This arm exists for reading a method you cannot see on disk. To work on it, call again with output_dir so the sources are written and the directory is linked.",
+    "This arm exists for reading a method you cannot see on disk. To work on it, call again with output_dir so its tree is written and the folder is linked.",
   );
 
   return { structuredContent, summary: lines.join("\n") };
@@ -1851,13 +1783,13 @@ async function writtenResult(
   context: CatalogWriteContext,
   client: CatalogWriteClient,
   input: { method_id: string; output_dir?: string; overwrite?: boolean },
-  stored: MethodData,
+  stored: MethodDetail,
   content: PulledContent,
   apiHost: string,
   // Awaited only for the summary, once the files and the link have landed:
   // nothing written depends on it.
   support: Promise<MethodVersionsSupport>,
-  // The directory's link as read before the method was; see getMthdsMethod.
+  // The folder's link as read before the method was; see getMthdsMethod.
   linkBefore: LinkRead | undefined,
 ): Promise<GetMethodResult> {
   if (context.saveRoot === undefined) {
@@ -1878,85 +1810,101 @@ async function writtenResult(
   }
   const { root, dir } = target;
 
+  // A folder still holding the link an earlier release wrote reads as
+  // unlinked, so the pull would judge it as somebody else's folder and write
+  // a second link beside the old one: refused before anything is planned.
+  if (await holdsLegacyLink(dir)) {
+    return getError("The method was not written: output_dir holds an old link file.", [
+      refuseOutputDir(
+        `${input.output_dir} holds ${LEGACY_LINK_FILE_NAME}, the link file an earlier release of the workshop wrote, which it now reads only at ${LINK_FILE_NAME}: pulled into as it is, the folder would read as unlinked.`,
+        `Move it into place from inside the folder, then pull again: ${LEGACY_LINK_MOVE} (plain mv outside git), and commit the move.`,
+      ),
+    ]);
+  }
+
   // ── the write set, computed ONCE ──────────────────────────────────
   //
   // Everything below iterates this one list: the ownership guard, the symlink
-  // inspection, the sub-directory creation and the write loop. That is the
-  // whole point. The guard used to reason about `sources` while the loop landed
-  // `[...sources, ...python]`, so a locally edited `.py` file was invisible to
-  // every refusal and overwritten anyway; the emptiness test asked for
-  // top-level `.mthds` files while the loop landed `.py` and nested paths. A
-  // guard that inspects a narrower set than the action lands is not a guard.
-  const all = [...content.sources, ...content.python];
-  const destinations: { file: MethodFile; name: string; absolute: string }[] = [];
+  // inspection, the sub-directory creation and the write loop. A guard that
+  // inspects a narrower set than the action lands is not a guard.
+  const destinations: Destination[] = [];
   const claimed = new Map<string, string>();
-  for (const file of all) {
-    const absolute = containedPath(dir, file.name);
+  for (const file of content.files) {
+    const absolute = containedPath(dir, file.path);
     if (absolute === undefined) {
-      return storedNameRefusal(file.name, "it leaves the output directory");
+      return storedNameRefusal(file.path, "it leaves the output folder");
     }
-    const refused = storedNameReason(file.name);
+    const refused = storedNameReason(file.path);
     if (refused !== undefined) {
-      return storedNameRefusal(file.name, refused);
+      return storedNameRefusal(file.path, refused);
     }
-    // Two stored names can resolve to ONE destination — `a.mthds` beside
-    // `./a.mthds`, or `Bundle.mthds` beside `bundle.mthds` on a
-    // case-insensitive filesystem, which this tool's own save produces because
-    // `nameFiles` keeps both as distinct names. Written in sequence one
-    // replaces the other, both are reported as written, and the next pull
-    // refuses the directory for holding changes nobody made. Compare folded, so
-    // the check answers for the filesystem the write lands on.
+    // Two stored paths can land on ONE file on a case-insensitive filesystem.
+    // Written in sequence one replaces the other, both are reported as
+    // written, and the next pull refuses the folder for holding changes nobody
+    // made. Compare folded, so the check answers for the filesystem the write
+    // lands on.
     const key = absolute.toLowerCase();
     const taken = claimed.get(key);
     if (taken !== undefined) {
       return storedNameRefusal(
-        file.name,
+        file.path,
         `it lands on the same file as \`${taken}\`, so one would silently replace the other`,
       );
     }
-    claimed.set(key, file.name);
-    destinations.push({ file, name: file.name, absolute });
+    claimed.set(key, file.path);
+    destinations.push({ file, name: file.path, absolute });
   }
 
-  // The draft's own files, on a version pull: the method read already carries
-  // them.
-  const draftContent = content.version === "draft" ? undefined : pulledContent(stored, undefined);
-  // A version whose files are exactly the draft's, by name and by byte, leaves
-  // the directory holding the draft, so the link records no version: marked,
-  // a save from here would be refused as a restore that restores nothing.
-  // Compared exactly rather than by digest, since a digest match says the
-  // platform found the two equal, not that these files are the draft's.
-  const versionIsDraft = draftContent !== undefined && sameFiles(content, draftContent);
+  // An entry this pull may not write through — a symlink, a directory, or a
+  // symlinked directory on a destination's path — is refused for what it is
+  // before anything is planned, so the refusal names
+  // it rather than calling it unsaved work. The landing asks again inside its
+  // turn, where the entry inspected is the one written.
+  const foreign = await foreignDestinationRefusal(dir, destinations);
+  if (foreign !== undefined) {
+    return foreign;
+  }
+
+  // A version whose tree is exactly the draft's, path for path and hash for
+  // hash, leaves the folder holding the draft, so the link records no
+  // version: marked, a save from here would be refused as a restore that
+  // restores nothing.
+  const versionIsDraft = content.version !== "draft" && sameListing(content.files, stored.files);
   const link = linkBefore ?? (await readMethodLink(dir));
   const observed = await observeDestinations(destinations);
-  const plan = await planPull(dir, stored, destinations, observed, input.overwrite === true, link, {
-    target: content.version,
-    // A version pull may land over the draft's own files, which are stored,
-    // so writing over them loses nothing. For a draft pull the target IS the
-    // draft, and a file differing from it is by definition not the draft.
-    ...(draftContent === undefined ? {} : { draft: filesByName(draftContent) }),
-    readVersion: (number) => readVersionFiles(client, stored, number),
-  });
+  // The limits are asked for once, before the landing's turn, which holds no
+  // call to the platform: the folder is listed against them before planning,
+  // again inside the turn when it holds no link, and after the landing.
+  const limits = await methodTreeLimitsOf(context, () => client);
+  const othersHere = () => unmanagedFiles(dir, limits, content.files);
+  const plan = await planPull(
+    stored,
+    destinations,
+    observed,
+    input.overwrite === true,
+    link,
+    {
+      target: content.version,
+      // A version pull may land over the draft's own files, which are stored,
+      // so writing over them loses nothing. For a draft pull the target IS the
+      // draft, and a file differing from it is by definition not the draft.
+      ...(content.version === "draft" ? {} : { draft: hashesByPath(stored.files) }),
+      readVersion: (number) => readVersionHashes(client, stored, number),
+    },
+    othersHere,
+  );
   if (plan.kind === "refuse") {
     return getError("The method was not written: output_dir holds work this pull would lose.", [
       plan.error,
     ]);
   }
 
-  // The landing is one local turn — the provisional link, the files, the final
-  // link — and every link write in it is a compare-and-swap: the first against
-  // the link this pull planned on, the last against the provisional one it
-  // wrote. A save or a pull that wrote the link after this pull read it moved
-  // the directory under the plan, and so did an edit to a destination since
-  // the plan read it, so the pull is refused before it writes a file, rather
-  // than land on a state it never looked at. The whole landing holds the
-  // workshop's write lock, so another workshop process neither writes between
-  // a compare and its write, nor resumes this pull while it is still writing,
-  // nor lands into a directory nested in this one at the same time, nor reads
-  // the directory for a save while this pull is half landed.
-  let landed: PullLanding;
-  try {
-    landed = await inLinkTurn(() =>
+  // The tree is downloaded into a private staging directory BEFORE the
+  // landing, so no download runs while the landing holds the workshop's
+  // lock, and a download that fails leaves output_dir untouched. A pull that
+  // only refreshes the link downloads nothing.
+  const land = (staged: string | undefined) =>
+    inLinkTurn(() =>
       withLinkLock(() =>
         landPull({
           root,
@@ -1969,22 +1917,49 @@ async function writtenResult(
           content,
           versionIsDraft,
           apiHost,
+          staged,
+          othersHere,
         }),
       ),
     );
+
+  // The landing is one local turn — the provisional link, the files, the final
+  // link — and every link write in it is a compare-and-swap: the first against
+  // the link this pull planned on, the last against the provisional one it
+  // wrote. A save or a pull that wrote the link after this pull read it moved
+  // the folder under the plan, and so did an edit to a destination since the
+  // plan read it, so the pull is refused before it writes a file, rather than
+  // land on a state it never looked at. The whole landing holds the
+  // workshop's write lock, so another workshop process neither writes between
+  // a compare and its write, nor resumes this pull while it is still writing,
+  // nor lands into a folder nested in this one at the same time, nor reads
+  // the folder for a save while this pull is half landed.
+  let landed: PullLanding;
+  try {
+    landed =
+      plan.kind === "write"
+        ? await withStagedTree(client, content.files, (staged) => land(staged))
+        : await land(undefined);
   } catch (err) {
-    if (!(err instanceof LinkLockError)) throw err;
-    return getError("The method was not written: the workshop's write lock could not be taken.", [
-      {
-        class: "runtime",
-        location: "output_dir",
-        message: `${err.message}, so nothing was written.`,
-        hint: err.busy
-          ? "Pull again in a moment: another workshop process on this machine is saving or pulling."
-          : "Fix what the message names, then pull again: no pull writes without that lock.",
-        retryable: err.busy,
-      },
-    ]);
+    if (err instanceof LinkLockError) {
+      return getError("The method was not written: the workshop's write lock could not be taken.", [
+        {
+          class: "runtime",
+          location: "output_dir",
+          message: `${err.message}, so nothing was written.`,
+          hint: err.busy
+            ? "Pull again in a moment: another workshop process on this machine is saving or pulling."
+            : "Fix what the message names, then pull again: no pull writes without that lock.",
+          retryable: err.busy,
+        },
+      ]);
+    }
+    const error = classifyError(err, {
+      ...GET_ERROR_OPTIONS,
+      auth: context.authError,
+      baseUrlSource: context.baseUrlSource,
+    });
+    return getError(summaryForToolError(error, GET_ERROR_SUMMARIES), [error]);
   }
   if (!landed.ok) {
     return landed.result;
@@ -1995,31 +1970,25 @@ async function writtenResult(
   // What is here that this method does not have. The pull writes the files the
   // catalog holds NOW, so a file a teammate removed from the stored method is
   // neither written nor noticed — and the link was refreshed to the new
-  // updated_at anyway, leaving the directory certifying a sync it does not
-  // have, with a bundle that validates and runs differently from the catalog's.
+  // updated_at anyway, leaving the folder certifying a sync it does not have,
+  // with a tree that validates and runs differently from the catalog's.
   //
   // This tool records no per-file state, so it cannot tell a file the catalog
   // dropped from one the user simply keeps here, and deleting on a guess is the
   // one thing it must not do. So it names them and says which two things they
-  // might be. Telling them apart needs the link to record what it manages,
-  // which is a change to the link's format and is filed rather than guessed at.
-  const { names: unmanaged, complete: unmanagedComplete } = await unmanagedSources(
-    dir,
-    destinations,
-  );
+  // might be: the files of the folder's tree, as a save from here would send
+  // them, that the method does not hold.
+  const { names: unmanaged, complete: unmanagedComplete } = await othersHere();
 
   const relativeDir = path.relative(root, dir) === "" ? "." : path.relative(root, dir);
-  const project = (file: MethodFile): SourceFile => ({
-    name: file.name,
-    bytes: utf8.encode(file.content).length,
-    written_to: path.join(relativeDir, file.name),
-  });
-
   const structuredContent: GetMethodSuccess = {
     status: "ok",
     ...contentFields(stored, content, apiHost),
-    files: content.sources.map(project),
-    python: content.python.map(project),
+    files: content.files.map((file) => ({
+      path: file.path,
+      bytes: file.size,
+      written_to: path.join(relativeDir, ...file.path.split("/")),
+    })),
     output_dir: relativeDir,
     link_file: linkFile,
     ...(unmanaged.length === 0 ? {} : { unmanaged }),
@@ -2027,56 +1996,59 @@ async function writtenResult(
     truncated: false,
   };
 
+  const count = content.files.length;
   const lines = [
-    `${contentTitle(stored, content)} written to \`${relativeDir}\` (${contentCoordinates(stored, content, apiHost)}).`,
+    `${contentTitle(stored, content)} written to \`${relativeDir}\`, ${count} file${count === 1 ? "" : "s"} (${contentCoordinates(stored, content, apiHost)}).`,
   ];
   if (content.version === "draft") {
     const callers = bareIdCallersSentence(stored, await support);
     if (callers !== undefined) lines.push(callers);
   } else if (versionIsDraft) {
     lines.push(
-      `Version ${content.version} is identical to the draft (updated_at ${stored.updated_at}), file for file, so the directory holds the draft: the link records no version, and a save from here needs no token, sending the link's as it would after a pull of the draft.`,
+      `Version ${content.version} is identical to the draft (updated_at ${stored.updated_at}), file for file, so the folder holds the draft: the link records no version, and a save from here needs no token, sending the link's as it would after a pull of the draft.`,
     );
   } else {
     lines.push(
-      `The directory now holds version ${content.version}, not the draft. To restore it as the draft once the user has asked, save from here with expected_updated_at ${stored.updated_at} and ${restorePythonClause(content.python)}; a save without the token is refused, so the draft (updated_at ${stored.updated_at}) is never replaced by accident. Restoring publishes nothing, and that token is not one to publish under: the draft's content was not read here.`,
-    );
-  }
-  if (content.synthesizedName) {
-    lines.push(
-      `The stored method carries no file names — it predates the catalog's named form — so \`${content.sources[0]?.name}\` is a name this tool invented, not the method's. Rename it if you like, but the next save sends whatever name is on disk.`,
+      `The folder now holds version ${content.version}, not the draft. To restore it as the draft once the user has asked, save from here with expected_updated_at ${stored.updated_at}; a save without the token is refused, so the draft (updated_at ${stored.updated_at}) is never replaced by accident. Restoring publishes nothing, and that token is not one to publish under: the draft's content was not read here.`,
     );
   }
   // What a failed link write means depends on what is already on disk, and
-  // saying "NOT linked" about a linked directory was the worst of the three: it
-  // told the caller to pass a method_id they did not need, about a directory
+  // saying "NOT linked" about a linked folder was the worst of the three: it
+  // told the caller to pass a method_id they did not need, about a folder
   // that would have saved the right method on its own. A link this pull wrote
   // provisionally still carries the interrupted-pull marker, and one written by
   // an earlier pull still carries that pull's synced_updated_at — neither is
-  // the refresh this pull owed, and both leave the directory linked.
+  // the refresh this pull owed, and both leave the folder linked.
   const marked = provisional?.report.written === true;
   const linkedAnyway = marked || link.kind === "link";
   lines.push(
     linkFile.written
-      ? `Linked by \`${linkFile.path}\` — commit it, so a save from this directory writes this method's draft instead of creating a second method.`
+      ? `Linked by \`${linkFile.path}\` — commit it, so a save from this folder writes this method's draft instead of creating a second method.`
       : final.changed
         ? `The files are written, but \`${linkFile.path}\` was not refreshed: ${linkFile.reason}. It may not describe these files, so pull again before saving from here.`
         : linkedAnyway
-          ? `The files are written and the directory IS linked to this method, but \`${linkFile.path}\` could not be refreshed (${linkFile.reason}), so it still records an out-of-date synced_updated_at${marked ? " and this pull's interrupted-pull marker" : ""}. Fix that and pull again${marked ? ": until then a save from here is refused, since the link marks this pull as unfinished." : " before saving from here: the link still describes the directory's previous sync, not these files."}`
-          : `The directory is NOT linked (${linkFile.reason}), so a save from it would create a SECOND method unless it passes method_id \`${stored.method_id}\`.`,
+          ? `The files are written and the folder IS linked to this method, but \`${linkFile.path}\` could not be refreshed (${linkFile.reason}), so it still records an out-of-date synced_updated_at${marked ? " and this pull's interrupted-pull marker" : ""}. Fix that and pull again${marked ? ": until then a save from here is refused, since the link marks this pull as unfinished." : " before saving from here: the link still describes the folder's previous sync, not these files."}`
+          : `The folder is NOT linked (${linkFile.reason}), so a save from it would create a SECOND method unless it passes method_id \`${stored.method_id}\`.`,
   );
 
   if (unmanaged.length > 0) {
     lines.push(
-      `The directory also holds ${unmanaged.map((name) => `\`${name}\``).join(", ")}, which this method does not. Either somebody removed ${unmanaged.length === 1 ? "it" : "them"} from the stored method, or ${unmanaged.length === 1 ? "it is" : "they are"} yours — this tool cannot tell, and deletes nothing. Check before saving from here, which would add ${unmanaged.length === 1 ? "it" : "them"} back to the catalog.`,
+      `The folder also holds ${unmanaged.map((name) => `\`${name}\``).join(", ")}, which this method does not. Either somebody removed ${unmanaged.length === 1 ? "it" : "them"} from the stored method, or ${unmanaged.length === 1 ? "it is" : "they are"} yours — this tool cannot tell, and deletes nothing. Check before saving from here, which would add ${unmanaged.length === 1 ? "it" : "them"} back to the catalog.`,
     );
   } else if (!unmanagedComplete) {
     lines.push(
-      `This tool could not finish reading what else \`${relativeDir}\` holds — a directory it could not open, or more entries than it looks at — so it is NOT saying the directory holds only this method's files. It is saying it does not know. Check before saving from here.`,
+      `This tool could not list what else \`${relativeDir}\` holds — the folder's tree is refused (a symbolic link, a name no tree takes) or past the deployment's limits — so it is NOT saying the folder holds only this method's files. It is saying it does not know. Check before saving from here, which lists the folder the same way.`,
     );
   }
 
   return { structuredContent, summary: lines.join("\n") };
+}
+
+/** One file a pull lands: the listing's entry, its path, and where it goes on disk. */
+interface Destination {
+  file: SavedMethodFile;
+  name: string;
+  absolute: string;
 }
 
 /** What a pull's landing did, or the refusal it made before writing a file. */
@@ -2087,26 +2059,31 @@ type PullLanding =
 /**
  * Land a planned pull: the provisional link, the files, the final link. Called
  * inside the turn ({@link inLinkTurn}), so within this process nothing reads
- * or writes the directory's link or files between those steps; every step is
- * local, so the turn is short.
+ * or writes the folder's link or files between those steps; every step is
+ * local, the files copied from the tree staged before the turn, so the turn is
+ * short.
  *
  * Both link writes are compare-and-swaps ({@link replaceMethodLink}). The
  * first expects the link this pull planned on: one that moved since was
- * written by a save or a pull that changed what the directory holds, so the
- * plan is about a state that is gone, and the pull is refused before a file
- * is written. The last expects the provisional link this pull wrote.
+ * written by a save or a pull that changed what the folder holds, so the plan
+ * is about a state that is gone, and the pull is refused before a file is
+ * written. The last expects the provisional link this pull wrote.
  */
 async function landPull(landing: {
   root: string;
   dir: string;
   link: LinkRead;
   plan: Exclude<PullPlan, { kind: "refuse" }>;
-  destinations: readonly { file: MethodFile; name: string; absolute: string }[];
+  destinations: readonly Destination[];
   observed: readonly ObservedFile[];
   stored: MethodData;
   content: PulledContent;
   versionIsDraft: boolean;
   apiHost: string;
+  /** The staged tree the files are copied from; absent on a link-only refresh. */
+  staged: string | undefined;
+  /** The files of the folder's tree the pull does not land, listed now. */
+  othersHere: () => Promise<{ names: string[]; complete: boolean }>;
 }): Promise<PullLanding> {
   const {
     root,
@@ -2119,16 +2096,18 @@ async function landPull(landing: {
     content,
     versionIsDraft,
     apiHost,
+    staged,
+    othersHere,
   } = landing;
   const linkFields = { apiHost, methodId: stored.method_id, name: stored.name };
   const moved = (report: LinkFileReport): PullLanding => ({
     ok: false,
-    result: getError("The method was not written: its directory changed while this pull ran.", [
+    result: getError("The method was not written: its folder changed while this pull ran.", [
       {
         class: "runtime",
         location: "output_dir",
-        message: `\`${report.path}\` changed after this pull read it — ${report.reason ?? "another save or pull rewrote it"} — so what this pull planned to write is about a directory that is gone. Nothing was written.`,
-        hint: "Pull again: the next pull plans against the directory as it stands now.",
+        message: `\`${report.path}\` changed after this pull read it — ${report.reason ?? "another save or pull rewrote it"} — so what this pull planned to write is about a folder that is gone. Nothing was written.`,
+        hint: "Pull again: the next pull plans against the folder as it stands now.",
         retryable: true,
       },
     ]),
@@ -2137,37 +2116,22 @@ async function landPull(landing: {
   // `containedPath` is lexical — it joins and compares strings. A destination
   // that is a symlink passes it and then sends `writeFile` to the link's
   // target, which is how a pull wrote outside the workspace entirely. Inspect
-  // every destination on REAL entries before anything is created or written,
+  // every destination and every existing directory on its path on REAL
+  // entries before anything is created or written, the provisional link included,
   // exactly as `codegen-writer.ts` does, and inside the turn, so the entry
   // inspected is the one written. A link-only refresh is refused too: it would
-  // vouch for a file that is not an ordinary file of this directory.
-  for (const destination of destinations) {
-    const foreign = await foreignEntryReason(destination.absolute);
-    if (foreign !== undefined) {
-      return {
-        ok: false,
-        result: getError(
-          "The method was not written: output_dir holds an entry it may not write.",
-          [
-            {
-              class: "input_domain",
-              location: "output_dir",
-              message: `\`${destination.name}\` cannot be written: ${foreign}. No files were written.`,
-              hint: "A method's files are written as ordinary files. Remove or move that entry aside, or point output_dir at a directory of its own.",
-              retryable: false,
-            },
-          ],
-        ),
-      };
-    }
+  // vouch for a file that is not an ordinary file of this folder.
+  const foreign = await foreignDestinationRefusal(dir, destinations);
+  if (foreign !== undefined) {
+    return { ok: false, result: foreign };
   }
 
   // A pull whose destinations already match writes NOTHING and refreshes the
   // link alone. Rewriting identical bytes changed every mtime, woke every
-  // watcher, and — where one source file was read-only — turned a pure link
-  // refresh into a mid-write failure that marked the directory as an
-  // interrupted pull having written nothing at all, which the next pull then
-  // read as licence to overwrite.
+  // watcher, and — where one file was read-only — turned a pure link refresh
+  // into a mid-write failure that marked the folder as an interrupted pull
+  // having written nothing at all, which the next pull then read as licence to
+  // overwrite.
   let provisional: LinkReplacement | undefined;
   let landedOn = link;
   if (plan.kind === "write") {
@@ -2187,11 +2151,29 @@ async function landPull(landing: {
       };
     }
 
+    // A folder with no link was found holding nothing but this method before
+    // the download, outside this turn: a file landing in it meanwhile would be
+    // claimed by the link written next, and sent by the next save from here
+    // as the method's own. So its tree is listed again here, where nothing of
+    // this process writes it, and the planned refusal is made on what it holds now.
+    if (link.kind === "none") {
+      const refusal = unlinkedOthersRefusal(await othersHere());
+      if (refusal !== undefined) {
+        return {
+          ok: false,
+          result: getError(
+            "The method was not written: output_dir holds work this pull would lose.",
+            [refusal],
+          ),
+        };
+      }
+    }
+
     // The link goes down BEFORE the files, marked `partial_pull`, so that a
-    // failure between two files leaves the directory owned by this method
-    // instead of looking like somebody else's bundle — which is what made the
+    // failure between two files leaves the folder owned by this method
+    // instead of looking like somebody else's work — which is what made the
     // retry this failure advertises impossible to perform. It keeps the sync
-    // the directory had, since the files are not yet what this pull brings, and
+    // the folder had, since the files are not yet what this pull brings, and
     // is rewritten without the marker once every file has landed. A save holds
     // the same lock while it reads, so none reads this landing half done; one
     // from a workshop too old to share the lock sees this link move when it
@@ -2218,18 +2200,17 @@ async function landPull(landing: {
     // save from here would replace the draft with the version, with no
     // explicit token: the restore guard the save keeps would never see them.
     // A draft pull over a link that records a version is refused the same way:
-    // left in place, that link would say the directory holds the version while
-    // it held the draft, and a later save would be refused on that false
-    // premise, with a restore hint that sends the draft back with the wrong
-    // Python. Any other draft pull needs no refusal — a link still describing
-    // an older sync is refused as stale, or the files are the draft's own.
+    // left in place, that link would say the folder holds the version while it
+    // held the draft, and a later save would be refused on that false premise.
+    // Any other draft pull needs no refusal — a link still describing an older
+    // sync is refused as stale, or the files are the draft's own.
     const markedVersion = link.kind === "link" ? link.link.synced_version : undefined;
     const report = provisional.report;
     if (!report.written && (content.version !== "draft" || markedVersion !== undefined)) {
       const consequence =
         content.version === "draft"
           ? `so its record of version ${markedVersion} could not be cleared, and the draft's files would have sat under a link saying they are that version`
-          : `so the directory could not be marked as holding version ${content.version}, and its files would have read as the draft's to a later save`;
+          : `so the folder could not be marked as holding version ${content.version}, and its files would have read as the draft's to a later save`;
       return {
         ok: false,
         result: getError("The method was not written: its link file could not be updated.", [
@@ -2237,7 +2218,7 @@ async function landPull(landing: {
             class: "runtime",
             location: "output_dir",
             message: `\`${report.path}\` could not be written (${report.reason ?? "unknown reason"}), ${consequence}. Nothing was written.`,
-            hint: "Check the link file's and the directory's permissions, then pull again — or pull the version into a directory of its own.",
+            hint: "Check the link file's and the folder's permissions, then pull again — or pull the version into a folder of its own.",
             retryable: false,
           },
         ]),
@@ -2260,7 +2241,11 @@ async function landPull(landing: {
         }
       }
       try {
-        await fs.writeFile(destination.absolute, destination.file.content, "utf8");
+        // Present: a write plan lands only from a staged tree.
+        const bytes = await fs.readFile(
+          path.join(staged ?? "", ...destination.file.path.split("/")),
+        );
+        await fs.writeFile(destination.absolute, bytes);
       } catch (err) {
         return {
           ok: false,
@@ -2274,11 +2259,11 @@ async function landPull(landing: {
   }
 
   // The link records the draft's token whichever content was pulled: it is
-  // what a save from here sends, and a save from a directory holding a version
+  // what a save from here sends, and a save from a folder holding a version
   // replaces the draft with it, which is how a version is restored. It records
   // the version too, so a later pull reads a file still holding that version's
   // bytes as stored rather than as unsaved work — unless the version is the
-  // draft, file for file, when the directory holds the draft.
+  // draft, file for file, when the folder holds the draft.
   const final = await replaceMethodLink(
     root,
     dir,
@@ -2298,220 +2283,176 @@ async function landPull(landing: {
 }
 
 /**
- * Whether two contents hold the same `.mthds` sources and the same Python: the
- * same set of names in each, each with the same bytes.
+ * The refusal of a pull whose destination is an entry it may not write
+ * through — a symlink, a directory, anything but an ordinary file — or lies
+ * below a directory symlink ({@link ancestorReason}), or `undefined` when
+ * every destination is absent or an ordinary file on an ordinary path.
  */
-function sameFiles(
-  a: Pick<PulledContent, "sources" | "python">,
-  b: Pick<PulledContent, "sources" | "python">,
-): boolean {
-  const sameSet = (left: readonly MethodFile[], right: readonly MethodFile[]): boolean => {
-    const byName = new Map(right.map((file) => [file.name, file.content]));
-    return (
-      left.length === right.length &&
-      byName.size === right.length &&
-      new Set(left.map((file) => file.name)).size === left.length &&
-      left.every((file) => byName.get(file.name) === file.content)
-    );
-  };
-  return sameSet(a.sources, b.sources) && sameSet(a.python, b.python);
-}
-
-/** A pull's files keyed by name: the `.mthds` sources and the Python alike. */
-function filesByName(content: Pick<PulledContent, "sources" | "python">): Map<string, string> {
-  return new Map([...content.sources, ...content.python].map((file) => [file.name, file.content]));
+async function foreignDestinationRefusal(
+  dir: string,
+  destinations: readonly Destination[],
+): Promise<GetMethodResult | undefined> {
+  for (const destination of destinations) {
+    const foreign =
+      (await ancestorReason(dir, destination.absolute)) ??
+      (await foreignEntryReason(destination.absolute));
+    if (foreign !== undefined) {
+      return getError("The method was not written: output_dir holds an entry it may not write.", [
+        {
+          class: "input_domain",
+          location: "output_dir",
+          message: `\`${destination.name}\` cannot be written: ${foreign}. No files were written.`,
+          hint: "A method's files are written as ordinary files. Remove or move that entry aside, or point output_dir at a folder of its own.",
+          retryable: false,
+        },
+      ]);
+    }
+  }
+  return undefined;
 }
 
 /**
- * A published version's files by name, or `undefined` when it cannot be read —
- * which the pull then treats as knowing nothing about it, so it refuses more,
- * never less.
+ * Why the directories between `dir`, the pull's real output folder, and a
+ * destination may not be written through, or `undefined` when they may.
+ *
+ * A stored path is checked lexically ({@link storedNameReason}) and the
+ * destination's own entry with `lstat` ({@link foreignEntryReason}), and
+ * neither sees a directory symlink on the way: `assets -> .claude` in the
+ * folder let a stored `assets/settings.json`, which has no dot segment and
+ * whose real parent stays inside the folder, land in `.claude/`, where an
+ * agent reads its configuration. So every existing ancestor is inspected with
+ * `lstat` and a symlink anywhere on the path refuses the pull, and the path
+ * the write would really take, from the deepest existing ancestor's real path
+ * on, is held to the same dot-segment rule as the stored one.
  */
-async function readVersionFiles(
+async function ancestorReason(dir: string, destination: string): Promise<string | undefined> {
+  const segments = path.relative(dir, path.dirname(destination)).split(path.sep).filter(Boolean);
+  let deepest = dir;
+  let walked = 0;
+  for (const segment of segments) {
+    const next = path.join(deepest, segment);
+    let entry;
+    try {
+      entry = await fs.lstat(next);
+    } catch (err) {
+      if (isMissingPathError(err)) break;
+      return errorMessage(err);
+    }
+    if (entry.isSymbolicLink()) {
+      return `\`${segments.slice(0, walked + 1).join("/")}\` on its path is a symlink, and writing through it would land wherever it points`;
+    }
+    // A file in the way fails the write, which reports it; nothing lies beyond it.
+    if (!entry.isDirectory()) break;
+    deepest = next;
+    walked += 1;
+  }
+  let realDeepest: string;
+  try {
+    realDeepest = await fs.realpath(deepest);
+  } catch (err) {
+    return errorMessage(err);
+  }
+  const realPath = path.join(realDeepest, ...segments.slice(walked), path.basename(destination));
+  const relative = path.relative(dir, realPath);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    return "its real path leaves the output folder";
+  }
+  if (relative.split(path.sep).some((segment) => segment.startsWith("."))) {
+    return `its real path in the output folder, \`${relative.split(path.sep).join("/")}\`, has a component beginning with a dot, which no method tree holds`;
+  }
+  return undefined;
+}
+
+/** Whether two listings name the same tree: the same paths, each with the same SHA-256. */
+function sameListing(
+  a: readonly { path: string; sha256: string }[],
+  b: readonly { path: string; sha256: string }[],
+): boolean {
+  if (a.length !== b.length) return false;
+  const byPath = hashesByPath(b);
+  return byPath.size === b.length && a.every((file) => byPath.get(file.path) === file.sha256);
+}
+
+/** A listing's SHA-256 by tree path. */
+function hashesByPath(files: readonly { path: string; sha256: string }[]): Map<string, string> {
+  return new Map(files.map((file) => [file.path, file.sha256]));
+}
+
+/**
+ * A published version's files' hashes by path, or `undefined` when it cannot
+ * be read — which the pull then treats as knowing nothing about it, so it
+ * refuses more, never less.
+ */
+async function readVersionHashes(
   client: CatalogWriteClient,
   stored: MethodData,
   version: number,
 ): Promise<Map<string, string> | undefined> {
   try {
-    return filesByName(
-      pulledContent(stored, await client.getMethodVersion(stored.method_id, version)),
-    );
+    return hashesByPath((await client.getMethodVersion(stored.method_id, version)).files);
   } catch {
     return undefined;
   }
 }
 
-/** How far the unmanaged-source walk goes before it stops looking. */
-const UNMANAGED_WALK_ENTRIES = 512;
-const UNMANAGED_WALK_DEPTH = 8;
-
 /**
- * The directory's `.mthds` and `.py` files that are not this method's.
+ * The files of the output folder's tree that are not this method's: the
+ * folder listed as a save from it would list it (`method-tree.ts`, the
+ * deployment's limits), minus the paths the pull wrote.
  *
- * Bounded rather than exhaustive, and it reports nothing when it hits a bound:
- * a partial list read as a complete one would be worse than none, since the
+ * It reports nothing when the folder's tree cannot be listed, and says so: a
+ * partial list read as a complete one would be worse than none, since the
  * point of the line it feeds is "here is everything here that the catalog does
- * not have". Symlinked directories are not followed, for the reason every walk
- * in this repo does not follow them.
- *
- * It reports its own completeness for the same reason `imageFieldPaths` does:
- * "nothing to report" and "I could not finish looking" are different answers,
- * and rendered as the same absent line the second reads as the first.
+ * not have", and a folder whose tree cannot be listed is one a save from it
+ * refuses too.
  */
-async function unmanagedSources(
+async function unmanagedFiles(
   dir: string,
-  destinations: readonly { absolute: string }[],
+  limits: FolderLimits,
+  stored: readonly SavedMethodFile[],
 ): Promise<{ names: string[]; complete: boolean }> {
-  const managed = new Set(destinations.map((destination) => destination.absolute.toLowerCase()));
-  const found: string[] = [];
-  let budget = UNMANAGED_WALK_ENTRIES;
-
-  const walk = async (current: string, depth: number): Promise<boolean> => {
-    if (depth > UNMANAGED_WALK_DEPTH) {
-      return false;
-    }
-    let entries;
-    try {
-      entries = await fs.readdir(current, { withFileTypes: true });
-    } catch {
-      // A directory nobody can read is a directory nobody has looked in. This
-      // answered "complete", which is how an unreadable subtree shortened the
-      // list while the line above kept claiming it named everything — the one
-      // thing this walk's own contract forbids.
-      return false;
-    }
-    for (const entry of entries) {
-      if (budget-- <= 0) {
-        return false;
-      }
-      const absolute = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        // A pruned or dot-leading directory holds nothing this method could
-        // own: `storedNameReason` refuses to WRITE a dotted component or
-        // anything a vendored tree contains, so no managed destination lands
-        // in one. Descending them spent the budget inside `node_modules` and
-        // listed `.venv/...`/`.git/...` files as sources "this method does
-        // not have" — and the link file is designed to be committed, so a
-        // repository at `output_dir` is the expected case, not a corner.
-        if (PRUNED_DIRECTORIES.has(entry.name) || entry.name.startsWith(".")) {
-          continue;
-        }
-        if (!(await walk(absolute, depth + 1))) {
-          return false;
-        }
-        continue;
-      }
-      if (!entry.isFile()) {
-        continue;
-      }
-      const extension = path.extname(entry.name).toLowerCase();
-      if (extension !== ".mthds" && extension !== ".py") {
-        continue;
-      }
-      if (!managed.has(absolute.toLowerCase())) {
-        found.push(path.relative(dir, absolute));
-      }
-    }
-    return true;
+  const listed = await listFolderTree(dir, limits);
+  if (!listed.ok) {
+    // A folder holding no file of a tree beside the pulled ones holds nothing
+    // unmanaged; an empty tree is no refusal of anything.
+    return listed.error.code === "empty_tree"
+      ? { names: [], complete: true }
+      : { names: [], complete: false };
+  }
+  const managed = new Set(stored.map((file) => file.path));
+  return {
+    names: listed.tree.files.map((file) => file.path).filter((treePath) => !managed.has(treePath)),
+    complete: true,
   };
-
-  const complete = await walk(dir, 0);
-  // Reporting nothing rather than a partial list is the contract; saying so is
-  // what makes it readable. An empty list alone renders as the absence of the
-  // line, which a reader cannot tell from "there is nothing else here".
-  return { names: complete ? found.sort() : [], complete };
 }
 
 /**
- * Why this stored file name may not be written here, or `undefined` when it may.
+ * Why this stored path may not be written here, or `undefined` when it may.
  *
  * Containment is not enough, because the catalog is an untrusted source of
- * paths: a method's names come from whoever saved it, `nameFiles` takes an
- * inline item's name straight from a caller-supplied `uri`, and `output_dir`
- * may be the workspace root. The occupancy guard only refuses paths that
- * already EXIST, so every previously absent path was planted unopposed — a
- * stored method could leave `.github/workflows/…` or an agent's configuration
- * file behind it in a workspace that had neither.
- *
- * So the pull writes method sources and nothing else:
- *
- *  - the extension is `.mthds` or `.py`, the two things a method is made of,
- *    and the two `nameFiles` stamps on every name it invents;
- *  - no path component begins with a dot, which is where a workspace keeps the
- *    files that configure its tools rather than its code;
- *  - the link file's own name is reserved, because writing it is the pull's
- *    LAST act: a stored file of that name is overwritten by the link, reported
- *    as written with contents that are not on disk, and the directory then
- *    refuses every later pull for holding a change nobody made.
+ * paths: a method's paths come from whoever saved it, and `output_dir` may be
+ * the workspace root. The occupancy guard only refuses paths that already
+ * EXIST, so a stored method could leave `.github/workflows/…` or an agent's
+ * configuration file behind it in a workspace that had neither. So no path
+ * component may begin with a dot, which is where a workspace keeps the files
+ * that configure its tools rather than its code, and where the link file
+ * lives: a method tree holds no such path under the standard, and a pull
+ * writes none. The SDK refuses a path that is not a tree path, or two that
+ * collide, before it downloads anything.
  */
 function storedNameReason(name: string): string | undefined {
-  const segments = toPosix(name).split("/");
-  if (segments.some((segment) => segment.startsWith("."))) {
-    return "it has a path component beginning with a dot, and a pull writes a method's sources, not a workspace's configuration";
-  }
-  const base = segments[segments.length - 1] ?? "";
-  if (base === LINK_FILE_NAME) {
-    return `\`${LINK_FILE_NAME}\` is the link file this tool writes last, so the pull would overwrite it and report it as written anyway`;
-  }
-  const extension = path.posix.extname(base).toLowerCase();
-  if (extension !== ".mthds" && extension !== ".py") {
-    return "it is neither a `.mthds` nor a `.py` file, and a method is made of those two";
-  }
-  return undefined;
-}
-
-/**
- * The name policy the SAVE side owes the PULL side — the same predicate, asked
- * before the bytes leave rather than after they come back.
- *
- * `storedNameReason` refuses a stored name the written pull will not place, and
- * it was added without a matching rule here. So a save took a caller-supplied
- * `uri` verbatim — `notes.md`, `pipelex-method.json`, `.drafts/x.mthds`, or two
- * names differing only in case — stored it, and every later
- * `mthds_get_method({ method_id, output_dir })` refused the WHOLE written arm
- * with no flag to bypass it. The bytes come back from the inline arm, so this
- * is not quite a method lost; above `MAX_INLINE_SOURCE_BYTES` it is, because
- * the inline arm withholds the content and names the written arm as the cure.
- *
- * One predicate, asked at both ends, is what stops the two from drifting again.
- */
-function unwritableNames(
-  entries: readonly { file: MethodFile; location: "files" | "python" }[],
-): ToolError | undefined {
-  const seen = new Map<string, string>();
-  for (const { file, location } of entries) {
-    const reason = storedNameReason(file.name);
-    if (reason !== undefined) {
-      return {
-        class: "input_domain",
-        location,
-        message: `\`${file.name}\` is a name this method could not be pulled back to disk under — ${reason}.`,
-        hint: "Rename the file, or give the item a uri that names it as it should be stored. A method's files are the `.mthds` and `.py` files it is made of, named relative to the bundle's root.",
-        retryable: false,
-      };
-    }
-    const folded = file.name.toLowerCase();
-    const clash = seen.get(folded);
-    if (clash !== undefined) {
-      return {
-        class: "input_domain",
-        location,
-        message: `\`${file.name}\` and \`${clash}\` differ only in case, so they are one destination on a case-insensitive filesystem and this method could not be pulled back to disk.`,
-        hint: "Give the two files names that differ by more than case.",
-        retryable: false,
-      };
-    }
-    seen.set(folded, file.name);
+  if (name.split("/").some((segment) => segment.startsWith("."))) {
+    return "it has a path component beginning with a dot, which no method tree holds, and a pull writes a method's files, not a workspace's configuration";
   }
   return undefined;
 }
 
 function storedNameRefusal(name: string, reason: string): GetMethodResult {
-  return getError("The method was not written: a stored file name may not be written here.", [
+  return getError("The method was not written: a stored file path may not be written here.", [
     {
       class: "runtime",
       message: `The stored method names a file this pull will not write: \`${name}\` — ${reason}.`,
-      hint: "No files were written. A method's file names come from whoever saved it, and output_dir may hold more than this method; fix the name in the webapp editor, or pull without output_dir to read the sources inline.",
+      hint: "No files were written. A method's file paths come from whoever saved it, and output_dir may hold more than this method; fix the path in the webapp editor, or pull without output_dir to read the files inline.",
       retryable: false,
     },
   ]);
@@ -2531,12 +2472,9 @@ function createSubdirectory(dir: string, parent: string): Promise<string | undef
 }
 
 /**
- * The mid-write failure, and the cure that actually works.
- *
- * The hint used to say "call again with the same output_dir", which the
- * ownership guard then refused as somebody else's bundle. It is true now
- * because the link file goes down first: the directory is this method's, marked
- * as an interrupted pull, and the retry is let through.
+ * The mid-write failure, and the cure that actually works: the link file goes
+ * down first, so the folder is this method's, marked as an interrupted pull,
+ * and the retry is let through.
  */
 function midWriteError(
   name: string,
@@ -2552,32 +2490,31 @@ function midWriteError(
     class: "runtime",
     message: `Could not write ${name}: ${reason}. ${landed}`,
     hint: linked
-      ? "The directory is linked to this method and marked as an interrupted pull, so calling again with the same output_dir resumes it once the cause is fixed. Check the directory's permissions first."
-      : "The link file could not be written either, so calling again would be refused as somebody else's bundle. Check the directory's permissions, then pull into an empty directory instead.",
+      ? "The folder is linked to this method and marked as an interrupted pull, so calling again with the same output_dir resumes it once the cause is fixed. Check the folder's permissions first."
+      : "The link file could not be written either, so calling again would be refused as somebody else's work. Check the folder's permissions, then pull into an empty folder instead.",
     retryable: linked,
   };
 }
 
 /**
  * What a pull decided to do, rather than merely whether it was allowed to.
- *
- * `link-only` is the third answer the old boolean shape could not carry: a
- * directory whose every destination already matches needs no write at all, and
- * saying so here is what keeps a pure link refresh out of `writeFile`.
+ * `link-only` is a folder whose every destination already matches: it needs
+ * no write at all, and saying so here is what keeps a pure link refresh out of
+ * `writeFile`.
  */
 type PullPlan = { kind: "refuse"; error: ToolError } | { kind: "write" } | { kind: "link-only" };
 
 /**
  * What the catalog holds besides the content being pulled — the other places
  * a local file's bytes may already be stored, so that writing over them loses
- * nothing.
+ * nothing. Files are compared by SHA-256, which the method's listings carry.
  */
 interface StoredElsewhere {
   /** The content being pulled: `"draft"`, or a published version's number. */
   target: number | "draft";
-  /** The draft's files by name, when the pull's target is a version. */
+  /** The draft's files' hashes by path, when the pull's target is a version. */
   draft?: ReadonlyMap<string, string>;
-  /** Reads a published version's files by name; `undefined` when it cannot. */
+  /** Reads a published version's files' hashes by path; `undefined` when it cannot. */
   readVersion: (version: number) => Promise<ReadonlyMap<string, string> | undefined>;
 }
 
@@ -2586,76 +2523,68 @@ interface StoredElsewhere {
  * or refuse — and why the rule is not the codegen writer's.
  *
  * `mthds_codegen` overwrites its own stamped output because the engine owns
- * those filenames. A method's sources are the USER's files and carry no stamp,
- * so the only evidence of ownership is the link file. Hence:
+ * those filenames. A method's files are the USER's and carry no stamp, so the
+ * only evidence of ownership is the link file. Hence:
  *
- *  - nothing of this method here and no bundle of anyone else's: written;
- *  - a bundle with no link, or a link naming another method: refused outright,
- *    because it is somebody else's work;
- *  - a link naming THIS method: compared destination by destination, with the
- *    three outcomes of the design's box R — identical writes nothing and only
- *    refreshes the link; different while the draft has NOT moved means the
- *    local files are work this directory never saved, so the pull is refused
- *    and says it would be lost; different AFTER the draft has moved means the
- *    tool cannot tell whose change it is looking at, so it refuses unless
- *    `overwrite` was sent — which the caller sends only after asking the user.
+ *  - no link, and nothing in the folder's tree but what this pull lands:
+ *    written, since the link then claims the whole folder and the next save
+ *    from it sends its whole tree; anything else in it, a stranger's bundle
+ *    included, refuses the pull;
+ *  - a link naming another method: refused outright, because it is somebody
+ *    else's work;
+ *  - a link naming THIS method: compared destination by destination —
+ *    identical writes nothing and only refreshes the link; different while the
+ *    draft has NOT moved means the local files are work this folder never
+ *    saved, so the pull is refused and says it would be lost; different AFTER
+ *    the draft has moved means the tool cannot tell whose change it is looking
+ *    at, so it refuses unless `overwrite` was sent — which the caller sends
+ *    only after asking the user.
  *
  * A destination that is simply ABSENT is none of those three: writing it
- * destroys nothing, so it is not compared against anything. Counting it as a
- * difference told a user who had deleted one file that the directory held
- * "changes that were never saved", named the file they had deleted, and then
- * refused every pull that would have restored it, with no flag to open it.
- *
- * Nor is a destination whose local bytes the catalog already stores elsewhere
- * (see {@link storedElsewhere}): the draft's own file, when the pull brings a
- * version, or the file of the version the directory was last synced with,
- * when it brings something else. Writing over a copy of stored bytes loses
- * nothing, and without this a directory that pulled version 3 could never pull
- * the draft back, its files reading as unsaved work against an unmoved draft.
+ * destroys nothing, so it is not compared against anything. Nor is a
+ * destination whose local bytes the catalog already stores elsewhere (see
+ * {@link storedElsewhere}): the draft's own file, when the pull brings a
+ * version, or the file of the version the folder was last synced with, when
+ * it brings something else.
  *
  * Every refusal is `input_domain` at `output_dir` and writes nothing at all.
  */
 async function planPull(
-  dir: string,
   stored: MethodData,
-  destinations: readonly { name: string; file: MethodFile; absolute: string }[],
+  destinations: readonly Destination[],
   observed: readonly ObservedFile[],
   overwrite: boolean,
   link: LinkRead,
   elsewhere: StoredElsewhere,
+  // The files of the folder's tree that the pull does not land, listed as a
+  // save from the folder would list them.
+  othersHere: () => Promise<{ names: string[]; complete: boolean }>,
 ): Promise<PullPlan> {
   if (link.kind === "unreadable") {
     return refusePull(
       `\`${LINK_FILE_NAME}\` is there but cannot be read: ${link.reason}.`,
-      "Something already claims this directory. Fix or remove that file, or point output_dir at an empty directory.",
+      "Something already claims this folder. Fix or remove that file, or point output_dir at an empty folder.",
     );
   }
 
   if (link.kind === "none") {
     // "Is anything this pull would land on already here" — asked of the write
-    // set itself, not of the top-level `.mthds` files, which is how a
-    // directory holding the user's `helpers.py` or a nested bundle read as
-    // empty and was written over.
+    // set itself.
     const occupied = await existingDestinations(destinations);
     if (occupied.length > 0) {
       return refusePull(
         `it already holds ${occupied.map((name) => `\`${name}\``).join(", ")} and no ${LINK_FILE_NAME}, so it is somebody else's work.`,
-        "Point output_dir at an empty or dedicated directory. A directory becomes linked by being saved from, or pulled into, by these tools.",
+        "Point output_dir at an empty or dedicated folder. A folder becomes linked by being saved from, or pulled into, by these tools.",
       );
     }
-    // And the other half of the same question, which asking about the write set
-    // alone does not answer: a directory holding a bundle of its OWN, under
-    // names this method does not use, is still somebody else's work. Landing
-    // beside a stranger's `their_bundle.mthds` and then claiming the whole
-    // directory with a link file is exactly what the link file exists to stop.
-    const foreign = await bundleFilesIn(dir);
-    if (foreign.length > 0) {
-      return refusePull(
-        `it already holds ${foreign.map((name) => `\`${name}\``).join(", ")} and no ${LINK_FILE_NAME}, so it is somebody else's bundle.`,
-        "Point output_dir at an empty or dedicated directory. Writing this method here would leave two bundles in one directory and link it to only one of them.",
-      );
-    }
-    return { kind: "write" };
+    // The link this pull writes claims the WHOLE folder: the next save from it
+    // sends every file of its tree. So a folder whose tree holds anything this
+    // pull does not land is refused rather than turned into a method that
+    // holds them: a project's own files above all with output_dir ".", and a
+    // stranger's `their_bundle.mthds` beside which the pull would land and
+    // then claim both bundles with one link.
+    const refusal = unlinkedOthersRefusal(await othersHere());
+    return refusal === undefined ? { kind: "write" } : { kind: "refuse", error: refusal };
   }
 
   // Compared bare: a link records the bare id, and the pull of `mt_x@3` is a
@@ -2663,7 +2592,7 @@ async function planPull(
   if (readMethodSelector(link.link.method_id).methodId !== stored.method_id) {
     return refusePull(
       `it is linked to a different method (\`${link.link.method_id}\` — ${link.link.name} on ${link.link.api_host}).`,
-      "Point output_dir at a directory of its own. Overwriting another method's directory would silently replace the bundle a teammate is working on.",
+      "Point output_dir at a folder of its own. Overwriting another method's folder would silently replace the files a teammate is working on.",
     );
   }
 
@@ -2683,15 +2612,11 @@ async function planPull(
   if (link.link.partial_pull === true) {
     // An earlier pull of THIS method died between two files, and the failure
     // told the caller to call again — so a destination that is absent, or
-    // already byte-identical, or holding bytes the catalog stores, is resumed
-    // without ceremony: completing it destroys nothing.
-    //
-    // What the marker does NOT license is writing over bytes that have since
-    // CHANGED. It says a pull was interrupted and nothing more, it is persisted
-    // JSON in a file the user is told to commit — so it can be stale or planted
-    // — and read as blanket authority it destroyed an edit made between the
-    // failure and the retry, silently, with no flag and no mention in the
-    // result.
+    // already identical, or holding bytes the catalog stores, is resumed
+    // without ceremony: completing it destroys nothing. What the marker does
+    // NOT license is writing over bytes that have since CHANGED: it is
+    // persisted JSON in a file the user is told to commit, so it can be stale
+    // or planted.
     if (unsaved.length === 0 || overwrite) {
       return { kind: "write" };
     }
@@ -2712,24 +2637,21 @@ async function planPull(
   }
 
   if (link.link.synced_updated_at === stored.updated_at) {
-    // The draft has not moved since this directory synced, so the local
+    // The draft has not moved since this folder synced, so the local
     // differences are work nobody has saved. No flag opens this: `overwrite`
     // answers "whose change is this", and here there is no question.
     return refusePull(
-      `it holds changes to ${unsaved.map((name) => `\`${name}\``).join(", ")} that were never saved — the draft has not moved since this directory last synced with it.`,
+      `it holds changes to ${unsaved.map((name) => `\`${name}\``).join(", ")} that were never saved — the draft has not moved since this folder last synced with it.`,
       `Those edits exist only here, so pulling would destroy them. Save them with ${WORKSHOP_TOOL_NAMES.saveMethod}, or move them aside, then pull again.`,
     );
   }
 
   if (!overwrite) {
-    // State only what was MEASURED. This used to say "both this directory and
-    // the stored method have changed", which asserts a local edit nothing
-    // checked: with no source hashes recorded, a directory the user never
-    // touched looks exactly like this the moment a teammate saves, and the
-    // message named files they had not edited as if it knew.
+    // State only what was MEASURED: a folder the user never touched looks
+    // exactly like this the moment a teammate saves.
     return refusePull(
-      `its copy of ${unsaved.map((name) => `\`${name}\``).join(", ")} differs from the stored one, and the draft has moved since this directory last synced (draft updated_at ${stored.updated_at}, last synced ${link.link.synced_updated_at}). That is what a teammate's save looks like, and it is also what a local edit looks like.`,
-      "This tool records no source hashes, so it cannot tell which of the two it is looking at. Inside a git repository `git status` answers it. Ask the user, and pass overwrite: true only if they say the stored version wins.",
+      `its copy of ${unsaved.map((name) => `\`${name}\``).join(", ")} differs from the stored one, and the draft has moved since this folder last synced (draft updated_at ${stored.updated_at}, last synced ${link.link.synced_updated_at}). That is what a teammate's save looks like, and it is also what a local edit looks like.`,
+      "This tool records no per-file state, so it cannot tell which of the two it is looking at. Inside a git repository `git status` answers it. Ask the user, and pass overwrite: true only if they say the stored version wins.",
     );
   }
 
@@ -2740,14 +2662,13 @@ async function planPull(
  * The differing destinations whose local bytes the catalog does NOT already
  * store — the ones a write would destroy.
  *
- * A local file equal to the draft's file of the same name is stored (a pull of
- * a version, over a directory holding the draft); so is one equal to the file
- * of the version the link says this directory was last synced with (a pull of
- * anything else, over a directory holding that version). The version is read
- * only when something is still in question, and a version that cannot be read
- * stores nothing — so this only ever narrows a refusal on evidence, and never
- * on a guess. An unreadable local file is never matched: its bytes cannot be
- * seen.
+ * A local file whose hash is the draft's file's at the same path is stored (a
+ * pull of a version, over a folder holding the draft); so is one whose hash is
+ * the file's of the version the link says this folder was last synced with (a
+ * pull of anything else, over a folder holding that version). The version is
+ * read only when something is still in question, and a version that cannot be
+ * read stores nothing — so this only ever narrows a refusal on evidence, and
+ * never on a guess. An unreadable local file is never matched.
  */
 async function storedElsewhere(
   differing: readonly LocalFile[],
@@ -2755,18 +2676,49 @@ async function storedElsewhere(
   elsewhere: StoredElsewhere,
 ): Promise<string[]> {
   let remaining = differing.filter(
-    (file) => file.content === undefined || elsewhere.draft?.get(file.name) !== file.content,
+    (file) => file.sha256 === undefined || elsewhere.draft?.get(file.name) !== file.sha256,
   );
   const synced = link.synced_version;
   if (remaining.length > 0 && synced !== undefined && synced !== elsewhere.target) {
     const version = await elsewhere.readVersion(synced);
     if (version !== undefined) {
       remaining = remaining.filter(
-        (file) => file.content === undefined || version.get(file.name) !== file.content,
+        (file) => file.sha256 === undefined || version.get(file.name) !== file.sha256,
       );
     }
   }
   return remaining.map((file) => file.name);
+}
+
+/** Names shown by name up to a handful, the rest counted. */
+function listedNames(names: readonly string[]): string {
+  const shown = names.slice(0, 5).map((name) => `\`${name}\``);
+  const rest = names.length - shown.length;
+  return rest > 0 ? `${shown.join(", ")} and ${rest} more` : shown.join(", ");
+}
+
+/**
+ * The refusal of a pull into a folder with no link whose tree holds files the
+ * pull does not land, or cannot be listed, or `undefined` when it holds none.
+ * Asked when the pull plans and again inside the landing's turn.
+ */
+function unlinkedOthersRefusal(others: {
+  names: readonly string[];
+  complete: boolean;
+}): ToolError | undefined {
+  if (!others.complete) {
+    return refuseOutputDir(
+      `it holds no ${LINK_FILE_NAME}, and what else its tree holds could not be listed (it is past the limits, or holds a file no method tree takes), so this pull cannot tell that the folder holds nothing but this method.`,
+      "Pull into a fresh folder of its own: a pull links the whole folder, and the next save from it sends every file of its tree.",
+    );
+  }
+  if (others.names.length > 0) {
+    return refuseOutputDir(
+      `it holds no ${LINK_FILE_NAME} and its tree holds files this method does not have: ${listedNames(others.names)}. A pull links the whole folder, so the next save from it would send those files as the method's own.`,
+      "Pull into a fresh folder of its own, such as a new subfolder, or move those files out first.",
+    );
+  }
+  return undefined;
 }
 
 function refusePull(message: string, hint: string): PullPlan {
@@ -2783,44 +2735,35 @@ function refuseOutputDir(message: string, hint: string): ToolError {
   };
 }
 
-/** A destination present on disk with bytes other than the pull's; `content` is absent when unreadable. */
+/** A destination present on disk with bytes other than the pull's; `sha256` is absent when unreadable. */
 interface LocalFile {
   name: string;
-  content?: string;
+  sha256?: string;
 }
 
 /**
  * How each destination's bytes on disk stand against what would be written,
- * told apart three ways rather than two.
- *
- * It takes the destinations the write loop lands — `.py` files included —
- * rather than the `.mthds` sources alone. A comparison narrower than the write
- * is how an edited `funcs.py` passed a guard that then overwrote it.
- *
- * `missing` is separate from `differing` because they lead to opposite
- * decisions. A file that is not there holds nothing to lose, so writing it is
- * free; a file that is there and differs is work this tool cannot account for.
- * Collapsing the two told a user who had deleted one source that the directory
- * held "changes that were never saved" and then refused every pull, `overwrite`
- * included. Anything unreadable — a permission error, a directory in its place
- * — counts as differing, not missing: the bytes cannot be seen, so they must
- * not be assumed absent.
+ * told apart three ways rather than two. `missing` is separate from
+ * `differing` because they lead to opposite decisions: a file that is not
+ * there holds nothing to lose, while a file that is there and differs is work
+ * this tool cannot account for. Anything unreadable — a permission error, a
+ * directory or a symlink in its place — counts as differing, not missing.
  */
 interface LocalComparison {
-  /** Present, and not what the pull brings — with the bytes, so they can be matched against the catalog. */
+  /** Present, and not what the pull brings — with the hash, so it can be matched against the catalog. */
   differing: LocalFile[];
   /** Not there at all. */
   missing: string[];
 }
 
-/** What one destination held when the pull looked: its bytes, nothing, or something unreadable. */
+/** What one destination held when the pull looked: a regular file's hash, nothing, or something unreadable. */
 type ObservedFile =
-  | { kind: "bytes"; content: string }
+  | { kind: "bytes"; sha256: string }
   | { kind: "missing" }
   | { kind: "unreadable" };
 
 /**
- * What each destination holds, read once. The plan decides on these reads,
+ * What each destination holds, hashed once. The plan decides on these reads,
  * and the landing writes only while every destination still holds what was
  * read here ({@link changedDestinations}).
  */
@@ -2829,17 +2772,43 @@ async function observeDestinations(
 ): Promise<ObservedFile[]> {
   const observed: ObservedFile[] = [];
   for (const destination of destinations) {
-    try {
-      observed.push({ kind: "bytes", content: await fs.readFile(destination.absolute, "utf8") });
-    } catch (err) {
-      observed.push(isMissingPathError(err) ? { kind: "missing" } : { kind: "unreadable" });
-    }
+    observed.push(await observeFile(destination.absolute));
   }
   return observed;
 }
 
+/** One destination's state: a regular file is streamed through SHA-256, never read whole, and never through a link. */
+async function observeFile(absolute: string): Promise<ObservedFile> {
+  try {
+    const entry = await fs.lstat(absolute);
+    if (!entry.isFile()) return { kind: "unreadable" };
+  } catch (err) {
+    return isMissingPathError(err) ? { kind: "missing" } : { kind: "unreadable" };
+  }
+  let handle;
+  try {
+    handle = await fs.open(absolute, "r");
+  } catch {
+    return { kind: "unreadable" };
+  }
+  try {
+    const hash = createHash("sha256");
+    const buffer = Buffer.alloc(64 * 1024);
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+    return { kind: "bytes", sha256: hash.digest("hex") };
+  } catch {
+    return { kind: "unreadable" };
+  } finally {
+    await handle.close();
+  }
+}
+
 function compareDestinations(
-  destinations: readonly { name: string; file: MethodFile }[],
+  destinations: readonly Destination[],
   observed: readonly ObservedFile[],
 ): LocalComparison {
   const differing: LocalFile[] = [];
@@ -2850,8 +2819,8 @@ function compareDestinations(
       missing.push(destination.name);
     } else if (seen.kind === "unreadable") {
       differing.push({ name: destination.name });
-    } else if (seen.content !== destination.file.content) {
-      differing.push({ name: destination.name, content: seen.content });
+    } else if (seen.sha256 !== destination.file.sha256) {
+      differing.push({ name: destination.name, sha256: seen.sha256 });
     }
   }
   return { differing, missing };
@@ -2859,11 +2828,11 @@ function compareDestinations(
 
 /**
  * The destinations that no longer hold what the plan read. The plan reads the
- * files, may then wait on the platform for a version's files, and only then
- * lands; an edit made meanwhile — an editor saving, another tool — moves no
- * link, so the link's compare-and-swap cannot see it, and the plan's verdict
- * that a file held stored bytes would overwrite the edit. Read again inside
- * the landing turn, so the window left is that turn's.
+ * files, may then wait on the platform for a version's listing and the
+ * download, and only then lands; an edit made meanwhile moves no link, so the
+ * link's compare-and-swap cannot see it, and the plan's verdict that a file
+ * held stored bytes would overwrite the edit. Read again inside the landing
+ * turn, so the window left is that turn's.
  */
 async function changedDestinations(
   destinations: readonly { name: string; absolute: string }[],
@@ -2877,18 +2846,21 @@ async function changedDestinations(
       before !== undefined &&
       after !== undefined &&
       before.kind === after.kind &&
-      (before.kind !== "bytes" || (after.kind === "bytes" && before.content === after.content));
+      (before.kind !== "bytes" || (after.kind === "bytes" && before.sha256 === after.sha256));
     return same ? [] : [destination.name];
   });
 }
 
-function emptySourceError(): GetMethodResult {
-  return getError("The method was not fetched: it has no MTHDS source yet.", [
+function emptyTreeError(version: number | "draft"): GetMethodResult {
+  return getError("The method was not fetched: it holds no file yet.", [
     {
       class: "input_domain",
       location: "method_id",
-      message: "The stored method has no MTHDS source yet.",
-      hint: `The method exists but is empty — a different answer from an unknown id, which is a 404 at this same field. Open it in the Pipelex webapp and save a bundle into it, or save one from here with ${WORKSHOP_TOOL_NAMES.saveMethod} and this method_id.`,
+      message:
+        version === "draft"
+          ? "The stored method's draft holds no file yet."
+          : `Version ${version} of the stored method holds no file.`,
+      hint: `The method exists but is empty — a different answer from an unknown id, which is a 404 at this same field. Open it in the Pipelex webapp and save into it, or save a folder into it from here with ${WORKSHOP_TOOL_NAMES.saveMethod} and this method_id.`,
       retryable: false,
     },
   ]);
@@ -2898,167 +2870,30 @@ function getError(summary: string, errors: ToolError[]): GetMethodResult {
   return { structuredContent: { status: "error", errors }, summary };
 }
 
-// ── naming ──────────────────────────────────────────────────────────
+// ── the folder's link ───────────────────────────────────────────────
 
-/**
- * The bundle's directory, from the first file's provenance — which is what
- * `link_dir` defaults to and what every file's catalog name is relative to.
- * `undefined` for an inline-only submission, which has no directory at all.
- */
-export function bundleDirectoryOf(files: readonly SubmittedFileInput[]): string | undefined {
-  const first = files[0];
-  if (first === undefined) {
-    return undefined;
-  }
-  // First-match union semantics, as `resolveSubmittedFiles` applies them. It
-  // reads the SUBMITTED item rather than the resolved one — the same answer,
-  // since a `{ path }` item resolves to that path as its `uri` — because the
-  // boundary it feeds has to be known BEFORE anything is opened.
-  const label = "content" in first ? first.uri : first.path;
-  if (label === undefined || label === null || label.trim() === "") {
-    return undefined;
-  }
-  const dir = path.dirname(label);
-  return dir === "" ? "." : dir;
-}
-
-/**
- * Which submitted `{ path }` items sit outside the bundle directory — asked
- * BEFORE the resolver opens any of them.
- *
- * `nameFiles` already refuses a file above the bundle directory, but it does so
- * after the bytes are in hand, which is too late for the `python` arm: that arm
- * reads a `.py` file and then UPLOADS it to the organization's catalog. The
- * extension gate bounds WHAT may be opened; this bounds WHERE, and only both
- * together close the injection vector.
- *
- * The directory that bounds a read is {@link linkDirectoryOf}'s, NOT
- * {@link bundleDirectoryOf}'s, and the difference is the whole fix. A file's
- * NAME inside the method may legitimately come from an inline item's `uri`,
- * which is documented as provenance and may be any label at all. Letting that
- * label bound a READ handed the caller the boundary: `{ content, uri:
- * "app/config/x.mthds" }` beside `{ path: "app/config/settings.py" }` declared
- * the secrets' own directory to be the bundle root, and the file went to the
- * catalog with its keys in it. Only a `{ path }` item names a directory that is
- * really there, so only a `{ path }` item may establish one — and a bundle
- * submitted inline establishes none, which makes every `{ path }` beside it a
- * refusal rather than a read.
- *
- * And the comparison is on REAL paths, not on the submitted strings. A lexical
- * `path.relative` accepts `bundle/helpers.py` whatever it points at, while the
- * resolver follows symlinks and contains only against the WORKSPACE — so
- * `bundle/helpers.py -> ../.env` cleared this gate, cleared the extension gate
- * (which reads the submitted NAME, never the resolved target), and uploaded the
- * workspace's secrets to the organization's catalog as the method's Python,
- * where nothing validates them and no delete from this tool reaches them. The
- * `python` arm is the live one for exactly that reason. Both checks are kept:
- * the lexical one names the ordinary mistake in the caller's own words, and the
- * real-path one is the boundary.
- */
-async function pathsOutsideBundle(
-  submitted: readonly SubmittedFileInput[] | undefined,
-  bundleDir: string | undefined,
-  location: "files" | "python",
-  // The directory submitted paths are relative TO — the same `rootDir` the
-  // resolver was built with, which `buildLocalToolContexts` takes from one
-  // argument for both. Resolving against `process.cwd()` instead would compare
-  // real paths that are not the ones the resolver will open, and on any root
-  // but the process's own it would find nothing and quietly check nothing.
-  // Absent, there is no resolver either and every `{ path }` is refused below.
-  base: string | undefined,
-): Promise<ToolError[]> {
-  if (submitted === undefined) {
-    return [];
-  }
-  const errors: ToolError[] = [];
-  // Resolved once. When the directory is not on disk there is nothing to
-  // contain anything, and every `{ path }` under it fails the resolver's own
-  // "File not found" — so the lexical answer stands alone rather than inventing
-  // a second refusal for a directory that was never there.
-  const bundleReal =
-    bundleDir === undefined || base === undefined
-      ? undefined
-      : await realPathOrUndefined(path.resolve(base, bundleDir));
-  for (const [index, item] of submitted.entries()) {
-    // The resolver reports a blank path and an unreadable one for itself.
-    if ("content" in item || item.path.trim() === "") {
-      continue;
-    }
-    if (bundleDir === undefined) {
-      errors.push({
-        class: "input_domain",
-        location: `${location}[${index}].path`,
-        message: `\`${item.path}\` has no bundle directory to sit under: the first submitted file is inline, so nothing names a directory on disk.`,
-        hint: "Submit the bundle's root file as a { path } item, which is what establishes the directory the others are read from — or send this file inline too. A uri is provenance for diagnostics and never decides what may be opened.",
-        retryable: false,
-      });
-      continue;
-    }
-    const relative = toPosix(path.relative(bundleDir, item.path));
-    if (relative === "" || relative.startsWith("../")) {
-      errors.push({
-        class: "input_domain",
-        location: `${location}[${index}].path`,
-        message: `\`${item.path}\` is outside the bundle directory \`${bundleDir}\`, so it is not part of this method.`,
-        hint: "Every submitted file must live at or under the directory of the first one, which is the bundle's root. Move it in, or submit the bundle from its own directory.",
-        retryable: false,
-      });
-      continue;
-    }
-    if (bundleReal === undefined) {
-      continue;
-    }
-    const itemReal =
-      base === undefined ? undefined : await realPathOrUndefined(path.resolve(base, item.path));
-    if (itemReal === undefined) {
-      // Missing, or unreadable for a reason of its own. The resolver reports
-      // both for itself, in the words it has always used.
-      continue;
-    }
-    if (!isInsideRoot(bundleReal, itemReal)) {
-      errors.push({
-        class: "input_domain",
-        location: `${location}[${index}].path`,
-        message: `\`${item.path}\` resolves to \`${itemReal}\`, which is outside the bundle directory \`${bundleDir}\`. A symlink does not make a file part of the method.`,
-        hint: "Every submitted file must REALLY live at or under the directory of the bundle's root file. Copy the file into the bundle if it belongs to the method, or send its contents inline as { content, uri? }.",
-        retryable: false,
-      });
-    }
-  }
-  return errors;
-}
-
-/** The real path, or `undefined` when there is not one to have. */
-async function realPathOrUndefined(target: string): Promise<string | undefined> {
-  try {
-    return await fs.realpath(target);
-  } catch {
-    return undefined;
-  }
-}
-
-/** What a directory says about itself before anything is written to the catalog. */
+/** What a folder says about itself before anything is written to the catalog. */
 type DirectoryClaim =
   | { kind: "link"; dir: string; link: MethodLink }
   | { kind: "unreadable"; dir: string; reason: string };
 
-/** A directory's link as read: where, and exactly what was there. */
+/** A folder's link as read: where, and exactly what was there. */
 interface LinkAt {
-  /** Relative to the working directory, for messages. */
+  /** As the caller wrote it, for messages. */
   dir: string;
   absolute: string;
   read: LinkRead;
 }
 
 /**
- * A directory's link, read WITHOUT creating anything.
+ * A pull's output folder's link, read WITHOUT creating anything.
  *
  * `resolveSaveDir` is the write path's routine and it makes the directory it
- * contains; this question is asked before a create, where making a directory in
- * order to decide whether to refuse would be a side effect of a refusal. So the
- * path is contained lexically, what is there is read, and anything that cannot
- * be resolved answers `undefined` — the link write that follows asks again with
- * the real routine and reports its own refusal.
+ * contains; this question is asked before the method is read, where making a
+ * directory in order to decide whether to refuse would be a side effect of a
+ * refusal. So the path is contained lexically, what is there is read, and
+ * anything that cannot be resolved answers `undefined` — the write that
+ * follows asks again with the real routine and reports its own refusal.
  */
 async function linkAt(
   context: CatalogWriteContext,
@@ -3076,14 +2911,14 @@ async function linkAt(
 }
 
 /**
- * What a directory already claims: its link, or a link file nobody can read.
+ * What a folder already claims: its link, or a link file nobody can read.
  *
  * `unreadable` is kept rather than folded into `undefined`, and that IS the
  * question the create arm asks. `readMethodLink` reports a malformed, truncated
  * or symlinked link file as `unreadable` precisely because something claims the
- * directory; flattening it to "no link" let the create run, mint a second
+ * folder; flattening it to "no link" let the create run, mint a second
  * method, and only then have the link write refuse — a duplicate this tool
- * cannot delete. Not knowing whether a directory is claimed is not the same as
+ * cannot delete. Not knowing whether a folder is claimed is not the same as
  * knowing it is free.
  */
 function claimOf(at: LinkAt | undefined): DirectoryClaim | undefined {
@@ -3093,164 +2928,6 @@ function claimOf(at: LinkAt | undefined): DirectoryClaim | undefined {
   return at.read.kind === "link"
     ? { kind: "link", dir: at.dir, link: at.read.link }
     : { kind: "unreadable", dir: at.dir, reason: at.read.reason };
-}
-
-/**
- * Whether two directories under the working directory are one — compared on
- * real paths when both exist, so `work`, `./work/` and a symlink to it agree,
- * and lexically otherwise.
- */
-async function sameDirectory(
-  context: CatalogWriteContext,
-  a: string | undefined,
-  b: string | undefined,
-): Promise<boolean> {
-  if (a === undefined || b === undefined || context.saveRoot === undefined) {
-    return a === b;
-  }
-  const left = path.resolve(context.saveRoot, a);
-  const right = path.resolve(context.saveRoot, b);
-  if (left === right) {
-    return true;
-  }
-  const [realLeft, realRight] = await Promise.all([
-    realPathOrUndefined(left),
-    realPathOrUndefined(right),
-  ]);
-  return realLeft !== undefined && realLeft === realRight;
-}
-
-/**
- * Why a save may not write its link at `linkTarget`: the directory holds a
- * bundle of its own, and the files being saved are not it. `undefined` when
- * the link goes beside the files, or into a directory holding no `.mthds`
- * file at all, which is the fork `link_dir` exists for.
- *
- * The link says what its directory holds. Written beside another bundle — a
- * pulled copy of the same method, a stranger's unlinked bundle — it would
- * vouch for that bundle as the draft this save wrote, under this save's
- * token, and the next save from that directory would replace the draft with
- * it without a conflict. It is the pull's ownership question
- * ({@link bundleFilesIn}), asked by the save before it writes anything.
- */
-async function otherBundleAt(
-  context: CatalogWriteContext,
-  linkTarget: string | undefined,
-  filesDir: string | undefined,
-): Promise<ToolError | undefined> {
-  if (linkTarget === undefined || context.saveRoot === undefined) {
-    return undefined;
-  }
-  if (filesDir !== undefined && (await sameDirectory(context, linkTarget, filesDir))) {
-    return undefined;
-  }
-  const absolute = path.resolve(context.saveRoot, linkTarget);
-  if (absolute !== context.saveRoot && !isInsideRoot(context.saveRoot, absolute)) {
-    return undefined;
-  }
-  const bundle = await bundleFilesIn(absolute);
-  if (bundle.length === 0) {
-    return undefined;
-  }
-  return {
-    class: "input_domain",
-    location: "link_dir",
-    message: `link_dir \`${linkTarget}\` holds a bundle of its own (${bundle.map((name) => `\`${name}\``).join(", ")}), and the files this save sends ${filesDir === undefined ? "came inline" : `are in \`${filesDir}\``}. Its ${LINK_FILE_NAME} would then vouch for that bundle as this save's draft, and a save from there would replace the draft with it without a conflict. Nothing was written.`,
-    hint: `Omit link_dir to link the files' own directory, or point it at a directory holding no .mthds file. To save the bundle in \`${linkTarget}\`, submit its own files as { path } items.`,
-    retryable: false,
-  };
-}
-
-/**
- * The directory the link file goes in when no `link_dir` was given — and the
- * reason it is NOT {@link bundleDirectoryOf}.
- *
- * The two look like the same question and are not. `bundleDirectoryOf` reads
- * the resolved `uri`, which is the right base for a file's NAME inside the
- * method: an inline item may legitimately carry `sub/x.mthds` as provenance and
- * be named for it. But `uri` is documented as provenance for diagnostics and
- * may be any label at all, so using it as a DIRECTORY meant a caller sending
- * `uri: "memory://draft.mthds"` had a directory called `memory:` created in
- * their workspace, and `uri: "bundle.mthds"` put the link at the workspace root
- * where it could replace an unrelated one. Only a `{ path }` item names a real
- * directory, which is also what SPEC.md's rule says: an inline-only submission
- * with no `link_dir` writes no link file.
- */
-export function linkDirectoryOf(files: readonly SubmittedFileInput[]): string | undefined {
-  const first = files[0];
-  // First-match union semantics, as `resolveSubmittedFiles` applies them.
-  if (first === undefined || "content" in first || first.path.trim() === "") {
-    return undefined;
-  }
-  const dir = path.dirname(first.path);
-  return dir === "" ? "." : dir;
-}
-
-type NamedFiles = { ok: true; files: MethodFile[] } | { ok: false; error: ToolError };
-
-/**
- * Name each resolved file for the catalog: its path relative to the bundle
- * directory, root file first, which is what makes a method saved from here open
- * in the webapp's editor as the same files.
- *
- * A file ABOVE the bundle directory is refused rather than flattened: its
- * relative name would start with `..`, which is not a path the catalog or a
- * later pull can place, and flattening it would silently collide two files with
- * the same basename.
- */
-function nameFiles(
-  files: readonly SubmittedFile[],
-  bundleDir: string | undefined,
-  fallbackStem: string,
-  extension: string,
-  // The caller's own argument, so a refusal locates at the field the caller
-  // actually sent. Hard-coding `files` here made a stray `.py` file blame the
-  // bundle the caller had got right.
-  location: "files" | "python",
-): NamedFiles {
-  const named: MethodFile[] = [];
-  for (const [index, file] of files.entries()) {
-    const uri = file.uri ?? undefined;
-    if (uri === null || uri === undefined || uri.trim() === "") {
-      named.push({
-        name: index === 0 ? `${fallbackStem}${extension}` : `${fallbackStem}-${index}${extension}`,
-        content: file.content,
-      });
-      continue;
-    }
-    if (bundleDir === undefined) {
-      named.push({ name: path.posix.basename(toPosix(uri)), content: file.content });
-      continue;
-    }
-    const relative = toPosix(path.relative(bundleDir, uri));
-    if (relative === "" || relative.startsWith("../")) {
-      return {
-        ok: false,
-        error: {
-          class: "input_domain",
-          location,
-          message: `\`${uri}\` is outside the bundle directory \`${bundleDir}\`, so it has no name inside the method.`,
-          hint: "Every submitted file must live at or under the directory of the first one, which is the bundle's root. Move it in, or submit the bundle from its own directory.",
-          retryable: false,
-        },
-      };
-    }
-    named.push({ name: relative, content: file.content });
-  }
-  return { ok: true, files: named };
-}
-
-function toPosix(value: string): string {
-  return value.split(path.sep).join("/");
-}
-
-/** A filesystem-safe stem for a method whose stored source carries no file names. */
-function slugify(name: string): string {
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug === "" ? "method" : slug;
 }
 
 // ── tool results ────────────────────────────────────────────────────

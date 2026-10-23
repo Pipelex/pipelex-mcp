@@ -845,6 +845,7 @@ const LISTING_ERROR_SUMMARIES: ErrorSummaries = {
   paywall:
     "Model deck could not be read: the organization's Pipelex plan does not cover this call.",
   auth: "Model deck could not be read: the Pipelex API key is missing or was refused.",
+  role: "Model deck could not be read: your role in this organization does not allow this.",
 };
 
 const CHECK_ERROR_SUMMARIES: ErrorSummaries = {
@@ -854,6 +855,7 @@ const CHECK_ERROR_SUMMARIES: ErrorSummaries = {
   paywall:
     "Model reference could not be checked: the organization's Pipelex plan does not cover this call.",
   auth: "Model reference could not be checked: the Pipelex API key is missing or was refused.",
+  role: "Model reference could not be checked: your role in this organization does not allow this.",
 };
 
 function errorResult(summary: string, errors: ToolError[]): ModelsResult {

@@ -1,6 +1,6 @@
 import { ApiResponseError } from "@pipelex/sdk";
 import type {
-  MethodData,
+  MethodDetail,
   MethodPublishInput,
   MethodPublishResult,
   MethodVersionSummary,
@@ -13,11 +13,12 @@ import type { CatalogWriteClient, CatalogWriteContext } from "./catalog-write.js
 import type { ToolError } from "./shared.js";
 
 const TOKEN = "2026-09-20T12:00:00Z";
+const DIGEST = `sha256:${"a".repeat(64)}`;
 
 function versionSummary(overrides: Partial<MethodVersionSummary> = {}): MethodVersionSummary {
   return {
     version: 3,
-    source_digest: "a".repeat(64),
+    tree_digest: DIGEST,
     crate_fingerprint: "crate-fp",
     runner_version: "0.78.0",
     description: null,
@@ -27,16 +28,16 @@ function versionSummary(overrides: Partial<MethodVersionSummary> = {}): MethodVe
   };
 }
 
-function method(overrides: Partial<MethodData> = {}): MethodData {
+function method(overrides: Partial<MethodDetail> = {}): MethodDetail {
   return {
     method_id: "mt_one",
     org_id: "org_1",
     created_by_user_id: "user_1",
     name: "Summarize PDF",
-    mthds: "[]",
+    files: [],
     created_at: "2026-09-01T00:00:00Z",
     updated_at: TOKEN,
-    draft_digest: "a".repeat(64),
+    draft_digest: DIGEST,
     latest_version: 3,
     latest_published: versionSummary(),
     ...overrides,
@@ -58,6 +59,7 @@ function publishing(
     renameMethod: notCalled,
     getMethodVersion: notCalled,
     publishMethod: publish,
+    writeMethodTree: notCalled,
     ...extra,
   };
 }
@@ -318,6 +320,46 @@ describe("publishMthdsMethod", () => {
     expect(error?.message).toContain("2026-09-21T09:00:00Z");
     expect(error?.message).toContain("nothing was published");
     expect(publishMethodToolResult(result).isError).toBe(true);
+  });
+
+  it("headlines a publish refused by role as the role, with the server's sentence", async () => {
+    const detail =
+      "Your role in this organization is runner: it runs the organization's published versions and changes no method.";
+    const result = await publishMthdsMethod(
+      { method_id: "mt_one", expected_draft_updated_at: TOKEN },
+      contextFor(
+        publishing(async () => {
+          throw new ApiResponseError(
+            "HTTP 403",
+            "https://api-dev.pipelex.com/v1/methods/mt_one/publish",
+            403,
+            "Forbidden",
+            "{}",
+            undefined,
+            detail,
+            undefined,
+            "role_not_permitted",
+            { details: { title: "Forbidden", errorDomain: "config", retryable: false } },
+          );
+        }),
+      ),
+    );
+
+    const [error] = errorsOf(result);
+    expect(error).toMatchObject({
+      class: "config",
+      kind: "role",
+      message: detail,
+      retryable: false,
+    });
+    expect(error?.location).toBeUndefined();
+    expect(result.summary).toBe(
+      "The method was not published: your role in this organization does not allow this.",
+    );
+    const tool = publishMethodToolResult(result);
+    expect(tool.isError).toBe(true);
+    expect(tool.content[0].text).toContain(detail);
+    expect(tool.content[0].text).not.toMatch(/PIPELEX_API_KEY|log ?in/i);
   });
 
   it("headlines a refused key as the key, not as connectivity", async () => {

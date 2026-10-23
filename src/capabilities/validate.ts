@@ -2,13 +2,12 @@ import { FIELD_KINDS } from "@pipelex/sdk";
 import type {
   FieldKind,
   IOMultiplicity,
-  MthdsFile,
+  PipelexValidateSource,
   PipelexValidationResult,
   PipelexValidationReport,
   PipelexInvalidReport,
   PresenceMarker,
-  ValidateFilesOptions,
-  ValidateMethodSelector,
+  ValidateOptions,
 } from "@pipelex/sdk";
 import { z } from "zod";
 
@@ -28,20 +27,20 @@ import {
   asRecord,
   blueprintMainPipeRefOf,
   buildApiConfig,
-  bundleFilesInputSchema,
   classifyError,
   createPipelexApiClient,
   filesSentSchema,
-  hasTemplateFiles,
   methodDirInputSchema,
-  resolveMethodFiles,
-  resourcesOption,
+  methodFilesInputSchema,
+  resolveMethodSource,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
   withFilesSent,
   failedBeforeSending,
+  isExecutionLocusRefusal,
+  treeSentInlineHeavy,
   markUnsent,
 } from "./shared.js";
 import type {
@@ -51,16 +50,16 @@ import type {
   ClassifyErrorOptions,
   ErrorSummaries,
   FileResolver,
-  SubmittedFile,
+  MethodTreeToSend,
   SubmittedFileInput,
   ToolError,
 } from "./shared.js";
-import { isTemplateFilePath } from "./template-files.js";
-import type { TemplateFiles } from "./template-files.js";
+import { methodTreeLimitsOf } from "./tree-limits.js";
+import type { TreeLimitsAware } from "./tree-limits.js";
 
 export const mthdsValidateInputSchema = {
   method_dir: methodDirInputSchema("one_selector"),
-  files: bundleFilesInputSchema.optional(),
+  files: methodFilesInputSchema.optional(),
   method_ref: z
     .string()
     .optional()
@@ -99,6 +98,12 @@ export const viewSpecSchema = z.enum(["dry_run_graph", "input_form"]);
  * "unknown" have to be distinguishable downstream.
  */
 export const VALIDATE_VIEW_TOKENS = ["input_form", "output_form"] as const;
+
+/** What every `/validate` call asks for beside the verdict: the Markdown view and the descriptors. */
+const VALIDATE_OPTIONS: ValidateOptions = {
+  render: ["markdown"],
+  views: [...VALIDATE_VIEW_TOKENS],
+};
 
 /**
  * The MTHDS standard's multiplicity vocabulary (`IOMultiplicity`), as a runtime
@@ -268,11 +273,10 @@ export interface MthdsValidateInput {
   graph_page?: boolean;
 }
 
-/** The validate request after `{ path }` resolution — what the checks and the API call consume. */
+/** The validate request once its method is resolved — what the checks and the API call consume. */
 interface ResolvedValidateRequest {
-  files: SubmittedFile[];
-  /** The bundle's template files, keyed by the path a step names; sent beside `files` only. */
-  resources?: TemplateFiles;
+  /** The method's tree, from `method_dir` or `files`. */
+  tree?: MethodTreeToSend;
   method_ref?: string;
   method_id?: string;
 }
@@ -322,7 +326,7 @@ export interface ValidationStructuredContent {
   graph_page?: GraphPageStructuredContent;
   /** By-id validations only: the content validated, when this server can tell. */
   method_version?: MethodVersionReport;
-  /** Validations of a method folder only: every file read from it and sent. */
+  /** Validations of a tree, from `method_dir` or `files`: every file sent. */
   files_sent?: string[];
   /** A valid verdict's advisory findings, relayed as the API sent them; absent when empty. */
   warnings?: unknown[];
@@ -357,31 +361,34 @@ export interface ValidationResult {
    * settled an entry pipe.
    */
   mainPipeRef?: string;
+  /**
+   * Set on a no-verdict result whose request the deployment refused for the
+   * Python the method holds, the execution-locus gate
+   * (`isExecutionLocusRefusal`): the deployment will not load the method, so
+   * it can give no verdict about it, while nothing is wrong with the request.
+   * `mthds_save_method` reads it to store the draft unvalidated rather than
+   * refuse to save it.
+   */
+  refusedForPython?: boolean;
 }
 
 export interface ValidationClient {
   /** `GET /v1/version`, read to learn whether a bare id names the draft or a version; optional on a test seam. */
   version?(): Promise<unknown>;
-  validateFiles(
-    files: MthdsFile[],
-    options?: ValidateFilesOptions,
-  ): Promise<PipelexValidationResult>;
   /**
-   * The selector arm of `POST /v1/validate` — the SDK's low-level `validate`
-   * with a `{ method_ref }` / `{ method_id }` source (mthds_sources must stay
-   * undefined for selectors: labels come from the package's, or the stored
-   * method's, real file names).
+   * `POST /v1/validate`, the SDK's `validate`: the method's tree as `{ tree }`,
+   * sent inline or by hash, or a `{ method_ref }` / `{ method_id }` selector,
+   * resolved server-side, whose diagnostics name the package's, or the stored
+   * method's, own tree paths.
    */
   validate(
-    source: ValidateMethodSelector,
+    source: PipelexValidateSource,
     allowSignatures?: boolean,
-    mthdsSources?: string[],
-    render?: string[],
-    views?: string[],
+    options?: ValidateOptions,
   ): Promise<PipelexValidationResult>;
 }
 
-export interface ValidationContext extends ApiConfig, MethodVersionsAware {
+export interface ValidationContext extends ApiConfig, MethodVersionsAware, TreeLimitsAware {
   client?: ValidationClient;
   /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
@@ -469,26 +476,28 @@ export async function validateMthds(
   input: MthdsValidateInput,
   context: ValidationContext = buildValidationContext(),
 ): Promise<ValidationResult> {
-  const resolution = await resolveMethodFiles(input, context.resolver, "one_selector");
+  const resolution = await resolveMethodSource(input, context.resolver, "one_selector", () =>
+    methodTreeLimitsOf(context, () => validationClient(context)),
+  );
   if (resolution.errors.length > 0) {
     return errorResult("Validation was not run: request input is invalid.", resolution.errors);
   }
 
   const request: ResolvedValidateRequest = {
-    ...input,
-    files: resolution.files,
-    resources: resolution.resources,
+    ...(resolution.tree === undefined ? {} : { tree: resolution.tree }),
+    ...(input.method_ref === undefined ? {} : { method_ref: input.method_ref }),
+    ...(input.method_id === undefined ? {} : { method_id: input.method_id }),
   };
-  const inputErrors = validateMethodSelectorRequest(request.files, request, {
+  const inputErrors = validateMethodSelectorRequest(request.tree !== undefined, request, {
     rule: "one_selector",
   });
   if (inputErrors.length > 0) {
     return errorResult("Validation was not run: request input is invalid.", inputErrors);
   }
 
-  const result = withFilesSent(await validateRequest(request, context), resolution.sent);
+  const result = withFilesSent(await validateRequest(request, context), request.tree);
   const saveRoot = context.saveRoot;
-  const pageFiles = graphPageFilesOf(input, request.files);
+  const pageFiles = graphPageFilesOf(input, request.tree);
   if (saveRoot === undefined || pageFiles === undefined) {
     return result;
   }
@@ -504,43 +513,29 @@ export async function validateMthds(
 }
 
 /**
- * The files the graph page embeds, with the paths they were given at: only
- * when the caller did not opt out and EVERY `.mthds` item came as `{ path }`,
- * or the method came from `method_dir`, whose files all carry the path they
- * were read at, so the page lands in the folder itself, the deepest directory
- * holding a bundle with one at its top. An inline item has no directory to
- * write beside, and a page embedding some of the method's files but not
- * others would draw a different method from the one validated. The template
- * files are not the method's text, so they are left out: the resolution put
- * them in `resources`, never among `resolved`, and only a request that
- * resolved without an error reaches here.
+ * The files the graph page embeds, with the paths they can be opened at: the
+ * `.mthds` files of the tree sent, only when the caller did not opt out and
+ * every file of it was read from disk, which a tree from `method_dir` always
+ * was, so the page lands in the folder itself, the deepest directory holding a
+ * bundle with one at its top. An inline item has no directory to write beside,
+ * and a page embedding some of the method's files but not others would draw a
+ * different method from the one validated. The other files of the tree are not
+ * the method's text, so they are left out.
  */
 function graphPageFilesOf(
   input: MthdsValidateInput,
-  resolved: SubmittedFile[],
+  tree: MethodTreeToSend | undefined,
 ): GraphPageFile[] | undefined {
-  if (input.graph_page === false) {
+  if (input.graph_page === false || tree === undefined) {
     return undefined;
   }
-  if (input.method_dir !== undefined) {
-    const pageFiles: GraphPageFile[] = [];
-    for (const file of resolved) {
-      if (file.uri == null) return undefined;
-      pageFiles.push({ path: file.uri, content: file.content });
-    }
-    return pageFiles.length > 0 ? pageFiles : undefined;
+  if (tree.files.some((file) => !file.onDisk)) {
+    return undefined;
   }
-  const submitted = (input.files ?? []).filter(
-    (file) => "content" in file || !isTemplateFilePath(file.path),
-  );
-  const pageFiles: GraphPageFile[] = [];
-  for (const [index, file] of submitted.entries()) {
-    const content = resolved[index]?.content;
-    if ("content" in file || content === undefined) {
-      return undefined;
-    }
-    pageFiles.push({ path: file.path, content });
-  }
+  const decoder = new TextDecoder();
+  const pageFiles = tree.files
+    .filter((file) => file.treePath.toLowerCase().endsWith(".mthds"))
+    .map((file) => ({ path: file.shown, content: decoder.decode(file.bytes) }));
   return pageFiles.length > 0 ? pageFiles : undefined;
 }
 
@@ -552,6 +547,19 @@ function graphPageContentOf(outcome: GraphPageOutcome): GraphPageStructuredConte
   return content;
 }
 
+/**
+ * Validate a method's tree already read and checked, as `mthds_save_method`
+ * does with the folder it saves: the tree goes to the route as it is, with no
+ * second read, no second pass of the secret guard, no second wait on the
+ * limits handshake, and no graph page, which the save's result never reports.
+ */
+export async function validateMethodTree(
+  tree: MethodTreeToSend,
+  context: ValidationContext,
+): Promise<ValidationResult> {
+  return withFilesSent(await validateRequest({ tree }, context), tree);
+}
+
 async function validateRequest(
   request: ResolvedValidateRequest,
   context: ValidationContext,
@@ -559,7 +567,7 @@ async function validateRequest(
   // Classify options follow the request's selector shape — each failure
   // locates at the field that caused it.
   const classifyOptions =
-    request.files.length > 0
+    request.tree !== undefined
       ? VALIDATE_ERROR_OPTIONS
       : request.method_ref !== undefined
         ? VALIDATE_BY_REF_ERROR_OPTIONS
@@ -575,28 +583,16 @@ async function validateRequest(
     // `input_form`, and the signature's inputs then keep the contract's
     // order. A selector is a SERVER pass-through on `POST /v1/validate`
     // itself: the runner resolves an address, the hosted platform resolves an
-    // id — nothing is expanded client-side, and `mthds_sources` stays
-    // undefined (labels come from the package's, or the stored method's, real
-    // file names).
+    // id — nothing is expanded client-side, and the diagnostics name the
+    // package's, or the stored method's, own tree paths.
     client = validationClient(context);
-    if (request.files.length > 0) {
-      report = await client.validateFiles(toMthdsFiles(request.files), {
-        allowSignatures: true,
-        render: ["markdown"],
-        views: [...VALIDATE_VIEW_TOKENS],
-        // The template files the bundle's steps name, which the dry run
-        // loads and checks; a valid verdict carries the check's findings in
-        // `warnings`.
-        ...resourcesOption(request.resources),
-      });
+    if (request.tree !== undefined) {
+      // The whole tree, inline or by hash: every .mthds file is judged, and
+      // the template files the steps name are loaded and checked, a valid
+      // verdict carrying the check's findings in `warnings`.
+      report = await client.validate({ tree: request.tree.source }, true, VALIDATE_OPTIONS);
     } else if (request.method_ref !== undefined) {
-      report = await client.validate(
-        { method_ref: request.method_ref },
-        true,
-        undefined,
-        undefined,
-        [...VALIDATE_VIEW_TOKENS],
-      );
+      report = await client.validate({ method_ref: request.method_ref }, true, VALIDATE_OPTIONS);
     } else if (request.method_id !== undefined) {
       // What a bare id reads differs between a platform that resolves version
       // selectors and one that does not yet, so the platform is asked beside
@@ -605,9 +601,7 @@ async function validateRequest(
       plan = planById(request.method_id, methodVersionsOf(context), client, {
         needBareReport: true,
       });
-      report = await client.validate({ method_id: plan.send }, true, undefined, undefined, [
-        ...VALIDATE_VIEW_TOKENS,
-      ]);
+      report = await client.validate({ method_id: plan.send }, true, VALIDATE_OPTIONS);
     } else {
       // Unreachable: the selector checks above guarantee a source.
       throw new Error("No method selector survived request validation.");
@@ -617,12 +611,16 @@ async function validateRequest(
       ...classifyOptions,
       auth: context.authError,
       baseUrlSource: context.baseUrlSource,
-      bundleResources: hasTemplateFiles(request.resources),
+      methodTree: request.tree !== undefined,
+      treeInline: await treeSentInlineHeavy(err, request.tree, client),
     });
     const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
-    const failed = errorResult(summaryForError(error), [error]);
+    const failed: ValidationResult = {
+      ...errorResult(summaryForError(error), [error]),
+      ...(isExecutionLocusRefusal(err) ? { refusedForPython: true } : {}),
+    };
     // A client that could not be built, or an argument refused before
-    // sending, sent no file of a folder.
+    // sending, sent no file of the tree.
     return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
 
@@ -656,6 +654,7 @@ const ERROR_SUMMARIES: ErrorSummaries = {
   runtime: "Validation could not be completed: the Pipelex API returned an error.",
   paywall: "Validation could not start: the organization's Pipelex plan does not cover this call.",
   auth: "Validation could not start: the Pipelex API key is missing or was refused.",
+  role: "Validation could not start: your role in this organization does not allow this.",
 };
 
 function summaryForError(error: ToolError): string {
@@ -1133,15 +1132,6 @@ export function defaultPipeRefOf(report: PipelexValidationReport): string | unde
     return blueprintMainPipeRefOf(report.bundle_blueprint);
   }
   return typeof stated === "string" && stated.length > 0 ? stated : undefined;
-}
-
-function toMthdsFiles(files: SubmittedFile[]): MthdsFile[] {
-  return files.map((file) => {
-    if (file.uri === undefined || file.uri === null) {
-      return { content: file.content };
-    }
-    return { content: file.content, uri: file.uri };
-  });
 }
 
 function errorResult(summary: string, errors: ToolError[]): ValidationResult {

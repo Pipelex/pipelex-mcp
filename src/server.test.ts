@@ -10,9 +10,8 @@ import { SDK_VERSION } from "@pipelex/sdk";
 import type {
   CodegenResponse,
   MethodPage,
-  MthdsFile,
+  PipelexValidateSource,
   PipelexValidationReport,
-  PipelexValidationResult,
 } from "@pipelex/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -365,6 +364,74 @@ describe("the workshop's contexts and dispatch", () => {
     }
   });
 
+  it("registers mthds_list_files as a read beside the method list and dispatches it to the files client", async () => {
+    const contexts = buildLocalToolContexts({ PIPELEX_API_KEY: "plx_sk_test" });
+    const queries: unknown[] = [];
+    contexts.files.client = {
+      async listFiles(query) {
+        queries.push(query);
+        return {
+          items: [
+            {
+              file_id: "fl_1",
+              uri: "pipelex-storage://org/uploads/fl_1/invoice.pdf",
+              name: "invoice.pdf",
+              media_type: "application/pdf",
+              format: "pdf",
+              size: 2048,
+              kind: "uploaded",
+              origin: { surface: "app", run_id: null, method_id: null, method_version: null },
+              created_by: "usr_secret",
+              created_at: "2026-10-22T08:15:00Z",
+            },
+          ],
+          nextCursor: null,
+        };
+      },
+    };
+
+    const { client, close } = await connectClient(createLocalServer({ contexts }));
+    try {
+      const tools = (await client.listTools()).tools;
+      const index = tools.findIndex((candidate) => candidate.name === "mthds_list_files");
+      const tool = tools[index];
+      const schema = tool?.inputSchema as { required?: string[]; properties?: object };
+
+      expect(tools[index - 1]?.name).toBe("mthds_list_methods");
+      expect(tool?.annotations).toMatchObject({
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      });
+      expect(schema.required ?? []).toEqual([]);
+      expect(Object.keys(schema.properties ?? {}).sort()).toEqual([
+        "cursor",
+        "format",
+        "kind",
+        "limit",
+        "method_id",
+        "query",
+      ]);
+
+      const result = await client.callTool({
+        name: "mthds_list_files",
+        arguments: { query: "invoice", format: ["PDF"] },
+      });
+
+      expect(queries).toEqual([{ q: "invoice", format: ["pdf"], limit: 20 }]);
+      expect(result.structuredContent).toMatchObject({
+        status: "ok",
+        returned_count: 1,
+        next_cursor: null,
+        files: [{ file_id: "fl_1", uri: "pipelex-storage://org/uploads/fl_1/invoice.pdf" }],
+      });
+      expect(JSON.stringify(result)).not.toContain("usr_secret");
+      expect(result._meta).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+
   it("registers mthds_models as a read with two optional arguments and dispatches a check to the runner", async () => {
     const contexts = buildLocalToolContexts({ PIPELEX_API_KEY: "plx_sk_test" });
     const listed: Array<string | undefined> = [];
@@ -473,9 +540,9 @@ describe("the workshop's contexts and dispatch", () => {
 
     const contexts = buildLocalToolContexts({ PIPELEX_BASE_URL: "http://127.0.0.1:8081" }, rootDir);
 
-    // Every method-taking tool reads the bundle's template files through one
-    // resolver; the save reads `.mthds` alone, since the catalog stores no
-    // template file.
+    // Every method-taking tool reads a method's files and its folder through
+    // one resolver; the save reads its folder through its own, which words
+    // its refusals for a tool that takes a folder alone.
     for (const resolver of [
       contexts.inputs.resolver,
       contexts.codegen.resolver,
@@ -484,23 +551,28 @@ describe("the workshop's contexts and dispatch", () => {
     ]) {
       expect(resolver).toBe(contexts.validation.resolver);
     }
-    expect(contexts.validation.resolver?.resolveTemplates).toBeDefined();
-    expect(contexts.catalogWrite.resolver?.resolveTemplates).toBeUndefined();
-    // The same goes for a method's folder: the save takes no folder.
-    expect(contexts.validation.resolver?.resolveMethodDir).toBeDefined();
-    expect(contexts.catalogWrite.resolver?.resolveMethodDir).toBeUndefined();
+    expect(contexts.catalogWrite.resolver).not.toBe(contexts.validation.resolver);
+    for (const resolver of [contexts.validation.resolver, contexts.catalogWrite.resolver]) {
+      expect(resolver?.readMethodFile).toBeDefined();
+      expect(resolver?.locateMethodDir).toBeDefined();
+      expect(resolver?.readMethodTree).toBeDefined();
+    }
     await expect(contexts.validation.resolver?.resolve("bundle.mthds")).resolves.toEqual({
       ok: true,
       content: 'domain = "demo"',
     });
-    await expect(contexts.catalogWrite.resolver?.resolve("bundle.mthds")).resolves.toEqual({
-      ok: true,
-      content: 'domain = "demo"',
-    });
-    await expect(contexts.catalogWrite.resolver?.resolve("invoice.xlsx")).resolves.toMatchObject({
-      ok: false,
-      message: "Path is not a .mthds file: invoice.xlsx",
-    });
+    // Every tool that sends a method's tree holds it to the limits the
+    // platform announces, asked once per platform through one shared memory.
+    for (const context of [
+      contexts.validation,
+      contexts.inputs,
+      contexts.codegen,
+      contexts.prepare,
+      contexts.run,
+    ]) {
+      expect(context.treeLimits).toBe(contexts.catalogWrite.treeLimits);
+    }
+    expect(contexts.catalogWrite.treeLimits).toBeDefined();
 
     const { client, close } = await connectClient(createLocalServer({ contexts }));
     try {
@@ -518,14 +590,11 @@ describe("the workshop's contexts and dispatch", () => {
     const rootDir = await makeTempDir();
     await fs.writeFile(path.join(rootDir, "bundle.mthds"), 'domain = "demo"', "utf8");
 
-    let submittedFiles: MthdsFile[] | undefined;
+    let submitted: PipelexValidateSource | undefined;
     const contexts = buildLocalToolContexts({}, rootDir);
     contexts.validation.client = {
-      async validate(): Promise<PipelexValidationResult> {
-        throw new Error("validate (selector leg) must not be called in this test");
-      },
-      async validateFiles(files) {
-        submittedFiles = files;
+      async validate(source) {
+        submitted = source;
         return validReport;
       },
     };
@@ -537,7 +606,12 @@ describe("the workshop's contexts and dispatch", () => {
         arguments: { files: [{ path: "bundle.mthds" }] },
       });
 
-      expect(submittedFiles).toEqual([{ content: 'domain = "demo"', uri: "bundle.mthds" }]);
+      const tree = submitted !== undefined && "tree" in submitted ? submitted.tree : undefined;
+      expect(tree?.files.map((file) => file.path)).toEqual(["bundle.mthds"]);
+      expect(new TextDecoder().decode(await tree?.readFile("bundle.mthds"))).toBe(
+        'domain = "demo"',
+      );
+      expect(result.structuredContent).toMatchObject({ files_sent: ["bundle.mthds"] });
       expect(result.structuredContent).toMatchObject({
         status: "ok",
         is_valid: true,
@@ -552,7 +626,7 @@ describe("the workshop's contexts and dispatch", () => {
       // and the flowchart as a page on disk in place of the view.
       const [block] = result.content as { type: string; text: string }[];
       expect(block?.text).toMatch(
-        /^# Valid\n\n## Main pipe\n\n`demo\.main\(\) -> native\.Text`\n\n## Method graph\n\nWrote the method's flowchart to `method-graph\.html`/,
+        /^# Valid\n\n## Main pipe\n\n`demo\.main\(\) -> native\.Text`\n\n## Files sent\n\nThe method's tree, every file this call sent and nothing else:\n\n- `bundle\.mthds`\n\n## Method graph\n\nWrote the method's flowchart to `method-graph\.html`/,
       );
       expect(result._meta?.pipe_io_contracts).toBeUndefined();
       expect(result._meta?.input_form).toBeUndefined();
