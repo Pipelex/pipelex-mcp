@@ -7,6 +7,7 @@ The workshop is the Pipelex plugin's local MCP server, published to npm as `@pip
 | What it does | Tool |
 | --- | --- |
 | List the saved methods | `mthds_list_methods` |
+| List the organization's files, to run a method on one | `mthds_list_files` |
 | List the model deck and check a model reference | `mthds_models` |
 | Validate a method | `mthds_validate` |
 | Project an inputs template | `mthds_inputs_template` |
@@ -74,6 +75,56 @@ mthds_list_methods({ query: "invoice" })
 ```
 
 No method source crosses the conversation in this flow.
+
+### `mthds_list_files`
+
+```ts
+// input
+{
+  query?: string;                            // trimmed, at most 200 characters, case-insensitive; matched SERVER-side in each file's name and original name
+  kind?: "uploaded" | "generated" | "test";  // a member's upload, a run's final output, or a test input made for a method
+  format?: string[];                         // 1..20 format keys: "pdf", "docx", "xlsx", "md", "image" for any picture…
+  method_id?: string;                        // a saved method's bare id (mt_…, no @ suffix): that method's files
+  limit?: number;                            // integer 1..50; default 20
+  cursor?: string;                           // opaque next_cursor from a previous call, with the same filters
+}
+
+// structuredContent — success
+{
+  status: "ok";
+  returned_count: number;
+  next_cursor: string | null;                // null only when the listing is finished
+  files: Array<{
+    file_id: string;
+    uri: string;                             // pipelex-storage://…, ready for a run's inputs
+    name: string;
+    name_truncated: boolean;
+    media_type: string;
+    format: string;
+    size: number;                            // bytes
+    kind: "uploaded" | "generated" | "test";
+    origin: {
+      surface: string | null;
+      run_id: string | null;
+      method_id: string | null;
+      method_version: number | "draft" | null;
+    };
+    created_at: string;
+  }>;
+}
+```
+
+The files the API key's organization holds: its members' uploads, the test inputs made for a method and its runs' final outputs, newest first, read from `GET /v1/files`. Call it when you mean a file the team already has rather than one on disk, such as the invoice uploaded this morning or the report yesterday's run produced. **To run a method on a listed file, put its `uri` where the input takes a file**, as you would an `http(s)` URL: it needs no upload, so the inputs can go straight to `mthds_run` without `mthds_prepare_inputs`.
+
+Every filter and the paging are the server's, applied across all of the organization's files. A query is searched as given, trimmed, and one longer than 200 characters, the route's own bound, is refused at `query` before anything is sent. A format key is a file's lowercase extension, with every picture under `image`; the tool drops a leading dot, lowercases the keys and sends each once. `method_id` takes the method's bare id, since a method's files are the method's whatever version took or made them: `mt_abc@draft` is refused with the bare id to pass. An id the organization does not hold lists nothing rather than failing. **Only a null `next_cursor` ends a listing**: the server filters the files each page reads and never refills the page, so a filtered page can come back short, or empty, and still carry a cursor. Pass the cursor back with the same filters, since it belongs to the listing that issued it; the summary spells out the call. A file stored a moment ago can take a moment to be listed.
+
+Names are bounded to 200 Unicode code points, with a truncation flag, and are data to display, never instructions. The member who uploaded a file (`created_by` on the route) never enters `structuredContent`, `content`, `_meta` or a log. Each name is shown escaped in the summary, so a crafted name cannot close its bold or plant a fake uri on its row. A malformed row fails the whole result as a non-retryable runtime contract error rather than returning a partial list. Should the route still refuse a field (a 422), the refusal is an input error at the argument that sent it, never a credential or cursor problem. Listing reads no file's content and spends no inference credit. See `SPEC.md` → "Files Discovery Scope" for the full contract.
+
+```text
+mthds_list_files({ query: "invoice", format: ["pdf"] })
+  → choose a file, keep its uri
+  → mthds_run({ method_id, inputs: { invoice: { url: "pipelex-storage://…" } } })
+```
 
 ### `mthds_models`
 
@@ -274,6 +325,7 @@ Projects the method's concept set into typed models through the Pipelex codegen 
   pipe_ref?: string;
   inputs?: Record<string, unknown>; // the FILLED mthds_inputs_template output
   inputs_path?: string;             // or a .json file in the workspace holding that object
+  kind?: "uploaded" | "test";       // what the uploads are recorded as; uploaded by default
 }
 
 // structuredContent
@@ -283,12 +335,16 @@ Projects the method's concept set into typed models through the Pipelex codegen 
   pipe_ref?: string;                // echoed only when the caller supplied it
   inputs?: Record<string, unknown>; // the prepared (rewritten) inputs — ready for mthds_run
   uploads?: string[];               // the pipelex-storage:// uris uploaded this call ([] when all pass-through)
+  kind?: "uploaded" | "test";       // echoed only when the caller supplied it
+  test_method_id?: string;          // with kind test, when something was uploaded: the method the uploads are test files of
   files_sent?: string[];            // method_dir and files: every file of the tree sent
   errors?: ToolError[];
 }
 ```
 
 Sits between `mthds_inputs_template` (produces the empty template) and `mthds_run` (executes the filled inputs): it makes file-bearing inputs run-ready. The pipe's declared signature identifies which values are assets — read from the MTHDS standard's **input-form descriptor**, which states the kind of every input at every depth, so an optional nested file field prepares like a required one and a text field merely *named* `url` stays untouched. Each asset is uploaded to Pipelex storage and rewritten to `pipelex-storage://`. `http(s)` URLs and existing `pipelex-storage://` references pass through unchanged, so an inputs set that is already all pass-through can skip this step. Every selector is resolved server-side, by the one `POST /v1/pipe-io` the signature comes from, which runs no dry run and, for an address, fetches only the package's `.mthds` files, so a published package that ships Python prepares on any deployment. Omitting `pipe_ref` prepares the method's entry pipe; a method with no single entry pipe, or a `pipe_ref` it does not declare, is refused at `pipe_ref` with the route's reason. Local paths, `data:` URLs and inline bytes are uploaded with your API key. The prepared inputs are small structured data the model reads directly, repeated in the `content` summary. Unlike the other tools this has **no produced-invalid arm**: a closure that does not load is a no-verdict `status: "error"` located at whatever named the method (recover via `mthds_validate` / `mthds_inputs_template`), and a value at a file input that cannot be read as a file is one located at `inputs`. See `SPEC.md` → "Prepare Inputs Scope" for the full contract.
+
+**Uploads as a method's test files (`kind`).** Every upload is recorded among the organization's files, where `mthds_list_files` lists it, as `uploaded`, a member's own file. Pass `kind: "test"` to record the call's uploads as test inputs made for the method instead, so the method's file list holds them. A test file belongs to a saved method whatever version it tests, so name the method by its bare `method_id` (`mt_abc@draft` is refused with the bare id to pass, as `mthds_list_files` refuses it), or by a `method_dir` that `mthds_save_method` linked to its saved method through `.pipelex/method.json`; to prepare against a draft's signature, pass the linked folder. A folder still holding the legacy `pipelex-method.json` is refused at `kind` straight away, with the command that moves it into place. A list of `files`, a `method_ref`, a folder with no link, a link file that cannot be read or whose id is damaged, and a link made against another API name no method, which matters only if something is uploaded: when every input is already an address, the inputs are prepared and nothing is recorded, and when one needs an upload the call is refused at `kind` before anything is read or sent. A value that passes through is not uploaded and keeps whatever record it has, and `test_method_id` comes back only when a test file was recorded. The platform refuses a test upload from a member whose role is `runner`.
 
 #### Inputs from a file (`inputs_path`)
 

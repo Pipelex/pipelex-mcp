@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import {
   asOneLine,
+  boundCodePoints,
   buildApiConfig,
   classifyError,
   createPipelexApiClient,
@@ -288,14 +289,6 @@ function projectRow(row: ValidatedRow): CatalogMethod {
     description: description?.value ?? null,
     description_truncated: description?.truncated ?? false,
     created_at: row.created_at,
-  };
-}
-
-function boundCodePoints(value: string, limit: number): { value: string; truncated: boolean } {
-  const codePoints = Array.from(value);
-  return {
-    value: codePoints.slice(0, limit).join(""),
-    truncated: codePoints.length > limit,
   };
 }
 

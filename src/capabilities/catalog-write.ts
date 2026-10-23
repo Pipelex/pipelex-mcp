@@ -840,7 +840,7 @@ async function saveToCatalog(
 
   // The tree as read, in the form both requests send: the validation and the
   // catalog write carry the same bytes, which the secret guard has passed.
-  const toSend = folderTreeToSend(location.methodDir, tree);
+  const toSend = folderTreeToSend(location, tree);
   const source: MethodTreeSource = toSend.source;
 
   // Validate through the same capability mthds_validate uses, on the tree

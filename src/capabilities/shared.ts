@@ -17,6 +17,7 @@ import {
   RequestArgumentError,
   RunLifecycleUnavailableError,
   ScopeUnavailableError,
+  TestFileRefusedError,
   UnsupportedUploadCapabilityError,
   UploadAuthenticationError,
   UploadTransportError,
@@ -271,6 +272,12 @@ export interface MethodTreeToSend {
   readonly files: readonly SentFile[];
   /** Whether it came from `method_dir`, which is where every refusal of it then locates. */
   readonly fromFolder: boolean;
+  /**
+   * The folder's real path, for a tree read from `method_dir`: where the files
+   * of the folder itself are read, such as the link file naming the saved
+   * method it holds. Absent for a list of files.
+   */
+  readonly folder?: string;
 }
 
 /** What a method-taking request names its method by, before anything is read. */
@@ -349,7 +356,7 @@ async function resolveFolderTree(
   const read = await resolver.readMethodTree(located, { limits: await limits() });
   if (!read.ok) return { errors: read.refusals.map(atMethodDirRefusal) };
 
-  const tree = folderTreeToSend(methodDir, read);
+  const tree = folderTreeToSend(located, read);
   const empty = tree.files.find(isEmptyBundle);
   if (empty !== undefined) {
     return {
@@ -387,7 +394,7 @@ async function resolveFolderTree(
  * both requests send.
  */
 export function folderTreeToSend(
-  methodDir: string,
+  location: LocatedMethodDir,
   read: {
     files: readonly { path: string; size: number; sha256: string }[];
     digest: string;
@@ -398,11 +405,12 @@ export function folderTreeToSend(
     source: treeSourceOf(read.files, read.digest, read.bytes),
     files: read.files.map((file) => ({
       treePath: file.path,
-      shown: shownIn(methodDir, file.path),
+      shown: shownIn(location.methodDir, file.path),
       onDisk: true,
       bytes: read.bytes.get(file.path) ?? new Uint8Array(),
     })),
     fromFolder: true,
+    folder: location.folder,
   };
 }
 
@@ -1309,6 +1317,98 @@ export function asOneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Escape the Markdown a member-chosen text could use to break out of where a
+ * summary puts it: emphasis (`*`, `_`), a code span (a backtick), a link
+ * (`[`, `]`), inline HTML (`<`, `>`), a table cell (`|`), strikethrough (`~`)
+ * and the escape character itself. A file name wrapped in `**…**` could
+ * otherwise close the bold and write a code span of its own, such as a fake
+ * `uri`, onto the line the model reads. Characters that matter only at the
+ * start of a line are left alone: the text never starts one.
+ */
+export function escapeMarkdownInline(text: string): string {
+  return text.replace(/[\\`*_[\]<>|~]/g, (character) => `\\${character}`);
+}
+
+/**
+ * Cut a text to `limit` Unicode code points, never splitting a surrogate pair,
+ * and say whether anything was cut.
+ */
+export function boundCodePoints(
+  value: string,
+  limit: number,
+): { value: string; truncated: boolean } {
+  const codePoints = Array.from(value);
+  return {
+    value: codePoints.slice(0, limit).join(""),
+    truncated: codePoints.length > limit,
+  };
+}
+
+/** A bare catalog id, as the platform mints them; a version suffix (`@draft`, `@3`) is no part of it. */
+export const BARE_METHOD_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/** The platform's bound on an id it takes as a filter. */
+export const METHOD_ID_MAX_CHARS = 128;
+
+/**
+ * Read `value` as a method's bare catalog id, the one form that names a
+ * method's files: they are the method's, whatever version took or made them.
+ * A suffixed id is reported with its bare part rather than stripped, so the
+ * caller can be told what to pass: a selector is never rewritten behind its
+ * back.
+ */
+export function bareMethodIdOf(
+  value: string,
+):
+  | { ok: true; methodId: string }
+  | { ok: false; suffixed: true; bare: string }
+  | { ok: false; suffixed: false } {
+  const methodId = value.trim();
+  const at = methodId.indexOf("@");
+  if (at >= 0) {
+    const bare = methodId.slice(0, at);
+    if (BARE_METHOD_ID_PATTERN.test(bare) && bare.length <= METHOD_ID_MAX_CHARS) {
+      return { ok: false, suffixed: true, bare };
+    }
+    return { ok: false, suffixed: false };
+  }
+  if (methodId.length > METHOD_ID_MAX_CHARS || !BARE_METHOD_ID_PATTERN.test(methodId)) {
+    return { ok: false, suffixed: false };
+  }
+  return { ok: true, methodId };
+}
+
+/**
+ * The refusal of a method id that should name a method's files and does not
+ * read as its bare id, located at `location`: a suffixed one names the bare id
+ * to pass, any other one says it is no catalog id. `hint` closes either hint
+ * with the caller's own alternative.
+ */
+export function bareMethodIdRefusal(
+  value: string,
+  check: { ok: false; suffixed: true; bare: string } | { ok: false; suffixed: false },
+  location: string,
+  hint: string,
+): ToolError {
+  if (check.suffixed) {
+    return {
+      class: "input_domain",
+      location,
+      message: `${location} ${JSON.stringify(value)} names a version of the method, and files belong to the method, not to one of its versions.`,
+      hint: `Pass ${location} ${JSON.stringify(check.bare)}, the method's bare id. ${hint}`,
+      retryable: false,
+    };
+  }
+  return {
+    class: "input_domain",
+    location,
+    message: `${location} ${JSON.stringify(value)} is not a catalog id.`,
+    hint: `Pass a saved method's bare id as ${WORKSHOP_TOOL_NAMES.listMethods} returns it (mt_…). ${hint}`,
+    retryable: false,
+  };
+}
+
 /** The env-derived API coordinates every capability context starts from. */
 export interface ApiConfig {
   baseUrl: string;
@@ -1615,6 +1715,20 @@ export interface ClassifyErrorOptions {
      */
     class?: ErrorClass;
     location?: string;
+    hint: string;
+  };
+  /**
+   * Texture for a route's `422` kept apart from {@link badRequest}, for a
+   * route whose `400` means something no argument names, such as a key acting
+   * for no organization. A `422` says the request's values broke the route's
+   * own bounds, so it is located at the argument behind the first field the
+   * platform's `errors[]` names: `field` maps that field's first segment to
+   * the tool's argument, and a field it does not map, or an answer naming
+   * none, leaves the refusal at no location. The class and `retryable` stay
+   * the SDK's.
+   */
+  unprocessable?: {
+    field: (field: string) => string | undefined;
     hint: string;
   };
   /**
@@ -2105,6 +2219,26 @@ function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions
     };
   }
 
+  // A test file the upload route refused for what it claims, never for its
+  // bytes. It subclasses the base error below, so it is caught first. Only
+  // `mthds_prepare_inputs` uploads a test file, and it takes the kind at
+  // `kind`, which is where a method the platform will not take one for is
+  // located. A refusal by role is the role arm every tool shares: no
+  // location, since no argument changes a role. Its verdict stays the SDK's.
+  if (err instanceof TestFileRefusedError) {
+    if (err.code === "role_not_permitted") {
+      return { kind: "role", message, hint: ROLE_REFUSAL_HINT };
+    }
+    return {
+      location: "kind",
+      message,
+      hint:
+        err.code === "method_being_deleted"
+          ? "The method is being deleted, so it takes no new test file. Name another saved method, or omit kind to upload the files as the organization's own."
+          : `The organization holds no saved method by that id: a method_dir's link may name a method deleted since, or one saved through another organization. Save the method again with ${WORKSHOP_TOOL_NAMES.saveMethod}, name another by method_id, or omit kind to upload the files as the organization's own.`,
+    };
+  }
+
   // The base class: an unqualified or unknown pipe_ref or no single default
   // pipe, raised CLIENT-SIDE — so they locate at `preparation`, which a route
   // separates from `badRequest` when its 400/422 is about a different field.
@@ -2312,6 +2446,24 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
       },
       { location: "files", message, hint: treeRefusal.hint },
     );
+  }
+
+  if (err.status === 422 && options.unprocessable !== undefined) {
+    // `<root>` is how the platform names a refusal of the request as a whole.
+    const entry = err.errors?.find(
+      (item) => typeof item.field === "string" && item.field !== "" && item.field !== "<root>",
+    );
+    const field = entry?.field ?? undefined;
+    const location =
+      field === undefined ? undefined : options.unprocessable.field(field.split(".")[0] ?? field);
+    return toolError(verdict, {
+      ...(location === undefined ? {} : { location }),
+      message:
+        field === undefined
+          ? message
+          : `The Pipelex API refused ${field}${typeof entry?.detail === "string" && entry.detail !== "" ? `: ${entry.detail}` : "."}`,
+      hint: options.unprocessable.hint,
+    });
   }
 
   if (err.status === 400 || err.status === 422) {
