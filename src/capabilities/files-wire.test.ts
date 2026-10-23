@@ -47,6 +47,7 @@ function stubDeployment(answers: Record<string, unknown>): SentRequest[] {
       return Promise.resolve(Response.json({ version: "1.0.0" }));
     }
     const answer = answers[url.pathname];
+    if (typeof answer === "function") return Promise.resolve((answer as () => Response)());
     return Promise.resolve(
       answer === undefined ? new Response("", { status: 404 }) : Response.json(answer),
     );
@@ -86,7 +87,7 @@ describe("the files list and a test upload on the wire", () => {
 
     const result = await prepareMthdsInputs(
       {
-        method_id: "mt_abc@draft",
+        method_id: "mt_abc",
         inputs: { invoice: "data:application/pdf;base64,JVBERi0xLjQK" },
         kind: "test",
       },
@@ -118,5 +119,62 @@ describe("the files list and a test upload on the wire", () => {
     expect(uploads).toHaveLength(1);
     expect(uploads[0]?.body).not.toHaveProperty("kind");
     expect(uploads[0]?.body).not.toHaveProperty("method_id");
+  });
+
+  it("locates the platform's 422 at the argument behind the field it names", async () => {
+    stubDeployment({
+      "/v1/files": () =>
+        Response.json(
+          {
+            type: "https://pipelex.com/errors/validation_failed",
+            title: "Validation failed",
+            status: 422,
+            detail: "Request body failed validation. See `errors` for the per-field breakdown.",
+            code: "validation_failed",
+            error_domain: "input",
+            retryable: false,
+            errors: [
+              {
+                field: "q",
+                code: "string_too_long",
+                detail: "String should have at most 200 characters",
+              },
+            ],
+          },
+          { status: 422, headers: { "content-type": "application/problem+json" } },
+        ),
+    });
+
+    const result = await listMthdsFiles(
+      { query: "invoice" },
+      { baseUrl: "https://files.example", apiKey: "plx_sk_test" },
+    );
+
+    expect(result.structuredContent).toMatchObject({
+      status: "error",
+      errors: [{ class: "input_domain", location: "query", retryable: false }],
+    });
+  });
+
+  it("uploads nothing for a test preparation whose method is unknown", async () => {
+    const sent = stubDeployment({
+      "/v1/pipe-io": PIPE_IO_REPORT,
+      "/v1/upload": { uri: "pipelex-storage://org/assets/abc.pdf", filename: "invoice.pdf" },
+    });
+
+    const result = await prepareMthdsInputs(
+      {
+        files: [{ content: 'domain = "invoice"' }],
+        inputs: { invoice: "data:application/pdf;base64,JVBERi0xLjQK" },
+        kind: "test",
+      },
+      { baseUrl: "https://upload.example", apiKey: "plx_sk_test" },
+    );
+
+    expect(result.structuredContent.errors?.[0]).toMatchObject({
+      class: "input_domain",
+      location: "kind",
+    });
+    expect(sent.filter((request) => request.url.pathname === "/v1/upload")).toHaveLength(0);
   });
 });

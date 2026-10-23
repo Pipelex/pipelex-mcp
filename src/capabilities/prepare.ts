@@ -1,4 +1,4 @@
-import { InputPreparationError } from "@pipelex/sdk";
+import { InputPreparationError, UploadNotAllowedError } from "@pipelex/sdk";
 import type {
   MethodTreeSource,
   PrepareInputsRequest,
@@ -8,7 +8,14 @@ import type {
 } from "@pipelex/sdk";
 import { z } from "zod";
 
-import { LINK_FILE_NAME, apiHostOf, readMethodLink } from "./catalog-link.js";
+import {
+  LEGACY_LINK_FILE_NAME,
+  LEGACY_LINK_MOVE,
+  LINK_FILE_NAME,
+  apiHostOf,
+  holdsLegacyLink,
+  readMethodLink,
+} from "./catalog-link.js";
 import {
   METHOD_ID_SELECTOR_SENTENCE,
   methodVersionReportSchema,
@@ -20,6 +27,8 @@ import {
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
 import {
   METHOD_REF_GRAMMAR,
+  bareMethodIdOf,
+  bareMethodIdRefusal,
   buildApiConfig,
   classifyError,
   createPipelexApiClient,
@@ -98,7 +107,7 @@ export const mthdsPrepareInputsInputSchema = {
     .enum(UPLOAD_KINDS)
     .optional()
     .describe(
-      `What the files this call uploads are recorded as in the organization's files: uploaded (the default, a member's file) or test (a test input made for this method, listed as its test file). test needs the method's saved id, so name the method by method_id, or by a method_dir that ${WORKSHOP_TOOL_NAMES.saveMethod} linked to its saved method (${LINK_FILE_NAME}). Values that pass through are not uploaded and keep what they are.`,
+      `What the files this call uploads are recorded as in the organization's files: uploaded (the default, a member's file) or test (a test input made for this method, listed as its test file). test needs the method's saved id, so name the method by its bare method_id (no @ suffix), or by a method_dir that ${WORKSHOP_TOOL_NAMES.saveMethod} linked to its saved method (${LINK_FILE_NAME}). Values that pass through are not uploaded and keep what they are.`,
     ),
 };
 
@@ -129,7 +138,7 @@ const prepareStructuredContentSchema = z.object({
     .string()
     .optional()
     .describe(
-      "With kind test: the bare id of the method the uploads were recorded as test files of.",
+      "With kind test, when something was uploaded: the bare id of the method the uploads were recorded as test files of.",
     ),
   method_version: methodVersionReportSchema,
   files_sent: filesSentSchema,
@@ -354,89 +363,123 @@ export async function prepareMthdsInputs(
     return errorResult("Inputs were not prepared: request input is invalid.", [marking.error]);
   }
 
-  return withFilesSent(await requestPreparedInputs(request, marking.upload, context), request.tree);
+  return withFilesSent(await requestPreparedInputs(request, marking, context), request.tree);
 }
 
 /**
- * What the request's uploads are recorded as, decided before anything is sent.
+ * What the request's uploads are recorded as, settled before anything is sent
+ * as far as it can be.
  *
  * `uploaded` is what the platform records when told nothing, so it sends
- * nothing. A test file names the method it was made for, by its bare id, and
- * the method is the one the request names: a `method_id`, its version suffix
- * dropped, since a test file is the method's whatever version it tests, or the
- * saved method a `method_dir` is linked to, read from its link file. Neither a
- * list of files nor a published address names a saved method, so a test
- * upload from one is refused here, at `kind`, rather than by the platform
- * after the method's signature was read.
+ * nothing. A test file names the method it was made for, by its bare id,
+ * since a test file is the method's whatever version it tests: a `method_id`
+ * selector must therefore be bare, and a suffixed one is refused with the bare
+ * id to pass, as `mthds_list_files` refuses one (`bareMethodIdOf`). From a
+ * `method_dir`, the method is the saved one its link file names. A folder
+ * still holding the link an earlier release wrote is refused at once with the
+ * command that moves it, as the save and the pull refuse it.
  *
- * A link recorded against another API than the one this call goes to names a
- * method of another plane, which the upload would answer as unknown, so it is
- * refused too, naming both hosts.
+ * Every other way of not knowing the method, a list of files, a published
+ * address, a folder with no link, a link file that cannot be read, a link
+ * whose id is damaged and a link made against another API, matters only when
+ * something is uploaded: inputs that are all addresses record no file at all.
+ * Such a request goes out with uploads disallowed (`unmarkable`), and the
+ * refusal is answered only if the SDK's walk meets a value that needs one.
  */
 async function uploadMarkingOf(
   request: ResolvedPrepareRequest,
   context: PrepareContext,
-): Promise<{ ok: true; upload?: UploadMarking } | { ok: false; error: ToolError }> {
+): Promise<UploadMarkingResult> {
   if (request.kind !== "test") return { ok: true };
-  const refuse = (message: string, hint: string) => ({
-    ok: false as const,
-    error: { class: "input_domain" as const, location: "kind", message, hint, retryable: false },
+  const unmarkable = (message: string, hint: string): UploadMarkingResult => ({
+    ok: true,
+    unmarkable: { class: "input_domain", location: "kind", message, hint, retryable: false },
   });
+
   if (request.method_id !== undefined) {
-    const bare = request.method_id.trim().split("@")[0] ?? "";
-    if (!/^[A-Za-z0-9_-]+$/.test(bare)) {
+    const check = bareMethodIdOf(request.method_id);
+    if (!check.ok) {
       return {
         ok: false,
-        error: {
-          class: "input_domain",
-          location: "method_id",
-          message: `method_id ${JSON.stringify(request.method_id)} names no saved method that test files could belong to.`,
-          hint: `Pass a saved method's catalog id (mt_…), as ${WORKSHOP_TOOL_NAMES.listMethods} returns it.`,
-          retryable: false,
-        },
+        error: bareMethodIdRefusal(
+          request.method_id,
+          check,
+          "method_id",
+          "To prepare test files against the draft's signature, pass the method's linked folder as method_dir instead.",
+        ),
       };
     }
-    return { ok: true, upload: { kind: "test", method_id: bare } };
+    return { ok: true, upload: { kind: "test", method_id: check.methodId } };
   }
+
   const folder = request.tree?.folder;
   if (folder === undefined) {
-    return refuse(
+    return unmarkable(
       "kind test records each upload as a test file of a saved method, and a list of files or a published address names none.",
       `Name the method by its saved id as method_id, or by a method_dir linked to its saved method (${LINK_FILE_NAME}, which ${WORKSHOP_TOOL_NAMES.saveMethod} writes); or omit kind to upload the files as the organization's own.`,
     );
   }
+  if (await holdsLegacyLink(folder)) {
+    return {
+      ok: false,
+      error: {
+        class: "input_domain",
+        location: "kind",
+        message: `The method_dir holds ${LEGACY_LINK_FILE_NAME}, the link file an earlier release of the workshop wrote, which it now reads only at ${LINK_FILE_NAME}: as it is, the folder reads as unlinked, and its test files would belong to no method. Nothing was sent.`,
+        hint: `Move it into place from inside the folder, then prepare again: ${LEGACY_LINK_MOVE} (plain mv outside git), and commit the move.`,
+        retryable: false,
+      },
+    };
+  }
   const read = await readMethodLink(folder);
   switch (read.kind) {
     case "none":
-      return refuse(
+      return unmarkable(
         "kind test records each upload as a test file of a saved method, and this method_dir is not linked to one: it holds no " +
           `${LINK_FILE_NAME}.`,
         `Save the method with ${WORKSHOP_TOOL_NAMES.saveMethod}, which links its folder, then prepare again; or omit kind to upload the files as the organization's own.`,
       );
     case "unreadable":
-      return refuse(
+      return unmarkable(
         `The method_dir's ${LINK_FILE_NAME} cannot be read, so the saved method its test files belong to is unknown: ${read.reason}.`,
         `Repair or remove ${LINK_FILE_NAME} (a save with ${WORKSHOP_TOOL_NAMES.saveMethod} writes it again), or name the method by its saved id as method_id.`,
       );
     case "link": {
+      const check = bareMethodIdOf(read.link.method_id);
+      if (!check.ok) {
+        return unmarkable(
+          `The method_dir's ${LINK_FILE_NAME} is damaged: its method_id ${JSON.stringify(read.link.method_id)} is not a saved method's bare id, so the method its test files belong to is unknown.`,
+          `Save the method again with ${WORKSHOP_TOOL_NAMES.saveMethod}, passing its id, which rewrites the link file; or name the method by its saved id as method_id. The link file is never edited by hand.`,
+        );
+      }
       const apiHost = apiHostOf(context.baseUrl);
       if (read.link.api_host !== apiHost) {
-        return refuse(
-          `The method_dir is linked to \`${read.link.method_id}\` on ${read.link.api_host}, and this call goes to ${apiHost}, where that method does not exist.`,
+        return unmarkable(
+          `The method_dir is linked to \`${check.methodId}\` on ${read.link.api_host}, and this call goes to ${apiHost}, where that method does not exist.`,
           `Prepare against the API the method was saved on, or save the method on ${apiHost} with ${WORKSHOP_TOOL_NAMES.saveMethod} first.`,
         );
       }
-      return { ok: true, upload: { kind: "test", method_id: read.link.method_id } };
+      return { ok: true, upload: { kind: "test", method_id: check.methodId } };
     }
   }
 }
 
+/**
+ * What {@link uploadMarkingOf} settled: a refusal before anything is sent, or
+ * the marking every upload carries, or, for a test upload whose method is
+ * unknown, the refusal to answer should the walk need to upload anything.
+ */
+type UploadMarkingResult =
+  | { ok: true; upload?: UploadMarking; unmarkable?: ToolError }
+  | { ok: false; error: ToolError };
+
 /** The SDK's `prepareInputs` for a request that passed its checks, and the projection of what it prepared. */
 async function requestPreparedInputs(
   request: ResolvedPrepareRequest,
-  upload: UploadMarking | undefined,
+  marking: { upload?: UploadMarking; unmarkable?: ToolError },
   context: PrepareContext,
 ): Promise<PrepareResult> {
+  const { upload, unmarkable } = marking;
   // Classify options follow the request's selector shape, exactly as
   // mthds_validate and mthds_codegen do — each failure locates at the field
   // that caused it.
@@ -472,9 +515,20 @@ async function requestPreparedInputs(
       ...(request.pipe_ref === undefined ? {} : { pipe_ref: request.pipe_ref }),
       inputs: request.inputs,
       ...(upload === undefined ? {} : { upload }),
+      ...(unmarkable === undefined ? {} : { allowUploads: false as const }),
     };
     prepared = await prepareWithUpload(client, envelope);
   } catch (err) {
+    // A test upload whose method is unknown, met by the first value of the
+    // walk that needs an upload: nothing was read or uploaded, and the
+    // refusal names that input.
+    if (unmarkable !== undefined && err instanceof UploadNotAllowedError) {
+      const error: ToolError = {
+        ...unmarkable,
+        message: `${unmarkable.message} The input ${err.inputPath} needs an upload, so a test file would be recorded.`,
+      };
+      return errorResult("Inputs were not prepared: request input is invalid.", [error]);
+    }
     // An input the storage service refuses as too large is a
     // `RejectedAssetError`, which the `asset` texture takes whatever named the
     // method; a refusal of the tree is read as about the files it sent.
@@ -533,6 +587,8 @@ interface PrepareEnvelope {
   inputs: Record<string, unknown>;
   /** What the walk's uploads are recorded as, when not the platform's default. */
   upload?: UploadMarking;
+  /** Set to `false` when a test upload's method is unknown: the walk then uploads nothing. */
+  allowUploads?: false;
 }
 
 /**
@@ -554,6 +610,7 @@ function prepareWithUpload(
     ...(envelope.pipe_ref === undefined ? {} : { pipe_ref: envelope.pipe_ref }),
     inputs: envelope.inputs,
     ...(envelope.upload === undefined ? {} : { upload: envelope.upload }),
+    ...(envelope.allowUploads === undefined ? {} : { allowUploads: envelope.allowUploads }),
   };
   if ("tree" in envelope.selector) {
     return client.prepareInputs({ ...base, tree: envelope.selector.tree });
@@ -622,7 +679,10 @@ export function prepareInputsResult(
   marking: { kind?: UploadKind; upload?: UploadMarking } = {},
 ): PrepareResult {
   const uploads = prepared.uploads.map((record) => record.uri);
-  const testMethodId = marking.upload?.kind === "test" ? marking.upload.method_id : undefined;
+  // Named only when a test file was recorded: inputs that are all addresses
+  // upload nothing, and then no file belongs to the method.
+  const testMethodId =
+    marking.upload?.kind === "test" && uploads.length > 0 ? marking.upload.method_id : undefined;
   return {
     structuredContent: {
       status: "ok",

@@ -163,7 +163,7 @@
         "type": "object",
         "properties": {
           "query": {
-            "description": "Optional case-insensitive text matched SERVER-side in each file's name and the name it was uploaded under, across all of the organization's files. Whitespace is trimmed; blank means no filter.",
+            "description": "Optional case-insensitive text matched SERVER-side in each file's name and the name it was uploaded under, across all of the organization's files. Whitespace is trimmed, blank means no filter, and the rest is at most 200 characters.",
             "type": "string"
           },
           "kind": {
@@ -1570,7 +1570,7 @@
             "type": "string"
           },
           "kind": {
-            "description": "What the files this call uploads are recorded as in the organization's files: uploaded (the default, a member's file) or test (a test input made for this method, listed as its test file). test needs the method's saved id, so name the method by method_id, or by a method_dir that mthds_save_method linked to its saved method (.pipelex/method.json). Values that pass through are not uploaded and keep what they are.",
+            "description": "What the files this call uploads are recorded as in the organization's files: uploaded (the default, a member's file) or test (a test input made for this method, listed as its test file). test needs the method's saved id, so name the method by its bare method_id (no @ suffix), or by a method_dir that mthds_save_method linked to its saved method (.pipelex/method.json). Values that pass through are not uploaded and keep what they are.",
             "type": "string",
             "enum": [
               "uploaded",
@@ -1621,7 +1621,7 @@
             ]
           },
           "test_method_id": {
-            "description": "With kind test: the bare id of the method the uploads were recorded as test files of.",
+            "description": "With kind test, when something was uploaded: the bare id of the method the uploads were recorded as test files of.",
             "type": "string"
           },
           "method_version": {

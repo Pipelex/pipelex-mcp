@@ -1317,6 +1317,98 @@ export function asOneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Escape the Markdown a member-chosen text could use to break out of where a
+ * summary puts it: emphasis (`*`, `_`), a code span (a backtick), a link
+ * (`[`, `]`), inline HTML (`<`, `>`), a table cell (`|`), strikethrough (`~`)
+ * and the escape character itself. A file name wrapped in `**…**` could
+ * otherwise close the bold and write a code span of its own, such as a fake
+ * `uri`, onto the line the model reads. Characters that matter only at the
+ * start of a line are left alone: the text never starts one.
+ */
+export function escapeMarkdownInline(text: string): string {
+  return text.replace(/[\\`*_[\]<>|~]/g, (character) => `\\${character}`);
+}
+
+/**
+ * Cut a text to `limit` Unicode code points, never splitting a surrogate pair,
+ * and say whether anything was cut.
+ */
+export function boundCodePoints(
+  value: string,
+  limit: number,
+): { value: string; truncated: boolean } {
+  const codePoints = Array.from(value);
+  return {
+    value: codePoints.slice(0, limit).join(""),
+    truncated: codePoints.length > limit,
+  };
+}
+
+/** A bare catalog id, as the platform mints them; a version suffix (`@draft`, `@3`) is no part of it. */
+export const BARE_METHOD_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/** The platform's bound on an id it takes as a filter. */
+export const METHOD_ID_MAX_CHARS = 128;
+
+/**
+ * Read `value` as a method's bare catalog id, the one form that names a
+ * method's files: they are the method's, whatever version took or made them.
+ * A suffixed id is reported with its bare part rather than stripped, so the
+ * caller can be told what to pass: a selector is never rewritten behind its
+ * back.
+ */
+export function bareMethodIdOf(
+  value: string,
+):
+  | { ok: true; methodId: string }
+  | { ok: false; suffixed: true; bare: string }
+  | { ok: false; suffixed: false } {
+  const methodId = value.trim();
+  const at = methodId.indexOf("@");
+  if (at >= 0) {
+    const bare = methodId.slice(0, at);
+    if (BARE_METHOD_ID_PATTERN.test(bare) && bare.length <= METHOD_ID_MAX_CHARS) {
+      return { ok: false, suffixed: true, bare };
+    }
+    return { ok: false, suffixed: false };
+  }
+  if (methodId.length > METHOD_ID_MAX_CHARS || !BARE_METHOD_ID_PATTERN.test(methodId)) {
+    return { ok: false, suffixed: false };
+  }
+  return { ok: true, methodId };
+}
+
+/**
+ * The refusal of a method id that should name a method's files and does not
+ * read as its bare id, located at `location`: a suffixed one names the bare id
+ * to pass, any other one says it is no catalog id. `hint` closes either hint
+ * with the caller's own alternative.
+ */
+export function bareMethodIdRefusal(
+  value: string,
+  check: { ok: false; suffixed: true; bare: string } | { ok: false; suffixed: false },
+  location: string,
+  hint: string,
+): ToolError {
+  if (check.suffixed) {
+    return {
+      class: "input_domain",
+      location,
+      message: `${location} ${JSON.stringify(value)} names a version of the method, and files belong to the method, not to one of its versions.`,
+      hint: `Pass ${location} ${JSON.stringify(check.bare)}, the method's bare id. ${hint}`,
+      retryable: false,
+    };
+  }
+  return {
+    class: "input_domain",
+    location,
+    message: `${location} ${JSON.stringify(value)} is not a catalog id.`,
+    hint: `Pass a saved method's bare id as ${WORKSHOP_TOOL_NAMES.listMethods} returns it (mt_…). ${hint}`,
+    retryable: false,
+  };
+}
+
 /** The env-derived API coordinates every capability context starts from. */
 export interface ApiConfig {
   baseUrl: string;
@@ -1623,6 +1715,20 @@ export interface ClassifyErrorOptions {
      */
     class?: ErrorClass;
     location?: string;
+    hint: string;
+  };
+  /**
+   * Texture for a route's `422` kept apart from {@link badRequest}, for a
+   * route whose `400` means something no argument names, such as a key acting
+   * for no organization. A `422` says the request's values broke the route's
+   * own bounds, so it is located at the argument behind the first field the
+   * platform's `errors[]` names: `field` maps that field's first segment to
+   * the tool's argument, and a field it does not map, or an answer naming
+   * none, leaves the refusal at no location. The class and `retryable` stay
+   * the SDK's.
+   */
+  unprocessable?: {
+    field: (field: string) => string | undefined;
     hint: string;
   };
   /**
@@ -2340,6 +2446,24 @@ function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorO
       },
       { location: "files", message, hint: treeRefusal.hint },
     );
+  }
+
+  if (err.status === 422 && options.unprocessable !== undefined) {
+    // `<root>` is how the platform names a refusal of the request as a whole.
+    const entry = err.errors?.find(
+      (item) => typeof item.field === "string" && item.field !== "" && item.field !== "<root>",
+    );
+    const field = entry?.field ?? undefined;
+    const location =
+      field === undefined ? undefined : options.unprocessable.field(field.split(".")[0] ?? field);
+    return toolError(verdict, {
+      ...(location === undefined ? {} : { location }),
+      message:
+        field === undefined
+          ? message
+          : `The Pipelex API refused ${field}${typeof entry?.detail === "string" && entry.detail !== "" ? `: ${entry.detail}` : "."}`,
+      hint: options.unprocessable.hint,
+    });
   }
 
   if (err.status === 400 || err.status === 422) {

@@ -2,9 +2,13 @@ import { z } from "zod";
 
 import {
   asOneLine,
+  bareMethodIdOf,
+  bareMethodIdRefusal,
+  boundCodePoints,
   buildApiConfig,
   classifyError,
   createPipelexApiClient,
+  escapeMarkdownInline,
   summaryForToolError,
   toolErrorSchema,
   toolResultContent,
@@ -18,6 +22,7 @@ import type {
   ToolError,
 } from "./shared.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
+import { formatMib } from "./upload-ceiling.js";
 
 /**
  * `mthds_list_files`: the organization's files, as `GET /v1/files` lists them.
@@ -40,14 +45,12 @@ import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 export const FILES_DEFAULT_LIMIT = 20;
 export const FILES_MAX_LIMIT = 50;
 export const FILE_NAME_LIMIT = 200;
+/** The route's own bound on `q`, in characters: a longer search is its `422`. */
+export const FILES_QUERY_MAX_CHARS = 200;
 /** How many format keys one call may filter on; the route takes more, and a model needs a handful. */
 export const FILES_MAX_FORMATS = 20;
 /** A format key is a file extension or `image`, so a longer value names nothing. */
 const FORMAT_MAX_CHARS = 64;
-/** The route's own bound on an id it takes as a filter. */
-const METHOD_ID_MAX_CHARS = 128;
-/** A bare id, as the platform mints them: a method's version suffix (`@draft`, `@3`) is no part of it. */
-const BARE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 /** What made a file, as the platform records it. */
 export const FILE_KINDS = ["uploaded", "generated", "test"] as const;
@@ -58,7 +61,7 @@ export const mthdsListFilesInputSchema = {
     .string()
     .optional()
     .describe(
-      "Optional case-insensitive text matched SERVER-side in each file's name and the name it was uploaded under, across all of the organization's files. Whitespace is trimmed; blank means no filter.",
+      `Optional case-insensitive text matched SERVER-side in each file's name and the name it was uploaded under, across all of the organization's files. Whitespace is trimmed, blank means no filter, and the rest is at most ${FILES_QUERY_MAX_CHARS} characters.`,
     ),
   kind: z
     .enum(FILE_KINDS)
@@ -321,6 +324,16 @@ function normalizeInput(
   }
 
   const errors: ToolError[] = [];
+  const query = parsed.data.query?.trim() ?? "";
+  if (Array.from(query).length > FILES_QUERY_MAX_CHARS) {
+    errors.push({
+      class: "input_domain",
+      location: "query",
+      message: `query is ${Array.from(query).length} characters long, over the ${FILES_QUERY_MAX_CHARS} the files list searches with.`,
+      hint: `Search with a shorter part of the name, at most ${FILES_QUERY_MAX_CHARS} characters.`,
+      retryable: false,
+    });
+  }
   const formats =
     parsed.data.format === undefined ? undefined : normalizeFormats(parsed.data.format, errors);
   const methodId =
@@ -332,7 +345,7 @@ function normalizeInput(
   return {
     ok: true,
     input: {
-      query: parsed.data.query?.trim() ?? "",
+      query,
       ...(parsed.data.kind === undefined ? {} : { kind: parsed.data.kind }),
       ...(formats === undefined ? {} : { formats }),
       ...(methodId === undefined ? {} : { method_id: methodId }),
@@ -369,34 +382,22 @@ function normalizeFormats(values: readonly string[], errors: ToolError[]): strin
 
 /**
  * A method's list is the method's, whatever version took or made its files, so
- * the route takes the bare id and refuses anything else as a `422` naming no
- * cure. A suffixed id is refused here instead, with the bare id to pass; it is
- * not stripped, since a selector is never rewritten behind the caller's back.
+ * the route takes the bare id and refuses anything else as a `422`. A suffixed
+ * id is refused here instead, with the bare id to pass, by the rule
+ * `mthds_prepare_inputs` holds a test file's method to (`bareMethodIdOf`).
  */
 function normalizeMethodId(value: string, errors: ToolError[]): string | undefined {
-  const methodId = value.trim();
-  if (methodId.includes("@")) {
-    const bare = methodId.slice(0, methodId.indexOf("@"));
-    errors.push({
-      class: "input_domain",
-      location: "method_id",
-      message: `method_id ${JSON.stringify(value)} names a version of the method; its files are listed by the method's bare id.`,
-      hint: `Pass method_id ${JSON.stringify(bare)}: a method's files are the method's, whatever version took or made them.`,
-      retryable: false,
-    });
-    return undefined;
-  }
-  if (methodId === "" || methodId.length > METHOD_ID_MAX_CHARS || !BARE_ID_PATTERN.test(methodId)) {
-    errors.push({
-      class: "input_domain",
-      location: "method_id",
-      message: `method_id ${JSON.stringify(value)} is not a catalog id.`,
-      hint: `Pass a saved method's bare id as ${WORKSHOP_TOOL_NAMES.listMethods} returns it (mt_…), or omit method_id to list every file of the organization.`,
-      retryable: false,
-    });
-    return undefined;
-  }
-  return methodId;
+  const check = bareMethodIdOf(value);
+  if (check.ok) return check.methodId;
+  errors.push(
+    bareMethodIdRefusal(
+      value,
+      check,
+      "method_id",
+      "Omit method_id to list every file of the organization.",
+    ),
+  );
+  return undefined;
 }
 
 /**
@@ -511,14 +512,6 @@ function originOf(value: unknown, index: number): OrgFileOrigin {
   };
 }
 
-function boundCodePoints(value: string, limit: number): { value: string; truncated: boolean } {
-  const codePoints = Array.from(value);
-  return {
-    value: codePoints.slice(0, limit).join(""),
-    truncated: codePoints.length > limit,
-  };
-}
-
 /**
  * The listing as the model reads it, and what to do with a row.
  *
@@ -551,7 +544,7 @@ function filesSummary(result: FilesSuccess, input: NormalizedFilesInput): string
     );
     for (const file of result.files) {
       lines.push(
-        `- **${asOneLine(file.name)}**${file.name_truncated ? "…" : ""} — ${file.format}, ${formatSize(file.size)}, ${provenanceOf(file)}, ${file.created_at} (uri: \`${file.uri}\`)`,
+        `- **${escapeMarkdownInline(asOneLine(file.name))}**${file.name_truncated ? "…" : ""} — ${file.format}, ${formatSize(file.size)}, ${provenanceOf(file)}, ${file.created_at} (uri: \`${file.uri}\`)`,
       );
     }
   } else if (result.next_cursor === null) {
@@ -640,20 +633,29 @@ function provenanceOf(file: OrgFile): string {
   }
 }
 
-/** A byte size a person reads at a glance: bytes below a KiB, else KiB or MiB to one decimal. */
+/**
+ * A byte size a person reads at a glance: bytes below a KiB, else KiB or MiB
+ * to one decimal. A size whose KiB figure rounds to 1024 is shown in MiB, so
+ * no size reads as "1024.0 KiB".
+ */
 export function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+  const kib = (bytes / 1024).toFixed(1);
+  return Number(kib) < 1024 ? `${kib} KiB` : formatMib(bytes);
 }
 
 /**
- * The 400/422 arm is chosen by REQUEST SHAPE, as on the method list. Without
- * a cursor the one reachable refusal is a key acting for no organization,
- * since the tool checks every value it sends; with one, the far likelier
- * cause is the cursor, which the route binds to the list and the filters that
- * issued it, so passing it with other filters is a `400`. A machine consumer
- * branches on the class, so a paging fault must not read as a credential one.
+ * The 400 arm is chosen by REQUEST SHAPE, as on the method list. Without a
+ * cursor the route's one `400` is a key acting for no organization; with one,
+ * the far likelier cause is the cursor, which the route binds to the list and
+ * the filters that issued it, so passing it with other filters is a `400`. A
+ * machine consumer branches on the class, so a paging fault must not read as
+ * a credential one.
+ *
+ * A `422` is kept apart from both: it is the route refusing one of the
+ * request's values against its own bounds (a search too long, a format key or
+ * an id it will not take), so it is located at the argument behind the field
+ * the platform names, and never at the key.
  *
  * A method id the organization does not hold is no refusal: the route answers
  * an empty list, which the summary words. A `404` is therefore never the
@@ -677,10 +679,26 @@ function filesErrorOptions(
             location: "cursor",
             hint: `The cursor was rejected: it belongs to the listing that issued it, filters included, and may be stale or truncated. Pass it with the same query, kind, format and method_id, or drop it and call ${WORKSHOP_TOOL_NAMES.listFiles} again from the start.`,
           },
+    // A 422 is the route refusing a value of the request, never the key's
+    // organization: located at the argument behind the field it names.
+    unprocessable: {
+      field: (field) => FILES_QUERY_ARGUMENTS[field],
+      hint: `Bring that argument within the files list's bounds (query at most ${FILES_QUERY_MAX_CHARS} characters, limit 1 to ${FILES_MAX_LIMIT}, method_id a bare mt_… id), then call ${WORKSHOP_TOOL_NAMES.listFiles} again.`,
+    },
     auth: context.authError,
     baseUrlSource: context.baseUrlSource,
   };
 }
+
+/** The tool's argument behind each query parameter `GET /v1/files` names in a refusal. */
+const FILES_QUERY_ARGUMENTS: Record<string, string | undefined> = {
+  q: "query",
+  kind: "kind",
+  format: "format",
+  method_id: "method_id",
+  limit: "limit",
+  cursor: "cursor",
+};
 
 const ERROR_SUMMARIES: ErrorSummaries = {
   config: "Files could not be listed: the Pipelex API or its files list is misconfigured.",
