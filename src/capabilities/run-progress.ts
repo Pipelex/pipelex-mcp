@@ -35,18 +35,26 @@
  * are kept first: those running or in trouble, with their ancestors so that
  * the list still nests; the rest fill what room is left in snapshot order, and
  * the list keeps snapshot order. The free texts the runtime or the platform
- * write in it (a failure's message, a degradation's, a skip reason) are bounded
- * as a run failure's are; the summary is not, since it is the contract's own
- * line, a label per level of the run's nesting.
+ * write in it (a degradation's message, a skip reason) are bounded as a run's
+ * problem is, and an invocation's latest failure is a problem carried as the
+ * run's own is (`runErrorOf` in `run-failure.ts`); the summary is not, since it
+ * is the contract's own line, a label per level of the run's nesting.
+ *
+ * `last_failure` is read as the hosted contract states it, `{ problem, at }`,
+ * and not as `@pipelex/sdk`'s `ProgressFailure` types it (`{ message, at }`, a
+ * shape the platform no longer serves): its `problem` is checked as a problem
+ * document, and an annotation without one is dropped.
  */
 
-import type { RunProgress } from "@pipelex/sdk";
+import type { Problem, RunProgress } from "@pipelex/sdk";
 import { z } from "zod";
 
 import {
   FAILURE_FIELD_MAX_CODE_POINTS,
   FAILURE_MESSAGE_MAX_CODE_POINTS,
   boundedFailureText,
+  runErrorOf,
+  runErrorSchema,
 } from "./run-failure.js";
 
 /**
@@ -82,7 +90,7 @@ export interface ProgressInvocationProjection {
   batch?: { total: number; done: number; running: number; failed: number };
   condition?: { selected_outcome: string | null };
   attempts?: number;
-  last_failure?: { message: string; at?: string };
+  last_failure?: { problem: Problem; at?: string };
   degradation?: ProgressDegradation;
 }
 
@@ -160,9 +168,11 @@ const progressInvocationSchema = z.object({
     .optional()
     .describe("How many times its work has been tried, when more than once."),
   last_failure: z
-    .object({ message: z.string(), at: z.string().optional() })
+    .object({ problem: runErrorSchema, at: z.string().optional() })
     .optional()
-    .describe("The latest failure of its work."),
+    .describe(
+      "The latest failure of its work: the problem that ended it when it failed, else that of the latest attempt its engine is trying again.",
+    ),
   degradation: progressDegradationSchema
     .optional()
     .describe("The run is stuck at this invocation."),
@@ -365,12 +375,16 @@ function conditionOf(value: unknown): ProgressInvocationProjection["condition"] 
   return { selected_outcome: value.selected_outcome };
 }
 
+/**
+ * An invocation's latest failure, `{ problem, at }` as the hosted contract
+ * states it, its problem carried as a run's own is; `undefined` when it holds
+ * no problem document.
+ */
 function lastFailureOf(value: unknown): ProgressInvocationProjection["last_failure"] {
-  if (!isRecord(value) || !isString(value.message)) return undefined;
-  return {
-    message: boundedFailureText(value.message, FAILURE_MESSAGE_MAX_CODE_POINTS),
-    ...(isString(value.at) ? { at: value.at } : {}),
-  };
+  if (!isRecord(value)) return undefined;
+  const problem = runErrorOf(value.problem);
+  if (problem === undefined) return undefined;
+  return { problem, ...(isString(value.at) ? { at: value.at } : {}) };
 }
 
 /**

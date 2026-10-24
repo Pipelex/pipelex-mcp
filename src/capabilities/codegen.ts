@@ -1,12 +1,19 @@
 import path from "node:path";
 
-import { CodegenLockError, isStampableArtifactPath, runCodegenCheck } from "@pipelex/sdk";
+import {
+  CodegenLockError,
+  buildProblem,
+  formatItem,
+  isStampableArtifactPath,
+  runCodegenCheck,
+} from "@pipelex/sdk";
 import type {
   CodegenRequest,
   CodegenResponse,
   CodegenTarget,
   CodegenValidReport,
-  ValidationErrorItem,
+  Problem,
+  ProblemItem,
 } from "@pipelex/sdk";
 import { z } from "zod";
 
@@ -22,34 +29,33 @@ import {
 } from "./method-versions.js";
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
 import {
-  DEFAULT_AUTH_HINT,
   METHOD_REF_GRAMMAR,
+  argumentProblem,
+  asOneLine,
   buildApiConfig,
-  classifyError,
   createPipelexApiClient,
+  faultsProblem,
   filesSentSchema,
   methodDirInputSchema,
   methodFilesInputSchema,
+  problemItemSchema,
+  problemOf,
+  problemSchema,
+  problemSummary,
   resolveMethodSource,
-  summaryForToolError,
-  toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
   withFilesSent,
   failedBeforeSending,
-  treeSentInlineHeavy,
   markUnsent,
+  withTooLargeNote,
 } from "./shared.js";
 import type {
   ApiConfig,
-  AuthErrorTexture,
-  BaseUrlSourceTexture,
-  ClassifyErrorOptions,
-  ErrorSummaries,
+  ApiNotes,
   FileResolver,
   MethodTreeToSend,
   SubmittedFileInput,
-  ToolError,
 } from "./shared.js";
 import { methodTreeLimitsOf } from "./tree-limits.js";
 import type { TreeLimitsAware } from "./tree-limits.js";
@@ -253,8 +259,15 @@ const codegenStructuredContentSchema = z.object({
     ),
   method_version: methodVersionReportSchema,
   files_sent: filesSentSchema,
-  validation_errors: z.array(z.unknown()).optional(),
-  errors: z.array(toolErrorSchema).optional(),
+  errors: z
+    .array(problemItemSchema)
+    .optional()
+    .describe(
+      "Invalid verdict only (status ok, is_valid false): one problem item per fault, the items mthds_validate lists for the same method.",
+    ),
+  problem: problemSchema
+    .optional()
+    .describe("status error only: why no verdict could be produced."),
 });
 
 export const mthdsCodegenOutputSchema = codegenStructuredContentSchema;
@@ -315,8 +328,10 @@ export interface CodegenStructuredContent {
   method_version?: MethodVersionReport;
   /** Calls on a method folder only: every file read from it and sent. */
   files_sent?: string[];
-  validation_errors?: unknown[];
-  errors?: ToolError[];
+  /** The invalid verdict's faults, as the route listed them. */
+  errors?: ProblemItem[];
+  /** Why no verdict could be produced. */
+  problem?: Problem;
 }
 
 export interface CodegenResult {
@@ -343,10 +358,8 @@ export interface CodegenContext extends ApiConfig, MethodVersionsAware, TreeLimi
    * instructively rather than resolved against a directory of its own.
    */
   saveRoot?: string;
-  /** Deployment-specific auth-failure texture; default env-var wording when absent. */
-  authError?: AuthErrorTexture;
-  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
-  baseUrlSource?: BaseUrlSourceTexture;
+  /** Where the call's key and base URL came from, closing a failed request's summary; env-var wording when absent. */
+  apiNotes?: ApiNotes;
 }
 
 export function buildCodegenContext(env = process.env): CodegenContext {
@@ -365,90 +378,12 @@ export function buildCodegenContext(env = process.env): CodegenContext {
  */
 export const CODEGEN_CONTENT_CAP = 64 * 1024;
 
-const TARGET_LIST = CODEGEN_TARGETS.join(", ");
-
-const CODEGEN_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/codegen",
-  // An unresolvable closure is a produced 200 verdict on this route, and the
-  // refusals of the tree itself are read by `classifyError`, so a 400/422 on a
-  // tree request is the projection axes — and this client always sends
-  // `kind: "types"` and never a `pipe_ref`, which leaves `target`.
-  badRequest: {
-    location: "target",
-    hint: `Pass target as one of ${TARGET_LIST}. If the target is right, the configured Pipelex API may predate it — check its version.`,
-  },
-};
-
-/**
- * Classify options for an address-shaped request: a 400/422 can be the ref
- * (parse/fetch/ambiguity) as well as the target, a 404 is the runner's
- * no-matching-package refusal, and a 501 is the reserved registry form — all
- * the caller's own selector, located at `method_ref`.
- */
-const CODEGEN_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/codegen",
-  badRequest: {
-    location: "method_ref",
-    hint: `Check the address and tag — ${METHOD_REF_GRAMMAR} — and that the tag is a git tag on the repository. If the address resolved, check target is one of ${TARGET_LIST}.`,
-  },
-  notFound: {
-    location: "method_ref",
-    hint: "The repository was fetched but holds no package matching this address by manifest identity. Check the package selector against the repository's METHODS.toml manifests.",
-  },
-  notImplemented: {
-    location: "method_ref",
-    hint: `Only address-form refs are supported (${METHOD_REF_GRAMMAR}); registry references are reserved until a method registry exists.`,
-  },
-};
-
-/**
- * Classify options for an id-shaped request. The hosted platform resolves the
- * id and injects the stored source before the runner sees the request; an
- * unknown or foreign-org id is a 404 (indistinguishable by design), a stored
- * method with no MTHDS source is a 422, and a deployment with no catalog (a
- * bare pipelex-api runner, or a hosted plane that predates the tooling
- * selector on this route) rejects the request-shape too — the 422 hint covers
- * all three, plus the target.
- */
-const CODEGEN_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/codegen",
-  badRequest: {
-    location: "method_id",
-    hint: `The stored method may have no MTHDS source yet, or this deployment may not resolve method_id on /v1/codegen — the selector is hosted-only (a bare pipelex-api runner has no catalog). If the id resolved, check target is one of ${TARGET_LIST}. Submit files or a method_ref instead if it persists.`,
-  },
-  notFound: {
-    location: "method_id",
-    hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.",
-  },
-};
-
-/** What a 403 from `/v1/codegen` may mean beyond the key, appended to the key's own hint. */
-const CODEGEN_GATE_SENTENCE =
-  "Code generation can refuse even a key every other tool accepts, since the hosted Pipelex API enables /v1/codegen per organization, by its plan or feature flags: if other tools work with the key, ask for code generation to be enabled for its organization.";
-
-/**
- * The 403 texture. The hosted authorizer gates `/v1/codegen` on a feature flag
- * as well as on the plan, so a caller whose credential is perfectly valid can
- * still be refused — and the generic "check your key" would send them to debug
- * the wrong thing. Composed per call so the deployment's own auth wording,
- * when its context carries one, stays in front. The gate's sentence follows
- * whichever key hint leads, the one saying no key is set included, so it
- * speaks of the route rather than of "this credential", which may not exist.
- */
-function forbiddenTexture(auth: AuthErrorTexture | undefined): { hint: string } {
-  return {
-    hint: `${auth?.hint ?? DEFAULT_AUTH_HINT} ${CODEGEN_GATE_SENTENCE}`,
-  };
-}
-
 // Constructed inside each caught block (mirroring run.ts's runClient): the SDK
-// constructor throws PipelineRequestError on a malformed base URL, and that
-// must classify to a config ToolError, not reject the MCP handler.
+// constructor throws on a malformed base URL, and that must become the
+// result's problem, not reject the MCP handler.
 function codegenClient(context: CodegenContext): CodegenClient {
   return context.client ?? createPipelexApiClient(context);
 }
-
-const INVALID_REQUEST_SUMMARY = "Code generation was not run: request input is invalid.";
 
 const WRITE_ARM_FALLBACK =
   "Omit output_dir to receive the artifacts in the response and write them yourself.";
@@ -463,41 +398,38 @@ const WRITE_ARM_FALLBACK =
 export function validateCodegenWriteRequest(
   outputDir: string | undefined,
   saveRoot: string | undefined,
-): ToolError[] {
+): Problem[] {
   if (outputDir === undefined) {
     return [];
   }
   if (outputDir.trim() === "") {
     return [
-      {
-        class: "input_domain",
-        location: "output_dir",
-        message: "output_dir must not be empty when supplied.",
-        hint: `Pass a dedicated generated directory relative to the server's working directory, such as \`src/generated/<method>/\`. ${WRITE_ARM_FALLBACK}`,
-        retryable: false,
-      },
+      argumentProblem(
+        "output_dir",
+        "empty",
+        "output_dir must not be empty when supplied.",
+        `Pass a dedicated generated directory relative to the server's working directory, such as \`src/generated/<method>/\`. ${WRITE_ARM_FALLBACK}`,
+      ),
     ];
   }
   if (saveRoot === undefined) {
     return [
-      {
-        class: "input_domain",
-        location: "output_dir",
-        message: "This deployment has no working directory, so it cannot write a generated tree.",
-        hint: `Writing the tree to disk is a local workshop capability — run the workshop server (npx @pipelex/mcp), which writes under the directory it was started in. ${WRITE_ARM_FALLBACK}`,
-        retryable: false,
-      },
+      argumentProblem(
+        "output_dir",
+        "not_writable_here",
+        "This deployment has no working directory, so it cannot write a generated tree.",
+        `Writing the tree to disk is a local workshop capability — run the workshop server (npx @pipelex/mcp), which writes under the directory it was started in. ${WRITE_ARM_FALLBACK}`,
+      ),
     ];
   }
   if (path.isAbsolute(outputDir)) {
     return [
-      {
-        class: "input_domain",
-        location: "output_dir",
-        message: "output_dir must be relative to the server's working directory, not absolute.",
-        hint: "The tree is written under the directory the host started this server in. Pass a relative directory such as `src/generated/<method>/`.",
-        retryable: false,
-      },
+      argumentProblem(
+        "output_dir",
+        "absolute",
+        "output_dir must be relative to the server's working directory, not absolute.",
+        "The tree is written under the directory the host started this server in. Pass a relative directory such as `src/generated/<method>/`.",
+      ),
     ];
   }
   return [];
@@ -510,8 +442,8 @@ export async function generateMthdsCode(
   const resolution = await resolveMethodSource(input, context.resolver, "one_selector", () =>
     methodTreeLimitsOf(context, () => codegenClient(context)),
   );
-  if (resolution.errors.length > 0) {
-    return errorResult(INVALID_REQUEST_SUMMARY, resolution.errors);
+  if (resolution.faults.length > 0) {
+    return errorResult(faultsProblem(resolution.faults), context.apiNotes);
   }
 
   const { method_dir: _methodDir, files: _files, ...selection } = input;
@@ -519,14 +451,14 @@ export async function generateMthdsCode(
     ...selection,
     ...(resolution.tree === undefined ? {} : { tree: resolution.tree }),
   };
-  const inputErrors = [
+  const faults = [
     ...validateMethodSelectorRequest(request.tree !== undefined, request, {
       rule: "one_selector",
     }),
     ...validateCodegenWriteRequest(request.output_dir, context.saveRoot),
   ];
-  if (inputErrors.length > 0) {
-    return errorResult(INVALID_REQUEST_SUMMARY, inputErrors);
+  if (faults.length > 0) {
+    return errorResult(faultsProblem(faults), context.apiNotes);
   }
 
   return withFilesSent(await requestCodegen(request, context), request.tree);
@@ -540,15 +472,6 @@ async function requestCodegen(
   request: ResolvedCodegenRequest,
   context: CodegenContext,
 ): Promise<CodegenResult> {
-  // Classify options follow the request's selector shape — each failure
-  // locates at the field that caused it.
-  const classifyOptions =
-    request.tree !== undefined
-      ? CODEGEN_ERROR_OPTIONS
-      : request.method_ref !== undefined
-        ? CODEGEN_BY_REF_ERROR_OPTIONS
-        : CODEGEN_BY_ID_ERROR_OPTIONS;
-
   let report: CodegenResponse;
   let plan: SelectorPlan | undefined;
   let client: CodegenClient | undefined;
@@ -567,16 +490,11 @@ async function requestCodegen(
     }
     report = await client.codegen(toCodegenRequest(sent));
   } catch (err) {
-    const classified = classifyError(err, {
-      ...classifyOptions,
-      auth: context.authError,
-      baseUrlSource: context.baseUrlSource,
-      forbidden: forbiddenTexture(context.authError),
-      methodTree: request.tree !== undefined,
-      treeInline: await treeSentInlineHeavy(err, request.tree, client),
-    });
-    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
-    const failed = errorResult(summaryForError(error), [error]);
+    // The SDK's problem as it came, a by-id call's selector note added, and
+    // a request the tree sent inline made too large saying so.
+    const sized = await withTooLargeNote(problemOf(err), err, request.tree, client);
+    const problem = await selectorFailure(sized, plan, methodVersionsOf(context));
+    const failed = errorResult(problem, context.apiNotes);
     // A client that could not be built, or an argument refused before
     // sending, sent no file of the tree.
     return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
@@ -592,7 +510,7 @@ async function requestCodegen(
   // API. A malformed report — a valid arm without its artifacts or lock, an
   // artifact path the check cannot verify, a lock filename that is not bare,
   // or a set that fails the SDK's own offline check — is a reachable contract
-  // violation, surfaced as a runtime no-verdict error. The preflight runs on
+  // violation, surfaced as a `client.response_unreadable` no-verdict. The preflight runs on
   // BOTH arms, not only the write path: the inline arm hands these bytes to a
   // model that will write them, so a report the write arm would refuse is one
   // the inline arm must not hand over either.
@@ -601,7 +519,7 @@ async function requestCodegen(
     assertReportAnswersRequest(report, request);
     await preflightReport(report);
   } catch (err) {
-    return malformedReportError(err);
+    return malformedReportError(err, context.apiNotes);
   }
 
   // The write arm. `output_dir` without a `saveRoot` was already refused as a
@@ -620,7 +538,7 @@ async function requestCodegen(
     // would both blow the budget and change the shape they expected. The retry
     // is one cheap call with a fixed output_dir.
     if (!result.ok) {
-      return errorResult(summaryForError(result.error), [result.error]);
+      return errorResult(result.problem, context.apiNotes);
     }
     written = result;
   }
@@ -632,7 +550,7 @@ async function requestCodegen(
       "generated code from",
     );
   } catch (err) {
-    return malformedReportError(err);
+    return malformedReportError(err, context.apiNotes);
   }
 }
 
@@ -675,7 +593,7 @@ function assertReportAnswersRequest(
  * artifact set is safe, canonical and unique (control characters and drive
  * prefixes included), and every artifact's stamp and body hash agree with the
  * lock. A `CodegenLockError` and a non-current verdict are equally contract
- * violations, and both surface as runtime no-verdicts.
+ * violations, and both surface as `client.response_unreadable` no-verdicts.
  */
 async function preflightReport(report: CodegenValidReport): Promise<void> {
   const check = await runCodegenCheck({ lockContent: report.lock, files: report.artifacts });
@@ -689,7 +607,14 @@ async function preflightReport(report: CodegenValidReport): Promise<void> {
   }
 }
 
-function malformedReportError(err: unknown): CodegenResult {
+/**
+ * A report that does not hold together: the API answered `200` and broke its
+ * own contract, so the answer cannot be used, `client.response_unreadable`,
+ * as the SDK reads such an answer. The lock it sent is the API's, so a
+ * `CodegenLockError` here is no local file the caller can fix: it is worded
+ * into the message rather than relayed.
+ */
+function malformedReportError(err: unknown, notes: ApiNotes | undefined): CodegenResult {
   const detail =
     err instanceof CodegenLockError
       ? `The Pipelex API returned an unreadable codegen lock: ${err.message}`
@@ -697,41 +622,24 @@ function malformedReportError(err: unknown): CodegenResult {
         ? err.message
         : "The Pipelex API returned a malformed codegen report.";
   return errorResult(
-    "Code generation produced no verdict: the Pipelex API returned a malformed report.",
-    [
+    buildProblem(
+      "client.response_unreadable",
+      { status: 200 },
       {
-        class: "runtime",
-        message: detail,
-        hint: "The API responded but its report did not hold together; nothing was written. Inspect pipelex-api logs.",
-        retryable: false,
+        extra: {
+          message: `${detail} The API responded but its report did not hold together; nothing was written. Inspect pipelex-api logs.`,
+        },
       },
-    ],
+    ),
+    notes,
   );
-}
-
-const ERROR_SUMMARIES: ErrorSummaries = {
-  config: "Code generation could not start: the Pipelex API is unreachable or misconfigured.",
-  input_domain: "Code generation was not run: the Pipelex API rejected the request.",
-  runtime: "Code generation could not be completed: the Pipelex API returned an error.",
-  paywall:
-    "Code generation could not start: the organization's Pipelex plan does not cover this call.",
-  auth: "Code generation could not start: the Pipelex API key is missing or was refused, or code generation is not enabled for its organization.",
-  role: "Code generation could not start: your role in this organization does not allow this.",
-};
-
-function summaryForError(error: ToolError): string {
-  return summaryForToolError(error, ERROR_SUMMARIES);
 }
 
 /** No `_meta`: the bounded copies below are the whole response. */
 export function codegenToolResult(result: CodegenResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(
-      result.summary,
-      result.structuredContent.errors,
-      result.structuredContent.files_sent,
-    ),
+    content: toolResultContent(result.summary, result.structuredContent.files_sent),
     isError: result.structuredContent.status === "error",
   };
 }
@@ -754,9 +662,9 @@ export function codegenResult(
       structuredContent: {
         status: "ok",
         is_valid: false,
-        validation_errors: report.validation_errors,
+        errors: report.errors,
       },
-      summary: invalidSummary(report.message, report.validation_errors),
+      summary: invalidSummary(report.message, report.errors),
     };
   }
 
@@ -1039,11 +947,9 @@ function checkVerdict(written: CodegenWriteSuccess): string {
   ].join("\n\n");
 }
 
-function invalidSummary(message: string, validationErrors: ValidationErrorItem[]): string {
-  const lines = validationErrors.map((error) => {
-    const source = error.source ? ` (${error.source})` : "";
-    return `- **${error.category}** — ${error.message}${source}`;
-  });
+/** The invalid verdict: the route's message, then each fault as its code, detail and location. */
+function invalidSummary(message: string, errors: readonly ProblemItem[]): string {
+  const lines = errors.map((item) => `- ${asOneLine(formatItem(item))}`);
 
   return ["# Code not generated", message, ...(lines.length > 0 ? [lines.join("\n")] : [])].join(
     "\n\n",
@@ -1096,13 +1002,14 @@ function unreachableSelector(): never {
   throw new Error("No method selector survived request validation.");
 }
 
-function errorResult(summary: string, errors: ToolError[]): CodegenResult {
+/** No verdict: the one problem, and its Markdown rendering as the summary. */
+function errorResult(problem: Problem, notes: ApiNotes | undefined): CodegenResult {
   return {
     structuredContent: {
       status: "error",
       is_valid: false,
-      errors,
+      problem,
     },
-    summary,
+    summary: problemSummary(problem, notes),
   };
 }

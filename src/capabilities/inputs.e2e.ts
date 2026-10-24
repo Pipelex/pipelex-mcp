@@ -116,30 +116,27 @@ describe("mthds_inputs_template (live)", () => {
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(false);
-    expect(result.structuredContent.validation_errors?.length ?? 0).toBeGreaterThan(0);
+    expect(result.structuredContent.errors?.length ?? 0).toBeGreaterThan(0);
     expect(result.structuredContent.inputs).toBeUndefined();
   });
 
-  it("refuses an unknown pipe_ref at pipe_ref, with the route's reason", async () => {
+  it("relays the route's refusal of an unknown pipe_ref, naming it", async () => {
     const result = await buildMthdsInputs(
       { files: fixtureFiles, pipe_ref: "mcp_e2e_fixture.no_such_pipe" },
       context,
     );
 
     expect(result.structuredContent.status).toBe("error");
-    const error = result.structuredContent.errors?.[0];
-    expect(error?.class).toBe("input_domain");
-    expect(error?.location).toBe("pipe_ref");
-    expect(error?.message).toContain("no_such_pipe");
-    expect(error?.retryable).toBe(false);
+    const problem = result.structuredContent.problem;
+    expect(problem).toMatchObject({ code: "request.pipe_not_found", domain: "input", retry: "no" });
+    expect(JSON.stringify(problem)).toContain("no_such_pipe");
   });
 
-  it("refuses a method with several entry pipes at pipe_ref, then projects the one named", async () => {
+  it("relays the refusal of a method with several entry pipes, then projects the one named", async () => {
     const refused = await buildMthdsInputs({ files: TWO_ENTRY_PIPES_FILES }, context);
 
     expect(refused.structuredContent.status).toBe("error");
-    expect(refused.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(refused.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
+    expect(refused.structuredContent.problem).toMatchObject({ domain: "input", retry: "no" });
 
     const named = await buildMthdsInputs(
       { files: TWO_ENTRY_PIPES_FILES, pipe_ref: "mcp_e2e_second.name_one_word" },
@@ -192,15 +189,17 @@ describe.skipIf(!SERVES_SELECTORS)("mthds_inputs_template by selector (live)", (
     expect(Object.keys(result.structuredContent.inputs ?? {})).toEqual([FIXTURE_INPUT_NAME]);
   });
 
-  it("refuses an unknown method id at method_id", async () => {
+  it("relays the catalog's refusal of an unknown method id", async () => {
     const result = await buildMthdsInputs(
       { method_id: "mt_00000000-0000-4000-8000-000000000000" },
       context,
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
-    expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "pipelex.catalog.not_found",
+      domain: "input",
+      retry: "no",
+    });
   });
 });

@@ -5,9 +5,9 @@
  * in the `.env` of `PIPELEX_HOME` when that is set, and the workshop reads the
  * same file whenever its host passes no key. This module owns that file: it
  * locates the home directory, reads the file, and decides each tool call's key
- * and base URL, with the textures its failures carry: which key an auth
- * failure was about, and, when the base URL is the file's, that a failure at
- * `PIPELEX_BASE_URL` is about the file. The login's writer belongs here too,
+ * and base URL, with the notes a failed request's summary closes with: which
+ * key a refused credential was, and where the base URL in use came from, the
+ * host's environment, the default or the file. The login's writer belongs here too,
  * so that the file is read and written by one module under one set of rules.
  *
  * The rules, and where they part from the pipelex runtime's on purpose:
@@ -46,7 +46,7 @@ import path from "node:path";
 import { parseEnv } from "node:util";
 
 import { DEFAULT_API_URL } from "./capabilities/shared.js";
-import type { AuthErrorTexture, BaseUrlSourceTexture } from "./capabilities/shared.js";
+import type { ApiNotes } from "./capabilities/shared.js";
 
 /** The command a user runs to save a key, in the one spelling every text gives it. */
 export const LOGIN_COMMAND = "npx -y @pipelex/mcp@latest login";
@@ -167,19 +167,19 @@ function isNotFound(err: unknown): boolean {
 /** Where a call's key came from: the host's environment, the home `.env`, or nowhere. */
 export type KeySource = "host" | "file" | "none";
 
-/** One tool call's API coordinates, and the textures that say where they came from when a call fails. */
+/**
+ * One tool call's API coordinates, and the notes that say where they came
+ * from when a request fails: `notes.apiKey`, which key a refused credential
+ * was and how to change it, and `notes.baseUrl`, which API the call used and
+ * where its base URL was read, the host's environment, the default or the
+ * home `.env` beside the saved key, which a note naming the variable alone
+ * would hide.
+ */
 export interface WorkshopCredentials {
   baseUrl: string;
   apiKey?: string;
   source: KeySource;
-  authError: AuthErrorTexture;
-  /**
-   * Set only when the base URL is the home `.env`'s: the key is the file's and
-   * the environment sets no `PIPELEX_BASE_URL`. A failure at
-   * `PIPELEX_BASE_URL` then says the value came from the file, which a hint
-   * naming the variable alone would hide.
-   */
-  baseUrlSource?: BaseUrlSourceTexture;
+  notes: Required<ApiNotes>;
 }
 
 /** Resolves one tool call's credentials. The workshop calls it at the start of every call. */
@@ -198,7 +198,7 @@ export function fileBranchBaseUrl(
 }
 
 /**
- * Decide one tool call's key and base URL, and the texture its auth failures
+ * Decide one tool call's key and base URL, and the notes its failed requests
  * carry. Never throws. The rules are this module's header.
  */
 export async function resolveWorkshopCredentials(
@@ -208,7 +208,12 @@ export async function resolveWorkshopCredentials(
   const hostKey = env.PIPELEX_API_KEY || undefined;
   if (hostKey !== undefined) {
     const baseUrl = env.PIPELEX_BASE_URL || DEFAULT_API_URL;
-    return { baseUrl, apiKey: hostKey, source: "host", authError: hostKeyTexture(baseUrl) };
+    return {
+      baseUrl,
+      apiKey: hostKey,
+      source: "host",
+      notes: { apiKey: hostKeyNote(baseUrl), baseUrl: environmentBaseUrlNote(env, baseUrl) },
+    };
   }
 
   const read = await readHomeEnv(env, options);
@@ -224,15 +229,20 @@ export async function resolveWorkshopCredentials(
       baseUrl,
       apiKey: fileKey,
       source: "file",
-      authError: fileKeyTexture(file, baseUrl),
-      ...(baseUrlFromFile ? { baseUrlSource: fileBaseUrlTexture(file, baseUrl) } : {}),
+      notes: {
+        apiKey: fileKeyNote(file, baseUrl),
+        baseUrl: baseUrlFromFile
+          ? fileBaseUrlNote(file, baseUrl)
+          : environmentBaseUrlNote(env, baseUrl),
+      },
     };
   }
 
+  const baseUrl = env.PIPELEX_BASE_URL || DEFAULT_API_URL;
   return {
-    baseUrl: env.PIPELEX_BASE_URL || DEFAULT_API_URL,
+    baseUrl,
     source: "none",
-    authError: noKeyTexture(read, homedir),
+    notes: { apiKey: noKeyNote(read, homedir), baseUrl: environmentBaseUrlNote(env, baseUrl) },
   };
 }
 
@@ -248,57 +258,55 @@ export function credentialsResolver(
   return () => resolveWorkshopCredentials(env, options);
 }
 
-// ── the auth texture ────────────────────────────────────────────────
-
-/** Where every auth failure locates: the key's variable, wherever its value came from. */
-const AUTH_LOCATION = "PIPELEX_API_KEY";
+// ── the notes ───────────────────────────────────────────────────────
 
 const LOGIN_CLAUSE = `run \`${LOGIN_COMMAND}\` in a terminal`;
 
 const HOST_CONFIG_CLAUSE = "set PIPELEX_API_KEY in the host's configuration";
 
-function hostKeyTexture(baseUrl: string): AuthErrorTexture {
-  return {
-    location: AUTH_LOCATION,
-    hint: `The PIPELEX_API_KEY the host passes was refused by ${apiOrigin(baseUrl)}. Replace it in the host's configuration, or remove it there and ${LOGIN_CLAUSE} to use a saved key instead.`,
-  };
+function hostKeyNote(baseUrl: string): string {
+  return `The PIPELEX_API_KEY the host passes was refused by ${apiOrigin(baseUrl)}. Replace it in the host's configuration, or remove it there and ${LOGIN_CLAUSE} to use a saved key instead.`;
 }
 
-function fileKeyTexture(file: string, baseUrl: string): AuthErrorTexture {
-  return {
-    location: AUTH_LOCATION,
-    hint: `The key saved in \`${file}\` was refused by ${apiOrigin(baseUrl)}. Run \`${LOGIN_COMMAND}\` again in a terminal to save a new one, or ${HOST_CONFIG_CLAUSE}.`,
-  };
+function fileKeyNote(file: string, baseUrl: string): string {
+  return `The key saved in \`${file}\` was refused by ${apiOrigin(baseUrl)}. Run \`${LOGIN_COMMAND}\` again in a terminal to save a new one, or ${HOST_CONFIG_CLAUSE}.`;
 }
 
 /**
- * The sentence a failure at `PIPELEX_BASE_URL` gains when the base URL is the
- * file's: where it was read, and that the host's configuration overrides it.
- * The base URL is named by its origin alone, or not at all when it has none.
+ * The note on the base URL when the file's is the one in use: where it was
+ * read, and that the host's configuration overrides it. The base URL is named
+ * by its origin alone, or not at all when it has none.
  */
-function fileBaseUrlTexture(file: string, baseUrl: string): BaseUrlSourceTexture {
+function fileBaseUrlNote(file: string, baseUrl: string): string {
   const origin = httpOrigin(baseUrl);
   const subject =
     origin === undefined
       ? "The PIPELEX_BASE_URL in use"
       : `The PIPELEX_BASE_URL in use, ${origin},`;
-  return {
-    hint: `${subject} was read from \`${file}\` beside the saved key: fix it there, or set PIPELEX_BASE_URL in the host's configuration, which overrides the file's.`,
-  };
-}
-
-function noKeyTexture(read: HomeEnvRead, homedir: () => string): AuthErrorTexture {
-  const hint =
-    read.status === "relative_home"
-      ? `No Pipelex API key is set: the host passes none, and no saved key is read, because ${RELATIVE_HOME_SENTENCE} Fix PIPELEX_HOME and ${LOGIN_CLAUSE}, or ${HOST_CONFIG_CLAUSE}.`
-      : read.status === "unreadable"
-        ? `No Pipelex API key is set: the host passes none, and \`${displayPath(read.file, homedir)}\` could not be read. Make it a file you can read and ${LOGIN_CLAUSE}, or ${HOST_CONFIG_CLAUSE}.`
-        : `No Pipelex API key is set: the host passes none, and none is saved in \`${displayPath(read.file, homedir)}\`. To save one there, ${LOGIN_CLAUSE}, or ${HOST_CONFIG_CLAUSE}.`;
-  return { location: AUTH_LOCATION, hint };
+  return `${subject} was read from \`${file}\` beside the saved key: fix it there, or set PIPELEX_BASE_URL in the host's configuration, which overrides the file's.`;
 }
 
 /**
- * The API as a hint names it: its origin, `scheme://host[:port]`, never a
+ * The note on the base URL when the environment decides it: the host's
+ * `PIPELEX_BASE_URL`, or the hosted API when the host sets none. The API is
+ * named by its origin alone.
+ */
+function environmentBaseUrlNote(env: CredentialsEnv, baseUrl: string): string {
+  return env.PIPELEX_BASE_URL
+    ? `The Pipelex API in use, ${apiOrigin(baseUrl)}, is the PIPELEX_BASE_URL the host passes: fix it in the host's configuration.`
+    : `The Pipelex API in use is the hosted one, ${apiOrigin(baseUrl)}, since the host passes no PIPELEX_BASE_URL: set one in the host's configuration to use another.`;
+}
+
+function noKeyNote(read: HomeEnvRead, homedir: () => string): string {
+  return read.status === "relative_home"
+    ? `No Pipelex API key is set: the host passes none, and no saved key is read, because ${RELATIVE_HOME_SENTENCE} Fix PIPELEX_HOME and ${LOGIN_CLAUSE}, or ${HOST_CONFIG_CLAUSE}.`
+    : read.status === "unreadable"
+      ? `No Pipelex API key is set: the host passes none, and \`${displayPath(read.file, homedir)}\` could not be read. Make it a file you can read and ${LOGIN_CLAUSE}, or ${HOST_CONFIG_CLAUSE}.`
+      : `No Pipelex API key is set: the host passes none, and none is saved in \`${displayPath(read.file, homedir)}\`. To save one there, ${LOGIN_CLAUSE}, or ${HOST_CONFIG_CLAUSE}.`;
+}
+
+/**
+ * The API as a note names it: its origin, `scheme://host[:port]`, never a
  * path, credentials or a query. A value that is not an http(s) URL is not
  * shown at all.
  */
@@ -337,7 +345,7 @@ function httpOrigin(baseUrl: string): string | undefined {
   return undefined;
 }
 
-/** A path as a hint shows it: `~/…` under the user's home directory, absolute otherwise. */
+/** A path as a note shows it: `~/…` under the user's home directory, absolute otherwise. */
 export function displayPath(file: string, homedir: () => string = os.homedir): string {
   try {
     const relative = path.relative(homedir(), file);

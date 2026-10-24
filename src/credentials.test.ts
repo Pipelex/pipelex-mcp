@@ -245,9 +245,8 @@ describe("resolveWorkshopCredentials", () => {
     expect(credentials.source).toBe("none");
     expect(credentials.apiKey).toBeUndefined();
     expect(credentials.baseUrl).toBe(DEFAULT_API_URL);
-    expect(credentials.authError.location).toBe("PIPELEX_API_KEY");
-    expect(credentials.authError.hint).toContain(RELATIVE_HOME_SENTENCE);
-    expect(credentials.authError.hint).toContain(`\`${LOGIN_COMMAND}\``);
+    expect(credentials.notes.apiKey).toContain(RELATIVE_HOME_SENTENCE);
+    expect(credentials.notes.apiKey).toContain(`\`${LOGIN_COMMAND}\``);
   });
 
   it("says no key is set, names the file and the login, when there is no file", async () => {
@@ -257,10 +256,9 @@ describe("resolveWorkshopCredentials", () => {
 
     expect(credentials.source).toBe("none");
     expect(credentials.apiKey).toBeUndefined();
-    expect(credentials.authError).toEqual({
-      location: "PIPELEX_API_KEY",
-      hint: `No Pipelex API key is set: the host passes none, and none is saved in \`${path.join("~", ".pipelex", ".env")}\`. To save one there, run \`npx -y @pipelex/mcp@latest login\` in a terminal, or set PIPELEX_API_KEY in the host's configuration.`,
-    });
+    expect(credentials.notes.apiKey).toBe(
+      `No Pipelex API key is set: the host passes none, and none is saved in \`${path.join("~", ".pipelex", ".env")}\`. To save one there, run \`npx -y @pipelex/mcp@latest login\` in a terminal, or set PIPELEX_API_KEY in the host's configuration.`,
+    );
   });
 
   it("counts a file it cannot read as holding no key, and says it could not be read", async () => {
@@ -280,8 +278,8 @@ describe("resolveWorkshopCredentials", () => {
 
       expect(credentials.source, home).toBe("none");
       expect(credentials.apiKey, home).toBeUndefined();
-      expect(credentials.authError.hint, home).toContain("could not be read");
-      expect(credentials.authError.hint, home).toContain(`\`${LOGIN_COMMAND}\``);
+      expect(credentials.notes.apiKey, home).toContain("could not be read");
+      expect(credentials.notes.apiKey, home).toContain(`\`${LOGIN_COMMAND}\``);
     }
   });
 
@@ -296,7 +294,7 @@ describe("resolveWorkshopCredentials", () => {
 
       expect(read.status).toBe("unreadable");
       expect(credentials.source).toBe("none");
-      expect(credentials.authError.hint).toContain("could not be read");
+      expect(credentials.notes.apiKey).toContain("could not be read");
     },
   );
 
@@ -308,7 +306,7 @@ describe("resolveWorkshopCredentials", () => {
     const credentials = await resolveWorkshopCredentials({}, { homedir });
 
     expect(credentials.source).toBe("none");
-    expect(credentials.authError.hint).toContain("could not be read");
+    expect(credentials.notes.apiKey).toContain("could not be read");
   });
 
   it("reads the file afresh on every call, so a key saved mid-session is used at once", async () => {
@@ -323,7 +321,7 @@ describe("resolveWorkshopCredentials", () => {
 });
 
 describe("the auth texture", () => {
-  it("names the login in every hint, spelled with @latest as every text gives it", async () => {
+  it("names the login in every note, spelled with @latest as every text gives it", async () => {
     // A copy of the package cached before `login` existed ignores its
     // arguments and starts the stdio server, which waits silently: `@latest`
     // is what keeps the command from looking like a hung login.
@@ -331,7 +329,7 @@ describe("the auth texture", () => {
 
     const unreadable = await makeTempDir();
     await fs.mkdir(path.join(unreadable, ".env"));
-    const hints = [
+    const notes = [
       // No key: no file, an unreadable file, a relative home.
       await resolveWorkshopCredentials({ PIPELEX_HOME: await makeTempDir() }),
       await resolveWorkshopCredentials({ PIPELEX_HOME: unreadable }),
@@ -341,11 +339,11 @@ describe("the auth texture", () => {
       await resolveWorkshopCredentials({
         PIPELEX_HOME: await homeWith("PIPELEX_API_KEY=plx_sk_saved\n"),
       }),
-    ].map((credentials) => credentials.authError.hint);
+    ].map((credentials) => credentials.notes.apiKey);
 
-    expect(hints).toHaveLength(5);
-    for (const hint of hints) {
-      expect(hint).toContain("`npx -y @pipelex/mcp@latest login`");
+    expect(notes).toHaveLength(5);
+    for (const note of notes) {
+      expect(note).toContain("`npx -y @pipelex/mcp@latest login`");
     }
   });
 
@@ -361,16 +359,15 @@ describe("the auth texture", () => {
       { homedir: homedirAt("/nowhere") },
     );
 
-    expect(host.authError).toEqual({
-      location: "PIPELEX_API_KEY",
-      hint: "The PIPELEX_API_KEY the host passes was refused by https://api-dev.pipelex.com. Replace it in the host's configuration, or remove it there and run `npx -y @pipelex/mcp@latest login` in a terminal to use a saved key instead.",
-    });
-    expect(file.authError).toEqual({
-      location: "PIPELEX_API_KEY",
-      hint: `The key saved in \`${path.join(home, ".env")}\` was refused by https://api.pipelex.com. Run \`npx -y @pipelex/mcp@latest login\` again in a terminal to save a new one, or set PIPELEX_API_KEY in the host's configuration.`,
-    });
-    for (const { authError } of [host, file]) {
-      expect(authError.hint).not.toContain("secret");
+    expect(host.notes.apiKey).toBe(
+      "The PIPELEX_API_KEY the host passes was refused by https://api-dev.pipelex.com. Replace it in the host's configuration, or remove it there and run `npx -y @pipelex/mcp@latest login` in a terminal to use a saved key instead.",
+    );
+    expect(file.notes.apiKey).toBe(
+      `The key saved in \`${path.join(home, ".env")}\` was refused by https://api.pipelex.com. Run \`npx -y @pipelex/mcp@latest login\` again in a terminal to save a new one, or set PIPELEX_API_KEY in the host's configuration.`,
+    );
+    for (const { notes } of [host, file]) {
+      expect(notes.apiKey).not.toContain("secret");
+      expect(notes.baseUrl).not.toContain("secret");
     }
   });
 
@@ -380,9 +377,9 @@ describe("the auth texture", () => {
       PIPELEX_BASE_URL: "https://user:hunter2@api.example.test:8443/v1/?token=abc#frag",
     });
 
-    expect(credentials.authError.hint).toContain("refused by https://api.example.test:8443.");
+    expect(credentials.notes.apiKey).toContain("refused by https://api.example.test:8443.");
     for (const leak of ["hunter2", "user", "token", "abc", "frag", "/v1"]) {
-      expect(credentials.authError.hint).not.toContain(leak);
+      expect(credentials.notes.apiKey).not.toContain(leak);
     }
   });
 
@@ -399,12 +396,12 @@ describe("the auth texture", () => {
 
     const credentials = await resolveWorkshopCredentials({}, { homedir: homedirAt(userHome) });
 
-    expect(credentials.authError.hint).toContain(`\`${path.join("~", ".pipelex", ".env")}\``);
-    expect(credentials.authError.hint).not.toContain(userHome);
+    expect(credentials.notes.apiKey).toContain(`\`${path.join("~", ".pipelex", ".env")}\``);
+    expect(credentials.notes.apiKey).not.toContain(userHome);
   });
 });
 
-describe("the base URL texture", () => {
+describe("the base URL note", () => {
   it("names the file and the origin when the base URL in use is the file's", async () => {
     const userHome = await makeTempDir();
     await fs.mkdir(path.join(userHome, ".pipelex"));
@@ -419,11 +416,11 @@ describe("the base URL texture", () => {
     );
 
     expect(credentials.source).toBe("file");
-    expect(credentials.baseUrlSource).toEqual({
-      hint: `The PIPELEX_BASE_URL in use, https://api-dev.pipelex.com, was read from \`${path.join("~", ".pipelex", ".env")}\` beside the saved key: fix it there, or set PIPELEX_BASE_URL in the host's configuration, which overrides the file's.`,
-    });
+    expect(credentials.notes.baseUrl).toBe(
+      `The PIPELEX_BASE_URL in use, https://api-dev.pipelex.com, was read from \`${path.join("~", ".pipelex", ".env")}\` beside the saved key: fix it there, or set PIPELEX_BASE_URL in the host's configuration, which overrides the file's.`,
+    );
     for (const leak of ["secret", "hunter2", "user", "token", "abc", "/v1", userHome]) {
-      expect(credentials.baseUrlSource?.hint).not.toContain(leak);
+      expect(credentials.notes.baseUrl).not.toContain(leak);
     }
   });
 
@@ -435,15 +432,15 @@ describe("the base URL texture", () => {
       { homedir: homedirAt("/nowhere") },
     );
 
-    expect(credentials.baseUrlSource?.hint).toMatch(
+    expect(credentials.notes.baseUrl).toMatch(
       new RegExp(
         `^The PIPELEX_BASE_URL in use was read from \`${escapeRegExp(path.join(home, ".env"))}\``,
       ),
     );
-    expect(credentials.baseUrlSource?.hint).not.toContain("localhost");
+    expect(credentials.notes.baseUrl).not.toContain("localhost");
   });
 
-  it("is absent when the environment sets the base URL, even beside the file's key", async () => {
+  it("names the host's variable when the environment sets the base URL, even beside the file's key", async () => {
     const home = await homeWith(
       "PIPELEX_API_KEY=plx_sk_file\nPIPELEX_BASE_URL=https://api-dev.pipelex.com\n",
     );
@@ -454,19 +451,23 @@ describe("the base URL texture", () => {
     });
 
     expect(credentials).toMatchObject({ source: "file", baseUrl: "http://localhost:8081" });
-    expect(credentials.baseUrlSource).toBeUndefined();
+    expect(credentials.notes.baseUrl).toBe(
+      "The Pipelex API in use, http://localhost:8081, is the PIPELEX_BASE_URL the host passes: fix it in the host's configuration.",
+    );
   });
 
-  it("is absent when the file's key goes to the hosted API by default", async () => {
+  it("names the hosted API when the file's key goes to it by default", async () => {
     const home = await homeWith("PIPELEX_API_KEY=plx_sk_file\nPIPELEX_BASE_URL=\n");
 
     const credentials = await resolveWorkshopCredentials({ PIPELEX_HOME: home });
 
     expect(credentials).toMatchObject({ source: "file", baseUrl: DEFAULT_API_URL });
-    expect(credentials.baseUrlSource).toBeUndefined();
+    expect(credentials.notes.baseUrl).toBe(
+      "The Pipelex API in use is the hosted one, https://api.pipelex.com, since the host passes no PIPELEX_BASE_URL: set one in the host's configuration to use another.",
+    );
   });
 
-  it("is absent when the key is the host's, or when there is none", async () => {
+  it("never names the file's base URL when the key is the host's, or when there is none", async () => {
     // The file's base URL never comes with the host's key, nor goes out alone.
     const saved = await homeWith(
       "PIPELEX_API_KEY=plx_sk_file\nPIPELEX_BASE_URL=https://api-dev.pipelex.com\n",
@@ -480,9 +481,15 @@ describe("the base URL texture", () => {
     const none = await resolveWorkshopCredentials({ PIPELEX_HOME: keyless });
 
     expect(host.source).toBe("host");
-    expect(host.baseUrlSource).toBeUndefined();
+    expect(host.baseUrl).toBe(DEFAULT_API_URL);
     expect(none.source).toBe("none");
-    expect(none.baseUrlSource).toBeUndefined();
+    expect(none.baseUrl).toBe(DEFAULT_API_URL);
+    for (const { notes } of [host, none]) {
+      expect(notes.baseUrl).toBe(
+        "The Pipelex API in use is the hosted one, https://api.pipelex.com, since the host passes no PIPELEX_BASE_URL: set one in the host's configuration to use another.",
+      );
+      expect(notes.baseUrl).not.toContain("api-dev");
+    }
   });
 });
 

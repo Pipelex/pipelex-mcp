@@ -1,16 +1,16 @@
-import { ApiResponseError } from "@pipelex/sdk";
+import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
 import type {
   MethodDetail,
   MethodPublishInput,
   MethodPublishResult,
   MethodVersionSummary,
+  Problem,
 } from "@pipelex/sdk";
 import { describe, expect, it, vi } from "vitest";
 
 import { publishMethodToolResult, publishMthdsMethod } from "./catalog-publish.js";
 import type { PublishMethodSuccess } from "./catalog-publish.js";
 import type { CatalogWriteClient, CatalogWriteContext } from "./catalog-write.js";
-import type { ToolError } from "./shared.js";
 
 const TOKEN = "2026-09-20T12:00:00Z";
 const DIGEST = `sha256:${"a".repeat(64)}`;
@@ -78,8 +78,47 @@ function success(result: { structuredContent: unknown }): PublishMethodSuccess {
   return sc;
 }
 
-function errorsOf(result: { structuredContent: unknown }): ToolError[] {
-  return (result.structuredContent as { errors?: ToolError[] }).errors ?? [];
+function problemOf(result: { structuredContent: unknown }): Problem | undefined {
+  const sc = result.structuredContent as { status: string; problem?: Problem };
+  return sc.status === "error" ? sc.problem : undefined;
+}
+
+const PUBLISH_URL = "https://api-dev.pipelex.com/v1/methods/mt_one/publish";
+
+/** A platform refusal carrying its problem document, its request id on the header. */
+function platformError(
+  status: number,
+  problem: { code: string; title: string; detail: string; domain: string } & Record<
+    string,
+    unknown
+  >,
+): ApiResponseError {
+  return new ApiResponseError(
+    `HTTP ${status}`,
+    PUBLISH_URL,
+    status,
+    "Refused",
+    JSON.stringify({
+      type: `https://docs.pipelex.com/errors/${problem.code}`,
+      status,
+      retry: "no",
+      next_step: { kind: "report", detail: "Report it." },
+      ...problem,
+    }),
+    { headers: { "x-request-id": `req_${status}` } },
+  );
+}
+
+/** The platform's refusal of a draft that moved since the token the publish sent. */
+function staleTokenRefusal(): ApiResponseError {
+  return platformError(409, {
+    code: "pipelex.catalog.update_conflict",
+    title: "The method changed since your token",
+    detail: "The draft changed since the expected_draft_updated_at you sent.",
+    domain: "input",
+    next_step: { kind: "reread", detail: "Read the method again, then decide what to send." },
+    location: { field: "expected_draft_updated_at" },
+  });
 }
 
 describe("publishMthdsMethod", () => {
@@ -188,8 +227,18 @@ describe("publishMthdsMethod", () => {
       { method_id: "mt_one@2", expected_draft_updated_at: TOKEN },
       contextFor(client),
     );
-    expect(errorsOf(refused)[0]).toMatchObject({ class: "input_domain", location: "method_id" });
-    expect(errorsOf(refused)[0]?.hint).toContain('"mt_one"');
+    const problem = problemOf(refused);
+    expect(problem).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      retry: "no",
+      params: { argument: "method_id", reason: "version_suffix" },
+      location: { field: "method_id" },
+    });
+    expect(problem?.message).toContain("names version 2");
+    expect(problem?.message).toContain('Pass method_id "mt_one"');
+    expect(refused.summary).toContain('Pass method_id "mt_one"');
+    expect(refused.summary).toContain("`client.argument_invalid`");
   });
 
   it("requires the draft token", async () => {
@@ -202,10 +251,34 @@ describe("publishMthdsMethod", () => {
       ),
     );
 
-    expect(errorsOf(result)[0]).toMatchObject({
-      class: "input_domain",
-      location: "expected_draft_updated_at",
+    expect(problemOf(result)).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      params: { argument: "expected_draft_updated_at", reason: "invalid_type" },
+      location: { field: "expected_draft_updated_at" },
     });
+    expect(problemOf(result)?.message).toContain("the draft token you last saw");
+  });
+
+  it("refuses every missing argument at once, as one problem listing each", async () => {
+    const result = await publishMthdsMethod(
+      {} as never,
+      contextFor(
+        publishing(async () => {
+          throw new Error("must not be sent");
+        }),
+      ),
+    );
+
+    const problem = problemOf(result);
+    expect(problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "method_id", reason: "several_faults" },
+    });
+    expect(problem?.errors?.map((item) => item.location?.field)).toEqual([
+      "method_id",
+      "expected_draft_updated_at",
+    ]);
   });
 
   it("reports an unchanged draft as nothing new, with the existing version", async () => {
@@ -235,10 +308,16 @@ describe("publishMthdsMethod", () => {
           validation: {
             is_valid: false,
             is_runnable: false,
-            validation_errors: [
-              { category: "blueprint_validation", message: "Unknown pipe type", source: "a.mthds" },
+            pending_signatures: [],
+            message: "The bundle is not valid.",
+            errors: [
+              {
+                code: "method.pipe_type_invalid",
+                detail: "Unknown pipe type\nPipeMagic",
+                location: { pipe: "summarize", file: "a.mthds" },
+              },
             ],
-          } as never,
+          },
           method: method({ latest_version: null, latest_published: null }),
         })),
       ),
@@ -250,10 +329,19 @@ describe("publishMthdsMethod", () => {
       is_valid: false,
       publish_state: "never_published",
       latest_version: null,
+      validation_errors: [
+        {
+          code: "method.pipe_type_invalid",
+          detail: "Unknown pipe type\nPipeMagic",
+          location: { pipe: "summarize", file: "a.mthds" },
+        },
+      ],
     });
     expect(success(result)).not.toHaveProperty("version");
     expect(result.summary).toContain("was NOT published");
-    expect(result.summary).toContain("**blueprint_validation** — Unknown pipe type (a.mthds)");
+    expect(result.summary).toContain(
+      "- method.pipe_type_invalid: Unknown pipe type PipeMagic (pipe 'summarize', file 'a.mthds')",
+    );
     expect(publishMethodToolResult(result).isError).toBe(false);
   });
 
@@ -290,17 +378,7 @@ describe("publishMthdsMethod", () => {
       contextFor(
         publishing(
           async () => {
-            throw new ApiResponseError(
-              "conflict",
-              "https://api-dev.pipelex.com/v1/methods/mt_one/publish",
-              409,
-              "Conflict",
-              "{}",
-              undefined,
-              "The draft changed.",
-              undefined,
-              "method_update_conflict",
-            );
+            throw staleTokenRefusal();
           },
           {
             async getMethod() {
@@ -311,84 +389,124 @@ describe("publishMthdsMethod", () => {
       ),
     );
 
-    const [error] = errorsOf(result);
-    expect(error).toMatchObject({
-      class: "input_domain",
-      location: "expected_draft_updated_at",
-      retryable: false,
+    const problem = problemOf(result);
+    // The platform's problem stands, code, domain, retry and location; the
+    // workshop adds only its sentence carrying both tokens.
+    expect(problem).toMatchObject({
+      code: "pipelex.catalog.update_conflict",
+      domain: "input",
+      retry: "no",
+      location: { field: "expected_draft_updated_at" },
+      detail: "The draft changed since the expected_draft_updated_at you sent.",
+      request_id: "req_409",
     });
-    expect(error?.message).toContain("2026-09-21T09:00:00Z");
-    expect(error?.message).toContain("nothing was published");
-    expect(publishMethodToolResult(result).isError).toBe(true);
+    expect(problem?.message).toContain("2026-09-21T09:00:00Z");
+    expect(problem?.message).toContain("not 2026-09-19T00:00:00Z");
+    expect(problem?.message).toContain("nothing was published");
+    expect(problem?.message).toContain("only if they still want to");
+    const tool = publishMethodToolResult(result);
+    expect(tool.isError).toBe(true);
+    expect(tool.content[0].text).toContain("The method changed since your token");
+    expect(tool.content[0].text).toContain("2026-09-21T09:00:00Z");
+    expect(tool.content[0].text).toContain("**Next step**");
+    expect(tool.content[0].text).toContain("`pipelex.catalog.update_conflict`");
+    expect(tool.content[0].text).toContain("`req_409`");
   });
 
-  it("headlines a publish refused by role as the role, with the server's sentence", async () => {
+  it("relays the stale-token refusal as the platform worded it when the draft cannot be read", async () => {
+    const result = await publishMthdsMethod(
+      { method_id: "mt_one", expected_draft_updated_at: "2026-09-19T00:00:00Z" },
+      contextFor(
+        publishing(async () => {
+          throw staleTokenRefusal();
+        }),
+      ),
+    );
+
+    const problem = problemOf(result);
+    expect(problem).toMatchObject({
+      code: "pipelex.catalog.update_conflict",
+      detail: "The draft changed since the expected_draft_updated_at you sent.",
+    });
+    expect(problem).not.toHaveProperty("message");
+  });
+
+  it("relays a publish refused by role as the platform's problem, with its sentence", async () => {
     const detail =
       "Your role in this organization is runner: it runs the organization's published versions and changes no method.";
     const result = await publishMthdsMethod(
       { method_id: "mt_one", expected_draft_updated_at: TOKEN },
       contextFor(
         publishing(async () => {
-          throw new ApiResponseError(
-            "HTTP 403",
-            "https://api-dev.pipelex.com/v1/methods/mt_one/publish",
-            403,
-            "Forbidden",
-            "{}",
-            undefined,
+          throw platformError(403, {
+            code: "auth.forbidden",
+            title: "The credential does not permit this",
             detail,
-            undefined,
-            "role_not_permitted",
-            { details: { title: "Forbidden", errorDomain: "config", retryable: false } },
-          );
+            domain: "account",
+            params: { requirement: "method_write" },
+            next_step: { kind: "contact_owner", detail: "Ask the account's owner for a role." },
+          });
         }),
       ),
     );
 
-    const [error] = errorsOf(result);
-    expect(error).toMatchObject({
-      class: "config",
-      kind: "role",
-      message: detail,
-      retryable: false,
+    expect(problemOf(result)).toMatchObject({
+      code: "auth.forbidden",
+      domain: "account",
+      retry: "no",
+      detail,
+      params: { requirement: "method_write" },
+      request_id: "req_403",
     });
-    expect(error?.location).toBeUndefined();
-    expect(result.summary).toBe(
-      "The method was not published: your role in this organization does not allow this.",
-    );
+    expect(problemOf(result)?.location).toBeUndefined();
     const tool = publishMethodToolResult(result);
     expect(tool.isError).toBe(true);
+    expect(tool.content[0].text).toContain("The credential does not permit this");
     expect(tool.content[0].text).toContain(detail);
+    expect(tool.content[0].text).toContain("Ask the account's owner for a role.");
+    // A role refusal is not the key's fault: no sentence about the key or a login.
     expect(tool.content[0].text).not.toMatch(/PIPELEX_API_KEY|log ?in/i);
   });
 
-  it("headlines a refused key as the key, not as connectivity", async () => {
+  it("reports a refused key as the key, with where it came from, not as connectivity", async () => {
+    const result = await publishMthdsMethod(
+      { method_id: "mt_one", expected_draft_updated_at: TOKEN },
+      {
+        ...contextFor(
+          publishing(async () => {
+            throw new ApiResponseError("HTTP 401", PUBLISH_URL, 401, "Unauthorized", "{}", {
+              headers: { "x-request-id": "req_401" },
+            });
+          }),
+        ),
+        apiNotes: {
+          apiKey: "The API key was read from the login file; log in again to change it.",
+        },
+      },
+    );
+
+    expect(problemOf(result)).toMatchObject({
+      code: "auth.missing_credential",
+      domain: "account",
+      request_id: "req_401",
+    });
+    expect(result.summary).toContain(
+      "The API key was read from the login file; log in again to change it.",
+    );
+    expect(result.summary).toContain("`auth.missing_credential`");
+  });
+
+  it("reports an API it could not reach as unreachable, naming where the base URL came from", async () => {
     const result = await publishMthdsMethod(
       { method_id: "mt_one", expected_draft_updated_at: TOKEN },
       contextFor(
         publishing(async () => {
-          throw new ApiResponseError(
-            "unauthorized",
-            "https://api-dev.pipelex.com/v1/methods/mt_one/publish",
-            401,
-            "Unauthorized",
-            "{}",
-            undefined,
-            "Missing API key",
-            undefined,
-            "unauthorized",
-          );
+          throw new ApiUnreachableError("fetch failed", PUBLISH_URL, "ECONNREFUSED");
         }),
       ),
     );
 
-    expect(errorsOf(result)[0]).toMatchObject({
-      class: "config",
-      kind: "auth",
-      location: "PIPELEX_API_KEY",
-    });
-    expect(result.summary).toBe(
-      "The method was not published: the Pipelex API key is missing or was refused.",
-    );
+    expect(problemOf(result)).toMatchObject({ code: "client.unreachable" });
+    expect(result.summary).toContain("PIPELEX_BASE_URL");
   });
 });

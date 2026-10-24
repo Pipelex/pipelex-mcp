@@ -1,6 +1,6 @@
 /**
  * The names the workshop gives its tools, as the capability core writes them
- * into model-facing text: result summaries, error hints and schema
+ * into model-facing text: result summaries, problem messages and schema
  * descriptions.
  *
  * A sentence that names another tool takes the name from here rather than

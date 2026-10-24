@@ -25,6 +25,27 @@ export const STUCK_ITEM_DEGRADATION: RunDegradation = {
   ends_at: "2026-10-12T09:45:33.480Z",
 };
 
+/**
+ * The latest failure of item 2's second step in the worked example, as the
+ * hosted contract serves it: `{ problem, at }`, the problem an engine-observed
+ * failure is served as, `runtime.unexpected`. `@pipelex/sdk`'s
+ * `ProgressFailure` still types `last_failure` as `{ message, at }`, a shape
+ * the platform no longer serves, and relays the member untouched, so the
+ * snapshot carries it cast to that type.
+ */
+export const RETRIED_STEP_FAILURE = {
+  problem: {
+    type: "https://mthds.ai/errors/runtime.unexpected",
+    title: "An unexpected error occurred",
+    detail: "The runtime met an unexpected error.",
+    code: "runtime.unexpected",
+    domain: "runtime",
+    retry: "no",
+    next_step: { kind: "report", detail: "Report this to whoever runs the runtime." },
+  },
+  at: "2026-10-12T09:30:52.317Z",
+};
+
 /** The summary the contract words from {@link MID_RUN_SNAPSHOT}. */
 export const MID_RUN_SUMMARY =
   "Running summarize_filing_batch (step 3 of 4): 1 of 3 items done, 2 running; not progressing at summarize_filing (step 3 of 4, item 3 of 3) after 4 failed attempts";
@@ -175,7 +196,7 @@ export const MID_RUN_SNAPSHOT: RunProgress = {
       null,
       {
         attempts: 2,
-        last_failure: { message: "An internal error occurred.", at: "2026-10-12T09:30:52.317Z" },
+        last_failure: RETRIED_STEP_FAILURE as unknown as ProgressInvocation["last_failure"],
       },
     ),
     invocation(

@@ -1,7 +1,8 @@
-import { ArtifactFetchError } from "@pipelex/sdk";
+import { ArtifactFetchError, buildProblem } from "@pipelex/sdk";
 import type {
   FetchArtifactOptions,
   GetRunResultOptions,
+  Problem,
   RunRead,
   RunResultArtifact,
   RunResultState,
@@ -9,45 +10,35 @@ import type {
 } from "@pipelex/sdk";
 import { z } from "zod";
 
-import type { RunFailure } from "./run-failure.js";
-import {
-  failedArmSummaryLines,
-  failureMessageOf,
-  failureOfFailedArm,
-  readFailedRun,
-  RUN_RESULTS_ERROR_OPTIONS,
-  runFailureSchema,
-  runStatusSchema,
-} from "./run.js";
+import { runErrorSchema } from "./run-failure.js";
+import { failedArmSummary, readFailedRun, runErrorOfFailedArm, runStatusSchema } from "./run.js";
 import type { FailedRunState } from "./run.js";
 import {
-  BULK_RESOLVE_ERROR_OPTIONS,
   INLINE_IMAGES_BUDGET,
   INLINE_IMAGE_MIME_TYPES,
   MAX_IMAGE_CANDIDATE_ENTRIES,
   MAX_INLINE_IMAGES,
   MAX_INLINE_IMAGE_BYTES,
   allowsPlainHttp,
+  argumentProblem,
   buildArtifactFetchConfig,
-  classifyError,
   createPipelexApiClient,
+  faultsProblem,
   imageCandidatesOf,
-  itemToolError,
-  summaryForToolError,
-  toolErrorSchema,
+  problemLine,
+  problemOf,
+  problemSchema,
+  problemSummary,
   toolResultContent,
   validateRunIdRequest,
 } from "./shared.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 import type {
   ApiConfig,
-  AuthErrorTexture,
-  BaseUrlSourceTexture,
+  ApiNotes,
   ContentImage,
-  ErrorSummaries,
   ImageCandidate,
   InlineImageMimeType,
-  ToolError,
 } from "./shared.js";
 
 /**
@@ -71,8 +62,8 @@ import type {
  * The fetch is the SDK's (`client.fetchArtifact` — fresh link, redirects
  * refused, no credentials forwarded, the cap checked from `Content-Length` and
  * again per chunk), so what this capability owns is the tool envelope, the
- * candidate prefilter, the content-type gate, the caps, the classification of
- * every failure into `ToolError`s, and the prose. See SPEC.md → Run Scope.
+ * candidate prefilter, the content-type gate, the caps, the problem each failure
+ * reports, and the prose. See SPEC.md → Run Scope.
  */
 
 /**
@@ -150,7 +141,9 @@ const shownImageSchema = z.object({
     .describe(
       'Why a picture was not inlined, when no error occurred: "size" (over the per-image cap), "budget" (would cross this call\'s total), "count" (past the per-call attempt cap — not fetched), "type" (the stored object is not an inlineable image type), "deadline" (this call ran out of its total time budget before reaching it — not fetched), "empty" (the stored object declares an image type but holds no bytes).',
     ),
-  error: toolErrorSchema.optional().describe("Present when this picture could not be read at all."),
+  error: problemSchema
+    .optional()
+    .describe("Present when this picture could not be read at all: why, as a problem."),
 });
 
 /** The output schema of `mthds_show_images`. */
@@ -171,14 +164,10 @@ export const mthdsShowImagesOutputSchema = z.object({
   run_status: runStatusSchema
     .optional()
     .describe('State "failed" only — the terminal lifecycle status.'),
-  failure_message: z
-    .string()
-    .optional()
-    .describe('State "failed" only — the platform\'s one-sentence account of the ending.'),
-  failure: runFailureSchema
+  run_error: runErrorSchema
     .optional()
     .describe(
-      `State "failed" only, when the run stored an error report — the same object ${WORKSHOP_TOOL_NAMES.runResults} carries: why it failed, what to do next, whether running it again can help, and what to give support.`,
+      `State "failed" only, when the run stored one — the run's own problem, as ${WORKSHOP_TOOL_NAMES.runResults} carries it.`,
     ),
   images: z
     .array(shownImageSchema)
@@ -198,7 +187,9 @@ export const mthdsShowImagesOutputSchema = z.object({
     .describe(
       'State "completed" only — true when every candidate THIS RUN produced became an image block: nothing withheld, nothing failed, nothing omitted from the listing, and nothing left unconsidered by a narrowed images/indices selection (vacuously true when the run produced no candidate). So a narrowed call reports false whenever the run holds a picture it did not ask for, and this member keeps answering "is everything this run produced now in front of me" rather than "did what I asked for arrive".',
     ),
-  errors: z.array(toolErrorSchema).optional(),
+  problem: problemSchema
+    .optional()
+    .describe('status "error" only: why no verdict could be produced.'),
 });
 
 export interface MthdsShowImagesInput {
@@ -215,7 +206,7 @@ export interface ShownImageEntry {
   bytes?: number;
   inlined: boolean;
   withheld?: WithheldReason;
-  error?: ToolError;
+  error?: Problem;
 }
 
 export interface ShowImagesStructuredContent {
@@ -224,13 +215,13 @@ export interface ShowImagesStructuredContent {
   state?: "running" | "completed" | "failed";
   retry_after_seconds?: number | null;
   run_status?: RunStatus;
-  failure_message?: string;
-  /** State "failed" only, when the run stored an error report. */
-  failure?: RunFailure;
+  /** State "failed" only, when the run stored one: the run's own problem. */
+  run_error?: Problem;
   images?: ShownImageEntry[];
   omitted?: number;
   all_inlined?: boolean;
-  errors?: ToolError[];
+  /** Status "error" only. */
+  problem?: Problem;
 }
 
 export interface ShowImagesResult {
@@ -259,7 +250,7 @@ export const SHOW_IMAGES_RESULT_ARTIFACTS: readonly RunResultArtifact[] = ["main
  */
 export interface ImagesClient {
   getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
-  /** Read once after a failed results arm, for when the run ended and its report (`readFailedRun`). */
+  /** Read once after a failed results arm, for when the run ended and its problem (`readFailedRun`). */
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   fetchArtifact(uri: string, options?: FetchArtifactOptions): Promise<Response>;
 }
@@ -272,10 +263,8 @@ export interface ImagesContext extends ApiConfig {
    * same fetch boundary.
    */
   allowHttp?: boolean;
-  /** Deployment-specific auth-failure texture; default env-var wording when absent. */
-  authError?: AuthErrorTexture;
-  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
-  baseUrlSource?: BaseUrlSourceTexture;
+  /** Where the key and the base URL came from, said beside a problem they may be the fix of. */
+  apiNotes?: ApiNotes;
 }
 
 export function buildImagesContext(env = process.env): ImagesContext {
@@ -284,22 +273,23 @@ export function buildImagesContext(env = process.env): ImagesContext {
 
 // Constructed inside the caught block (mirroring the sibling capabilities): the
 // SDK constructor throws PipelineRequestError on a malformed base URL, and that
-// must classify to a config ToolError, not reject the MCP handler.
+// must become the problem it carries, not reject the MCP handler.
 function imagesClient(context: ImagesContext): ImagesClient {
   return context.client ?? createPipelexApiClient(context);
 }
 
-export function validateShowImagesRequest(input: MthdsShowImagesInput): ToolError[] {
+export function validateShowImagesRequest(input: MthdsShowImagesInput): Problem[] {
   const errors = validateRunIdRequest(input.run_id);
 
   if (input.images !== undefined && input.indices !== undefined) {
-    errors.push({
-      class: "input_domain",
-      location: "images",
-      message: "Pass either images or indices, never both.",
-      hint: `Both name the same candidates two ways. Pass the pipelex-storage:// references as images, or their positions in ${WORKSHOP_TOOL_NAMES.runResults}' image_candidates as indices, or neither to show them all.`,
-      retryable: false,
-    });
+    errors.push(
+      argumentProblem(
+        "images",
+        "mutually_exclusive",
+        "Pass either images or indices, never both.",
+        `Both name the same candidates two ways. Pass the pipelex-storage:// references as images, or their positions in ${WORKSHOP_TOOL_NAMES.runResults}' image_candidates as indices, or neither to show them all.`,
+      ),
+    );
   }
   if (input.images !== undefined && input.images.length === 0) {
     errors.push(emptySelection("images"));
@@ -311,23 +301,22 @@ export function validateShowImagesRequest(input: MthdsShowImagesInput): ToolErro
   return errors;
 }
 
-function emptySelection(location: "images" | "indices"): ToolError {
-  return {
-    class: "input_domain",
-    location,
-    message: `${location} must not be empty when supplied.`,
-    hint: "Name at least one candidate, or omit the field to show every candidate the run produced.",
-    retryable: false,
-  };
+function emptySelection(field: "images" | "indices"): Problem {
+  return argumentProblem(
+    field,
+    "empty",
+    `${field} must not be empty when supplied.`,
+    "Name at least one candidate, or omit the field to show every candidate the run produced.",
+  );
 }
 
 export async function showMthdsRunImages(
   input: MthdsShowImagesInput,
   context: ImagesContext = buildImagesContext(),
 ): Promise<ShowImagesResult> {
-  const requestErrors = validateShowImagesRequest(input);
-  if (requestErrors.length > 0) {
-    return errorResult("No images were shown: request input is invalid.", requestErrors);
+  const faults = validateShowImagesRequest(input);
+  if (faults.length > 0) {
+    return errorResult(faultsProblem(faults), context.apiNotes);
   }
 
   // The run is read first, so a run that is still running, that failed, or
@@ -338,12 +327,7 @@ export async function showMthdsRunImages(
     client = imagesClient(context);
     state = await client.getRunResult(input.run_id, { artifacts: SHOW_IMAGES_RESULT_ARTIFACTS });
   } catch (err) {
-    const error = classifyError(err, {
-      ...RUN_RESULTS_ERROR_OPTIONS,
-      auth: context.authError,
-      baseUrlSource: context.baseUrlSource,
-    });
-    return errorResult(summaryForToolError(error, ERROR_SUMMARIES), [error]);
+    return errorResult(problemOf(err), context.apiNotes);
   }
 
   switch (state.state) {
@@ -357,23 +341,28 @@ export async function showMthdsRunImages(
 
   // The SDK guarantees a non-null main_stuff on a completed run (it throws
   // MissingMainStuffError otherwise); reaching here without one is a contract
-  // violation, surfaced as a runtime no-verdict like mthds_run_results does.
+  // violation, which the SDK itself reads as an answer it could not read.
   if (state.result.main_stuff == null) {
-    return errorResult("No images were shown: the Pipelex API returned a malformed report.", [
-      {
-        class: "runtime",
-        message: "Completed run results did not include main_stuff.",
-        hint: "The API responded but its report was missing required fields; inspect the run on the platform.",
-        retryable: false,
-      },
-    ]);
+    return errorResult(
+      buildProblem(
+        "client.response_unreadable",
+        { status: 200 },
+        {
+          extra: {
+            message:
+              "Completed run results did not include main_stuff, so no picture was looked for; inspect the run on the platform.",
+          },
+        },
+      ),
+      context.apiNotes,
+    );
   }
 
   const runId = state.pipeline_run_id;
   const candidates = imageCandidatesOf(state.result.main_stuff);
   const selection = selectCandidates(candidates, input);
   if (!selection.ok) {
-    return errorResult("No images were shown: request input is invalid.", [selection.error]);
+    return errorResult(selection.problem, context.apiNotes);
   }
   if (selection.selected.length === 0) {
     return emptyWalkResult(runId);
@@ -386,14 +375,12 @@ export async function showMthdsRunImages(
   // stopped the walk before ANY picture was shown there is no partial answer
   // to report: nothing was produced. Reporting `status: "ok"` there told a
   // consumer the call had succeeded on a deployment where every call fails
-  // deterministically, and it buried the classified cause (the `paywall`
-  // headline above all) under a generic "no picture could be shown" line.
-  // Once a picture HAS arrived, partial success is a produced verdict as
-  // before and the error rides its own entry.
-  if (walk.wholeRequestError !== undefined && walk.blocks.length === 0) {
-    return errorResult(summaryForToolError(walk.wholeRequestError, ERROR_SUMMARIES), [
-      walk.wholeRequestError,
-    ]);
+  // deterministically, and it buried the cause (a plan refusal above all)
+  // under a generic "no picture could be shown" line. Once a picture HAS
+  // arrived, partial success is a produced verdict as before and the problem
+  // rides its own entry.
+  if (walk.wholeRequestProblem !== undefined && walk.blocks.length === 0) {
+    return errorResult(walk.wholeRequestProblem, context.apiNotes);
   }
 
   return completedResult(runId, walk);
@@ -401,7 +388,7 @@ export async function showMthdsRunImages(
 
 // ── the selection ───────────────────────────────────────────────────
 
-type Selection = { ok: true; selected: ImageCandidate[] } | { ok: false; error: ToolError };
+type Selection = { ok: true; selected: ImageCandidate[] } | { ok: false; problem: Problem };
 
 /**
  * Intersect the caller's selection with what the run actually produced, so an
@@ -430,13 +417,12 @@ export function selectCandidates(
       if (candidate === undefined) {
         return {
           ok: false,
-          error: {
-            class: "input_domain",
-            location: "images",
-            message: `This run produced no image candidate with the reference ${uri}.`,
-            hint: `Take the references from ${WORKSHOP_TOOL_NAMES.runResults}' image_candidates for this run id — only a stored reference whose key looks like an image can be shown.`,
-            retryable: false,
-          },
+          problem: argumentProblem(
+            "images",
+            "not_a_candidate",
+            `This run produced no image candidate with the reference ${uri}.`,
+            `Take the references from ${WORKSHOP_TOOL_NAMES.runResults}' image_candidates for this run id — only a stored reference whose key looks like an image can be shown.`,
+          ),
         };
       }
       if (seen.has(candidate.uri)) continue;
@@ -454,13 +440,12 @@ export function selectCandidates(
       if (index < 0 || candidate === undefined) {
         return {
           ok: false,
-          error: {
-            class: "input_domain",
-            location: "indices",
-            message: `Index ${index} is outside this run's image candidates (${candidates.length} candidate(s)).`,
-            hint: `Indices are zero-based positions in ${WORKSHOP_TOOL_NAMES.runResults}' image_candidates for this run id. Pass the references themselves as images when the positions are not to hand.`,
-            retryable: false,
-          },
+          problem: argumentProblem(
+            "indices",
+            "out_of_range",
+            `Index ${index} is outside this run's image candidates (${candidates.length} candidate(s)).`,
+            `Indices are zero-based positions in ${WORKSHOP_TOOL_NAMES.runResults}' image_candidates for this run id. Pass the references themselves as images when the positions are not to hand.`,
+          ),
         };
       }
       if (seen.has(candidate.uri)) continue;
@@ -497,12 +482,12 @@ interface Walk {
    */
   unselected: number;
   /**
-   * The failure that was not about any one picture and ended the walk, when
+   * The problem that was not about any one picture and ended the walk, when
    * one occurred. It rides its own entry as well; this copy is what lets the
    * caller tell a call that produced a partial answer from one that produced
    * nothing at all.
    */
-  wholeRequestError?: ToolError;
+  wholeRequestProblem?: Problem;
 }
 
 /**
@@ -545,10 +530,9 @@ async function walkCandidates(
   let attempts = 0;
   let spent = 0;
   let stopped = false;
-  let wholeRequestError: ToolError | undefined;
+  let wholeRequestProblem: Problem | undefined;
 
   for (const candidate of listed) {
-    const location = `images[${entries.length}].uri`;
     if (stopped || attempts >= MAX_INLINE_IMAGES) {
       entries.push({ uri: candidate.uri, inlined: false, withheld: "count" });
       continue;
@@ -595,25 +579,17 @@ async function walkCandidates(
         // fault: it is a withholding with a reason, so the caller reads "too
         // big to show" rather than "something went wrong".
         entries.push(
-          err.code === "too_large"
+          err.reason === "too_large"
             ? { uri: candidate.uri, inlined: false, withheld: "size" }
-            : {
-                uri: candidate.uri,
-                inlined: false,
-                error: itemToolError({ code: err.code, detail: err.message }, location),
-              },
+            : { uri: candidate.uri, inlined: false, error: problemOf(err) },
         );
         continue;
       }
       // Not about this reference: the resolve route refused the whole request,
       // or the host is unreachable. Nothing after it can succeed either.
-      const error = classifyError(err, {
-        ...BULK_RESOLVE_ERROR_OPTIONS,
-        auth: context.authError,
-        baseUrlSource: context.baseUrlSource,
-      });
-      entries.push({ uri: candidate.uri, inlined: false, error });
-      wholeRequestError = error;
+      const problem = problemOf(err);
+      entries.push({ uri: candidate.uri, inlined: false, error: problem });
+      wholeRequestProblem = problem;
       stopped = true;
       continue;
     }
@@ -662,7 +638,7 @@ async function walkCandidates(
       }
       // The cap is also enforced per chunk, so a lying `Content-Length` errors
       // the stream here with the same code the declared-size refusal used.
-      if (err instanceof ArtifactFetchError && err.code === "too_large") {
+      if (err instanceof ArtifactFetchError && err.reason === "too_large") {
         entries.push({ uri: candidate.uri, mime_type: mimeType, inlined: false, withheld: "size" });
         continue;
       }
@@ -670,14 +646,7 @@ async function walkCandidates(
         uri: candidate.uri,
         mime_type: mimeType,
         inlined: false,
-        error:
-          err instanceof ArtifactFetchError
-            ? itemToolError({ code: err.code, detail: err.message }, location)
-            : classifyError(err, {
-                ...BULK_RESOLVE_ERROR_OPTIONS,
-                auth: context.authError,
-                baseUrlSource: context.baseUrlSource,
-              }),
+        error: problemOf(err),
       });
       continue;
     }
@@ -735,7 +704,7 @@ async function walkCandidates(
     blocks,
     omitted: selected.length - listed.length,
     unselected: produced - selected.length,
-    ...(wholeRequestError === undefined ? {} : { wholeRequestError }),
+    ...(wholeRequestProblem === undefined ? {} : { wholeRequestProblem }),
   };
 }
 
@@ -802,21 +771,25 @@ function runningResult(runId: string, retryAfterSeconds: number | null): ShowIma
   };
 }
 
+/**
+ * A run that ended without success: its own problem, from the failed arm or,
+ * when the arm carries none, from the status read that followed it, as
+ * `mthds_run_results` reads it.
+ */
 function failedResult(state: FailedRunState, failedRead: RunRead | undefined): ShowImagesResult {
   const runId = state.pipeline_run_id;
-  const failure = failureOfFailedArm(state, failedRead);
+  const runError = runErrorOfFailedArm(state, failedRead);
   return {
     structuredContent: {
       status: "ok",
       run_id: runId,
       state: "failed",
       run_status: state.status,
-      failure_message: failureMessageOf(state),
-      ...(failure === undefined ? {} : { failure }),
+      ...(runError === undefined ? {} : { run_error: runError }),
     },
     summary: [
       "# No images",
-      failedArmSummaryLines(state, failure, failedRead).join("\n"),
+      failedArmSummary(state, runError, failedRead),
       "A failed run produces no images to show.",
     ].join("\n\n"),
     imageBlocks: [],
@@ -916,8 +889,7 @@ function completedSummary(runId: string, walk: Walk): string {
   if (withheld.length > 0) {
     const lines = withheld.map((entry) => {
       if (entry.error !== undefined) {
-        const hint = entry.error.hint === undefined ? "" : ` *Hint: ${entry.error.hint}*`;
-        return `- \`${entry.uri}\` — failed: ${entry.error.message}${hint}`;
+        return `- \`${entry.uri}\` — failed: ${problemLine(entry.error)}`;
       }
       const reason =
         entry.withheld === undefined ? "it was not inlined" : WITHHELD_REASONS[entry.withheld];
@@ -940,19 +912,10 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
-const ERROR_SUMMARIES: ErrorSummaries = {
-  config: "Images could not be shown: the Pipelex API is unreachable or misconfigured.",
-  input_domain: "No images were shown: the Pipelex API rejected the request.",
-  runtime: "Images could not be shown: the Pipelex API returned an error.",
-  paywall: "Images could not be shown: the organization's Pipelex plan does not cover this call.",
-  auth: "Images could not be shown: the Pipelex API key is missing or was refused.",
-  role: "Images could not be shown: your role in this organization does not allow this.",
-};
-
-function errorResult(summary: string, errors: ToolError[]): ShowImagesResult {
+function errorResult(problem: Problem, notes: ApiNotes | undefined): ShowImagesResult {
   return {
-    structuredContent: { status: "error", errors },
-    summary,
+    structuredContent: { status: "error", problem },
+    summary: problemSummary(problem, notes),
     imageBlocks: [],
   };
 }
@@ -962,10 +925,7 @@ export function showImagesToolResult(result: ShowImagesResult) {
     structuredContent: result.structuredContent,
     // The text block first, the pictures after it, so a host that renders in
     // order shows the summary and then what it is about.
-    content: [
-      ...toolResultContent(result.summary, result.structuredContent.errors),
-      ...result.imageBlocks,
-    ],
+    content: [...toolResultContent(result.summary), ...result.imageBlocks],
     isError: result.structuredContent.status === "error",
   };
 }

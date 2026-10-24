@@ -1,6 +1,8 @@
 import { PipelexApiClient, RejectedAssetError } from "@pipelex/sdk";
 import type { UploadInput, UploadedFile } from "@pipelex/sdk";
 
+import { argumentProblem } from "./shared.js";
+
 /**
  * The real ceiling on `POST /v1/upload`, and a client that refuses past it
  * before spending a round-trip on a request the gateway will reject.
@@ -67,12 +69,15 @@ export function base64DecodedLength(data: string): number {
  * A `PipelexApiClient` that refuses an oversize upload locally instead of
  * letting the gateway answer `413` after the whole payload has crossed the
  * wire. It throws the same `RejectedAssetError` the SDK maps a real 413 onto,
- * `code: "too_large"` included — only the message improves, because it can
- * name the actual limit where the server's cannot. It does not reach a caller
- * the way a real 413 does, though: the SDK's `uploadFile` wraps whatever
- * `upload()` throws in an `UploadTransportError`, a real 413 being mapped
- * before that wrap, so this one arrives as the wrapper's `cause`, and
- * `classifyError` unwraps it.
+ * `reason: "too_large"` included, carrying the problem of a refusal made
+ * before anything left: `client.argument_invalid` naming `inputs`, the
+ * argument whose file it is, for the reason `upload_too_large`, with a
+ * `message` naming the file, its size and the actual limit, which the
+ * gateway's bare 413 cannot. Without that problem the SDK would read the
+ * status alone, a body that is no problem document, as an answer it could not
+ * read. The SDK's `uploadFile` wraps whatever `upload()` throws in an
+ * `UploadTransportError`, a real 413 being mapped before that wrap, so this
+ * one arrives as the wrapper's `cause`, and the wrapper carries its problem.
  *
  * `upload` is the only seam available here: the SDK's `prepareInputs` walk
  * calls it through `this`, so subclassing catches the workshop's delegated
@@ -88,12 +93,16 @@ export class SizeGuardedPipelexApiClient extends PipelexApiClient {
     const size = base64DecodedLength(input.data);
     if (size > MAX_UPLOAD_BYTES) {
       const shown = formatSizeOverLimit(size, MAX_UPLOAD_BYTES);
-      throw new RejectedAssetError(
-        `"${input.filename}" is ${shown.size}, over the ${shown.limit} Pipelex upload limit.`,
-        input.filename,
-        413,
-        { code: "too_large" },
-      );
+      const message = `"${input.filename}" is ${shown.size}, over the ${shown.limit} Pipelex upload limit.`;
+      throw new RejectedAssetError(message, input.filename, 413, {
+        reason: "too_large",
+        problem: argumentProblem(
+          "inputs",
+          "upload_too_large",
+          message,
+          "Shrink the file, or reference it by an http(s) URL instead.",
+        ),
+      });
     }
     return super.upload(input);
   }

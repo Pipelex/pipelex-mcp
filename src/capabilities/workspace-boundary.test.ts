@@ -68,8 +68,12 @@ describe("resolveSaveDir", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error.class).toBe("input_domain");
-    expect(result.error.location).toBe("dir");
+    expect(result.problem).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      params: { argument: "dir", reason: "outside_workspace" },
+      location: { field: "dir" },
+    });
     await expect(fs.stat(sibling)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
@@ -82,8 +86,9 @@ describe("resolveSaveDir", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error.location).toBe("dir");
-    expect(result.error.message).toContain("outside");
+    expect(result.problem.location).toEqual({ field: "dir" });
+    expect(result.problem.params).toEqual({ argument: "dir", reason: "outside_workspace" });
+    expect(result.problem.message).toContain("outside");
     // The escape was caught on the deepest existing ancestor: nothing was
     // created at the link's target.
     expect(await fs.readdir(outside)).toEqual([]);
@@ -97,7 +102,12 @@ describe("resolveSaveDir", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error.location).toBe("dir");
+    expect(result.problem.location).toEqual({ field: "dir" });
+    // `mkdir -p` refuses a path a file holds, so the directory cannot be used.
+    expect(result.problem).toMatchObject({
+      code: "client.write_failed",
+      params: { path: "notes.txt", reason: "EEXIST" },
+    });
   });
 
   it("locates its refusals at the caller's own field name", async () => {
@@ -107,8 +117,9 @@ describe("resolveSaveDir", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error.location).toBe("output_dir");
-    expect(result.error.message).toContain("output_dir");
+    expect(result.problem.location).toEqual({ field: "output_dir" });
+    expect(result.problem.params).toMatchObject({ argument: "output_dir" });
+    expect(result.problem.message).toContain("output_dir");
   });
 });
 
@@ -130,8 +141,9 @@ describe("escapedDirectoryError", () => {
 
     for (const dir of ["linked", "linked/not-yet", "../elsewhere"]) {
       expect(await escapedDirectoryError(root, dir, "link_dir")).toMatchObject({
-        class: "input_domain",
-        location: "link_dir",
+        code: "client.argument_invalid",
+        params: { argument: "link_dir", reason: "outside_workspace" },
+        location: { field: "link_dir" },
       });
     }
     await expect(fs.access(path.join(outside, "not-yet"))).rejects.toThrow();

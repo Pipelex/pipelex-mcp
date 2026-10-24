@@ -8,7 +8,7 @@ import { treeDigest } from "mthds";
 
 import { GRAPH_PAGE_FILENAME, GRAPH_PAGE_MARK } from "./capabilities/graph-page.js";
 import type { ListingLimits } from "./capabilities/method-tree.js";
-import type { MethodTreeRead } from "./capabilities/shared.js";
+import type { MethodTreeRead, Refusal } from "./capabilities/shared.js";
 import { FALLBACK_TREE_LIMITS } from "./capabilities/tree-limits.js";
 import { localFileResolver, localMethodFileResolver } from "./files.js";
 
@@ -61,7 +61,9 @@ describe("localFileResolver", () => {
     expect(resolution.ok).toBe(false);
     if (!resolution.ok) {
       expect(resolution.message).toBe("File not found: missing.mthds");
-      expect(resolution.hint).toContain("working directory");
+      expect(resolution.remedy).toContain("working directory");
+      // A file that is not there cannot be read: client.file_unreadable at its path.
+      expect(resolution).toMatchObject({ reason: "not_found", unreadable: "missing.mthds" });
     }
   });
 
@@ -85,6 +87,9 @@ describe("localFileResolver", () => {
     expect(resolution.ok).toBe(false);
     if (!resolution.ok) {
       expect(resolution.message).toMatch(/outside the server's working directory/);
+      // A refused argument, not an unreadable file: nothing outside is opened.
+      expect(resolution.reason).toBe("outside_workspace");
+      expect(resolution.unreadable).toBeUndefined();
     }
   });
 
@@ -123,6 +128,7 @@ describe("localFileResolver", () => {
     expect(resolution.ok).toBe(false);
     if (!resolution.ok) {
       expect(resolution.message).toMatch(/not a regular file/);
+      expect(resolution).toMatchObject({ reason: "not_a_file", unreadable: "bundle.mthds" });
     }
   });
 
@@ -136,7 +142,7 @@ describe("localFileResolver", () => {
       expect(resolution.message).toMatch(/not a \.mthds file/);
       // The secret must not leak into the failure surface.
       expect(resolution.message).not.toContain("SECRET");
-      expect(resolution.hint).not.toContain("SECRET");
+      expect(resolution.remedy).not.toContain("SECRET");
     }
   });
 
@@ -307,10 +313,11 @@ describe("localMethodFileResolver", () => {
 
         expect(resolution).toEqual({
           ok: false,
+          reason: "wrong_extension",
           message: `Path is not a .mthds file or a template file: ${name}`,
-          hint: expect.stringContaining(".html, .xlsx, .docx, .pptx"),
+          remedy: expect.stringContaining(".html, .xlsx, .docx, .pptx"),
         });
-        expect(resolution.ok === false && resolution.hint).toContain("method_dir");
+        expect(resolution.ok === false && resolution.remedy).toContain("method_dir");
       },
     );
 
@@ -374,7 +381,7 @@ describe("localMethodFileResolver", () => {
     async function refusalOf(
       methodDir: string,
       options: { limits?: ListingLimits; save?: boolean } = {},
-    ): Promise<{ message: string; hint: string }> {
+    ): Promise<Refusal> {
       const tree = await folder(methodDir, options);
       if (tree.ok)
         throw new Error(`expected a refusal, read ${tree.files.map((f) => f.path).join(", ")}`);
@@ -478,26 +485,28 @@ describe("localMethodFileResolver", () => {
       await fs.symlink(outsideDir, path.join(rootDir, "linked"));
       const byLink = await refusalOf("linked");
       expect(byLink.message).toContain("resolves outside the server's working directory");
-      expect(byLink.hint).toContain("files");
+      expect(byLink.remedy).toContain("files");
     });
 
     it("refuses a missing folder and a file passed as a folder", async () => {
       const missing = await refusalOf("methods/nowhere");
       expect(missing.message).toBe("Folder not found: methods/nowhere");
-      expect(missing.hint).toContain("working directory");
+      expect(missing.remedy).toContain("working directory");
+      expect(missing).toMatchObject({ reason: "not_found", unreadable: "methods/nowhere" });
 
       const file = await refusalOf("methods/invoice/invoice.mthds");
       expect(file.message).toBe("method_dir is not a directory: methods/invoice/invoice.mthds");
-      expect(file.hint).toContain("files");
+      expect(file.remedy).toContain("files");
+      expect(file.reason).toBe("not_a_directory");
     });
 
     it("words a save's refusals for a tool that takes a folder alone", async () => {
       const missing = await refusalOf("methods/nowhere", { save: true });
-      expect(missing.hint).toContain("then save the folder again.");
-      expect(missing.hint).not.toContain("files");
+      expect(missing.remedy).toContain("then save the folder again.");
+      expect(missing.remedy).not.toContain("files");
 
       const file = await refusalOf("methods/invoice/invoice.mthds", { save: true });
-      expect(file.hint).toContain("its whole tree is what a save stores");
+      expect(file.remedy).toContain("its whole tree is what a save stores");
     });
 
     it("refuses a folder with no .mthds file at its top, naming the deeper ones", async () => {
@@ -506,7 +515,7 @@ describe("localMethodFileResolver", () => {
       expect(refusal.message).toBe(
         `methods holds no .mthds file at its top; it holds ${path.join("methods", "invoice", "invoice.mthds")} further down.`,
       );
-      expect(refusal.hint).toContain(".gitignore");
+      expect(refusal.remedy).toContain(".gitignore");
 
       await fs.mkdir(path.join(rootDir, "empty"));
       expect((await refusalOf("empty")).message).toBe("empty holds no .mthds file at its top.");
@@ -521,7 +530,7 @@ describe("localMethodFileResolver", () => {
 
       const refusal = await refusalOf("methods/invoice");
       expect(refusal.message).toContain("holds a symbolic link, 'templates/alias.xlsx'");
-      expect(refusal.hint).toContain("never followed");
+      expect(refusal.remedy).toContain("never followed");
 
       await place("methods/invoice/.gitignore", "alias.xlsx\n");
       expect(await sent("methods/invoice")).toEqual(["invoice.mthds", "templates/invoice.xlsx"]);
@@ -537,7 +546,7 @@ describe("localMethodFileResolver", () => {
       expect(deployment.message).toContain(
         "The Pipelex deployment this workshop talks to takes no method holding more than 2 files.",
       );
-      expect(deployment.hint).toContain(".gitignore");
+      expect(deployment.remedy).toContain(".gitignore");
 
       await placeSparse("methods/invoice/samples/scan.pdf", 4096);
       const size = await refusalOf("methods/invoice", {

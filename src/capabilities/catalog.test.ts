@@ -100,8 +100,33 @@ describe("mthds_list_methods schemas", () => {
     expect(calls).toBe(0);
     expect(result.structuredContent).toMatchObject({
       status: "error",
-      errors: [{ class: "input_domain", location: "limit", retryable: false }],
+      problem: {
+        code: "client.argument_invalid",
+        domain: "input",
+        retry: "no",
+        params: { argument: "limit", reason: "too_small" },
+        location: { field: "limit" },
+      },
     });
+  });
+
+  it("refuses every invalid argument in one problem, each fault listed", async () => {
+    const result = await listMthdsMethods(
+      { limit: 0, cursor: "" },
+      context({
+        async listMethods() {
+          return page([]);
+        },
+      }),
+    );
+
+    const problem = firstProblem(result);
+    expect(problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "limit", reason: "several_faults" },
+    });
+    expect(problem?.errors?.map((item) => item.location?.field)).toEqual(["limit", "cursor"]);
+    expect(problem?.errors?.every((item) => item.code === "client.argument_invalid")).toBe(true);
   });
 });
 
@@ -334,122 +359,133 @@ describe("listMthdsMethods projection", () => {
 });
 
 describe("listMthdsMethods failures", () => {
-  it("maps unreachable API failures to retryable config", async () => {
+  it("relays an unreachable API as the SDK's client.unreachable, naming the base URL", async () => {
     const result = await failure(
       new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED"),
     );
-    expect(firstError(result)).toMatchObject({
-      class: "config",
-      location: "PIPELEX_BASE_URL",
-      retryable: true,
+    expect(firstProblem(result)).toMatchObject({
+      code: "client.unreachable",
+      domain: "runtime",
+      retry: "yes",
+      params: { base_url: DEFAULT_API_URL },
     });
+    // The fix may be the base URL, so the summary says which API was used.
+    expect(result.summary).toContain("PIPELEX_BASE_URL");
   });
 
-  it("maps HTTP auth failures through deployment auth texture", async () => {
-    for (const error of [apiError(401, "Unauthorized"), apiError(403, "Forbidden")]) {
+  it("closes a refused key's summary with the call's own key note", async () => {
+    for (const error of [apiError(401), apiError(403)]) {
       const result = await failure(error, {
-        authError: { location: "api_key", hint: "Bring your own key." },
+        apiNotes: { apiKey: "Bring your own key.", baseUrl: "The API is the dev one." },
       });
-      expect(firstError(result)).toMatchObject({
-        class: "config",
-        location: "api_key",
-        hint: "Bring your own key.",
-        retryable: false,
-      });
+      const problem = firstProblem(result);
+      expect(problem?.code).toMatch(/^auth\./);
+      expect(problem?.domain).toBe("account");
+      expect(problem?.retry).toBe("no");
+      expect(result.summary).toContain("Bring your own key.");
+      expect(result.summary).toContain("The API is the dev one.");
     }
   });
 
-  it("maps missing active-org context (400) to config at the deployment key location", async () => {
-    const result = await failure(apiError(400, "No active organization"), {
-      authError: { location: "api_key", hint: "Bring your own key." },
-    });
-
-    expect(firstError(result)).toMatchObject({
-      class: "config",
-      location: "api_key",
-      retryable: false,
-    });
-    expect(firstError(result)?.hint).toContain("active organization");
-  });
-
-  it("blames the cursor, not the key, when a 400 answers a request that carried one", async () => {
-    // The route has two unrelated bad-request causes and only the request shape
-    // tells them apart. The live API answers a stale cursor with `Invalid cursor`;
-    // routing that to config@PIPELEX_API_KEY sends the caller to rotate a key that
-    // was never wrong, and a machine consumer branches on `class`, not the wording.
-    const result = await failure(apiError(400, "Invalid cursor"), {}, { cursor: "stale-cursor" });
-
-    expect(firstError(result)).toMatchObject({
-      class: "input_domain",
-      location: "cursor",
-      retryable: false,
-    });
-    expect(firstError(result)?.hint).toContain("from the start");
-    expect(firstError(result)?.hint).not.toContain("organization");
-  });
-
-  it("headlines a missing or refused key as the key, not as connectivity", async () => {
-    for (const status of [401, 403]) {
-      const refused = await failure(apiError(status, "Missing API key"));
-      expect(firstError(refused), String(status)).toMatchObject({
-        class: "config",
-        kind: "auth",
-        location: "PIPELEX_API_KEY",
-        retryable: false,
-      });
-      expect(refused.summary, String(status)).toBe(
-        "Method catalog could not be listed: the Pipelex API key is missing or was refused.",
-      );
-    }
-  });
-
-  it("maps paywall, missing route, and server faults with catalog-specific semantics", async () => {
-    const paywall = await failure(apiError(402, "Subscription required"));
-    expect(firstError(paywall)).toMatchObject({
-      class: "config",
-      kind: "paywall",
-      retryable: false,
-    });
-    // A headline-only host shows just this line, so it must name the plan
-    // rather than the connectivity headline every other `config` error gets.
-    expect(paywall.summary).toBe(
-      "Method catalog could not be listed: the organization's Pipelex plan does not cover this call.",
+  it("relays the platform's problem for a key acting for no organization, request id included", async () => {
+    const result = await failure(
+      platformError(400, {
+        code: "pipelex.org.required",
+        title: "An organization is required",
+        detail: "This operation acts on an organization, and the request acts for none.",
+        domain: "account",
+        next_step: { kind: "contact_owner", detail: "Use a key minted for an organization." },
+        request_id: "req_org",
+      }),
     );
-    expect(paywall.summary).not.toMatch(/misconfigured/);
 
-    const missingRoute = firstError(await failure(apiError(404, "Not found")));
-    expect(missingRoute).toMatchObject({
-      class: "config",
-      location: "PIPELEX_BASE_URL",
-      retryable: false,
+    expect(firstProblem(result)).toMatchObject({
+      code: "pipelex.org.required",
+      domain: "account",
+      retry: "no",
+      request_id: "req_org",
     });
-    expect(missingRoute?.hint).toContain("/v1/methods");
+    expect(result.summary).toContain("## An organization is required");
+    expect(result.summary).toContain("acts for none");
+    expect(result.summary).toContain("Use a key minted for an organization.");
+    expect(result.summary).toContain("`pipelex.org.required`");
+    expect(result.summary).toContain("`req_org`");
+  });
 
-    expect(firstError(await failure(apiError(503, "Unavailable")))).toMatchObject({
-      class: "runtime",
-      retryable: true,
+  it("relays the API's refusal of a stale cursor as the caller's input, not as the key", async () => {
+    // The route has two unrelated bad-request causes and only the API's own
+    // problem tells them apart now: its code and location name the cursor.
+    const result = await failure(
+      platformError(400, {
+        code: "request.invalid",
+        title: "A request field is invalid",
+        detail: "The request's field 'cursor' does not match the route's schema.",
+        domain: "input",
+        next_step: { kind: "change_input", detail: "Drop the cursor and list again." },
+        params: { field: "cursor" },
+        location: { field: "cursor" },
+      }),
+      {},
+      { cursor: "stale-cursor" },
+    );
+
+    expect(firstProblem(result)).toMatchObject({
+      code: "request.invalid",
+      domain: "input",
+      location: { field: "cursor" },
+    });
+    // A cursor fault is not a credential fault: no key note.
+    expect(result.summary).not.toContain("PIPELEX_API_KEY");
+  });
+
+  it("relays a plan limit, a missing route and a server fault as the API's problems", async () => {
+    const paywall = await failure(
+      platformError(402, {
+        code: "pipelex.billing.credit_exhausted",
+        title: "The organization has no credit left",
+        detail: "The organization has no credit left, so the operation was refused.",
+        domain: "account",
+        next_step: { kind: "contact_owner", detail: "Ask the organization's owner to add credit." },
+      }),
+    );
+    expect(firstProblem(paywall)).toMatchObject({
+      code: "pipelex.billing.credit_exhausted",
+      domain: "account",
+      retry: "no",
+    });
+    // A plan limit names the plan, never a misconfigured API.
+    expect(paywall.summary).toContain("no credit left");
+    expect(paywall.summary).not.toContain("PIPELEX_BASE_URL");
+
+    const missingRoute = await failure(apiError(404));
+    expect(firstProblem(missingRoute)).toMatchObject({ code: "request.not_found", retry: "no" });
+    expect(missingRoute.summary).toContain("PIPELEX_BASE_URL");
+
+    expect(firstProblem(await failure(apiError(503)))).toMatchObject({
+      code: "runtime.unavailable",
+      domain: "runtime",
+      retry: "yes",
     });
   });
 
-  it("maps unknown errors to retryable runtime", async () => {
-    expect(firstError(await failure(new Error("boom")))).toMatchObject({
-      class: "runtime",
+  it("reads an error the SDK did not raise as runtime.unexpected, carrying its message", async () => {
+    expect(firstProblem(await failure(new Error("boom")))).toMatchObject({
+      code: "runtime.unexpected",
+      domain: "runtime",
       message: "boom",
-      retryable: true,
     });
   });
 
-  it("classifies malformed base URLs instead of rejecting the handler", async () => {
+  it("relays a malformed base URL as the SDK's problem instead of rejecting the handler", async () => {
     const result = await listMthdsMethods({}, { baseUrl: "not a url" });
 
-    expect(firstError(result)).toMatchObject({
-      class: "config",
-      location: "PIPELEX_BASE_URL",
-      retryable: false,
+    expect(firstProblem(result)).toMatchObject({
+      code: "client.not_configured",
+      params: { setting: "base_url" },
     });
   });
 
-  it("maps non-page and malformed rows to non-retryable runtime contract errors", async () => {
+  it("reads non-page and malformed rows as an answer this server cannot use", async () => {
     const nonPage = await listMthdsMethods(
       {},
       context({
@@ -459,7 +495,10 @@ describe("listMthdsMethods failures", () => {
         },
       }),
     );
-    expect(firstError(nonPage)).toMatchObject({ class: "runtime", retryable: false });
+    expect(firstProblem(nonPage)).toMatchObject({
+      code: "client.response_unreadable",
+      retry: "no",
+    });
 
     const malformed = await listMthdsMethods(
       {},
@@ -469,8 +508,8 @@ describe("listMthdsMethods failures", () => {
         },
       }),
     );
-    expect(firstError(malformed)).toMatchObject({ class: "runtime", retryable: false });
-    expect(firstError(malformed)?.message).toContain("name");
+    expect(firstProblem(malformed)).toMatchObject({ code: "client.response_unreadable" });
+    expect(firstProblem(malformed)?.message).toContain("name");
   });
 
   it("treats an absent nextCursor as a contract break, never as the end of the catalog", async () => {
@@ -487,16 +526,20 @@ describe("listMthdsMethods failures", () => {
       }),
     );
 
-    expect(firstError(result)).toMatchObject({ class: "runtime", retryable: false });
-    expect(firstError(result)?.message).toContain("nextCursor");
+    expect(firstProblem(result)).toMatchObject({ code: "client.response_unreadable" });
+    expect(firstProblem(result)?.message).toContain("nextCursor");
   });
 
-  it("marks MCP tool results as errors and surfaces classified detail in content", async () => {
-    const result = catalogToolResult(await failure(apiError(404, "Not found")));
+  it("marks MCP tool results as errors and renders the problem in content", async () => {
+    const result = catalogToolResult(await failure(apiError(404)));
 
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("PIPELEX_BASE_URL");
-    expect(result.content[0].text).toContain("/v1/methods");
+    const text = result.content[0].text;
+    expect(text).toContain("## ");
+    expect(text).toContain("`request.not_found`");
+    expect(text).toContain("**Next step**");
+    expect(text).toContain("`req_404`");
+    expect(text).toContain("PIPELEX_BASE_URL");
   });
 });
 
@@ -516,22 +559,41 @@ async function failure(
   });
 }
 
-function firstError(result: Awaited<ReturnType<typeof listMthdsMethods>>) {
-  return result.structuredContent.status === "error"
-    ? result.structuredContent.errors[0]
-    : undefined;
+function firstProblem(result: Awaited<ReturnType<typeof listMthdsMethods>>) {
+  return result.structuredContent.status === "error" ? result.structuredContent.problem : undefined;
 }
 
-function apiError(status: number, message: string): ApiResponseError {
+/** An answer with no problem body, which the SDK reads by its status; its request id rides the header. */
+function apiError(status: number): ApiResponseError {
   return new ApiResponseError(
     `HTTP ${status}`,
     `${DEFAULT_API_URL}/v1/methods`,
     status,
-    message,
+    "Refused",
     "{}",
-    status === 402 ? "subscription_required" : "request_error",
-    message,
-    undefined,
-    undefined,
+    { headers: { "x-request-id": `req_${status}` } },
+  );
+}
+
+/** A platform refusal carrying its problem document, as the hosted API answers every refusal. */
+function platformError(
+  status: number,
+  problem: { code: string; title: string; detail: string; domain: string } & Record<
+    string,
+    unknown
+  >,
+): ApiResponseError {
+  return new ApiResponseError(
+    `HTTP ${status}`,
+    `${DEFAULT_API_URL}/v1/methods`,
+    status,
+    "Refused",
+    JSON.stringify({
+      type: `https://docs.pipelex.com/errors/${problem.code}`,
+      status,
+      retry: "no",
+      next_step: { kind: "report", detail: "Report it." },
+      ...problem,
+    }),
   );
 }

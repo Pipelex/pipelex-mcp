@@ -1,24 +1,20 @@
+import { buildProblem } from "@pipelex/sdk";
 import type { ListMethodsQuery, MethodPage } from "@pipelex/sdk";
 import { z } from "zod";
 
 import {
+  argumentProblem,
   asOneLine,
   boundCodePoints,
   buildApiConfig,
-  classifyError,
   createPipelexApiClient,
-  summaryForToolError,
-  toolErrorSchema,
+  faultsProblem,
+  problemOf,
+  problemSchema,
+  problemSummary,
   toolResultContent,
 } from "./shared.js";
-import type {
-  ApiConfig,
-  AuthErrorTexture,
-  BaseUrlSourceTexture,
-  ClassifyErrorOptions,
-  ErrorSummaries,
-  ToolError,
-} from "./shared.js";
+import type { ApiConfig, ApiNotes, Problem } from "./shared.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 
 export const CATALOG_DEFAULT_LIMIT = 20;
@@ -68,7 +64,7 @@ export const mthdsListMethodsOutputSchema = z.object({
   returned_count: z.number().int().nonnegative().optional(),
   next_cursor: z.string().nullable().optional(),
   methods: z.array(catalogMethodSchema).optional(),
-  errors: z.array(toolErrorSchema).optional(),
+  problem: problemSchema.optional(),
 });
 
 export interface MthdsListMethodsInput {
@@ -95,7 +91,7 @@ export interface CatalogSuccess {
 
 export interface CatalogFailure {
   status: "error";
-  errors: ToolError[];
+  problem: Problem;
 }
 
 export type CatalogStructuredContent = CatalogSuccess | CatalogFailure;
@@ -112,10 +108,8 @@ export interface CatalogClient {
 
 export interface CatalogContext extends ApiConfig {
   client?: CatalogClient;
-  /** Deployment-specific auth-failure texture; env-var wording by default. */
-  authError?: AuthErrorTexture;
-  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
-  baseUrlSource?: BaseUrlSourceTexture;
+  /** Where the call's key and base URL came from, closing a failed request's summary. */
+  apiNotes?: ApiNotes;
 }
 
 export function buildCatalogContext(env = process.env): CatalogContext {
@@ -138,16 +132,13 @@ export async function listMthdsMethods(
 ): Promise<CatalogResult> {
   const normalized = normalizeInput(input);
   if (!normalized.ok) {
-    return errorResult(
-      "Method catalog was not listed: request input is invalid.",
-      normalized.errors,
-    );
+    return errorResult(faultsProblem(normalized.faults), context);
   }
 
   let page: MethodPage;
   try {
-    // Client construction stays inside the caught path: malformed base URLs
-    // must become classified tool errors, not rejected MCP handlers.
+    // Client construction stays inside the caught path: a malformed base URL
+    // must become the SDK's problem, not a rejected MCP handler.
     // Search and paging are the SERVER's job: filtering one page client-side
     // would be searching 50 of 10,000 rows and calling it a search.
     page = await catalogClient(context).listMethods({
@@ -156,40 +147,40 @@ export async function listMthdsMethods(
       ...(normalized.input.cursor === undefined ? {} : { cursor: normalized.input.cursor }),
     });
   } catch (err) {
-    const error = classifyError(err, catalogErrorOptions(context, normalized.input));
-    return errorResult(summaryForError(error), [error]);
+    // The API's own problem, relayed: a stale cursor, a key acting for no
+    // organization, a refused key, a plan limit each carry their own code.
+    return errorResult(problemOf(err), context);
   }
 
   try {
     return projectCatalog(page, normalized.input);
   } catch (err) {
+    // The API answered, and its page breaks the route's contract: an answer
+    // this server cannot use, which no argument changes.
     const message =
       err instanceof Error ? err.message : "The Pipelex API returned a malformed methods catalog.";
-    return errorResult("Method catalog produced no verdict: the API returned malformed data.", [
-      {
-        class: "runtime",
-        message,
-        hint: "The API responded, but its methods payload violated the SDK contract; inspect the hosted API.",
-        retryable: false,
-      },
-    ]);
+    return errorResult(
+      buildProblem("client.response_unreadable", { status: 200 }, { extra: { message } }),
+      context,
+    );
   }
 }
 
 function normalizeInput(
   input: MthdsListMethodsInput,
-): { ok: true; input: NormalizedCatalogInput } | { ok: false; errors: ToolError[] } {
+): { ok: true; input: NormalizedCatalogInput } | { ok: false; faults: Problem[] } {
   const parsed = mthdsListMethodsInputObjectSchema.safeParse(input);
   if (!parsed.success) {
     return {
       ok: false,
-      errors: parsed.error.issues.map((issue) => ({
-        class: "input_domain",
-        ...(issue.path.length === 0 ? {} : { location: issue.path.join(".") }),
-        message: issue.message,
-        hint: `Use query as text, limit as an integer from 1 to ${CATALOG_MAX_LIMIT}, and cursor as the opaque next_cursor from a previous call.`,
-        retryable: false,
-      })),
+      faults: parsed.error.issues.map((issue) =>
+        argumentProblem(
+          issue.path.length === 0 ? "arguments" : issue.path.join("."),
+          issue.code,
+          issue.message,
+          `Use query as text, limit as an integer from 1 to ${CATALOG_MAX_LIMIT}, and cursor as the opaque next_cursor from a previous call.`,
+        ),
+      ),
     };
   }
 
@@ -317,7 +308,7 @@ function projectRow(row: ValidatedRow): CatalogMethod {
  *    getMethod per row — the exact read the index exists to avoid. A
  *    source-less method now announces itself where the answer is actionable
  *    rather than advisory: passing its id to validate, inputs-template,
- *    prepare or run fails fast as an input_domain no-verdict at `method_id`.
+ *    prepare or run fails fast with the API's problem about that id.
  *
  * Names and descriptions are org-authored, hence untrusted: they are collapsed
  * to one line so they cannot break out of their bullet, and the directive names
@@ -359,65 +350,20 @@ function catalogSummary(result: CatalogSuccess, query: string): string {
 }
 
 /**
- * The 400/422 arm is chosen by REQUEST SHAPE, because this route has two
- * unrelated bad-request causes and only the caller's own input tells them apart.
- *
- * Without a cursor the only reachable rejection is a missing active-organization
- * context, which is a credential problem. With one, the far likelier cause is the
- * cursor itself — the API answers a stale or corrupted one with `Invalid cursor`,
- * and routing that to `config`@`PIPELEX_API_KEY` sends the caller to rotate a key
- * that was never wrong. The class matters more than the wording: a machine
- * consumer branches on it, so a paging fault must not read as an auth fault.
+ * A no-verdict result: the problem, and its Markdown summary, closed by the
+ * notes on the call's key and base URL when the fix may be one of them.
  */
-function catalogErrorOptions(
-  context: CatalogContext,
-  input: NormalizedCatalogInput,
-): ClassifyErrorOptions {
+function errorResult(problem: Problem, context: CatalogContext): CatalogResult {
   return {
-    route: "/v1/methods",
-    badRequest:
-      input.cursor === undefined
-        ? {
-            class: "config",
-            location: context.authError?.location ?? "PIPELEX_API_KEY",
-            hint: "The methods catalog needs an active organization context. Use a platform key minted for the intended organization, then retry.",
-          }
-        : {
-            // No `class` override: a rejected cursor is the caller's input, so it
-            // takes the default `input_domain`.
-            location: "cursor",
-            hint: `The cursor was rejected — it may be stale, truncated, or from a different catalog. Drop it and call ${WORKSHOP_TOOL_NAMES.listMethods} again from the start.`,
-          },
-    auth: context.authError,
-    baseUrlSource: context.baseUrlSource,
+    structuredContent: { status: "error", problem },
+    summary: problemSummary(problem, context.apiNotes),
   };
-}
-
-const ERROR_SUMMARIES: ErrorSummaries = {
-  config: "Method catalog could not be listed: the Pipelex API or catalog access is misconfigured.",
-  input_domain: "Method catalog was not listed: the Pipelex API rejected the request.",
-  runtime: "Method catalog could not be listed: the Pipelex API returned an error.",
-  paywall:
-    "Method catalog could not be listed: the organization's Pipelex plan does not cover this call.",
-  auth: "Method catalog could not be listed: the Pipelex API key is missing or was refused.",
-  role: "Method catalog could not be listed: your role in this organization does not allow this.",
-};
-
-function summaryForError(error: ToolError): string {
-  return summaryForToolError(error, ERROR_SUMMARIES);
-}
-
-function errorResult(summary: string, errors: ToolError[]): CatalogResult {
-  return { structuredContent: { status: "error", errors }, summary };
 }
 
 export function catalogToolResult(result: CatalogResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(
-      result.summary,
-      result.structuredContent.status === "error" ? result.structuredContent.errors : undefined,
-    ),
+    content: toolResultContent(result.summary),
     isError: result.structuredContent.status === "error",
   };
 }

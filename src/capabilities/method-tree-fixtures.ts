@@ -34,7 +34,7 @@ export function fakeMethodResolver(
     async statMethodFile(submitted) {
       const content = files[submitted];
       if (content === undefined) {
-        return { ok: false, message: `File not found: ${submitted}`, hint: "Check the path." };
+        return { ok: false, message: `File not found: ${submitted}`, remedy: "Check the path." };
       }
       const absolute = path.posix.resolve("/w", submitted);
       return {
@@ -47,11 +47,11 @@ export function fakeMethodResolver(
     async readMethodFile(submitted, options) {
       const content = files[submitted];
       if (content === undefined) {
-        return { ok: false, message: `File not found: ${submitted}`, hint: "Check the path." };
+        return { ok: false, message: `File not found: ${submitted}`, remedy: "Check the path." };
       }
       const bytes = bytesOf(content);
       if (bytes.byteLength > options.maxBytes) {
-        return { ok: false, message: `File is too large: ${submitted}`, hint: "Shrink it." };
+        return { ok: false, message: `File is too large: ${submitted}`, remedy: "Shrink it." };
       }
       return { ok: true, bytes };
     },

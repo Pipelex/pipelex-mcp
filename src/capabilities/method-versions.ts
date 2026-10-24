@@ -1,7 +1,8 @@
-import { ApiResponseError, parseMethodSelector } from "@pipelex/sdk";
+import { parseMethodSelector } from "@pipelex/sdk";
 import { z } from "zod";
 
-import type { ToolError } from "./shared.js";
+import { argumentProblem } from "./shared.js";
+import type { Problem } from "./shared.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 
 /**
@@ -33,8 +34,8 @@ import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
  * published version — every method existing when the platform started
  * resolving versions was published as version 1, so that version almost
  * always differs from an edited draft. A platform that does not resolve a
- * suffix refuses it, loudly, and the refusal's hint says that a bare id reads
- * the draft there.
+ * suffix refuses it, loudly, and this server's note on the refusal says that
+ * a bare id reads the draft there.
  *
  * Only `supported` is cached, for ten minutes, in the memory the workshop
  * shares across its tools (`createMethodVersionsMemories`), one answer per
@@ -48,7 +49,7 @@ import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
  * acknowledgement catches it there, and a tooling route cannot. `unknown` is
  * never cached either. A handshake is given three seconds, and past that the
  * call reads `unknown`. The answer is asked only for a bare id whose result
- * says what it read, and for a refusal's hint, and a bare id's is asked
+ * says what it read, and for a refusal's note, and a bare id's is asked
  * beside its request, never before it: what is sent never depends on it, so
  * only the result's sentence waits for it.
  *
@@ -353,7 +354,7 @@ export interface SelectorPlan {
    * resolve versions and so never caches its answer. Never rejects.
    */
   reads: Promise<MethodVersionReport | undefined>;
-  /** Asks the platform, for the hint of a refused suffix; absent when the client cannot. */
+  /** Asks the platform, for the note on a refused suffix; absent when the client cannot. */
   readVersion?: VersionReader;
 }
 
@@ -409,17 +410,16 @@ export function planMethodSelector(
 export function linkageSuffixError(
   value: string,
   source: "files" | "method_dir" = "files",
-): ToolError | undefined {
+): Problem | undefined {
   const selector = readMethodSelector(value);
   if (selector.form !== "draft" && selector.form !== "version") return undefined;
   const runs = source === "files" ? "these files" : "the folder";
-  return {
-    class: "input_domain",
-    location: "method_id",
-    message: `Beside ${source}, method_id only files the run under its method, so it must be the bare id \`${selector.methodId}\`, not \`${value}\`: ${source === "files" ? "the files are" : "the folder is"} what runs, and a version suffix would claim a version that did not.`,
-    hint: `Pass method_id "${selector.methodId}" to run ${runs} and record the run under the method, or drop ${source} to run \`${value}\` itself.`,
-    retryable: false,
-  };
+  return argumentProblem(
+    "method_id",
+    "suffix_on_linkage",
+    `Beside ${source}, method_id only files the run under its method, so it must be the bare id \`${selector.methodId}\`, not \`${value}\`: ${source === "files" ? "the files are" : "the folder is"} what runs, and a version suffix would claim a version that did not.`,
+    `Pass method_id "${selector.methodId}" to run ${runs} and record the run under the method, or drop ${source} to run \`${value}\` itself.`,
+  );
 }
 
 // ── what a result says ──────────────────────────────────────────────
@@ -458,104 +458,100 @@ export function methodContentSentence(
   return `This ${verb} ${phrase}.`;
 }
 
-/** The platform codes that prove it resolved the selector it was sent. */
-const SELECTOR_RESOLVED_CODES: ReadonlySet<string> = new Set([
-  "method_version_not_found",
-  "method_not_published",
-]);
+/** A bare id's refusal for a method never published, which only a platform that resolves selectors sends. */
+const NOT_PUBLISHED_CODE = "pipelex.catalog.not_published";
+
+/** The catalog's miss, of a method, a version or an example as its `resource` parameter says. */
+const CATALOG_NOT_FOUND_CODE = "pipelex.catalog.not_found";
 
 /**
- * Whether `err` is a refusal only a platform that resolves selectors sends: a
- * `409` `method_not_published` or a `404` `method_version_not_found`. Either
- * proves the capability, whatever the memory says.
+ * Whether `problem` is a refusal only a platform that resolves selectors
+ * sends: a `409` `pipelex.catalog.not_published`, or a `404`
+ * `pipelex.catalog.not_found` of a version. Either proves the capability,
+ * whatever the memory says.
  */
-function provesMethodVersions(err: unknown): boolean {
+function provesMethodVersions(problem: Problem): boolean {
   return (
-    err instanceof ApiResponseError &&
-    err.code !== undefined &&
-    SELECTOR_RESOLVED_CODES.has(err.code)
+    problem.code === NOT_PUBLISHED_CODE ||
+    (problem.code === CATALOG_NOT_FOUND_CODE && problem.params?.resource === "version")
   );
 }
 
 /**
- * How a platform that does not resolve selectors refuses a suffixed id, and
- * how certain that reading is.
+ * Whether `problem` is how a platform that does not resolve selectors may
+ * refuse a suffixed id, as the SDK reads it:
  *
- * - `unread`: the run route's body pattern refuses the `@` before any lookup,
- *   with a `422` `validation_failed` naming `method_id`. A platform that
- *   resolves selectors never answers a well-formed one so.
- * - `missed`: the tooling routes look the id up literally and miss it, with a
- *   `404` `not_found`, which a platform that resolves selectors also answers
- *   for a method that does not exist.
+ * - a miss, `pipelex.catalog.not_found` of anything but a version, or
+ *   `request.not_found`, which is how the SDK reads a `404` whose body is no
+ *   problem document: the tooling routes of such a platform look the id up
+ *   literally and miss it, and a platform that resolves selectors answers a
+ *   method that does not exist the same way;
+ * - `client.response_unreadable` at `422`, which is how the SDK reads such a
+ *   platform's run route refusing the `@` by its body pattern, an answer that
+ *   names no field and so cannot be told from another `422` it could not read.
  *
- * Any other refusal (a method being deleted, a draft with no source, inputs
- * refused) says nothing about the suffix.
+ * Neither proves the platform does not resolve selectors, so the platform's
+ * answer decides what is said. Any other refusal (a method being deleted, a
+ * draft with no source, inputs refused) says nothing about the suffix.
  */
-function suffixRefusalOf(err: unknown): "unread" | "missed" | undefined {
-  if (!(err instanceof ApiResponseError)) return undefined;
-  if (
-    err.status === 422 &&
-    err.code === "validation_failed" &&
-    (err.errors ?? []).some((field) => field.field === "method_id")
-  ) {
-    return "unread";
-  }
-  if (err.status === 404 && err.code === "not_found") return "missed";
-  return undefined;
+function isSuffixRefusal(problem: Problem): boolean {
+  if (problem.code === CATALOG_NOT_FOUND_CODE) return problem.params?.resource !== "version";
+  if (problem.code === "request.not_found") return true;
+  return problem.code === "client.response_unreadable" && problem.params?.status === 422;
 }
 
-function neverPublishedHint(methodId: string): string {
+function neverPublishedNote(methodId: string): string {
   return `\`${methodId}\` has a draft and no published version yet, and a bare id names the latest published version. Address its draft as \`${methodId}@draft\`, or publish it with ${WORKSHOP_TOOL_NAMES.publishMethod} — only when the user asks for a publish.`;
 }
 
 /**
- * Read a failed by-id call for what it says about the platform, and word the
- * error accordingly.
+ * The problem with this server's note about the platform closing its
+ * `message`. Its code, domain and retry are the platform's and stand.
+ */
+function withNote(problem: Problem, note: string): Problem {
+  const said = problem.message;
+  return {
+    ...problem,
+    message: typeof said === "string" && said !== "" ? `${said} ${note}` : note,
+  };
+}
+
+/**
+ * Read a failed by-id call for what it says about the platform, and note it
+ * on the problem the call relays.
  *
  * A version refusal proves the capability, and a never-published one gets a
- * hint naming this method's own draft selector. A suffix the caller addressed
+ * note naming this method's own draft selector. A suffix the caller addressed
  * (`@draft` or `@<n>`) refused the way a platform that does not resolve
- * suffixes refuses one gets a hint about it:
- *
- * - `unread`, which only such a platform sends, says so plainly, and the
- *   memory forgets a `supported` the refusal contradicts.
- * - `missed` is also how a platform that resolves suffixes answers a method
- *   that does not exist, so it contradicts nothing, and the memory is left as
- *   it is. The platform's answer decides the wording: the one in memory, else
- *   one asked now. Where the platform resolves suffixes the miss is a plain
- *   miss; where it does not, the hint says so, on the condition that the
- *   method exists; where this server cannot tell, it hedges.
+ * suffixes may refuse one gets a note about it, worded by the platform's
+ * answer: the one in memory, else one asked now. Where the platform resolves
+ * suffixes the refusal is left as it is; where it does not, the note says so,
+ * on the condition that the method exists; where this server cannot tell, it
+ * hedges. A refusal that may be a plain miss contradicts nothing, so the
+ * memory is left as it is.
  */
 export async function noteSelectorRefusal(
-  err: unknown,
-  error: ToolError,
+  problem: Problem,
   plan: SelectorPlan,
   memory: MethodVersionsMemory | undefined,
-): Promise<ToolError> {
-  if (provesMethodVersions(err)) {
+): Promise<Problem> {
+  if (provesMethodVersions(problem)) {
     noteMethodVersionsSupported(memory);
-    return err instanceof ApiResponseError && err.code === "method_not_published"
-      ? { ...error, hint: neverPublishedHint(plan.methodId) }
-      : error;
+    return problem.code === NOT_PUBLISHED_CODE
+      ? withNote(problem, neverPublishedNote(plan.methodId))
+      : problem;
   }
   const addressed = plan.selector.form === "draft" || plan.selector.form === "version";
-  const refusal = addressed ? suffixRefusalOf(err) : undefined;
-  if (refusal === undefined) return error;
-  const id = plan.methodId;
-  if (refusal === "unread") {
-    forgetMethodVersionsSupported(memory);
-    return {
-      ...error,
-      hint: `This platform does not resolve version suffixes yet, so it refused \`${plan.send}\`. On it a bare \`${id}\` reads the method's draft.`,
-    };
-  }
+  if (!addressed || !isSuffixRefusal(problem)) return problem;
   const support = await methodVersionsSupport(memory, plan.readVersion);
-  if (support === "supported") return error;
-  const reason =
+  if (support === "supported") return problem;
+  const id = plan.methodId;
+  return withNote(
+    problem,
     support === "unsupported"
-      ? `it was not found because this platform does not resolve version suffixes yet; on it a bare \`${id}\` reads the draft.`
-      : `this platform may not resolve version suffixes yet; on such a platform a bare \`${id}\` reads the draft.`;
-  return { ...error, hint: `${error.hint ?? ""} If \`${id}\` exists, ${reason}`.trim() };
+      ? `If \`${id}\` exists, this platform refused \`${plan.send}\` because it does not resolve version suffixes yet; on it a bare \`${id}\` reads the draft.`
+      : `If \`${id}\` exists, this platform may have refused \`${plan.send}\` because it does not resolve version suffixes yet; on such a platform a bare \`${id}\` reads the draft.`,
+  );
 }
 
 // ── the by-id wiring every method-taking tool shares ───────────────
@@ -582,14 +578,13 @@ export function planById(
   );
 }
 
-/** A classified failure of a call that may have been planned: the selector note when it was. */
+/** The problem of a failed call that may have been planned: the selector note added when it was. */
 export async function selectorFailure(
-  err: unknown,
-  error: ToolError,
+  problem: Problem,
   plan: SelectorPlan | undefined,
   memory: MethodVersionsMemory | undefined,
-): Promise<ToolError> {
-  return plan === undefined ? error : noteSelectorRefusal(err, error, plan, memory);
+): Promise<Problem> {
+  return plan === undefined ? problem : noteSelectorRefusal(problem, plan, memory);
 }
 
 /**

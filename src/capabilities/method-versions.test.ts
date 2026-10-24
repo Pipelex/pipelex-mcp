@@ -25,7 +25,7 @@ import type {
   MethodVersionsSupport,
   SelectorPlan,
 } from "./method-versions.js";
-import type { ToolError } from "./shared.js";
+import { problemOf } from "./shared.js";
 
 const SUPPORTED = { version: "1.0.0", extensions: ["runs", "method_versions"] };
 const UNSUPPORTED = { version: "1.0.0", extensions: ["runs"] };
@@ -387,49 +387,98 @@ describe("runContentReport", () => {
 });
 
 describe("noteSelectorRefusal", () => {
-  const atMethodId: ToolError = {
-    class: "input_domain",
-    location: "method_id",
-    message: "No such method.",
-    hint: "Check the id.",
-    retryable: false,
-  };
+  const START_URL = "https://api-dev.pipelex.com/v1/start";
 
-  /** A refusal as the SDK throws it, with the problem document's field errors. */
+  /** A platform refusal carrying its problem document, as the SDK throws it. */
   function refusal(
-    code: string,
-    status = 404,
-    errors?: { field: string; code: string }[],
+    status: number,
+    problem: { code: string; title: string; detail: string; domain: string } & Record<
+      string,
+      unknown
+    >,
   ): ApiResponseError {
     return new ApiResponseError(
-      "refused",
-      "https://api-dev.pipelex.com/v1/start",
+      `HTTP ${status}`,
+      START_URL,
       status,
       "Refused",
-      "{}",
-      undefined,
-      "refused",
-      undefined,
-      code,
-      errors === undefined ? undefined : { details: { status, code, errors } as never },
+      JSON.stringify({
+        type: `https://docs.pipelex.com/errors/${problem.code}`,
+        status,
+        retry: "no",
+        next_step: { kind: "change_input", detail: "Change the call." },
+        ...problem,
+      }),
     );
   }
-  /** How the run route of a platform that does not resolve suffixes refuses the `@`. */
-  const patternRefusal = () =>
-    refusal("validation_failed", 422, [{ field: "method_id", code: "string_pattern_mismatch" }]);
 
-  it("says a platform that refused a suffix by its pattern does not resolve suffixes, and forgets supported", async () => {
+  /** The catalog's miss of `resource`: a method, or a version of one. */
+  const missOf = (resource: "method" | "version") =>
+    refusal(404, {
+      code: "pipelex.catalog.not_found",
+      title: "The saved method does not exist",
+      detail: `No such ${resource} of mt_a in the organization's catalog.`,
+      domain: "input",
+      params: { resource, method_id: "mt_a", ...(resource === "version" ? { version: 3 } : {}) },
+    });
+
+  /**
+   * How a platform that predates problem documents refuses the `@` on its run
+   * route, by its body pattern: the SDK cannot read that body, so the problem
+   * is `client.response_unreadable` at 422, naming no field.
+   */
+  const patternRefusal = () =>
+    new ApiResponseError(
+      "HTTP 422",
+      START_URL,
+      422,
+      "Unprocessable Entity",
+      JSON.stringify({
+        code: "validation_failed",
+        message: "Invalid request.",
+        errors: [{ field: "method_id", code: "string_pattern_mismatch" }],
+      }),
+    );
+
+  /** What every caller passes: the problem the error relays. */
+  async function noted(
+    err: ApiResponseError,
+    plan: SelectorPlan,
+    memory: ReturnType<typeof createMethodVersionsMemory> | undefined,
+  ) {
+    const problem = problemOf(err);
+    return { problem, noted: await noteSelectorRefusal(problem, plan, memory) };
+  }
+
+  it("reads a refusal of the @ it cannot read by the platform's answer, and never as proof either way", async () => {
+    const fresh = createMethodVersionsMemory();
+    const old = planById(
+      "mt_a@draft",
+      fresh,
+      { version: async () => UNSUPPORTED },
+      { needBareReport: true },
+    );
+    const said = await noted(patternRefusal(), old, fresh);
+    // The SDK's problem stands; the note closes this server's message.
+    expect(said.noted).toMatchObject({
+      code: "client.response_unreadable",
+      domain: said.problem.domain,
+      retry: said.problem.retry,
+      params: { status: 422 },
+    });
+    expect(said.noted.message).toContain(
+      "this platform refused `mt_a@draft` because it does not resolve version suffixes yet",
+    );
+    expect(said.noted.message).toContain("a bare `mt_a` reads the draft");
+
+    // Where the memory says the platform resolves suffixes, the refusal is
+    // left as it is, and an answer the SDK could not read contradicts nothing.
     const memory = createMethodVersionsMemory();
     noteMethodVersionsSupported(memory);
     const { plan } = await planned("mt_a@draft", "unknown");
-
-    const noted = await noteSelectorRefusal(patternRefusal(), atMethodId, plan, memory);
-
-    expect(noted.hint).toContain(
-      "does not resolve version suffixes yet, so it refused `mt_a@draft`",
-    );
-    expect(noted.hint).toContain("a bare `mt_a` reads the method's draft");
-    expect(memory.cached).toBeUndefined();
+    const kept = await noted(patternRefusal(), plan, memory);
+    expect(kept.noted).toBe(kept.problem);
+    expect(memory.cached?.support).toBe("supported");
   });
 
   it("reads a miss by what the platform answers: plain where it resolves suffixes, explained where it does not", async () => {
@@ -438,9 +487,8 @@ describe("noteSelectorRefusal", () => {
     const resolving = planById("mt_a@3", memory, {}, { needBareReport: true });
     // A platform that resolves suffixes misses a method that does not exist
     // the same way: the miss contradicts nothing, and the memory stays.
-    expect(await noteSelectorRefusal(refusal("not_found"), atMethodId, resolving, memory)).toBe(
-      atMethodId,
-    );
+    const plain = await noted(missOf("method"), resolving, memory);
+    expect(plain.noted).toBe(plain.problem);
     expect(memory.cached?.support).toBe("supported");
 
     const fresh = createMethodVersionsMemory();
@@ -450,28 +498,63 @@ describe("noteSelectorRefusal", () => {
       { version: async () => UNSUPPORTED },
       { needBareReport: true },
     );
-    expect(
-      (await noteSelectorRefusal(refusal("not_found"), atMethodId, old, fresh)).hint,
-    ).toContain("it was not found because this platform does not resolve version suffixes yet");
+    // A 404 with no problem document, as such a platform answers, is read as
+    // the SDK reads it: request.not_found.
+    const oldMiss = new ApiResponseError(
+      "HTTP 404",
+      START_URL,
+      404,
+      "Not Found",
+      JSON.stringify({ code: "not_found", message: "Method not found." }),
+    );
+    const explained = await noted(oldMiss, old, fresh);
+    expect(explained.noted).toMatchObject({ code: "request.not_found" });
+    expect(explained.noted.message).toContain(
+      "If `mt_a` exists, this platform refused `mt_a@3` because it does not resolve version suffixes yet",
+    );
 
     const silent = planById("mt_a@3", createMethodVersionsMemory(), {}, { needBareReport: true });
-    expect(
-      (await noteSelectorRefusal(refusal("not_found"), atMethodId, silent, undefined)).hint,
-    ).toContain("may not resolve version suffixes yet");
+    const hedged = await noted(missOf("method"), silent, undefined);
+    expect(hedged.noted).toMatchObject({
+      code: "pipelex.catalog.not_found",
+      detail: "No such method of mt_a in the organization's catalog.",
+    });
+    expect(hedged.noted.message).toContain("may have refused `mt_a@3`");
+  });
+
+  it("takes a missed version as proof, and leaves its problem as it is", async () => {
+    const memory = createMethodVersionsMemory();
+    const { plan } = await planned("mt_a@3", "unknown");
+
+    const said = await noted(missOf("version"), plan, memory);
+
+    expect(said.noted).toBe(said.problem);
+    expect(memory.cached?.support).toBe("supported");
   });
 
   it("names the method's own draft when a bare id meets a never-published method, and takes it as proof", async () => {
     const memory = createMethodVersionsMemory();
     const { plan } = await planned("mt_a", "unknown", false);
 
-    const noted = await noteSelectorRefusal(
-      refusal("method_not_published", 409),
-      atMethodId,
+    const said = await noted(
+      refusal(409, {
+        code: "pipelex.catalog.not_published",
+        title: "The saved method has no published version",
+        detail: "mt_a has no published version.",
+        domain: "input",
+        params: { method_id: "mt_a" },
+      }),
       plan,
       memory,
     );
 
-    expect(noted.hint).toContain("`mt_a@draft`");
+    expect(said.noted).toMatchObject({
+      code: "pipelex.catalog.not_published",
+      domain: "input",
+      retry: "no",
+      detail: "mt_a has no published version.",
+    });
+    expect(said.noted.message).toContain("`mt_a@draft`");
     expect(memory.cached?.support).toBe("supported");
   });
 
@@ -480,15 +563,26 @@ describe("noteSelectorRefusal", () => {
     noteMethodVersionsSupported(memory);
     const { plan } = await planned("mt_a@draft", "unknown");
     for (const err of [
-      refusal("method_being_deleted", 409),
-      refusal("validation_failed", 422, [{ field: "inputs", code: "missing" }]),
+      refusal(409, {
+        code: "pipelex.catalog.being_deleted",
+        title: "The saved method is being deleted",
+        detail: "mt_a is being deleted.",
+        domain: "input",
+      }),
+      refusal(422, {
+        code: "request.invalid",
+        title: "The request is invalid",
+        detail: "The inputs are missing.",
+        domain: "input",
+        location: { field: "inputs" },
+      }),
     ]) {
-      expect(await noteSelectorRefusal(err, atMethodId, plan, memory)).toBe(atMethodId);
+      const said = await noted(err, plan, memory);
+      expect(said.noted).toBe(said.problem);
     }
     const bare = (await planned("mt_a", "supported")).plan;
-    expect(await noteSelectorRefusal(refusal("not_found"), atMethodId, bare, memory)).toBe(
-      atMethodId,
-    );
+    const bareMiss = await noted(missOf("method"), bare, memory);
+    expect(bareMiss.noted).toBe(bareMiss.problem);
     expect(memory.cached?.support).toBe("supported");
   });
 });
@@ -498,10 +592,15 @@ describe("linkageSuffixError", () => {
     expect(linkageSuffixError("mt_a")).toBeUndefined();
     expect(linkageSuffixError("not-an-id")).toBeUndefined();
     for (const value of ["mt_a@draft", "mt_a@2"]) {
-      expect(linkageSuffixError(value)).toMatchObject({
-        class: "input_domain",
-        location: "method_id",
+      const problem = linkageSuffixError(value);
+      expect(problem).toMatchObject({
+        code: "client.argument_invalid",
+        domain: "input",
+        params: { argument: "method_id", reason: "suffix_on_linkage" },
+        location: { field: "method_id" },
       });
+      expect(problem?.message).toContain('Pass method_id "mt_a"');
     }
+    expect(linkageSuffixError("mt_a@2", "method_dir")?.message).toContain("drop method_dir");
   });
 });

@@ -1,26 +1,22 @@
+import { buildProblem } from "@pipelex/sdk";
 import { z } from "zod";
 
 import {
+  argumentProblem,
   asOneLine,
   bareMethodIdOf,
   bareMethodIdRefusal,
   boundCodePoints,
   buildApiConfig,
-  classifyError,
   createPipelexApiClient,
   escapeMarkdownInline,
-  summaryForToolError,
-  toolErrorSchema,
+  faultsProblem,
+  problemOf,
+  problemSchema,
+  problemSummary,
   toolResultContent,
 } from "./shared.js";
-import type {
-  ApiConfig,
-  AuthErrorTexture,
-  BaseUrlSourceTexture,
-  ClassifyErrorOptions,
-  ErrorSummaries,
-  ToolError,
-} from "./shared.js";
+import type { ApiConfig, ApiNotes, Problem } from "./shared.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 import { formatMib } from "./upload-ceiling.js";
 
@@ -152,7 +148,7 @@ export const mthdsListFilesOutputSchema = z.object({
       "Null only when the listing is finished. A filtered page can hold fewer files than asked, or none, and still carry a cursor.",
     ),
   files: z.array(orgFileSchema).optional(),
-  errors: z.array(toolErrorSchema).optional(),
+  problem: problemSchema.optional(),
 });
 
 export interface MthdsListFilesInput {
@@ -193,7 +189,7 @@ export interface FilesSuccess {
 
 export interface FilesFailure {
   status: "error";
-  errors: ToolError[];
+  problem: Problem;
 }
 
 export type FilesStructuredContent = FilesSuccess | FilesFailure;
@@ -236,10 +232,8 @@ export interface FilesClient {
 export interface FilesContext extends ApiConfig {
   /** A test seam; the SDK's client when absent. */
   client?: FilesClient;
-  /** Deployment-specific auth-failure texture; env-var wording by default. */
-  authError?: AuthErrorTexture;
-  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
-  baseUrlSource?: BaseUrlSourceTexture;
+  /** Where the call's key and base URL came from, closing a failed request's summary. */
+  apiNotes?: ApiNotes;
 }
 
 export function buildFilesContext(env = process.env): FilesContext {
@@ -262,35 +256,34 @@ export async function listMthdsFiles(
 ): Promise<FilesResult> {
   const normalized = normalizeInput(input);
   if (!normalized.ok) {
-    return errorResult("Files were not listed: request input is invalid.", normalized.errors);
+    return errorResult(faultsProblem(normalized.faults), context);
   }
 
   let page: FilesPage;
   try {
-    // The client is built inside the try, so a base URL it refuses is
-    // classified like any other failure rather than rejecting the handler.
+    // The client is built inside the try, so a base URL it refuses is the
+    // SDK's problem like any other failure rather than rejecting the handler.
     const client = context.client ?? createPipelexApiClient(context);
     // Every filter and the paging are the SERVER's: filtering one page here
     // would search the rows one page happened to read and call it a search.
     page = await client.listFiles(queryOf(normalized.input));
   } catch (err) {
-    const error = classifyError(err, filesErrorOptions(context, normalized.input));
-    return errorResult(summaryForError(error), [error]);
+    // The API's own problem, relayed: a cursor bound to other filters, a key
+    // acting for no organization, a value past the route's bounds each carry
+    // their own code and location.
+    return errorResult(problemOf(err), context);
   }
 
   try {
     return projectFiles(page, normalized.input);
   } catch (err) {
+    // The API answered, and its page breaks the contract of GET /v1/files.
     const message =
       err instanceof Error ? err.message : "The Pipelex API returned a malformed files list.";
-    return errorResult("Files could not be listed: the API returned malformed data.", [
-      {
-        class: "runtime",
-        message,
-        hint: "The API responded, but its files payload violated the contract of GET /v1/files; inspect the hosted API.",
-        retryable: false,
-      },
-    ]);
+    return errorResult(
+      buildProblem("client.response_unreadable", { status: 200 }, { extra: { message } }),
+      context,
+    );
   }
 }
 
@@ -308,31 +301,33 @@ function queryOf(input: NormalizedFilesInput): ListFilesQuery {
 
 function normalizeInput(
   input: MthdsListFilesInput,
-): { ok: true; input: NormalizedFilesInput } | { ok: false; errors: ToolError[] } {
+): { ok: true; input: NormalizedFilesInput } | { ok: false; faults: Problem[] } {
   const parsed = mthdsListFilesInputObjectSchema.safeParse(input);
   if (!parsed.success) {
     return {
       ok: false,
-      errors: parsed.error.issues.map((issue) => ({
-        class: "input_domain",
-        ...(issue.path.length === 0 ? {} : { location: issue.path.join(".") }),
-        message: issue.message,
-        hint: `Use query as text, kind as uploaded, generated or test, format as a list of up to ${FILES_MAX_FORMATS} extensions, method_id as a bare mt_… id, limit as an integer from 1 to ${FILES_MAX_LIMIT}, and cursor as the opaque next_cursor from a previous call.`,
-        retryable: false,
-      })),
+      faults: parsed.error.issues.map((issue) =>
+        argumentProblem(
+          issue.path.length === 0 ? "arguments" : issue.path.join("."),
+          issue.code,
+          issue.message,
+          `Use query as text, kind as uploaded, generated or test, format as a list of up to ${FILES_MAX_FORMATS} extensions, method_id as a bare mt_… id, limit as an integer from 1 to ${FILES_MAX_LIMIT}, and cursor as the opaque next_cursor from a previous call.`,
+        ),
+      ),
     };
   }
 
-  const errors: ToolError[] = [];
+  const errors: Problem[] = [];
   const query = parsed.data.query?.trim() ?? "";
   if (Array.from(query).length > FILES_QUERY_MAX_CHARS) {
-    errors.push({
-      class: "input_domain",
-      location: "query",
-      message: `query is ${Array.from(query).length} characters long, over the ${FILES_QUERY_MAX_CHARS} the files list searches with.`,
-      hint: `Search with a shorter part of the name, at most ${FILES_QUERY_MAX_CHARS} characters.`,
-      retryable: false,
-    });
+    errors.push(
+      argumentProblem(
+        "query",
+        "too_long",
+        `query is ${Array.from(query).length} characters long, over the ${FILES_QUERY_MAX_CHARS} the files list searches with.`,
+        `Search with a shorter part of the name, at most ${FILES_QUERY_MAX_CHARS} characters.`,
+      ),
+    );
   }
   const formats =
     parsed.data.format === undefined ? undefined : normalizeFormats(parsed.data.format, errors);
@@ -340,7 +335,7 @@ function normalizeInput(
     parsed.data.method_id === undefined
       ? undefined
       : normalizeMethodId(parsed.data.method_id, errors);
-  if (errors.length > 0) return { ok: false, errors };
+  if (errors.length > 0) return { ok: false, faults: errors };
 
   return {
     ok: true,
@@ -361,18 +356,19 @@ function normalizeInput(
  * written, or `image` for every picture, so `.PDF` and `pdf` name one format
  * and folding them is no guess.
  */
-function normalizeFormats(values: readonly string[], errors: ToolError[]): string[] {
+function normalizeFormats(values: readonly string[], errors: Problem[]): string[] {
   const formats: string[] = [];
   values.forEach((value, index) => {
     const format = value.trim().replace(/^\./, "").toLowerCase();
     if (format === "" || format.length > FORMAT_MAX_CHARS || /\s/.test(format)) {
-      errors.push({
-        class: "input_domain",
-        location: `format.${index}`,
-        message: `${JSON.stringify(value)} is not a format.`,
-        hint: 'Name a format by its file extension, such as "pdf" or "docx", or "image" for any picture.',
-        retryable: false,
-      });
+      errors.push(
+        argumentProblem(
+          `format.${index}`,
+          "not_a_format",
+          `${JSON.stringify(value)} is not a format.`,
+          'Name a format by its file extension, such as "pdf" or "docx", or "image" for any picture.',
+        ),
+      );
       return;
     }
     if (!formats.includes(format)) formats.push(format);
@@ -386,7 +382,7 @@ function normalizeFormats(values: readonly string[], errors: ToolError[]): strin
  * id is refused here instead, with the bare id to pass, by the rule
  * `mthds_prepare_inputs` holds a test file's method to (`bareMethodIdOf`).
  */
-function normalizeMethodId(value: string, errors: ToolError[]): string | undefined {
+function normalizeMethodId(value: string, errors: Problem[]): string | undefined {
   const check = bareMethodIdOf(value);
   if (check.ok) return check.methodId;
   errors.push(
@@ -645,85 +641,27 @@ export function formatSize(bytes: number): string {
 }
 
 /**
- * The 400 arm is chosen by REQUEST SHAPE, as on the method list. Without a
- * cursor the route's one `400` is a key acting for no organization; with one,
- * the far likelier cause is the cursor, which the route binds to the list and
- * the filters that issued it, so passing it with other filters is a `400`. A
- * machine consumer branches on the class, so a paging fault must not read as
- * a credential one.
+ * A no-verdict result: the problem, and its Markdown summary, closed by the
+ * notes on the call's key and base URL when the fix may be one of them.
  *
- * A `422` is kept apart from both: it is the route refusing one of the
- * request's values against its own bounds (a search too long, a format key or
- * an id it will not take), so it is located at the argument behind the field
- * the platform names, and never at the key.
- *
- * A method id the organization does not hold is no refusal: the route answers
- * an empty list, which the summary words. A `404` is therefore never the
- * caller's here, and keeps the shared arm: a deployment that does not serve
- * `/v1/files`.
+ * A failed request's problem is the route's own: without a cursor the route's
+ * `400` is a key acting for no organization, with one the cursor bound to
+ * other filters, a `422` a value past the route's bounds located at the field
+ * it names, and each says so in its code and location. A method id the
+ * organization does not hold is no refusal: the route answers an empty list,
+ * which the summary words.
  */
-function filesErrorOptions(
-  context: FilesContext,
-  input: NormalizedFilesInput,
-): ClassifyErrorOptions {
+function errorResult(problem: Problem, context: FilesContext): FilesResult {
   return {
-    route: "/v1/files",
-    badRequest:
-      input.cursor === undefined
-        ? {
-            class: "config",
-            location: context.authError?.location ?? "PIPELEX_API_KEY",
-            hint: "The files list needs an active organization context. Use a platform key minted for the intended organization, then retry.",
-          }
-        : {
-            location: "cursor",
-            hint: `The cursor was rejected: it belongs to the listing that issued it, filters included, and may be stale or truncated. Pass it with the same query, kind, format and method_id, or drop it and call ${WORKSHOP_TOOL_NAMES.listFiles} again from the start.`,
-          },
-    // A 422 is the route refusing a value of the request, never the key's
-    // organization: located at the argument behind the field it names.
-    unprocessable: {
-      field: (field) => FILES_QUERY_ARGUMENTS[field],
-      hint: `Bring that argument within the files list's bounds (query at most ${FILES_QUERY_MAX_CHARS} characters, limit 1 to ${FILES_MAX_LIMIT}, method_id a bare mt_… id), then call ${WORKSHOP_TOOL_NAMES.listFiles} again.`,
-    },
-    auth: context.authError,
-    baseUrlSource: context.baseUrlSource,
+    structuredContent: { status: "error", problem },
+    summary: problemSummary(problem, context.apiNotes),
   };
-}
-
-/** The tool's argument behind each query parameter `GET /v1/files` names in a refusal. */
-const FILES_QUERY_ARGUMENTS: Record<string, string | undefined> = {
-  q: "query",
-  kind: "kind",
-  format: "format",
-  method_id: "method_id",
-  limit: "limit",
-  cursor: "cursor",
-};
-
-const ERROR_SUMMARIES: ErrorSummaries = {
-  config: "Files could not be listed: the Pipelex API or its files list is misconfigured.",
-  input_domain: "Files were not listed: the Pipelex API rejected the request.",
-  runtime: "Files could not be listed: the Pipelex API returned an error.",
-  paywall: "Files could not be listed: the organization's Pipelex plan does not cover this call.",
-  auth: "Files could not be listed: the Pipelex API key is missing or was refused.",
-  role: "Files could not be listed: your role in this organization does not allow this.",
-};
-
-function summaryForError(error: ToolError): string {
-  return summaryForToolError(error, ERROR_SUMMARIES);
-}
-
-function errorResult(summary: string, errors: ToolError[]): FilesResult {
-  return { structuredContent: { status: "error", errors }, summary };
 }
 
 export function filesToolResult(result: FilesResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(
-      result.summary,
-      result.structuredContent.status === "error" ? result.structuredContent.errors : undefined,
-    ),
+    content: toolResultContent(result.summary),
     isError: result.structuredContent.status === "error",
   };
 }

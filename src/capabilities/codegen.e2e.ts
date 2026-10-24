@@ -60,7 +60,7 @@ describe("mthds_codegen (live)", () => {
       expect(result.structuredContent.is_valid).toBe(true);
       expect(result.structuredContent.target).toBe(target);
       expect(result.structuredContent.kind).toBe("types");
-      expect(result.structuredContent.errors).toBeUndefined();
+      expect(result.structuredContent.problem).toBeUndefined();
       expect(typeof result.structuredContent.crate_fingerprint).toBe("string");
       expect(typeof result.structuredContent.engine_version).toBe("string");
 
@@ -117,9 +117,9 @@ describe("mthds_codegen (live)", () => {
     // caller discriminates on is_valid — never on the transport.
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(false);
-    expect(result.structuredContent.errors).toBeUndefined();
+    expect(result.structuredContent.problem).toBeUndefined();
     expect(result.structuredContent.artifacts).toBeUndefined();
-    const validationErrors = result.structuredContent.validation_errors;
+    const validationErrors = result.structuredContent.errors;
     expect(Array.isArray(validationErrors)).toBe(true);
     expect(validationErrors?.length ?? 0).toBeGreaterThan(0);
     expect(result.summary.trim()).not.toBe("");
@@ -129,7 +129,10 @@ describe("mthds_codegen (live)", () => {
     const result = await generateMthdsCode({ target: "ts-zod" }, context);
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { reason: "missing" },
+    });
   });
 });
 
@@ -214,9 +217,9 @@ describe("mthds_codegen output_dir (live)", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "output_dir",
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.target_exists",
+      location: { field: "output_dir" },
     });
     expect(await fs.readdir(dir)).toEqual(["types.ts"]);
     expect(await fs.readFile(path.join(dir, "types.ts"), "utf8")).toBe("export const mine = 1;\n");

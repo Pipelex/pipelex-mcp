@@ -2,7 +2,7 @@ import { PipelexApiClient, RejectedAssetError, UploadTransportError } from "@pip
 import { describe, expect, it, vi } from "vitest";
 
 import { prepareClient } from "./prepare.js";
-import { classifyError } from "./shared.js";
+import { problemOf } from "./shared.js";
 import {
   MAX_UPLOAD_BYTES,
   SizeGuardedPipelexApiClient,
@@ -100,10 +100,18 @@ describe("SizeGuardedPipelexApiClient", () => {
     expect((error as RejectedAssetError).message).toContain("huge.pdf");
     expect((error as RejectedAssetError).message).toContain("9.0 MiB");
     expect((error as RejectedAssetError).message).toContain(formatMib(MAX_UPLOAD_BYTES));
-    // Reported as the same 413 the gateway would have produced, with the code
-    // the SDK gives a real one.
+    // Reported as the same 413 the gateway would have produced, with the
+    // reason the SDK gives a real one, and the problem of a refusal made
+    // before anything was sent.
     expect((error as RejectedAssetError).status).toBe(413);
-    expect((error as RejectedAssetError).code).toBe("too_large");
+    expect((error as RejectedAssetError).reason).toBe("too_large");
+    expect((error as RejectedAssetError).problem).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      retry: "no",
+      params: { argument: "inputs", reason: "upload_too_large" },
+      location: { field: "inputs" },
+    });
   });
 
   it("names an upload just over the limit apart from the limit itself", async () => {
@@ -122,10 +130,11 @@ describe("SizeGuardedPipelexApiClient", () => {
     );
   });
 
-  it("reaches the caller of uploadFile as a refused asset, not as a retryable transport fault", async () => {
+  it("reaches the caller of uploadFile as a refused argument, not as a retryable transport fault", async () => {
     // Every real caller uploads through `uploadFile`, which wraps what
-    // `upload()` throws in an UploadTransportError; classified as that, an
-    // oversize file told the agent to retry.
+    // `upload()` throws in an UploadTransportError; read as that, an
+    // oversize file told the agent to retry. The wrapper carries its
+    // cause's problem.
     const client = new SizeGuardedPipelexApiClient({ baseUrl: "https://api.pipelex.test" });
     const wire = vi
       .spyOn(PipelexApiClient.prototype, "upload")
@@ -138,14 +147,14 @@ describe("SizeGuardedPipelexApiClient", () => {
     expect(wire).not.toHaveBeenCalled();
     expect(error).toBeInstanceOf(UploadTransportError);
     expect((error as UploadTransportError).cause).toBeInstanceOf(RejectedAssetError);
-    expect(classifyError(error, { asset: { location: "attachments[0]" } })).toEqual({
-      class: "input_domain",
-      location: "attachments[0]",
+    expect(problemOf(error)).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      retry: "no",
+      location: { field: "inputs" },
       message: expect.stringContaining(
         `over the ${formatMib(MAX_UPLOAD_BYTES)} Pipelex upload limit`,
       ),
-      hint: expect.any(String),
-      retryable: false,
     });
 
     wire.mockRestore();

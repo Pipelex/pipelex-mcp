@@ -18,13 +18,15 @@ import {
 } from "./images.js";
 import type { ImagesClient, ImagesContext } from "./images.js";
 import {
-  CALLER_FACING_TIMEOUT_REPORT,
+  OPERATOR_VIEW_LLM_COMPLETION_PROBLEM,
   RECORDED_FAILED_RUNS,
+  TIMED_OUT_RUN_PROBLEM,
   relayingArmOf,
 } from "./failed-run-fixtures.js";
 import {
   DEFAULT_API_URL,
   INLINE_IMAGES_BUDGET,
+  callerView,
   MAX_IMAGE_CANDIDATE_ENTRIES,
   MAX_INLINE_IMAGES,
   MAX_INLINE_IMAGE_BYTES,
@@ -142,19 +144,36 @@ function scriptedClock(times: number[]): () => void {
   return () => spy.mockRestore();
 }
 
-function apiError(route: string, status: number, message: string): ApiResponseError {
+/**
+ * An answer of the API as the SDK reads it: a problem document as it came, or,
+ * when the body is none, by its status alone.
+ */
+function apiError(
+  route: string,
+  status: number,
+  problem?: Record<string, unknown>,
+): ApiResponseError {
   return new ApiResponseError(
     `HTTP ${status}`,
     `${DEFAULT_API_URL}${route}`,
     status,
     "Error",
-    "{}",
-    "error",
-    message,
-    undefined,
-    undefined,
+    problem === undefined ? "{}" : JSON.stringify(problem),
   );
 }
+
+/** A plan refusal as the platform serves it, on the bulk resolve route. */
+const PLAN_REFUSAL = {
+  type: "https://docs.pipelex.com/errors/pipelex.billing.credit_exhausted",
+  title: "No credit left",
+  status: 402,
+  detail: "The organization has no credit left, so the operation was refused.",
+  code: "pipelex.billing.credit_exhausted",
+  domain: "account",
+  retry: "no",
+  next_step: { kind: "contact_owner", detail: "Ask the organization's owner to add credit." },
+  request_id: "req_resolve_402",
+};
 
 describe("validateShowImagesRequest", () => {
   it("takes a bare run id", () => {
@@ -162,26 +181,37 @@ describe("validateShowImagesRequest", () => {
   });
 
   it("refuses a blank run id", () => {
-    const [error] = validateShowImagesRequest({ run_id: "  " });
+    const [problem] = validateShowImagesRequest({ run_id: "  " });
 
-    expect(error.class).toBe("input_domain");
-    expect(error.location).toBe("run_id");
+    expect(problem).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      retry: "no",
+      params: { argument: "run_id", reason: "empty" },
+      location: { field: "run_id" },
+    });
   });
 
   it("refuses naming the same candidates two ways", () => {
-    const errors = validateShowImagesRequest({ run_id: RUN_ID, images: [COVER], indices: [0] });
+    const problems = validateShowImagesRequest({ run_id: RUN_ID, images: [COVER], indices: [0] });
 
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toMatchObject({ class: "input_domain", location: "images" });
-    expect(errors[0].message).toContain("never both");
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "images", reason: "mutually_exclusive" },
+      location: { field: "images" },
+    });
+    expect(problems[0].message).toContain("never both");
   });
 
   it("refuses an empty selection on either field", () => {
     expect(validateShowImagesRequest({ run_id: RUN_ID, images: [] })[0]).toMatchObject({
-      location: "images",
+      params: { argument: "images", reason: "empty" },
+      location: { field: "images" },
     });
     expect(validateShowImagesRequest({ run_id: RUN_ID, indices: [] })[0]).toMatchObject({
-      location: "indices",
+      params: { argument: "indices", reason: "empty" },
+      location: { field: "indices" },
     });
   });
 });
@@ -218,8 +248,12 @@ describe("selectCandidates", () => {
 
     expect(selection.ok).toBe(false);
     if (!selection.ok) {
-      expect(selection.error).toMatchObject({ class: "input_domain", location: "images" });
-      expect(selection.error.message).toContain(REPORT);
+      expect(selection.problem).toMatchObject({
+        code: "client.argument_invalid",
+        params: { argument: "images", reason: "not_a_candidate" },
+        location: { field: "images" },
+      });
+      expect(selection.problem.message).toContain(REPORT);
     }
   });
 
@@ -227,7 +261,12 @@ describe("selectCandidates", () => {
     for (const index of [-1, 2]) {
       const selection = selectCandidates(candidates, { indices: [index] });
       expect(selection.ok).toBe(false);
-      if (!selection.ok) expect(selection.error.location).toBe("indices");
+      if (!selection.ok) {
+        expect(selection.problem).toMatchObject({
+          params: { argument: "indices", reason: "out_of_range" },
+          location: { field: "indices" },
+        });
+      }
     }
   });
 });
@@ -490,67 +529,95 @@ describe("showMthdsRunImages", () => {
     const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
 
     expect(result.structuredContent.status).toBe("ok");
+    // The SDK's own problem for a vanished object, with the store's sentence.
     expect(result.structuredContent.images?.[0]).toMatchObject({
       uri: COVER,
       inlined: false,
-      error: { class: "input_domain", location: "images[0].uri", retryable: false },
+      error: {
+        code: "input.reference_not_found",
+        domain: "input",
+        retry: "no",
+        next_step: { kind: "change_input" },
+        params: { input: COVER },
+        message: "object is gone (HTTP 404).",
+      },
     });
     expect(result.imageBlocks).toHaveLength(2);
-    expect(result.summary).toContain("failed: object is gone");
+    const line = result.summary.split("\n").find((text) => text.startsWith(`- \`${COVER}\``));
+    expect(line).toContain("failed: The input");
+    expect(line).toContain("object is gone (HTTP 404).");
+    expect(line).toContain("(`input.reference_not_found`)");
+    expect(line).toContain("Next step: Point the input");
   });
 
   it("is a NO-VERDICT when a whole-request refusal showed nothing at all", async () => {
     // Round 1's finding: a deployment where the resolve route rejects the
     // credential, or where a plan limit refuses it, failed every call
     // deterministically and answered `status: "ok"` — a consumer branching on
-    // status read a success, and the classified cause was buried under a
-    // generic "no picture could be shown" line.
+    // status read a success, and the cause was buried under a generic "no
+    // picture could be shown" line.
     const { client, fetches } = fakeClient({
-      [COVER]: { throws: () => apiError("/v1/resolve-storage-url/bulk", 400, "no active org") },
+      [COVER]: { throws: () => apiError("/v1/resolve-storage-url/bulk", 400) },
     });
 
     const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
 
     expect(fetches).toHaveLength(1);
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({ class: "config" });
+    // An answer that is no problem document, read by the SDK by its status.
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.response_unreadable",
+      domain: "runtime",
+      params: { status: 400 },
+    });
     expect(result.structuredContent).not.toHaveProperty("images");
     expect(showImagesToolResult(result).isError).toBe(true);
   });
 
-  it("names the plan in the headline when the refusal is a paywall", async () => {
-    // The whole point of routing a no-verdict through summaryForToolError: on
-    // a host that shows the agent only the top content line, the generic
-    // connectivity headline WAS the entire message for a billing refusal.
+  it("relays a plan refusal unchanged, and states it first", async () => {
+    // On a host that shows the agent only the top content line, a generic
+    // connectivity headline WAS the entire message for a billing refusal, so
+    // the summary opens on the refusal's own title.
     const { client } = fakeClient({
-      [COVER]: { throws: () => apiError("/v1/resolve-storage-url/bulk", 402, "plan limit") },
+      [COVER]: { throws: () => apiError("/v1/resolve-storage-url/bulk", 402, PLAN_REFUSAL) },
     });
 
     const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({ kind: "paywall" });
-    expect(result.summary).toContain("plan does not cover this call");
+    expect(result.structuredContent.problem).toEqual(PLAN_REFUSAL);
+    expect(result.summary.startsWith(`## ${PLAN_REFUSAL.title}`)).toBe(true);
+    expect(result.summary).toContain(PLAN_REFUSAL.detail);
+    expect(result.summary).toContain(PLAN_REFUSAL.next_step.detail);
+    expect(result.summary).toContain("`pipelex.billing.credit_exhausted`");
+    expect(result.summary).toContain("Request id: `req_resolve_402`");
+    // A plan refusal is no fault of the key or of the API in use.
+    expect(result.summary).not.toContain("PIPELEX_API_KEY");
+    expect(result.summary).not.toContain("PIPELEX_BASE_URL");
   });
 
-  it("names the key in the headline when the resolve route refuses it", async () => {
+  it("says where the key came from when the resolve route refuses it", async () => {
     const { client } = fakeClient({
-      [COVER]: {
-        throws: () => apiError("/v1/resolve-storage-url/bulk", 401, "Missing API key"),
-      },
+      [COVER]: { throws: () => apiError("/v1/resolve-storage-url/bulk", 401) },
     });
 
-    const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
+    const bare = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
 
-    expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "config",
-      kind: "auth",
-      location: "PIPELEX_API_KEY",
+    expect(bare.structuredContent.status).toBe("error");
+    expect(bare.structuredContent.problem).toMatchObject({
+      code: "auth.missing_credential",
+      domain: "account",
     });
-    expect(result.summary).toBe(
-      "Images could not be shown: the Pipelex API key is missing or was refused.",
+    expect(bare.summary).toContain("`auth.missing_credential`");
+    expect(bare.summary).toContain("The API key is read from PIPELEX_API_KEY.");
+
+    const noted = await showMthdsRunImages(
+      { run_id: RUN_ID },
+      context(client, { apiNotes: { apiKey: "Sign in again with the login command." } }),
     );
+
+    expect(noted.summary).toContain("Sign in again with the login command.");
+    expect(noted.summary).not.toContain("The API key is read from PIPELEX_API_KEY.");
   });
 
   it("stays a PRODUCED verdict when a picture had already arrived", async () => {
@@ -559,7 +626,7 @@ describe("showMthdsRunImages", () => {
     // rest is reported as `count`.
     const { client, fetches } = fakeClient({
       [COVER]: { response: () => imageResponse(TINY_PNG) },
-      [THUMB]: { throws: () => apiError("/v1/resolve-storage-url/bulk", 400, "no active org") },
+      [THUMB]: { throws: () => apiError("/v1/resolve-storage-url/bulk", 400) },
     });
 
     const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
@@ -571,7 +638,7 @@ describe("showMthdsRunImages", () => {
     expect(result.structuredContent.images?.[1]).toMatchObject({
       uri: THUMB,
       inlined: false,
-      error: { class: "config" },
+      error: { code: "client.response_unreadable", params: { status: 400 } },
     });
     expect(result.structuredContent.images?.slice(2)).toEqual([
       { uri: UNTYPED, inlined: false, withheld: "count" },
@@ -667,7 +734,7 @@ describe("showMthdsRunImages", () => {
 
     expect(fetches).toEqual([COVER]);
     expect(result.structuredContent.status).toBe("ok");
-    expect(result.structuredContent.errors).toBeUndefined();
+    expect(result.structuredContent.problem).toBeUndefined();
     expect(result.structuredContent.images).toEqual([
       { uri: COVER, inlined: false, withheld: "deadline" },
     ]);
@@ -811,70 +878,36 @@ describe("showMthdsRunImages", () => {
       getRunResult: () => Promise.resolve(resultsArm),
       fetchArtifact: () => Promise.reject(new Error("must not fetch")),
     };
+    const runError = statusRead.error;
+    if (runError == null) throw new Error("the recording carries the run's problem");
 
     const result = await showMthdsRunImages(
       { run_id: statusRead.pipeline_run_id },
       context(client),
     );
 
-    expect(result.structuredContent).toMatchObject({
+    // The arm nests no problem, so the run's own comes from the status read.
+    expect(resultsArm.error).toBeNull();
+    expect(result.structuredContent).toEqual({
       status: "ok",
+      run_id: statusRead.pipeline_run_id,
       state: "failed",
       run_status: "FAILED",
-      failure_message: resultsArm.message,
-      failure: {
-        run_id: statusRead.pipeline_run_id,
-        error_type: "LLMCompletionError",
-        title: "LLM completion",
-        retryable: false,
-        finished_at: statusRead.finished_at,
-      },
+      run_error: runError,
     });
-    expect(result.structuredContent.failure).not.toHaveProperty("provider_metadata");
-    expect(result.structuredContent.failure).not.toHaveProperty("message");
-    expect(result.summary).toContain("Why: LLM completion\n");
-    expect(result.summary).toContain("What to do: The provider rejected the request");
+    expect(result.summary).toContain(`## ${runError.title}`);
+    expect(result.summary).toContain(runError.detail);
+    expect(result.summary).toContain(runError.next_step.detail);
+    expect(result.summary).toContain("`model.unavailable`");
     expect(result.summary).toContain(
-      "Retry: The report does not expect running it again unchanged to help.",
+      `For support: Run ${statusRead.pipeline_run_id} · model.unavailable · ended ${statusRead.finished_at ?? ""}`,
     );
-    expect(result.summary).toContain(
-      `For support: Run ${statusRead.pipeline_run_id} · LLMCompletionError · ended ${statusRead.finished_at ?? ""}`,
-    );
+    expect(result.summary).toContain("A failed run produces no images to show.");
     expect(result.imageBlocks).toEqual([]);
   });
 
-  it("takes the report from the failed arm when it relays one, quoting no message not flagged caller-facing", async () => {
-    const { relayedArm, statusRead } = RECORDED_FAILED_RUNS.sandboxProvisioning;
-    const client: ImagesClient = {
-      getRunStatus: () => Promise.reject(new Error("status unavailable")),
-      getRunResult: () => Promise.resolve(relayedArm),
-      fetchArtifact: () => Promise.reject(new Error("must not fetch")),
-    };
-
-    const result = await showMthdsRunImages(
-      { run_id: relayedArm.pipeline_run_id },
-      context(client),
-    );
-
-    expect(relayedArm.message).toContain(statusRead.error?.message ?? "");
-    expect(result.structuredContent).toEqual({
-      status: "ok",
-      run_id: relayedArm.pipeline_run_id,
-      state: "failed",
-      run_status: "FAILED",
-      failure_message: "Run finished with status FAILED; no result available",
-      failure: {
-        run_id: relayedArm.pipeline_run_id,
-        error_type: "SandboxProvisioningError",
-        title: "Sandbox provisioning",
-      },
-    });
-    expect(result.summary).not.toMatch(/Retry:/);
-    expect(result.summary).not.toContain("Could not provision");
-  });
-
-  it("keeps the arm's account and the message of a report flagged caller-facing", async () => {
-    const arm = relayingArmOf(RUN_ID, CALLER_FACING_TIMEOUT_REPORT);
+  it("takes the run's problem from the failed arm when it relays one, without the operator's diagnostics", async () => {
+    const arm = relayingArmOf(RUN_ID, OPERATOR_VIEW_LLM_COMPLETION_PROBLEM);
     const client: ImagesClient = {
       getRunStatus: () => Promise.reject(new Error("status unavailable")),
       getRunResult: () => Promise.resolve(arm),
@@ -888,20 +921,40 @@ describe("showMthdsRunImages", () => {
       run_id: RUN_ID,
       state: "failed",
       run_status: "FAILED",
-      failure_message: arm.message,
-      failure: {
-        run_id: RUN_ID,
-        error_type: "RunTimedOutError",
-        title: "Run timed out",
-        message: CALLER_FACING_TIMEOUT_REPORT.message,
-        error_domain: "runtime",
-        retryable: false,
-        user_action: { kind: "contact_support", detail: "Give support the run id run_x." },
-      },
+      run_error: callerView(OPERATOR_VIEW_LLM_COMPLETION_PROBLEM),
     });
-    expect(arm.message).toBe(
-      `Run finished with status FAILED: ${CALLER_FACING_TIMEOUT_REPORT.message ?? ""}`,
-    );
+    expect(result.structuredContent.run_error).not.toHaveProperty("diagnostics");
+    // The provider's raw answer reaches neither stream.
+    expect(result.summary).not.toContain("model_not_allowed_error");
+    expect(result.summary).toContain("`model.unavailable`");
+  });
+
+  it("keeps the run problem's own message, and bounds a detail too long to relay whole", async () => {
+    const longDetail = `The run was stopped at the one-hour limit. ${"Its last step was still waiting. ".repeat(100)}`;
+    const arm = relayingArmOf(RUN_ID, {
+      ...TIMED_OUT_RUN_PROBLEM,
+      detail: longDetail,
+      message: "The run took longer than this deployment allows.",
+    });
+    const client: ImagesClient = {
+      getRunStatus: () => Promise.reject(new Error("status unavailable")),
+      getRunResult: () => Promise.resolve(arm),
+      fetchArtifact: () => Promise.reject(new Error("must not fetch")),
+    };
+
+    const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
+
+    const runError = result.structuredContent.run_error;
+    expect(runError).toMatchObject({
+      code: "run.timed_out",
+      domain: TIMED_OUT_RUN_PROBLEM.domain,
+      retry: TIMED_OUT_RUN_PROBLEM.retry,
+      message: "The run took longer than this deployment allows.",
+    });
+    expect(runError?.detail.startsWith("The run was stopped at the one-hour limit.")).toBe(true);
+    expect(runError?.detail).toMatch(/more characters left out\]$/);
+    expect(runError?.detail.length).toBeLessThan(longDetail.length);
+    expect(result.summary).toContain("The run took longer than this deployment allows.");
   });
 
   it("produces an empty verdict, and fetches nothing, for a run with no candidate", async () => {
@@ -937,11 +990,16 @@ describe("showMthdsRunImages", () => {
 
     expect(fetches).toEqual([]);
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({ location: "images" });
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "images", reason: "not_a_candidate" },
+      location: { field: "images" },
+    });
+    expect(result.summary).toContain(REPORT);
     expect(result.imageBlocks).toEqual([]);
   });
 
-  it("classifies an unreachable API as a no-verdict rather than a walk", async () => {
+  it("reads an unreachable API as a no-verdict rather than a walk", async () => {
     const client: ImagesClient = {
       getRunStatus: noStatusRead,
       getRunResult: () =>
@@ -952,14 +1010,15 @@ describe("showMthdsRunImages", () => {
     const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "config",
-      retryable: true,
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.unreachable",
+      retry: "yes",
+      params: { base_url: DEFAULT_API_URL },
     });
-    expect(result.summary).toContain("unreachable or misconfigured");
+    expect(result.summary).toContain("PIPELEX_BASE_URL");
   });
 
-  it("reports a completed result with no main_stuff as a runtime no-verdict", async () => {
+  it("reports a completed result with no main_stuff as an answer it could not read", async () => {
     const client: ImagesClient = {
       getRunStatus: noStatusRead,
       getRunResult: () =>
@@ -974,7 +1033,12 @@ describe("showMthdsRunImages", () => {
     const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0].class).toBe("runtime");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.response_unreadable",
+      domain: "runtime",
+      retry: "no",
+    });
+    expect(result.structuredContent.problem?.message).toContain("main_stuff");
   });
 });
 
@@ -1008,5 +1072,6 @@ describe("showImagesToolResult", () => {
 
     expect(tool.isError).toBe(true);
     expect(tool.content.map((item) => item.type)).toEqual(["text"]);
+    expect(tool.structuredContent.problem?.location).toEqual({ field: "run_id" });
   });
 });

@@ -2,11 +2,15 @@ import { promises as fs } from "node:fs";
 import type { Dirent, Stats } from "node:fs";
 import path from "node:path";
 
-import { CodegenLockError, isStampableArtifactPath, runCodegenCheck } from "@pipelex/sdk";
-import type { CodegenDrift, CodegenTreeFile } from "@pipelex/sdk";
+import {
+  buildProblem,
+  isProblemError,
+  isStampableArtifactPath,
+  runCodegenCheck,
+} from "@pipelex/sdk";
+import type { CodegenDrift, CodegenTreeFile, Problem } from "@pipelex/sdk";
 
-import { PRUNED_DIRECTORIES } from "./shared.js";
-import type { ToolError } from "./shared.js";
+import { PRUNED_DIRECTORIES, asOneLine, problemOf } from "./shared.js";
 import {
   containedPath,
   createContainedSubdirectory,
@@ -30,8 +34,11 @@ import {
  * before creating anything. The two share {@link resolveSaveDir}'s
  * containment and nothing above it.
  *
- * Every failure is a returned value, never a throw — the capability turns it
- * into a `ToolError` on the tool result.
+ * Every failure is a returned value, never a throw: a problem, built with a
+ * core client code (`client.target_exists`, `client.write_failed`,
+ * `client.file_unreadable`) or read from the SDK, which the capability puts
+ * on the tool result. Each carries the writer's own sentence as its
+ * `message`, saying what is on disk.
  */
 
 // ── the ownership predicate (a mirror of the SDK's internal one) ─────
@@ -132,7 +139,7 @@ export interface CodegenWriteSuccess {
   drifts: CodegenDrift[];
 }
 
-export type CodegenWriteResult = CodegenWriteSuccess | { ok: false; error: ToolError };
+export type CodegenWriteResult = CodegenWriteSuccess | { ok: false; problem: Problem };
 
 const DEDICATED_DIRECTORY_HINT =
   "Point output_dir at a dedicated generated directory such as `src/generated/<method>/` — this tool overwrites only files carrying a codegen stamp and the codegen.lock beside them, so it refuses rather than touch anything else.";
@@ -146,7 +153,7 @@ export async function writeCodegenTree(request: CodegenWriteRequest): Promise<Co
   //    created at write time, in step 4.
   const target = await resolveSaveDir(request.root, request.outputDir, "output_dir");
   if (!target.ok) {
-    return { ok: false, error: target.error };
+    return { ok: false, problem: target.problem };
   }
   const { root, dir } = target;
 
@@ -162,7 +169,7 @@ export async function writeCodegenTree(request: CodegenWriteRequest): Promise<Co
   for (const artifact of request.artifacts) {
     const contained = containedPath(dir, artifact.path);
     if (contained === undefined) {
-      return { ok: false, error: escapedArtifactError(artifact.path) };
+      return { ok: false, problem: escapedArtifactError(artifact.path) };
     }
     destinations.push({
       relative: artifact.path,
@@ -173,7 +180,7 @@ export async function writeCodegenTree(request: CodegenWriteRequest): Promise<Co
   }
   const lockDestination = containedPath(dir, request.lockFilename);
   if (lockDestination === undefined) {
-    return { ok: false, error: escapedArtifactError(request.lockFilename) };
+    return { ok: false, problem: escapedArtifactError(request.lockFilename) };
   }
   destinations.push({
     relative: request.lockFilename,
@@ -186,15 +193,13 @@ export async function writeCodegenTree(request: CodegenWriteRequest): Promise<Co
   //    written. `lstat`, not `stat`: an overwrite through a symlink writes
   //    wherever it points, so a symlink is foreign by construction.
   for (const destination of destinations) {
-    const inspection = await inspectDestination(destination.absolute, destination.isLock);
-    if (inspection.kind === "error") {
-      return { ok: false, error: inspection.error };
+    const shown = path.relative(root, destination.absolute);
+    const inspection = await inspectDestination(destination.absolute, shown, destination.isLock);
+    if (inspection.outcome === "error") {
+      return { ok: false, problem: inspection.problem };
     }
-    if (inspection.kind === "foreign") {
-      return {
-        ok: false,
-        error: foreignFileError(path.relative(root, destination.absolute), inspection.reason),
-      };
+    if (inspection.outcome === "foreign") {
+      return { ok: false, problem: foreignFileError(shown, inspection.reason) };
     }
   }
 
@@ -210,13 +215,24 @@ export async function writeCodegenTree(request: CodegenWriteRequest): Promise<Co
     if (parent !== dir) {
       const created = await createSubdirectory(dir, parent);
       if (created !== undefined) {
-        return { ok: false, error: midWriteError(created, landed) };
+        return {
+          ok: false,
+          problem: midWriteError(path.relative(root, parent), "mkdir_failed", created, landed),
+        };
       }
     }
     try {
       await fs.writeFile(destination.absolute, content, "utf8");
     } catch (err) {
-      return { ok: false, error: midWriteError(errorMessage(err), landed) };
+      return {
+        ok: false,
+        problem: midWriteError(
+          path.relative(root, destination.absolute),
+          systemReason(err),
+          errorMessage(err),
+          landed,
+        ),
+      };
     }
     landed.push(destination.relative);
     if (!destination.isLock) {
@@ -230,9 +246,9 @@ export async function writeCodegenTree(request: CodegenWriteRequest): Promise<Co
 
   // 5. Check what landed, against what landed — the lock re-read from disk
   //    with the same strict decoder, not the copy we meant to write.
-  const verification = await verifyWrittenTree(dir, request.lockFilename, written);
+  const verification = await verifyWrittenTree(root, dir, request.lockFilename, written);
   if (!verification.ok) {
-    return { ok: false, error: verification.error };
+    return { ok: false, problem: verification.problem };
   }
 
   return {
@@ -254,58 +270,61 @@ export async function writeCodegenTree(request: CodegenWriteRequest): Promise<Co
 }
 
 type Inspection =
-  | { kind: "missing" }
-  | { kind: "owned" }
-  | { kind: "foreign"; reason: string }
-  | { kind: "error"; error: ToolError };
+  | { outcome: "missing" }
+  | { outcome: "owned" }
+  | { outcome: "foreign"; reason: string }
+  | { outcome: "error"; problem: Problem };
 
-async function inspectDestination(absolute: string, isLock: boolean): Promise<Inspection> {
+/** `shown` is the destination as the caller finds it: its path from the working directory. */
+async function inspectDestination(
+  absolute: string,
+  shown: string,
+  isLock: boolean,
+): Promise<Inspection> {
   let stats: Stats;
   try {
     stats = await fs.lstat(absolute);
   } catch (err) {
     if (isMissingPathError(err)) {
-      return { kind: "missing" };
+      return { outcome: "missing" };
     }
     return {
-      kind: "error",
-      error: {
-        class: "runtime",
-        message: `Could not inspect the existing file at ${absolute}: ${errorMessage(err)}`,
-        hint: "Check the generated directory's permissions, then call again with the same output_dir.",
-        retryable: true,
-      },
+      outcome: "error",
+      problem: unreadableError(
+        shown,
+        systemReason(err),
+        `Could not inspect the existing file at ${absolute}: ${errorMessage(err)}. Nothing was written. Check the generated directory's permissions, then call again with the same output_dir.`,
+      ),
     };
   }
 
   if (stats.isSymbolicLink()) {
     return {
-      kind: "foreign",
+      outcome: "foreign",
       reason: "it is a symlink, and writing through it would write outside the generated directory",
     };
   }
   if (!stats.isFile()) {
-    return { kind: "foreign", reason: "it is not a regular file" };
+    return { outcome: "foreign", reason: "it is not a regular file" };
   }
 
   const head = await readHead(absolute);
   if (head === undefined) {
     return {
-      kind: "error",
-      error: {
-        class: "runtime",
-        message: `Could not read the existing file at ${absolute}.`,
-        hint: "Check the generated directory's permissions, then call again with the same output_dir.",
-        retryable: true,
-      },
+      outcome: "error",
+      problem: unreadableError(
+        shown,
+        "unreadable",
+        `Could not read the existing file at ${absolute}. Nothing was written. Check the generated directory's permissions, then call again with the same output_dir.`,
+      ),
     };
   }
 
   const owned = isLock ? isCodegenLock(head) : hasCodegenStamp(absolute, head);
   return owned
-    ? { kind: "owned" }
+    ? { outcome: "owned" }
     : {
-        kind: "foreign",
+        outcome: "foreign",
         reason: isLock
           ? "it does not open with the `# codegen.lock` header, so it is not a lock this tool wrote"
           : "it carries no codegen stamp, so it was not generated by this tool",
@@ -352,13 +371,15 @@ function createSubdirectory(dir: string, parent: string): Promise<string | undef
 
 type Verification =
   | { ok: true; report: Awaited<ReturnType<typeof runCodegenCheck>>; orphansTruncated: boolean }
-  | { ok: false; error: ToolError };
+  | { ok: false; problem: Problem };
 
 async function verifyWrittenTree(
+  root: string,
   dir: string,
   lockFilename: string,
   written: readonly WrittenArtifact[],
 ): Promise<Verification> {
+  const shown = (relative: string) => path.relative(root, path.join(dir, relative));
   const locked = new Set(written.map((artifact) => artifact.path));
 
   const files: CodegenTreeFile[] = [];
@@ -368,52 +389,44 @@ async function verifyWrittenTree(
   for (const artifact of written) {
     const text = await readStrict(path.join(dir, artifact.path));
     if (text === undefined) {
-      return { ok: false, error: undecodableError(artifact.path) };
+      return { ok: false, problem: undecodableError(artifact.path, shown(artifact.path)) };
     }
     files.push({ path: artifact.path, content: text });
   }
 
-  const walk = await collectOrphanCandidates(dir, locked, lockFilename);
+  const walk = await collectOrphanCandidates(root, dir, locked, lockFilename);
   if (!walk.ok) {
-    return { ok: false, error: walk.error };
+    return { ok: false, problem: walk.problem };
   }
   files.push(...walk.files);
 
   const lockContent = await readStrict(path.join(dir, lockFilename));
   if (lockContent === undefined) {
-    return { ok: false, error: undecodableError(lockFilename) };
+    return { ok: false, problem: undecodableError(lockFilename, shown(lockFilename)) };
   }
 
   try {
     const report = await runCodegenCheck({ lockContent, files });
     return { ok: true, report, orphansTruncated: walk.truncated };
   } catch (err) {
-    if (err instanceof CodegenLockError) {
-      return {
-        ok: false,
-        error: {
-          class: "runtime",
-          message: `The generated tree was written but its lock could not be read back: ${err.message}`,
-          hint: "The files are on disk under output_dir; verify them with `pipelex codegen check` before committing them.",
-          retryable: false,
-        },
-      };
-    }
+    // The SDK's own problem when it raised one (`CodegenLockError` is
+    // `client.file_unreadable` naming the lock), with the writer's sentence
+    // saying the files are on disk.
     return {
       ok: false,
-      error: {
-        class: "runtime",
-        message: `The generated tree was written but could not be checked: ${errorMessage(err)}`,
-        hint: "The files are on disk under output_dir; verify them with `pipelex codegen check` before committing them.",
-        retryable: false,
-      },
+      problem: withWriterMessage(
+        problemOf(err),
+        isProblemError(err)
+          ? `The generated tree was written but its lock could not be read back: ${err.message} The files are on disk under output_dir; verify them with \`pipelex codegen check\` before committing them.`
+          : `The generated tree was written but could not be checked: ${errorMessage(err)} The files are on disk under output_dir; verify them with \`pipelex codegen check\` before committing them.`,
+      ),
     };
   }
 }
 
 type WalkResult =
   | { ok: true; files: CodegenTreeFile[]; truncated: boolean }
-  | { ok: false; error: ToolError };
+  | { ok: false; problem: Problem };
 
 /**
  * Walk the generated directory for stampable files the lock does not track —
@@ -422,6 +435,7 @@ type WalkResult =
  * two bounds above.
  */
 async function collectOrphanCandidates(
+  root: string,
   dir: string,
   locked: ReadonlySet<string>,
   lockFilename: string,
@@ -430,7 +444,7 @@ async function collectOrphanCandidates(
   let bytes = 0;
   let truncated = false;
 
-  const visit = async (current: string): Promise<ToolError | undefined> => {
+  const visit = async (current: string): Promise<Problem | undefined> => {
     let entries: Dirent[];
     try {
       entries = await fs.readdir(current, { withFileTypes: true });
@@ -438,12 +452,11 @@ async function collectOrphanCandidates(
       if (isMissingPathError(err)) {
         return undefined;
       }
-      return {
-        class: "runtime",
-        message: `Could not read the generated directory: ${errorMessage(err)}`,
-        hint: "The files are on disk under output_dir; verify them with `pipelex codegen check`.",
-        retryable: true,
-      };
+      return unreadableError(
+        path.relative(root, current) || ".",
+        systemReason(err),
+        `Could not read the generated directory: ${errorMessage(err)}. The files are on disk under output_dir; verify them with \`pipelex codegen check\`.`,
+      );
     }
 
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
@@ -492,7 +505,7 @@ async function collectOrphanCandidates(
 
       const text = await readStrict(absolute);
       if (text === undefined) {
-        return undecodableError(relative);
+        return undecodableError(relative, path.relative(root, absolute));
       }
       bytes += size ?? utf8.encode(text).length;
       if (bytes > MAX_WALK_BYTES) {
@@ -505,7 +518,7 @@ async function collectOrphanCandidates(
   };
 
   const failure = await visit(dir);
-  return failure === undefined ? { ok: true, files, truncated } : { ok: false, error: failure };
+  return failure === undefined ? { ok: true, files, truncated } : { ok: false, problem: failure };
 }
 
 /**
@@ -535,45 +548,95 @@ function toPosix(relative: string): string {
   return relative.split(path.sep).join("/");
 }
 
-// ── error values ────────────────────────────────────────────────────
+// ── the writer's problems ───────────────────────────────────────────
 
-function escapedArtifactError(artifactPath: string): ToolError {
-  return {
-    class: "runtime",
-    message: `The Pipelex API returned an artifact path that leaves the generated directory: ${artifactPath}`,
-    hint: "Nothing was written. This is a contract violation on the API side; inspect pipelex-api logs.",
-    retryable: false,
-  };
+/** Why a filesystem call failed, as the system's error code (`EACCES`, …), or `failed`. */
+function systemReason(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return typeof code === "string" && code !== "" ? code : "failed";
 }
 
-function foreignFileError(relative: string, reason: string): ToolError {
-  return {
-    class: "input_domain",
-    location: "output_dir",
-    message: `output_dir already holds \`${relative}\`, which this tool does not own: ${reason}. Nothing was written.`,
-    hint: DEDICATED_DIRECTORY_HINT,
-    retryable: false,
-  };
+/**
+ * A problem with the writer's sentence as its `message`, on one line, unless
+ * it carries a message of its own that the sentence does not already quote:
+ * the writer's sentence quotes the error's, which `problemOf` relays as the
+ * message of a problem that has none.
+ */
+function withWriterMessage(problem: Problem, message: string): Problem {
+  const sentence = asOneLine(message);
+  const own = problem.message;
+  return typeof own === "string" && own !== "" && !sentence.includes(own)
+    ? problem
+    : { ...problem, message: sentence };
 }
 
-function midWriteError(detail: string, landed: readonly string[]): ToolError {
+/**
+ * An artifact path the API returned that leaves the generated directory: the
+ * API broke its own contract in a `200`, so its answer cannot be used,
+ * `client.response_unreadable`, and nothing the caller passed is at fault.
+ */
+function escapedArtifactError(artifactPath: string): Problem {
+  return buildProblem(
+    "client.response_unreadable",
+    { status: 200 },
+    {
+      extra: {
+        message: `The Pipelex API returned an artifact path that leaves the generated directory: ${artifactPath}. Nothing was written. This is a contract violation on the API side; inspect pipelex-api logs.`,
+      },
+    },
+  );
+}
+
+/** A file in `output_dir` this tool does not own: `client.target_exists`, located at `output_dir`. */
+function foreignFileError(relative: string, reason: string): Problem {
+  return buildProblem(
+    "client.target_exists",
+    { path: relative },
+    {
+      location: { field: "output_dir" },
+      extra: {
+        message: `output_dir already holds \`${relative}\`, which this tool does not own: ${reason}. Nothing was written. ${DEDICATED_DIRECTORY_HINT}`,
+      },
+    },
+  );
+}
+
+/** A write that failed part-way: `client.write_failed` at the path it could not write, naming what landed. */
+function midWriteError(
+  relative: string,
+  reason: string,
+  detail: string,
+  landed: readonly string[],
+): Problem {
   const written =
     landed.length === 0
       ? "Nothing was written."
       : `Written before the failure: ${landed.map((file) => `\`${file}\``).join(", ")}.`;
-  return {
-    class: "runtime",
-    message: `The generated tree could not be written: ${detail}. ${written}`,
-    hint: "Call again with the same output_dir — regeneration overwrites its own files, so the retry finds the stamped files it left and proceeds.",
-    retryable: true,
-  };
+  return buildProblem(
+    "client.write_failed",
+    { path: relative, reason },
+    {
+      location: { field: "output_dir" },
+      extra: {
+        message: `The generated tree could not be written: ${detail}. ${written} Call again with the same output_dir — regeneration overwrites its own files, so the retry finds the stamped files it left and proceeds.`,
+      },
+    },
+  );
 }
 
-function undecodableError(relative: string): ToolError {
-  return {
-    class: "runtime",
-    message: `\`${relative}\` in the generated directory is not valid UTF-8, so the tree could not be checked.`,
-    hint: "The generated files are on disk under output_dir, but the tree could not be confirmed current. The offline check hashes exact UTF-8 bytes, so a file that cannot be decoded cannot be verified: remove or fix that file, or point output_dir at a dedicated generated directory, then verify with `pipelex codegen check`.",
-    retryable: false,
-  };
+/** A file of the generated directory that could not be read: `client.file_unreadable`. */
+function unreadableError(relative: string, reason: string, message: string): Problem {
+  return buildProblem(
+    "client.file_unreadable",
+    { path: relative, reason },
+    { location: { field: "output_dir" }, extra: { message } },
+  );
+}
+
+function undecodableError(relative: string, shown: string): Problem {
+  return unreadableError(
+    shown,
+    "not_utf8",
+    `\`${relative}\` in the generated directory is not valid UTF-8, so the tree could not be checked. The generated files are on disk under output_dir, but the tree could not be confirmed current. The offline check hashes exact UTF-8 bytes, so a file that cannot be decoded cannot be verified: remove or fix that file, or point output_dir at a dedicated generated directory, then verify with \`pipelex codegen check\`.`,
+  );
 }

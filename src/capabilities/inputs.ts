@@ -1,9 +1,5 @@
-import type {
-  PipeIORequest,
-  PipeIOResponse,
-  PipeIOValidReport,
-  ValidationErrorItem,
-} from "@pipelex/sdk";
+import { buildProblem, formatItem } from "@pipelex/sdk";
+import type { PipeIORequest, PipeIOResponse, PipeIOValidReport } from "@pipelex/sdk";
 import { z } from "zod";
 
 import { inputsTemplateFor } from "./inputs-template.js";
@@ -19,32 +15,34 @@ import {
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
 import {
   METHOD_REF_GRAMMAR,
+  argumentProblem,
+  asOneLine,
   buildApiConfig,
-  classifyError,
   createPipelexApiClient,
+  faultsProblem,
   filesSentSchema,
   methodDirInputSchema,
   methodFilesInputSchema,
+  problemItemSchema,
+  problemOf,
+  problemSchema,
+  problemSummary,
   resolveMethodSource,
-  summaryForToolError,
-  toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
   withFilesSent,
   failedBeforeSending,
-  treeSentInlineHeavy,
   markUnsent,
+  withTooLargeNote,
 } from "./shared.js";
 import type {
   ApiConfig,
-  AuthErrorTexture,
-  BaseUrlSourceTexture,
-  ClassifyErrorOptions,
-  ErrorSummaries,
+  ApiNotes,
   FileResolver,
   MethodTreeToSend,
+  Problem,
+  ProblemItem,
   SubmittedFileInput,
-  ToolError,
 } from "./shared.js";
 import { methodTreeLimitsOf } from "./tree-limits.js";
 import type { TreeLimitsAware } from "./tree-limits.js";
@@ -119,8 +117,15 @@ const inputsStructuredContentSchema = z.object({
     .describe('The fill-in inputs template, as raw TOML text (format "toml").'),
   method_version: methodVersionReportSchema,
   files_sent: filesSentSchema,
-  validation_errors: z.array(z.unknown()).optional(),
-  errors: z.array(toolErrorSchema).optional(),
+  errors: z
+    .array(problemItemSchema)
+    .optional()
+    .describe(
+      "An invalid verdict's faults about the method, one problem item each, with its own code, detail and location; absent on a valid verdict.",
+    ),
+  problem: problemSchema
+    .optional()
+    .describe("Why no template could be produced; present exactly when status is error."),
 });
 
 export const mthdsInputsOutputSchema = inputsStructuredContentSchema;
@@ -158,8 +163,10 @@ export interface InputsStructuredContent {
   method_version?: MethodVersionReport;
   /** Calls on a tree, from `method_dir` or `files`: every file sent. */
   files_sent?: string[];
-  validation_errors?: unknown[];
-  errors?: ToolError[];
+  /** An invalid verdict's faults, the API's problem items as it sent them. */
+  errors?: ProblemItem[];
+  /** The one problem of a call that produced no template. */
+  problem?: Problem;
 }
 
 export interface InputsResult {
@@ -184,103 +191,17 @@ export interface InputsContext extends ApiConfig, MethodVersionsAware, TreeLimit
   client?: InputsClient;
   /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
-  /** Deployment-specific auth-failure texture; default env-var wording when absent. */
-  authError?: AuthErrorTexture;
-  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
-  baseUrlSource?: BaseUrlSourceTexture;
+  /** Where the call's key and base URL came from, for a failed request's summary; the variables' names when absent. */
+  apiNotes?: ApiNotes;
 }
 
 export function buildInputsContext(env = process.env): InputsContext {
   return buildApiConfig(env);
 }
 
-/** The route this tool reads, named by the classification of a 404 that has no texture of its own. */
-const INPUTS_ROUTE = "/v1/pipe-io";
-
-/**
- * The route's refusal of a pipe selection — a `pipe_ref` naming no pipe, a
- * method with no entry pipe, or several — is a typed `422` about the pipe,
- * whatever named the method, so every shape locates it at `pipe_ref`, with
- * the route's own reason, which names the candidates where there are some.
- */
-const INPUTS_SELECTION_TEXTURE: NonNullable<ClassifyErrorOptions["selection"]> = {
-  location: "pipe_ref",
-  hint: "Pass pipe_ref as a qualified domain.pipe_code the method declares; omitting it requires the method to settle exactly one entry pipe — a package manifest's main_pipe, else a single main_pipe declaration.",
-};
-
-/**
- * Classify options for a tree-shaped request. With the selection refusals
- * typed and located at `pipe_ref`, and the refusals of the tree itself read
- * by `classifyError`, a bare `400`/`422` from the route is the request's.
- */
-const INPUTS_BY_FILES_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: INPUTS_ROUTE,
-  methodLocation: "files",
-  badRequest: {
-    location: "files",
-    hint: "Check the method's files, and pass pipe_ref, when you name one, as a qualified domain.pipe_code.",
-  },
-  selection: INPUTS_SELECTION_TEXTURE,
-};
-
-/**
- * Classify options for an address-shaped request: a `400`/`422` is the ref
- * (parse, fetch, ambiguity), a `404` is the runner's no-matching-package
- * refusal, and a `501` is the reserved registry form — all the caller's own
- * selector, located at `method_ref`. The route fetches a package's `.mthds`
- * files alone, so the execution-locus gate never fires here. A runner too old
- * to serve the route answers a bare `404` too, which the SDK reads as the
- * deployment's rather than the caller's, so it keeps the missing-route arm
- * here and on the id shape.
- */
-const INPUTS_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: INPUTS_ROUTE,
-  methodLocation: "method_ref",
-  badRequest: {
-    location: "method_ref",
-    hint: `Check the address and tag — ${METHOD_REF_GRAMMAR}. The tag must be a git tag on the repository (branches do not pin), and the ref must be resolvable by an anonymous clone.`,
-  },
-  notFound: {
-    location: "method_ref",
-    hint: "The repository was fetched but holds no package matching this address by manifest identity. Check the package selector against the repository's METHODS.toml manifests.",
-  },
-  notImplemented: {
-    location: "method_ref",
-    hint: `Only address-form refs are supported (${METHOD_REF_GRAMMAR}); registry references are reserved until a method registry exists.`,
-  },
-  selection: INPUTS_SELECTION_TEXTURE,
-};
-
-/**
- * Classify options for an id-shaped request. The hosted platform resolves the
- * id against the key's organization and forwards the stored files, so an
- * unknown or foreign-org id is a `404` (indistinguishable by design), and a
- * stored method with no MTHDS source is a `422` from the same resolution.
- */
-const INPUTS_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: INPUTS_ROUTE,
-  methodLocation: "method_id",
-  badRequest: {
-    location: "method_id",
-    hint: "The stored method may have no MTHDS source yet, or this deployment may not resolve method_id on /v1/pipe-io — the selector is hosted-only (a bare pipelex-api runner has no catalog).",
-  },
-  notFound: {
-    location: "method_id",
-    hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.",
-  },
-  selection: INPUTS_SELECTION_TEXTURE,
-};
-
-/** Classify options follow the selector, so each failure locates at the field that named the method. */
-function inputsErrorOptions(request: ResolvedInputsRequest): ClassifyErrorOptions {
-  if (request.method_ref !== undefined) return INPUTS_BY_REF_ERROR_OPTIONS;
-  if (request.method_id !== undefined) return INPUTS_BY_ID_ERROR_OPTIONS;
-  return INPUTS_BY_FILES_ERROR_OPTIONS;
-}
-
 // Constructed inside the caught block (mirroring run.ts's runClient): the SDK
-// constructor throws PipelineRequestError on a malformed base URL, and that
-// must classify to a config ToolError, not reject the MCP handler.
+// constructor throws on a malformed base URL, and that must become the
+// result's problem, not reject the MCP handler.
 function inputsClient(context: InputsContext): InputsClient {
   return context.client ?? createPipelexApiClient(context);
 }
@@ -292,8 +213,8 @@ export async function buildMthdsInputs(
   const resolution = await resolveMethodSource(input, context.resolver, "one_selector", () =>
     methodTreeLimitsOf(context, () => inputsClient(context)),
   );
-  if (resolution.errors.length > 0) {
-    return errorResult("Inputs template was not run: request input is invalid.", resolution.errors);
+  if (resolution.faults.length > 0) {
+    return errorResult(faultsProblem(resolution.faults), context);
   }
 
   const { method_dir: _methodDir, files: _files, ...selection } = input;
@@ -301,9 +222,9 @@ export async function buildMthdsInputs(
     ...selection,
     ...(resolution.tree === undefined ? {} : { tree: resolution.tree }),
   };
-  const inputErrors = validateInputsRequest(request);
-  if (inputErrors.length > 0) {
-    return errorResult("Inputs template was not run: request input is invalid.", inputErrors);
+  const inputFaults = validateInputsRequest(request);
+  if (inputFaults.length > 0) {
+    return errorResult(faultsProblem(inputFaults), context);
   }
 
   return withFilesSent(await requestInputsTemplate(request, context), request.tree);
@@ -332,15 +253,13 @@ async function requestInputsTemplate(
     }
     report = await client.pipeIo(toPipeIoRequest(sent));
   } catch (err) {
-    const classified = classifyError(err, {
-      ...inputsErrorOptions(request),
-      auth: context.authError,
-      baseUrlSource: context.baseUrlSource,
-      methodTree: request.tree !== undefined,
-      treeInline: await treeSentInlineHeavy(err, request.tree, client),
-    });
-    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
-    const failed = errorResult(summaryForError(error), [error]);
+    // The SDK's problem, as it read the answer or the failure: its code, its
+    // domain and its retry verdict are relayed, never overridden. A refused
+    // pipe selection is the route's own typed problem, located at pipe_ref,
+    // and a request the tree sent inline made too large says so.
+    const sized = await withTooLargeNote(problemOf(err), err, request.tree, client);
+    const problem = await selectorFailure(sized, plan, methodVersionsOf(context));
+    const failed = errorResult(problem, context);
     // A client that could not be built, or an argument refused before
     // sending, sent no file of the tree.
     return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
@@ -348,8 +267,8 @@ async function requestInputsTemplate(
 
   // The API responded; projecting it must not be reported as an unreachable
   // API. A malformed answer (a valid arm with no resolved pipe, or no
-  // descriptor the projection can walk for it) is a reachable contract
-  // violation, surfaced as a runtime no-verdict error.
+  // descriptor the projection can walk for it) is an answer the workshop
+  // cannot read, `client.response_unreadable` of the 200 it came on.
   try {
     const result = inputsResult(report, {
       explicit: request.explicit ?? true,
@@ -358,69 +277,50 @@ async function requestInputsTemplate(
     return await withMethodContent(result, plan, "projected the template from");
   } catch (err) {
     return errorResult(
-      "Inputs template produced no verdict: the Pipelex API returned a malformed report.",
-      [
+      buildProblem(
+        "client.response_unreadable",
+        { status: 200 },
         {
-          class: "runtime",
-          message:
-            err instanceof Error
-              ? err.message
-              : "The Pipelex API returned a malformed pipe I/O answer.",
-          hint: "The API responded but its answer was missing required fields; inspect pipelex-api logs.",
-          retryable: false,
+          extra: {
+            message: `${err instanceof Error ? err.message : "The Pipelex API returned a malformed pipe I/O answer."} The API answered, but its answer was missing required fields.`,
+          },
         },
-      ],
+      ),
+      context,
     );
   }
-}
-
-const ERROR_SUMMARIES: ErrorSummaries = {
-  config: "Inputs template could not start: the Pipelex API is unreachable or misconfigured.",
-  input_domain: "Inputs template was not run: the Pipelex API rejected the request.",
-  runtime: "Inputs template could not be completed: the Pipelex API returned an error.",
-  paywall:
-    "Inputs template could not start: the organization's Pipelex plan does not cover this call.",
-  auth: "Inputs template could not start: the Pipelex API key is missing or was refused.",
-  role: "Inputs template could not start: your role in this organization does not allow this.",
-};
-
-function summaryForError(error: ToolError): string {
-  return summaryForToolError(error, ERROR_SUMMARIES);
 }
 
 export function inputsToolResult(result: InputsResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(
-      result.summary,
-      result.structuredContent.errors,
-      result.structuredContent.files_sent,
-    ),
+    content: toolResultContent(result.summary, result.structuredContent.files_sent),
     isError: result.structuredContent.status === "error",
   };
 }
 
-export function validateInputsRequest(input: ResolvedInputsRequest): ToolError[] {
-  const errors = validateMethodSelectorRequest(input.tree !== undefined, input, {
+export function validateInputsRequest(input: ResolvedInputsRequest): Problem[] {
+  const faults = validateMethodSelectorRequest(input.tree !== undefined, input, {
     rule: "one_selector",
   });
 
   if (input.pipe_ref !== undefined && input.pipe_ref.trim() === "") {
-    errors.push({
-      class: "input_domain",
-      location: "pipe_ref",
-      message: "pipe_ref must not be empty when supplied.",
-      hint: "Pass a qualified domain.pipe_code, or omit pipe_ref to default to the closure's main_pipe.",
-      retryable: false,
-    });
+    faults.push(
+      argumentProblem(
+        "pipe_ref",
+        "empty",
+        "pipe_ref must not be empty when supplied.",
+        "Pass a qualified domain.pipe_code, or omit pipe_ref to default to the closure's main_pipe.",
+      ),
+    );
   }
 
-  return errors;
+  return faults;
 }
 
 /**
  * Project the route's answer. The invalid arm is a produced verdict about the
- * closure and passes its `validation_errors[]` through. The valid arm is keyed
+ * closure and relays its faults, one problem item each, as `errors`. The valid arm is keyed
  * by exactly the `pipe_ref` it resolved, so the template is projected from
  * that pipe's descriptor; an answer that resolved no pipe, or carries no
  * descriptor the projection can walk for it, throws for the caller to report
@@ -432,9 +332,9 @@ export function inputsResult(report: PipeIOResponse, choice: InputsTemplateChoic
       structuredContent: {
         status: "ok",
         is_valid: false,
-        validation_errors: report.validation_errors,
+        errors: report.errors,
       },
-      summary: invalidSummary(report.message, report.validation_errors),
+      summary: invalidSummary(report.message, report.errors),
     };
   }
 
@@ -500,11 +400,8 @@ function validSummary(pipeRef: string, template: ProjectedInputsTemplate): strin
   ].join("\n\n");
 }
 
-function invalidSummary(message: string, validationErrors: ValidationErrorItem[]): string {
-  const lines = validationErrors.map((error) => {
-    const source = error.source ? ` (${error.source})` : "";
-    return `- **${error.category}** — ${error.message}${source}`;
-  });
+function invalidSummary(message: string, errors: readonly ProblemItem[]): string {
+  const lines = errors.map((item) => `- ${asOneLine(formatItem(item))}`);
 
   return [
     "# Inputs template not produced",
@@ -526,13 +423,14 @@ function toPipeIoRequest(input: ResolvedInputsRequest): PipeIORequest {
   return input.pipe_ref === undefined ? selector : { ...selector, pipe_ref: input.pipe_ref };
 }
 
-function errorResult(summary: string, errors: ToolError[]): InputsResult {
+/** A call that produced no template: its one problem, and the problem's summary. */
+function errorResult(problem: Problem, context: { apiNotes?: ApiNotes }): InputsResult {
   return {
     structuredContent: {
       status: "error",
       is_valid: false,
-      errors,
+      problem,
     },
-    summary,
+    summary: problemSummary(problem, context.apiNotes),
   };
 }

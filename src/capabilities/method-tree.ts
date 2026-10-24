@@ -417,19 +417,27 @@ function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-/** A refusal of a listing as a tool shows it: what happened, and what the caller can do. */
+/** A refusal of a listing as a tool shows it: what happened, what the caller can do, and why, as the listing's refusal code. */
 export interface TreeRefusalText {
   message: string;
-  hint: string;
+  remedy: string;
+  reason: string;
 }
 
 /**
  * The words a tool puts on a listing's refusal, at the field that named the
  * folder. The message is `mthds`'s own, which names the offending path; the
- * hint says what the caller can change, by refusal code. `fallback` is the
- * tool's own last resort, appended to every hint.
+ * remedy says what the caller can change, by refusal code. `fallback` is the
+ * tool's own last resort, appended to every remedy.
  */
 export function describeTreeRefusal(error: MethodTreeError, fallback: string): TreeRefusalText {
+  return { reason: error.code, ...treeRefusalWords(error, fallback) };
+}
+
+function treeRefusalWords(
+  error: MethodTreeError,
+  fallback: string,
+): Omit<TreeRefusalText, "reason"> {
   if (error instanceof TreeLimitExceededError) {
     const what =
       error.limit === "maxFileCount"
@@ -443,46 +451,46 @@ export function describeTreeRefusal(error: MethodTreeError, fallback: string): T
         : `The Pipelex deployment this workshop talks to takes no method holding ${what}.`;
     return {
       message: `${error.message} ${whose}`,
-      hint: `Point at the method's own folder, or keep what is not part of the method out with a .gitignore inside the folder or METHODS.toml's [package] exclude; ${fallback}`,
+      remedy: `Point at the method's own folder, or keep what is not part of the method out with a .gitignore inside the folder or METHODS.toml's [package] exclude; ${fallback}`,
     };
   }
   switch (error.code) {
     case "symbolic_link":
       return {
         message: error.message,
-        hint: `A link in a method's folder is refused, never followed: replace it with the file it points at, or keep it out with a name starting with a dot or a .gitignore line inside the folder, written without a trailing slash (node_modules, not node_modules/), since git matches a link as a file; ${fallback}`,
+        remedy: `A link in a method's folder is refused, never followed: replace it with the file it points at, or keep it out with a name starting with a dot or a .gitignore line inside the folder, written without a trailing slash (node_modules, not node_modules/), since git matches a link as a file; ${fallback}`,
       };
     case "special_file":
       return {
         message: error.message,
-        hint: `Remove it, or keep it out with a .gitignore line inside the folder; ${fallback}`,
+        remedy: `Remove it, or keep it out with a .gitignore line inside the folder; ${fallback}`,
       };
     case "invalid_tree_path":
     case "normalization_collision":
     case "path_collision":
       return {
         message: error.message,
-        hint: `A method's files must keep their names on every machine, case-insensitive file systems included: rename what the message names, or keep it out with a .gitignore line inside the folder; ${fallback}`,
+        remedy: `A method's files must keep their names on every machine, case-insensitive file systems included: rename what the message names, or keep it out with a .gitignore line inside the folder; ${fallback}`,
       };
     case "gitignore_not_utf8":
       return {
         message: error.message,
-        hint: `Re-save that .gitignore as UTF-8; ${fallback}`,
+        remedy: `Re-save that .gitignore as UTF-8; ${fallback}`,
       };
     case "manifest_invalid":
       return {
         message: error.message,
-        hint: `Fix METHODS.toml's [package] exclude, an array of patterns, each a string; ${fallback}`,
+        remedy: `Fix METHODS.toml's [package] exclude, an array of patterns, each a string; ${fallback}`,
       };
     case "empty_tree":
       return {
         message: error.message,
-        hint: `Files whose names start with a dot, and what the folder's .gitignore files exclude, are not part of a method; ${fallback}`,
+        remedy: `Files whose names start with a dot, and what the folder's .gitignore files exclude, are not part of a method; ${fallback}`,
       };
     default:
       return {
         message: error.message,
-        hint: `Check the file and its permissions, or keep it out of the method with a .gitignore inside the folder; ${fallback}`,
+        remedy: `Check the file and its permissions, or keep it out of the method with a .gitignore inside the folder; ${fallback}`,
       };
   }
 }

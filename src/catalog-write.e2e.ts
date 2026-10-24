@@ -107,7 +107,7 @@ async function linkedMethodId(): Promise<string> {
 function asSaved(result: { structuredContent: unknown }): SaveMethodSuccess {
   const sc = result.structuredContent as SaveMethodSuccess | SaveMethodFailure;
   if (sc.status !== "ok") {
-    throw new Error(`expected a produced verdict, got errors: ${JSON.stringify(sc.errors)}`);
+    throw new Error(`expected a produced verdict, got the problem: ${JSON.stringify(sc.problem)}`);
   }
   return sc;
 }
@@ -246,15 +246,16 @@ describe("mthds_save_method (live)", () => {
     const sc = result.structuredContent as SaveMethodSuccess | SaveMethodFailure;
     expect(sc.status).toBe("error");
     const failure = sc as SaveMethodFailure;
-    expect(failure.errors[0].class).toBe("input_domain");
-    expect(failure.errors[0].location).toBe("method_id");
-    expect(failure.errors[0].retryable).toBe(false);
-    expect(failure.errors[0].hint).toContain(await linkedMethodId());
+    expect(failure.problem).toMatchObject({
+      code: "client.target_exists",
+      location: { field: "method_id" },
+    });
+    expect(failure.problem.message).toContain(await linkedMethodId());
   });
 
   /**
    * The `expected_updated_at` compare-and-swap: the platform refuses a stale
-   * token with a 409 `method_update_conflict`, and nothing is written.
+   * token with a 409 `pipelex.catalog.update_conflict`, and nothing is written.
    */
   it("refuses a draft write whose expected_updated_at is stale", async () => {
     const result = await saveMthdsMethod(
@@ -270,11 +271,10 @@ describe("mthds_save_method (live)", () => {
     const sc = result.structuredContent as SaveMethodSuccess | SaveMethodFailure;
     expect(sc.status).toBe("error");
     const failure = sc as SaveMethodFailure;
-    expect(failure.errors.length).toBeGreaterThan(0);
-    expect(failure.errors[0].class).toBe("input_domain");
-    expect(failure.errors[0].location).toBe("expected_updated_at");
-    expect(failure.errors[0].retryable).toBe(false);
-    expect(failure.errors[0].message).toContain("Nothing was written");
+    expect(failure.problem).toMatchObject({
+      code: "pipelex.catalog.update_conflict",
+      retry: "no",
+    });
   });
 
   /**
@@ -371,9 +371,9 @@ describe("mthds_publish_method (live)", () => {
       context,
     );
 
-    const sc = result.structuredContent as { status: string; errors?: { location?: string }[] };
+    const sc = result.structuredContent as { status: string; problem?: { code?: string } };
     expect(sc.status).toBe("error");
-    expect(sc.errors?.[0]?.location).toBe("expected_draft_updated_at");
+    expect(sc.problem?.code).toBe("pipelex.catalog.update_conflict");
   });
 });
 
