@@ -219,9 +219,11 @@ describe("runErrorOf's bounds", () => {
     expect(Array.from(String(params.reason)).length).toBeLessThan(
       RUN_ERROR_ITEM_MAX_CODE_POINTS + 60,
     );
-    // A typed list keeps its entries alone; the count of the rest sits beside it.
+    // A typed list keeps its entries alone; the count of the rest sits in the
+    // object's one `…` member, which no member of the object takes.
     expect(params.missing_blobs).toEqual(hashes.slice(0, RUN_ERROR_MAX_ITEMS));
-    expect(params.missing_blobs_omitted).toBe(5);
+    expect(params["…"]).toBe("5 more entries of missing_blobs left out");
+    expect(params).not.toHaveProperty("missing_blobs_omitted");
     const wide = params.wide as Record<string, unknown>;
     expect(Object.keys(wide)).toHaveLength(RUN_ERROR_MAX_ITEMS + 1);
     expect(wide["…"]).toBe("3 more members left out");
@@ -232,8 +234,9 @@ describe("runErrorOf's bounds", () => {
     expect(Array.from(runError?.location?.pipe ?? "").length).toBeLessThan(
       FAILURE_FIELD_MAX_CODE_POINTS + 60,
     );
-    expect(runError?.location?.path).toEqual(names.slice(0, RUN_ERROR_MAX_ITEMS));
-    expect(runError?.location?.path_omitted).toBe(5);
+    // A pipe path cut anywhere would name another pipe, so it is carried whole.
+    expect(runError?.location?.path).toEqual(names);
+    expect(runError?.location).not.toHaveProperty("…");
     expect(runError?.location?.item).toBe(3);
 
     const [first, second] = runError?.errors ?? [];
@@ -248,6 +251,24 @@ describe("runErrorOf's bounds", () => {
     expect(second?.suggested_fix).toEqual(smallFix);
 
     expect(runErrorSchema.safeParse(runError).success).toBe(true);
+    expect(isProblem(runError)).toBe(true);
+  });
+
+  it("never lets the count of what it left out take a member's place", () => {
+    // The platform's own members include names a sibling count would have
+    // taken (`files_omitted`) and the `…` the count is named by: each is kept
+    // as served, and the count takes the first name of `…` no member has.
+    const files = Array.from({ length: RUN_ERROR_MAX_ITEMS + 2 }, (_, index) => `f${index}.mthds`);
+    const runError = runErrorOf({
+      ...TIMED_OUT_RUN_PROBLEM,
+      params: { files, files_omitted: 40, "…": "the platform's own member" },
+    });
+
+    const params = runError?.params as Record<string, unknown>;
+    expect(params.files).toEqual(files.slice(0, RUN_ERROR_MAX_ITEMS));
+    expect(params.files_omitted).toBe(40);
+    expect(params["…"]).toBe("the platform's own member");
+    expect(params["……"]).toBe("2 more entries of files left out");
     expect(isProblem(runError)).toBe(true);
   });
 

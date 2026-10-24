@@ -256,8 +256,12 @@ async function requestInputsTemplate(
     // The SDK's problem, as it read the answer or the failure: its code, its
     // domain and its retry verdict are relayed, never overridden. A refused
     // pipe selection is the route's own typed problem, located at pipe_ref,
-    // and a request the tree sent inline made too large says so.
-    const sized = await withTooLargeNote(problemOf(err), err, request.tree, client);
+    // and a call the method's files made too large says so.
+    const sized = await withTooLargeNote(problemOf(err), err, {
+      route: "/v1/pipe-io",
+      tree: request.tree,
+      client,
+    });
     const problem = await selectorFailure(sized, plan, methodVersionsOf(context));
     const failed = errorResult(problem, context);
     // A client that could not be built, or an argument refused before

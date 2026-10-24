@@ -3,7 +3,12 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { ApiResponseError, ApiUnreachableError, MethodFileTransferError } from "@pipelex/sdk";
+import {
+  ApiResponseError,
+  ApiUnreachableError,
+  MethodFileTransferError,
+  RequestArgumentError,
+} from "@pipelex/sdk";
 import type {
   MethodData,
   MethodDetail,
@@ -224,7 +229,10 @@ function storedVersion(overrides: Partial<MethodVersion> = {}): MethodVersion {
 
 /**
  * A platform refusal as the hosted API answers it: a problem document, which
- * the SDK reads as it came, its request id on the header.
+ * the SDK reads as it came, its request id on the header, and the error the
+ * SDK raises for it, whose message names the route (`API <METHOD> <path>
+ * failed (<status>): <detail>`) and whose `apiUrl` is the base URL. The
+ * method is the route's usual one; nothing reads it.
  */
 function platformRefusal(
   route: string,
@@ -234,9 +242,14 @@ function platformRefusal(
     unknown
   >,
 ): ApiResponseError {
+  const method = route.endsWith("/draft")
+    ? "PUT"
+    : route === "/v1/methods" || route.startsWith("/v1/blobs/") || route === "/v1/validate"
+      ? "POST"
+      : "GET";
   return new ApiResponseError(
-    `HTTP ${status}`,
-    `https://api-dev.pipelex.com${route}`,
+    `API ${method} ${route} failed (${status}): ${problem.detail}`,
+    "https://api-dev.pipelex.com",
     status,
     "Refused",
     JSON.stringify({
@@ -1625,6 +1638,128 @@ describe("saveMthdsMethod", () => {
     }
   });
 
+  it("keeps the plain problem of a create shown never to have left, and warns on any other", async () => {
+    // Only a proof that the create was never sent, or that its route refused
+    // it, keeps the failure's own problem: an argument the SDK refused, a
+    // failure of a step before the create (the handshake, the blob route,
+    // whatever their status), or a refusal the create's route answered. A
+    // failure the SDK did not raise, or a 5xx from the create's route, may
+    // have come after the method was written.
+    const unavailable = {
+      code: "runtime.unavailable",
+      title: "The platform is unavailable",
+      detail: "The platform could not take the request.",
+      domain: "runtime",
+    };
+    const cases: { name: string; err: unknown; plain: string | undefined }[] = [
+      {
+        name: "an argument the SDK refused",
+        err: new RequestArgumentError("createMethod() takes the method's tree in one form."),
+        plain: "client.argument_invalid",
+      },
+      {
+        name: "the blob route's 503",
+        err: platformRefusal("/v1/blobs/missing", 503, unavailable),
+        plain: "runtime.unavailable",
+      },
+      {
+        name: "the handshake's 503",
+        err: platformRefusal("/v1/version", 503, unavailable),
+        plain: "runtime.unavailable",
+      },
+      {
+        name: "the create route's 501",
+        err: platformRefusal("/v1/methods", 501, {
+          ...unavailable,
+          code: "runtime.not_implemented",
+        }),
+        plain: "runtime.not_implemented",
+      },
+      {
+        name: "the create route's 503",
+        err: platformRefusal("/v1/methods", 503, unavailable),
+        plain: undefined,
+      },
+      {
+        name: "an abort the SDK did not raise",
+        err: new DOMException("The operation was aborted.", "AbortError"),
+        plain: undefined,
+      },
+      { name: "a wrapper's error", err: new Error("socket hang up"), plain: undefined },
+    ];
+    for (const { name, err, plain } of cases) {
+      await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+      const result = await saveMthdsMethod(
+        { method_dir: "methods/demo", name: "Demo" },
+        contextFor(
+          {
+            ...clientNotCalled,
+            createMethod(): Promise<MethodData> {
+              return Promise.reject(err);
+            },
+          },
+          validationAnswering(validReport),
+        ),
+      );
+
+      const error = problemOf(result.structuredContent);
+      if (plain === undefined) {
+        expect(error, name).toMatchObject({
+          code: "client.outcome_unknown",
+          retry: "outcome_unknown",
+          next_step: { kind: "refresh" },
+        });
+      } else {
+        expect(error.code, name).toBe(plain);
+        expect(result.summary, name).not.toContain("client.outcome_unknown");
+      }
+    }
+  });
+
+  it("keeps the plain problem of a create whose blob route failed before the create was sent", async () => {
+    // The real client sends the tree by hash, the deployment announcing an
+    // inline limit no tree passes, and the blob route fails: the create was
+    // never posted, so nothing was minted and the outcome is known.
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+    const posted: string[] = [];
+    vi.stubGlobal("fetch", (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      const method = input instanceof Request ? input.method : (init?.method ?? "GET");
+      posted.push(`${method} ${url.pathname}`);
+      if (url.pathname === "/v1/version") {
+        return Promise.resolve(
+          Response.json({
+            version: "1.0.0",
+            blob_store: true,
+            limits: { method_tree: { max_inline_bytes: 1 } },
+          }),
+        );
+      }
+      if (url.pathname === "/v1/blobs/missing") {
+        return Promise.resolve(new Response("upstream unavailable", { status: 503 }));
+      }
+      return Promise.resolve(new Response("", { status: 404 }));
+    });
+    try {
+      const real = createPipelexApiClient({ baseUrl: DEFAULT_API_URL });
+      const result = await saveMthdsMethod(
+        { method_dir: "methods/demo", name: "Demo" },
+        contextFor(
+          { ...clientNotCalled, createMethod: (input) => real.createMethod(input) },
+          validationAnswering(validReport),
+        ),
+      );
+
+      expect(posted).toContain("POST /v1/blobs/missing");
+      expect(posted).not.toContain("POST /v1/methods");
+      const error = problemOf(result.structuredContent);
+      expect(error.code).not.toBe("client.outcome_unknown");
+      expect(result.summary).not.toContain("client.outcome_unknown");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("relays a refused key on the create as the key, not as connectivity", async () => {
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
 
@@ -1714,7 +1849,16 @@ describe("saveMthdsMethod", () => {
     // A 2xx the SDK could not read is a create the platform accepted, which the
     // SDK reports as a final ApiResponseError: the method exists all the same.
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
-    vi.stubGlobal("fetch", () => Promise.resolve(new Response("", { status: 201 })));
+    const posted: string[] = [];
+    vi.stubGlobal("fetch", (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      const method = input instanceof Request ? input.method : (init?.method ?? "GET");
+      if (url.pathname === "/v1/version") {
+        return Promise.resolve(Response.json({ version: "1.0.0", blob_store: false }));
+      }
+      posted.push(`${method} ${url.pathname}`);
+      return Promise.resolve(new Response("", { status: 201 }));
+    });
     try {
       const real = createPipelexApiClient({ baseUrl: DEFAULT_API_URL });
       const result = await saveMthdsMethod(
@@ -1736,6 +1880,7 @@ describe("saveMthdsMethod", () => {
       });
       expect(error.message).toContain("client.response_unreadable");
       expect(error.next_step.detail).toContain("mthds_list_methods");
+      expect(posted).toEqual(["POST /v1/methods"]);
     } finally {
       vi.unstubAllGlobals();
     }

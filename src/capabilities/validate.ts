@@ -553,8 +553,12 @@ async function validateRequest(
   } catch (err) {
     // The SDK's problem, as it read the answer or the failure: its code, its
     // domain and its retry verdict are relayed, never overridden; a request
-    // the tree sent inline made too large says so in its message.
-    const sized = await withTooLargeNote(problemOf(err), err, request.tree, client);
+    // the method's files made too large says so in its message.
+    const sized = await withTooLargeNote(problemOf(err), err, {
+      route: "/v1/validate",
+      tree: request.tree,
+      client,
+    });
     const problem = await selectorFailure(sized, plan, methodVersionsOf(context));
     const failed: ValidationResult = {
       ...errorResult(problem, context),

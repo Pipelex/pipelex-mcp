@@ -491,8 +491,12 @@ async function requestCodegen(
     report = await client.codegen(toCodegenRequest(sent));
   } catch (err) {
     // The SDK's problem as it came, a by-id call's selector note added, and
-    // a request the tree sent inline made too large saying so.
-    const sized = await withTooLargeNote(problemOf(err), err, request.tree, client);
+    // a call the method's files made too large saying so.
+    const sized = await withTooLargeNote(problemOf(err), err, {
+      route: "/v1/codegen",
+      tree: request.tree,
+      client,
+    });
     const problem = await selectorFailure(sized, plan, methodVersionsOf(context));
     const failed = errorResult(problem, context.apiNotes);
     // A client that could not be built, or an argument refused before

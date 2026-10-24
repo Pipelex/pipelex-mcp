@@ -56,10 +56,12 @@ import type {
 import { secretFindings, secretRefusalText } from "./secret-guard.js";
 import {
   SECRET_REASON,
+  answeredRoute,
   argumentProblem,
   asOneLine,
   buildApiConfig,
   createPipelexApiClient,
+  failedBeforeSending,
   faultsProblem,
   folderTreeToSend,
   problemItemSchema,
@@ -1291,26 +1293,19 @@ async function draftConflictProblem(
  * `PUT` replaces the draft and is idempotent by construction — so this
  * applies to the create alone.
  *
- * A create may have reached the catalog unless its failure proves otherwise,
- * the same safe side the SDK takes for a start: an answer the API gave
- * refusing it (a `4xx` but `408`, `501`) proves nothing was created, as does
- * a failure the SDK reports as final before an answer (`retry: "no"`, such as
- * an argument it refused), and a file that could not be uploaded, since the
- * upload comes before the create, which is then never sent. A `2xx` the SDK
- * could not read is a create the platform accepted, so the method exists.
- * The SDK's test of whether a transport failure proves nothing left is not
- * exported, so every transport failure counts as one that may have left.
+ * A create may have reached the catalog unless its failure proves otherwise
+ * ({@link createMayHaveLanded}), the same safe side the SDK takes for a start.
  *
  * When the SDK gains the key, this function goes.
  */
 function createFailureProblem(err: unknown, problem: Problem): Problem {
-  if (!createMayHaveLanded(err, problem)) return problem;
+  if (!createMayHaveLanded(err)) return problem;
   const outcome = buildProblem("client.outcome_unknown", {});
   return {
     ...outcome,
     title: "The save may have created the method",
     detail:
-      "The create request had left when its answer was lost, so the catalog may already hold the new method.",
+      "The create request may have left before the save failed, so the catalog may already hold the new method.",
     next_step: {
       kind: "refresh",
       detail: `List the catalog with ${WORKSHOP_TOOL_NAMES.listMethods} before saving again: if the method is there, save again with its method_id, which writes its draft. A save without it would create a second method, since the create cannot yet carry an idempotency key.`,
@@ -1320,15 +1315,37 @@ function createFailureProblem(err: unknown, problem: Problem): Problem {
   };
 }
 
-/** Whether a failed create may have reached the catalog (see {@link createFailureProblem}). */
-function createMayHaveLanded(err: unknown, problem: Problem): boolean {
-  if (err instanceof MethodFileTransferError) return false;
-  const status = err instanceof ApiResponseError ? err.status : problem.params?.status;
-  if (typeof status === "number") {
-    if (status >= 200 && status < 300) return true;
-    return status === 408 || (status >= 500 && status !== 501);
-  }
-  return problem.retry !== "no";
+/** The route `createMethod` posts the create to, as the SDK names it in an answer's error. */
+const CREATE_ROUTE = "/v1/methods";
+
+/**
+ * Whether a failed create may have reached the catalog (see
+ * {@link createFailureProblem}). Only a proof that the create never left, or
+ * that the catalog refused it, says it did not:
+ *
+ * - the SDK refused an argument before any request (`RequestArgumentError`);
+ * - a step that comes before the create failed, which then is never sent: a
+ *   file's upload (`MethodFileTransferError`), or an answer from another
+ *   route than the create's, the version handshake or `POST /v1/blobs/missing`,
+ *   whatever its status, the route read from the error ({@link answeredRoute});
+ * - the create's route answered a refusal, a `4xx` but `408`, or a `501`.
+ *
+ * Everything else may have landed: a `2xx` the SDK could not read is a create
+ * the platform accepted, a `408` or another `5xx` may come after the write,
+ * an answer whose route the error does not name may be the create's, and a
+ * transport failure may come after the create left, the SDK's test of one
+ * that proves nothing was sent not being exported. So may a failure the SDK
+ * did not raise, an abort or a wrapper's error, which proves nothing of what
+ * was sent, whatever problem it reads as.
+ */
+function createMayHaveLanded(err: unknown): boolean {
+  if (failedBeforeSending(err) || err instanceof MethodFileTransferError) return false;
+  if (!(err instanceof ApiResponseError)) return true;
+  const route = answeredRoute(err);
+  if (route !== undefined && route !== CREATE_ROUTE) return false;
+  const { status } = err;
+  if (status >= 200 && status < 300) return true;
+  return status === 408 || (status >= 500 && status !== 501);
 }
 
 /**

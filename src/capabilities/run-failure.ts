@@ -116,9 +116,7 @@ export function runErrorOf(value: unknown): Problem | undefined {
     ...(view.params === undefined
       ? {}
       : { params: boundedMembers(view.params, RUN_ERROR_ITEM_MAX_CODE_POINTS) }),
-    ...(view.location === undefined
-      ? {}
-      : { location: boundedMembers(view.location, FAILURE_FIELD_MAX_CODE_POINTS) }),
+    ...(view.location === undefined ? {} : { location: boundedLocation(view.location) }),
     ...(view.errors === undefined ? {} : boundedItems(view.errors)),
   };
 }
@@ -152,9 +150,7 @@ function boundedItem(item: ProblemItem): ProblemItem {
     ...(item.params === undefined
       ? {}
       : { params: boundedMembers(item.params, RUN_ERROR_ITEM_MAX_CODE_POINTS) }),
-    ...(item.location === undefined
-      ? {}
-      : { location: boundedMembers(item.location, FAILURE_FIELD_MAX_CODE_POINTS) }),
+    ...(item.location === undefined ? {} : { location: boundedLocation(item.location) }),
   };
   if (suggestions !== undefined) {
     const kept = suggestions
@@ -185,15 +181,31 @@ function boundedMembers<T>(value: T, maxText: number): T {
 }
 
 /**
+ * A problem's `location` bounded for a result as {@link boundedMembers}
+ * bounds it, but for its `path`, the pipe codes from the run's main pipe down
+ * to the failing one, which is carried whole, entries and their text alike:
+ * a path cut anywhere names another pipe, or none, and its length is the
+ * method's own nesting.
+ */
+function boundedLocation<T>(location: T): T {
+  if (!isRecord(location) || !("path" in location)) {
+    return boundedMembers(location, FAILURE_FIELD_MAX_CODE_POINTS);
+  }
+  const { path, ...rest } = location;
+  return { ...boundedMembers(rest, FAILURE_FIELD_MAX_CODE_POINTS), path } as T;
+}
+
+/**
  * A structured value bounded for a result, so that what it says still reads
  * as the protocol declares it:
  *
  * - a text is cut to `maxText` code points, saying how much it left out;
- * - an object keeps at most {@link RUN_ERROR_MAX_ITEMS} members, a `…`
- *   member counting the rest, and a list it holds keeps at most as many
- *   entries, a sibling `<name>_omitted` counting the rest, as `errors_omitted`
- *   does, so a typed list, such as `missing_blobs`, holds nothing but its
- *   entries;
+ * - an object keeps at most {@link RUN_ERROR_MAX_ITEMS} members, and a list
+ *   it holds keeps at most as many entries, so a typed list, such as
+ *   `missing_blobs`, holds nothing but its entries; what either left out is
+ *   counted in one text member named `…`, or with as many more `…` as it
+ *   takes to name no member the object has ({@link omissionKey}), so the
+ *   count never takes a member's place;
  * - a list inside a list keeps as many entries, followed by a text entry
  *   counting the rest;
  * - a value nested deeper than {@link RUN_ERROR_VALUE_MAX_DEPTH} becomes a
@@ -222,20 +234,35 @@ export function boundedValue(value: unknown, maxText: number, depth: number): un
       configurable: true,
     });
   };
+  const omitted: string[] = [];
+  if (entries.length > RUN_ERROR_MAX_ITEMS) {
+    omitted.push(`${entries.length - RUN_ERROR_MAX_ITEMS} more members`);
+  }
   for (const [name, member] of entries.slice(0, RUN_ERROR_MAX_ITEMS)) {
     const key = boundedFailureText(name, FAILURE_FIELD_MAX_CODE_POINTS);
     if (Array.isArray(member) && depth + 1 < RUN_ERROR_VALUE_MAX_DEPTH) {
       const kept = boundedList(member, maxText, depth + 1);
       put(key, kept);
-      if (member.length > kept.length) put(`${key}_omitted`, member.length - kept.length);
+      if (member.length > kept.length) {
+        omitted.push(`${member.length - kept.length} more entries of ${key}`);
+      }
     } else {
       put(key, boundedValue(member, maxText, depth + 1));
     }
   }
-  if (entries.length > RUN_ERROR_MAX_ITEMS) {
-    put("…", `${entries.length - RUN_ERROR_MAX_ITEMS} more members left out`);
-  }
+  if (omitted.length > 0) put(omissionKey(value, bounded), `${omitted.join(", ")} left out`);
   return bounded;
+}
+
+/**
+ * The name of the member that counts what an object's bounding left out:
+ * `…`, or `……` and so on when the object as served, or as bounded, already
+ * has a member by that name.
+ */
+function omissionKey(served: Record<string, unknown>, bounded: Record<string, unknown>): string {
+  let key = "…";
+  while (Object.hasOwn(served, key) || Object.hasOwn(bounded, key)) key += "…";
+  return key;
 }
 
 /** A list's first {@link RUN_ERROR_MAX_ITEMS} entries, each bounded. */

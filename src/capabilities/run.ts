@@ -1270,9 +1270,12 @@ async function requestRunStart(
     return startResult(ack, content);
   } catch (err) {
     // A start refused as too large says which part of it made it so, when
-    // that can be told: the tree sent inline, or the inputs.
-    const sized = await withTooLargeNote(problemOf(err), err, request.tree, client, {
-      inputs: request.inputs,
+    // that can be told: the method's files, the inputs, or both.
+    const sized = await withTooLargeNote(problemOf(err), err, {
+      route: "/v1/start",
+      tree: request.tree,
+      client,
+      inputs: request.inputs ?? {},
     });
     const problem = await selectorFailure(sized, plan, methodVersionsOf(context));
     const failed = startErrorResult(problem, context);

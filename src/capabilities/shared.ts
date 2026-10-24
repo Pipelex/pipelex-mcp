@@ -2,6 +2,7 @@ import {
   ApiResponseError,
   ArtifactFetchError,
   INLINE_TREE_MAX_BYTES,
+  MethodFileTransferError,
   PIPELEX_STORAGE_SCHEME,
   PipelexApiClient,
   RequestArgumentError,
@@ -880,43 +881,84 @@ export function failedBeforeSending(err: unknown): boolean {
 }
 
 /**
- * What a method's tree had to do with a request refused as too large:
- * `tree`, it travelled inline at a weight that can have made it so; `not_tree`,
- * its bytes did not ride the request, since none was sent or it travelled by
- * hash; `unknown`, it rode inline at a weight that may or may not have, or
- * how it travelled cannot be told.
+ * The route an answer the SDK raised came from, as its path from the origin
+ * without its query (`/v1/start`, `/v1/blobs/missing`), or `undefined` when
+ * its message names none. The SDK names the route in the message alone
+ * (`API <METHOD> <path> failed (<status>): …` for a refusal,
+ * `API <METHOD> <path> answered <status> with …` for an answer it could not
+ * read), its `apiUrl` being the base URL.
  */
-export type TreeShareOfTooLarge = "tree" | "not_tree" | "unknown";
+export function answeredRoute(err: ApiResponseError): string | undefined {
+  return /^API [A-Z]+ (\/[^\s?]*)/.exec(err.message)?.[1];
+}
 
 /**
- * What `tree` had to do with `err` when it is a `413`, or `undefined` for any
- * other error. A tree within the SDK's inline threshold
- * (`INLINE_TREE_MAX_BYTES`), weighed as the SDK weighs it
- * ({@link inlineTreeWeight}), travels inline everywhere, so it rode the
- * request and may have filled it to a limit lower than the threshold:
- * `unknown`. A heavier one travels by hash to a deployment keeping a blob
- * store and inline only to one keeping none, so the deployment is asked,
- * through the client's `version()` (`GET /v1/version`'s `blob_store`), only
- * then; a client without `version()`, or a handshake that fails, says
- * nothing, which is `unknown` too.
+ * Which step of a call a `413` came from: `request`, the call's own route
+ * (`POST /v1/start`, `/v1/validate`, …), whose body carries whatever the call
+ * sends; `tree_preparation`, the preparation of the method's files before it,
+ * the blob route (`POST /v1/blobs/missing`) or a file's upload to storage,
+ * which carries no input. A `413` whose step cannot be told reads as none.
  */
-export async function treeShareOfTooLarge(
-  err: unknown,
-  tree: MethodTreeToSend | undefined,
-  client: unknown,
-): Promise<TreeShareOfTooLarge | undefined> {
-  if (!(err instanceof ApiResponseError) || err.status !== 413) return undefined;
-  if (tree === undefined) return "not_tree";
-  if (inlineTreeWeight(tree) <= INLINE_TREE_MAX_BYTES) return "unknown";
-  if (typeof client !== "object" || client === null) return "unknown";
-  const version = (client as { version?: unknown }).version;
-  if (typeof version !== "function") return "unknown";
-  try {
-    const info: unknown = await (version as () => Promise<unknown>).call(client);
-    return asRecord(info)?.blob_store === true ? "not_tree" : "tree";
-  } catch {
-    return "unknown";
+type TooLargeStep = { step: "request" } | { step: "tree_preparation"; what: string };
+
+/**
+ * The step `err` was refused at as too large, or `undefined` when it is no
+ * `413` or its step cannot be told: the route an answer came from is read
+ * from its error ({@link answeredRoute}), and a file's upload is the SDK's
+ * `MethodFileTransferError`.
+ */
+function tooLargeStepOf(err: unknown, route: string): TooLargeStep | undefined {
+  if (err instanceof MethodFileTransferError) {
+    if (err.operation !== "upload" || err.status !== 413) return undefined;
+    return {
+      step: "tree_preparation",
+      what: `the upload of ${err.path === undefined ? "one of the method's files" : `the method's file ${err.path}`}`,
+    };
   }
+  if (!(err instanceof ApiResponseError) || err.status !== 413) return undefined;
+  const path = answeredRoute(err);
+  if (path === undefined) return undefined;
+  if (path === route) return { step: "request" };
+  if (path.startsWith("/v1/blobs/")) return { step: "tree_preparation", what: `POST ${path}` };
+  return undefined;
+}
+
+/**
+ * How a method's tree travelled in the request a `413` refused: `inline`,
+ * its files rode the request's body; `by_hash`, only their hashes did;
+ * `unknown`, which cannot be told, the deployment's version handshake not
+ * answering.
+ *
+ * The SDK sends the whole tree inline to a deployment keeping no blob store,
+ * and to one keeping a blob store only a tree whose inline map weighs no more
+ * than the lower of `INLINE_TREE_MAX_BYTES` and the `max_inline_bytes` the
+ * handshake announces under `limits.method_tree`; a heavier one travels by
+ * hash. That threshold picks the transport and says nothing of the
+ * deployment's request ceiling, so it never blames the tree on its own.
+ */
+type TreeTravel = { how: "inline"; why: string } | { how: "by_hash" } | { how: "unknown" };
+
+async function treeTravelOf(weight: number, client: unknown): Promise<TreeTravel> {
+  if (typeof client !== "object" || client === null) return { how: "unknown" };
+  const version = (client as { version?: unknown }).version;
+  if (typeof version !== "function") return { how: "unknown" };
+  let info: Record<string, unknown> | undefined;
+  try {
+    info = asRecord(await (version as () => Promise<unknown>).call(client));
+  } catch {
+    return { how: "unknown" };
+  }
+  if (info?.blob_store !== true) {
+    return { how: "inline", why: "the deployment keeping no blob store" };
+  }
+  const announced = asRecord(asRecord(info.limits)?.method_tree)?.max_inline_bytes;
+  const maxInline =
+    typeof announced === "number" && Number.isSafeInteger(announced) && announced > 0
+      ? Math.min(INLINE_TREE_MAX_BYTES, announced)
+      : INLINE_TREE_MAX_BYTES;
+  return weight <= maxInline
+    ? { how: "inline", why: `within the ${sizeWords(maxInline)} a tree may weigh to travel inline` }
+    : { how: "by_hash" };
 }
 
 const STRICT_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -948,62 +990,95 @@ const TREE_TOO_LARGE_REMEDY =
 /** What to do about a run's inputs that made its start too large. */
 const INPUTS_TOO_LARGE_REMEDY = `Upload large file inputs with ${WORKSHOP_TOOL_NAMES.prepareInputs}, which replaces them with pipelex-storage:// references, or pass them as URLs.`;
 
+/** What a call sends that a `413` can be about: its route, its tree, its client, and a start's inputs. */
+export interface TooLargeContext {
+  /** The call's own route, as the SDK names it: `/v1/start`, `/v1/validate`, `/v1/codegen`, `/v1/pipe-io`. */
+  route: string;
+  tree: MethodTreeToSend | undefined;
+  client: unknown;
+  /** A start's inputs; absent on a call that sends none. */
+  inputs?: Record<string, unknown> | undefined;
+}
+
 /**
- * `problem` with what the workshop can tell of a request refused as too
- * large, a `413`, added to its `message`, since neither the platform's answer
- * nor a bare gateway `413` says which part of the request made it so. Any
- * other failure comes back as it was, and so does a `413` the workshop can say
+ * `problem` with what the workshop can tell of a call refused as too large,
+ * a `413`, added to its `message`, since neither the platform's answer nor a
+ * bare gateway `413` says which part of the call made it so. Any other
+ * failure comes back as it was, and so does a `413` the workshop can say
  * nothing about. The problem's code, domain, retry and next step are kept.
  *
- * - A tree shown to have travelled inline at a weight that can have made the
- *   request too large ({@link treeShareOfTooLarge} is `tree`): a deployment
- *   without a blob store takes every file of a tree inline, so the caller
- *   sends a smaller tree.
- * - On a start (`run` given): the inputs are blamed only when the start
- *   carried some and the tree is shown not to have ridden the request;
- *   otherwise the note names both possible causes, with the weights measured
- *   here, the tree's as it travels inline and the inputs' as JSON.
+ * The step the `413` came from is told first ({@link tooLargeStepOf}): one
+ * refused while the method's files were prepared, the blob route or a file's
+ * upload, is about the tree, which carries no input. On the call's own route,
+ * what rode its body is weighed, the tree's inline map once
+ * ({@link inlineTreeWeight}) and a start's inputs as JSON, and how the tree
+ * travelled is asked of the handshake ({@link treeTravelOf}):
+ *
+ * - a tree that travelled inline is named alone only when nothing else rode
+ *   the body, no input on a start;
+ * - a start's inputs are named alone only when no file rode the body, the
+ *   tree having gone by hash or none having been sent;
+ * - when both rode it, or how the tree went cannot be told, both are named
+ *   with the weights measured here;
+ * - when neither rode it, a start by reference or by id with no inputs, or a
+ *   tree by hash on a call carrying nothing else, nothing is named.
  */
 export async function withTooLargeNote(
   problem: Problem,
   err: unknown,
-  tree: MethodTreeToSend | undefined,
-  client: unknown,
-  run?: { inputs: Record<string, unknown> | undefined },
+  context: TooLargeContext,
 ): Promise<Problem> {
-  const share = await treeShareOfTooLarge(err, tree, client);
-  if (share === undefined) return problem;
-  const note = tooLargeNote(share, tree, run);
+  const step = tooLargeStepOf(err, context.route);
+  if (step === undefined) return problem;
+  const note =
+    step.step === "tree_preparation"
+      ? treePreparationNote(step.what, context.tree)
+      : await requestTooLargeNote(context);
   if (note === undefined) return problem;
   const said = typeof problem.message === "string" && problem.message !== "" ? problem.message : "";
   return { ...problem, message: said === "" ? note : `${said} ${note}` };
 }
 
-function tooLargeNote(
-  share: TreeShareOfTooLarge,
-  tree: MethodTreeToSend | undefined,
-  run: { inputs: Record<string, unknown> | undefined } | undefined,
-): string | undefined {
-  if (share === "tree" && tree !== undefined) {
-    return `The method's files travelled inline in this request, ${sizeWords(inlineTreeWeight(tree))} of them, which is what made it larger than the Pipelex deployment takes in one request: a deployment without a blob store takes every file of a tree inline. ${TREE_TOO_LARGE_REMEDY}`;
+/** A `413` met while the method's files were prepared, before the call's own request. */
+function treePreparationNote(what: string, tree: MethodTreeToSend | undefined): string | undefined {
+  if (tree === undefined) return undefined;
+  return `The Pipelex deployment refused ${what} as too large while the method's files were prepared, before the request itself was sent, so no input played a part: one of the method's files, or the list of them, is larger than it takes. ${TREE_TOO_LARGE_REMEDY}`;
+}
+
+/** A `413` on the call's own route, from what rode its body. */
+async function requestTooLargeNote(context: TooLargeContext): Promise<string | undefined> {
+  const { tree, client, inputs } = context;
+  const carriesInputs = inputs !== undefined && Object.keys(inputs).length > 0;
+  const treeWeight = tree === undefined ? undefined : inlineTreeWeight(tree);
+  const travel = treeWeight === undefined ? undefined : await treeTravelOf(treeWeight, client);
+
+  if (treeWeight === undefined || travel?.how === "by_hash") {
+    if (!carriesInputs) return undefined;
+    const inputsWeight = jsonWeight(inputs);
+    const weighing =
+      inputsWeight === undefined ? "" : `, ${sizeWords(inputsWeight)} of them as JSON`;
+    const why =
+      treeWeight === undefined
+        ? "the method being named by method_ref or method_id"
+        : "the method's files having gone by hash";
+    return `The run's inputs are what made its request too large${weighing}, since none of the method's files rode it, ${why}. ${INPUTS_TOO_LARGE_REMEDY}`;
   }
-  if (run === undefined) return undefined;
-  const inputs = run.inputs ?? {};
-  const carriesInputs = Object.keys(inputs).length > 0;
-  if (share === "not_tree" && carriesInputs) {
-    return `The method's files are not what made the run's request too large, since they did not ride it inline: its inputs did. ${INPUTS_TOO_LARGE_REMEDY}`;
-  }
-  const measured: string[] = [];
-  if (tree !== undefined && share !== "not_tree") {
-    measured.push(`the method's files weigh ${sizeWords(inlineTreeWeight(tree))} inline`);
-  }
+
   if (!carriesInputs) {
-    measured.push("the run carries no inputs");
-  } else {
-    const weight = jsonWeight(inputs);
-    if (weight !== undefined) measured.push(`its inputs weigh ${sizeWords(weight)} as JSON`);
+    return travel?.how === "inline"
+      ? `The method's files travelled inline in this request, ${sizeWords(treeWeight)} of them, ${travel.why}, and nothing else of any size rode it, so they are what made it larger than the Pipelex deployment takes in one request. ${TREE_TOO_LARGE_REMEDY}`
+      : `The method's files, ${sizeWords(treeWeight)} of them inline, are the only part of this request that can have made it too large, if they travelled inline, which cannot be told since the deployment's version handshake did not answer. ${TREE_TOO_LARGE_REMEDY}`;
   }
-  return `Which part of the run's request made it too large cannot be told from here: the method's files, when they travel inline, or the run's inputs. ${TREE_TOO_LARGE_REMEDY} ${INPUTS_TOO_LARGE_REMEDY} Measured here, ${measured.join(", and ")}.`;
+
+  const inputsWeight = jsonWeight(inputs);
+  const how =
+    travel?.how === "inline"
+      ? `which travelled inline, ${travel.why}`
+      : "if they travelled inline, which cannot be told since the deployment's version handshake did not answer";
+  const measured = [`the method's files weigh ${sizeWords(treeWeight)} inline`];
+  if (inputsWeight !== undefined)
+    measured.push(`its inputs weigh ${sizeWords(inputsWeight)} as JSON`);
+  return `Which part of the run's request made it too large cannot be told from here: the method's files, ${how}, or the run's inputs. ${TREE_TOO_LARGE_REMEDY} ${INPUTS_TOO_LARGE_REMEDY} Measured here, ${measured.join(", and ")}.`;
 }
 
 /** A value's weight as a request carries it: its JSON, in UTF-8 bytes, or `undefined` when it has none. */
@@ -1015,8 +1090,9 @@ function jsonWeight(value: unknown): number | undefined {
   }
 }
 
-/** A size in the unit that reads best: KiB below a mebibyte, MiB above. */
+/** A size in the unit that reads best: bytes below a kibibyte, KiB below a mebibyte, MiB above. */
 function sizeWords(bytes: number): string {
+  if (bytes < 1024) return `${bytes} bytes`;
   return bytes < 1024 * 1024
     ? `${(bytes / 1024).toFixed(1)} KiB`
     : `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
@@ -1365,7 +1441,8 @@ export function refusalProblem(field: string, refusal: Refusal): Problem {
  * own, ahead of every other, since a problem item carries no retry verdict
  * and the wrapper's `no` would hide it: what was read while files were
  * changing cannot be trusted, and the retry reads again and reports whatever
- * faults remain. Its `message` says that other faults were found.
+ * faults remain. Its `message` names each other fault by its code and where
+ * it is ({@link faultLabel}), so none is lost from the account.
  */
 export function faultsProblem(faults: readonly Problem[]): Problem {
   const [first] = faults;
@@ -1376,9 +1453,12 @@ export function faultsProblem(faults: readonly Problem[]): Problem {
   const retryable = faults.find((fault) => fault.retry !== "no");
   if (retryable !== undefined) {
     const said = typeof retryable.message === "string" ? `${retryable.message} ` : "";
+    const others = faults.filter((fault) => fault !== retryable).map(faultLabel);
     return {
       ...retryable,
-      message: `${said}Other faults were found in this call too; once retried, it reports any that remain.`,
+      message: asOneLine(
+        `${said}Other faults were found in this call too: ${others.join("; ")}. Once retried, it reports any that remain.`,
+      ),
     };
   }
   const argument =
@@ -1397,6 +1477,17 @@ export function faultsProblem(faults: readonly Problem[]): Problem {
       },
     },
   );
+}
+
+/**
+ * A fault named in a sentence: its code, and where it is when it says so, the
+ * field it is located at, else the argument or the path its parameters name.
+ */
+function faultLabel(fault: Problem): string {
+  const where = [fault.location?.field, fault.params?.argument, fault.params?.path].find(
+    (value): value is string => typeof value === "string" && value !== "",
+  );
+  return where === undefined ? fault.code : `${fault.code} at ${where}`;
 }
 
 /** A problem as one item of another's `errors`: its code, its own sentence, its parameters and location. */
