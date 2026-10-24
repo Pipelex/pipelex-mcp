@@ -31,6 +31,7 @@ import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./m
 import {
   METHOD_REF_GRAMMAR,
   argumentProblem,
+  asOneLine,
   buildApiConfig,
   createPipelexApiClient,
   faultsProblem,
@@ -47,6 +48,7 @@ import {
   withFilesSent,
   failedBeforeSending,
   markUnsent,
+  withTooLargeNote,
 } from "./shared.js";
 import type {
   ApiConfig,
@@ -488,8 +490,10 @@ async function requestCodegen(
     }
     report = await client.codegen(toCodegenRequest(sent));
   } catch (err) {
-    // The SDK's problem as it came, a by-id call's selector note added.
-    const problem = await selectorFailure(problemOf(err), plan, methodVersionsOf(context));
+    // The SDK's problem as it came, a by-id call's selector note added, and
+    // a request the tree sent inline made too large saying so.
+    const sized = await withTooLargeNote(problemOf(err), err, request.tree, client);
+    const problem = await selectorFailure(sized, plan, methodVersionsOf(context));
     const failed = errorResult(problem, context.apiNotes);
     // A client that could not be built, or an argument refused before
     // sending, sent no file of the tree.
@@ -945,7 +949,7 @@ function checkVerdict(written: CodegenWriteSuccess): string {
 
 /** The invalid verdict: the route's message, then each fault as its code, detail and location. */
 function invalidSummary(message: string, errors: readonly ProblemItem[]): string {
-  const lines = errors.map((item) => `- ${formatItem(item)}`);
+  const lines = errors.map((item) => `- ${asOneLine(formatItem(item))}`);
 
   return ["# Code not generated", message, ...(lines.length > 0 ? [lines.join("\n")] : [])].join(
     "\n\n",

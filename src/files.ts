@@ -54,7 +54,9 @@ export interface LocalFileResolverOptions {
  * paths (symlinks followed): the resolved target must live inside the
  * `rootDir` subtree. Escapes, missing files, non-regular files, and read
  * failures are reported as {@link FileResolution} failures, never thrown —
- * the seam turns them into `client.argument_invalid` problems at `files[i].path`.
+ * the seam turns an escape or a wrong extension into `client.argument_invalid`
+ * at `files[i].path`, and a missing, non-regular or unreadable file into
+ * `client.file_unreadable` naming the path.
  *
  * `extension` is the ONE thing a caller chooses, and it is chosen per argument
  * rather than per call: every bundle argument is `.mthds`. It is deliberately

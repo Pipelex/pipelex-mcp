@@ -43,6 +43,7 @@ import {
   failedBeforeSending,
   isExecutionLocusRefusal,
   markUnsent,
+  withTooLargeNote,
 } from "./shared.js";
 import type {
   ApiConfig,
@@ -551,8 +552,10 @@ async function validateRequest(
     }
   } catch (err) {
     // The SDK's problem, as it read the answer or the failure: its code, its
-    // domain and its retry verdict are relayed, never overridden.
-    const problem = await selectorFailure(problemOf(err), plan, methodVersionsOf(context));
+    // domain and its retry verdict are relayed, never overridden; a request
+    // the tree sent inline made too large says so in its message.
+    const sized = await withTooLargeNote(problemOf(err), err, request.tree, client);
+    const problem = await selectorFailure(sized, plan, methodVersionsOf(context));
     const failed: ValidationResult = {
       ...errorResult(problem, context),
       ...(isExecutionLocusRefusal(err) ? { refusedForPython: true } : {}),

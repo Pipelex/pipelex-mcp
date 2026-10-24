@@ -1541,7 +1541,7 @@ describe("saveMthdsMethod", () => {
     expect(unsupported.summary).toContain("runs this draft from its next call, not version 2");
   });
 
-  it("relays a create-side transport fault unchanged, and cautions against a blind retry", async () => {
+  it("reads a create-side transport fault as an outcome unknown, never as retryable", async () => {
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
 
     const result = await saveMthdsMethod(
@@ -1561,14 +1561,68 @@ describe("saveMthdsMethod", () => {
       ),
     );
 
-    // The SDK's problem, unchanged: asking again can succeed. The route honours
-    // an idempotency key the SDK cannot send, so a create whose response was
-    // lost would mint a SECOND method on retry, which the summary says.
+    // The route honours an idempotency key the SDK cannot send, so a create
+    // whose response was lost would mint a SECOND method on retry: the
+    // structured result says the outcome is unknown, with the SDK's reading
+    // kept in the message, and its step is to list the catalog first.
     const error = problemOf(result.structuredContent);
-    expect(error).toMatchObject({ code: "client.unreachable", domain: "runtime", retry: "yes" });
+    expect(error).toMatchObject({
+      code: "client.outcome_unknown",
+      retry: "outcome_unknown",
+      next_step: { kind: "refresh" },
+    });
+    expect(error.next_step.detail).toContain("mthds_list_methods");
+    expect(error.message).toContain("client.unreachable");
     expectProblemSummary(result.summary, error);
-    expect(result.summary).toContain("This was a CREATE, and it must not be retried blindly");
-    expect(result.summary).toContain("mthds_list_methods");
+  });
+
+  it("reads a create that committed and lost its answer as an outcome unknown, pointing at the catalog", async () => {
+    // The platform stores the method, then the connection drops before its
+    // answer arrives: the real SDK client meets a reset after the request
+    // left. A retry would create a second method, so nothing in the result
+    // may say that asking again is safe.
+    await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
+    const created: string[] = [];
+    vi.stubGlobal("fetch", (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      const method = input instanceof Request ? input.method : (init?.method ?? "GET");
+      if (method === "POST" && url.pathname === "/v1/methods") {
+        created.push("mt_committed");
+        const reset = Object.assign(new Error("read ECONNRESET"), {
+          code: "ECONNRESET",
+          syscall: "read",
+        });
+        return Promise.reject(new TypeError("fetch failed", { cause: reset }));
+      }
+      if (url.pathname === "/v1/version") {
+        return Promise.resolve(Response.json({ version: "1.0.0", blob_store: false }));
+      }
+      return Promise.resolve(new Response("", { status: 404 }));
+    });
+    try {
+      const real = createPipelexApiClient({ baseUrl: DEFAULT_API_URL });
+      const result = await saveMthdsMethod(
+        { method_dir: "methods/demo", name: "Demo" },
+        contextFor(
+          { ...clientNotCalled, createMethod: (input) => real.createMethod(input) },
+          validationAnswering(validReport),
+        ),
+      );
+
+      expect(created).toEqual(["mt_committed"]);
+      expect(result.structuredContent.status).toBe("error");
+      const error = problemOf(result.structuredContent);
+      expect(error.code).toBe("client.outcome_unknown");
+      expect(error.retry).not.toBe("yes");
+      expect(error.next_step.kind).not.toBe("retry");
+      expect(error.next_step.detail).toContain("mthds_list_methods");
+      expect(error.next_step.detail).toContain("method_id");
+      expectProblemSummary(result.summary, error);
+      // No link is written for a method whose id never came back.
+      await expect(fs.stat(path.join(root, "methods/demo/.pipelex/method.json"))).rejects.toThrow();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("relays a refused key on the create as the key, not as connectivity", async () => {
@@ -1595,10 +1649,10 @@ describe("saveMthdsMethod", () => {
       request_id: "req_401",
     });
     expectProblemSummary(result.summary, error);
-    // Where the key came from, beside a refused credential, and no create caution:
-    // a refusal is an answer, so nothing was minted.
+    // Where the key came from, beside a refused credential, and no unknown
+    // outcome: a refusal is an answer, so nothing was minted.
     expect(result.summary).toContain("PIPELEX_API_KEY");
-    expect(result.summary).not.toContain("CREATE");
+    expect(result.summary).not.toContain("client.outcome_unknown");
   });
 
   it("relays a draft write refused by role as the role, with the server's sentence", async () => {
@@ -1633,7 +1687,7 @@ describe("saveMthdsMethod", () => {
     expect(content.text).not.toMatch(/PIPELEX_API_KEY|log ?in/i);
   });
 
-  it("keeps a create refused by role as the role, with no create retry warning", async () => {
+  it("keeps a create refused by role as the role, its outcome known", async () => {
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
 
     const result = await saveMthdsMethod(
@@ -1652,8 +1706,8 @@ describe("saveMthdsMethod", () => {
     const error = problemOf(result.structuredContent);
     expect(error).toMatchObject({ code: "auth.forbidden", domain: "account", retry: "no" });
     expectProblemSummary(result.summary, error);
-    // A refusal is an answer, so nothing was minted and no list-first warning is due.
-    expect(result.summary).not.toContain("CREATE");
+    // A refusal is an answer, so nothing was minted and the outcome is known.
+    expect(result.summary).not.toContain("client.outcome_unknown");
   });
 
   it("warns that the method may exist when the create's answer came back unreadable", async () => {
@@ -1671,22 +1725,23 @@ describe("saveMthdsMethod", () => {
         ),
       );
 
-      // The SDK's reading, unchanged: an answer it could not read is final.
-      // The caution is the summary's, since the method exists all the same.
+      // The create was accepted, so the method exists although its answer
+      // could not be read: the outcome is unknown, the SDK's reading kept in
+      // the message.
       const error = problemOf(result.structuredContent);
       expect(error).toMatchObject({
-        code: "client.response_unreadable",
-        retry: "no",
-        params: { status: 201 },
+        code: "client.outcome_unknown",
+        retry: "outcome_unknown",
+        next_step: { kind: "refresh" },
       });
-      expect(result.summary).toContain("This was a CREATE, and it must not be retried blindly");
-      expect(result.summary).toContain("mthds_list_methods");
+      expect(error.message).toContain("client.response_unreadable");
+      expect(error.next_step.detail).toContain("mthds_list_methods");
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it("relays a draft write's transport fault as retryable, with no create caution, PUT being idempotent", async () => {
+  it("relays a draft write's transport fault as retryable, PUT being idempotent", async () => {
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
 
     const result = await saveMthdsMethod(
@@ -1708,7 +1763,7 @@ describe("saveMthdsMethod", () => {
 
     const error = problemOf(result.structuredContent);
     expect(error).toMatchObject({ code: "client.unreachable", retry: "yes" });
-    expect(result.summary).not.toContain("CREATE");
+    expect(result.summary).not.toContain("client.outcome_unknown");
   });
 
   it("answers a malformed base URL as an error rather than throwing", async () => {
@@ -1906,10 +1961,11 @@ describe("saveMthdsMethod", () => {
     );
 
     // The SDK's problem for the transfer, unchanged: storage could not be
-    // reached, which a later attempt can pass; no create was sent, so no caution.
+    // reached, which a later attempt can pass; no create was sent, so its
+    // outcome is known.
     const error = problemOf(result.structuredContent);
     expect(error).toMatchObject({ code: "runtime.unavailable", domain: "runtime", retry: "yes" });
-    expect(result.summary).not.toContain("CREATE");
+    expect(result.summary).not.toContain("client.outcome_unknown");
   });
 });
 

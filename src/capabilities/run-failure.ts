@@ -79,14 +79,24 @@ export function boundedFailureText(value: string, max: number): string {
 }
 
 /**
+ * How deep a structured member of a run problem (`params`, `location`) is
+ * carried; a value nested deeper is replaced by a text saying it was left out.
+ */
+export const RUN_ERROR_VALUE_MAX_DEPTH = 4;
+
+/**
  * A run's own problem as a result carries it, or `undefined` when `value` is
  * no problem document: the caller's view, without the operator's
  * `diagnostics`, its `detail`, `message` and `next_step.detail` bounded to
  * {@link FAILURE_MESSAGE_MAX_CODE_POINTS}, its `title` to
  * {@link FAILURE_FIELD_MAX_CODE_POINTS}, and its `errors` to
  * {@link RUN_ERROR_MAX_ITEMS} faults of {@link RUN_ERROR_ITEM_MAX_CODE_POINTS}
- * each, with `errors_omitted` saying how many were left out. Every other
- * member is kept as served, so the result is still an open problem document.
+ * each, with `errors_omitted` saying how many were left out. Its `params` and
+ * `location`, and each fault's `params`, `location` and `suggestions`, are
+ * bounded the same way ({@link boundedMembers}), and a fault's
+ * `suggested_fix` is carried whole or not at all ({@link boundedItem}). Every
+ * cut says what it left out, and the result is still a problem document
+ * (`isProblem`), open to every other member as served.
  */
 export function runErrorOf(value: unknown): Problem | undefined {
   if (!isProblem(value)) return undefined;
@@ -103,23 +113,138 @@ export function runErrorOf(value: unknown): Problem | undefined {
     ...(typeof message === "string"
       ? { message: boundedFailureText(message, FAILURE_MESSAGE_MAX_CODE_POINTS) }
       : {}),
+    ...(view.params === undefined
+      ? {}
+      : { params: boundedMembers(view.params, RUN_ERROR_ITEM_MAX_CODE_POINTS) }),
+    ...(view.location === undefined
+      ? {}
+      : { location: boundedMembers(view.location, FAILURE_FIELD_MAX_CODE_POINTS) }),
     ...(view.errors === undefined ? {} : boundedItems(view.errors)),
   };
 }
 
-/** A problem's faults, at most {@link RUN_ERROR_MAX_ITEMS} of them, each detail bounded, and how many were left out. */
+/** A problem's faults, at most {@link RUN_ERROR_MAX_ITEMS} of them, each bounded, and how many were left out. */
 function boundedItems(items: readonly ProblemItem[]): {
   errors: ProblemItem[];
   errors_omitted?: number;
 } {
-  const kept = items.slice(0, RUN_ERROR_MAX_ITEMS).map((item) => ({
-    ...item,
-    detail: boundedFailureText(item.detail, RUN_ERROR_ITEM_MAX_CODE_POINTS),
-  }));
+  const kept = items.slice(0, RUN_ERROR_MAX_ITEMS).map(boundedItem);
   return {
     errors: kept,
     ...(items.length > kept.length ? { errors_omitted: items.length - kept.length } : {}),
   };
+}
+
+/**
+ * One fault with its texts and its structured members bounded. Its
+ * `suggestions`, a list of names, keep at most {@link RUN_ERROR_MAX_ITEMS},
+ * with `suggestions_omitted` counting the rest. A `suggested_fix` is a patch a
+ * tool applies as written, so a cut one would be a wrong one: it is carried
+ * whole while its JSON fits {@link FAILURE_MESSAGE_MAX_CODE_POINTS}, and
+ * otherwise left out, `suggested_fix_omitted` saying so.
+ */
+function boundedItem(item: ProblemItem): ProblemItem {
+  const { suggestions, suggested_fix: suggestedFix, ...rest } = item;
+  const bounded: ProblemItem = {
+    ...rest,
+    code: item.code,
+    detail: boundedFailureText(item.detail, RUN_ERROR_ITEM_MAX_CODE_POINTS),
+    ...(item.params === undefined
+      ? {}
+      : { params: boundedMembers(item.params, RUN_ERROR_ITEM_MAX_CODE_POINTS) }),
+    ...(item.location === undefined
+      ? {}
+      : { location: boundedMembers(item.location, FAILURE_FIELD_MAX_CODE_POINTS) }),
+  };
+  if (suggestions !== undefined) {
+    const kept = suggestions
+      .slice(0, RUN_ERROR_MAX_ITEMS)
+      .map((name) => boundedFailureText(name, FAILURE_FIELD_MAX_CODE_POINTS));
+    bounded.suggestions = kept;
+    if (suggestions.length > kept.length) {
+      bounded.suggestions_omitted = suggestions.length - kept.length;
+    }
+  }
+  if (suggestedFix !== undefined) {
+    if (Array.from(JSON.stringify(suggestedFix)).length <= FAILURE_MESSAGE_MAX_CODE_POINTS) {
+      bounded.suggested_fix = suggestedFix;
+    } else {
+      bounded.suggested_fix_omitted = 1;
+    }
+  }
+  return bounded;
+}
+
+/**
+ * An object member of a problem (`params`, `location`) bounded for a result,
+ * by {@link boundedValue} at every level. Kept as it came when it is no
+ * object, which a problem document never sends.
+ */
+function boundedMembers<T>(value: T, maxText: number): T {
+  return isRecord(value) ? (boundedValue(value, maxText, 0) as T) : value;
+}
+
+/**
+ * A structured value bounded for a result, so that what it says still reads
+ * as the protocol declares it:
+ *
+ * - a text is cut to `maxText` code points, saying how much it left out;
+ * - an object keeps at most {@link RUN_ERROR_MAX_ITEMS} members, a `…`
+ *   member counting the rest, and a list it holds keeps at most as many
+ *   entries, a sibling `<name>_omitted` counting the rest, as `errors_omitted`
+ *   does, so a typed list, such as `missing_blobs`, holds nothing but its
+ *   entries;
+ * - a list inside a list keeps as many entries, followed by a text entry
+ *   counting the rest;
+ * - a value nested deeper than {@link RUN_ERROR_VALUE_MAX_DEPTH} becomes a
+ *   text saying it was left out;
+ * - a number, a boolean and `null` are kept.
+ */
+export function boundedValue(value: unknown, maxText: number, depth: number): unknown {
+  if (typeof value === "string") return boundedFailureText(value, maxText);
+  if (Array.isArray(value)) {
+    if (depth >= RUN_ERROR_VALUE_MAX_DEPTH) return `[a list of ${value.length} left out]`;
+    const kept = boundedList(value, maxText, depth);
+    return value.length > kept.length
+      ? [...kept, `… [${value.length - kept.length} more left out]`]
+      : kept;
+  }
+  if (!isRecord(value)) return value;
+  const entries = Object.entries(value);
+  if (depth >= RUN_ERROR_VALUE_MAX_DEPTH)
+    return `[an object of ${entries.length} members left out]`;
+  const bounded: Record<string, unknown> = {};
+  const put = (name: string, member: unknown): void => {
+    Object.defineProperty(bounded, name, {
+      value: member,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  };
+  for (const [name, member] of entries.slice(0, RUN_ERROR_MAX_ITEMS)) {
+    const key = boundedFailureText(name, FAILURE_FIELD_MAX_CODE_POINTS);
+    if (Array.isArray(member) && depth + 1 < RUN_ERROR_VALUE_MAX_DEPTH) {
+      const kept = boundedList(member, maxText, depth + 1);
+      put(key, kept);
+      if (member.length > kept.length) put(`${key}_omitted`, member.length - kept.length);
+    } else {
+      put(key, boundedValue(member, maxText, depth + 1));
+    }
+  }
+  if (entries.length > RUN_ERROR_MAX_ITEMS) {
+    put("…", `${entries.length - RUN_ERROR_MAX_ITEMS} more members left out`);
+  }
+  return bounded;
+}
+
+/** A list's first {@link RUN_ERROR_MAX_ITEMS} entries, each bounded. */
+function boundedList(list: readonly unknown[], maxText: number, depth: number): unknown[] {
+  return list.slice(0, RUN_ERROR_MAX_ITEMS).map((entry) => boundedValue(entry, maxText, depth + 1));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

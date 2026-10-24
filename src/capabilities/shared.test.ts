@@ -1407,6 +1407,34 @@ describe("the problems of the workshop's own refusals", () => {
     expect(problemSchema.safeParse(problem).success).toBe(true);
     expect(() => faultsProblem([])).toThrow();
   });
+
+  it("reports a fault a retry can clear on its own, so its retry verdict is kept", () => {
+    const missing = argumentProblem(
+      "inputs_path",
+      "missing",
+      "Supply the filled inputs, as inputs or as inputs_path.",
+    );
+    const busy = refusalProblem("method_dir", {
+      message: "bundle.mthds changed while it was read.",
+      remedy: "Save the file, then call again.",
+      reason: "changed_while_read",
+      busy: "methods/demo/bundle.mthds",
+    });
+    expect(busy.retry).toBe("yes");
+
+    const problem = faultsProblem([missing, busy]);
+
+    expect(problem).toMatchObject({
+      code: "client.workspace_busy",
+      retry: "yes",
+      params: { path: "methods/demo/bundle.mthds" },
+      location: { field: "method_dir" },
+    });
+    expect(problem.errors).toBeUndefined();
+    expect(problem.message).toContain("bundle.mthds changed while it was read.");
+    expect(problem.message).toContain("Other faults were found");
+    expect(problemSchema.safeParse(problem).success).toBe(true);
+  });
 });
 
 describe("problemSummary", () => {

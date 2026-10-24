@@ -33,6 +33,7 @@ import {
   withFilesSent,
   failedBeforeSending,
   markUnsent,
+  withTooLargeNote,
 } from "./shared.js";
 import type {
   ApiConfig,
@@ -254,8 +255,10 @@ async function requestInputsTemplate(
   } catch (err) {
     // The SDK's problem, as it read the answer or the failure: its code, its
     // domain and its retry verdict are relayed, never overridden. A refused
-    // pipe selection is the route's own typed problem, located at pipe_ref.
-    const problem = await selectorFailure(problemOf(err), plan, methodVersionsOf(context));
+    // pipe selection is the route's own typed problem, located at pipe_ref,
+    // and a request the tree sent inline made too large says so.
+    const sized = await withTooLargeNote(problemOf(err), err, request.tree, client);
+    const problem = await selectorFailure(sized, plan, methodVersionsOf(context));
     const failed = errorResult(problem, context);
     // A client that could not be built, or an argument refused before
     // sending, sent no file of the tree.

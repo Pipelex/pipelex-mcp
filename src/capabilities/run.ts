@@ -54,6 +54,7 @@ import {
   withFilesSent,
   failedBeforeSending,
   markUnsent,
+  withTooLargeNote,
 } from "./shared.js";
 import type {
   ApiConfig,
@@ -1268,7 +1269,12 @@ async function requestRunStart(
     else if (content.disproved) forgetMethodVersionsSupported(methodVersionsOf(context));
     return startResult(ack, content);
   } catch (err) {
-    const problem = await selectorFailure(problemOf(err), plan, methodVersionsOf(context));
+    // A start refused as too large says which part of it made it so, when
+    // that can be told: the tree sent inline, or the inputs.
+    const sized = await withTooLargeNote(problemOf(err), err, request.tree, client, {
+      inputs: request.inputs,
+    });
+    const problem = await selectorFailure(sized, plan, methodVersionsOf(context));
     const failed = startErrorResult(problem, context);
     // A client that could not be built, or an argument refused before
     // sending, sent no file of the tree.

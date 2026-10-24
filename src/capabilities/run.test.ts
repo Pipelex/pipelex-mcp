@@ -2832,54 +2832,120 @@ describe("startMthdsRun path submissions", () => {
   const noBlobStore = () => Promise.resolve({ version: "1.0.0", blob_store: false });
   const blobStore = () => Promise.resolve({ version: "1.0.0", blob_store: true });
 
-  it("relays a 413's problem as the API answered it, blaming no part of the start itself", async () => {
+  /** The problem of a refused start: the deployment's own, with the workshop's account in `message`. */
+  function tooLargeProblem(result: Awaited<ReturnType<typeof startMthdsRun>>): Problem {
+    const problem = result.structuredContent.problem;
+    expect(problem).toMatchObject({
+      code: TOO_LARGE.code,
+      domain: TOO_LARGE.domain,
+      retry: TOO_LARGE.retry,
+      next_step: TOO_LARGE.next_step,
+      params: TOO_LARGE.params,
+    });
+    expect(problem).not.toHaveProperty("location");
+    return problem as Problem;
+  }
+
+  it("names both causes of a 413 on a start carrying a small tree and no inputs, keeping the API's problem", async () => {
     const { context, versionCalls } = refusingStart(noBlobStore);
 
     const result = await startMthdsRun({ files: [{ content: 'domain = "invoice"' }] }, context);
 
-    expect(result.structuredContent.problem).toEqual(TOO_LARGE);
-    expect(result.structuredContent.problem).not.toHaveProperty("location");
-    expect(result.summary).toBe(problemSummary(TOO_LARGE));
-    // Nothing asks the deployment how the tree travelled any more.
+    const message = String(tooLargeProblem(result).message);
+    expect(message).toContain("cannot be told from here");
+    expect(message).toContain("mthds_prepare_inputs");
+    expect(message).toContain("the run carries no inputs");
+    expect(message).not.toContain("its inputs did");
+    expect(result.summary).toContain(message);
+    // A tree within the inline threshold rode inline wherever it went: no handshake asks.
     expect(versionCalls()).toBe(0);
   });
 
-  it("relays a 413 alike whatever the start carried and however its tree travelled, asking no handshake", async () => {
+  it("names both causes of a 413 on a start carrying inputs beside a small tree, with what it measured", async () => {
+    const { context } = refusingStart(noBlobStore);
+
+    const result = await startMthdsRun(
+      { files: [{ content: 'domain = "invoice"' }], inputs: { question: "why?" } },
+      context,
+    );
+
+    const message = String(tooLargeProblem(result).message);
+    expect(message).toContain("cannot be told from here");
+    expect(message).toMatch(/the method's files weigh \d+\.\d KiB inline/);
+    expect(message).toMatch(/its inputs weigh \d+\.\d KiB as JSON/);
+  });
+
+  it("blames a start's inputs for a 413 when it sent no tree", async () => {
+    const { context, versionCalls } = refusingStart(noBlobStore);
+
+    const result = await startMthdsRun(
+      { method_ref: "github.com/Pipelex/methods/documents@v0.1.0", inputs: { question: "why?" } },
+      context,
+    );
+
+    expect(tooLargeProblem(result).message).toContain("its inputs did");
+    expect(versionCalls()).toBe(0);
+  });
+
+  it("blames a heavy tree a deployment without a blob store took inline, and the inputs when it went by hash", async () => {
     const heavy = "x".repeat(INLINE_TREE_MAX_BYTES + 1);
     const folder = { "methods/invoice.mthds": 'domain = "invoice"', "methods/report.html": heavy };
     const files = [{ path: "methods/invoice.mthds" }, { path: "methods/report.html" }];
-    // Raw, the workbook is under the inline threshold; as base64 it is over.
+
+    const inline = await startMthdsRun({ files }, refusingStart(noBlobStore, folder).context);
+    const inlineMessage = String(tooLargeProblem(inline).message);
+    expect(inlineMessage).toContain("The method's files travelled inline in this request");
+    expect(inlineMessage).toContain("without a blob store");
+
+    // The same tree went by hash to a deployment keeping a blob store, so the
+    // inputs riding the start take the blame, and with none, nothing does.
+    const withInputs = await startMthdsRun(
+      { files, inputs: { question: "why?" } },
+      refusingStart(blobStore, folder).context,
+    );
+    expect(tooLargeProblem(withInputs).message).toContain("its inputs did");
+    const withoutInputs = await startMthdsRun({ files }, refusingStart(blobStore, folder).context);
+    expect(tooLargeProblem(withoutInputs).message).toContain("the run carries no inputs");
+  });
+
+  it("weighs a binary file as the base64 it travels inline as", async () => {
+    // Raw, the workbook is under the inline threshold; as base64 it is over,
+    // so a deployment without a blob store took it inline at that weight.
     const workbook = new Uint8Array(Math.floor(INLINE_TREE_MAX_BYTES * 0.9)).fill(0xff);
-    const failingHandshake = () =>
-      Promise.reject(new ApiUnreachableError("connection reset", DEFAULT_API_URL, "ECONNRESET"));
-    const starts: Array<[Parameters<typeof startMthdsRun>[0], ReturnType<typeof refusingStart>]> = [
-      [
-        { files: [{ content: 'domain = "invoice"' }], inputs: { question: "why?" } },
-        refusingStart(noBlobStore),
-      ],
-      [
-        { method_ref: "github.com/Pipelex/methods/documents@v0.1.0", inputs: { question: "why?" } },
-        refusingStart(noBlobStore),
-      ],
-      [{ files }, refusingStart(noBlobStore, folder)],
-      [{ files, inputs: { question: "why?" } }, refusingStart(blobStore, folder)],
-      [{ files }, refusingStart(blobStore, folder)],
-      [
-        { files: [{ path: "methods/invoice.mthds" }, { path: "methods/templates/invoice.xlsx" }] },
-        refusingStart(noBlobStore, {
-          "methods/invoice.mthds": 'domain = "invoice"',
-          "methods/templates/invoice.xlsx": workbook,
-        }),
-      ],
-      [{ files, inputs: { question: "why?" } }, refusingStart(failingHandshake, folder)],
-    ];
+    const { context, versionCalls } = refusingStart(noBlobStore, {
+      "methods/invoice.mthds": 'domain = "invoice"',
+      "methods/templates/invoice.xlsx": workbook,
+    });
 
-    for (const [input, { context, versionCalls }] of starts) {
-      const result = await startMthdsRun(input, context);
+    const result = await startMthdsRun(
+      { files: [{ path: "methods/invoice.mthds" }, { path: "methods/templates/invoice.xlsx" }] },
+      context,
+    );
 
-      expect(result.structuredContent.problem).toEqual(TOO_LARGE);
-      expect(versionCalls()).toBe(0);
-    }
+    expect(versionCalls()).toBe(1);
+    expect(tooLargeProblem(result).message).toContain("travelled inline in this request");
+  });
+
+  it("blames neither cause of a 413 when the handshake that would tell how a heavy tree went fails", async () => {
+    const heavy = "x".repeat(INLINE_TREE_MAX_BYTES + 1);
+    const { context, versionCalls } = refusingStart(
+      () =>
+        Promise.reject(new ApiUnreachableError("connection reset", DEFAULT_API_URL, "ECONNRESET")),
+      { "methods/invoice.mthds": 'domain = "invoice"', "methods/report.html": heavy },
+    );
+
+    const result = await startMthdsRun(
+      {
+        files: [{ path: "methods/invoice.mthds" }, { path: "methods/report.html" }],
+        inputs: { question: "why?" },
+      },
+      context,
+    );
+
+    expect(versionCalls()).toBe(1);
+    const message = String(tooLargeProblem(result).message);
+    expect(message).toContain("cannot be told from here");
+    expect(message).not.toContain("its inputs did");
   });
 
   it("rejects { path } items instructively without a resolver (hosted)", async () => {

@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { MethodFileTransferError, buildProblem } from "@pipelex/sdk";
+import { ApiResponseError, MethodFileTransferError, buildProblem } from "@pipelex/sdk";
 import type {
   CoreErrorCode,
   MethodData,
@@ -889,8 +889,7 @@ async function saveToCatalog(
       // Present: the create arm was refused above without one.
       stored = await client.createMethod({ name: data.name ?? "", tree: source });
     } catch (err) {
-      const problem = problemOf(err);
-      return saveError(context, problem, createCaution(err, problem));
+      return saveError(context, createFailureProblem(err, problemOf(err)));
     }
     saved = "created";
   } else {
@@ -1280,34 +1279,56 @@ async function draftConflictProblem(
 }
 
 /**
- * The caution a failed create's summary closes on, when the create may have
- * reached the catalog. A create whose response was lost cannot be replayed
- * safely: `POST /v1/methods` honours an `Idempotency-Key` and `@pipelex/sdk`
- * exposes no way to send one, so a retry mints a SECOND method under the same
- * name. The problem stays the SDK's, whose `retry` says whether asking again
- * can succeed, never whether it is safe; only the summary says what to do
- * first. A draft write has no such hazard — `PUT` replaces the draft and is
- * idempotent by construction — so its summary carries none.
+ * The problem of a failed create. A create that may have reached the catalog
+ * cannot be replayed safely: `POST /v1/methods` honours an `Idempotency-Key`
+ * and `@pipelex/sdk` exposes no way to send one, so a retry mints a SECOND
+ * method under the same name. Such a failure is therefore
+ * `client.outcome_unknown` in the structured result, whatever the SDK read,
+ * so that no caller branching on `retry` resends it: its `retry` is
+ * `outcome_unknown`, and its step is to list the catalog before saving again.
+ * The SDK's own reading is kept in `message`, with its code, and its
+ * `request_id` beside it for support. A draft write has no such hazard —
+ * `PUT` replaces the draft and is idempotent by construction — so this
+ * applies to the create alone.
  *
- * A 2xx the SDK could not read gets the caution too, although its `retry` is
- * `no`: the create was accepted and only its answer was lost, so the method
- * exists and a second save without its id would mint another.
- *
- * A file that could not be uploaded is none of this: the upload comes before
- * the create, which is never sent.
+ * A create may have reached the catalog unless its failure proves otherwise,
+ * the same safe side the SDK takes for a start: an answer the API gave
+ * refusing it (a `4xx` but `408`, `501`) proves nothing was created, as does
+ * a failure the SDK reports as final before an answer (`retry: "no"`, such as
+ * an argument it refused), and a file that could not be uploaded, since the
+ * upload comes before the create, which is then never sent. A `2xx` the SDK
+ * could not read is a create the platform accepted, so the method exists.
+ * The SDK's test of whether a transport failure proves nothing left is not
+ * exported, so every transport failure counts as one that may have left.
  *
  * When the SDK gains the key, this function goes.
  */
-function createCaution(err: unknown, problem: Problem): string | undefined {
-  if (err instanceof MethodFileTransferError) return undefined;
-  const status = problem.params?.status;
-  const accepted =
-    problem.code === "client.response_unreadable" &&
-    typeof status === "number" &&
-    status >= 200 &&
-    status < 300;
-  if (problem.retry === "no" && !accepted) return undefined;
-  return `This was a CREATE, and it must not be retried blindly: the API accepts an idempotency key but the SDK cannot send one, so a create whose response was lost would be minted twice. List the catalog with ${WORKSHOP_TOOL_NAMES.listMethods} first — if the method is there, save again with its method_id, which writes its draft.`;
+function createFailureProblem(err: unknown, problem: Problem): Problem {
+  if (!createMayHaveLanded(err, problem)) return problem;
+  const outcome = buildProblem("client.outcome_unknown", {});
+  return {
+    ...outcome,
+    title: "The save may have created the method",
+    detail:
+      "The create request had left when its answer was lost, so the catalog may already hold the new method.",
+    next_step: {
+      kind: "refresh",
+      detail: `List the catalog with ${WORKSHOP_TOOL_NAMES.listMethods} before saving again: if the method is there, save again with its method_id, which writes its draft. A save without it would create a second method, since the create cannot yet carry an idempotency key.`,
+    },
+    message: asOneLine(`The create failed with ${problem.code}: ${problemSentence(problem)}`),
+    ...(problem.request_id === undefined ? {} : { request_id: problem.request_id }),
+  };
+}
+
+/** Whether a failed create may have reached the catalog (see {@link createFailureProblem}). */
+function createMayHaveLanded(err: unknown, problem: Problem): boolean {
+  if (err instanceof MethodFileTransferError) return false;
+  const status = err instanceof ApiResponseError ? err.status : problem.params?.status;
+  if (typeof status === "number") {
+    if (status >= 200 && status < 300) return true;
+    return status === 408 || (status >= 500 && status !== 501);
+  }
+  return problem.retry !== "no";
 }
 
 /**

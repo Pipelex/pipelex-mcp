@@ -1,6 +1,7 @@
 import {
   ApiResponseError,
   ArtifactFetchError,
+  INLINE_TREE_MAX_BYTES,
   PIPELEX_STORAGE_SCHEME,
   PipelexApiClient,
   RequestArgumentError,
@@ -879,6 +880,149 @@ export function failedBeforeSending(err: unknown): boolean {
 }
 
 /**
+ * What a method's tree had to do with a request refused as too large:
+ * `tree`, it travelled inline at a weight that can have made it so; `not_tree`,
+ * its bytes did not ride the request, since none was sent or it travelled by
+ * hash; `unknown`, it rode inline at a weight that may or may not have, or
+ * how it travelled cannot be told.
+ */
+export type TreeShareOfTooLarge = "tree" | "not_tree" | "unknown";
+
+/**
+ * What `tree` had to do with `err` when it is a `413`, or `undefined` for any
+ * other error. A tree within the SDK's inline threshold
+ * (`INLINE_TREE_MAX_BYTES`), weighed as the SDK weighs it
+ * ({@link inlineTreeWeight}), travels inline everywhere, so it rode the
+ * request and may have filled it to a limit lower than the threshold:
+ * `unknown`. A heavier one travels by hash to a deployment keeping a blob
+ * store and inline only to one keeping none, so the deployment is asked,
+ * through the client's `version()` (`GET /v1/version`'s `blob_store`), only
+ * then; a client without `version()`, or a handshake that fails, says
+ * nothing, which is `unknown` too.
+ */
+export async function treeShareOfTooLarge(
+  err: unknown,
+  tree: MethodTreeToSend | undefined,
+  client: unknown,
+): Promise<TreeShareOfTooLarge | undefined> {
+  if (!(err instanceof ApiResponseError) || err.status !== 413) return undefined;
+  if (tree === undefined) return "not_tree";
+  if (inlineTreeWeight(tree) <= INLINE_TREE_MAX_BYTES) return "unknown";
+  if (typeof client !== "object" || client === null) return "unknown";
+  const version = (client as { version?: unknown }).version;
+  if (typeof version !== "function") return "unknown";
+  try {
+    const info: unknown = await (version as () => Promise<unknown>).call(client);
+    return asRecord(info)?.blob_store === true ? "not_tree" : "tree";
+  } catch {
+    return "unknown";
+  }
+}
+
+const STRICT_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/**
+ * The weight of a tree's inline `files` map as the SDK measures it against
+ * its inline threshold: the map's JSON with no whitespace, in UTF-8 bytes,
+ * each file as its text, or as `{ base64 }` when it is not UTF-8 text, so a
+ * binary file weighs about four thirds of its bytes.
+ */
+export function inlineTreeWeight(tree: MethodTreeToSend): number {
+  const files: Record<string, string | { base64: string }> = {};
+  for (const file of tree.files) {
+    let entry: string | { base64: string };
+    try {
+      entry = STRICT_UTF8_DECODER.decode(file.bytes);
+    } catch {
+      entry = { base64: Buffer.from(file.bytes).toString("base64") };
+    }
+    Object.defineProperty(files, file.treePath, { value: entry, enumerable: true });
+  }
+  return Buffer.byteLength(JSON.stringify(files), "utf8");
+}
+
+/** What to do about a method's tree that made a request too large. */
+const TREE_TOO_LARGE_REMEDY =
+  "Keep what is not part of the method out of its folder with a .gitignore inside it or METHODS.toml's [package] exclude, or send fewer or smaller files.";
+
+/** What to do about a run's inputs that made its start too large. */
+const INPUTS_TOO_LARGE_REMEDY = `Upload large file inputs with ${WORKSHOP_TOOL_NAMES.prepareInputs}, which replaces them with pipelex-storage:// references, or pass them as URLs.`;
+
+/**
+ * `problem` with what the workshop can tell of a request refused as too
+ * large, a `413`, added to its `message`, since neither the platform's answer
+ * nor a bare gateway `413` says which part of the request made it so. Any
+ * other failure comes back as it was, and so does a `413` the workshop can say
+ * nothing about. The problem's code, domain, retry and next step are kept.
+ *
+ * - A tree shown to have travelled inline at a weight that can have made the
+ *   request too large ({@link treeShareOfTooLarge} is `tree`): a deployment
+ *   without a blob store takes every file of a tree inline, so the caller
+ *   sends a smaller tree.
+ * - On a start (`run` given): the inputs are blamed only when the start
+ *   carried some and the tree is shown not to have ridden the request;
+ *   otherwise the note names both possible causes, with the weights measured
+ *   here, the tree's as it travels inline and the inputs' as JSON.
+ */
+export async function withTooLargeNote(
+  problem: Problem,
+  err: unknown,
+  tree: MethodTreeToSend | undefined,
+  client: unknown,
+  run?: { inputs: Record<string, unknown> | undefined },
+): Promise<Problem> {
+  const share = await treeShareOfTooLarge(err, tree, client);
+  if (share === undefined) return problem;
+  const note = tooLargeNote(share, tree, run);
+  if (note === undefined) return problem;
+  const said = typeof problem.message === "string" && problem.message !== "" ? problem.message : "";
+  return { ...problem, message: said === "" ? note : `${said} ${note}` };
+}
+
+function tooLargeNote(
+  share: TreeShareOfTooLarge,
+  tree: MethodTreeToSend | undefined,
+  run: { inputs: Record<string, unknown> | undefined } | undefined,
+): string | undefined {
+  if (share === "tree" && tree !== undefined) {
+    return `The method's files travelled inline in this request, ${sizeWords(inlineTreeWeight(tree))} of them, which is what made it larger than the Pipelex deployment takes in one request: a deployment without a blob store takes every file of a tree inline. ${TREE_TOO_LARGE_REMEDY}`;
+  }
+  if (run === undefined) return undefined;
+  const inputs = run.inputs ?? {};
+  const carriesInputs = Object.keys(inputs).length > 0;
+  if (share === "not_tree" && carriesInputs) {
+    return `The method's files are not what made the run's request too large, since they did not ride it inline: its inputs did. ${INPUTS_TOO_LARGE_REMEDY}`;
+  }
+  const measured: string[] = [];
+  if (tree !== undefined && share !== "not_tree") {
+    measured.push(`the method's files weigh ${sizeWords(inlineTreeWeight(tree))} inline`);
+  }
+  if (!carriesInputs) {
+    measured.push("the run carries no inputs");
+  } else {
+    const weight = jsonWeight(inputs);
+    if (weight !== undefined) measured.push(`its inputs weigh ${sizeWords(weight)} as JSON`);
+  }
+  return `Which part of the run's request made it too large cannot be told from here: the method's files, when they travel inline, or the run's inputs. ${TREE_TOO_LARGE_REMEDY} ${INPUTS_TOO_LARGE_REMEDY} Measured here, ${measured.join(", and ")}.`;
+}
+
+/** A value's weight as a request carries it: its JSON, in UTF-8 bytes, or `undefined` when it has none. */
+function jsonWeight(value: unknown): number | undefined {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+/** A size in the unit that reads best: KiB below a mebibyte, MiB above. */
+function sizeWords(bytes: number): string {
+  return bytes < 1024 * 1024
+    ? `${(bytes / 1024).toFixed(1)} KiB`
+    : `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+/**
  * Put a tree's listing on a result produced once its request was sent, a
  * no-verdict error included, since its files left the machine either way. A
  * result {@link markUnsent} marked, whose request never left, gets no listing.
@@ -1096,8 +1240,9 @@ export type { Problem, ProblemItem };
  * A refusal a file resolver, a folder's listing or the secret guard words
  * before anything is sent: what happened and what the caller can do, and the
  * facts the problem it becomes is built from. `reason` says why in one
- * identifier; `unreadable` names a local file that exists and cannot be read,
- * which is `client.file_unreadable` rather than a refused argument; `busy`
+ * identifier; `unreadable` names a local path that cannot be read — missing,
+ * not a regular file, or refused by the system — which is
+ * `client.file_unreadable` rather than a refused argument; `busy`
  * names one that changed while it was read, which is `client.workspace_busy`.
  */
 export interface Refusal {
@@ -1214,6 +1359,13 @@ export function refusalProblem(field: string, refusal: Refusal): Problem {
  * fault found: the fault itself when there is one, else one
  * `client.argument_invalid` naming the first fault's argument, whose `errors`
  * list every fault as an item, its own code, sentence and location kept.
+ *
+ * A fault a retry can clear (its `retry` other than `no`, such as a file that
+ * changed while it was read, `client.workspace_busy`) is reported on its
+ * own, ahead of every other, since a problem item carries no retry verdict
+ * and the wrapper's `no` would hide it: what was read while files were
+ * changing cannot be trusted, and the retry reads again and reports whatever
+ * faults remain. Its `message` says that other faults were found.
  */
 export function faultsProblem(faults: readonly Problem[]): Problem {
   const [first] = faults;
@@ -1221,6 +1373,14 @@ export function faultsProblem(faults: readonly Problem[]): Problem {
     throw new Error("faultsProblem needs at least one fault");
   }
   if (faults.length === 1) return first;
+  const retryable = faults.find((fault) => fault.retry !== "no");
+  if (retryable !== undefined) {
+    const said = typeof retryable.message === "string" ? `${retryable.message} ` : "";
+    return {
+      ...retryable,
+      message: `${said}Other faults were found in this call too; once retried, it reports any that remain.`,
+    };
+  }
   const argument =
     typeof first.params?.argument === "string"
       ? first.params.argument
@@ -1879,18 +2039,6 @@ export function fetchItemProblem(error: { code: string; detail: string }, uri: s
     : problem;
 }
 
-// ── the image-inlining boundary (mthds_show_images) ─────────────────
-
-/**
- * The per-image byte cap. NOT a cost control: the host probe
- * (L-260920-fc66db) established that a host bills an
- * image block at the model's native vision price, derived from its pixel
- * dimensions, and that its base64 size costs nothing. This is a transport
- * guard and a point of diminishing returns — Claude Code's stdio transport
- * carried an 8 MiB PNG and died on a 12 MiB one with `Connection closed`,
- * and above roughly a megabyte every host measured re-encodes the image to a
- * fraction of what was sent, so bytes past that buy nothing.
- */
 /**
  * Directories a misaimed `output_dir` would otherwise drag in wholesale.
  *
@@ -1910,6 +2058,18 @@ export const PRUNED_DIRECTORIES = new Set([
   "__pycache__",
 ]);
 
+// ── the image-inlining boundary (mthds_show_images) ─────────────────
+
+/**
+ * The per-image byte cap. NOT a cost control: the host probe
+ * (L-260920-fc66db) established that a host bills an
+ * image block at the model's native vision price, derived from its pixel
+ * dimensions, and that its base64 size costs nothing. This is a transport
+ * guard and a point of diminishing returns — Claude Code's stdio transport
+ * carried an 8 MiB PNG and died on a 12 MiB one with `Connection closed`,
+ * and above roughly a megabyte every host measured re-encodes the image to a
+ * fraction of what was sent, so bytes past that buy nothing.
+ */
 export const MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024;
 
 /**

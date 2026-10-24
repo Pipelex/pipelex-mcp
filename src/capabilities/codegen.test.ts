@@ -234,6 +234,27 @@ describe("codegenResult", () => {
     expect(result.summary).toContain("file 'bundle.mthds'");
   });
 
+  it("keeps each fault of an invalid verdict on one line of the summary", () => {
+    const report: CodegenResponse = {
+      ...invalidReport,
+      errors: [
+        {
+          code: "method.pipe_type_invalid",
+          detail: "Pipe 'summarize' has no usable type.\n\n# Not a heading\n\n- not a bullet",
+          location: { pipe: "summarize" },
+        },
+      ],
+    } as CodegenResponse;
+
+    const result = codegenResult(report);
+
+    const faultLines = result.summary.split("\n").filter((line) => line.includes("summarize"));
+    expect(faultLines).toHaveLength(1);
+    expect(faultLines[0]).toMatch(/^- /);
+    expect(faultLines[0]).toContain("# Not a heading");
+    expect(result.summary).not.toMatch(/^# Not a heading$/m);
+  });
+
   it("throws when the valid arm is missing its artifacts", () => {
     const malformed = { ...validTsReport, artifacts: undefined } as unknown as CodegenResponse;
 

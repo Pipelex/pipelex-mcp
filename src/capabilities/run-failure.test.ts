@@ -12,6 +12,7 @@ import {
   FAILURE_MESSAGE_MAX_CODE_POINTS,
   RUN_ERROR_ITEM_MAX_CODE_POINTS,
   RUN_ERROR_MAX_ITEMS,
+  RUN_ERROR_VALUE_MAX_DEPTH,
   runErrorOf,
   runErrorSchema,
   runErrorSummary,
@@ -169,6 +170,85 @@ describe("runErrorOf's bounds", () => {
       expect(Array.from(item.detail).length).toBeLessThan(RUN_ERROR_ITEM_MAX_CODE_POINTS + 60);
     }
     expect(runErrorSchema.safeParse(runError).success).toBe(true);
+  });
+
+  it("bounds the params and the location of the problem and of each fault, saying what it left out", () => {
+    const longText = "z".repeat(RUN_ERROR_ITEM_MAX_CODE_POINTS * 3);
+    const hashes = Array.from({ length: RUN_ERROR_MAX_ITEMS + 5 }, (_, index) =>
+      index.toString(16).padStart(64, "0"),
+    );
+    const names = Array.from({ length: RUN_ERROR_MAX_ITEMS + 5 }, (_, index) => `pipe_${index}`);
+    const wideObject = Object.fromEntries(
+      Array.from({ length: RUN_ERROR_MAX_ITEMS + 3 }, (_, index) => [`member_${index}`, index]),
+    );
+    let deep: unknown = "bottom";
+    for (let level = 0; level < RUN_ERROR_VALUE_MAX_DEPTH + 2; level += 1) deep = { level: deep };
+    const largeFix = {
+      fix_code: "rename-model",
+      description: longText,
+      safety: "safe",
+      ops: [{ kind: "set_key", table_path: ["pipe", "summarize"], key: "model", value: longText }],
+    };
+    const smallFix = {
+      fix_code: "rename-model",
+      description: "Use the model the deck names.",
+      safety: "safe",
+      ops: [{ kind: "set_key", table_path: ["pipe", "summarize"], key: "model", value: "gpt-5" }],
+    };
+    const runError = runErrorOf({
+      ...TIMED_OUT_RUN_PROBLEM,
+      params: { timeout: 3600, reason: longText, missing_blobs: hashes, wide: wideObject, deep },
+      location: { pipe: "p".repeat(FAILURE_FIELD_MAX_CODE_POINTS * 2), path: names, item: 3 },
+      errors: [
+        {
+          code: "method.invalid",
+          detail: "One fault.",
+          params: { reason: longText },
+          location: { file: "f".repeat(FAILURE_FIELD_MAX_CODE_POINTS * 2), line: 12 },
+          suggestions: names,
+          suggested_fix: largeFix,
+        },
+        { code: "method.invalid", detail: "Another fault.", suggested_fix: smallFix },
+      ],
+    });
+
+    expect(runError).toBeDefined();
+    const params = runError?.params as Record<string, unknown>;
+    expect(params.timeout).toBe(3600);
+    expect(params.reason).toMatch(/… \[\d+ more characters left out\]$/);
+    expect(Array.from(String(params.reason)).length).toBeLessThan(
+      RUN_ERROR_ITEM_MAX_CODE_POINTS + 60,
+    );
+    // A typed list keeps its entries alone; the count of the rest sits beside it.
+    expect(params.missing_blobs).toEqual(hashes.slice(0, RUN_ERROR_MAX_ITEMS));
+    expect(params.missing_blobs_omitted).toBe(5);
+    const wide = params.wide as Record<string, unknown>;
+    expect(Object.keys(wide)).toHaveLength(RUN_ERROR_MAX_ITEMS + 1);
+    expect(wide["…"]).toBe("3 more members left out");
+    expect(JSON.stringify(params.deep)).toContain("left out]");
+    expect(JSON.stringify(params.deep)).not.toContain("bottom");
+
+    expect(runError?.location?.pipe).toMatch(/… \[\d+ more characters left out\]$/);
+    expect(Array.from(runError?.location?.pipe ?? "").length).toBeLessThan(
+      FAILURE_FIELD_MAX_CODE_POINTS + 60,
+    );
+    expect(runError?.location?.path).toEqual(names.slice(0, RUN_ERROR_MAX_ITEMS));
+    expect(runError?.location?.path_omitted).toBe(5);
+    expect(runError?.location?.item).toBe(3);
+
+    const [first, second] = runError?.errors ?? [];
+    expect(String(first?.params?.reason)).toMatch(/… \[\d+ more characters left out\]$/);
+    expect(first?.location?.file).toMatch(/… \[\d+ more characters left out\]$/);
+    expect(first?.location?.line).toBe(12);
+    expect(first?.suggestions).toEqual(names.slice(0, RUN_ERROR_MAX_ITEMS));
+    expect(first?.suggestions_omitted).toBe(5);
+    // A fix is applied as written, so one too large is left out rather than cut.
+    expect(first).not.toHaveProperty("suggested_fix");
+    expect(first?.suggested_fix_omitted).toBe(1);
+    expect(second?.suggested_fix).toEqual(smallFix);
+
+    expect(runErrorSchema.safeParse(runError).success).toBe(true);
+    expect(isProblem(runError)).toBe(true);
   });
 
   it("carries a problem that fits whole, with no count of left-out faults", () => {

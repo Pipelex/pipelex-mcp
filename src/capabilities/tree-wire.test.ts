@@ -291,3 +291,130 @@ describe("a blob gone missing, on every route that sends a tree", () => {
     });
   }
 });
+
+/**
+ * A request refused as too large, a `413` the gateway answers with no
+ * problem document. Neither the answer nor the SDK says which part of the
+ * request made it so, so the workshop adds what it can tell to the problem's
+ * `message`: a tree shown to have travelled inline past the SDK's threshold
+ * is the tree's, and on a start a tree shown not to have ridden the request
+ * leaves the inputs to blame.
+ */
+describe("a request refused as too large", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** A deployment answering `route` with a bare `413`, keeping a blob store or not. */
+  function stubTooLarge(route: string, blobStore: boolean): void {
+    vi.stubGlobal("fetch", (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname === "/v1/version") {
+        return Promise.resolve(Response.json({ version: "1.0.0", blob_store: blobStore }));
+      }
+      if (url.pathname === "/v1/blobs/missing") {
+        return Promise.resolve(Response.json({ missing: [] }));
+      }
+      if (url.pathname === route) {
+        return Promise.resolve(new Response("Request Entity Too Large", { status: 413 }));
+      }
+      return Promise.resolve(new Response("", { status: 404 }));
+    });
+  }
+
+  const HEAVY = folderSource(HEAVY_FOLDER);
+
+  const ROUTES = [
+    {
+      tool: "mthds_validate",
+      route: "/v1/validate",
+      call: (baseUrl: string) =>
+        validateMthds(
+          { ...HEAVY.source, graph_page: false },
+          { baseUrl, resolver: HEAVY.resolver },
+        ),
+    },
+    {
+      tool: "mthds_run",
+      route: "/v1/start",
+      call: (baseUrl: string) => startMthdsRun(HEAVY.source, { baseUrl, resolver: HEAVY.resolver }),
+    },
+    {
+      tool: "mthds_codegen",
+      route: "/v1/codegen",
+      call: (baseUrl: string) =>
+        generateMthdsCode(
+          { ...HEAVY.source, target: "ts-zod" },
+          { baseUrl, resolver: HEAVY.resolver },
+        ),
+    },
+    {
+      tool: "mthds_inputs_template",
+      route: "/v1/pipe-io",
+      call: (baseUrl: string) =>
+        buildMthdsInputs(HEAVY.source, { baseUrl, resolver: HEAVY.resolver }),
+    },
+    {
+      tool: "mthds_prepare_inputs",
+      route: "/v1/pipe-io",
+      call: (baseUrl: string) =>
+        prepareMthdsInputs({ ...HEAVY.source, inputs: {} }, { baseUrl, resolver: HEAVY.resolver }),
+    },
+  ] as const;
+
+  for (const { tool, route, call } of ROUTES) {
+    it(`${tool} says a tree sent inline past the threshold made the request too large`, async () => {
+      stubTooLarge(route, false);
+
+      const result = await call(`https://large.${tool}.example`);
+
+      expect(result.structuredContent.status).toBe("error");
+      const problem = result.structuredContent.problem;
+      expect(problem?.message).toContain("The method's files travelled inline in this request");
+      expect(problem?.message).toContain(".gitignore");
+      expect(result.summary).toContain("travelled inline");
+    });
+  }
+
+  it("blames a start's inputs when the tree went by hash", async () => {
+    stubTooLarge("/v1/start", true);
+
+    const result = await startMthdsRun(
+      { ...HEAVY.source, inputs: { text: "x".repeat(2048) } },
+      { baseUrl: "https://large.inputs.example", resolver: HEAVY.resolver },
+    );
+
+    const message = result.structuredContent.problem?.message;
+    expect(message).toContain("its inputs did");
+    expect(message).toContain("mthds_prepare_inputs");
+    expect(message).not.toContain("travelled inline in this request");
+  });
+
+  it("names both causes, with what it measured, when a small inline tree rode the start", async () => {
+    stubTooLarge("/v1/start", false);
+    const small = folderSource(FOLDER);
+
+    const result = await startMthdsRun(
+      { ...small.source, inputs: { text: "x".repeat(2048) } },
+      { baseUrl: "https://large.both.example", resolver: small.resolver },
+    );
+
+    const message = result.structuredContent.problem?.message;
+    expect(message).toContain("cannot be told from here");
+    expect(message).toMatch(/the method's files weigh [\d.]+ KiB inline/);
+    expect(message).toMatch(/its inputs weigh [\d.]+ KiB as JSON/);
+  });
+
+  it("adds nothing to a tool's 413 when the tree rode inline below the threshold", async () => {
+    stubTooLarge("/v1/validate", false);
+    const small = folderSource(FOLDER);
+
+    const result = await validateMthds(
+      { ...small.source, graph_page: false },
+      { baseUrl: "https://large.small.example", resolver: small.resolver },
+    );
+
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.problem?.message ?? "").not.toContain("travelled inline");
+  });
+});
