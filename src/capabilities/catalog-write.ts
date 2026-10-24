@@ -56,7 +56,6 @@ import type {
 import { secretFindings, secretRefusalText } from "./secret-guard.js";
 import {
   SECRET_REASON,
-  answeredRoute,
   argumentProblem,
   asOneLine,
   buildApiConfig,
@@ -1315,34 +1314,29 @@ function createFailureProblem(err: unknown, problem: Problem): Problem {
   };
 }
 
-/** The route `createMethod` posts the create to, as the SDK names it in an answer's error. */
-const CREATE_ROUTE = "/v1/methods";
-
 /**
  * Whether a failed create may have reached the catalog (see
- * {@link createFailureProblem}). Only a proof that the create never left, or
- * that the catalog refused it, says it did not:
+ * {@link createFailureProblem}). Only a proof, read from the error's class and
+ * status alone, says it did not:
  *
  * - the SDK refused an argument before any request (`RequestArgumentError`);
- * - a step that comes before the create failed, which then is never sent: a
- *   file's upload (`MethodFileTransferError`), or an answer from another
- *   route than the create's, the version handshake or `POST /v1/blobs/missing`,
- *   whatever its status, the route read from the error ({@link answeredRoute});
- * - the create's route answered a refusal, a `4xx` but `408`, or a `501`.
+ * - a file could not be uploaded (`MethodFileTransferError`): the uploads come
+ *   before the create, which `createMethod` then never sends;
+ * - an answer refused the call, a `4xx` other than `408`, or a `501`: a
+ *   refusal of a step before the create, the version handshake or the blob
+ *   route, means the create was never sent, and a refusal of the create
+ *   itself means nothing was written, `createMethod` making no request after
+ *   the create.
  *
- * Everything else may have landed: a `2xx` the SDK could not read is a create
- * the platform accepted, a `408` or another `5xx` may come after the write,
- * an answer whose route the error does not name may be the create's, and a
- * transport failure may come after the create left, the SDK's test of one
- * that proves nothing was sent not being exported. So may a failure the SDK
- * did not raise, an abort or a wrapper's error, which proves nothing of what
- * was sent, whatever problem it reads as.
+ * Everything else may have landed: a `2xx` the SDK could not read, a `408` or
+ * another `5xx`, whichever route answered it, a transport failure, the SDK's
+ * test of one that proves nothing left not being exported, and a failure the
+ * SDK did not raise, such as an abort or a wrapper's error, which proves
+ * nothing of what was sent, whatever problem it reads as.
  */
 function createMayHaveLanded(err: unknown): boolean {
   if (failedBeforeSending(err) || err instanceof MethodFileTransferError) return false;
   if (!(err instanceof ApiResponseError)) return true;
-  const route = answeredRoute(err);
-  if (route !== undefined && route !== CREATE_ROUTE) return false;
   const { status } = err;
   if (status >= 200 && status < 300) return true;
   return status === 408 || (status >= 500 && status !== 501);

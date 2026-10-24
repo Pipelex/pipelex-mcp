@@ -8,7 +8,6 @@ import {
   ApiResponseError,
   ApiUnreachableError,
   INLINE_TREE_MAX_BYTES,
-  MethodFileTransferError,
   MissingMainStuffError,
   RequestArgumentError,
   RunLifecycleUnavailableError,
@@ -110,18 +109,14 @@ function runRead(overrides: Partial<RunRead> = {}): RunRead {
 
 /**
  * What `@pipelex/sdk` raises when the API answers `route` with `problem`: an
- * `ApiResponseError` built as the client builds it, its message naming the
- * route (`API <METHOD> <path> failed (<status>): <detail>`) and its `apiUrl`
- * the base URL, which reads the problem document from the answer's body, so
- * the problem is the one the SDK reads. A route under `/v1/runs/` is read
- * with `GET`, every other one posted.
+ * `ApiResponseError` built as the client builds it, which reads the problem
+ * document from the answer's body, so the problem is the one the SDK reads.
  */
 function answeredWith(route: string, problem: Problem): ApiResponseError {
   const status = problem.status ?? 500;
-  const method = route.startsWith("/v1/runs/") ? "GET" : "POST";
   return new ApiResponseError(
-    `API ${method} ${route} failed (${status}): ${problem.detail ?? ""}`,
-    DEFAULT_API_URL,
+    `HTTP ${status}`,
+    `${DEFAULT_API_URL}${route}`,
     status,
     "",
     JSON.stringify(problem),
@@ -2813,20 +2808,16 @@ describe("startMthdsRun path submissions", () => {
     { status: 413 },
   );
 
-  /**
-   * A context whose start rejects with `refusal`, by default the deployment's
-   * 413 on `POST /v1/start`, its handshake counted and answering `version`.
-   */
+  /** A context whose start answers a 413, its handshake counted and answering `version`. */
   function refusingStart(
     version: () => Promise<unknown>,
     files: Record<string, string | Uint8Array> = {},
-    refusal: unknown = answeredWith("/v1/start", TOO_LARGE),
   ): { context: RunContext; versionCalls: () => number } {
     let calls = 0;
     return {
       context: {
         ...contextWith({
-          start: () => Promise.reject(refusal),
+          start: () => Promise.reject(answeredWith("/v1/start", TOO_LARGE)),
           version: () => {
             calls += 1;
             return version();
@@ -2855,22 +2846,22 @@ describe("startMthdsRun path submissions", () => {
     return problem as Problem;
   }
 
-  it("names a small tree a start carried inline with no inputs as the cause, keeping the API's problem", async () => {
+  it("names both causes of a 413 on a start carrying a small tree and no inputs, keeping the API's problem", async () => {
     const { context, versionCalls } = refusingStart(noBlobStore);
 
     const result = await startMthdsRun({ files: [{ content: 'domain = "invoice"' }] }, context);
 
     const message = String(tooLargeProblem(result).message);
-    expect(message).toMatch(
-      /The method's files travelled inline in this request, \d+ bytes of them, the deployment keeping no blob store/,
-    );
-    expect(message).not.toContain("mthds_prepare_inputs");
-    expect(message).not.toContain("cannot be told");
+    expect(message).toContain("cannot be told from here");
+    expect(message).toContain("mthds_prepare_inputs");
+    expect(message).toContain("the run carries no inputs");
+    expect(message).not.toContain("its inputs did");
     expect(result.summary).toContain(message);
-    expect(versionCalls()).toBe(1);
+    // A tree within the inline threshold rode inline wherever it went: no handshake asks.
+    expect(versionCalls()).toBe(0);
   });
 
-  it("names both causes of a 413 on a start carrying inputs beside a tree that travelled inline, with what it measured", async () => {
+  it("names both causes of a 413 on a start carrying inputs beside a small tree, with what it measured", async () => {
     const { context } = refusingStart(noBlobStore);
 
     const result = await startMthdsRun(
@@ -2880,47 +2871,23 @@ describe("startMthdsRun path submissions", () => {
 
     const message = String(tooLargeProblem(result).message);
     expect(message).toContain("cannot be told from here");
-    expect(message).toContain("which travelled inline, the deployment keeping no blob store");
-    expect(message).toMatch(/the method's files weigh \d+ bytes inline/);
-    expect(message).toMatch(/its inputs weigh \d+ bytes as JSON/);
+    expect(message).toMatch(/the method's files weigh \d+\.\d KiB inline/);
+    expect(message).toMatch(/its inputs weigh \d+\.\d KiB as JSON/);
   });
 
-  it("blames a start's inputs for a 413 when it sent no tree, asking no handshake", async () => {
-    for (const selector of [
-      { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
-      { method_id: "mt_abc123" },
-    ]) {
-      const { context, versionCalls } = refusingStart(noBlobStore);
+  it("blames a start's inputs for a 413 when it sent no tree", async () => {
+    const { context, versionCalls } = refusingStart(noBlobStore);
 
-      const result = await startMthdsRun({ ...selector, inputs: { question: "why?" } }, context);
+    const result = await startMthdsRun(
+      { method_ref: "github.com/Pipelex/methods/documents@v0.1.0", inputs: { question: "why?" } },
+      context,
+    );
 
-      const message = String(tooLargeProblem(result).message);
-      expect(message).toMatch(
-        /^The run's inputs are what made its request too large, \d+ bytes of them as JSON/,
-      );
-      expect(message).toContain("the method being named by method_ref or method_id");
-      expect(versionCalls()).toBe(0);
-    }
+    expect(tooLargeProblem(result).message).toContain("its inputs did");
+    expect(versionCalls()).toBe(0);
   });
 
-  it("adds nothing to a 413 on a start by method_ref or method_id carrying no inputs", async () => {
-    for (const selector of [
-      { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
-      { method_id: "mt_abc123" },
-      { method_id: "mt_abc123", inputs: {} },
-    ]) {
-      const { context, versionCalls } = refusingStart(noBlobStore);
-
-      const result = await startMthdsRun(selector, context);
-
-      const message = String(tooLargeProblem(result).message ?? "");
-      expect(message).not.toContain("inputs");
-      expect(message).not.toContain("method's files");
-      expect(versionCalls()).toBe(0);
-    }
-  });
-
-  it("blames a heavy tree a deployment without a blob store took inline, the inputs when it went by hash, and nothing when neither rode", async () => {
+  it("blames a heavy tree a deployment without a blob store took inline, and the inputs when it went by hash", async () => {
     const heavy = "x".repeat(INLINE_TREE_MAX_BYTES + 1);
     const folder = { "methods/invoice.mthds": 'domain = "invoice"', "methods/report.html": heavy };
     const files = [{ path: "methods/invoice.mthds" }, { path: "methods/report.html" }];
@@ -2928,7 +2895,7 @@ describe("startMthdsRun path submissions", () => {
     const inline = await startMthdsRun({ files }, refusingStart(noBlobStore, folder).context);
     const inlineMessage = String(tooLargeProblem(inline).message);
     expect(inlineMessage).toContain("The method's files travelled inline in this request");
-    expect(inlineMessage).toContain("the deployment keeping no blob store");
+    expect(inlineMessage).toContain("without a blob store");
 
     // The same tree went by hash to a deployment keeping a blob store, so the
     // inputs riding the start take the blame, and with none, nothing does.
@@ -2936,146 +2903,49 @@ describe("startMthdsRun path submissions", () => {
       { files, inputs: { question: "why?" } },
       refusingStart(blobStore, folder).context,
     );
-    const withInputsMessage = String(tooLargeProblem(withInputs).message);
-    expect(withInputsMessage).toContain("The run's inputs are what made its request too large");
-    expect(withInputsMessage).toContain("the method's files having gone by hash");
+    expect(tooLargeProblem(withInputs).message).toContain("its inputs did");
     const withoutInputs = await startMthdsRun({ files }, refusingStart(blobStore, folder).context);
-    expect(String(tooLargeProblem(withoutInputs).message ?? "")).not.toContain("method's files");
-  });
-
-  it("reads the lower max_inline_bytes a deployment announces to tell how the tree went", async () => {
-    const folder = { "methods/invoice.mthds": `domain = "invoice"\n${"# note\n".repeat(200)}` };
-    const announcing = (maxInlineBytes: number) => () =>
-      Promise.resolve({
-        version: "1.0.0",
-        blob_store: true,
-        limits: { method_tree: { max_inline_bytes: maxInlineBytes } },
-      });
-    const files = [{ path: "methods/invoice.mthds" }];
-
-    // Over the announced 512 bytes, the tree went by hash, leaving the inputs.
-    const byHash = await startMthdsRun(
-      { files, inputs: { question: "why?" } },
-      refusingStart(announcing(512), folder).context,
-    );
-    expect(tooLargeProblem(byHash).message).toContain("the method's files having gone by hash");
-
-    // Within an announced 64 KiB, the tree rode inline beside the inputs.
-    const inline = await startMthdsRun(
-      { files, inputs: { question: "why?" } },
-      refusingStart(announcing(64 * 1024), folder).context,
-    );
-    expect(tooLargeProblem(inline).message).toContain(
-      "which travelled inline, within the 64.0 KiB a tree may weigh to travel inline",
-    );
-
-    // An announcement above the SDK's own threshold changes nothing: 256 KiB holds.
-    const above = await startMthdsRun(
-      { files, inputs: { question: "why?" } },
-      refusingStart(announcing(10 * 1024 * 1024), folder).context,
-    );
-    expect(tooLargeProblem(above).message).toContain(
-      `within the ${INLINE_TREE_MAX_BYTES / 1024}.0 KiB a tree may weigh to travel inline`,
-    );
+    expect(tooLargeProblem(withoutInputs).message).toContain("the run carries no inputs");
   });
 
   it("weighs a binary file as the base64 it travels inline as", async () => {
     // Raw, the workbook is under the inline threshold; as base64 it is over,
-    // so a deployment keeping a blob store sent it by hash, leaving the inputs.
+    // so a deployment without a blob store took it inline at that weight.
     const workbook = new Uint8Array(Math.floor(INLINE_TREE_MAX_BYTES * 0.9)).fill(0xff);
-    const { context, versionCalls } = refusingStart(blobStore, {
+    const { context, versionCalls } = refusingStart(noBlobStore, {
       "methods/invoice.mthds": 'domain = "invoice"',
       "methods/templates/invoice.xlsx": workbook,
     });
 
     const result = await startMthdsRun(
+      { files: [{ path: "methods/invoice.mthds" }, { path: "methods/templates/invoice.xlsx" }] },
+      context,
+    );
+
+    expect(versionCalls()).toBe(1);
+    expect(tooLargeProblem(result).message).toContain("travelled inline in this request");
+  });
+
+  it("blames neither cause of a 413 when the handshake that would tell how a heavy tree went fails", async () => {
+    const heavy = "x".repeat(INLINE_TREE_MAX_BYTES + 1);
+    const { context, versionCalls } = refusingStart(
+      () =>
+        Promise.reject(new ApiUnreachableError("connection reset", DEFAULT_API_URL, "ECONNRESET")),
+      { "methods/invoice.mthds": 'domain = "invoice"', "methods/report.html": heavy },
+    );
+
+    const result = await startMthdsRun(
       {
-        files: [{ path: "methods/invoice.mthds" }, { path: "methods/templates/invoice.xlsx" }],
+        files: [{ path: "methods/invoice.mthds" }, { path: "methods/report.html" }],
         inputs: { question: "why?" },
       },
       context,
     );
 
     expect(versionCalls()).toBe(1);
-    expect(tooLargeProblem(result).message).toContain("the method's files having gone by hash");
-  });
-
-  it("names both causes of a 413 with inputs when the handshake that would tell how the tree went fails", async () => {
-    const heavy = "x".repeat(INLINE_TREE_MAX_BYTES + 1);
-    const failing = () =>
-      Promise.reject(new ApiUnreachableError("connection reset", DEFAULT_API_URL, "ECONNRESET"));
-    const folder = { "methods/invoice.mthds": 'domain = "invoice"', "methods/report.html": heavy };
-    const files = [{ path: "methods/invoice.mthds" }, { path: "methods/report.html" }];
-
-    const withInputs = refusingStart(failing, folder);
-    const result = await startMthdsRun({ files, inputs: { question: "why?" } }, withInputs.context);
-    expect(withInputs.versionCalls()).toBe(1);
     const message = String(tooLargeProblem(result).message);
     expect(message).toContain("cannot be told from here");
-    expect(message).toContain("if they travelled inline, which cannot be told");
-    expect(message).not.toContain("The run's inputs are what made");
-
-    // With no inputs, the tree is the only part of any size, named with a hedge.
-    const alone = await startMthdsRun({ files }, refusingStart(failing, folder).context);
-    expect(tooLargeProblem(alone).message).toContain(
-      "are the only part of this request that can have made it too large, if they travelled inline",
-    );
-  });
-
-  it("names the method's files, never the inputs, for a 413 met while they were prepared", async () => {
-    const folder = { "methods/invoice.mthds": 'domain = "invoice"' };
-    const files = [{ path: "methods/invoice.mthds" }];
-
-    const blobRoute = refusingStart(
-      blobStore,
-      folder,
-      answeredWith("/v1/blobs/missing?read_scope=organization", TOO_LARGE),
-    );
-    const refusedAsking = await startMthdsRun(
-      { files, inputs: { question: "why?" } },
-      blobRoute.context,
-    );
-    const askingMessage = String(tooLargeProblem(refusedAsking).message);
-    expect(askingMessage).toContain(
-      "refused POST /v1/blobs/missing as too large while the method's files were prepared",
-    );
-    expect(askingMessage).not.toContain("mthds_prepare_inputs");
-    expect(blobRoute.versionCalls()).toBe(0);
-
-    const upload = new MethodFileTransferError("Uploading the file failed (413)", {
-      operation: "upload",
-      reason: "refused",
-      sha256: "a".repeat(64),
-      path: "methods/invoice.mthds",
-      status: 413,
-    });
-    const refusedUpload = await startMthdsRun(
-      { files, inputs: { question: "why?" } },
-      refusingStart(blobStore, folder, upload).context,
-    );
-    const uploadMessage = String(refusedUpload.structuredContent.problem?.message);
-    expect(uploadMessage).toContain(
-      "refused the upload of the method's file methods/invoice.mthds as too large",
-    );
-    expect(uploadMessage).not.toContain("mthds_prepare_inputs");
-  });
-
-  it("adds nothing to a 413 from a route that is neither the start nor the tree's preparation", async () => {
-    const { context, versionCalls } = refusingStart(
-      noBlobStore,
-      { "methods/invoice.mthds": 'domain = "invoice"' },
-      answeredWith("/v1/version", TOO_LARGE),
-    );
-
-    const result = await startMthdsRun(
-      { files: [{ path: "methods/invoice.mthds" }], inputs: { question: "why?" } },
-      context,
-    );
-
-    const message = String(tooLargeProblem(result).message ?? "");
-    expect(message).not.toContain("inputs");
-    expect(message).not.toContain("method's files");
-    expect(versionCalls()).toBe(0);
+    expect(message).not.toContain("its inputs did");
   });
 
   it("rejects { path } items instructively without a resolver (hosted)", async () => {

@@ -296,139 +296,85 @@ describe("a blob gone missing, on every route that sends a tree", () => {
  * A request refused as too large, a `413` the gateway answers with no
  * problem document. Neither the answer nor the SDK says which part of the
  * request made it so, so the workshop adds what it can tell to the problem's
- * `message`, from the route the SDK names in its error and from how the tree
- * travelled, which the handshake decides as the SDK decided it: a refusal of
- * the tree's preparation is the tree's alone, a tree that rode the request
- * inline is named with its weight, and on a start a tree shown not to have
- * ridden the request leaves the inputs to blame.
+ * `message`: a tree shown to have travelled inline past the SDK's threshold
+ * is the tree's, and on a start a tree shown not to have ridden the request
+ * leaves the inputs to blame.
  */
 describe("a request refused as too large", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  /**
-   * A deployment answering `route` with a bare `413`, keeping a blob store or
-   * not, its handshake announcing `maxInlineBytes` when given. The blob route
-   * answers that the organization holds every blob, unless it is `route`.
-   */
-  function stubTooLarge(route: string, blobStore: boolean, maxInlineBytes?: number): void {
-    const limits =
-      maxInlineBytes === undefined
-        ? {}
-        : { limits: { method_tree: { max_inline_bytes: maxInlineBytes } } };
+  /** A deployment answering `route` with a bare `413`, keeping a blob store or not. */
+  function stubTooLarge(route: string, blobStore: boolean): void {
     vi.stubGlobal("fetch", (input: string | URL | Request) => {
       const url = new URL(input instanceof Request ? input.url : String(input));
-      if (url.pathname === route) {
-        return Promise.resolve(new Response("Request Entity Too Large", { status: 413 }));
-      }
       if (url.pathname === "/v1/version") {
-        return Promise.resolve(
-          Response.json({ version: "1.0.0", blob_store: blobStore, ...limits }),
-        );
+        return Promise.resolve(Response.json({ version: "1.0.0", blob_store: blobStore }));
       }
       if (url.pathname === "/v1/blobs/missing") {
         return Promise.resolve(Response.json({ missing: [] }));
+      }
+      if (url.pathname === route) {
+        return Promise.resolve(new Response("Request Entity Too Large", { status: 413 }));
       }
       return Promise.resolve(new Response("", { status: 404 }));
     });
   }
 
   const HEAVY = folderSource(HEAVY_FOLDER);
-  const SMALL = folderSource(FOLDER);
 
   const ROUTES = [
     {
       tool: "mthds_validate",
       route: "/v1/validate",
-      call: (baseUrl: string, sent = HEAVY) =>
-        validateMthds({ ...sent.source, graph_page: false }, { baseUrl, resolver: sent.resolver }),
+      call: (baseUrl: string) =>
+        validateMthds(
+          { ...HEAVY.source, graph_page: false },
+          { baseUrl, resolver: HEAVY.resolver },
+        ),
     },
     {
       tool: "mthds_run",
       route: "/v1/start",
-      call: (baseUrl: string, sent = HEAVY) =>
-        startMthdsRun(sent.source, { baseUrl, resolver: sent.resolver }),
+      call: (baseUrl: string) => startMthdsRun(HEAVY.source, { baseUrl, resolver: HEAVY.resolver }),
     },
     {
       tool: "mthds_codegen",
       route: "/v1/codegen",
-      call: (baseUrl: string, sent = HEAVY) =>
+      call: (baseUrl: string) =>
         generateMthdsCode(
-          { ...sent.source, target: "ts-zod" },
-          { baseUrl, resolver: sent.resolver },
+          { ...HEAVY.source, target: "ts-zod" },
+          { baseUrl, resolver: HEAVY.resolver },
         ),
     },
     {
       tool: "mthds_inputs_template",
       route: "/v1/pipe-io",
-      call: (baseUrl: string, sent = HEAVY) =>
-        buildMthdsInputs(sent.source, { baseUrl, resolver: sent.resolver }),
+      call: (baseUrl: string) =>
+        buildMthdsInputs(HEAVY.source, { baseUrl, resolver: HEAVY.resolver }),
     },
     {
       tool: "mthds_prepare_inputs",
       route: "/v1/pipe-io",
-      call: (baseUrl: string, sent = HEAVY) =>
-        prepareMthdsInputs({ ...sent.source, inputs: {} }, { baseUrl, resolver: sent.resolver }),
+      call: (baseUrl: string) =>
+        prepareMthdsInputs({ ...HEAVY.source, inputs: {} }, { baseUrl, resolver: HEAVY.resolver }),
     },
   ] as const;
 
   for (const { tool, route, call } of ROUTES) {
-    it(`${tool} says a tree sent inline to a deployment with no blob store made the request too large`, async () => {
+    it(`${tool} says a tree sent inline past the threshold made the request too large`, async () => {
       stubTooLarge(route, false);
 
       const result = await call(`https://large.${tool}.example`);
 
       expect(result.structuredContent.status).toBe("error");
-      const message = result.structuredContent.problem?.message;
-      expect(message).toContain("The method's files travelled inline in this request");
-      expect(message).toMatch(
-        /inline in this request, [\d.]+ KiB of them, the deployment keeping no blob store/,
-      );
-      expect(message).toContain(".gitignore");
-      expect(message).not.toContain("mthds_prepare_inputs");
+      const problem = result.structuredContent.problem;
+      expect(problem?.message).toContain("The method's files travelled inline in this request");
+      expect(problem?.message).toContain(".gitignore");
       expect(result.summary).toContain("travelled inline");
     });
-
-    it(`${tool} adds nothing to a 413 when the tree went by hash and nothing else rode the request`, async () => {
-      stubTooLarge(route, true);
-
-      const result = await call(`https://large.hash.${tool}.example`);
-
-      expect(result.structuredContent.status).toBe("error");
-      const message = result.structuredContent.problem?.message ?? "";
-      expect(message).not.toContain("method's files");
-      expect(message).not.toContain("mthds_prepare_inputs");
-    });
-
-    it(`${tool} says the method's files, not its inputs, were refused when the blob route answered the 413`, async () => {
-      stubTooLarge("/v1/blobs/missing", true);
-
-      const result = await call(`https://large.blobs.${tool}.example`);
-
-      expect(result.structuredContent.status).toBe("error");
-      const message = result.structuredContent.problem?.message;
-      expect(message).toContain(
-        "refused POST /v1/blobs/missing as too large while the method's files were prepared",
-      );
-      expect(message).toContain("no input played a part");
-      expect(message).not.toContain("mthds_prepare_inputs");
-    });
   }
-
-  it("names a small tree a validation carried inline with its weight, as the only part of any size", async () => {
-    stubTooLarge("/v1/validate", false);
-
-    const result = await validateMthds(
-      { ...SMALL.source, graph_page: false },
-      { baseUrl: "https://large.small.example", resolver: SMALL.resolver },
-    );
-
-    expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.problem?.message).toMatch(
-      /travelled inline in this request, \d+ bytes of them, the deployment keeping no blob store/,
-    );
-  });
 
   it("blames a start's inputs when the tree went by hash", async () => {
     stubTooLarge("/v1/start", true);
@@ -439,69 +385,36 @@ describe("a request refused as too large", () => {
     );
 
     const message = result.structuredContent.problem?.message;
-    expect(message).toContain(
-      "The run's inputs are what made its request too large, 2.0 KiB of them as JSON",
-    );
-    expect(message).toContain("the method's files having gone by hash");
+    expect(message).toContain("its inputs did");
     expect(message).toContain("mthds_prepare_inputs");
     expect(message).not.toContain("travelled inline in this request");
   });
 
-  it("never blames a start's inputs when the blob route answered the 413", async () => {
-    stubTooLarge("/v1/blobs/missing", true);
-
-    const result = await startMthdsRun(
-      { ...HEAVY.source, inputs: { text: "x".repeat(2048) } },
-      { baseUrl: "https://large.blobs.inputs.example", resolver: HEAVY.resolver },
-    );
-
-    const message = result.structuredContent.problem?.message;
-    expect(message).toContain("while the method's files were prepared");
-    expect(message).not.toContain("The run's inputs");
-    expect(message).not.toContain("mthds_prepare_inputs");
-  });
-
-  it("names both causes, with what it measured, when inputs rode a start beside a heavy inline tree", async () => {
+  it("names both causes, with what it measured, when a small inline tree rode the start", async () => {
     stubTooLarge("/v1/start", false);
+    const small = folderSource(FOLDER);
 
     const result = await startMthdsRun(
-      { ...HEAVY.source, inputs: { text: "x".repeat(2048) } },
-      { baseUrl: "https://large.both.example", resolver: HEAVY.resolver },
+      { ...small.source, inputs: { text: "x".repeat(2048) } },
+      { baseUrl: "https://large.both.example", resolver: small.resolver },
     );
 
     const message = result.structuredContent.problem?.message;
     expect(message).toContain("cannot be told from here");
-    expect(message).toContain("which travelled inline, the deployment keeping no blob store");
     expect(message).toMatch(/the method's files weigh [\d.]+ KiB inline/);
-    expect(message).toContain("its inputs weigh 2.0 KiB as JSON");
+    expect(message).toMatch(/its inputs weigh [\d.]+ KiB as JSON/);
   });
 
-  it("reads a deployment's max_inline_bytes below the SDK's threshold, which sends a small tree by hash", async () => {
-    // The tree is far under INLINE_TREE_MAX_BYTES but over the 64 bytes this
-    // deployment announces, so the SDK sent it by hash and the inputs alone
-    // rode the start.
-    stubTooLarge("/v1/start", true, 64);
+  it("adds nothing to a tool's 413 when the tree rode inline below the threshold", async () => {
+    stubTooLarge("/v1/validate", false);
+    const small = folderSource(FOLDER);
 
-    const result = await startMthdsRun(
-      { ...SMALL.source, inputs: { text: "x".repeat(2048) } },
-      { baseUrl: "https://large.announced.example", resolver: SMALL.resolver },
+    const result = await validateMthds(
+      { ...small.source, graph_page: false },
+      { baseUrl: "https://large.small.example", resolver: small.resolver },
     );
 
-    const message = result.structuredContent.problem?.message;
-    expect(message).toContain("The run's inputs are what made its request too large");
-    expect(message).toContain("the method's files having gone by hash");
-  });
-
-  it("names a tree within a deployment's announced inline limit as having travelled inline", async () => {
-    stubTooLarge("/v1/codegen", true, 4096);
-
-    const result = await generateMthdsCode(
-      { ...SMALL.source, target: "ts-zod" },
-      { baseUrl: "https://large.within.example", resolver: SMALL.resolver },
-    );
-
-    expect(result.structuredContent.problem?.message).toContain(
-      "within the 4.0 KiB a tree may weigh to travel inline",
-    );
+    expect(result.structuredContent.status).toBe("error");
+    expect(result.structuredContent.problem?.message ?? "").not.toContain("travelled inline");
   });
 });

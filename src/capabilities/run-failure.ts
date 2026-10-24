@@ -92,8 +92,11 @@ export const RUN_ERROR_VALUE_MAX_DEPTH = 4;
  * {@link FAILURE_FIELD_MAX_CODE_POINTS}, and its `errors` to
  * {@link RUN_ERROR_MAX_ITEMS} faults of {@link RUN_ERROR_ITEM_MAX_CODE_POINTS}
  * each, with `errors_omitted` saying how many were left out. Its `params` and
- * `location`, and each fault's `params`, `location` and `suggestions`, are
- * bounded the same way ({@link boundedMembers}), and a fault's
+ * `location`, and each fault's `params` and `location`, are bounded by
+ * {@link boundedMembers}, which counts what an object's bounding left out,
+ * its members and the entries of the lists it holds, in that object's one
+ * `…` member ({@link omissionKey}) rather than beside a list; a fault's
+ * `suggestions` keep their cap with `suggestions_omitted`, and its
  * `suggested_fix` is carried whole or not at all ({@link boundedItem}). Every
  * cut says what it left out, and the result is still a problem document
  * (`isProblem`), open to every other member as served.
@@ -116,7 +119,9 @@ export function runErrorOf(value: unknown): Problem | undefined {
     ...(view.params === undefined
       ? {}
       : { params: boundedMembers(view.params, RUN_ERROR_ITEM_MAX_CODE_POINTS) }),
-    ...(view.location === undefined ? {} : { location: boundedLocation(view.location) }),
+    ...(view.location === undefined
+      ? {}
+      : { location: boundedMembers(view.location, FAILURE_FIELD_MAX_CODE_POINTS) }),
     ...(view.errors === undefined ? {} : boundedItems(view.errors)),
   };
 }
@@ -150,7 +155,9 @@ function boundedItem(item: ProblemItem): ProblemItem {
     ...(item.params === undefined
       ? {}
       : { params: boundedMembers(item.params, RUN_ERROR_ITEM_MAX_CODE_POINTS) }),
-    ...(item.location === undefined ? {} : { location: boundedLocation(item.location) }),
+    ...(item.location === undefined
+      ? {}
+      : { location: boundedMembers(item.location, FAILURE_FIELD_MAX_CODE_POINTS) }),
   };
   if (suggestions !== undefined) {
     const kept = suggestions
@@ -178,21 +185,6 @@ function boundedItem(item: ProblemItem): ProblemItem {
  */
 function boundedMembers<T>(value: T, maxText: number): T {
   return isRecord(value) ? (boundedValue(value, maxText, 0) as T) : value;
-}
-
-/**
- * A problem's `location` bounded for a result as {@link boundedMembers}
- * bounds it, but for its `path`, the pipe codes from the run's main pipe down
- * to the failing one, which is carried whole, entries and their text alike:
- * a path cut anywhere names another pipe, or none, and its length is the
- * method's own nesting.
- */
-function boundedLocation<T>(location: T): T {
-  if (!isRecord(location) || !("path" in location)) {
-    return boundedMembers(location, FAILURE_FIELD_MAX_CODE_POINTS);
-  }
-  const { path, ...rest } = location;
-  return { ...boundedMembers(rest, FAILURE_FIELD_MAX_CODE_POINTS), path } as T;
 }
 
 /**

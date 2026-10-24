@@ -234,9 +234,9 @@ describe("runErrorOf's bounds", () => {
     expect(Array.from(runError?.location?.pipe ?? "").length).toBeLessThan(
       FAILURE_FIELD_MAX_CODE_POINTS + 60,
     );
-    // A pipe path cut anywhere would name another pipe, so it is carried whole.
-    expect(runError?.location?.path).toEqual(names);
-    expect(runError?.location).not.toHaveProperty("…");
+    expect(runError?.location?.path).toEqual(names.slice(0, RUN_ERROR_MAX_ITEMS));
+    expect(runError?.location?.["…"]).toBe("5 more entries of path left out");
+    expect(runError?.location).not.toHaveProperty("path_omitted");
     expect(runError?.location?.item).toBe(3);
 
     const [first, second] = runError?.errors ?? [];

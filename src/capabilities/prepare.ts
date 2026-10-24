@@ -450,12 +450,8 @@ async function requestPreparedInputs(
     // domain and its retry verdict are relayed, never overridden. An input
     // over the upload limit is the problem `upload-ceiling.ts` gives it, and
     // a refused pipe selection the route's own, located at pipe_ref, and a
-    // call the method's files made too large says so.
-    const sized = await withTooLargeNote(problemOf(err), err, {
-      route: "/v1/pipe-io",
-      tree: request.tree,
-      client,
-    });
+    // request the tree sent inline made too large says so.
+    const sized = await withTooLargeNote(problemOf(err), err, request.tree, client);
     const problem = await selectorFailure(sized, plan, methodVersionsOf(context));
     const failed = errorResult(problem, context);
     // A client that could not be built, or an argument refused before

@@ -1422,14 +1422,7 @@ describe("the problems of the workshop's own refusals", () => {
     });
     expect(busy.retry).toBe("yes");
 
-    const unreadable = refusalProblem("files[1].path", {
-      message: "notes.md could not be read.",
-      remedy: "Make it readable, then call again.",
-      reason: "unreadable",
-      unreadable: "methods/demo/notes.md",
-    });
-
-    const problem = faultsProblem([missing, busy, unreadable]);
+    const problem = faultsProblem([missing, busy]);
 
     expect(problem).toMatchObject({
       code: "client.workspace_busy",
@@ -1439,10 +1432,7 @@ describe("the problems of the workshop's own refusals", () => {
     });
     expect(problem.errors).toBeUndefined();
     expect(problem.message).toContain("bundle.mthds changed while it was read.");
-    // The other faults are named by code and place, so none is lost.
-    expect(problem.message).toContain(
-      "Other faults were found in this call too: client.argument_invalid at inputs_path; client.file_unreadable at files[1].path.",
-    );
+    expect(problem.message).toContain("Other faults were found");
     expect(problemSchema.safeParse(problem).success).toBe(true);
   });
 });

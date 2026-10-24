@@ -229,10 +229,7 @@ function storedVersion(overrides: Partial<MethodVersion> = {}): MethodVersion {
 
 /**
  * A platform refusal as the hosted API answers it: a problem document, which
- * the SDK reads as it came, its request id on the header, and the error the
- * SDK raises for it, whose message names the route (`API <METHOD> <path>
- * failed (<status>): <detail>`) and whose `apiUrl` is the base URL. The
- * method is the route's usual one; nothing reads it.
+ * the SDK reads as it came, its request id on the header.
  */
 function platformRefusal(
   route: string,
@@ -242,14 +239,9 @@ function platformRefusal(
     unknown
   >,
 ): ApiResponseError {
-  const method = route.endsWith("/draft")
-    ? "PUT"
-    : route === "/v1/methods" || route.startsWith("/v1/blobs/") || route === "/v1/validate"
-      ? "POST"
-      : "GET";
   return new ApiResponseError(
-    `API ${method} ${route} failed (${status}): ${problem.detail}`,
-    "https://api-dev.pipelex.com",
+    `HTTP ${status}`,
+    `https://api-dev.pipelex.com${route}`,
     status,
     "Refused",
     JSON.stringify({
@@ -1638,18 +1630,24 @@ describe("saveMthdsMethod", () => {
     }
   });
 
-  it("keeps the plain problem of a create shown never to have left, and warns on any other", async () => {
-    // Only a proof that the create was never sent, or that its route refused
-    // it, keeps the failure's own problem: an argument the SDK refused, a
-    // failure of a step before the create (the handshake, the blob route,
-    // whatever their status), or a refusal the create's route answered. A
-    // failure the SDK did not raise, or a 5xx from the create's route, may
-    // have come after the method was written.
+  it("keeps the plain problem of a create shown not to have happened, and warns on any other", async () => {
+    // Only a proof read from the error's class and status keeps the failure's
+    // own problem: an argument the SDK refused, or a refusal an answer gave,
+    // whichever route gave it, since a refused step before the create means
+    // the create was never sent. A 5xx, whichever route answered, a failure
+    // the SDK did not raise and a transport failure may all have come after
+    // the method was written.
     const unavailable = {
       code: "runtime.unavailable",
       title: "The platform is unavailable",
       detail: "The platform could not take the request.",
       domain: "runtime",
+    };
+    const refused = {
+      code: "request.invalid",
+      title: "The request is invalid",
+      detail: "The request could not be read.",
+      domain: "input",
     };
     const cases: { name: string; err: unknown; plain: string | undefined }[] = [
       {
@@ -1658,14 +1656,9 @@ describe("saveMthdsMethod", () => {
         plain: "client.argument_invalid",
       },
       {
-        name: "the blob route's 503",
-        err: platformRefusal("/v1/blobs/missing", 503, unavailable),
-        plain: "runtime.unavailable",
-      },
-      {
-        name: "the handshake's 503",
-        err: platformRefusal("/v1/version", 503, unavailable),
-        plain: "runtime.unavailable",
+        name: "the blob route's refusal",
+        err: platformRefusal("/v1/blobs/missing", 422, refused),
+        plain: "request.invalid",
       },
       {
         name: "the create route's 501",
@@ -1678,6 +1671,16 @@ describe("saveMthdsMethod", () => {
       {
         name: "the create route's 503",
         err: platformRefusal("/v1/methods", 503, unavailable),
+        plain: undefined,
+      },
+      {
+        name: "the handshake's 503, which the error's class and status cannot tell from the create's",
+        err: platformRefusal("/v1/version", 503, unavailable),
+        plain: undefined,
+      },
+      {
+        name: "a refused connection, which the SDK's own test would place before the create",
+        err: new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED"),
         plain: undefined,
       },
       {
@@ -1716,9 +1719,9 @@ describe("saveMthdsMethod", () => {
     }
   });
 
-  it("keeps the plain problem of a create whose blob route failed before the create was sent", async () => {
+  it("keeps the plain problem of a create whose blob route refused it before the create was sent", async () => {
     // The real client sends the tree by hash, the deployment announcing an
-    // inline limit no tree passes, and the blob route fails: the create was
+    // inline limit no tree passes, and the blob route refuses: the create was
     // never posted, so nothing was minted and the outcome is known.
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
     const posted: string[] = [];
@@ -1736,7 +1739,7 @@ describe("saveMthdsMethod", () => {
         );
       }
       if (url.pathname === "/v1/blobs/missing") {
-        return Promise.resolve(new Response("upstream unavailable", { status: 503 }));
+        return Promise.resolve(new Response("Forbidden", { status: 403 }));
       }
       return Promise.resolve(new Response("", { status: 404 }));
     });
