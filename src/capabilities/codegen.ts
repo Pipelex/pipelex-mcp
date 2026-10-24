@@ -506,7 +506,7 @@ async function requestCodegen(
   // API. A malformed report — a valid arm without its artifacts or lock, an
   // artifact path the check cannot verify, a lock filename that is not bare,
   // or a set that fails the SDK's own offline check — is a reachable contract
-  // violation, surfaced as a runtime no-verdict error. The preflight runs on
+  // violation, surfaced as a `client.response_unreadable` no-verdict. The preflight runs on
   // BOTH arms, not only the write path: the inline arm hands these bytes to a
   // model that will write them, so a report the write arm would refuse is one
   // the inline arm must not hand over either.
@@ -589,7 +589,7 @@ function assertReportAnswersRequest(
  * artifact set is safe, canonical and unique (control characters and drive
  * prefixes included), and every artifact's stamp and body hash agree with the
  * lock. A `CodegenLockError` and a non-current verdict are equally contract
- * violations, and both surface as runtime no-verdicts.
+ * violations, and both surface as `client.response_unreadable` no-verdicts.
  */
 async function preflightReport(report: CodegenValidReport): Promise<void> {
   const check = await runCodegenCheck({ lockContent: report.lock, files: report.artifacts });
