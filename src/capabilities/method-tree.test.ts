@@ -430,8 +430,8 @@ describe("listFolderTree", () => {
       expect(error).toBeInstanceOf(TreeLimitExceededError);
       const text = describeTreeRefusal(error, "or list the method's files in files.");
       expect(text.message).toContain("more than 2 files");
-      expect(text.hint).toMatch(/\.gitignore/);
-      expect(text.hint.endsWith("or list the method's files in files.")).toBe(true);
+      expect(text.remedy).toMatch(/\.gitignore/);
+      expect(text.remedy.endsWith("or list the method's files in files.")).toBe(true);
 
       expect((await listing({ maxFileCount: 3 })).files).toHaveLength(3);
     });

@@ -72,10 +72,13 @@ describe("mthds_models against the live API", () => {
         if (result.structuredContent.status === "error") {
           // The one refusal the tool documents for a runner that predates the
           // category, and nothing else.
-          expect(result.structuredContent.errors[0], result.summary).toMatchObject({
-            class: "input_domain",
-            location: "category",
+          // The runner's problem is relayed as it sent it, naming the category.
+          expect(result.structuredContent.problem, result.summary).toMatchObject({
+            domain: "input",
           });
+          expect(JSON.stringify(result.structuredContent.problem), result.summary).toContain(
+            "category",
+          );
           continue;
         }
       }
@@ -149,10 +152,10 @@ describe("mthds_models against the live API", () => {
 
     expect(result.structuredContent.status, result.summary).toBe("error");
     if (result.structuredContent.status !== "error") return;
-    expect(result.structuredContent.errors[0], result.summary).toMatchObject({
-      class: "input_domain",
-      location: "reference",
-      retryable: false,
+    expect(result.structuredContent.problem, result.summary).toMatchObject({
+      domain: "input",
+      retry: "no",
     });
+    expect(JSON.stringify(result.structuredContent.problem), result.summary).toContain("reference");
   });
 });

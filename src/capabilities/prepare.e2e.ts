@@ -131,7 +131,10 @@ describe.skipIf(!SERVES_SELECTORS)("mthds_prepare_inputs — by selector (live)"
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { reason: "mutually_exclusive" },
+      location: { field: "method_ref" },
+    });
   });
 });

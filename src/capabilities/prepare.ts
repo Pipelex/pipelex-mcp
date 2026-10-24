@@ -27,41 +27,39 @@ import {
 import type { MethodVersionReport, MethodVersionsAware, SelectorPlan } from "./method-versions.js";
 import {
   METHOD_REF_GRAMMAR,
+  argumentProblem,
   bareMethodIdOf,
   bareMethodIdRefusal,
   buildApiConfig,
-  classifyError,
   createPipelexApiClient,
+  faultsProblem,
   filesSentSchema,
   inputsPathSchema,
   methodDirInputSchema,
   methodFilesInputSchema,
+  problemOf,
+  problemSchema,
+  problemSummary,
   resolveInputsSource,
   resolveMethodSource,
-  summaryForToolError,
-  toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
   withFilesSent,
   failedBeforeSending,
-  treeSentInlineHeavy,
   markUnsent,
 } from "./shared.js";
 import type {
   ApiConfig,
-  AuthErrorTexture,
-  BaseUrlSourceTexture,
-  ClassifyErrorOptions,
-  ErrorSummaries,
+  ApiNotes,
   FileResolver,
   MethodTreeToSend,
+  Problem,
   SubmittedFileInput,
-  ToolError,
 } from "./shared.js";
 import { methodTreeLimitsOf } from "./tree-limits.js";
 import type { TreeLimitsAware } from "./tree-limits.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
-import { MAX_UPLOAD_BYTES, SizeGuardedPipelexApiClient, formatMib } from "./upload-ceiling.js";
+import { SizeGuardedPipelexApiClient } from "./upload-ceiling.js";
 
 /** What an upload is recorded as: a member's file, or a test input made for one method. */
 export const UPLOAD_KINDS = ["uploaded", "test"] as const satisfies readonly UploadKind[];
@@ -142,7 +140,9 @@ const prepareStructuredContentSchema = z.object({
     ),
   method_version: methodVersionReportSchema,
   files_sent: filesSentSchema,
-  errors: z.array(toolErrorSchema).optional(),
+  problem: problemSchema
+    .optional()
+    .describe("Why the inputs could not be prepared; present exactly when status is error."),
 });
 
 export const mthdsPrepareInputsOutputSchema = prepareStructuredContentSchema;
@@ -183,7 +183,8 @@ export interface PrepareStructuredContent {
   method_version?: MethodVersionReport;
   /** Calls on a tree, from `method_dir` or `files`: every file sent. */
   files_sent?: string[];
-  errors?: ToolError[];
+  /** The one problem of a call that prepared nothing. */
+  problem?: Problem;
 }
 
 export interface PrepareResult {
@@ -214,112 +215,17 @@ export interface PrepareContext extends ApiConfig, MethodVersionsAware, TreeLimi
   resolver?: FileResolver;
   /** Reads `inputs_path` from disk (local workshop, `.json` only); without one `inputs_path` is refused. */
   inputsResolver?: FileResolver;
-  /** Deployment-specific auth-failure texture; default env-var wording when absent. */
-  authError?: AuthErrorTexture;
-  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
-  baseUrlSource?: BaseUrlSourceTexture;
+  /** Where the call's key and base URL came from, for a failed request's summary; the variables' names when absent. */
+  apiNotes?: ApiNotes;
 }
 
 export function buildPrepareContext(env = process.env): PrepareContext {
   return buildApiConfig(env);
 }
 
-/**
- * Name the real ceiling. `POST /v1/upload` sits behind an AWS gateway whose
- * 10 MiB request quota, divided by base64's 4/3 inflation, is the actual wall
- * — NOT the app-level 50 MiB MAX_UPLOAD_MIB, which is unreachable through the
- * public gateway and must never be quoted to a caller. Shared by all three
- * shapes: an oversize asset is the caller's input value whatever named the
- * method.
- */
-const PREPARE_ASSET_TEXTURE: NonNullable<ClassifyErrorOptions["asset"]> = {
-  hint: `Pipelex storage accepts uploads up to ${formatMib(MAX_UPLOAD_BYTES)}. Shrink the file, or reference it by an http(s) URL instead.`,
-};
-
-/**
- * The signature texture, and the reason every shape carries it unchanged: the
- * SDK refuses an unqualified `pipe_ref` before any request, and turns the
- * route's typed refusals of a selection (an unknown `pipe_ref`, a method that
- * settles no entry pipe, or several) into an `InputPreparationError` carrying
- * the server's reason. Each really is a question about the pipe, whatever
- * named the method — which is why it rides `preparation` rather than
- * `badRequest`, whose locator follows the selector the caller actually typed.
- */
-const PREPARE_SIGNATURE_TEXTURE: NonNullable<ClassifyErrorOptions["preparation"]> = {
-  location: "pipe_ref",
-  hint: "Pass pipe_ref as a qualified domain.pipe_code the method declares; omitting it requires the method to settle exactly one entry pipe.",
-};
-
-/** Classify options for a files-shaped request. */
-const PREPARE_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/pipe-io",
-  methodLocation: "files",
-  // No `badRequest` override on purpose: a files request names no selector
-  // field, so the default `files` locator is already right. It must NOT be the
-  // signature texture, which is what it was while this tool still sent
-  // `pipe_ref` to `/v1/build/inputs`: the route's refusals of a selection are
-  // typed, and the SDK turns them into an `InputPreparationError`, which
-  // reaches `preparation`, so a bare 400 or 422 is never about the pipe.
-  preparation: PREPARE_SIGNATURE_TEXTURE,
-  asset: PREPARE_ASSET_TEXTURE,
-};
-
-/**
- * Classify options for an address-shaped request — the `mthds_validate`
- * textures, since the address is resolved by the runner the same way. The
- * route fetches a package's `.mthds` files alone, so the execution-locus gate
- * does not apply and a package shipping Python prepares on any deployment, as
- * it answers on `mthds_inputs_template` and `mthds_codegen`; its run is still
- * refused at the start off a sandbox-hosted deployment. A runner too old to
- * serve `/v1/pipe-io` answers a bare 404, which the SDK reads as the
- * deployment's rather than the address's, so it keeps the missing-route arm
- * here and on the id shape.
- */
-const PREPARE_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/pipe-io",
-  methodLocation: "method_ref",
-  badRequest: {
-    location: "method_ref",
-    hint: `Check the address and tag — ${METHOD_REF_GRAMMAR}. The tag must be a git tag on the repository (branches do not pin), and the ref must be resolvable by an anonymous clone.`,
-  },
-  preparation: PREPARE_SIGNATURE_TEXTURE,
-  notFound: {
-    location: "method_ref",
-    hint: "The repository was fetched but holds no package matching this address by manifest identity. Check the package selector against the repository's METHODS.toml manifests.",
-  },
-  notImplemented: {
-    location: "method_ref",
-    hint: `Only address-form refs are supported (${METHOD_REF_GRAMMAR}); registry references are reserved until a method registry exists.`,
-  },
-  asset: PREPARE_ASSET_TEXTURE,
-};
-
-/**
- * Classify options for an id-shaped request. The hosted platform resolves the
- * id and injects the stored source before the runner sees the request, so the
- * failures are `mthds_validate`'s: an unknown or foreign-org id is a 404
- * (indistinguishable by design), and a stored method with no MTHDS source is a
- * 422 — which is where a source-less method now surfaces, the fail-fast
- * `EmptyMethodSourceError` having gone out with the client-side expansion.
- */
-const PREPARE_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/pipe-io",
-  methodLocation: "method_id",
-  badRequest: {
-    location: "method_id",
-    hint: "The stored method may have no MTHDS source yet, or this deployment may not resolve method_id on /v1/pipe-io — the selector is hosted-only (a bare pipelex-api runner has no catalog).",
-  },
-  preparation: PREPARE_SIGNATURE_TEXTURE,
-  notFound: {
-    location: "method_id",
-    hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.",
-  },
-  asset: PREPARE_ASSET_TEXTURE,
-};
-
 // Constructed inside each caught block (mirroring inputs.ts / run.ts): the SDK
-// constructor throws PipelineRequestError on a malformed base URL, and that
-// must classify to a config ToolError, not reject the MCP handler.
+// constructor throws on a malformed base URL, and that must become the
+// result's problem, not reject the MCP handler.
 export function prepareClient(context: PrepareContext): PrepareClient {
   return (
     context.client ??
@@ -341,9 +247,9 @@ export async function prepareMthdsInputs(
   const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
     required: true,
   });
-  const resolutionErrors = [...resolution.errors, ...inputsResolution.errors];
-  if (resolutionErrors.length > 0) {
-    return errorResult("Inputs were not prepared: request input is invalid.", resolutionErrors);
+  const resolutionFaults = [...resolution.faults, ...inputsResolution.faults];
+  if (resolutionFaults.length > 0) {
+    return errorResult(faultsProblem(resolutionFaults), context);
   }
 
   // `inputs_path` is settled into `inputs` here and goes no further: the rest
@@ -354,13 +260,13 @@ export async function prepareMthdsInputs(
     ...(resolution.tree === undefined ? {} : { tree: resolution.tree }),
     inputs: inputsResolution.inputs ?? {},
   };
-  const inputErrors = validatePrepareInputsRequest(request);
-  if (inputErrors.length > 0) {
-    return errorResult("Inputs were not prepared: request input is invalid.", inputErrors);
+  const inputFaults = validatePrepareInputsRequest(request);
+  if (inputFaults.length > 0) {
+    return errorResult(faultsProblem(inputFaults), context);
   }
   const marking = await uploadMarkingOf(request, context);
   if (!marking.ok) {
-    return errorResult("Inputs were not prepared: request input is invalid.", [marking.error]);
+    return errorResult(marking.problem, context);
   }
 
   return withFilesSent(await requestPreparedInputs(request, marking, context), request.tree);
@@ -391,9 +297,9 @@ async function uploadMarkingOf(
   context: PrepareContext,
 ): Promise<UploadMarkingResult> {
   if (request.kind !== "test") return { ok: true };
-  const unmarkable = (message: string, hint: string): UploadMarkingResult => ({
+  const unmarkable = (reason: string, message: string, remedy: string): UploadMarkingResult => ({
     ok: true,
-    unmarkable: { class: "input_domain", location: "kind", message, hint, retryable: false },
+    unmarkable: { reason, message, remedy },
   });
 
   if (request.method_id !== undefined) {
@@ -401,7 +307,7 @@ async function uploadMarkingOf(
     if (!check.ok) {
       return {
         ok: false,
-        error: bareMethodIdRefusal(
+        problem: bareMethodIdRefusal(
           request.method_id,
           check,
           "method_id",
@@ -415,6 +321,7 @@ async function uploadMarkingOf(
   const folder = request.tree?.folder;
   if (folder === undefined) {
     return unmarkable(
+      "no_saved_method",
       "kind test records each upload as a test file of a saved method, and a list of files or a published address names none.",
       `Name the method by its saved id as method_id, or by a method_dir linked to its saved method (${LINK_FILE_NAME}, which ${WORKSHOP_TOOL_NAMES.saveMethod} writes); or omit kind to upload the files as the organization's own.`,
     );
@@ -422,25 +329,26 @@ async function uploadMarkingOf(
   if (await holdsLegacyLink(folder)) {
     return {
       ok: false,
-      error: {
-        class: "input_domain",
-        location: "kind",
-        message: `The method_dir holds ${LEGACY_LINK_FILE_NAME}, the link file an earlier release of the workshop wrote, which it now reads only at ${LINK_FILE_NAME}: as it is, the folder reads as unlinked, and its test files would belong to no method. Nothing was sent.`,
-        hint: `Move it into place from inside the folder, then prepare again: ${LEGACY_LINK_MOVE} (plain mv outside git), and commit the move.`,
-        retryable: false,
-      },
+      problem: argumentProblem(
+        "kind",
+        "legacy_link",
+        `The method_dir holds ${LEGACY_LINK_FILE_NAME}, the link file an earlier release of the workshop wrote, which it now reads only at ${LINK_FILE_NAME}: as it is, the folder reads as unlinked, and its test files would belong to no method. Nothing was sent.`,
+        `Move it into place from inside the folder, then prepare again: ${LEGACY_LINK_MOVE} (plain mv outside git), and commit the move.`,
+      ),
     };
   }
   const read = await readMethodLink(folder);
   switch (read.kind) {
     case "none":
       return unmarkable(
+        "unlinked",
         "kind test records each upload as a test file of a saved method, and this method_dir is not linked to one: it holds no " +
           `${LINK_FILE_NAME}.`,
         `Save the method with ${WORKSHOP_TOOL_NAMES.saveMethod}, which links its folder, then prepare again; or omit kind to upload the files as the organization's own.`,
       );
     case "unreadable":
       return unmarkable(
+        "link_unreadable",
         `The method_dir's ${LINK_FILE_NAME} cannot be read, so the saved method its test files belong to is unknown: ${read.reason}.`,
         `Repair or remove ${LINK_FILE_NAME} (a save with ${WORKSHOP_TOOL_NAMES.saveMethod} writes it again), or name the method by its saved id as method_id.`,
       );
@@ -448,6 +356,7 @@ async function uploadMarkingOf(
       const check = bareMethodIdOf(read.link.method_id);
       if (!check.ok) {
         return unmarkable(
+          "link_damaged",
           `The method_dir's ${LINK_FILE_NAME} is damaged: its method_id ${JSON.stringify(read.link.method_id)} is not a saved method's bare id, so the method its test files belong to is unknown.`,
           `Save the method again with ${WORKSHOP_TOOL_NAMES.saveMethod}, passing its id, which rewrites the link file; or name the method by its saved id as method_id. The link file is never edited by hand.`,
         );
@@ -455,6 +364,7 @@ async function uploadMarkingOf(
       const apiHost = apiHostOf(context.baseUrl);
       if (read.link.api_host !== apiHost) {
         return unmarkable(
+          "linked_elsewhere",
           `The method_dir is linked to \`${check.methodId}\` on ${read.link.api_host}, and this call goes to ${apiHost}, where that method does not exist.`,
           `Prepare against the API the method was saved on, or save the method on ${apiHost} with ${WORKSHOP_TOOL_NAMES.saveMethod} first.`,
         );
@@ -465,30 +375,32 @@ async function uploadMarkingOf(
 }
 
 /**
+ * Why a test upload's method is unknown, answered as a refusal of `kind` only
+ * should the walk need to upload anything: the refusal's reason, the sentence
+ * and what to do, which the input that needed an upload is put between.
+ */
+interface UnmarkableTest {
+  reason: string;
+  message: string;
+  remedy: string;
+}
+
+/**
  * What {@link uploadMarkingOf} settled: a refusal before anything is sent, or
  * the marking every upload carries, or, for a test upload whose method is
  * unknown, the refusal to answer should the walk need to upload anything.
  */
 type UploadMarkingResult =
-  | { ok: true; upload?: UploadMarking; unmarkable?: ToolError }
-  | { ok: false; error: ToolError };
+  | { ok: true; upload?: UploadMarking; unmarkable?: UnmarkableTest }
+  | { ok: false; problem: Problem };
 
 /** The SDK's `prepareInputs` for a request that passed its checks, and the projection of what it prepared. */
 async function requestPreparedInputs(
   request: ResolvedPrepareRequest,
-  marking: { upload?: UploadMarking; unmarkable?: ToolError },
+  marking: { upload?: UploadMarking; unmarkable?: UnmarkableTest },
   context: PrepareContext,
 ): Promise<PrepareResult> {
   const { upload, unmarkable } = marking;
-  // Classify options follow the request's selector shape, exactly as
-  // mthds_validate and mthds_codegen do — each failure locates at the field
-  // that caused it.
-  const classifyOptions =
-    request.tree !== undefined
-      ? PREPARE_ERROR_OPTIONS
-      : request.method_ref !== undefined
-        ? PREPARE_BY_REF_ERROR_OPTIONS
-        : PREPARE_BY_ID_ERROR_OPTIONS;
 
   let prepared: PreparedInputs;
   let plan: SelectorPlan | undefined;
@@ -508,8 +420,8 @@ async function requestPreparedInputs(
       sent = { ...request, method_id: plan.send };
     }
     // Built inside the try for the same reason the client is: the selector
-    // narrowing throws on its own unreachable arm, and that must classify as a
-    // ToolError rather than reject the MCP handler.
+    // narrowing throws on its own unreachable arm, and that must become the
+    // result's problem rather than reject the MCP handler.
     const envelope: PrepareEnvelope = {
       selector: prepareSelectorOf(sent),
       ...(request.pipe_ref === undefined ? {} : { pipe_ref: request.pipe_ref }),
@@ -523,24 +435,22 @@ async function requestPreparedInputs(
     // walk that needs an upload: nothing was read or uploaded, and the
     // refusal names that input.
     if (unmarkable !== undefined && err instanceof UploadNotAllowedError) {
-      const error: ToolError = {
-        ...unmarkable,
-        message: `${unmarkable.message} The input ${err.inputPath} needs an upload, so a test file would be recorded.`,
-      };
-      return errorResult("Inputs were not prepared: request input is invalid.", [error]);
+      return errorResult(
+        argumentProblem(
+          "kind",
+          unmarkable.reason,
+          `${unmarkable.message} The input ${err.inputPath} needs an upload, so a test file would be recorded.`,
+          unmarkable.remedy,
+        ),
+        context,
+      );
     }
-    // An input the storage service refuses as too large is a
-    // `RejectedAssetError`, which the `asset` texture takes whatever named the
-    // method; a refusal of the tree is read as about the files it sent.
-    const classified = classifyError(err, {
-      ...classifyOptions,
-      auth: context.authError,
-      baseUrlSource: context.baseUrlSource,
-      methodTree: request.tree !== undefined,
-      treeInline: await treeSentInlineHeavy(err, request.tree, client),
-    });
-    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
-    const failed = errorResult(summaryForError(error), [error]);
+    // The SDK's problem, as it read the answer or the failure: its code, its
+    // domain and its retry verdict are relayed, never overridden. An input
+    // over the upload limit is the problem `upload-ceiling.ts` gives it, and
+    // a refused pipe selection the route's own, located at pipe_ref.
+    const problem = await selectorFailure(problemOf(err), plan, methodVersionsOf(context));
+    const failed = errorResult(problem, context);
     // A client that could not be built, or an argument refused before
     // sending, sent no file of the tree.
     return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
@@ -573,8 +483,8 @@ function prepareSelectorOf(request: ResolvedPrepareRequest): PrepareSelector {
   // Unreachable: `validateMethodSelectorRequest` has already refused a request
   // carrying no selector. Throwing rather than defaulting is the point — a
   // placeholder would put a blank selector on the wire if the invariant ever
-  // broke, and this lands in the capability's own catch as a classified
-  // no-verdict instead.
+  // broke, and this lands in the capability's own catch as the result's
+  // problem instead.
   throw new InputPreparationError(
     "Cannot prepare inputs: no method selector. Supply exactly one of method_dir, files, method_ref or method_id.",
   );
@@ -621,25 +531,26 @@ function prepareWithUpload(
   return client.prepareInputs({ ...base, method_id: envelope.selector.method_id });
 }
 
-export function validatePrepareInputsRequest(input: ResolvedPrepareRequest): ToolError[] {
-  const errors = validateMethodSelectorRequest(input.tree !== undefined, input, {
+export function validatePrepareInputsRequest(input: ResolvedPrepareRequest): Problem[] {
+  const faults = validateMethodSelectorRequest(input.tree !== undefined, input, {
     rule: "one_selector",
   });
 
   if (input.pipe_ref !== undefined && input.pipe_ref.trim() === "") {
-    errors.push({
-      class: "input_domain",
-      location: "pipe_ref",
-      message: "pipe_ref must not be empty when supplied.",
-      hint: "Pass a qualified domain.pipe_code, or omit pipe_ref to default to the closure's main_pipe.",
-      retryable: false,
-    });
+    faults.push(
+      argumentProblem(
+        "pipe_ref",
+        "empty",
+        "pipe_ref must not be empty when supplied.",
+        "Pass a qualified domain.pipe_code, or omit pipe_ref to default to the closure's main_pipe.",
+      ),
+    );
   } else if (input.pipe_ref !== undefined) {
     const refusal = pipeRefRefusal(input.pipe_ref.trim());
-    if (refusal !== undefined) errors.push(refusal);
+    if (refusal !== undefined) faults.push(refusal);
   }
 
-  return errors;
+  return faults;
 }
 
 /**
@@ -651,24 +562,22 @@ export function validatePrepareInputsRequest(input: ResolvedPrepareRequest): Too
  * request error: a folder's files are then known never to have left the
  * machine, where the SDK's `InputPreparationError` cannot say whether they did.
  */
-function pipeRefRefusal(pipeRef: string): ToolError | undefined {
+function pipeRefRefusal(pipeRef: string): Problem | undefined {
   if (pipeRef.includes("->")) {
-    return {
-      class: "input_domain",
-      location: "pipe_ref",
-      message: `pipe_ref "${pipeRef}" names a dependency package's pipe; preparation covers the method's own pipes.`,
-      hint: "Name one of the method's own pipes as domain.pipe_code, or omit pipe_ref to default to the method's main_pipe.",
-      retryable: false,
-    };
+    return argumentProblem(
+      "pipe_ref",
+      "dependency_pipe",
+      `pipe_ref "${pipeRef}" names a dependency package's pipe; preparation covers the method's own pipes.`,
+      "Name one of the method's own pipes as domain.pipe_code, or omit pipe_ref to default to the method's main_pipe.",
+    );
   }
   if (!pipeRef.includes(".")) {
-    return {
-      class: "input_domain",
-      location: "pipe_ref",
-      message: `pipe_ref must be qualified (domain.pipe_code), got the bare "${pipeRef}".`,
-      hint: "Qualify the pipe with its domain, as domain.pipe_code, or omit pipe_ref to default to the method's main_pipe.",
-      retryable: false,
-    };
+    return argumentProblem(
+      "pipe_ref",
+      "not_qualified",
+      `pipe_ref must be qualified (domain.pipe_code), got the bare "${pipeRef}".`,
+      "Qualify the pipe with its domain, as domain.pipe_code, or omit pipe_ref to default to the method's main_pipe.",
+    );
   }
   return undefined;
 }
@@ -723,39 +632,22 @@ function prepareSummary(
   return parts.join("\n\n");
 }
 
-const ERROR_SUMMARIES: ErrorSummaries = {
-  config: "Inputs could not be prepared: the Pipelex API is unreachable or misconfigured.",
-  input_domain: "Inputs were not prepared: the request could not be prepared as submitted.",
-  runtime: "Inputs could not be prepared: the Pipelex API returned an error.",
-  paywall:
-    "Inputs could not be prepared: the organization's Pipelex plan does not cover this call.",
-  auth: "Inputs could not be prepared: the Pipelex API key is missing or was refused.",
-  role: "Inputs could not be prepared: your role in this organization does not allow this.",
-};
-
-function summaryForError(error: ToolError): string {
-  return summaryForToolError(error, ERROR_SUMMARIES);
-}
-
 export function prepareInputsToolResult(result: PrepareResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(
-      result.summary,
-      result.structuredContent.errors,
-      result.structuredContent.files_sent,
-    ),
+    content: toolResultContent(result.summary, result.structuredContent.files_sent),
     isError: result.structuredContent.status === "error",
   };
 }
 
-function errorResult(summary: string, errors: ToolError[]): PrepareResult {
+/** A call that prepared nothing: its one problem, and the problem's summary. */
+function errorResult(problem: Problem, context: { apiNotes?: ApiNotes }): PrepareResult {
   return {
     structuredContent: {
       status: "error",
       is_valid: false,
-      errors,
+      problem,
     },
-    summary,
+    summary: problemSummary(problem, context.apiNotes),
   };
 }

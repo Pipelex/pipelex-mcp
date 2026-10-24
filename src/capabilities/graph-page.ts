@@ -5,8 +5,11 @@ import path from "node:path";
 import { MTHDS_SOURCES_EMBED_ID, serializeMthdsSourcesEmbed } from "@pipelex/mthds-ui/static-graph";
 import type { MthdsSource } from "@pipelex/mthds-ui/static-graph";
 
+import { buildProblem } from "@pipelex/sdk";
+import type { CoreErrorCode, ProblemParamsByCode } from "@pipelex/sdk";
+
 import { asOneLine } from "./shared.js";
-import type { ToolError } from "./shared.js";
+import type { Problem } from "./shared.js";
 import {
   deepestCommonDirectory,
   errorMessage,
@@ -169,13 +172,38 @@ export interface GraphPageFile {
 /**
  * What became of the page. `path` is where it is, or would have been, relative
  * to the working directory; `created` distinguishes a first write from a
- * rewrite, for the summary alone; `error` says why nothing was written.
+ * rewrite, for the summary alone; `error` says why nothing was written, as
+ * the problem of a write the workshop refused or could not make, located at
+ * `graph_page`.
  */
 export interface GraphPageOutcome {
   path: string;
   written: boolean;
   created?: boolean;
-  error?: ToolError;
+  error?: Problem;
+}
+
+/**
+ * The problem of a page not written, located at `graph_page`, the argument
+ * that turns the page off, with the workshop's own sentence and what to do as
+ * its `message`.
+ */
+function pageProblem<Code extends CoreErrorCode>(
+  code: Code,
+  params: ProblemParamsByCode[Code],
+  message: string,
+  remedy: string,
+): Problem {
+  return buildProblem(code, params, {
+    location: { field: "graph_page" },
+    extra: { message: `${message} ${remedy}` },
+  });
+}
+
+/** Why a file operation failed, as the system's error code, or `unreadable`. */
+function systemReason(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return typeof code === "string" && code !== "" ? code : "unreadable";
 }
 
 /**
@@ -200,13 +228,15 @@ export async function writeGraphPage(
     return {
       path: GRAPH_PAGE_FILENAME,
       written: false,
-      error: {
-        class: "config",
-        location: "deployment",
-        message: `Could not resolve the server's working directory: ${errorMessage(err)}`,
-        hint: `The local workshop writes the method graph page under its working directory (${saveRoot}), which must exist.`,
-        retryable: false,
-      },
+      error: buildProblem(
+        "client.not_configured",
+        { setting: "working_directory" },
+        {
+          extra: {
+            message: `Could not resolve the server's working directory: ${errorMessage(err)} The local workshop writes the method graph page under its working directory (${saveRoot}), which must exist.`,
+          },
+        },
+      ),
     };
   }
 
@@ -216,22 +246,26 @@ export async function writeGraphPage(
     try {
       dir = await fs.realpath(path.dirname(path.resolve(root, file.path)));
     } catch (err) {
-      return notWritten(GRAPH_PAGE_FILENAME, {
-        class: "runtime",
-        location: "graph_page",
-        message: `Could not resolve the directory of ${file.path}: ${errorMessage(err)}`,
-        hint: "Validate again once the file is back in place, or pass graph_page: false.",
-        retryable: true,
-      });
+      return notWritten(
+        GRAPH_PAGE_FILENAME,
+        pageProblem(
+          "client.workspace_busy",
+          { path: file.path },
+          `Could not resolve the directory of ${file.path}: ${errorMessage(err)}`,
+          "Validate again once the file is back in place, or pass graph_page: false.",
+        ),
+      );
     }
     if (!isInsideRoot(root, dir)) {
-      return notWritten(GRAPH_PAGE_FILENAME, {
-        class: "input_domain",
-        location: "graph_page",
-        message: `The directory of ${file.path} resolves outside the server's working directory.`,
-        hint: `The method graph page is written only inside the directory the host started this server in (${root}).`,
-        retryable: false,
-      });
+      return notWritten(
+        GRAPH_PAGE_FILENAME,
+        pageProblem(
+          "client.argument_invalid",
+          { argument: "graph_page", reason: "outside_workspace" },
+          `The directory of ${file.path} resolves outside the server's working directory.`,
+          `The method graph page is written only inside the directory the host started this server in (${root}).`,
+        ),
+      );
     }
     located.push({ dir, file: path.basename(file.path), content: file.content });
   }
@@ -254,18 +288,20 @@ export async function writeGraphPage(
   const title = `${path.basename(pageDir)} — method graph`;
   const page = renderGraphPage(title, sources);
 
-  const inspection = await inspectPage(pagePath);
+  const inspection = await inspectPage(pagePath, reported);
   if (inspection.kind === "error") {
     return notWritten(reported, inspection.error);
   }
   if (inspection.kind === "foreign") {
-    return notWritten(reported, {
-      class: "input_domain",
-      location: "graph_page",
-      message: `${reported} is already there and was not written by this tool (${inspection.reason}), so it was left untouched.`,
-      hint: "Rename or move that file to get the method graph page there, or pass graph_page: false to stop writing it.",
-      retryable: false,
-    });
+    return notWritten(
+      reported,
+      pageProblem(
+        "client.target_exists",
+        { path: reported },
+        `${reported} is already there and was not written by this tool (${inspection.reason}), so it was left untouched.`,
+        "Rename or move that file to get the method graph page there, or pass graph_page: false to stop writing it.",
+      ),
+    );
   }
 
   const created = inspection.kind === "missing";
@@ -276,22 +312,27 @@ export async function writeGraphPage(
     await fs.writeFile(pagePath, page, { encoding: "utf8", flag: created ? "wx" : "w" });
   } catch (err) {
     const appeared = (err as NodeJS.ErrnoException).code === "EEXIST";
-    return notWritten(reported, {
-      class: "runtime",
-      location: "graph_page",
-      message: appeared
-        ? `${reported} appeared while the method graph page was being written, so it was left untouched.`
-        : `Could not write ${reported}: ${errorMessage(err)}`,
-      hint: appeared
-        ? "Validate again to write the page, or pass graph_page: false."
-        : "Check that the directory holding the .mthds files is writable, or pass graph_page: false.",
-      retryable: appeared,
-    });
+    return notWritten(
+      reported,
+      appeared
+        ? pageProblem(
+            "client.workspace_busy",
+            { path: reported },
+            `${reported} appeared while the method graph page was being written, so it was left untouched.`,
+            "Validate again to write the page, or pass graph_page: false.",
+          )
+        : pageProblem(
+            "client.write_failed",
+            { path: reported, reason: systemReason(err) },
+            `Could not write ${reported}: ${errorMessage(err)}`,
+            "Check that the directory holding the .mthds files is writable, or pass graph_page: false.",
+          ),
+    );
   }
   return { path: reported, written: true, created };
 }
 
-function notWritten(reported: string, error: ToolError): GraphPageOutcome {
+function notWritten(reported: string, error: Problem): GraphPageOutcome {
   return { path: reported, written: false, error };
 }
 
@@ -299,13 +340,13 @@ type Inspection =
   | { kind: "missing" }
   | { kind: "owned" }
   | { kind: "foreign"; reason: string }
-  | { kind: "error"; error: ToolError };
+  | { kind: "error"; error: Problem };
 
 /**
  * `lstat`, not `stat`: overwriting through a symlink writes wherever it points,
  * so a symlink at the page's name is foreign by construction.
  */
-async function inspectPage(absolute: string): Promise<Inspection> {
+async function inspectPage(absolute: string, reported: string): Promise<Inspection> {
   let stats: Stats;
   try {
     stats = await fs.lstat(absolute);
@@ -313,7 +354,7 @@ async function inspectPage(absolute: string): Promise<Inspection> {
     if (isMissingPathError(err)) {
       return { kind: "missing" };
     }
-    return { kind: "error", error: inspectionError(absolute, err) };
+    return { kind: "error", error: inspectionError(absolute, reported, err) };
   }
 
   if (stats.isSymbolicLink()) {
@@ -327,21 +368,20 @@ async function inspectPage(absolute: string): Promise<Inspection> {
   try {
     owned = await carriesGraphPageMark(absolute);
   } catch (err) {
-    return { kind: "error", error: inspectionError(absolute, err) };
+    return { kind: "error", error: inspectionError(absolute, reported, err) };
   }
   return owned
     ? { kind: "owned" }
     : { kind: "foreign", reason: "it does not carry this tool's generator mark" };
 }
 
-function inspectionError(absolute: string, err: unknown): ToolError {
-  return {
-    class: "runtime",
-    location: "graph_page",
-    message: `Could not inspect the existing ${path.basename(absolute)}: ${errorMessage(err)}`,
-    hint: "Check the directory's permissions, then validate again, or pass graph_page: false.",
-    retryable: true,
-  };
+function inspectionError(absolute: string, reported: string, err: unknown): Problem {
+  return pageProblem(
+    "client.file_unreadable",
+    { path: reported, reason: systemReason(err) },
+    `Could not inspect the existing ${path.basename(absolute)}: ${errorMessage(err)}`,
+    "Check the directory's permissions, then validate again, or pass graph_page: false.",
+  );
 }
 
 // Neither flag exists on Windows, where the caller's own `lstat` is the only guard.
@@ -377,16 +417,22 @@ export async function carriesGraphPageMark(absolute: string): Promise<boolean> {
  * produced one, and otherwise the errors, since saying a verdict stands where
  * none exists would invite the model to report one.
  */
+/** The sentence a page's problem says itself with: the workshop's own `message`, else its detail. */
+function pageProblemText(problem: Problem): string {
+  const message: unknown = problem.message;
+  return typeof message === "string" && message !== "" ? message : problem.detail;
+}
+
 export function graphPageSection(outcome: GraphPageOutcome, verdictProduced: boolean): string {
   const where = `\`${asOneLine(outcome.path)}\``;
   if (!outcome.written) {
     const unaffected = verdictProduced
       ? "the verdict above stands"
       : "the result above is unaffected";
-    const reason = outcome.error === undefined ? "" : ` ${asOneLine(outcome.error.message)}`;
-    const hint =
-      outcome.error?.hint === undefined ? "" : `\n\n*Hint: ${asOneLine(outcome.error.hint)}*`;
-    return `## Method graph\n\nThe method's flowchart page was not written to ${where}; ${unaffected}.${reason}${hint}`;
+    const reason =
+      outcome.error === undefined ? "" : ` ${asOneLine(pageProblemText(outcome.error))}`;
+    const code = outcome.error === undefined ? "" : ` (\`${outcome.error.code}\`)`;
+    return `## Method graph\n\nThe method's flowchart page was not written to ${where}; ${unaffected}.${reason}${code}`;
   }
   if (outcome.created === true) {
     return (

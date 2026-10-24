@@ -9,7 +9,7 @@ The repository is one package at its root, `@pipelex/mcp`, published to npm from
 | Path | What it is |
 | --- | --- |
 | `src/` | The workshop's shell: its entry point (`main.ts`), server and instructions (`server.ts`), tool table (`tools.ts`) and file resolver (`files.ts`), with the tool-definition shape and the helpers the server tests use. |
-| `src/capabilities/` | The capability core the workshop is built from: the API calls, the projections, error classification, the run lifecycle and the workspace writers. |
+| `src/capabilities/` | The capability core the workshop is built from: the API calls, the projections, the problem every failure is reported as, the run lifecycle and the workspace writers. |
 | `scripts/`, `tests/` | The repository's own tooling and the tests that belong to no module: the text budgets, the publish guard, the live smoke run, and the Makefile, lint and manifest tests. |
 
 tsup bundles `src/` into `dist/main.js`, the one file the tarball ships besides the README and the licence, so what every `npx @pipelex/mcp` install downloads is the manifest's `dependencies` alone. The layout is the one the package was published from through 0.20.0; from the workspace split of pipelex-mcp#89 until the flatten after 0.22.0 the core and the workshop were two packages under `packages/`, which older commits and items cite. Every `make` target runs from the root.

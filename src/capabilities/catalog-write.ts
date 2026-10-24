@@ -3,8 +3,9 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { ApiResponseError, MethodFileTransferError } from "@pipelex/sdk";
+import { MethodFileTransferError, buildProblem } from "@pipelex/sdk";
 import type {
+  CoreErrorCode,
   MethodData,
   MethodDetail,
   MethodDraftInput,
@@ -15,6 +16,9 @@ import type {
   MethodTreeSource,
   MethodVersion,
   MethodWriteInput,
+  Problem,
+  ProblemItem,
+  ProblemParamsByCode,
   SavedMethodFile,
 } from "@pipelex/sdk";
 import { z } from "zod";
@@ -51,26 +55,28 @@ import type {
 } from "./method-versions.js";
 import { secretFindings, secretRefusalText } from "./secret-guard.js";
 import {
+  SECRET_REASON,
+  argumentProblem,
   asOneLine,
   buildApiConfig,
-  classifyError,
   createPipelexApiClient,
+  faultsProblem,
   folderTreeToSend,
+  problemItemSchema,
+  problemOf,
+  problemSchema,
+  problemSummary,
+  refusalProblem,
   shownIn,
-  summaryForToolError,
-  toolErrorSchema,
   toolResultContent,
 } from "./shared.js";
 import type {
   ApiConfig,
-  AuthErrorTexture,
-  BaseUrlSourceTexture,
-  ClassifyErrorOptions,
-  ErrorSummaries,
+  ApiNotes,
   FileResolver,
   LocatedMethodDir,
   MethodTreeRead,
-  ToolError,
+  Refusal,
 } from "./shared.js";
 import { type FolderLimits, methodTreeLimitsOf } from "./tree-limits.js";
 import type { TreeLimitsAware } from "./tree-limits.js";
@@ -264,18 +270,27 @@ export const mthdsSaveMethodOutputSchema = z.object({
     .describe(
       "Every file of the tree this save sent, each as method_dir joined with its path inside the folder.",
     ),
-  rename_error: toolErrorSchema
+  rename_error: problemSchema
     .optional()
     .describe(
-      "Present when the draft was saved but the requested rename failed: the name is unchanged.",
+      "Present when the draft was saved but the requested rename failed: the rename's problem, and the name is unchanged.",
     ),
-  validation_errors: z.array(z.unknown()).optional(),
-  validation_refused: toolErrorSchema
+  validation_errors: z
+    .array(problemItemSchema)
+    .optional()
+    .describe("The validation verdict's errors, one problem item each, when it found any."),
+  validation_warnings: z
+    .array(problemItemSchema)
+    .optional()
+    .describe("The validation verdict's advisory findings, one problem item each."),
+  validation_refused: problemSchema
     .optional()
     .describe(
-      "Present, with no is_valid, is_runnable or pending_signatures, when the deployment refused to load the method for the Python it holds, so it gave no verdict: the draft was saved unvalidated, and this is the refusal, whose hint says where the method validates.",
+      "Present, with no is_valid, is_runnable or pending_signatures, when the deployment refused to load the method for the Python it holds, so it gave no verdict: the draft was saved unvalidated, and this is the deployment's problem, whose code names the refusal.",
     ),
-  errors: z.array(toolErrorSchema).optional(),
+  problem: problemSchema
+    .optional()
+    .describe("Present with status error: why nothing was saved, and what to do."),
 });
 
 const treeFileSchema = z.object({
@@ -312,7 +327,9 @@ export const mthdsGetMethodOutputSchema = z.object({
   unmanaged: z.array(z.string()).optional(),
   unmanaged_truncated: z.boolean().optional(),
   truncated: z.boolean().optional(),
-  errors: z.array(toolErrorSchema).optional(),
+  problem: problemSchema
+    .optional()
+    .describe("Present with status error: why nothing was fetched or written, and what to do."),
 });
 
 // ── TypeScript surfaces ─────────────────────────────────────────────
@@ -353,14 +370,15 @@ export interface SaveMethodSuccess {
   api_host?: string;
   link_file?: LinkFileReport;
   files_sent?: string[];
-  rename_error?: ToolError;
-  validation_errors?: unknown[];
-  validation_refused?: ToolError;
+  rename_error?: Problem;
+  validation_errors?: ProblemItem[];
+  validation_warnings?: ProblemItem[];
+  validation_refused?: Problem;
 }
 
 export interface SaveMethodFailure {
   status: "error";
-  errors: ToolError[];
+  problem: Problem;
 }
 
 export type SaveMethodStructuredContent = SaveMethodSuccess | SaveMethodFailure;
@@ -393,7 +411,7 @@ export interface GetMethodSuccess {
 
 export interface GetMethodFailure {
   status: "error";
-  errors: ToolError[];
+  problem: Problem;
 }
 
 export type GetMethodStructuredContent = GetMethodSuccess | GetMethodFailure;
@@ -439,9 +457,8 @@ export interface CatalogWriteContext extends ApiConfig, TreeLimitsAware {
   saveRoot?: string;
   /** The validation capability these saves run the bundle through — `mthds_validate`'s own. */
   validation: ValidationContext;
-  authError?: AuthErrorTexture;
-  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
-  baseUrlSource?: BaseUrlSourceTexture;
+  /** Where the call's key and base URL came from, which a failed request's summary closes with. */
+  apiNotes?: ApiNotes;
 }
 
 export function buildCatalogWriteContext(env = process.env): CatalogWriteContext {
@@ -516,96 +533,83 @@ export function bareIdCallersSentence(
   return `Callers of the bare \`${id}\` still run version ${latest}${where}; this draft is ahead of it until it is published.`;
 }
 
-// ── error options ───────────────────────────────────────────────────
-
-/** What a tree the catalog refuses can be changed into, whichever save route refused it. */
-const TREE_REFUSED_HINT =
-  "The platform refused the method's tree: the message names the file or the limit. Rename or remove what it names, or keep it out of the method with a .gitignore inside the folder, then save again.";
-
-const CREATE_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/methods",
-  badRequest: {
-    location: "method_dir",
-    hint: `${TREE_REFUSED_HINT} If the error mentions organization context, mint a key in the intended organization.`,
-  },
-  tooLarge: {
-    location: "method_dir",
-    hint: "The method is larger than the catalog stores in one method. Make the folder smaller, or keep what is not part of the method out with a .gitignore inside it.",
-  },
-};
-
-const NOT_FOUND_ON_SAVE = {
-  location: "method_id",
-  hint: `No registered method with this id is visible to the API key's organization. The catalog is org-scoped, so a method from another organization reads exactly like a miss — check the api_host recorded in ${LINK_FILE_NAME} against the API this server is configured for.`,
-};
+// ── problems ────────────────────────────────────────────────────────
 
 /**
- * The draft write. A stale token is the platform's own compare-and-swap
- * refusing the write, located at the field that carried the token; the hint
- * is the save's, and the message is rebuilt with both tokens once the stored
- * one has been read (see {@link draftConflictError}).
+ * A refusal these tools make themselves, before or after anything is sent:
+ * the problem of a core code, located at the tool argument `field` when one
+ * names what to change, or at the method's `file` it is about, with this
+ * server's sentence and remedy as its `message`, on one line. A failure the SDK
+ * raised is never one of these: it is relayed as the SDK read it
+ * ({@link problemOf}).
  */
-const DRAFT_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/methods/{id}/draft",
-  badRequest: {
-    location: "method_dir",
-    hint: `${TREE_REFUSED_HINT} If the error mentions organization context, mint a key in the intended organization.`,
-  },
-  notFound: NOT_FOUND_ON_SAVE,
-  conflict: {
-    location: "expected_updated_at",
-    hint: `Somebody saved this method's draft since this folder synced with it — the webapp saves as it edits. Pull it with ${WORKSHOP_TOOL_NAMES.getMethod} into a folder of its own to compare, then decide with the user what to keep. To replace their draft knowingly, save again with expected_updated_at set to the draft's current updated_at. If that updated_at is your own last save's (one whose link write failed), pull the method into this folder to refresh the link.`,
-  },
-  tooLarge: {
-    location: "method_dir",
-    hint: "The draft is larger than the catalog stores in one method. Make the folder smaller, or keep what is not part of the method out with a .gitignore inside it.",
-  },
-};
+function workshopProblem<Code extends CoreErrorCode>(
+  code: Code,
+  params: ProblemParamsByCode[Code],
+  where: { field?: string; file?: string; message: string; remedy: string },
+): Problem {
+  const location = {
+    ...(where.field === undefined ? {} : { field: where.field }),
+    ...(where.file === undefined ? {} : { file: where.file }),
+  };
+  return buildProblem(code, params, {
+    ...(Object.keys(location).length === 0 ? {} : { location }),
+    extra: { message: asOneLine(`${where.message} ${where.remedy}`) },
+  });
+}
 
-const RENAME_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/methods/{id}",
-  badRequest: {
-    location: "name",
-    hint: "The API rejected the name. Pass a non-empty name.",
-  },
-  notFound: NOT_FOUND_ON_SAVE,
-  tooLarge: {
-    location: "name",
-    hint: "That name would leave the method too large to publish. Choose a shorter one.",
-  },
-};
+/** The catalog's refusal of a draft write whose token no longer names the draft. */
+const UPDATE_CONFLICT_CODE = "pipelex.catalog.update_conflict";
 
-const GET_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/methods/{id}",
-  badRequest: {
-    location: "method_id",
-    hint: "The API rejected the read. Check the method_id as the catalog returned it.",
-  },
-  notFound: {
-    location: "method_id",
-    hint: `No registered method with this id is visible to the API key's organization. The catalog is org-scoped, so a method from another organization reads exactly like a miss — check the id with ${WORKSHOP_TOOL_NAMES.listMethods}.`,
-  },
-};
+/** The catalog's answer for a method, or a version of one, it does not hold. */
+const NOT_FOUND_CODE = "pipelex.catalog.not_found";
 
-const SAVE_ERROR_SUMMARIES: ErrorSummaries = {
-  config: "The method was not saved: the Pipelex API or catalog access is misconfigured.",
-  input_domain: "The method was not saved: the request was rejected.",
-  runtime: "The method was not saved: the Pipelex API returned an error.",
-  paywall: "The method was not saved: the organization's Pipelex plan does not cover this call.",
-  auth: "The method was not saved: the Pipelex API key is missing or was refused.",
-  role: "The method was not saved: your role in this organization does not allow this.",
-};
+/** The refusal of a deployment without the working directory these tools read or write under. */
+function noWorkingDirectory(message: string, remedy: string): Problem {
+  return workshopProblem(
+    "client.not_configured",
+    { setting: "working_directory" },
+    { message, remedy },
+  );
+}
 
-const GET_ERROR_SUMMARIES: ErrorSummaries = {
-  config: "The method was not fetched: the Pipelex API or catalog access is misconfigured.",
-  input_domain: "The method was not fetched: the request was rejected.",
-  runtime: "The method was not fetched: the Pipelex API returned an error.",
-  paywall: "The method was not fetched: the organization's Pipelex plan does not cover this call.",
-  auth: "The method was not fetched: the Pipelex API key is missing or was refused.",
-  role: "The method was not fetched: your role in this organization does not allow this.",
-};
+/**
+ * The workshop's write lock that could not be taken, so the call read or
+ * wrote nothing under it, as `consequence` says: another workshop process
+ * holding it, which a retry in a moment passes, or a lock that cannot be had
+ * here at all.
+ */
+function lockProblem(
+  err: LinkLockError,
+  where: { folder: string; field: string; consequence: string; again: string },
+): Problem {
+  const message = `${err.message}, ${where.consequence}`;
+  return err.busy
+    ? workshopProblem(
+        "client.workspace_busy",
+        { path: where.folder },
+        {
+          field: where.field,
+          message,
+          remedy: `${where.again} in a moment: another workshop process on this machine is saving or pulling.`,
+        },
+      )
+    : workshopProblem(
+        "client.write_failed",
+        { path: where.folder, reason: "lock_unavailable" },
+        {
+          field: where.field,
+          message,
+          remedy: `Fix what the message names, then ${where.again.toLowerCase()}: no save reads its files and no pull writes without that lock.`,
+        },
+      );
+}
 
-const INVALID_SAVE = "The method was not saved: request input is invalid.";
+/** The problem of a zod issue in a tool's arguments, at the argument it names. */
+function issueProblem(issue: z.core.$ZodIssue, remedy: string): Problem {
+  const field = issue.path.length === 0 ? "arguments" : issue.path.map(String).join(".");
+  return argumentProblem(field, issue.code, issue.message, remedy);
+}
 
 /**
  * The bare id a method route takes, from a `method_id` the caller passed, or a
@@ -618,15 +622,15 @@ const INVALID_SAVE = "The method was not saved: request input is invalid.";
  */
 export function methodRouteId(
   value: string,
-  refuseVersion: (selector: Extract<MethodSelector, { form: "version" }>) => ToolError,
-): { ok: true; methodId: string; selector: MethodSelector } | { ok: false; error: ToolError } {
+  refuseVersion: (selector: Extract<MethodSelector, { form: "version" }>) => Problem,
+): { ok: true; methodId: string; selector: MethodSelector } | { ok: false; problem: Problem } {
   const selector = readMethodSelector(value);
   if (selector.form === "version") {
-    return { ok: false, error: refuseVersion(selector) };
+    return { ok: false, problem: refuseVersion(selector) };
   }
-  const malformed = malformedSuffixError(value, selector);
+  const malformed = malformedSuffixProblem(value, selector);
   if (malformed !== undefined) {
-    return { ok: false, error: malformed };
+    return { ok: false, problem: malformed };
   }
   return { ok: true, methodId: selector.methodId, selector };
 }
@@ -636,15 +640,14 @@ export function methodRouteId(
  * rather than sent for the SDK to throw on; the method routes' one check of
  * the id's shape. Any other value is the server's to judge.
  */
-function malformedSuffixError(value: string, selector: MethodSelector): ToolError | undefined {
+function malformedSuffixProblem(value: string, selector: MethodSelector): Problem | undefined {
   if (selector.form !== "opaque" || !value.includes("@")) return undefined;
-  return {
-    class: "input_domain",
-    location: "method_id",
-    message: `\`${value}\` is not a method id: a catalog id is mt_… with at most one suffix, @<n> for a published version or @draft for the draft.`,
-    hint: `Pass the id as ${WORKSHOP_TOOL_NAMES.listMethods} or ${LINK_FILE_NAME} gives it.`,
-    retryable: false,
-  };
+  return argumentProblem(
+    "method_id",
+    "not_a_selector",
+    `\`${value}\` is not a method id: a catalog id is mt_… with at most one suffix, @<n> for a published version or @draft for the draft.`,
+    `Pass the id as ${WORKSHOP_TOOL_NAMES.listMethods} or ${LINK_FILE_NAME} gives it.`,
+  );
 }
 
 // ── mthds_save_method ───────────────────────────────────────────────
@@ -656,43 +659,45 @@ export async function saveMthdsMethod(
   const parsed = mthdsSaveMethodInputObjectSchema.safeParse(input);
   if (!parsed.success) {
     return saveError(
-      INVALID_SAVE,
-      parsed.error.issues.map((issue) => ({
-        class: "input_domain" as const,
-        ...(issue.path.length === 0 ? {} : { location: issue.path.join(".") }),
-        message: issue.message,
-        hint: "Send method_dir, the method's folder, and a name on a create; add method_id to save an existing method's draft.",
-        retryable: false,
-      })),
+      context,
+      faultsProblem(
+        parsed.error.issues.map((issue) =>
+          issueProblem(
+            issue,
+            "Send method_dir, the method's folder, and a name on a create; add method_id to save an existing method's draft.",
+          ),
+        ),
+      ),
     );
   }
   const data = parsed.data;
 
   if (data.method_id === undefined && data.name === undefined) {
-    return saveError(INVALID_SAVE, [
-      {
-        class: "input_domain",
-        location: "name",
-        message: "name is required to create a method.",
-        hint: `Pass the name the method is listed under. To save an existing method's draft instead, pass its method_id (from the folder's ${LINK_FILE_NAME}).`,
-        retryable: false,
-      },
-    ]);
+    return saveError(
+      context,
+      argumentProblem(
+        "name",
+        "missing",
+        "name is required to create a method.",
+        `Pass the name the method is listed under. To save an existing method's draft instead, pass its method_id (from the folder's ${LINK_FILE_NAME}).`,
+      ),
+    );
   }
 
   // The id the method routes take. A version is immutable, so a save aimed at
   // one is refused rather than silently retargeted at the draft.
   let targetId: string | undefined;
   if (data.method_id !== undefined) {
-    const routeId = methodRouteId(data.method_id, (selector) => ({
-      class: "input_domain",
-      location: "method_id",
-      message: `\`${data.method_id}\` names published version ${selector.version}, which never changes: a save writes the method's draft.`,
-      hint: `Pass method_id "${selector.methodId}" to save this folder as the draft of that method.`,
-      retryable: false,
-    }));
+    const routeId = methodRouteId(data.method_id, (selector) =>
+      argumentProblem(
+        "method_id",
+        "version_selector",
+        `\`${data.method_id}\` names published version ${selector.version}, which never changes: a save writes the method's draft.`,
+        `Pass method_id "${selector.methodId}" to save this folder as the draft of that method.`,
+      ),
+    );
     if (!routeId.ok) {
-      return saveError(INVALID_SAVE, [routeId.error]);
+      return saveError(context, routeId.problem);
     }
     targetId = routeId.methodId;
   }
@@ -703,52 +708,45 @@ export async function saveMthdsMethod(
     resolver?.locateMethodDir === undefined ||
     resolver.readMethodTree === undefined
   ) {
-    return saveError("The method was not saved: this deployment cannot read a method's folder.", [
-      {
-        class: "config",
-        location: "deployment",
-        message: "This deployment has no working directory to read a method's folder from.",
-        hint: "Use the local workshop server (npx @pipelex/mcp), which reads method_dir under the directory the host started it in.",
-        retryable: false,
-      },
-    ]);
+    return saveError(
+      context,
+      noWorkingDirectory(
+        "This deployment has no working directory to read a method's folder from, so the method was not saved.",
+        "Use the local workshop server (npx @pipelex/mcp), which reads method_dir under the directory the host started it in.",
+      ),
+    );
   }
 
   // Where the folder is, on its real path inside the working directory, before
   // anything under it is read: its link is read first, from there.
   const located = await resolver.locateMethodDir(data.method_dir);
   if (!located.ok) {
-    return saveError(INVALID_SAVE, located.refusals.map(atMethodDir));
+    return saveError(context, atMethodDir(located.refusals));
   }
 
   // A folder still holding the link an earlier release wrote reads as
   // unlinked here, and its whole tree, the old link included, would be
   // uploaded as the method: refused before anything is asked or sent.
   if (await holdsLegacyLink(located.folder)) {
-    return saveError(INVALID_SAVE, [
-      {
-        class: "input_domain",
-        location: "method_dir",
-        message: `${data.method_dir} holds ${LEGACY_LINK_FILE_NAME}, the link file an earlier release of the workshop wrote, which it now reads only at ${LINK_FILE_NAME}: saved as it is, the folder would read as unlinked and the old file would be uploaded as one of the method's files. Nothing was sent.`,
-        hint: `Move it into place from inside the folder, then save again: ${LEGACY_LINK_MOVE} (plain mv outside git), and commit the move.`,
-        retryable: false,
-      },
-    ]);
+    return saveError(
+      context,
+      argumentProblem(
+        "method_dir",
+        "legacy_link_file",
+        `${data.method_dir} holds ${LEGACY_LINK_FILE_NAME}, the link file an earlier release of the workshop wrote, which it now reads only at ${LINK_FILE_NAME}: saved as it is, the folder would read as unlinked and the old file would be uploaded as one of the method's files. Nothing was sent.`,
+        `Move it into place from inside the folder, then save again: ${LEGACY_LINK_MOVE} (plain mv outside git), and commit the move.`,
+      ),
+    );
   }
 
   // Built inside a try, as the pull and the publish build theirs: the SDK's
   // constructor refuses a malformed base URL by throwing, and that must come
-  // back as a ToolError rather than reject the MCP handler.
+  // back as a problem rather than reject the MCP handler.
   let client: CatalogWriteClient;
   try {
     client = catalogWriteClient(context);
   } catch (err) {
-    const error = classifyError(err, {
-      ...(targetId === undefined ? CREATE_ERROR_OPTIONS : DRAFT_ERROR_OPTIONS),
-      auth: context.authError,
-      baseUrlSource: context.baseUrlSource,
-    });
-    return saveError(summaryForToolError(error, SAVE_ERROR_SUMMARIES), [error]);
+    return saveError(context, problemOf(err));
   }
 
   // A create holds a turn of its own across its whole flow — see inCreateTurn.
@@ -760,15 +758,23 @@ export async function saveMthdsMethod(
   return targetId === undefined ? inCreateTurn(run) : run();
 }
 
-/** A refusal of the folder's resolver, at `method_dir`. */
-function atMethodDir(refusal: { message: string; hint: string }): ToolError {
-  return {
-    class: "input_domain",
-    location: "method_dir",
-    message: refusal.message,
-    hint: refusal.hint,
-    retryable: false,
-  };
+/** The refusals of the folder's resolver, at `method_dir`, as the call's one problem. */
+function atMethodDir(refusals: readonly Refusal[]): Problem {
+  return faultsProblem(refusals.map((refusal) => refusalProblem("method_dir", refusal)));
+}
+
+/**
+ * A save refused for the link its folder already holds: the link claims the
+ * folder for a method this call does not name, or claims it with content no
+ * one can read. `client.target_exists`, naming the link file, the core code
+ * nearest the catalog's own link conflict, which a problem built here cannot
+ * carry until the Pipelex registry is vendored.
+ */
+function linkClaimProblem(
+  dir: string,
+  where: { field: string; message: string; remedy: string },
+): Problem {
+  return workshopProblem("client.target_exists", { path: path.join(dir, LINK_FILE_NAME) }, where);
 }
 
 /**
@@ -821,17 +827,15 @@ async function saveToCatalog(
     );
   } catch (err) {
     if (!(err instanceof LinkLockError)) throw err;
-    return saveError("The method was not saved: the workshop's write lock could not be taken.", [
-      {
-        class: "runtime",
-        location: "method_dir",
-        message: `${err.message}, so this save read nothing and sent nothing.`,
-        hint: err.busy
-          ? "Save again in a moment: another workshop process on this machine is saving or pulling."
-          : "Fix what the message names, then save again: no save reads its files without that lock.",
-        retryable: err.busy,
-      },
-    ]);
+    return saveError(
+      context,
+      lockProblem(err, {
+        folder: data.method_dir,
+        field: "method_dir",
+        consequence: "so this save read nothing and sent nothing.",
+        again: "Save again",
+      }),
+    );
   }
   if (!sources.ok) {
     return sources.result;
@@ -856,16 +860,16 @@ async function saveToCatalog(
   // credential, refuses the save, since the tool could not say what it saved.
   const verdict = await validateMethodTree(toSend, context.validation);
   const validation: ValidationStructuredContent = verdict.structuredContent;
-  let validationRefused: ToolError | undefined;
+  let validationRefused: Problem | undefined;
   if (validation.status === "error") {
-    const errors = validation.errors ?? [];
-    const [first] = errors;
-    if (verdict.refusedForPython === true && first !== undefined) {
-      validationRefused = first;
+    const problem = validation.problem ?? problemOf(undefined);
+    if (verdict.refusedForPython === true) {
+      validationRefused = problem;
     } else {
       return saveError(
-        `The method was not saved, because validating it produced no verdict${first === undefined ? "." : `: ${asOneLine(first.message)}`}`,
-        errors,
+        context,
+        problem,
+        "The method was not saved: validating it produced no verdict, so nothing of the folder was written to the catalog.",
       );
     }
   }
@@ -875,7 +879,7 @@ async function saveToCatalog(
   const support = catalogVersionsSupport(context, client);
   let stored: MethodData;
   let saved: "created" | "updated" | "renamed";
-  let renameError: ToolError | undefined;
+  let renameError: Problem | undefined;
   let previousName: string | undefined;
   let staleName: string | undefined;
   let draftMovedTo: string | undefined;
@@ -885,14 +889,8 @@ async function saveToCatalog(
       // Present: the create arm was refused above without one.
       stored = await client.createMethod({ name: data.name ?? "", tree: source });
     } catch (err) {
-      const error = classifyError(err, {
-        ...CREATE_ERROR_OPTIONS,
-        auth: context.authError,
-        baseUrlSource: context.baseUrlSource,
-      });
-      return saveError(summaryForToolError(error, SAVE_ERROR_SUMMARIES), [
-        notRetryableCreate(err, error),
-      ]);
+      const problem = problemOf(err);
+      return saveError(context, problem, createCaution(err, problem));
     }
     saved = "created";
   } else {
@@ -912,19 +910,15 @@ async function saveToCatalog(
     try {
       stored = await client.writeDraft(targetId, draftInput);
     } catch (err) {
-      const error = classifyError(err, {
-        ...DRAFT_ERROR_OPTIONS,
-        auth: context.authError,
-        baseUrlSource: context.baseUrlSource,
-      });
+      const problem = problemOf(err);
       const reported =
-        error.location === "expected_updated_at" && token !== undefined
-          ? await draftConflictError(error, client, targetId, {
+        problem.code === UPDATE_CONFLICT_CODE && token !== undefined
+          ? await draftConflictProblem(problem, client, targetId, {
               token,
               fromLink: data.expected_updated_at === undefined,
             })
-          : error;
-      return saveError(summaryForToolError(reported, SAVE_ERROR_SUMMARIES), [reported]);
+          : problem;
+      return saveError(context, reported);
     }
     saved = "updated";
 
@@ -960,11 +954,7 @@ async function saveToCatalog(
         stored = { ...stored, name: renamed.name };
         saved = "renamed";
       } catch (err) {
-        renameError = classifyError(err, {
-          ...RENAME_ERROR_OPTIONS,
-          auth: context.authError,
-          baseUrlSource: context.baseUrlSource,
-        });
+        renameError = problemOf(err);
       }
     }
   }
@@ -1004,9 +994,12 @@ async function saveToCatalog(
     link_file: linkFile,
     files_sent: toSend.files.map((file) => file.shown),
     ...(renameError === undefined ? {} : { rename_error: renameError }),
-    ...(validation.validation_errors === undefined
+    ...(validation.errors === undefined || validation.errors.length === 0
       ? {}
-      : { validation_errors: validation.validation_errors }),
+      : { validation_errors: validation.errors }),
+    ...(validation.warnings === undefined || validation.warnings.length === 0
+      ? {}
+      : { validation_warnings: validation.warnings }),
   };
 
   const answer = await support;
@@ -1080,9 +1073,9 @@ async function readSaveSources(
   },
 ): Promise<SaveSources> {
   const { data, targetId, location, limits } = request;
-  const refuse = (summary: string, errors: ToolError[]): SaveSources => ({
+  const refuse = (problem: Problem): SaveSources => ({
     ok: false,
-    result: saveError(summary, errors),
+    result: saveError(context, problem),
   });
 
   const at: LinkAt = {
@@ -1099,23 +1092,19 @@ async function readSaveSources(
     // Preventing a duplicate is the link file's whole purpose: a create from a
     // folder already linked would mint a SECOND method for the same files.
     if (claim !== undefined) {
-      return refuse("The method was not saved: that folder is already claimed.", [
+      return refuse(
         claim.kind === "link"
-          ? {
-              class: "input_domain",
-              location: "method_id",
-              message: `\`${claim.dir}\` is linked to \`${claim.link.method_id}\` (${claim.link.name} on ${claim.link.api_host}), and this call names no method_id, so it would have created a SECOND method for the same folder.`,
-              hint: `Pass method_id: "${claim.link.method_id}" to save the draft of the method this folder is linked to. To make a genuinely new method from these files, copy the folder without its ${LINK_FILE_NAME} and save the copy.`,
-              retryable: false,
-            }
-          : {
-              class: "input_domain",
-              location: "method_dir",
-              message: `\`${claim.dir}\` holds a \`${LINK_FILE_NAME}\` that cannot be read (${claim.reason}), so something already claims this folder. Creating a method from here would leave a SECOND method that this tool cannot delete.`,
-              hint: `Repair or remove \`${LINK_FILE_NAME}\` in that folder — if it names the method you meant, pass its method_id — or copy the folder without it to create a genuinely new method.`,
-              retryable: false,
-            },
-      ]);
+          ? linkClaimProblem(claim.dir, {
+              field: "method_id",
+              message: `\`${claim.dir}\` is linked to \`${claim.link.method_id}\` (${claim.link.name} on ${claim.link.api_host}), and this call names no method_id, so it would have created a SECOND method for the same folder. Nothing was sent.`,
+              remedy: `Pass method_id: "${claim.link.method_id}" to save the draft of the method this folder is linked to. To make a genuinely new method from these files, copy the folder without its ${LINK_FILE_NAME} and save the copy.`,
+            })
+          : linkClaimProblem(claim.dir, {
+              field: "method_dir",
+              message: `\`${claim.dir}\` holds a \`${LINK_FILE_NAME}\` that cannot be read (${claim.reason}), so something already claims this folder. Creating a method from here would leave a SECOND method that this tool cannot delete. Nothing was sent.`,
+              remedy: `Repair or remove \`${LINK_FILE_NAME}\` in that folder — if it names the method you meant, pass its method_id — or copy the folder without it to create a genuinely new method.`,
+            }),
+      );
     }
   } else {
     // A method_id read from the wrong place, or a stale one pasted by a user,
@@ -1125,19 +1114,17 @@ async function readSaveSources(
     // are compared bare, since the link records the bare id and `@draft` names
     // the same method.
     if (claim?.kind === "link" && readMethodSelector(claim.link.method_id).methodId !== targetId) {
-      return refuse("The method was not saved: that folder is linked to another method.", [
-        {
-          class: "input_domain",
-          location: "method_id",
-          message: `\`${claim.dir}\` is linked to \`${claim.link.method_id}\` (${claim.link.name} on ${claim.link.api_host}), but this call names method_id \`${data.method_id}\`. Saving would have replaced a different method's draft with this folder's files, and a replaced draft cannot be given back.`,
-          hint: `Pass method_id: "${claim.link.method_id}" to save the draft of the method this folder is linked to. If you really mean to save these files as \`${targetId}\`, copy the folder without its ${LINK_FILE_NAME} and save the copy, so the two methods stop sharing one link.`,
-          retryable: false,
-        },
-      ]);
+      return refuse(
+        linkClaimProblem(claim.dir, {
+          field: "method_id",
+          message: `\`${claim.dir}\` is linked to \`${claim.link.method_id}\` (${claim.link.name} on ${claim.link.api_host}), but this call names method_id \`${data.method_id}\`. Saving would have replaced a different method's draft with this folder's files, and a replaced draft cannot be given back. Nothing was sent.`,
+          remedy: `Pass method_id: "${claim.link.method_id}" to save the draft of the method this folder is linked to. If you really mean to save these files as \`${targetId}\`, copy the folder without its ${LINK_FILE_NAME} and save the copy, so the two methods stop sharing one link.`,
+        }),
+      );
     }
     const linked = draftTokenOf(claim, data.expected_updated_at, targetId);
     if (!linked.ok) {
-      return refuse(linked.summary, [linked.error]);
+      return refuse(linked.problem);
     }
     token = linked.token;
     if (claim?.kind === "link") {
@@ -1151,7 +1138,7 @@ async function readSaveSources(
   // present: the caller refused a deployment without it.
   const tree = await context.resolver!.readMethodTree!(location, { limits });
   if (!tree.ok) {
-    return refuse(INVALID_SAVE, tree.refusals.map(atMethodDir));
+    return refuse(atMethodDir(tree.refusals));
   }
 
   // The secret guard, over the bytes in hand, before any of them is sent.
@@ -1166,23 +1153,23 @@ async function readSaveSources(
       arm: "folder",
       again: "save again",
     });
-    return refuse("The method was not saved: its folder holds what looks like a secret.", [
-      { class: "input_domain", location: "method_dir", ...text, retryable: false },
-    ]);
+    return refuse(refusalProblem("method_dir", { reason: SECRET_REASON, ...text }));
   }
 
   // The second read of the link, now that the bytes are in hand.
   const after = await readMethodLink(location.folder);
   if (!sameLinkRead(at.read, after)) {
-    return refuse("The method was not saved: the folder changed while this save read it.", [
-      {
-        class: "runtime",
-        location: "method_dir",
-        message: `\`${path.join(at.dir, LINK_FILE_NAME)}\` changed while this save read the files — something that does not take the workshop's write lock, an editor, a git checkout or an older workshop, wrote into \`${at.dir}\` meanwhile — so the bytes read may not be the ones its link vouches for. Nothing was sent.`,
-        hint: "Look at what the folder holds now, then save again.",
-        retryable: true,
-      },
-    ]);
+    return refuse(
+      workshopProblem(
+        "client.workspace_busy",
+        { path: path.join(at.dir, LINK_FILE_NAME) },
+        {
+          field: "method_dir",
+          message: `\`${path.join(at.dir, LINK_FILE_NAME)}\` changed while this save read the files — something that does not take the workshop's write lock, an editor, a git checkout or an older workshop, wrote into \`${at.dir}\` meanwhile — so the bytes read may not be the ones its link vouches for. Nothing was sent.`,
+          remedy: "Look at what the folder holds now, then save again.",
+        },
+      ),
+    );
   }
 
   return {
@@ -1219,115 +1206,108 @@ function draftTokenOf(
   claim: DirectoryClaim | undefined,
   explicit: string | undefined,
   methodId: string,
-): { ok: true; token?: string } | { ok: false; error: ToolError; summary: string } {
+): { ok: true; token?: string } | { ok: false; problem: Problem } {
   if (explicit !== undefined) return { ok: true, token: explicit };
   if (claim === undefined) return { ok: true };
   const toSaveAnyway = `To save these files as they stand, pass expected_updated_at with the draft's current updated_at (${WORKSHOP_TOOL_NAMES.getMethod} reports it) once the user has said to.`;
   if (claim.kind === "unreadable") {
     return {
       ok: false,
-      summary: "The method was not saved: the folder's link file cannot be read.",
-      error: {
-        class: "input_domain",
-        location: "method_dir",
-        message: `\`${claim.dir}\` holds a \`${LINK_FILE_NAME}\` that cannot be read (${claim.reason}), so this save has no draft token to protect the draft with, and without one it would replace whatever the draft holds now. Nothing was sent.`,
-        hint: `Repair it — a git merge conflict is the usual cause, and the side with the later synced_updated_at is the one to keep — or remove it and pull the method into the folder to relink it. ${toSaveAnyway}`,
-        retryable: false,
-      },
+      problem: workshopProblem(
+        "client.file_unreadable",
+        { path: path.join(claim.dir, LINK_FILE_NAME), reason: "link_unreadable" },
+        {
+          field: "method_dir",
+          message: `\`${claim.dir}\` holds a \`${LINK_FILE_NAME}\` that cannot be read (${claim.reason}), so this save has no draft token to protect the draft with, and without one it would replace whatever the draft holds now. Nothing was sent.`,
+          remedy: `Repair it — a git merge conflict is the usual cause, and the side with the later synced_updated_at is the one to keep — or remove it and pull the method into the folder to relink it. ${toSaveAnyway}`,
+        },
+      ),
     };
   }
   const link = claim.link;
   if (link.partial_pull === true || link.synced_updated_at === "") {
     return {
       ok: false,
-      summary: "The method was not saved: an earlier pull into that folder never finished.",
-      error: {
-        class: "input_domain",
-        location: "method_dir",
-        message: `An earlier pull of \`${methodId}\` into \`${claim.dir}\` was interrupted, so the folder may hold a mix of two contents, and its \`${LINK_FILE_NAME}\` records no sync that finished. Saving would replace the draft with that mix. Nothing was sent.`,
-        hint: `Pull the method into the folder again, which finishes the interrupted pull, then save. ${toSaveAnyway}`,
-        retryable: false,
-      },
+      problem: argumentProblem(
+        "method_dir",
+        "partial_pull",
+        `An earlier pull of \`${methodId}\` into \`${claim.dir}\` was interrupted, so the folder may hold a mix of two contents, and its \`${LINK_FILE_NAME}\` records no sync that finished. Saving would replace the draft with that mix. Nothing was sent.`,
+        `Pull the method into the folder again, which finishes the interrupted pull, then save. ${toSaveAnyway}`,
+      ),
     };
   }
   if (link.synced_version !== undefined) {
     return {
       ok: false,
-      summary: "The method was not saved: the folder holds a published version, not the draft.",
-      error: {
-        class: "input_domain",
-        location: "expected_updated_at",
-        message: `\`${claim.dir}\` holds version ${link.synced_version} of \`${methodId}\`, pulled over the draft, so this save would replace the draft with that version's files and any edits made to them: that restores version ${link.synced_version} as the draft, and loses whatever the draft held beyond it. Nothing was sent.`,
-        hint: `If the user wants version ${link.synced_version} restored as the draft, save again with expected_updated_at "${link.synced_updated_at}". Otherwise pull the draft back into the folder (method_id "${methodId}") and work from it.`,
-        retryable: false,
-      },
+      problem: argumentProblem(
+        "expected_updated_at",
+        "version_pulled",
+        `\`${claim.dir}\` holds version ${link.synced_version} of \`${methodId}\`, pulled over the draft, so this save would replace the draft with that version's files and any edits made to them: that restores version ${link.synced_version} as the draft, and loses whatever the draft held beyond it. Nothing was sent.`,
+        `If the user wants version ${link.synced_version} restored as the draft, save again with expected_updated_at "${link.synced_updated_at}". Otherwise pull the draft back into the folder (method_id "${methodId}") and work from it.`,
+      ),
     };
   }
   return { ok: true, token: link.synced_updated_at };
 }
 
 /**
- * The draft write's stale-token refusal, carrying both tokens. The platform's
- * refusal names neither, and the caller needs both: the stored one to tell a
- * teammate's save from this session's own (a save whose link write failed
- * leaves the link a token behind), the one it sent to see which sync it was.
- * The read is best-effort — when it fails, the refusal stands as the platform
- * worded it.
+ * The draft write's stale-token refusal, the catalog's problem as it sent it
+ * with a `message` carrying both tokens. The platform's refusal names
+ * neither, and the caller needs both: the stored one to tell a teammate's
+ * save from this session's own (a save whose link write failed leaves the
+ * link a token behind), the one it sent to see which sync it was. The read is
+ * best-effort — when it fails, the refusal stands as the platform worded it.
  */
-async function draftConflictError(
-  error: ToolError,
+async function draftConflictProblem(
+  problem: Problem,
   client: CatalogWriteClient,
   methodId: string,
   sent: { token: string; fromLink: boolean },
-): Promise<ToolError> {
+): Promise<Problem> {
   let current: MethodData;
   try {
     current = await client.getMethod(methodId);
   } catch {
-    return error;
+    return problem;
   }
   const source = sent.fromLink
     ? ` as this folder's ${LINK_FILE_NAME} records (synced_updated_at)`
     : "";
   return {
-    ...error,
-    message: `The method's draft was last saved at ${current.updated_at}, not ${sent.token}${source}. Nothing was written.`,
+    ...problem,
+    message: `The method's draft was last saved at ${current.updated_at}, not ${sent.token}${source}. Nothing was written. Somebody saved this method's draft since this folder synced with it — the webapp saves as it edits. Pull it with ${WORKSHOP_TOOL_NAMES.getMethod} into a folder of its own to compare, then decide with the user what to keep. To replace their draft knowingly, save again with expected_updated_at set to the draft's current updated_at. If that updated_at is your own last save's (one whose link write failed), pull the method into this folder to refresh the link.`,
   };
 }
 
 /**
- * A create whose response was lost cannot be replayed safely: `POST /v1/methods`
- * honours an `Idempotency-Key` and `@pipelex/sdk` exposes no way to send one, so
- * the retry mints a SECOND method under the same name. A create-side transport
- * fault is therefore reported as not retryable, with the cure that does work.
- * This overrides the SDK's `retryable` on purpose, as `classifyStartError`
- * (`run.ts`) does for a start: the SDK's verdict says whether asking again can
- * succeed, never whether it is safe. A draft write has no such hazard — `PUT`
- * replaces the draft and is idempotent by construction — so its faults keep the
- * SDK's verdict.
+ * The caution a failed create's summary closes on, when the create may have
+ * reached the catalog. A create whose response was lost cannot be replayed
+ * safely: `POST /v1/methods` honours an `Idempotency-Key` and `@pipelex/sdk`
+ * exposes no way to send one, so a retry mints a SECOND method under the same
+ * name. The problem stays the SDK's, whose `retry` says whether asking again
+ * can succeed, never whether it is safe; only the summary says what to do
+ * first. A draft write has no such hazard — `PUT` replaces the draft and is
+ * idempotent by construction — so its summary carries none.
  *
- * A 2xx the SDK could not read gets the warning too, although the SDK calls it
- * final: the create was accepted and only its answer was lost, so the method
+ * A 2xx the SDK could not read gets the caution too, although its `retry` is
+ * `no`: the create was accepted and only its answer was lost, so the method
  * exists and a second save without its id would mint another.
  *
  * A file that could not be uploaded is none of this: the upload comes before
- * the create, which is never sent, so the SDK's verdict stands.
+ * the create, which is never sent.
  *
  * When the SDK gains the key, this function goes.
  */
-function notRetryableCreate(err: unknown, error: ToolError): ToolError {
-  if (err instanceof MethodFileTransferError) {
-    return error;
-  }
-  const accepted = err instanceof ApiResponseError && err.status >= 200 && err.status < 300;
-  if (!error.retryable && !accepted) {
-    return error;
-  }
-  return {
-    ...error,
-    retryable: false,
-    hint: `${error.hint} This was a CREATE, and it must not be retried blindly: the API accepts an idempotency key but the SDK cannot send one, so a create whose response was lost would be minted twice. List the catalog with ${WORKSHOP_TOOL_NAMES.listMethods} first — if the method is there, save again with its method_id, which writes its draft.`,
-  };
+function createCaution(err: unknown, problem: Problem): string | undefined {
+  if (err instanceof MethodFileTransferError) return undefined;
+  const status = problem.params?.status;
+  const accepted =
+    problem.code === "client.response_unreadable" &&
+    typeof status === "number" &&
+    status >= 200 &&
+    status < 300;
+  if (problem.retry === "no" && !accepted) return undefined;
+  return `This was a CREATE, and it must not be retried blindly: the API accepts an idempotency key but the SDK cannot send one, so a create whose response was lost would be minted twice. List the catalog with ${WORKSHOP_TOOL_NAMES.listMethods} first — if the method is there, save again with its method_id, which writes its draft.`;
 }
 
 /**
@@ -1405,7 +1385,7 @@ function saveSummary(
   }
   if (result.rename_error !== undefined) {
     lines.push(
-      `The rename to the requested name FAILED, so the method keeps its name: ${result.rename_error.message} The draft itself was saved; save again with the same name to retry the rename alone.`,
+      `The rename to the requested name FAILED, so the method keeps its name: ${problemSentence(result.rename_error)} (${result.rename_error.code}). The draft itself was saved; save again with the same name to retry the rename alone.`,
     );
   }
   if (notes.staleName !== undefined) {
@@ -1425,9 +1405,9 @@ function saveSummary(
 
   if (result.validation_refused !== undefined) {
     const refused = result.validation_refused;
-    const said = asOneLine(refused.message);
+    const said = problemSentence(refused);
     lines.push(
-      `The method was NOT validated, so whether it is valid is unknown: this deployment refuses to load it for the Python it holds — ${said}${/[.!?]$/.test(said) ? "" : "."} It was saved anyway, as a draft may be, and a publish validates it before publishing anything.${refused.hint === undefined ? "" : ` ${refused.hint}`}`,
+      `The method was NOT validated, so whether it is valid is unknown: this deployment refuses to load it for the Python it holds — ${said}${/[.!?]$/.test(said) ? "" : "."} It was saved anyway, as a draft may be, and a publish validates it before publishing anything. ${refused.next_step.detail}`,
     );
   } else if (!result.is_valid) {
     lines.push(
@@ -1475,8 +1455,26 @@ function saveSummary(
   return lines.join("\n");
 }
 
-function saveError(summary: string, errors: ToolError[]): SaveMethodResult {
-  return { structuredContent: { status: "error", errors }, summary };
+/**
+ * A save that produced no result: its one problem, and the problem's summary
+ * with, when given, a closing paragraph of what this tool knows beside it.
+ */
+function saveError(
+  context: { apiNotes?: ApiNotes },
+  problem: Problem,
+  closing?: string,
+): SaveMethodResult {
+  const summary = problemSummary(problem, context.apiNotes);
+  return {
+    structuredContent: { status: "error", problem },
+    summary: closing === undefined ? summary : `${summary}\n\n${closing}`,
+  };
+}
+
+/** A problem's own sentence, on one line: this server's `message` when it wrote one, else the `detail`. */
+function problemSentence(problem: Problem): string {
+  const message = problem.message;
+  return asOneLine(typeof message === "string" && message !== "" ? message : problem.detail);
 }
 
 // ── mthds_get_method ────────────────────────────────────────────────
@@ -1502,14 +1500,15 @@ export async function getMthdsMethod(
   const parsed = mthdsGetMethodInputObjectSchema.safeParse(input);
   if (!parsed.success) {
     return getError(
-      "The method was not fetched: request input is invalid.",
-      parsed.error.issues.map((issue) => ({
-        class: "input_domain" as const,
-        ...(issue.path.length === 0 ? {} : { location: issue.path.join(".") }),
-        message: issue.message,
-        hint: "Pass method_id as the catalog returned it; add output_dir to write the method's tree to disk.",
-        retryable: false,
-      })),
+      context,
+      faultsProblem(
+        parsed.error.issues.map((issue) =>
+          issueProblem(
+            issue,
+            "Pass method_id as the catalog returned it; add output_dir to write the method's tree to disk.",
+          ),
+        ),
+      ),
     );
   }
 
@@ -1518,9 +1517,9 @@ export async function getMthdsMethod(
   // carries the name, the draft's token the link records, the draft's tree,
   // and the latest version's number.
   const selector = readMethodSelector(parsed.data.method_id);
-  const malformed = malformedSuffixError(parsed.data.method_id, selector);
+  const malformed = malformedSuffixProblem(parsed.data.method_id, selector);
   if (malformed !== undefined) {
-    return getError("The method was not fetched: request input is invalid.", [malformed]);
+    return getError(context, malformed);
   }
   const methodId = selector.methodId;
   const wanted: number | "draft" = selector.form === "version" ? selector.version : "draft";
@@ -1565,12 +1564,7 @@ export async function getMthdsMethod(
       version = read.value;
     }
   } catch (err) {
-    const error = classifyError(err, {
-      ...GET_ERROR_OPTIONS,
-      auth: context.authError,
-      baseUrlSource: context.baseUrlSource,
-    });
-    return getError(summaryForToolError(error, GET_ERROR_SUMMARIES), [error]);
+    return getError(context, problemOf(err));
   }
 
   const content: PulledContent = {
@@ -1581,7 +1575,7 @@ export async function getMthdsMethod(
   if (content.files.length === 0) {
     // The row exists but its draft holds no file — a produced failure, and a
     // different answer from "no such method", which is a 404 at the same field.
-    return emptyTreeError(content.version);
+    return emptyTreeError(context, content.version);
   }
   const apiHost = apiHostOf(context.baseUrl);
 
@@ -1592,8 +1586,11 @@ export async function getMthdsMethod(
 }
 
 /**
- * A version read the platform refused. A version the method never published
- * says what the method does have, from the method read beside it.
+ * A version read the platform refused, its problem as the SDK read it. The
+ * catalog answers `pipelex.catalog.not_found` alike for a method it does not
+ * hold and for a version the method never published; the method read beside
+ * this one succeeded, so here it is the version, and the problem's `message`
+ * says what the method does have.
  */
 function versionReadError(
   err: unknown,
@@ -1601,13 +1598,9 @@ function versionReadError(
   wanted: number,
   context: CatalogWriteContext,
 ): GetMethodResult {
-  const error = classifyError(err, {
-    ...GET_ERROR_OPTIONS,
-    auth: context.authError,
-    baseUrlSource: context.baseUrlSource,
-  });
-  if (!(err instanceof ApiResponseError) || err.code !== "method_version_not_found") {
-    return getError(summaryForToolError(error, GET_ERROR_SUMMARIES), [error]);
+  const problem = problemOf(err);
+  if (problem.code !== NOT_FOUND_CODE) {
+    return getError(context, problem);
   }
   const latest = latestVersionOf(stored);
   const has =
@@ -1616,13 +1609,10 @@ function versionReadError(
       : typeof latest === "number"
         ? `its latest published version is ${latest}`
         : "it has no such version";
-  return getError(GET_ERROR_SUMMARIES.input_domain, [
-    {
-      ...error,
-      message: `\`${stored.method_id}\` has no version ${wanted}: ${has}.`,
-      hint: `Pull its draft with method_id "${stored.method_id}"${typeof latest === "number" ? `, or a version from 1 to ${latest} as "${stored.method_id}@<n>"` : ""}.`,
-    },
-  ]);
+  return getError(context, {
+    ...problem,
+    message: `\`${stored.method_id}\` has no version ${wanted}: ${has}. Pull its draft with method_id "${stored.method_id}"${typeof latest === "number" ? `, or a version from 1 to ${latest} as "${stored.method_id}@<n>"` : ""}.`,
+  });
 }
 
 /** "The draft of **Name**" or "Version 3 of **Name**", to open a summary. */
@@ -1735,15 +1725,7 @@ async function inlineResult(
         : { path: file.path, bytes: file.size, content: text };
     });
   } catch (err) {
-    const classified = classifyError(err, {
-      ...GET_ERROR_OPTIONS,
-      auth: context.authError,
-      baseUrlSource: context.baseUrlSource,
-    });
-    // This arm writes nowhere the caller named, so a download failure has no
-    // field to point at.
-    const { location: _unused, ...error } = classified;
-    return getError(summaryForToolError(error, GET_ERROR_SUMMARIES), [error]);
+    return getError(context, problemOf(err));
   }
 
   const structuredContent: GetMethodSuccess = {
@@ -1793,20 +1775,18 @@ async function writtenResult(
   linkBefore: LinkRead | undefined,
 ): Promise<GetMethodResult> {
   if (context.saveRoot === undefined) {
-    return getError("The method was not written: this deployment cannot write files.", [
-      {
-        class: "config",
-        location: "deployment",
-        message: "This deployment has no working directory to write into.",
-        hint: "Use the local workshop server (npx @pipelex/mcp), which writes under the directory the host started it in.",
-        retryable: false,
-      },
-    ]);
+    return getError(
+      context,
+      noWorkingDirectory(
+        "This deployment has no working directory to write into, so the method was not written.",
+        "Use the local workshop server (npx @pipelex/mcp), which writes under the directory the host started it in.",
+      ),
+    );
   }
 
   const target = await resolveSaveDir(context.saveRoot, input.output_dir, "output_dir");
   if (!target.ok) {
-    return getError("The method was not written: output_dir cannot be used.", [target.error]);
+    return getError(context, target.problem);
   }
   const { root, dir } = target;
 
@@ -1814,12 +1794,15 @@ async function writtenResult(
   // unlinked, so the pull would judge it as somebody else's folder and write
   // a second link beside the old one: refused before anything is planned.
   if (await holdsLegacyLink(dir)) {
-    return getError("The method was not written: output_dir holds an old link file.", [
-      refuseOutputDir(
-        `${input.output_dir} holds ${LEGACY_LINK_FILE_NAME}, the link file an earlier release of the workshop wrote, which it now reads only at ${LINK_FILE_NAME}: pulled into as it is, the folder would read as unlinked.`,
+    return getError(
+      context,
+      argumentProblem(
+        "output_dir",
+        "legacy_link_file",
+        `${input.output_dir} holds ${LEGACY_LINK_FILE_NAME}, the link file an earlier release of the workshop wrote, which it now reads only at ${LINK_FILE_NAME}: pulled into as it is, the folder would read as unlinked. Nothing was written.`,
         `Move it into place from inside the folder, then pull again: ${LEGACY_LINK_MOVE} (plain mv outside git), and commit the move.`,
       ),
-    ]);
+    );
   }
 
   // ── the write set, computed ONCE ──────────────────────────────────
@@ -1832,11 +1815,11 @@ async function writtenResult(
   for (const file of content.files) {
     const absolute = containedPath(dir, file.path);
     if (absolute === undefined) {
-      return storedNameRefusal(file.path, "it leaves the output folder");
+      return storedNameRefusal(context, file.path, "it leaves the output folder");
     }
     const refused = storedNameReason(file.path);
     if (refused !== undefined) {
-      return storedNameRefusal(file.path, refused);
+      return storedNameRefusal(context, file.path, refused);
     }
     // Two stored paths can land on ONE file on a case-insensitive filesystem.
     // Written in sequence one replaces the other, both are reported as
@@ -1847,6 +1830,7 @@ async function writtenResult(
     const taken = claimed.get(key);
     if (taken !== undefined) {
       return storedNameRefusal(
+        context,
         file.path,
         `it lands on the same file as \`${taken}\`, so one would silently replace the other`,
       );
@@ -1862,7 +1846,7 @@ async function writtenResult(
   // turn, where the entry inspected is the one written.
   const foreign = await foreignDestinationRefusal(dir, destinations);
   if (foreign !== undefined) {
-    return foreign;
+    return getError(context, foreign);
   }
 
   // A version whose tree is exactly the draft's, path for path and hash for
@@ -1877,7 +1861,10 @@ async function writtenResult(
   // again inside the turn when it holds no link, and after the landing.
   const limits = await methodTreeLimitsOf(context, () => client);
   const othersHere = () => unmanagedFiles(dir, limits, content.files);
+  // output_dir as the caller wrote it, which the problems name.
+  const shown = input.output_dir ?? (path.relative(root, dir) || ".");
   const plan = await planPull(
+    shown,
     stored,
     destinations,
     observed,
@@ -1894,9 +1881,7 @@ async function writtenResult(
     othersHere,
   );
   if (plan.kind === "refuse") {
-    return getError("The method was not written: output_dir holds work this pull would lose.", [
-      plan.error,
-    ]);
+    return getError(context, plan.problem);
   }
 
   // The tree is downloaded into a private staging directory BEFORE the
@@ -1909,6 +1894,7 @@ async function writtenResult(
         landPull({
           root,
           dir,
+          shown,
           link,
           plan,
           destinations,
@@ -1942,27 +1928,20 @@ async function writtenResult(
         : await land(undefined);
   } catch (err) {
     if (err instanceof LinkLockError) {
-      return getError("The method was not written: the workshop's write lock could not be taken.", [
-        {
-          class: "runtime",
-          location: "output_dir",
-          message: `${err.message}, so nothing was written.`,
-          hint: err.busy
-            ? "Pull again in a moment: another workshop process on this machine is saving or pulling."
-            : "Fix what the message names, then pull again: no pull writes without that lock.",
-          retryable: err.busy,
-        },
-      ]);
+      return getError(
+        context,
+        lockProblem(err, {
+          folder: shown,
+          field: "output_dir",
+          consequence: "so nothing was written.",
+          again: "Pull again",
+        }),
+      );
     }
-    const error = classifyError(err, {
-      ...GET_ERROR_OPTIONS,
-      auth: context.authError,
-      baseUrlSource: context.baseUrlSource,
-    });
-    return getError(summaryForToolError(error, GET_ERROR_SUMMARIES), [error]);
+    return getError(context, problemOf(err));
   }
   if (!landed.ok) {
-    return landed.result;
+    return getError(context, landed.problem);
   }
   const { provisional, final } = landed;
   const linkFile = final.report;
@@ -2053,7 +2032,7 @@ interface Destination {
 
 /** What a pull's landing did, or the refusal it made before writing a file. */
 type PullLanding =
-  | { ok: false; result: GetMethodResult }
+  | { ok: false; problem: Problem }
   | { ok: true; provisional?: LinkReplacement; final: LinkReplacement };
 
 /**
@@ -2072,6 +2051,8 @@ type PullLanding =
 async function landPull(landing: {
   root: string;
   dir: string;
+  /** output_dir as the caller wrote it, for the problems. */
+  shown: string;
   link: LinkRead;
   plan: Exclude<PullPlan, { kind: "refuse" }>;
   destinations: readonly Destination[];
@@ -2088,6 +2069,7 @@ async function landPull(landing: {
   const {
     root,
     dir,
+    shown,
     link,
     plan,
     destinations,
@@ -2102,15 +2084,15 @@ async function landPull(landing: {
   const linkFields = { apiHost, methodId: stored.method_id, name: stored.name };
   const moved = (report: LinkFileReport): PullLanding => ({
     ok: false,
-    result: getError("The method was not written: its folder changed while this pull ran.", [
+    problem: workshopProblem(
+      "client.workspace_busy",
+      { path: report.path },
       {
-        class: "runtime",
-        location: "output_dir",
+        field: "output_dir",
         message: `\`${report.path}\` changed after this pull read it — ${report.reason ?? "another save or pull rewrote it"} — so what this pull planned to write is about a folder that is gone. Nothing was written.`,
-        hint: "Pull again: the next pull plans against the folder as it stands now.",
-        retryable: true,
+        remedy: "Pull again: the next pull plans against the folder as it stands now.",
       },
-    ]),
+    ),
   });
 
   // `containedPath` is lexical — it joins and compares strings. A destination
@@ -2123,7 +2105,7 @@ async function landPull(landing: {
   // vouch for a file that is not an ordinary file of this folder.
   const foreign = await foreignDestinationRefusal(dir, destinations);
   if (foreign !== undefined) {
-    return { ok: false, result: foreign };
+    return { ok: false, problem: foreign };
   }
 
   // A pull whose destinations already match writes NOTHING and refreshes the
@@ -2139,15 +2121,16 @@ async function landPull(landing: {
     if (edited.length > 0) {
       return {
         ok: false,
-        result: getError("The method was not written: its files changed while this pull ran.", [
+        problem: workshopProblem(
+          "client.workspace_busy",
+          { path: shown },
           {
-            class: "runtime",
-            location: "output_dir",
+            field: "output_dir",
             message: `${edited.map((name) => `\`${name}\``).join(", ")} changed after this pull read ${edited.length === 1 ? "it" : "them"}, so the plan to write over ${edited.length === 1 ? "it" : "them"} is about bytes that are gone. Nothing was written.`,
-            hint: "Pull again once the edit is done: the next pull compares the files as they stand.",
-            retryable: true,
+            remedy:
+              "Pull again once the edit is done: the next pull compares the files as they stand.",
           },
-        ]),
+        ),
       };
     }
 
@@ -2157,15 +2140,9 @@ async function landPull(landing: {
     // as the method's own. So its tree is listed again here, where nothing of
     // this process writes it, and the planned refusal is made on what it holds now.
     if (link.kind === "none") {
-      const refusal = unlinkedOthersRefusal(await othersHere());
+      const refusal = unlinkedOthersRefusal(shown, await othersHere());
       if (refusal !== undefined) {
-        return {
-          ok: false,
-          result: getError(
-            "The method was not written: output_dir holds work this pull would lose.",
-            [refusal],
-          ),
-        };
+        return { ok: false, problem: refusal };
       }
     }
 
@@ -2213,15 +2190,16 @@ async function landPull(landing: {
           : `so the folder could not be marked as holding version ${content.version}, and its files would have read as the draft's to a later save`;
       return {
         ok: false,
-        result: getError("The method was not written: its link file could not be updated.", [
+        problem: workshopProblem(
+          "client.write_failed",
+          { path: report.path, reason: "link_unwritable" },
           {
-            class: "runtime",
-            location: "output_dir",
+            field: "output_dir",
             message: `\`${report.path}\` could not be written (${report.reason ?? "unknown reason"}), ${consequence}. Nothing was written.`,
-            hint: "Check the link file's and the folder's permissions, then pull again — or pull the version into a folder of its own.",
-            retryable: false,
+            remedy:
+              "Check the link file's and the folder's permissions, then pull again — or pull the version into a folder of its own.",
           },
-        ]),
+        ),
       };
     }
     landedOn = provisional.wrote ?? link;
@@ -2234,9 +2212,7 @@ async function landPull(landing: {
         if (escaped !== undefined) {
           return {
             ok: false,
-            result: getError("The method was only partly written.", [
-              midWriteError(destination.name, escaped, written, report.written),
-            ]),
+            problem: midWriteProblem(destination.name, escaped, written, report.written),
           };
         }
       }
@@ -2249,9 +2225,7 @@ async function landPull(landing: {
       } catch (err) {
         return {
           ok: false,
-          result: getError("The method was only partly written.", [
-            midWriteError(destination.name, errorMessage(err), written, report.written),
-          ]),
+          problem: midWriteProblem(destination.name, errorMessage(err), written, report.written),
         };
       }
       written.push(destination.name);
@@ -2291,21 +2265,22 @@ async function landPull(landing: {
 async function foreignDestinationRefusal(
   dir: string,
   destinations: readonly Destination[],
-): Promise<GetMethodResult | undefined> {
+): Promise<Problem | undefined> {
   for (const destination of destinations) {
     const foreign =
       (await ancestorReason(dir, destination.absolute)) ??
       (await foreignEntryReason(destination.absolute));
     if (foreign !== undefined) {
-      return getError("The method was not written: output_dir holds an entry it may not write.", [
+      return workshopProblem(
+        "client.target_exists",
+        { path: destination.name },
         {
-          class: "input_domain",
-          location: "output_dir",
+          field: "output_dir",
           message: `\`${destination.name}\` cannot be written: ${foreign}. No files were written.`,
-          hint: "A method's files are written as ordinary files. Remove or move that entry aside, or point output_dir at a folder of its own.",
-          retryable: false,
+          remedy:
+            "A method's files are written as ordinary files. Remove or move that entry aside, or point output_dir at a folder of its own.",
         },
-      ]);
+      );
     }
   }
   return undefined;
@@ -2447,15 +2422,28 @@ function storedNameReason(name: string): string | undefined {
   return undefined;
 }
 
-function storedNameRefusal(name: string, reason: string): GetMethodResult {
-  return getError("The method was not written: a stored file path may not be written here.", [
-    {
-      class: "runtime",
-      message: `The stored method names a file this pull will not write: \`${name}\` — ${reason}.`,
-      hint: "No files were written. A method's file paths come from whoever saved it, and output_dir may hold more than this method; fix the path in the webapp editor, or pull without output_dir to read the files inline.",
-      retryable: false,
-    },
-  ]);
+/**
+ * A pull refused for a path the stored method names: the method's package,
+ * which whoever saved it fixes, located at that file of the method.
+ */
+function storedNameRefusal(
+  context: CatalogWriteContext,
+  name: string,
+  reason: string,
+): GetMethodResult {
+  return getError(
+    context,
+    workshopProblem(
+      "method.package_invalid",
+      { reason: "unsafe_file_path" },
+      {
+        file: name,
+        message: `The stored method names a file this pull will not write: \`${name}\` — ${reason}.`,
+        remedy:
+          "No files were written. A method's file paths come from whoever saved it, and output_dir may hold more than this method; fix the path in the webapp editor, or pull without output_dir to read the files inline.",
+      },
+    ),
+  );
 }
 
 /**
@@ -2474,26 +2462,29 @@ function createSubdirectory(dir: string, parent: string): Promise<string | undef
 /**
  * The mid-write failure, and the cure that actually works: the link file goes
  * down first, so the folder is this method's, marked as an interrupted pull,
- * and the retry is let through.
+ * and a call made again once the cause is fixed is let through.
  */
-function midWriteError(
+function midWriteProblem(
   name: string,
   reason: string,
   written: readonly string[],
   linked: boolean,
-): ToolError {
+): Problem {
   const landed =
     written.length === 0
       ? "No files were written."
       : `Written before the failure: ${written.map((each) => `\`${each}\``).join(", ")}.`;
-  return {
-    class: "runtime",
-    message: `Could not write ${name}: ${reason}. ${landed}`,
-    hint: linked
-      ? "The folder is linked to this method and marked as an interrupted pull, so calling again with the same output_dir resumes it once the cause is fixed. Check the folder's permissions first."
-      : "The link file could not be written either, so calling again would be refused as somebody else's work. Check the folder's permissions, then pull into an empty folder instead.",
-    retryable: linked,
-  };
+  return workshopProblem(
+    "client.write_failed",
+    { path: name, reason: "partly_written" },
+    {
+      field: "output_dir",
+      message: `Could not write ${name}: ${reason}. ${landed}`,
+      remedy: linked
+        ? "The folder is linked to this method and marked as an interrupted pull, so calling again with the same output_dir resumes it once the cause is fixed. Check the folder's permissions first."
+        : "The link file could not be written either, so calling again would be refused as somebody else's work. Check the folder's permissions, then pull into an empty folder instead.",
+    },
+  );
 }
 
 /**
@@ -2502,7 +2493,7 @@ function midWriteError(
  * no write at all, and saying so here is what keeps a pure link refresh out of
  * `writeFile`.
  */
-type PullPlan = { kind: "refuse"; error: ToolError } | { kind: "write" } | { kind: "link-only" };
+type PullPlan = { kind: "refuse"; problem: Problem } | { kind: "write" } | { kind: "link-only" };
 
 /**
  * What the catalog holds besides the content being pulled — the other places
@@ -2547,9 +2538,12 @@ interface StoredElsewhere {
  * version, or the file of the version the folder was last synced with, when
  * it brings something else.
  *
- * Every refusal is `input_domain` at `output_dir` and writes nothing at all.
+ * Every refusal is `client.target_exists` at `output_dir`, the folder holding
+ * what this pull will not write over, and writes nothing at all.
  */
 async function planPull(
+  // output_dir as the caller wrote it, for the refusals.
+  shown: string,
   stored: MethodData,
   destinations: readonly Destination[],
   observed: readonly ObservedFile[],
@@ -2562,6 +2556,7 @@ async function planPull(
 ): Promise<PullPlan> {
   if (link.kind === "unreadable") {
     return refusePull(
+      shown,
       `\`${LINK_FILE_NAME}\` is there but cannot be read: ${link.reason}.`,
       "Something already claims this folder. Fix or remove that file, or point output_dir at an empty folder.",
     );
@@ -2573,6 +2568,7 @@ async function planPull(
     const occupied = await existingDestinations(destinations);
     if (occupied.length > 0) {
       return refusePull(
+        shown,
         `it already holds ${occupied.map((name) => `\`${name}\``).join(", ")} and no ${LINK_FILE_NAME}, so it is somebody else's work.`,
         "Point output_dir at an empty or dedicated folder. A folder becomes linked by being saved from, or pulled into, by these tools.",
       );
@@ -2583,14 +2579,15 @@ async function planPull(
     // holds them: a project's own files above all with output_dir ".", and a
     // stranger's `their_bundle.mthds` beside which the pull would land and
     // then claim both bundles with one link.
-    const refusal = unlinkedOthersRefusal(await othersHere());
-    return refusal === undefined ? { kind: "write" } : { kind: "refuse", error: refusal };
+    const refusal = unlinkedOthersRefusal(shown, await othersHere());
+    return refusal === undefined ? { kind: "write" } : { kind: "refuse", problem: refusal };
   }
 
   // Compared bare: a link records the bare id, and the pull of `mt_x@3` is a
   // pull of `mt_x`.
   if (readMethodSelector(link.link.method_id).methodId !== stored.method_id) {
     return refusePull(
+      shown,
       `it is linked to a different method (\`${link.link.method_id}\` — ${link.link.name} on ${link.link.api_host}).`,
       "Point output_dir at a folder of its own. Overwriting another method's folder would silently replace the files a teammate is working on.",
     );
@@ -2621,6 +2618,7 @@ async function planPull(
       return { kind: "write" };
     }
     return refusePull(
+      shown,
       `an earlier pull of this method was interrupted here, and ${unsaved.map((name) => `\`${name}\``).join(", ")} changed after it landed.`,
       `Resuming would overwrite those bytes. Save them with ${WORKSHOP_TOOL_NAMES.saveMethod}, or move them aside, then pull again — or pass overwrite: true if the stored version wins.`,
     );
@@ -2641,6 +2639,7 @@ async function planPull(
     // differences are work nobody has saved. No flag opens this: `overwrite`
     // answers "whose change is this", and here there is no question.
     return refusePull(
+      shown,
       `it holds changes to ${unsaved.map((name) => `\`${name}\``).join(", ")} that were never saved — the draft has not moved since this folder last synced with it.`,
       `Those edits exist only here, so pulling would destroy them. Save them with ${WORKSHOP_TOOL_NAMES.saveMethod}, or move them aside, then pull again.`,
     );
@@ -2650,6 +2649,7 @@ async function planPull(
     // State only what was MEASURED: a folder the user never touched looks
     // exactly like this the moment a teammate saves.
     return refusePull(
+      shown,
       `its copy of ${unsaved.map((name) => `\`${name}\``).join(", ")} differs from the stored one, and the draft has moved since this folder last synced (draft updated_at ${stored.updated_at}, last synced ${link.link.synced_updated_at}). That is what a teammate's save looks like, and it is also what a local edit looks like.`,
       "This tool records no per-file state, so it cannot tell which of the two it is looking at. Inside a git repository `git status` answers it. Ask the user, and pass overwrite: true only if they say the stored version wins.",
     );
@@ -2702,18 +2702,23 @@ function listedNames(names: readonly string[]): string {
  * pull does not land, or cannot be listed, or `undefined` when it holds none.
  * Asked when the pull plans and again inside the landing's turn.
  */
-function unlinkedOthersRefusal(others: {
-  names: readonly string[];
-  complete: boolean;
-}): ToolError | undefined {
+function unlinkedOthersRefusal(
+  shown: string,
+  others: {
+    names: readonly string[];
+    complete: boolean;
+  },
+): Problem | undefined {
   if (!others.complete) {
     return refuseOutputDir(
+      shown,
       `it holds no ${LINK_FILE_NAME}, and what else its tree holds could not be listed (it is past the limits, or holds a file no method tree takes), so this pull cannot tell that the folder holds nothing but this method.`,
       "Pull into a fresh folder of its own: a pull links the whole folder, and the next save from it sends every file of its tree.",
     );
   }
   if (others.names.length > 0) {
     return refuseOutputDir(
+      shown,
       `it holds no ${LINK_FILE_NAME} and its tree holds files this method does not have: ${listedNames(others.names)}. A pull links the whole folder, so the next save from it would send those files as the method's own.`,
       "Pull into a fresh folder of its own, such as a new subfolder, or move those files out first.",
     );
@@ -2721,18 +2726,21 @@ function unlinkedOthersRefusal(others: {
   return undefined;
 }
 
-function refusePull(message: string, hint: string): PullPlan {
-  return { kind: "refuse", error: refuseOutputDir(message, hint) };
+function refusePull(shown: string, message: string, remedy: string): PullPlan {
+  return { kind: "refuse", problem: refuseOutputDir(shown, message, remedy) };
 }
 
-function refuseOutputDir(message: string, hint: string): ToolError {
-  return {
-    class: "input_domain",
-    location: "output_dir",
-    message: `output_dir was not written: ${message} Nothing was written.`,
-    hint,
-    retryable: false,
-  };
+/** A pull refused for what `output_dir` already holds, which it will not write over. */
+function refuseOutputDir(shown: string, message: string, remedy: string): Problem {
+  return workshopProblem(
+    "client.target_exists",
+    { path: shown },
+    {
+      field: "output_dir",
+      message: `output_dir was not written: ${message} Nothing was written.`,
+      remedy,
+    },
+  );
 }
 
 /** A destination present on disk with bytes other than the pull's; `sha256` is absent when unreadable. */
@@ -2851,23 +2859,35 @@ async function changedDestinations(
   });
 }
 
-function emptyTreeError(version: number | "draft"): GetMethodResult {
-  return getError("The method was not fetched: it holds no file yet.", [
-    {
-      class: "input_domain",
-      location: "method_id",
-      message:
-        version === "draft"
-          ? "The stored method's draft holds no file yet."
-          : `Version ${version} of the stored method holds no file.`,
-      hint: `The method exists but is empty — a different answer from an unknown id, which is a 404 at this same field. Open it in the Pipelex webapp and save into it, or save a folder into it from here with ${WORKSHOP_TOOL_NAMES.saveMethod} and this method_id.`,
-      retryable: false,
-    },
-  ]);
+/**
+ * A pull of a method that holds no file: the method's package, which whoever
+ * saves into it fixes, and a different answer from an unknown id, which is the
+ * catalog's `pipelex.catalog.not_found`.
+ */
+function emptyTreeError(context: CatalogWriteContext, version: number | "draft"): GetMethodResult {
+  return getError(
+    context,
+    workshopProblem(
+      "method.package_invalid",
+      { reason: "empty_tree" },
+      {
+        field: "method_id",
+        message:
+          version === "draft"
+            ? "The stored method's draft holds no file yet."
+            : `Version ${version} of the stored method holds no file.`,
+        remedy: `The method exists but is empty — a different answer from an unknown id, which the catalog reports as pipelex.catalog.not_found. Open it in the Pipelex webapp and save into it, or save a folder into it from here with ${WORKSHOP_TOOL_NAMES.saveMethod} and this method_id.`,
+      },
+    ),
+  );
 }
 
-function getError(summary: string, errors: ToolError[]): GetMethodResult {
-  return { structuredContent: { status: "error", errors }, summary };
+/** A pull that produced no result: its one problem, and the problem's summary. */
+function getError(context: { apiNotes?: ApiNotes }, problem: Problem): GetMethodResult {
+  return {
+    structuredContent: { status: "error", problem },
+    summary: problemSummary(problem, context.apiNotes),
+  };
 }
 
 // ── the folder's link ───────────────────────────────────────────────
@@ -2935,10 +2955,7 @@ function claimOf(at: LinkAt | undefined): DirectoryClaim | undefined {
 export function saveMethodToolResult(result: SaveMethodResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(
-      result.summary,
-      result.structuredContent.status === "error" ? result.structuredContent.errors : undefined,
-    ),
+    content: toolResultContent(result.summary),
     isError: result.structuredContent.status === "error",
   };
 }
@@ -2946,10 +2963,7 @@ export function saveMethodToolResult(result: SaveMethodResult) {
 export function getMethodToolResult(result: GetMethodResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(
-      result.summary,
-      result.structuredContent.status === "error" ? result.structuredContent.errors : undefined,
-    ),
+    content: toolResultContent(result.summary),
     isError: result.structuredContent.status === "error",
   };
 }

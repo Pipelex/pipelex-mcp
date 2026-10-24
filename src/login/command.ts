@@ -29,7 +29,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import os from "node:os";
 
-import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
+import { ApiResponseError, isProblemError } from "@pipelex/sdk";
 import type { UserProfile } from "@pipelex/sdk";
 
 import pkg from "../../package.json" with { type: "json" };
@@ -345,14 +345,25 @@ export type ApiKeyCheck =
   | { verdict: "refused"; status: number }
   | { verdict: "unchecked"; reason: string };
 
+/** The codes of an answer refusing the key the check sent: a credential missing, refused or expired. */
+const REFUSED_KEY_CODES: ReadonlySet<string> = new Set([
+  "auth.missing_credential",
+  "auth.invalid_credential",
+  "auth.credential_expired",
+]);
+
+/** The codes of a check that never had its answer: the API unreachable, or silent past the time limit. */
+const UNREACHED_CODES: ReadonlySet<string> = new Set(["client.unreachable", "client.timeout"]);
+
 /** The identity the check's request carries: the workshop's, with no host, since none drives a login. */
 const LOGIN_APP_INFO = mcpAppInfo({ mode: "workshop", version: pkg.version }, undefined);
 
 /**
- * Ask the API whose key this is, with `GET /v1/me`. Only a 401 or a 403
- * refuses the key; any other failure (a base URL the client refuses, the
- * network, another status, an answer that is not a profile) leaves it
- * unchecked, with a reason naming the API by its origin alone.
+ * Ask the API whose key this is, with `GET /v1/me`. Only an answer whose
+ * problem is a missing, refused or expired credential refuses the key; any
+ * other failure (a base URL the client refuses, the network, another problem,
+ * an answer that is not a profile) leaves it unchecked, with a reason naming
+ * the API by its origin alone.
  */
 export async function checkApiKey(
   createClient: (config: ApiConfig) => MeClient,
@@ -373,13 +384,15 @@ export async function checkApiKey(
   try {
     profile = await client.getMe();
   } catch (err) {
+    // Read by the problem's code, never the status: a refused or missing
+    // credential is the key's fault, and anything else leaves the key unchecked.
     if (err instanceof ApiResponseError) {
-      if (err.status === 401 || err.status === 403) {
+      if (REFUSED_KEY_CODES.has(err.code)) {
         return { verdict: "refused", status: err.status };
       }
-      return { verdict: "unchecked", reason: `${api} answered HTTP ${err.status}` };
+      return { verdict: "unchecked", reason: `${api} answered HTTP ${err.status} (${err.code})` };
     }
-    if (err instanceof ApiUnreachableError) {
+    if (isProblemError(err) && UNREACHED_CODES.has(err.code)) {
       return { verdict: "unchecked", reason: `${api} could not be reached` };
     }
     return { verdict: "unchecked", reason: `${api} did not answer with an account` };

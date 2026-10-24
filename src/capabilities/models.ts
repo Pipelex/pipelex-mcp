@@ -25,29 +25,24 @@
  * would otherwise take for granted.
  */
 
-import { ApiResponseError } from "@pipelex/sdk";
+import { buildProblem } from "@pipelex/sdk";
 import type { ModelCheckCategory, ModelReferenceVerdict } from "@pipelex/sdk";
 import { MODEL_CATEGORIES } from "mthds/protocol";
 import type { ModelCategory, ModelDeck, ModelInfo } from "mthds/protocol";
 import { z } from "zod";
 
 import {
+  argumentProblem,
   asOneLine,
   buildApiConfig,
-  classifyError,
   createPipelexApiClient,
-  summaryForToolError,
-  toolErrorSchema,
+  faultsProblem,
+  problemOf,
+  problemSchema,
+  problemSummary,
   toolResultContent,
 } from "./shared.js";
-import type {
-  ApiConfig,
-  AuthErrorTexture,
-  BaseUrlSourceTexture,
-  ClassifyErrorOptions,
-  ErrorSummaries,
-  ToolError,
-} from "./shared.js";
+import type { ApiConfig, ApiNotes, Problem } from "./shared.js";
 
 /**
  * The pipe type that names a reference of each category, which is how an author
@@ -178,7 +173,7 @@ export const mthdsModelsOutputSchema = z.object({
   suggestions: z.array(z.string()).optional(),
   other_kinds: z.array(z.string()).optional(),
   other_categories: z.array(deckCategoryNameSchema).optional(),
-  errors: z.array(toolErrorSchema).optional(),
+  problem: problemSchema.optional(),
 });
 
 export interface MthdsModelsInput {
@@ -246,7 +241,7 @@ export interface ModelReferenceCheck {
 
 export interface ModelsFailure {
   status: "error";
-  errors: ToolError[];
+  problem: Problem;
 }
 
 export type ModelsStructuredContent = ModelDeckListing | ModelReferenceCheck | ModelsFailure;
@@ -267,10 +262,8 @@ export interface ModelsClient {
 
 export interface ModelsContext extends ApiConfig {
   client?: ModelsClient;
-  /** Deployment-specific auth-failure texture; the `PIPELEX_API_KEY` wording by default. */
-  authError?: AuthErrorTexture;
-  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
-  baseUrlSource?: BaseUrlSourceTexture;
+  /** Where the call's key and base URL came from, closing a failed request's summary. */
+  apiNotes?: ApiNotes;
 }
 
 export function buildModelsContext(env = process.env): ModelsContext {
@@ -288,29 +281,31 @@ export async function readMthdsModels(
   const parsedInput = mthdsModelsInputObjectSchema.safeParse(input);
   if (!parsedInput.success) {
     return errorResult(
-      "Model deck was not read: request input is invalid.",
-      parsedInput.error.issues.map((issue) => ({
-        class: "input_domain",
-        ...(issue.path.length === 0 ? {} : { location: issue.path.join(".") }),
-        message: issue.message,
-        hint: `Use category as one of ${CHECK_CATEGORIES.join(", ")}, and reference as text.`,
-        retryable: false,
-      })),
+      faultsProblem(
+        parsedInput.error.issues.map((issue) =>
+          argumentProblem(
+            issue.path.length === 0 ? "arguments" : issue.path.join("."),
+            issue.code,
+            issue.message,
+            `Use category as one of ${CHECK_CATEGORIES.join(", ")}, and reference as text.`,
+          ),
+        ),
+      ),
+      context,
     );
   }
   const { category, reference } = parsedInput.data;
   if (reference !== undefined) return checkReference(reference, category, context);
   if (category === "doc_gen") {
-    return errorResult("Model deck was not read: the deck lists no doc_gen category.", [
-      {
-        class: "input_domain",
-        location: "category",
-        message:
-          "The MTHDS Protocol defines no doc_gen category, so the deck lists none; a check covers it.",
-        hint: `Pass reference to check a doc_gen reference, or list one of ${MODEL_CATEGORIES.join(", ")}.`,
-        retryable: false,
-      },
-    ]);
+    return errorResult(
+      argumentProblem(
+        "category",
+        "not_listed",
+        "The MTHDS Protocol defines no doc_gen category, so the deck lists none; a check covers it.",
+        `Pass reference to check a doc_gen reference, or list one of ${MODEL_CATEGORIES.join(", ")}.`,
+      ),
+      context,
+    );
   }
   return listDeck(category, context);
 }
@@ -322,26 +317,25 @@ async function listDeck(
   let wire: ModelDeck;
   try {
     // The route's own filter. Client construction stays inside the caught
-    // path, so a malformed base URL becomes a classified error rather than a
+    // path, so a malformed base URL becomes the SDK's problem rather than a
     // rejected handler.
     wire = await modelsClient(context).models(category);
   } catch (err) {
-    const error = classifyError(err, listingErrorOptions(context, err));
-    return errorResult(summaryForToolError(error, LISTING_ERROR_SUMMARIES), [error]);
+    // The API's own problem, relayed: a category an older runner does not
+    // know, a key acting for no organization, a refused key.
+    return errorResult(problemOf(err), context);
   }
 
   let deck: Map<DeckCategoryName, DeckCategory>;
   try {
     deck = projectDeck(wire);
   } catch (err) {
-    return errorResult("Model deck produced no answer: the API returned a malformed deck.", [
-      {
-        class: "runtime",
-        message: err instanceof Error ? err.message : "The Pipelex API returned a malformed deck.",
-        hint: "The API responded, but its model deck violated the protocol's ModelDeck shape; inspect the hosted API.",
-        retryable: false,
-      },
-    ]);
+    return errorResult(
+      unusableAnswer(
+        err instanceof Error ? err.message : "The Pipelex API returned a malformed deck.",
+      ),
+      context,
+    );
   }
 
   const listing: ModelDeckListing = {
@@ -363,11 +357,9 @@ async function checkReference(
     // it and refuses one it cannot read, and its rule is the only one.
     wire = await modelsClient(context).checkModelReference(reference, category);
   } catch (err) {
-    const refusal = checkRefusalOf(err);
-    const error = classifyError(err, checkErrorOptions(context, err, refusal));
-    return errorResult(refusal?.headline ?? summaryForToolError(error, CHECK_ERROR_SUMMARIES), [
-      error,
-    ]);
+    // The runner's own problem, relayed: a reference it cannot read, a
+    // category older than its protocol, a request it refused, each by its code.
+    return errorResult(problemOf(err), context);
   }
 
   const parsed = wireVerdictSchema.safeParse(wire);
@@ -375,15 +367,10 @@ async function checkReference(
     const issue = parsed.error.issues[0];
     const at = issue === undefined || issue.path.length === 0 ? "" : ` at ${issue.path.join(".")}`;
     return errorResult(
-      "Model reference check produced no answer: the API returned a malformed verdict.",
-      [
-        {
-          class: "runtime",
-          message: `The model reference verdict is malformed${at}: ${issue?.message ?? "it is not an object"}.`,
-          hint: "The API responded, but its verdict violated the shape of GET /v1/models/check; inspect the hosted API.",
-          retryable: false,
-        },
-      ],
+      unusableAnswer(
+        `The model reference verdict is malformed${at}: ${issue?.message ?? "it is not an object"}.`,
+      ),
+      context,
     );
   }
 
@@ -730,145 +717,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 // ── failures ──
 
 /**
- * The listing's 400/422 arm is picked by status, as the upload grant's is,
- * because the two refusals come from two layers. A 422 is the runner's, and its
- * only one on this route is a `type` it does not know, which only a listing with
- * a category sends. This tool declares the protocol's categories, so a runner
- * refuses one only when it implements an older protocol than the one that
- * defined it, as a runner before protocol 0.7.0 refuses `judgment`; the hint
- * says so rather than offering the refused value back. A 400 is the platform's
- * missing active-organization refusal: the route takes a user credential alone
- * today and never answers it, but the refusal is the platform's on every
- * organization-scoped route, and it would arrive with a category or without
- * one, so the category must not take the blame for it.
+ * An answer the API gave that breaks the route's contract, a deck or a verdict
+ * this tool cannot read: `client.response_unreadable`, carrying what was wrong.
+ * The SDK handed it back as a success, so it came on a `2xx`.
  */
-function listingErrorOptions(context: ModelsContext, err: unknown): ClassifyErrorOptions {
-  return {
-    route: "/v1/models",
-    badRequest: isOrglessRefusal(err)
-      ? orglessTexture(context)
-      : { location: "category", hint: OLDER_PROTOCOL_HINT },
-    auth: context.authError,
-    baseUrlSource: context.baseUrlSource,
-  };
-}
-
-const OLDER_PROTOCOL_HINT =
-  "The runner does not know this category, which happens when it implements an older MTHDS protocol than the one that defined it. Omit category to cover every category it serves.";
-
-/** A typed refusal of the check route: where it points, what to do, and its headline. */
-interface CheckRefusal {
-  location: string;
-  hint: string;
-  headline: string;
+function unusableAnswer(message: string): Problem {
+  return buildProblem("client.response_unreadable", { status: 200 }, { extra: { message } });
 }
 
 /**
- * The check route's two `422`s that name the caller's argument, by the
- * runner's `error_type`. A reference the runner cannot read (blank, a sigil or
- * a namespace with nothing after it, or past its length limit) is the
- * `reference`'s fault, and its message says which; an unknown `type` is the
- * category's. This tool sends only the protocol's categories and `doc_gen`,
- * which the route has taken since it was first served, so the refusal means a
- * runner older than a protocol category.
+ * A no-verdict result: the problem, and its Markdown summary, closed by the
+ * notes on the call's key and base URL when the fix may be one of them.
  */
-const CHECK_REFUSALS: ReadonlyMap<string, CheckRefusal> = new Map([
-  [
-    "InvalidModelReference",
-    {
-      location: "reference",
-      hint: "Write the reference as a pipe's model field does — $preset, @alias, ~waterfall or a bare handle, with a name after any sigil or prefix — or omit reference to list the deck.",
-      headline: "Model reference was not checked: the runner cannot read it as a reference.",
-    },
-  ],
-  [
-    "InvalidModelCategory",
-    {
-      location: "category",
-      hint: OLDER_PROTOCOL_HINT,
-      headline: "Model reference was not checked: the runner does not know the category.",
-    },
-  ],
-]);
-
-function checkRefusalOf(err: unknown): CheckRefusal | undefined {
-  return err instanceof ApiResponseError && err.status === 422 && err.errorType !== undefined
-    ? CHECK_REFUSALS.get(err.errorType)
-    : undefined;
-}
-
-/**
- * The check's 400/422 arm, by status and then by `error_type`. A 400 is the
- * platform's missing active organization, as on the listing. A 422 that names
- * the reference or the category takes that argument's texture; any other 422 is
- * about a request this tool built itself, a parameter missing or repeated
- * (`ValidationError`), which no argument changes, so it is `config`: the
- * runner serves another version of the route than this tool speaks.
- */
-function checkErrorOptions(
-  context: ModelsContext,
-  err: unknown,
-  refusal: CheckRefusal | undefined,
-): ClassifyErrorOptions {
-  const badRequest: ClassifyErrorOptions["badRequest"] = isOrglessRefusal(err)
-    ? orglessTexture(context)
-    : refusal !== undefined
-      ? { location: refusal.location, hint: refusal.hint }
-      : {
-          class: "config",
-          hint: "The runner refused the check request this tool built, which happens when it serves another version of /v1/models/check; the message says what it refused.",
-        };
+function errorResult(problem: Problem, context: ModelsContext): ModelsResult {
   return {
-    route: "/v1/models/check",
-    badRequest,
-    auth: context.authError,
-    baseUrlSource: context.baseUrlSource,
+    structuredContent: { status: "error", problem },
+    summary: problemSummary(problem, context.apiNotes),
   };
-}
-
-function isOrglessRefusal(err: unknown): boolean {
-  return err instanceof ApiResponseError && err.status === 400;
-}
-
-function orglessTexture(context: ModelsContext): NonNullable<ClassifyErrorOptions["badRequest"]> {
-  return {
-    class: "config",
-    location: context.authError?.location ?? "PIPELEX_API_KEY",
-    hint: "The model deck needs an active organization context. Use a platform key minted for the intended organization, then retry.",
-  };
-}
-
-const LISTING_ERROR_SUMMARIES: ErrorSummaries = {
-  config: "Model deck could not be read: the Pipelex API or its access is misconfigured.",
-  input_domain: "Model deck was not read: the Pipelex API rejected the request.",
-  runtime: "Model deck could not be read: the Pipelex API returned an error.",
-  paywall:
-    "Model deck could not be read: the organization's Pipelex plan does not cover this call.",
-  auth: "Model deck could not be read: the Pipelex API key is missing or was refused.",
-  role: "Model deck could not be read: your role in this organization does not allow this.",
-};
-
-const CHECK_ERROR_SUMMARIES: ErrorSummaries = {
-  config: "Model reference could not be checked: the Pipelex API or its access is misconfigured.",
-  input_domain: "Model reference was not checked: the Pipelex API rejected the request.",
-  runtime: "Model reference could not be checked: the Pipelex API returned an error.",
-  paywall:
-    "Model reference could not be checked: the organization's Pipelex plan does not cover this call.",
-  auth: "Model reference could not be checked: the Pipelex API key is missing or was refused.",
-  role: "Model reference could not be checked: your role in this organization does not allow this.",
-};
-
-function errorResult(summary: string, errors: ToolError[]): ModelsResult {
-  return { structuredContent: { status: "error", errors }, summary };
 }
 
 export function modelsToolResult(result: ModelsResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(
-      result.summary,
-      result.structuredContent.status === "error" ? result.structuredContent.errors : undefined,
-    ),
+    content: toolResultContent(result.summary),
     isError: result.structuredContent.status === "error",
   };
 }

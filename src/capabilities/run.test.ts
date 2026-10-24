@@ -11,7 +11,7 @@ import {
   MissingMainStuffError,
   RequestArgumentError,
   RunLifecycleUnavailableError,
-  runMayHaveStartedOf,
+  buildProblem,
 } from "@pipelex/sdk";
 import type {
   GetRunResultOptions,
@@ -19,6 +19,7 @@ import type {
   MethodProvenance,
   OutputForm,
   PipeIOContracts,
+  Problem,
   RunProgress,
   RunRead,
   RunResultArtifact,
@@ -33,13 +34,14 @@ import type {
 
 import {
   boundMainStuff,
-  classifyStartError,
   ELLIPSIS_MARKER,
   FAILED_RUN_READ_TIMEOUT_MS,
-  failureMessageOf,
   getMthdsRunResults,
   getMthdsRunStatus,
   MAIN_STUFF_CAP,
+  mthdsRunOutputSchema,
+  mthdsRunResultsOutputSchema,
+  mthdsRunStatusOutputSchema,
   PROGRESS_READ_TIMEOUT_MS,
   projectRunUsage,
   projectUsageByPipe,
@@ -47,10 +49,8 @@ import {
   readRunProgress,
   resultsResult,
   RUN_RESULTS_ARTIFACTS,
-  RUN_RESULTS_ERROR_OPTIONS,
-  RUN_START_ERROR_OPTIONS,
-  RUN_STATUS_ERROR_OPTIONS,
   runResultsToolResult,
+  runStatusToolResult,
   runToolResult,
   startMthdsRun,
   startResult,
@@ -60,9 +60,9 @@ import {
 import type { FailedRunState, RunContext } from "./run.js";
 import { localMethodFileResolver } from "../files.js";
 import {
-  CALLER_FACING_TIMEOUT_REPORT,
+  OPERATOR_VIEW_LLM_COMPLETION_PROBLEM,
   RECORDED_FAILED_RUNS,
-  STRICT_LLM_COMPLETION_REPORT,
+  TIMED_OUT_RUN_PROBLEM,
   relayingArmOf,
 } from "./failed-run-fixtures.js";
 import { MAX_PROGRESS_INVOCATIONS } from "./run-progress.js";
@@ -80,10 +80,10 @@ import {
   noteMethodVersionsSupported,
 } from "./method-versions.js";
 import {
-  classifyError,
   createPipelexApiClient,
   DEFAULT_API_URL,
   MAX_IMAGE_CANDIDATE_ENTRIES,
+  problemSummary,
 } from "./shared.js";
 import type { MethodTreeToSend } from "./shared.js";
 import { comparableRequest, contentsOf, fakeMethodResolver } from "./method-tree-fixtures.js";
@@ -105,6 +105,69 @@ function runRead(overrides: Partial<RunRead> = {}): RunRead {
     degraded: false,
     ...overrides,
   };
+}
+
+/**
+ * What `@pipelex/sdk` raises when the API answers `route` with `problem`: an
+ * `ApiResponseError` built as the client builds it, which reads the problem
+ * document from the answer's body, so the problem is the one the SDK reads.
+ */
+function answeredWith(route: string, problem: Problem): ApiResponseError {
+  const status = problem.status ?? 500;
+  return new ApiResponseError(
+    `HTTP ${status}`,
+    `${DEFAULT_API_URL}${route}`,
+    status,
+    "",
+    JSON.stringify(problem),
+  );
+}
+
+/** A Pipelex code's problem as the hosted API answers it, written out: `buildProblem` builds core codes alone. */
+function pipelexProblem(
+  code: string,
+  members: {
+    title: string;
+    status: number;
+    detail: string;
+    domain: string;
+    retry: string;
+    next_step: { kind: string; detail: string };
+    params?: Record<string, unknown>;
+  },
+): Problem {
+  return { type: `https://docs.pipelex.com/errors/${code}`, code, ...members };
+}
+
+/** Where the workshop says the call's key and base URL came from, as `src/credentials.ts` sets them. */
+const API_NOTES = {
+  apiKey: "The API key in use is the one saved by the last login, in ~/.pipelex/.env.",
+  baseUrl: "The base URL in use is PIPELEX_BASE_URL from this host's environment.",
+};
+
+/** The hosted API's refusal of a key it does not know, on `route`. */
+function refusedKey(route: string): ApiResponseError {
+  return answeredWith(route, buildProblem("auth.invalid_credential", {}, { status: 401 }));
+}
+
+/** The hosted API's refusal of a call for an organization with no credit left, on `route`. */
+function outOfCredit(route: string): ApiResponseError {
+  return answeredWith(
+    route,
+    pipelexProblem("pipelex.billing.credit_exhausted", {
+      title: "The organization is out of credit",
+      status: 402,
+      detail: "The organization has no credit left, so the operation was refused.",
+      domain: "account",
+      retry: "no",
+      next_step: {
+        kind: "check_account",
+        detail:
+          "Add credit to the organization, or move it to a plan that includes more, then try again.",
+      },
+      params: {},
+    }),
+  );
 }
 
 /**
@@ -135,11 +198,11 @@ const INPUT_FORM: InputForm = { [FIXTURE_PIPE_REF]: { fields: [] } };
 
 describe("validateRunRequest", () => {
   it("rejects a request naming no method", () => {
-    const errors = validateRunRequest({});
+    const faults = validateRunRequest({});
 
-    expect(errors).toHaveLength(1);
-    expect(errors[0]?.class).toBe("input_domain");
-    expect(errors[0]?.location).toBe("files");
+    expect(faults).toHaveLength(1);
+    expect(faults[0]).toMatchObject({ code: "client.argument_invalid", domain: "input" });
+    expect(faults[0]?.location?.field).toBe("files");
   });
 
   it("accepts a method_id-only request", () => {
@@ -147,226 +210,209 @@ describe("validateRunRequest", () => {
   });
 
   it("rejects a blank method_id at method_id", () => {
-    const errors = validateRunRequest({ method_id: "  " });
+    const faults = validateRunRequest({ method_id: "  " });
 
-    expect(errors).toHaveLength(1);
-    expect(errors[0]?.class).toBe("input_domain");
-    expect(errors[0]?.location).toBe("method_id");
+    expect(faults).toHaveLength(1);
+    expect(faults[0]?.domain).toBe("input");
+    expect(faults[0]?.location?.field).toBe("method_id");
   });
 
   it("rejects a blank pipe_code", () => {
-    const errors = validateRunRequest({ tree: A_TREE, pipe_code: "  " });
+    const faults = validateRunRequest({ tree: A_TREE, pipe_code: "  " });
 
-    expect(errors.map((error) => error.location)).toEqual(["pipe_code"]);
-    expect(errors[0]?.class).toBe("input_domain");
+    expect(faults.map((fault) => fault.location?.field)).toEqual(["pipe_code"]);
+    expect(faults[0]).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      retry: "no",
+      params: { argument: "pipe_code", reason: "empty" },
+    });
+    expect(faults[0]?.message).toContain("pipe_code must not be empty when supplied.");
   });
 
   it("accepts an omitted pipe_code", () => {
-    const errors = validateRunRequest({ tree: A_TREE });
+    const faults = validateRunRequest({ tree: A_TREE });
 
-    expect(errors).toEqual([]);
+    expect(faults).toEqual([]);
   });
 });
 
-describe("run-route error classification", () => {
-  it("classifies a 404 on the run routes as an unknown run id (input_domain)", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 404",
-        `${DEFAULT_API_URL}/v1/runs/${RUN_ID}/status`,
-        404,
-        "Not Found",
-        "{}",
-        "not_found",
-        "Run not found",
-        undefined, // validationErrors
-        undefined, // code
-      ),
-      RUN_STATUS_ERROR_OPTIONS,
+describe("the run routes' problems, relayed as the API answered them", () => {
+  it("relays an unknown run id as run.not_found, alike on every run-id route", async () => {
+    const notFound = (route: string) =>
+      answeredWith(
+        `/v1/runs/${RUN_ID}/${route}`,
+        buildProblem("run.not_found", { pipeline_run_id: RUN_ID }, { status: 404 }),
+      );
+    const status = await getMthdsRunStatus(
+      { run_id: RUN_ID },
+      contextWith({ getRunStatus: () => Promise.reject(notFound("status")) }),
+    );
+    const results = await getMthdsRunResults(
+      { run_id: RUN_ID },
+      contextWith({ getRunResult: () => Promise.reject(notFound("results")) }),
     );
 
-    expect(error.class).toBe("input_domain");
-    expect(error.location).toBe("run_id");
-    expect(error.message).toBe("Run not found");
-  });
-
-  it("says an unknown run id may be another organization's, as after a login, on every run-id route", () => {
-    for (const [route, options] of [
-      ["status", RUN_STATUS_ERROR_OPTIONS],
-      ["results", RUN_RESULTS_ERROR_OPTIONS],
-    ] as const) {
-      const error = classifyError(
-        new ApiResponseError(
-          "HTTP 404",
-          `${DEFAULT_API_URL}/v1/runs/${RUN_ID}/${route}`,
-          404,
-          "Not Found",
-          "{}",
-          "not_found",
-          "Run not found",
-          undefined, // validationErrors
-          undefined, // code
-        ),
-        options,
-      );
-
-      expect(error.hint, route).toContain("PIPELEX_BASE_URL points at the deployment");
-      expect(error.hint, route).toContain(
-        "the API key in use belongs to the organization that started it",
-      );
-      expect(error.hint, route).toContain("after a login");
+    for (const result of [status, results]) {
+      expect(result.structuredContent.status).toBe("error");
+      expect(result.structuredContent.problem).toMatchObject({
+        code: "run.not_found",
+        domain: "input",
+        retry: "no",
+        status: 404,
+        params: { pipeline_run_id: RUN_ID },
+        next_step: { kind: "change_input" },
+      });
+      expect(result.summary.startsWith("## No such run")).toBe(true);
     }
+    expect(status.structuredContent.problem).toEqual(results.structuredContent.problem);
   });
 
-  it("keeps the missing-route 404 arm (config) on the start route", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 404",
-        `${DEFAULT_API_URL}/v1/start`,
-        404,
-        "Not Found",
-        "{}",
-        "not_found",
-        "Not found",
-        undefined, // validationErrors
-        undefined, // code
-      ),
-      RUN_START_ERROR_OPTIONS,
-    );
-
-    expect(error.class).toBe("config");
-    expect(error.location).toBe("PIPELEX_BASE_URL");
-    expect(error.hint).toContain("/v1/start");
-  });
-
-  it("points a start-route 5xx at the recoverable causes first", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 503",
-        `${DEFAULT_API_URL}/v1/start`,
-        503,
-        "Service Unavailable",
-        "{}",
-        "pipeline_start_unavailable",
-        "Failed to start pipeline",
-        undefined, // validationErrors
-        undefined, // code
-      ),
-      RUN_START_ERROR_OPTIONS,
-    );
-
-    // The hosted /v1/start answers 503 for an invalid bundle too — the hint
-    // must point at validation before blaming the platform.
-    expect(error.class).toBe("runtime");
-    expect(error.hint).toMatch(/mthds_validate/);
-  });
-
-  it("reads the platform's refusal of another organization's stored file as the inputs', not the key's", () => {
-    // The platform's `CrossOrgStorageAccessError`: a 403 coded `forbidden`,
-    // whose problem document sets the domain to `input` and `retryable` false.
-    const crossOrg = (): ApiResponseError =>
-      new ApiResponseError(
-        "HTTP 403",
-        `${DEFAULT_API_URL}/v1/start`,
-        403,
-        "Forbidden",
-        "{}",
-        undefined, // errorType
-        "Storage URI belongs to another organization.",
-        undefined, // validationErrors
-        "forbidden",
-        {
-          details: {
-            errorDomain: "input",
-            retryable: false,
-            title: "File belongs to another organization",
-          },
-          mayStartRun: true,
-        },
+  it("reads a server without the run routes as runtime.unsupported, saying where its base URL came from", async () => {
+    const lifecycle = () =>
+      Promise.reject(
+        new RunLifecycleUnavailableError("no run lifecycle", `${DEFAULT_API_URL}/v1/start`),
       );
 
-    for (const error of [
-      classifyError(crossOrg(), RUN_START_ERROR_OPTIONS),
-      classifyStartError(crossOrg(), RUN_START_ERROR_OPTIONS),
-    ]) {
-      expect(error.class).toBe("input_domain");
-      expect(error).not.toHaveProperty("kind");
-      expect(error.location).toBe("inputs");
-      expect(error.retryable).toBe(false);
-      expect(error.hint).toContain("mthds_prepare_inputs");
-      // Not an auth hint, which sends the user to check or replace the key.
-      expect(error.hint).not.toContain("PIPELEX_API_KEY");
-    }
-
-    // Any other `forbidden` is the platform's credential refusal, `config`
-    // in the SDK's reading, and keeps the auth arm.
-    const refusedKey = classifyError(
-      new ApiResponseError(
-        "HTTP 403",
-        `${DEFAULT_API_URL}/v1/start`,
-        403,
-        "Forbidden",
-        "{}",
-        undefined,
-        "Forbidden",
-        undefined,
-        "forbidden",
-      ),
-      RUN_START_ERROR_OPTIONS,
+    const noted = await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }] },
+      { ...contextWith({ start: lifecycle }), apiNotes: API_NOTES },
     );
-    expect(refusedKey).toMatchObject({
-      class: "config",
-      kind: "auth",
-      location: "PIPELEX_API_KEY",
+    const bare = await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }] },
+      contextWith({ start: lifecycle }),
+    );
+
+    expect(noted.structuredContent.problem).toMatchObject({
+      code: "runtime.unsupported",
+      retry: "no",
     });
+    expect(noted.summary).toContain(API_NOTES.baseUrl);
+    expect(noted.summary).not.toContain(API_NOTES.apiKey);
+    // A context without notes names the environment variable.
+    expect(bare.summary).toContain("PIPELEX_BASE_URL");
   });
 
-  it("points a start-route 422 at the run request fields", () => {
-    const error = classifyError(
-      new ApiResponseError(
-        "HTTP 422",
-        `${DEFAULT_API_URL}/v1/start`,
-        422,
-        "Unprocessable Entity",
-        "{}",
-        "validation_error",
-        "Invalid bundle",
-        undefined, // validationErrors
-        undefined, // code
-      ),
-      RUN_START_ERROR_OPTIONS,
+  it("relays a start the platform refused before reaching the runner with its own retry verdict, adding nothing", async () => {
+    const refusal = buildProblem("runtime.unavailable", {}, { status: 503 });
+
+    const result = await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }] },
+      contextWith({ start: () => Promise.reject(answeredWith("/v1/start", refusal)) }),
     );
 
-    expect(error.class).toBe("input_domain");
-    expect(error.location).toBe("files");
-    expect(error.hint).toMatch(/mthds_validate/);
+    expect(result.structuredContent.problem).toEqual(refusal);
+    expect(result.structuredContent.problem?.retry).toBe("yes");
+    expect(result.summary).toBe(problemSummary(refusal));
+    expect(result.summary).not.toMatch(/may have started/);
   });
 
-  it("points a 400/422 on the run-id routes at run_id, not files", () => {
-    const routes: Array<[string, typeof RUN_STATUS_ERROR_OPTIONS]> = [
-      ["/v1/runs/not-a-run-id/status", RUN_STATUS_ERROR_OPTIONS],
-      ["/v1/runs/not-a-run-id/results", RUN_RESULTS_ERROR_OPTIONS],
-    ];
-    for (const [route, options] of routes) {
-      const error = classifyError(
-        new ApiResponseError(
-          "HTTP 422",
-          `${DEFAULT_API_URL}${route}`,
-          422,
-          "Unprocessable Entity",
-          "{}",
-          "validation_error",
-          "Invalid run id",
-          undefined, // validationErrors
-          undefined, // code
-        ),
-        options,
-      );
+  it("relays the platform's refusal of another organization's stored file as the inputs', with no note about the key", async () => {
+    const crossOrg = pipelexProblem("pipelex.org.mismatch", {
+      title: "The reference belongs to another organization",
+      status: 403,
+      detail: "The request's storage_uri belongs to an organization other than the caller's.",
+      domain: "input",
+      retry: "no",
+      next_step: {
+        kind: "change_input",
+        detail:
+          "Use a storage_uri of the organization the request acts for, then send the request again.",
+      },
+      params: { reference: "storage_uri" },
+    });
 
-      expect(error.class).toBe("input_domain");
-      expect(error.location).toBe("run_id");
-      expect(error.hint).toMatch(/mthds_run/);
+    const result = await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }], inputs: { doc: "pipelex-storage://org_b/x.pdf" } },
+      {
+        ...contextWith({ start: () => Promise.reject(answeredWith("/v1/start", crossOrg)) }),
+        apiNotes: API_NOTES,
+      },
+    );
+
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "pipelex.org.mismatch",
+      domain: "input",
+      retry: "no",
+      params: { reference: "storage_uri" },
+    });
+    // Not the key's note, which sends the user to check or replace the key.
+    expect(result.summary).not.toContain(API_NOTES.apiKey);
+    expect(result.summary).not.toContain("PIPELEX_API_KEY");
+
+    // A refused key is the key's problem, and its summary says where the key came from.
+    const refused = await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }] },
+      {
+        ...contextWith({ start: () => Promise.reject(refusedKey("/v1/start")) }),
+        apiNotes: API_NOTES,
+      },
+    );
+    expect(refused.structuredContent.problem).toMatchObject({
+      code: "auth.invalid_credential",
+      domain: "account",
+    });
+    expect(refused.summary).toContain(API_NOTES.apiKey);
+    expect(refused.summary).toContain(API_NOTES.baseUrl);
+  });
+
+  it("relays the location the API gives a refused start, rewriting none", async () => {
+    const invalid = buildProblem(
+      "request.invalid",
+      { field: "inputs.question" },
+      { status: 422, location: { field: "inputs.question" } },
+    );
+
+    const result = await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }], inputs: { question: 42 } },
+      contextWith({ start: () => Promise.reject(answeredWith("/v1/start", invalid)) }),
+    );
+
+    expect(result.structuredContent.problem).toEqual(invalid);
+    expect(result.structuredContent.problem?.location).toEqual({ field: "inputs.question" });
+  });
+
+  it("relays a refused run id on the run-id routes with the API's own location", async () => {
+    const invalid = buildProblem(
+      "request.invalid",
+      { field: "run_id" },
+      { status: 422, location: { field: "run_id" } },
+    );
+    const status = await getMthdsRunStatus(
+      { run_id: "not-a-run-id" },
+      contextWith({
+        getRunStatus: () => Promise.reject(answeredWith("/v1/runs/not-a-run-id/status", invalid)),
+      }),
+    );
+    const results = await getMthdsRunResults(
+      { run_id: "not-a-run-id" },
+      contextWith({
+        getRunResult: () => Promise.reject(answeredWith("/v1/runs/not-a-run-id/results", invalid)),
+      }),
+    );
+
+    for (const result of [status, results]) {
+      expect(result.structuredContent.problem).toEqual(invalid);
     }
+  });
+
+  it("gives every no-verdict result a problem its tool's output schema accepts", async () => {
+    const start = await startMthdsRun({}, contextWith({}));
+    const status = await getMthdsRunStatus({ run_id: " " }, contextWith({}));
+    const results = await getMthdsRunResults(
+      { run_id: RUN_ID },
+      contextWith({ getRunResult: () => Promise.reject(refusedKey(`/v1/runs/${RUN_ID}/results`)) }),
+    );
+
+    expect(mthdsRunOutputSchema.safeParse(start.structuredContent).success).toBe(true);
+    expect(mthdsRunStatusOutputSchema.safeParse(status.structuredContent).success).toBe(true);
+    expect(mthdsRunResultsOutputSchema.safeParse(results.structuredContent).success).toBe(true);
+    for (const result of [start, status, results]) {
+      expect(result.structuredContent).not.toHaveProperty("errors");
+      expect(Array.isArray(result.structuredContent.problem)).toBe(false);
+    }
+    // The text stream is the problem's summary, nothing added.
+    expect(runStatusToolResult(status).content[0].text).toBe(status.summary);
   });
 });
 
@@ -504,55 +550,70 @@ describe("statusResult", () => {
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.run_status).toBe("FAILED");
     expect(result.structuredContent.is_terminal).toBe(true);
-    expect(result.structuredContent).not.toHaveProperty("errors");
+    expect(result.structuredContent).not.toHaveProperty("problem");
   });
 
-  it("carries why a failed run ended, from the report its status read serves", () => {
+  it("carries why a failed run ended, from the problem its status read serves", () => {
     const { statusRead } = RECORDED_FAILED_RUNS.llmCompletion;
     const result = statusResult(statusRead);
 
-    // The recorded report is not flagged caller-facing, so its message is left out.
-    expect(result.structuredContent.failure).toEqual({
-      run_id: statusRead.pipeline_run_id,
-      error_type: "LLMCompletionError",
-      title: "LLM completion",
-      error_domain: "config",
-      error_category: "configuration",
-      retryable: false,
-      user_action: {
-        kind: "change_input",
-        detail: "The provider rejected the request — review the prompt, parameters, and inputs.",
-      },
-      finished_at: "2026-09-23T15:16:37.856067+00:00",
+    expect(result.structuredContent.error).toEqual(statusRead.error);
+    expect(result.structuredContent.error).toMatchObject({
+      code: "model.unavailable",
+      domain: "operator",
+      retry: "no",
     });
-    expect(result.structuredContent.failure).not.toHaveProperty("provider_metadata");
-    // The reason, the next step, the retry advice and the support line, in the summary.
-    expect(result.summary).toContain("Why: LLM completion\n");
-    expect(result.summary).not.toContain(statusRead.error?.message ?? "");
+    expect(mthdsRunStatusOutputSchema.safeParse(result.structuredContent).success).toBe(true);
+    // The problem's title, detail, next step and verdict, and the support line, in the summary.
+    expect(result.summary).toContain(`Run \`${statusRead.pipeline_run_id}\` ended FAILED.`);
+    expect(result.summary).toContain("## This deployment serves no backend for the model");
     expect(result.summary).toContain(
-      "What to do: The provider rejected the request — review the prompt, parameters, and inputs.",
+      "**Next step** (`change_model`): Use a model this deployment serves in place of 'claude-4.8-opus', or ask whoever runs the runtime to serve it.",
     );
+    expect(result.summary).toContain("- Code: `model.unavailable` (domain operator, retry no)");
     expect(result.summary).toContain(
-      "Retry: The report does not expect running it again unchanged to help.",
-    );
-    expect(result.summary).toContain(
-      `For support: Run ${statusRead.pipeline_run_id} · LLMCompletionError · ended 2026-09-23T15:16:37.856067+00:00`,
+      `For support: Run ${statusRead.pipeline_run_id} · model.unavailable · ended 2026-09-23T15:16:37.856067+00:00`,
     );
     // No promise of details elsewhere: the details are here.
     expect(result.summary).not.toContain("returns the failure details");
   });
 
-  it("makes no retry claim for a report that does not say", () => {
+  it("states the retry verdict the problem gives, inferring none", () => {
     const result = statusResult(RECORDED_FAILED_RUNS.sandboxProvisioning.statusRead);
 
-    expect(result.structuredContent.failure).not.toHaveProperty("retryable");
-    expect(result.summary).toContain("Why: Sandbox provisioning\n");
-    expect(result.summary).not.toContain("Could not provision a Daytona box");
-    expect(result.summary).not.toMatch(/Retry:|run it again|can succeed/);
+    expect(result.structuredContent.error).toMatchObject({
+      code: "pipelex.sandbox.unavailable",
+      retry: "yes",
+    });
+    expect(result.summary).toContain(
+      "- Code: `pipelex.sandbox.unavailable` (domain runtime, retry yes)",
+    );
+    expect(result.summary).toContain("Run the method again after a while.");
   });
 
-  it("carries the status alone, and says so, when the read has no report or a malformed one", () => {
-    for (const error of [null, undefined, "boom", { provider_metadata: { message: "raw" } }]) {
+  it("drops the operator's diagnostics from the problem a status read serves", () => {
+    const result = statusResult(
+      runRead({
+        status: "FAILED",
+        finished_at: "2026-07-15T10:05:00Z",
+        error: OPERATOR_VIEW_LLM_COMPLETION_PROBLEM,
+      }),
+    );
+
+    expect(result.structuredContent.error).not.toHaveProperty("diagnostics");
+    expect(result.structuredContent.error?.code).toBe("model.unavailable");
+    expect(JSON.stringify(result)).not.toContain("not allowed for this integration");
+  });
+
+  it("carries the status alone, and says so, when the read has no problem or one that is no problem document", () => {
+    const notProblems = [
+      null,
+      undefined,
+      "boom",
+      { provider_metadata: { message: "raw" } },
+      { error_type: "LLMCompletionError", title: "LLM completion", retryable: false },
+    ];
+    for (const error of notProblems) {
       const result = statusResult(
         runRead({
           status: "CANCELLED",
@@ -561,19 +622,19 @@ describe("statusResult", () => {
         }),
       );
 
-      expect(result.structuredContent).not.toHaveProperty("failure");
+      expect(result.structuredContent).not.toHaveProperty("error");
       expect(result.structuredContent.run_status).toBe("CANCELLED");
-      expect(result.summary).toContain("the run stored no error report");
+      expect(result.summary).toContain("The run stored no problem saying why it ended");
       expect(result.summary).toContain(`For support: Run ${RUN_ID} · ended 2026-07-15T10:05:00Z`);
     }
   });
 
-  it("carries no failure on a completed run or a live one, whatever the read holds", () => {
-    const report = RECORDED_FAILED_RUNS.llmCompletion.statusRead.error;
+  it("carries no problem on a completed run or a live one, whatever the read holds", () => {
+    const runError = RECORDED_FAILED_RUNS.llmCompletion.statusRead.error;
     for (const status of ["COMPLETED", "RUNNING"] as const) {
-      expect(statusResult(runRead({ status, error: report })).structuredContent).not.toHaveProperty(
-        "failure",
-      );
+      expect(
+        statusResult(runRead({ status, error: runError })).structuredContent,
+      ).not.toHaveProperty("error");
     }
   });
 
@@ -637,16 +698,19 @@ describe("statusResult", () => {
       const { statusRead } = RECORDED_FAILED_RUNS.llmCompletion;
 
       const result = statusResult(statusRead, FAILED_RUN_SNAPSHOT);
-      const paragraphs = result.summary.split("\n\n");
+      const progress =
+        "Progress: Failed at condense_filing (step 3 of 4, item 2 of 3, step 2 of 2)";
 
-      expect(result.structuredContent.failure).toMatchObject({ error_type: "LLMCompletionError" });
+      expect(result.structuredContent.error).toMatchObject({ code: "model.unavailable" });
       expect(result.structuredContent.progress?.status).toBe("failed");
-      expect(paragraphs).toHaveLength(2);
-      expect(paragraphs[0]).toContain("Why: LLM completion\n");
-      expect(paragraphs[0]).toContain(`For support: Run ${statusRead.pipeline_run_id}`);
-      expect(paragraphs[1]).toBe(
-        "Progress: Failed at condense_filing (step 3 of 4, item 2 of 3, step 2 of 2)",
+      expect(result.summary.startsWith(`Run \`${statusRead.pipeline_run_id}\` ended FAILED.`)).toBe(
+        true,
       );
+      expect(result.summary.endsWith(`\n\n${progress}`)).toBe(true);
+      expect(result.summary.indexOf("## This deployment serves no backend")).toBeLessThan(
+        result.summary.indexOf(`For support: Run ${statusRead.pipeline_run_id}`),
+      );
+      expect(result.summary.indexOf("For support:")).toBeLessThan(result.summary.indexOf(progress));
     });
 
     it("counts the invocations a wide snapshot leaves out beside it", () => {
@@ -1057,14 +1121,8 @@ describe("resultsResult", () => {
     expect(() => resultsResult(state)).toThrow(/main_stuff/);
   });
 
-  it("projects a failed run with no report as a produced ok verdict with its status", () => {
-    const failedArm: RunResultState = {
-      state: "failed",
-      pipeline_run_id: RUN_ID,
-      status: "FAILED",
-      message: "Run finished with status FAILED; no result available",
-      error: null,
-    };
+  it("projects a failed run with no problem as a produced ok verdict with its status", () => {
+    const failedArm = relayingArmOf(RUN_ID, null);
     const result = resultsResult(failedArm, runRead({ status: "FAILED", error: null }));
 
     expect(result.structuredContent).toEqual({
@@ -1072,79 +1130,67 @@ describe("resultsResult", () => {
       run_id: RUN_ID,
       state: "failed",
       run_status: "FAILED",
-      failure_message: "Run finished with status FAILED; no result available",
       available_view_specs: [],
     });
     expect(result.summary).toContain(`Run \`${RUN_ID}\` ended FAILED.`);
-    expect(result.summary).toContain("the run stored no error report");
+    expect(result.summary).toContain("The run stored no problem saying why it ended");
     expect(result.summary).toMatch(/no graph/i);
   });
 
-  it("bounds the failed arm's account of the ending, which quotes the report's message once relayed", () => {
-    const result = resultsResult({
-      state: "failed",
-      pipeline_run_id: RUN_ID,
-      status: "FAILED",
-      message: `Run finished with status FAILED: ${"y".repeat(100_000)}`,
-      error: {
-        error_type: "LLMCompletionError",
-        message: "y".repeat(100_000),
-        caller_facing_message: true,
-      },
-    });
+  it("bounds the run's problem the failed arm relays", () => {
+    const result = resultsResult(
+      relayingArmOf(RUN_ID, { ...TIMED_OUT_RUN_PROBLEM, detail: "y".repeat(100_000) }),
+    );
 
-    expect(result.structuredContent.failure_message?.length).toBeLessThan(2_100);
-    expect(result.structuredContent.failure_message).toMatch(/more characters left out\]$/);
-    expect(result.structuredContent.failure?.message?.length).toBeLessThan(2_100);
+    expect(result.structuredContent.run_error?.detail.length).toBeLessThan(2_100);
+    expect(result.structuredContent.run_error?.detail).toMatch(/more characters left out\]$/);
     expect(result.summary.length).toBeLessThan(3_000);
+    expect(mthdsRunResultsOutputSchema.safeParse(result.structuredContent).success).toBe(true);
   });
 
   it("says the reason is unknown, not missing, when the status read after a bare failed arm failed", () => {
-    const result = resultsResult({
-      state: "failed",
-      pipeline_run_id: RUN_ID,
-      status: "FAILED",
-      message: "Run finished with status FAILED; no result available",
-      error: null,
-    });
+    const result = resultsResult(relayingArmOf(RUN_ID, null));
 
-    expect(result.summary).toContain("Why: unknown for now");
-    expect(result.summary).not.toContain("stored no error report");
+    expect(result.summary).toContain("Why it ended is unknown for now");
+    expect(result.summary).not.toContain("stored no problem");
   });
 
-  it("gives the status-only account for an arm with no report whose account quotes one", () => {
-    // The quoting form with no report beside it: a report the SDK's check
-    // dropped, or one never sent, leaves nothing to vouch for the message.
+  it("carries neither the arm's own sentence nor its run.failed problem, only the run's own", () => {
+    // The arm's `message` is the `run.failed` detail, and its `problem` says only
+    // that the run did not succeed, which `state` and `run_status` already say:
+    // neither reaches the result, whatever text the arm holds.
     const arm: FailedRunState = {
-      state: "failed",
-      pipeline_run_id: RUN_ID,
-      status: "TIMED_OUT",
+      ...relayingArmOf(RUN_ID, null, "TIMED_OUT"),
       message: "Run finished with status TIMED_OUT: Traceback (most recent call last): …",
-      error: null,
     };
 
-    expect(failureMessageOf(arm)).toBe("Run finished with status TIMED_OUT; no result available");
-    expect(resultsResult(arm).structuredContent).toEqual({
+    const result = resultsResult(arm);
+
+    expect(result.structuredContent).toEqual({
       status: "ok",
       run_id: RUN_ID,
       state: "failed",
       run_status: "TIMED_OUT",
-      failure_message: "Run finished with status TIMED_OUT; no result available",
       available_view_specs: [],
     });
+    expect(JSON.stringify(result)).not.toContain("Traceback");
+    expect(result.summary).not.toContain("run.failed");
   });
 
-  it("keeps the platform's own account of an arm with no report that quotes none", async () => {
-    // The 409 the results route answers for a stored result it refuses to read
-    // names no run status, so the SDK reads it as FAILED, though the run may have
-    // completed: the platform's sentence is the account, and the status-only
-    // one would misstate it.
-    const detail =
-      "The run's recorded result location does not belong to this run; its results cannot be served.";
+  it("reads the platform's 409 through the SDK into the run's own problem, in the caller's view", async () => {
+    const runError = {
+      ...TIMED_OUT_RUN_PROBLEM,
+      pipeline_run_id: RUN_ID,
+      diagnostics: { text: "engine text" },
+    };
     vi.stubGlobal("fetch", () =>
       Promise.resolve(
         Response.json(
-          { type: "about:blank", title: "Conflict", status: 409, detail },
+          buildProblem(
+            "run.failed",
+            { pipeline_run_id: RUN_ID, run_status: "TIMED_OUT" },
+            { status: 409, pipeline_run_id: RUN_ID, extra: { run_error: runError } },
+          ),
           { status: 409, headers: { "content-type": "application/problem+json" } },
         ),
       ),
@@ -1153,150 +1199,85 @@ describe("resultsResult", () => {
       const arm = await createPipelexApiClient({ baseUrl: DEFAULT_API_URL }).getRunResult(RUN_ID);
       if (arm.state !== "failed") throw new Error("the SDK did not read the 409 as a failed arm");
 
-      expect(arm).toEqual({
-        state: "failed",
-        pipeline_run_id: RUN_ID,
-        status: "FAILED",
-        message: detail,
-        error: null,
-      });
+      expect(arm.status).toBe("TIMED_OUT");
+      const { diagnostics: _operatorOnly, ...callerView } = runError;
       expect(resultsResult(arm).structuredContent).toEqual({
         status: "ok",
         run_id: RUN_ID,
         state: "failed",
-        run_status: "FAILED",
-        failure_message: detail,
+        run_status: "TIMED_OUT",
+        run_error: callerView,
         available_view_specs: [],
       });
+      expect(JSON.stringify(resultsResult(arm))).not.toContain("engine text");
     } finally {
       vi.unstubAllGlobals();
     }
-    // The platform's status-only sentence, and the SDK's own when no detail came, are kept as written.
-    for (const message of [
-      "Run finished with status CANCELLED; no result available",
-      "Run finished without a result.",
-    ]) {
-      expect(
-        failureMessageOf({
-          state: "failed",
-          pipeline_run_id: RUN_ID,
-          status: "CANCELLED",
-          message,
-          error: null,
-        }),
-      ).toBe(message);
-    }
   });
 
-  it("carries the report the failed arm relays, with when the run ended from the status read", () => {
+  it("carries the problem the failed arm relays, with when the run ended from the status read", () => {
     const { relayedArm, statusRead } = RECORDED_FAILED_RUNS.llmCompletion;
     const result = resultsResult(relayedArm, { ...statusRead, error: null });
 
-    // The verbose report is not flagged caller-facing, so neither the failure
-    // nor the arm's account, which quotes the report's message, carries it.
-    expect(relayedArm.message).toContain(statusRead.error?.message ?? "");
     expect(result.structuredContent).toEqual({
       status: "ok",
       run_id: statusRead.pipeline_run_id,
       state: "failed",
       run_status: "FAILED",
-      failure_message: "Run finished with status FAILED; no result available",
-      failure: {
-        run_id: statusRead.pipeline_run_id,
-        error_type: "LLMCompletionError",
-        title: "LLM completion",
-        error_domain: "config",
-        error_category: "configuration",
-        retryable: false,
-        user_action: {
-          kind: "change_input",
-          detail: "The provider rejected the request — review the prompt, parameters, and inputs.",
-        },
-        finished_at: statusRead.finished_at,
-      },
+      run_error: statusRead.error,
       available_view_specs: [],
     });
     expect(result.summary).toContain("# Run failed");
-    expect(result.summary).toContain("Why: LLM completion\n");
-    expect(result.summary).toContain("What to do: The provider rejected the request");
+    expect(result.summary).toContain("## This deployment serves no backend for the model");
+    expect(result.summary).toContain("**Next step** (`change_model`)");
+    expect(result.summary).toContain("- Code: `model.unavailable` (domain operator, retry no)");
     expect(result.summary).toContain(
-      "Retry: The report does not expect running it again unchanged to help.",
-    );
-    expect(result.summary).toContain(
-      `For support: Run ${statusRead.pipeline_run_id} · LLMCompletionError · ended ${statusRead.finished_at ?? ""}`,
+      `For support: Run ${statusRead.pipeline_run_id} · model.unavailable · ended ${statusRead.finished_at ?? ""}`,
     );
   });
 
-  it("gives the status-only account, never the placeholder, for a strict report not flagged caller-facing", () => {
-    const arm = relayingArmOf(RUN_ID, STRICT_LLM_COMPLETION_REPORT);
+  it("drops the operator's diagnostics from a problem the failed arm relays", () => {
+    const arm = relayingArmOf(RUN_ID, OPERATOR_VIEW_LLM_COMPLETION_PROBLEM);
     const result = resultsResult(
       arm,
       runRead({ status: "FAILED", finished_at: "2026-07-15T10:05:00Z", error: null }),
     );
 
-    expect(arm.message).toBe("Run finished with status FAILED: An internal error occurred.");
-    expect(result.structuredContent).toEqual({
-      status: "ok",
-      run_id: RUN_ID,
-      state: "failed",
-      run_status: "FAILED",
-      failure_message: "Run finished with status FAILED; no result available",
-      failure: {
-        run_id: RUN_ID,
-        error_type: "LLMCompletionError",
-        title: "LLM completion",
-        error_domain: "config",
-        error_category: "configuration",
-        retryable: false,
-        finished_at: "2026-07-15T10:05:00Z",
-      },
-      available_view_specs: [],
-    });
-    expect(JSON.stringify(result)).not.toContain("An internal error occurred.");
+    const { diagnostics: _operatorOnly, ...callerView } = OPERATOR_VIEW_LLM_COMPLETION_PROBLEM;
+    expect(result.structuredContent.run_error).toEqual(callerView);
+    expect(JSON.stringify(result)).not.toContain("not allowed for this integration");
   });
 
-  it("keeps the arm's account and the message of a report flagged caller-facing", () => {
-    const arm = relayingArmOf(RUN_ID, CALLER_FACING_TIMEOUT_REPORT);
+  it("relays the problem the platform writes for a run it timed out, its next step included", () => {
+    const arm = relayingArmOf(RUN_ID, TIMED_OUT_RUN_PROBLEM, "TIMED_OUT");
     const result = resultsResult(
       arm,
-      runRead({ status: "FAILED", finished_at: "2026-07-15T10:05:00Z", error: null }),
+      runRead({ status: "TIMED_OUT", finished_at: "2026-07-15T10:05:00Z", error: null }),
     );
 
     expect(result.structuredContent).toEqual({
       status: "ok",
       run_id: RUN_ID,
       state: "failed",
-      run_status: "FAILED",
-      failure_message: `Run finished with status FAILED: ${CALLER_FACING_TIMEOUT_REPORT.message ?? ""}`,
-      failure: {
-        run_id: RUN_ID,
-        error_type: "RunTimedOutError",
-        title: "Run timed out",
-        message: CALLER_FACING_TIMEOUT_REPORT.message,
-        error_domain: "runtime",
-        retryable: false,
-        user_action: { kind: "contact_support", detail: "Give support the run id run_x." },
-        finished_at: "2026-07-15T10:05:00Z",
-      },
+      run_status: "TIMED_OUT",
+      run_error: TIMED_OUT_RUN_PROBLEM,
       available_view_specs: [],
     });
+    expect(result.summary).toContain(`Run \`${RUN_ID}\` ended TIMED_OUT.`);
     expect(result.summary).toContain(
-      `Why: Run timed out — ${CALLER_FACING_TIMEOUT_REPORT.message ?? ""}`,
+      "**Next step** (`contact_owner`): Ask the method's owner to make the method end within the deployment's run limit.",
     );
   });
 
-  it("takes the report from the status read when the failed arm carries none", () => {
+  it("takes the problem from the status read when the failed arm carries none", () => {
     const { resultsArm, statusRead } = RECORDED_FAILED_RUNS.sandboxProvisioning;
     const result = resultsResult(resultsArm, statusRead);
 
-    expect(result.structuredContent.failure).toEqual({
-      run_id: statusRead.pipeline_run_id,
-      error_type: "SandboxProvisioningError",
-      title: "Sandbox provisioning",
-      finished_at: statusRead.finished_at,
-    });
-    expect(result.summary).toContain("What to do: the report names no next step.");
-    expect(result.summary).not.toMatch(/Retry:/);
+    expect(resultsArm.error).toBeNull();
+    expect(result.structuredContent.run_error).toEqual(statusRead.error);
+    expect(result.summary).toContain(
+      "- Code: `pipelex.sandbox.unavailable` (domain runtime, retry yes)",
+    );
   });
 });
 
@@ -1653,25 +1634,34 @@ describe("startMthdsRun", () => {
     const result = await startMthdsRun({ files: [] }, contextWith({}));
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+    });
     expect(result.structuredContent.available_view_specs).toEqual([]);
   });
 
-  it("classifies an unreachable API as config", async () => {
-    const context = contextWith({
-      start: () =>
-        Promise.reject(
-          new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED"),
-        ),
-    });
+  it("relays an unreachable API as client.unreachable, retryable, saying where its base URL came from", async () => {
+    const context = {
+      ...contextWith({
+        start: () =>
+          Promise.reject(
+            new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED"),
+          ),
+      }),
+      apiNotes: API_NOTES,
+    };
 
     const result = await startMthdsRun({ files: [{ content: 'domain = "demo"' }] }, context);
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
-    expect(result.summary).toContain("unreachable or misconfigured");
     // Refused before it was sent: no run exists, so a retry is safe.
-    expect(result.structuredContent.errors?.[0]?.retryable).toBe(true);
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.unreachable",
+      retry: "yes",
+    });
+    expect(result.summary).toContain(API_NOTES.baseUrl);
+    expect(result.summary).not.toMatch(/may have started/);
   });
 
   /**
@@ -1694,11 +1684,22 @@ describe("startMthdsRun", () => {
     throw new Error("the start did not fail");
   }
 
-  /** An answer of `status` carrying a problem document with `members`. */
+  /** An answer of `status` whose body is no problem document, holding `members`. */
   function answered(status: number, members: Record<string, unknown> = {}) {
     return () =>
       Promise.resolve(
         new Response(JSON.stringify({ status, detail: "Failed to start pipeline", ...members }), {
+          status,
+          headers: { "content-type": "application/problem+json" },
+        }),
+      );
+  }
+
+  /** An answer of `status` whose body is the problem document `problem`. */
+  function problemAnswer(status: number, problem: Problem) {
+    return () =>
+      Promise.resolve(
+        new Response(JSON.stringify(problem), {
           status,
           headers: { "content-type": "application/problem+json" },
         }),
@@ -1715,11 +1716,13 @@ describe("startMthdsRun", () => {
       );
   }
 
-  it("refuses a retry when the failed start may have created a run", async () => {
+  /** What the summary of a start that may have created a run opens with, read from its `retry`. */
+  const MAY_HAVE_STARTED = /^Run may have started: /;
+
+  it("relays client.outcome_unknown when the failed start may have created a run, and reads its retry", async () => {
     // A start creates a paid run and sends no idempotency key: after a dropped
-    // connection, a gateway 502/504, a 408, a 500 the platform relays from the
-    // runner, or a 503 without the platform's code, the SDK reads the run as
-    // one that may exist.
+    // connection, or a gateway's 502/504, a 408, a 500 or a 503 whose body is
+    // no problem document, the SDK reads the run as one that may exist.
     const answers = [
       cutOff("ECONNRESET", "read"),
       answered(504),
@@ -1730,24 +1733,28 @@ describe("startMthdsRun", () => {
     ];
     for (const answer of answers) {
       const failure = await startFailure(answer);
-      expect(runMayHaveStartedOf(failure)).toBe(true);
       const result = await startMthdsRun(
         { files: [{ content: 'domain = "demo"' }] },
         contextWith({ start: () => Promise.reject(failure) }),
       );
-      const error = result.structuredContent.errors?.[0];
-      expect(error?.retryable).toBe(false);
-      expect(error?.hint).toContain("the run may have started");
+
+      expect(result.structuredContent.problem).toMatchObject({
+        code: "client.outcome_unknown",
+        retry: "outcome_unknown",
+        next_step: { kind: "read_run" },
+      });
       // The headline some hosts show alone must not say the run did not start.
-      expect(result.summary).toMatch(/^Run may have started/);
+      expect(result.summary).toMatch(MAY_HAVE_STARTED);
       expect(result.summary).not.toMatch(/could not (be )?start/);
+      // The problem's own rendering follows the opening line.
+      expect(result.summary).toContain("## The call may have created a run");
     }
   });
 
-  it("warns that the run may exist when the server says a retry cannot help", async () => {
-    // The runner's catch-all 500 states `retryable: false` whatever it
-    // interrupted; the SDK's reading of the start still says the run may exist.
-    const catchAll = await startFailure(
+  it("reads an answer that is no problem document as an unknown outcome, and a problem document as the server's own verdict", async () => {
+    // The runner's old catch-all 500 body, no problem document: the SDK still
+    // reads the run as one that may exist, whatever the body says of retrying.
+    const legacy = await startFailure(
       answered(500, {
         error_type: "UnexpectedError",
         detail: "An unexpected error occurred",
@@ -1755,18 +1762,30 @@ describe("startMthdsRun", () => {
         retryable: false,
       }),
     );
-
-    const result = await startMthdsRun(
+    const legacyResult = await startMthdsRun(
       { files: [{ content: 'domain = "demo"' }] },
-      contextWith({ start: () => Promise.reject(catchAll) }),
+      contextWith({ start: () => Promise.reject(legacy) }),
     );
+    expect(legacyResult.structuredContent.problem?.code).toBe("client.outcome_unknown");
+    expect(legacyResult.summary).toMatch(MAY_HAVE_STARTED);
 
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("the run may have started");
-    expect(result.summary).toMatch(/^Run may have started/);
+    // A problem document is the server's own word on the start, relayed as it came.
+    const stated = await startFailure(
+      problemAnswer(500, buildProblem("runtime.unexpected", {}, { status: 500 })),
+    );
+    const statedResult = await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }] },
+      contextWith({ start: () => Promise.reject(stated) }),
+    );
+    expect(statedResult.structuredContent.problem).toMatchObject({
+      code: "runtime.unexpected",
+      retry: "no",
+    });
+    expect(statedResult.summary).not.toMatch(/may have started/);
   });
 
-  it("refuses a retry of a 500 on the start, and nowhere else", async () => {
-    // A 500 from the status route reads nothing into being and stays retryable.
+  it("reads an unknown outcome on the start alone, never on a read", async () => {
+    // A 500 from the status route reads nothing into being.
     const status = await getMthdsRunStatus(
       { run_id: RUN_ID },
       contextWith({
@@ -1778,44 +1797,39 @@ describe("startMthdsRun", () => {
               500,
               "Server Error",
               "{}",
-              undefined,
-              undefined,
-              undefined,
-              undefined,
             ),
           ),
       }),
     );
-    const statusError = status.structuredContent.errors?.[0];
-    expect(statusError?.retryable).toBe(true);
-    expect(statusError?.hint ?? "").not.toContain("the run may have started");
+
+    expect(status.structuredContent.problem?.code).not.toBe("client.outcome_unknown");
+    expect(status.structuredContent.problem?.retry).not.toBe("outcome_unknown");
+    expect(status.summary).not.toMatch(/may have started/);
   });
 
   it("keeps a start the server refused before running anything retryable", async () => {
-    // The platform's 503 coded `pipeline_start_unavailable` never reached the
-    // runner, a 429 is a throttle, and a refused connection sent nothing.
+    // The platform's own refusal before reaching the runner, a throttle, and a
+    // refused connection that sent nothing.
     for (const answer of [
-      answered(503, { code: "pipeline_start_unavailable" }),
+      problemAnswer(503, buildProblem("runtime.unavailable", {}, { status: 503 })),
       answered(429),
       cutOff("ECONNREFUSED", "connect"),
     ]) {
       const failure = await startFailure(answer);
-      expect(runMayHaveStartedOf(failure)).toBe(false);
-      const error = classifyStartError(failure, RUN_START_ERROR_OPTIONS);
-      expect(error.retryable).toBe(true);
-      expect(error.hint).not.toContain("the run may have started");
       const refused = await startMthdsRun(
         { files: [{ content: 'domain = "demo"' }] },
         contextWith({ start: () => Promise.reject(failure) }),
       );
+
+      expect(refused.structuredContent.problem?.retry).toBe("yes");
       expect(refused.summary).not.toMatch(/may have started/);
     }
   });
 
   it("says the run may exist when the start's acknowledgement came back unreadable", async () => {
-    // A 2xx the SDK could not read is a start the server accepted, which the
-    // SDK reports as a final ApiResponseError: the run exists all the same.
-    // The handshake that decides how the tree travels is answered first: a
+    // A 2xx the SDK could not read is a start the server accepted: the run
+    // exists all the same, and the SDK reads it as an unknown outcome. The
+    // handshake that decides how the tree travels is answered first: a
     // deployment with no blob store, which takes it inline.
     vi.stubGlobal("fetch", (input: string | URL | Request) =>
       Promise.resolve(
@@ -1831,10 +1845,12 @@ describe("startMthdsRun", () => {
         contextWith({ start: (options: PipelexStartOptions) => real.start(options) }),
       );
 
-      const error = result.structuredContent.errors?.[0];
-      expect(error?.retryable).toBe(false);
-      expect(error?.hint).toContain("the run may have started");
-      expect(result.summary).toMatch(/^Run may have started/);
+      expect(result.structuredContent.problem).toMatchObject({
+        code: "client.outcome_unknown",
+        retry: "outcome_unknown",
+      });
+      expect(result.summary).toMatch(MAY_HAVE_STARTED);
+      expect(runToolResult(result).content[0].text).toMatch(MAY_HAVE_STARTED);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -1866,8 +1882,11 @@ describe("startMthdsRun by method_ref", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      location: { field: "method_ref" },
+    });
   });
 
   it("rejects method_ref beside method_id without calling the client", async () => {
@@ -1877,114 +1896,102 @@ describe("startMthdsRun by method_ref", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("provenance");
+    expect(result.structuredContent.problem).toMatchObject({
+      domain: "input",
+      location: { field: "method_id" },
+    });
+    expect(result.structuredContent.problem?.message).toContain("provenance");
   });
 
-  it("classifies a structures refusal (403 MethodStructuresRefusedError) at method_ref", async () => {
-    const context = contextWith({
-      start: () =>
-        Promise.reject(
-          new ApiResponseError(
-            "HTTP 403",
-            `${DEFAULT_API_URL}/v1/start`,
-            403,
-            "Forbidden",
-            "{}",
-            "MethodStructuresRefusedError",
-            "The method declares in-process Python structures",
-            undefined,
-            undefined,
-            // The runner sends this refusal with no `error_domain`
-            // (L-261007-31dea6), which the SDK reads as `config`.
-          ),
-        ),
+  it("relays a structures refusal as the deployment answered it, the method's to change", async () => {
+    const refusal = pipelexProblem("pipelex.deployment.python_structures_refused", {
+      title: "Python structure classes are not allowed here",
+      status: 422,
+      detail:
+        "The method declares structures as Python classes, which this runner does not import.",
+      domain: "method",
+      retry: "no",
+      next_step: {
+        kind: "change_method",
+        detail:
+          "Declare the structures as concepts in the method in place of Python classes, then run it again.",
+      },
+      params: { files: ["structures.py"] },
     });
 
-    const result = await startMthdsRun({ method_ref: ADDRESS }, context);
+    const result = await startMthdsRun(
+      { method_ref: ADDRESS },
+      contextWith({ start: () => Promise.reject(answeredWith("/v1/start", refusal)) }),
+    );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
-    expect(result.structuredContent.errors?.[0]?.hint).toMatch(/MTHDS concepts/);
+    expect(result.structuredContent.problem).toEqual(refusal);
+    expect(result.summary).toContain("Declare the structures as concepts in the method");
   });
 
-  it("classifies a sandbox refusal (403 CustomCodeRequiresSandbox) at what named the method", async () => {
-    const refusal = (): Promise<never> =>
-      Promise.reject(
-        new ApiResponseError(
-          "HTTP 403",
-          `${DEFAULT_API_URL}/v1/start`,
-          403,
-          "Forbidden",
-          "{}",
-          "CustomCodeRequiresSandbox",
-          "This bundle ships custom Python (.py); running it requires a sandbox-hosted deployment.",
-          undefined,
-          undefined,
-          // The runner tags this refusal `error_domain: input` (raise_forbidden).
-          { details: { errorDomain: "input" } },
-        ),
-      );
+  it("relays a sandbox refusal alike whatever named the method, locating it nowhere of its own", async () => {
+    const refusal = pipelexProblem("pipelex.deployment.custom_code_requires_sandbox", {
+      title: "Custom code needs a sandbox-hosted deployment",
+      status: 501,
+      detail:
+        "The method ships Python code in its bundle, and this deployment runs none outside the Daytona sandbox.",
+      domain: "operator",
+      retry: "no",
+      next_step: { kind: "report", detail: "Report this to whoever runs the runtime." },
+      params: { origin: "bundle" },
+    });
+    const start = () => Promise.reject(answeredWith("/v1/start", refusal));
 
-    const byRef = await startMthdsRun({ method_ref: ADDRESS }, contextWith({ start: refusal }));
-    // `/v1/start` applies the same gate to a submitted bundle, so the locator
-    // follows the request shape rather than always naming the address.
+    const byRef = await startMthdsRun({ method_ref: ADDRESS }, contextWith({ start }));
     const byFiles = await startMthdsRun(
       { files: [{ content: 'domain = "demo"' }] },
-      contextWith({ start: refusal }),
+      contextWith({ start }),
     );
 
     for (const result of [byRef, byFiles]) {
       expect(result.structuredContent.status).toBe("error");
-      expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-      expect(result.structuredContent.errors?.[0]?.hint).toMatch(/sandbox-hosted/);
+      expect(result.structuredContent.problem).toEqual(refusal);
+      expect(result.summary).toContain("Daytona sandbox");
     }
-    expect(byRef.structuredContent.errors?.[0]?.location).toBe("method_ref");
-    expect(byFiles.structuredContent.errors?.[0]?.location).toBe("files");
   });
 
-  it("classifies a registry-form 501 at method_ref with the address-form hint", async () => {
-    const context = contextWith({
-      start: () =>
-        Promise.reject(
-          new ApiResponseError(
-            "HTTP 501",
-            `${DEFAULT_API_URL}/v1/start`,
-            501,
-            "Not Implemented",
-            "{}",
-            undefined,
-            "Registry-form refs are not implemented",
-            undefined,
-            undefined,
-          ),
-        ),
-    });
+  it("relays a refused registry-form reference with the API's own location", async () => {
+    const refusal = buildProblem(
+      "request.unsupported",
+      { field: "method_ref", reason: "registry_reference" },
+      { status: 501, location: { field: "method_ref" } },
+    );
 
-    const result = await startMthdsRun({ method_ref: ADDRESS }, context);
+    const result = await startMthdsRun(
+      { method_ref: ADDRESS },
+      contextWith({ start: () => Promise.reject(answeredWith("/v1/start", refusal)) }),
+    );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
-    expect(result.structuredContent.errors?.[0]?.hint).toMatch(/address-form/i);
+    expect(result.structuredContent.problem).toEqual(refusal);
+    expect(result.structuredContent.problem?.location).toEqual({ field: "method_ref" });
   });
 });
 
 describe("startMthdsRun by method_id", () => {
+  /** The catalog's miss of the method `mt_missing`. */
+  const METHOD_NOT_FOUND = pipelexProblem("pipelex.catalog.not_found", {
+    title: "The saved method does not exist",
+    status: 404,
+    detail:
+      "The organization's catalog holds no method matching the request for the method 'mt_missing'.",
+    domain: "input",
+    retry: "no",
+    next_step: {
+      kind: "change_input",
+      detail:
+        "List the organization's catalog to find the method, then send the request again with one that exists.",
+    },
+    params: { resource: "method", method_id: "mt_missing" },
+  });
+
   function notFound(): ApiResponseError {
-    return new ApiResponseError(
-      "HTTP 404",
-      `${DEFAULT_API_URL}/v1/start`,
-      404,
-      "Not Found",
-      "{}",
-      "not_found",
-      "Method 'mt_missing' not found",
-      undefined, // validationErrors
-      "not_found",
-    );
+    return answeredWith("/v1/start", METHOD_NOT_FOUND);
   }
 
   it("starts by id alone — method_id crosses as a named option, no tree", async () => {
@@ -2031,9 +2038,12 @@ describe("startMthdsRun by method_id", () => {
     const result = await startMthdsRun({}, contextWith({}));
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("files");
-    expect(result.structuredContent.errors?.[0]?.message).toBe(
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      location: { field: "files" },
+    });
+    expect(result.structuredContent.problem?.message).toContain(
       "Provide a method folder, MTHDS files, a method_ref address, or a method_id.",
     );
   });
@@ -2042,96 +2052,80 @@ describe("startMthdsRun by method_id", () => {
     const result = await startMthdsRun({ method_id: "   " }, contextWith({}));
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
+    expect(result.structuredContent.problem?.location?.field).toBe("method_id");
   });
 
-  it("classifies an unknown-method 404 as input_domain at method_id, not retryable", async () => {
+  it("relays an unknown method as the catalog's miss, not retryable", async () => {
     const context = contextWith({ start: () => Promise.reject(notFound()) });
 
     const result = await startMthdsRun({ method_id: "mt_missing" }, context);
 
     expect(result.structuredContent.status).toBe("error");
-    const error = result.structuredContent.errors?.[0];
-    expect(error?.class).toBe("input_domain");
-    expect(error?.location).toBe("method_id");
-    expect(error?.hint).toMatch(/org-scoped/);
-    expect(error?.retryable).toBe(false);
+    expect(result.structuredContent.problem).toEqual(METHOD_NOT_FOUND);
+    expect(result.structuredContent.problem?.retry).toBe("no");
+    expect(result.summary).toContain("List the organization's catalog to find the method");
   });
 
-  it("keeps a files-only 404 as config at PIPELEX_BASE_URL (regression guard)", async () => {
+  it("relays the same problem whatever selector named the method, rewriting no location by request shape", async () => {
     const context = contextWith({ start: () => Promise.reject(notFound()) });
 
-    const result = await startMthdsRun({ files: [{ content: 'domain = "demo"' }] }, context);
+    const filesOnly = await startMthdsRun({ files: [{ content: 'domain = "demo"' }] }, context);
+    const mixed = await startMthdsRun(
+      { files: [{ content: 'domain = "demo"' }], method_id: "mt_missing" },
+      context,
+    );
 
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
+    for (const result of [filesOnly, mixed]) {
+      expect(result.structuredContent.problem).toEqual(METHOD_NOT_FOUND);
+      expect(result.structuredContent.problem).not.toHaveProperty("location");
+    }
   });
 
-  it("classifies a paywall 402 as config with the billing hint", async () => {
-    const context = contextWith({
-      start: () =>
-        Promise.reject(
-          new ApiResponseError(
-            "HTTP 402",
-            `${DEFAULT_API_URL}/v1/start`,
-            402,
-            "Payment Required",
-            "{}",
-            "subscription_required",
-            "Subscription required to run methods",
-            undefined, // validationErrors
-            "forbidden",
-          ),
-        ),
-    });
+  it("relays an organization out of credit as the account's problem, with no note about the key or the API", async () => {
+    const context = {
+      ...contextWith({ start: () => Promise.reject(outOfCredit("/v1/start")) }),
+      apiNotes: API_NOTES,
+    };
 
     const result = await startMthdsRun({ method_id: "mt_abc123" }, context);
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
-    expect(result.structuredContent.errors?.[0]?.kind).toBe("paywall");
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("app.pipelex.com");
-    // A headline-only host shows just this line, so it must name the plan
-    // rather than the connectivity headline every other `config` error gets.
-    expect(result.summary).toBe(
-      "Run could not start: the organization's Pipelex plan does not cover this call.",
-    );
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "pipelex.billing.credit_exhausted",
+      domain: "account",
+      retry: "no",
+    });
+    // A headline-only host shows just the first line, which names the credit.
+    expect(result.summary.startsWith("## The organization is out of credit")).toBe(true);
+    expect(result.summary).not.toContain(API_NOTES.apiKey);
+    expect(result.summary).not.toContain(API_NOTES.baseUrl);
     expect(result.summary).not.toMatch(/unreachable/);
   });
 
-  it("headlines a refused key (401) as the key, not as connectivity", async () => {
-    const context = contextWith({
-      start: () => Promise.reject(refusedKey("/v1/start")),
-    });
+  it("relays a refused key (401) as the key's problem, saying where the key came from", async () => {
+    const context = {
+      ...contextWith({ start: () => Promise.reject(refusedKey("/v1/start")) }),
+      apiNotes: API_NOTES,
+    };
 
     const result = await startMthdsRun({ method_id: "mt_abc123" }, context);
 
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "config",
-      kind: "auth",
-      location: "PIPELEX_API_KEY",
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "auth.invalid_credential",
+      domain: "account",
     });
-    expect(result.summary).toBe(
-      "Run could not start: the Pipelex API key is missing or was refused.",
-    );
+    expect(result.summary).toContain(API_NOTES.apiKey);
+    expect(result.summary).not.toMatch(/may have started/);
   });
 
-  it("points a mixed-request 422 at files — the executed source — not method_id", async () => {
+  it("relays a mixed request's refusal at the location the API names", async () => {
+    const invalid = buildProblem(
+      "request.pipe_not_found",
+      { pipe: "missing_pipe", suggestions: ["main_pipe"] },
+      { status: 422 },
+    );
     const context = contextWith({
-      start: () =>
-        Promise.reject(
-          new ApiResponseError(
-            "HTTP 422",
-            `${DEFAULT_API_URL}/v1/start`,
-            422,
-            "Unprocessable Entity",
-            "{}",
-            "unprocessable_entity",
-            "Pipe 'missing_pipe' not found in the submitted bundle",
-            undefined, // validationErrors
-            undefined, // code
-          ),
-        ),
+      start: () => Promise.reject(answeredWith("/v1/start", invalid)),
     });
 
     const result = await startMthdsRun(
@@ -2139,87 +2133,25 @@ describe("startMthdsRun by method_id", () => {
       context,
     );
 
-    const error = result.structuredContent.errors?.[0];
-    expect(error?.class).toBe("input_domain");
-    expect(error?.location).toBe("files");
-    expect(error?.hint).toMatch(/files, pipe_code, and inputs/);
-    expect(error?.retryable).toBe(false);
+    expect(result.structuredContent.problem).toEqual(invalid);
+    expect(result.structuredContent.problem?.retry).toBe("no");
   });
 
-  it("keeps a mixed-request 404 at method_id — the linkage id is what a 404 is about", async () => {
-    const context = contextWith({ start: () => Promise.reject(notFound()) });
-
-    const result = await startMthdsRun(
-      { files: [{ content: 'domain = "demo"' }], method_id: "mt_missing" },
-      context,
+  it("relays a by-id refusal of a stored method with no source to run, as the API answered it", async () => {
+    const refusal = buildProblem(
+      "request.invalid",
+      { field: "method_id" },
+      { status: 422, location: { field: "method_id" } },
     );
-
-    const error = result.structuredContent.errors?.[0];
-    expect(error?.class).toBe("input_domain");
-    expect(error?.location).toBe("method_id");
-    expect(error?.hint).toMatch(/org-scoped/);
-    expect(error?.retryable).toBe(false);
-  });
-
-  it("points a by-id 422 at method_id with the combined no-source/org-context hint", async () => {
     const context = contextWith({
-      start: () =>
-        Promise.reject(
-          new ApiResponseError(
-            "HTTP 422",
-            `${DEFAULT_API_URL}/v1/start`,
-            422,
-            "Unprocessable Entity",
-            "{}",
-            "unprocessable_entity",
-            "Stored method 'mt_abc123' has no MTHDS source to run.",
-            undefined, // validationErrors
-            undefined, // code
-          ),
-        ),
+      start: () => Promise.reject(answeredWith("/v1/start", refusal)),
     });
 
     const result = await startMthdsRun({ method_id: "mt_abc123" }, context);
 
-    const error = result.structuredContent.errors?.[0];
-    expect(error?.class).toBe("input_domain");
-    expect(error?.location).toBe("method_id");
-    expect(error?.hint).toMatch(/no MTHDS source/);
-    expect(error?.hint).toMatch(/organization context/);
+    expect(result.structuredContent.problem).toEqual(refusal);
   });
 });
-
-// A 402 on a run route: the platform reports a plan limit this way, and its
-// problem `code` really is "forbidden" (never sniffed — the status decides).
-// A 401 on any route: the hosted API refuses a call that carries no key, or a
-// key it does not know, this way.
-function refusedKey(route: string): ApiResponseError {
-  return new ApiResponseError(
-    "HTTP 401",
-    `${DEFAULT_API_URL}${route}`,
-    401,
-    "Unauthorized",
-    "{}",
-    undefined, // errorType
-    "Missing API key",
-    undefined, // validationErrors
-    "unauthorized",
-  );
-}
-
-function paywall(routeSuffix: string): ApiResponseError {
-  return new ApiResponseError(
-    "HTTP 402",
-    `${DEFAULT_API_URL}/v1/runs/${RUN_ID}${routeSuffix}`,
-    402,
-    "Payment Required",
-    "{}",
-    "subscription_required",
-    "Subscription required",
-    undefined, // validationErrors
-    "forbidden",
-  );
-}
 
 describe("getMthdsRunStatus", () => {
   it("reads and projects the status by id", async () => {
@@ -2242,24 +2174,20 @@ describe("getMthdsRunStatus", () => {
     const result = await getMthdsRunStatus({ run_id: "  " }, contextWith({}));
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("run_id");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      location: { field: "run_id" },
+    });
   });
 
-  it("classifies an unknown-id 404 as input_domain", async () => {
+  it("relays an unknown id as run.not_found, the caller's to change", async () => {
     const context = contextWith({
       getRunStatus: () =>
         Promise.reject(
-          new ApiResponseError(
-            "HTTP 404",
-            `${DEFAULT_API_URL}/v1/runs/${RUN_ID}/status`,
-            404,
-            "Not Found",
-            "{}",
-            "not_found",
-            "Run not found",
-            undefined, // validationErrors
-            undefined, // code
+          answeredWith(
+            `/v1/runs/${RUN_ID}/status`,
+            buildProblem("run.not_found", { pipeline_run_id: RUN_ID }, { status: 404 }),
           ),
         ),
     });
@@ -2267,33 +2195,36 @@ describe("getMthdsRunStatus", () => {
     const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("run_id");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "run.not_found",
+      domain: "input",
+    });
   });
 
-  it("headlines a paywall (402) as a plan limit, not as connectivity", async () => {
-    const context = contextWith({ getRunStatus: () => Promise.reject(paywall("/status")) });
-
-    const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
-
-    expect(result.structuredContent.errors?.[0]?.kind).toBe("paywall");
-    expect(result.summary).toBe(
-      "Run status could not be read: the organization's Pipelex plan does not cover this call.",
-    );
-    expect(result.summary).not.toMatch(/unreachable/);
-  });
-
-  it("headlines a refused key (401) as the key, not as connectivity", async () => {
+  it("relays an organization out of credit as the account's problem, not as connectivity", async () => {
     const context = contextWith({
-      getRunStatus: () => Promise.reject(refusedKey(`/v1/runs/${RUN_ID}/status`)),
+      getRunStatus: () => Promise.reject(outOfCredit(`/v1/runs/${RUN_ID}/status`)),
     });
 
     const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
 
-    expect(result.structuredContent.errors?.[0]?.kind).toBe("auth");
-    expect(result.summary).toBe(
-      "Run status could not be read: the Pipelex API key is missing or was refused.",
-    );
+    expect(result.structuredContent.problem?.code).toBe("pipelex.billing.credit_exhausted");
+    expect(result.summary.startsWith("## The organization is out of credit")).toBe(true);
+    expect(result.summary).not.toMatch(/unreachable/);
+  });
+
+  it("relays a refused key (401) as the key's problem, saying where the key came from", async () => {
+    const context = {
+      ...contextWith({
+        getRunStatus: () => Promise.reject(refusedKey(`/v1/runs/${RUN_ID}/status`)),
+      }),
+      apiNotes: API_NOTES,
+    };
+
+    const result = await getMthdsRunStatus({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.problem?.code).toBe("auth.invalid_credential");
+    expect(result.summary).toContain(API_NOTES.apiKey);
   });
 
   describe("the progress read after it", () => {
@@ -2358,7 +2289,7 @@ describe("getMthdsRunStatus", () => {
         `progress ${statusRead.pipeline_run_id}`,
       ]);
       expect(result.structuredContent.run_status).toBe("FAILED");
-      expect(result.structuredContent.failure).toBeDefined();
+      expect(result.structuredContent.error).toBeDefined();
       expect(result.summary).toContain(
         "Progress: Failed at condense_filing (step 3 of 4, item 2 of 3, step 2 of 2)",
       );
@@ -2366,16 +2297,9 @@ describe("getMthdsRunStatus", () => {
 
     it("answers the status without progress when the progress read fails, never as an error", async () => {
       const failures = [
-        new ApiResponseError(
-          "HTTP 503",
-          `${DEFAULT_API_URL}/v1/runs/${RUN_ID}/progress`,
-          503,
-          "Service Unavailable",
-          "{}",
-          "service_unavailable",
-          "The run's progress events could not be read",
-          undefined, // validationErrors
-          undefined, // code
+        answeredWith(
+          `/v1/runs/${RUN_ID}/progress`,
+          buildProblem("runtime.unavailable", {}, { status: 503 }),
         ),
         new ApiUnreachableError("connection reset", DEFAULT_API_URL, "ECONNRESET"),
         new Error("an answer the SDK could not read"),
@@ -2390,7 +2314,7 @@ describe("getMthdsRunStatus", () => {
         expect(result.structuredContent.status).toBe("ok");
         expect(result.structuredContent.run_status).toBe("RUNNING");
         expect(result.structuredContent).not.toHaveProperty("progress");
-        expect(result.structuredContent).not.toHaveProperty("errors");
+        expect(result.structuredContent).not.toHaveProperty("problem");
         expect(result.summary).not.toContain("Progress");
       }
     });
@@ -2409,7 +2333,7 @@ describe("getMthdsRunStatus", () => {
 
       expect(result.structuredContent.status).toBe("ok");
       expect(result.structuredContent).not.toHaveProperty("progress");
-      expect(result.structuredContent).not.toHaveProperty("errors");
+      expect(result.structuredContent).not.toHaveProperty("problem");
       expect(result.summary).toMatch(
         /^Run `[^`]+` is RUNNING — not terminal yet\. Check again in ~\d+s\.$/,
       );
@@ -2453,7 +2377,7 @@ describe("getMthdsRunStatus", () => {
 });
 
 describe("getMthdsRunResults", () => {
-  it("follows a failed arm with one status read, for the report and when the run ended", async () => {
+  it("follows a failed arm with one status read, for the run's problem and when the run ended", async () => {
     const { resultsArm, statusRead } = RECORDED_FAILED_RUNS.llmCompletion;
     const statusReads: string[] = [];
     const context = contextWith({
@@ -2469,16 +2393,12 @@ describe("getMthdsRunResults", () => {
     expect(statusReads).toEqual([statusRead.pipeline_run_id]);
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.state).toBe("failed");
-    expect(result.structuredContent.failure_message).toBe(
-      "Run finished with status FAILED; no result available",
+    expect(result.structuredContent).not.toHaveProperty("failure_message");
+    expect(result.structuredContent.run_error).toEqual(statusRead.error);
+    expect(result.summary).toContain(
+      `For support: Run ${statusRead.pipeline_run_id} · model.unavailable · ended ${statusRead.finished_at ?? ""}`,
     );
-    expect(result.structuredContent.failure).toMatchObject({
-      error_type: "LLMCompletionError",
-      title: "LLM completion",
-      retryable: false,
-      finished_at: statusRead.finished_at,
-    });
-    expect(result.summary).toContain("What to do: The provider rejected the request");
+    expect(result.summary).toContain("**Next step** (`change_model`)");
   });
 
   it("keeps the failed verdict when the status read that follows it fails", async () => {
@@ -2495,20 +2415,20 @@ describe("getMthdsRunResults", () => {
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.state).toBe("failed");
-    expect(result.structuredContent.failure).toMatchObject({
-      error_type: "ExtractJobFailureError",
-      retryable: true,
-      user_action: { kind: "wait_and_retry" },
+    expect(result.structuredContent.run_error).toMatchObject({
+      code: "provider.failed",
+      retry: "yes",
+      next_step: { kind: "retry" },
     });
+    expect(result.summary).toContain("- Code: `provider.failed` (domain runtime, retry yes)");
     // The arm does not carry when the run ended, so the support line goes without it.
-    expect(result.structuredContent.failure).not.toHaveProperty("finished_at");
-    expect(result.summary).toContain("Retry: Running it again can succeed.");
     expect(result.summary).toContain(
-      `For support: Run ${relayedArm.pipeline_run_id} · ExtractJobFailureError`,
+      `For support: Run ${relayedArm.pipeline_run_id} · provider.failed\n`,
     );
+    expect(result.summary).not.toContain("· ended");
   });
 
-  it("says the reason is unknown when neither the arm nor the failed status read carries a report", async () => {
+  it("says the reason is unknown when neither the arm nor the failed status read carries a problem", async () => {
     const { resultsArm } = RECORDED_FAILED_RUNS.llmCompletion;
     const context = contextWith({
       getRunResult: () => Promise.resolve(resultsArm),
@@ -2521,9 +2441,9 @@ describe("getMthdsRunResults", () => {
     const result = await getMthdsRunResults({ run_id: resultsArm.pipeline_run_id }, context);
 
     expect(result.structuredContent.state).toBe("failed");
-    expect(result.structuredContent).not.toHaveProperty("failure");
-    expect(result.summary).toContain("Why: unknown for now");
-    expect(result.summary).not.toContain("stored no error report");
+    expect(result.structuredContent).not.toHaveProperty("run_error");
+    expect(result.summary).toContain("Why it ended is unknown for now");
+    expect(result.summary).not.toContain("stored no problem");
   });
 
   describe("the status read's deadline", () => {
@@ -2550,8 +2470,8 @@ describe("getMthdsRunResults", () => {
 
       expect(signal?.aborted).toBe(true);
       expect(result.structuredContent.state).toBe("failed");
-      expect(result.structuredContent.failure).toMatchObject({ error_type: "LLMCompletionError" });
-      expect(result.structuredContent.failure).not.toHaveProperty("finished_at");
+      expect(result.structuredContent.run_error).toMatchObject({ code: "model.unavailable" });
+      expect(result.summary).not.toContain("· ended");
     });
 
     it("returns the read when it answers in time, and aborts nothing", async () => {
@@ -2609,10 +2529,13 @@ describe("getMthdsRunResults", () => {
     const result = await getMthdsRunResults({ run_id: "" }, contextWith({}));
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+    });
   });
 
-  it("classifies the SDK's MissingMainStuffError as runtime", async () => {
+  it("relays the SDK's MissingMainStuffError as an answer it could not read, naming the run", async () => {
     const context = contextWith({
       getRunResult: () =>
         Promise.reject(new MissingMainStuffError("completed run has no main stuff", RUN_ID)),
@@ -2621,10 +2544,13 @@ describe("getMthdsRunResults", () => {
     const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.response_unreadable",
+      pipeline_run_id: RUN_ID,
+    });
   });
 
-  it("treats a reachable but malformed completed result as runtime, not unreachable", async () => {
+  it("reads a reachable but malformed completed result as an answer it could not read, not as unreachable", async () => {
     const state: RunResultState = {
       state: "completed",
       pipeline_run_id: RUN_ID,
@@ -2635,33 +2561,70 @@ describe("getMthdsRunResults", () => {
     const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
-    expect(result.summary).toContain("malformed report");
-  });
-
-  it("headlines a paywall (402) as a plan limit, not as connectivity", async () => {
-    const context = contextWith({ getRunResult: () => Promise.reject(paywall("/result")) });
-
-    const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
-
-    expect(result.structuredContent.errors?.[0]?.kind).toBe("paywall");
-    expect(result.summary).toBe(
-      "Run results could not be read: the organization's Pipelex plan does not cover this call.",
-    );
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.response_unreadable",
+      params: { status: 200 },
+      pipeline_run_id: RUN_ID,
+      message: "Completed run results did not include main_stuff.",
+    });
+    expect(result.summary).toContain("## The runtime's answer could not be read");
     expect(result.summary).not.toMatch(/unreachable/);
   });
 
-  it("headlines a refused key (401) as the key, not as connectivity", async () => {
+  it("reads a 409 that is no run.failed as no verdict, never as a failed run", async () => {
+    // The platform's 409 for a stored result it refuses to read names no run
+    // status; the SDK no longer reads it as a failed arm, so it is no verdict.
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(
+        Response.json(
+          {
+            type: "about:blank",
+            title: "Conflict",
+            status: 409,
+            detail:
+              "The run's recorded result location does not belong to this run; its results cannot be served.",
+          },
+          { status: 409, headers: { "content-type": "application/problem+json" } },
+        ),
+      ),
+    );
+    try {
+      const result = await getMthdsRunResults({ run_id: RUN_ID }, { baseUrl: DEFAULT_API_URL });
+
+      expect(result.structuredContent.status).toBe("error");
+      expect(result.structuredContent.problem).toMatchObject({
+        code: "client.response_unreadable",
+        params: { status: 409 },
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("relays an organization out of credit as the account's problem, not as connectivity", async () => {
     const context = contextWith({
-      getRunResult: () => Promise.reject(refusedKey(`/v1/runs/${RUN_ID}/result`)),
+      getRunResult: () => Promise.reject(outOfCredit(`/v1/runs/${RUN_ID}/results`)),
     });
 
     const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
 
-    expect(result.structuredContent.errors?.[0]?.kind).toBe("auth");
-    expect(result.summary).toBe(
-      "Run results could not be read: the Pipelex API key is missing or was refused.",
-    );
+    expect(result.structuredContent.problem?.code).toBe("pipelex.billing.credit_exhausted");
+    expect(result.summary.startsWith("## The organization is out of credit")).toBe(true);
+    expect(result.summary).not.toMatch(/unreachable/);
+  });
+
+  it("relays a refused key (401) as the key's problem, saying where the key came from", async () => {
+    const context = {
+      ...contextWith({
+        getRunResult: () => Promise.reject(refusedKey(`/v1/runs/${RUN_ID}/results`)),
+      }),
+      apiNotes: API_NOTES,
+    };
+
+    const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.problem?.code).toBe("auth.invalid_credential");
+    expect(result.summary).toContain(API_NOTES.apiKey);
   });
 });
 
@@ -2827,30 +2790,23 @@ describe("startMthdsRun path submissions", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "files[1].path",
-      retryable: false,
+    expect(result.structuredContent.problem).toMatchObject({
+      domain: "input",
+      location: { field: "files[1].path" },
+      retry: "no",
     });
-    expect(result.structuredContent.errors?.[0]?.message).toContain("methods/report.html");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("nothing was sent");
+    expect(result.structuredContent.problem?.message).toContain("methods/report.html");
+    expect(result.structuredContent.problem?.message).toContain("nothing was sent");
     expect(result.structuredContent).not.toHaveProperty("files_sent");
     expect(JSON.stringify(result)).not.toContain(fakeKey);
   });
 
-  /** The 413 a deployment answers a start too large for it with. */
-  const tooLarge = () =>
-    new ApiResponseError(
-      "HTTP 413",
-      `${DEFAULT_API_URL}/v1/start`,
-      413,
-      "Content Too Large",
-      "{}",
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-    );
+  /** The problem a deployment answers a start too large for it with. */
+  const TOO_LARGE = buildProblem(
+    "request.too_large",
+    { limit: 10 * 1024 * 1024, size: 12 * 1024 * 1024 },
+    { status: 413 },
+  );
 
   /** A context whose start answers a 413, its handshake counted and answering `version`. */
   function refusingStart(
@@ -2861,7 +2817,7 @@ describe("startMthdsRun path submissions", () => {
     return {
       context: {
         ...contextWith({
-          start: () => Promise.reject(tooLarge()),
+          start: () => Promise.reject(answeredWith("/v1/start", TOO_LARGE)),
           version: () => {
             calls += 1;
             return version();
@@ -2876,118 +2832,54 @@ describe("startMthdsRun path submissions", () => {
   const noBlobStore = () => Promise.resolve({ version: "1.0.0", blob_store: false });
   const blobStore = () => Promise.resolve({ version: "1.0.0", blob_store: true });
 
-  it("names both causes of a 413 on a start carrying a small tree and no inputs, blaming neither", async () => {
+  it("relays a 413's problem as the API answered it, blaming no part of the start itself", async () => {
     const { context, versionCalls } = refusingStart(noBlobStore);
 
     const result = await startMthdsRun({ files: [{ content: 'domain = "invoice"' }] }, context);
 
-    const error = result.structuredContent.errors?.[0];
-    expect(error).toMatchObject({ class: "input_domain" });
-    expect(error).not.toHaveProperty("location");
-    expect(error?.hint).toContain("cannot be told from here");
-    expect(error?.hint).toContain("mthds_prepare_inputs");
-    expect(error?.hint).toContain("the run carries no inputs");
-    expect(error?.hint).not.toContain("are not what made it so");
-    // A tree within the inline threshold rode inline wherever it went: no handshake asks.
+    expect(result.structuredContent.problem).toEqual(TOO_LARGE);
+    expect(result.structuredContent.problem).not.toHaveProperty("location");
+    expect(result.summary).toBe(problemSummary(TOO_LARGE));
+    // Nothing asks the deployment how the tree travelled any more.
     expect(versionCalls()).toBe(0);
   });
 
-  it("names both causes of a 413 on a start carrying inputs beside a small tree", async () => {
-    const { context } = refusingStart(noBlobStore);
-
-    const result = await startMthdsRun(
-      { files: [{ content: 'domain = "invoice"' }], inputs: { question: "why?" } },
-      context,
-    );
-
-    const error = result.structuredContent.errors?.[0];
-    expect(error).not.toHaveProperty("location");
-    expect(error?.hint).toContain("cannot be told from here");
-    expect(error?.hint).toMatch(/the method's files weigh \d+\.\d KiB inline/);
-    expect(error?.hint).toMatch(/its inputs weigh \d+\.\d KiB as JSON/);
-  });
-
-  it("reads a 413 on a start sending no tree, carrying inputs, as its inputs', at inputs", async () => {
-    const { context } = refusingStart(noBlobStore);
-
-    const result = await startMthdsRun(
-      { method_ref: "github.com/Pipelex/methods/documents@v0.1.0", inputs: { question: "why?" } },
-      context,
-    );
-
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "inputs",
-    });
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("its inputs did");
-  });
-
-  it("reads a 413 on a heavy tree a deployment without a blob store took inline as the tree's", async () => {
+  it("relays a 413 alike whatever the start carried and however its tree travelled, asking no handshake", async () => {
     const heavy = "x".repeat(INLINE_TREE_MAX_BYTES + 1);
     const folder = { "methods/invoice.mthds": 'domain = "invoice"', "methods/report.html": heavy };
     const files = [{ path: "methods/invoice.mthds" }, { path: "methods/report.html" }];
-
-    const inline = await startMthdsRun({ files }, refusingStart(noBlobStore, folder).context);
-    expect(inline.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "files",
-    });
-    expect(inline.structuredContent.errors?.[0]?.hint).toContain("without a blob store");
-
-    // The same tree went by hash to a deployment keeping a blob store, so the
-    // inputs riding the start take the blame, and with none, nothing does.
-    const withInputs = await startMthdsRun(
-      { files, inputs: { question: "why?" } },
-      refusingStart(blobStore, folder).context,
-    );
-    expect(withInputs.structuredContent.errors?.[0]?.location).toBe("inputs");
-    const withoutInputs = await startMthdsRun({ files }, refusingStart(blobStore, folder).context);
-    expect(withoutInputs.structuredContent.errors?.[0]).not.toHaveProperty("location");
-    expect(withoutInputs.structuredContent.errors?.[0]?.hint).toContain(
-      "the run carries no inputs",
-    );
-  });
-
-  it("weighs a binary file as the base64 it travels inline as", async () => {
-    // Raw, the workbook is under the inline threshold; as base64 it is over,
-    // so a deployment without a blob store took it inline at that weight.
+    // Raw, the workbook is under the inline threshold; as base64 it is over.
     const workbook = new Uint8Array(Math.floor(INLINE_TREE_MAX_BYTES * 0.9)).fill(0xff);
-    const { context, versionCalls } = refusingStart(noBlobStore, {
-      "methods/invoice.mthds": 'domain = "invoice"',
-      "methods/templates/invoice.xlsx": workbook,
-    });
+    const failingHandshake = () =>
+      Promise.reject(new ApiUnreachableError("connection reset", DEFAULT_API_URL, "ECONNRESET"));
+    const starts: Array<[Parameters<typeof startMthdsRun>[0], ReturnType<typeof refusingStart>]> = [
+      [
+        { files: [{ content: 'domain = "invoice"' }], inputs: { question: "why?" } },
+        refusingStart(noBlobStore),
+      ],
+      [
+        { method_ref: "github.com/Pipelex/methods/documents@v0.1.0", inputs: { question: "why?" } },
+        refusingStart(noBlobStore),
+      ],
+      [{ files }, refusingStart(noBlobStore, folder)],
+      [{ files, inputs: { question: "why?" } }, refusingStart(blobStore, folder)],
+      [{ files }, refusingStart(blobStore, folder)],
+      [
+        { files: [{ path: "methods/invoice.mthds" }, { path: "methods/templates/invoice.xlsx" }] },
+        refusingStart(noBlobStore, {
+          "methods/invoice.mthds": 'domain = "invoice"',
+          "methods/templates/invoice.xlsx": workbook,
+        }),
+      ],
+      [{ files, inputs: { question: "why?" } }, refusingStart(failingHandshake, folder)],
+    ];
 
-    const result = await startMthdsRun(
-      { files: [{ path: "methods/invoice.mthds" }, { path: "methods/templates/invoice.xlsx" }] },
-      context,
-    );
+    for (const [input, { context, versionCalls }] of starts) {
+      const result = await startMthdsRun(input, context);
 
-    expect(versionCalls()).toBe(1);
-    expect(result.structuredContent.errors?.[0]?.location).toBe("files");
-  });
-
-  it("blames neither cause of a 413 when the handshake that would tell how a heavy tree went fails", async () => {
-    const heavy = "x".repeat(INLINE_TREE_MAX_BYTES + 1);
-    const { context, versionCalls } = refusingStart(
-      () =>
-        Promise.reject(new ApiUnreachableError("connection reset", DEFAULT_API_URL, "ECONNRESET")),
-      { "methods/invoice.mthds": 'domain = "invoice"', "methods/report.html": heavy },
-    );
-
-    const result = await startMthdsRun(
-      {
-        files: [{ path: "methods/invoice.mthds" }, { path: "methods/report.html" }],
-        inputs: { question: "why?" },
-      },
-      context,
-    );
-
-    expect(versionCalls()).toBe(1);
-    const error = result.structuredContent.errors?.[0];
-    expect(error).toMatchObject({ class: "input_domain" });
-    expect(error).not.toHaveProperty("location");
-    expect(error?.hint).toContain("cannot be told from here");
-    expect(error?.hint).not.toContain("are not what made it so");
+      expect(result.structuredContent.problem).toEqual(TOO_LARGE);
+      expect(versionCalls()).toBe(0);
+    }
   });
 
   it("rejects { path } items instructively without a resolver (hosted)", async () => {
@@ -2997,10 +2889,14 @@ describe("startMthdsRun path submissions", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("files[0].path");
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("npx @pipelex/mcp");
-    expect(result.summary).toBe("Run was not started: request input is invalid.");
+    expect(result.structuredContent.problem).toMatchObject({
+      domain: "input",
+      location: { field: "files[0].path" },
+    });
+    expect(result.structuredContent.problem?.message).toContain("npx @pipelex/mcp");
+    const problem = result.structuredContent.problem;
+    if (problem === undefined) throw new Error("the refusal carried no problem");
+    expect(result.summary).toBe(problemSummary(problem));
   });
 });
 
@@ -3111,6 +3007,8 @@ describe("startMthdsRun by method_id, on both platforms", () => {
   });
 
   it("says a platform that refused a suffix by its pattern does not resolve suffixes", async () => {
+    // Such a platform's run route refuses the `@` by its body pattern, with a
+    // 422 the SDK cannot read as a problem document.
     const result = await startMthdsRun(
       { method_id: "mt_abc123@draft" },
       contextWith({
@@ -3121,97 +3019,71 @@ describe("startMthdsRun by method_id, on both platforms", () => {
               `${DEFAULT_API_URL}/v1/start`,
               422,
               "Unprocessable Entity",
-              "{}",
-              undefined,
-              "Request validation failed.",
-              undefined,
-              "validation_failed",
-              {
-                details: {
-                  status: 422,
-                  code: "validation_failed",
-                  errors: [{ field: "method_id", code: "string_pattern_mismatch" }],
-                } as never,
-              },
+              JSON.stringify({
+                status: 422,
+                code: "validation_failed",
+                errors: [{ field: "method_id", code: "string_pattern_mismatch" }],
+              }),
+              { mayStartRun: true },
             ),
           ),
+        version: versionsUnsupported,
       }),
     );
 
-    expect(result.structuredContent.errors?.[0]?.hint).toContain(
-      "does not resolve version suffixes yet, so it refused `mt_abc123@draft`",
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.response_unreadable",
+      params: { status: 422 },
+    });
+    expect(result.structuredContent.problem?.message).toContain(
+      "this platform refused `mt_abc123@draft` because it does not resolve version suffixes yet",
     );
   });
 
-  it("headlines a run of the draft refused by role as the role, with the server's sentence", async () => {
-    const detail =
-      "Your role in this organization is runner: it runs the organization's published versions, mt_…@<n> or the bare id, and not a draft.";
+  it("relays a run of the draft refused by role as the platform answered it", async () => {
+    const forbidden = buildProblem(
+      "auth.forbidden",
+      { requirement: "a role that runs drafts" },
+      { status: 403 },
+    );
     const result = await startMthdsRun(
       { method_id: "mt_abc123@draft" },
-      contextWith({
-        start: () =>
-          Promise.reject(
-            new ApiResponseError(
-              "HTTP 403",
-              `${DEFAULT_API_URL}/v1/start`,
-              403,
-              "Forbidden",
-              "{}",
-              undefined,
-              detail,
-              undefined,
-              "role_not_permitted",
-              {
-                details: { title: "Forbidden", errorDomain: "config", retryable: false },
-                mayStartRun: true,
-              },
-            ),
-          ),
-      }),
+      contextWith({ start: () => Promise.reject(answeredWith("/v1/start", forbidden)) }),
     );
 
-    const error = result.structuredContent.errors?.[0];
-    expect(error).toMatchObject({
-      class: "config",
-      kind: "role",
-      message: detail,
-      retryable: false,
-    });
-    expect(error?.location).toBeUndefined();
+    expect(result.structuredContent.problem).toEqual(forbidden);
     // A refusal is an answer: nothing ran, so it is neither a may-have-run start
-    // nor a refused suffix.
-    expect(result.summary).toBe(
-      "Run could not start: your role in this organization does not allow this.",
-    );
+    // nor a refused suffix, and the key that was accepted is not in question.
+    expect(result.summary.startsWith(`## ${forbidden.title}`)).toBe(true);
     const text = runToolResult(result).content[0].text;
-    expect(text).toContain(detail);
-    expect(text).not.toMatch(/PIPELEX_API_KEY|log ?in|version suffixes/i);
+    expect(text).toContain(forbidden.detail);
+    expect(text).not.toMatch(/PIPELEX_API_KEY|log ?in|version suffixes|may have started/i);
   });
 
   it("explains a never-published method's bare id", async () => {
+    const notPublished = pipelexProblem("pipelex.catalog.not_published", {
+      title: "The saved method has no published version",
+      status: 409,
+      detail: "The method 'mt_abc123' has no published version.",
+      domain: "input",
+      retry: "no",
+      next_step: {
+        kind: "change_input",
+        detail:
+          "Publish a version of the method 'mt_abc123', or name its draft as 'mt_abc123@draft', then send the request again.",
+      },
+      params: { method_id: "mt_abc123" },
+    });
     const result = await startMthdsRun(
       { method_id: "mt_abc123" },
-      contextWith({
-        start: () =>
-          Promise.reject(
-            new ApiResponseError(
-              "HTTP 409",
-              `${DEFAULT_API_URL}/v1/start`,
-              409,
-              "Conflict",
-              "{}",
-              undefined,
-              "mt_abc123 has never been published.",
-              undefined,
-              "method_not_published",
-            ),
-          ),
-      }),
+      contextWith({ start: () => Promise.reject(answeredWith("/v1/start", notPublished)) }),
     );
 
-    const error = result.structuredContent.errors?.[0];
-    expect(error).toMatchObject({ class: "input_domain", location: "method_id" });
-    expect(error?.hint).toContain("`mt_abc123@draft`");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "pipelex.catalog.not_published",
+      domain: "input",
+    });
+    expect(result.structuredContent.problem?.message).toContain("`mt_abc123@draft`");
   });
 
   it("surfaces the version a run ran on its status read", async () => {
@@ -3313,13 +3185,13 @@ describe("startMthdsRun from a method folder", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "method_id",
+    expect(result.structuredContent.problem).toMatchObject({
+      domain: "input",
+      location: { field: "method_id" },
     });
-    expect(result.structuredContent.errors?.[0]?.message).toContain("Beside method_dir");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("the folder is what runs");
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("drop method_dir");
+    expect(result.structuredContent.problem?.message).toContain("Beside method_dir");
+    expect(result.structuredContent.problem?.message).toContain("the folder is what runs");
+    expect(result.structuredContent.problem?.message).toContain("drop method_dir");
     expect(result.structuredContent).not.toHaveProperty("files_sent");
   });
 
@@ -3353,34 +3225,29 @@ describe("startMthdsRun from a method folder", () => {
       { ...contextWith({}), resolver: localMethodFileResolver("/nonexistent-root") },
     );
 
-    expect(result.structuredContent.errors?.map((error) => error.location)).toEqual(["method_ref"]);
+    // One fault, so the problem is that fault, with no list of several.
+    expect(result.structuredContent.problem?.location?.field).toBe("method_ref");
+    expect(result.structuredContent.problem).not.toHaveProperty("errors");
   });
 
-  it("locates a refusal of what it sent at method_dir, the field the caller passed", async () => {
+  it("relays a refusal of what it sent with the API's own location, and lists the files it sent", async () => {
     const root = await methodFolder();
-    const refusedTree = new ApiResponseError(
-      "HTTP 422",
-      `${DEFAULT_API_URL}/v1/start`,
-      422,
-      "Unprocessable Content",
-      "{}",
-      undefined,
-      "'a//b.mthds' is not a tree path",
-      undefined,
-      "invalid_method_files",
+    const refusal = buildProblem(
+      "request.invalid",
+      { field: "tree.files" },
+      { status: 422, location: { field: "tree.files" } },
     );
     const context: RunContext = {
-      ...contextWith({ start: () => Promise.reject(refusedTree) }),
+      ...contextWith({ start: () => Promise.reject(answeredWith("/v1/start", refusal)) }),
       resolver: localMethodFileResolver(root),
     };
 
     const result = await startMthdsRun({ method_dir: "invoice" }, context);
 
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "method_dir",
-    });
+    // The location names the request's own field, never rewritten to the tool's.
+    expect(result.structuredContent.problem).toEqual(refusal);
     // The files left the machine all the same.
     expect(result.structuredContent.files_sent).toEqual(SENT);
+    expect(runToolResult(result).content[0].text).toContain("## Files sent");
   });
 });

@@ -1,4 +1,5 @@
-import type { MethodData, MethodPublishResult } from "@pipelex/sdk";
+import { formatItem } from "@pipelex/sdk";
+import type { MethodData, MethodPublishResult, PipelexValidationResult } from "@pipelex/sdk";
 import { z } from "zod";
 
 import { apiHostOf } from "./catalog-link.js";
@@ -13,14 +14,16 @@ import {
 import type { CatalogWriteClient, CatalogWriteContext, PublishState } from "./catalog-write.js";
 import type { MethodVersionsSupport } from "./method-versions.js";
 import {
+  argumentProblem,
   asOneLine,
-  asRecord,
-  classifyError,
-  summaryForToolError,
-  toolErrorSchema,
+  faultsProblem,
+  problemItemSchema,
+  problemOf,
+  problemSchema,
+  problemSummary,
   toolResultContent,
 } from "./shared.js";
-import type { ClassifyErrorOptions, ErrorSummaries, ToolError } from "./shared.js";
+import type { Problem, ProblemItem } from "./shared.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 
 /**
@@ -38,8 +41,8 @@ import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
  * so each is `status: "ok"`, discriminated on `outcome`: `published` with the
  * new version, `unchanged` when the draft equals the latest version, and
  * `refused` with the validation verdict that refused it. `status: "error"` is
- * a publish that produced no verdict: a stale token, an unknown method, a
- * runner the platform could not reach.
+ * a publish that produced no verdict, with its one problem: a stale token, an
+ * unknown method, a runner the platform could not reach.
  */
 
 export const mthdsPublishMethodInputSchema = {
@@ -94,12 +97,17 @@ export const mthdsPublishMethodOutputSchema = z.object({
   is_valid: z.boolean().optional(),
   is_runnable: z.boolean().optional(),
   pending_signatures: z.array(z.string()).optional(),
-  validation_errors: z.array(z.unknown()).optional(),
+  validation_errors: z
+    .array(problemItemSchema)
+    .optional()
+    .describe("refused, invalid only: the validation verdict's errors, one problem item each."),
   updated_at: z.string().optional().describe("The draft's token, which a publish never moves."),
   latest_version: z.number().int().nullable().optional(),
   publish_state: publishStateSchema.optional(),
   api_host: z.string().optional(),
-  errors: z.array(toolErrorSchema).optional(),
+  problem: problemSchema
+    .optional()
+    .describe("Present with status error: why nothing was published, and what to do."),
 });
 
 export interface MthdsPublishMethodInput {
@@ -120,7 +128,7 @@ export interface PublishMethodSuccess {
   is_valid?: boolean;
   is_runnable?: boolean;
   pending_signatures?: string[];
-  validation_errors?: unknown[];
+  validation_errors?: ProblemItem[];
   updated_at: string;
   latest_version?: number | null;
   publish_state?: PublishState;
@@ -129,7 +137,7 @@ export interface PublishMethodSuccess {
 
 export interface PublishMethodFailure {
   status: "error";
-  errors: ToolError[];
+  problem: Problem;
 }
 
 export type PublishMethodStructuredContent = PublishMethodSuccess | PublishMethodFailure;
@@ -139,36 +147,6 @@ export interface PublishMethodResult {
   summary: string;
 }
 
-const PUBLISH_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/methods/{id}/publish",
-  badRequest: {
-    location: "method_id",
-    hint: "The platform refused to publish this draft as it stands: it has no .mthds file, or two of its files share a name a run cannot tell apart. Fix the bundle, save the draft, and publish again when the user asks.",
-  },
-  notFound: {
-    location: "method_id",
-    hint: `No registered method with this id is visible to the API key's organization. The catalog is org-scoped, so a method from another organization reads exactly like a miss — check the id with ${WORKSHOP_TOOL_NAMES.listMethods}.`,
-  },
-  conflict: {
-    location: "expected_draft_updated_at",
-    hint: `The draft changed since that token — somebody saved it, and the webapp saves as it edits — so nothing was published. Read it with ${WORKSHOP_TOOL_NAMES.getMethod} and tell the user what it now holds; publish it, with its new updated_at, only if they still want to.`,
-  },
-  tooLarge: {
-    location: "method_id",
-    hint: "The draft is too large to publish as a version. Make the bundle smaller, save it, and publish again.",
-  },
-};
-
-const PUBLISH_ERROR_SUMMARIES: ErrorSummaries = {
-  config: "The method was not published: the Pipelex API or catalog access is misconfigured.",
-  input_domain: "The method was not published: the request was rejected.",
-  runtime: "The method was not published: the Pipelex API returned an error.",
-  paywall:
-    "The method was not published: the organization's Pipelex plan does not cover this call.",
-  auth: "The method was not published: the Pipelex API key is missing or was refused.",
-  role: "The method was not published: your role in this organization does not allow this.",
-};
-
 export async function publishMthdsMethod(
   input: MthdsPublishMethodInput,
   context: CatalogWriteContext,
@@ -176,26 +154,30 @@ export async function publishMthdsMethod(
   const parsed = mthdsPublishMethodInputObjectSchema.safeParse(input);
   if (!parsed.success) {
     return publishError(
-      "The method was not published: request input is invalid.",
-      parsed.error.issues.map((issue) => ({
-        class: "input_domain" as const,
-        ...(issue.path.length === 0 ? {} : { location: issue.path.join(".") }),
-        message: issue.message,
-        hint: "Pass the method's catalog id and the draft token you last saw (the updated_at of your last save of it, or of your last pull of its draft).",
-        retryable: false,
-      })),
+      faultsProblem(
+        parsed.error.issues.map((issue) =>
+          argumentProblem(
+            issue.path.length === 0 ? "arguments" : issue.path.join("."),
+            issue.code,
+            issue.message,
+            "Pass the method's catalog id and the draft token you last saw (the updated_at of your last save of it, or of your last pull of its draft).",
+          ),
+        ),
+      ),
+      context,
     );
   }
 
-  const routeId = methodRouteId(parsed.data.method_id, (selector) => ({
-    class: "input_domain",
-    location: "method_id",
-    message: `\`${parsed.data.method_id}\` names version ${selector.version}, which is already published and never changes: a publish publishes the draft.`,
-    hint: `Pass method_id "${selector.methodId}" to publish its draft. To publish version ${selector.version}'s content again as the next version, pull it into the bundle's directory, save it as the draft, and publish that.`,
-    retryable: false,
-  }));
+  const routeId = methodRouteId(parsed.data.method_id, (selector) =>
+    argumentProblem(
+      "method_id",
+      "version_suffix",
+      `\`${parsed.data.method_id}\` names version ${selector.version}, which is already published and never changes: a publish publishes the draft.`,
+      `Pass method_id "${selector.methodId}" to publish its draft. To publish version ${selector.version}'s content again as the next version, pull it into the bundle's directory, save it as the draft, and publish that.`,
+    ),
+  );
   if (!routeId.ok) {
-    return publishError("The method was not published: request input is invalid.", [routeId.error]);
+    return publishError(routeId.problem, context);
   }
   const methodId = routeId.methodId;
   const expected = parsed.data.expected_draft_updated_at;
@@ -210,16 +192,12 @@ export async function publishMthdsMethod(
     support = catalogVersionsSupport(context, client);
     result = await client.publishMethod(methodId, { expected_draft_updated_at: expected });
   } catch (err) {
-    const error = classifyError(err, {
-      ...PUBLISH_ERROR_OPTIONS,
-      auth: context.authError,
-      baseUrlSource: context.baseUrlSource,
-    });
+    const problem = problemOf(err);
     const reported =
-      error.location === "expected_draft_updated_at" && client
-        ? await staleTokenError(error, client, methodId, expected)
-        : error;
-    return publishError(summaryForToolError(reported, PUBLISH_ERROR_SUMMARIES), [reported]);
+      problem.code === STALE_TOKEN_CODE && client
+        ? await staleTokenProblem(problem, client, methodId, expected)
+        : problem;
+    return publishError(reported, context);
   }
 
   const apiHost = apiHostOf(context.baseUrl);
@@ -228,26 +206,32 @@ export async function publishMthdsMethod(
   return { structuredContent, summary: publishSummary(structuredContent, answer) };
 }
 
+/** The platform's refusal of a draft that moved since the token the publish sent. */
+const STALE_TOKEN_CODE = "pipelex.catalog.update_conflict";
+
 /**
  * The stale-token refusal, carrying the draft's current token beside the one
- * the call sent, so the caller can tell its own unrecorded save from somebody
- * else's. Best-effort: when the read fails, the refusal stands as worded.
+ * the call sent in this server's `message`, so the caller can tell its own
+ * unrecorded save from somebody else's, and that a publish under the new
+ * token is the user's to ask for: the platform's problem names neither token,
+ * and its code, domain and retry stand. Best-effort: when the read fails, the
+ * refusal stands as the platform worded it.
  */
-async function staleTokenError(
-  error: ToolError,
+async function staleTokenProblem(
+  problem: Problem,
   client: CatalogWriteClient,
   methodId: string,
   expected: string,
-): Promise<ToolError> {
+): Promise<Problem> {
   let current: MethodData;
   try {
     current = await client.getMethod(methodId);
   } catch {
-    return error;
+    return problem;
   }
   return {
-    ...error,
-    message: `The method's draft was last saved at ${current.updated_at}, not ${expected}, so nothing was published.`,
+    ...problem,
+    message: `The method's draft was last saved at ${current.updated_at}, not ${expected}, so nothing was published. Read it with ${WORKSHOP_TOOL_NAMES.getMethod} and tell the user what it now holds; publish it under its new updated_at only if they still want to.`,
   };
 }
 
@@ -289,27 +273,28 @@ function publishContent(result: MethodPublishResult, apiHost: string): PublishMe
 
 /**
  * The verdict fields of the runner's validation answer, which the platform
- * relays verbatim. Read defensively: it is the runner's shape, and a field
- * that is not what it should be is left out rather than guessed at.
+ * relays and the SDK reads as `validate` does: `is_valid`, then the invalid
+ * arm's `errors` as problem items. The other members are still read
+ * defensively, being the runner's shape, and one that is not what it should
+ * be is left out rather than guessed at.
  */
 function validationVerdictOf(
-  validation: unknown,
+  validation: PipelexValidationResult,
 ): Pick<
   PublishMethodSuccess,
   "is_valid" | "is_runnable" | "pending_signatures" | "validation_errors"
 > {
-  const record = asRecord(validation);
-  if (record === undefined) return {};
-  const pending = record.pending_signatures;
+  const pending: unknown = validation.pending_signatures;
+  const runnable: unknown = validation.is_runnable;
   return {
-    ...(typeof record.is_valid === "boolean" ? { is_valid: record.is_valid } : {}),
-    ...(typeof record.is_runnable === "boolean" ? { is_runnable: record.is_runnable } : {}),
+    is_valid: validation.is_valid,
+    ...(typeof runnable === "boolean" ? { is_runnable: runnable } : {}),
     ...(Array.isArray(pending) && pending.every((item) => typeof item === "string")
       ? { pending_signatures: pending as string[] }
       : {}),
-    ...(Array.isArray(record.validation_errors)
-      ? { validation_errors: record.validation_errors as unknown[] }
-      : {}),
+    ...(validation.is_valid || validation.errors.length === 0
+      ? {}
+      : { validation_errors: validation.errors }),
   };
 }
 
@@ -363,28 +348,23 @@ function publishSummary(result: PublishMethodSuccess, support: MethodVersionsSup
   return lines.join("\n");
 }
 
-/** One runner diagnostic as a Markdown bullet, every field read defensively. */
-function validationErrorLine(item: unknown): string {
-  const record = asRecord(item);
-  if (record === undefined) return `- ${asOneLine(String(item))}`;
-  const category = typeof record.category === "string" ? `**${record.category}** — ` : "";
-  const message = typeof record.message === "string" ? asOneLine(record.message) : "(no message)";
-  const source =
-    typeof record.source === "string" && record.source !== "" ? ` (${record.source})` : "";
-  return `- ${category}${message}${source}`;
+/** One validation fault as a Markdown bullet: its code, its detail and where it happened. */
+function validationErrorLine(item: ProblemItem): string {
+  return `- ${asOneLine(formatItem(item))}`;
 }
 
-function publishError(summary: string, errors: ToolError[]): PublishMethodResult {
-  return { structuredContent: { status: "error", errors }, summary };
+/** A publish that produced no verdict: its one problem, and that problem as the summary. */
+function publishError(problem: Problem, context: CatalogWriteContext): PublishMethodResult {
+  return {
+    structuredContent: { status: "error", problem },
+    summary: problemSummary(problem, context.apiNotes),
+  };
 }
 
 export function publishMethodToolResult(result: PublishMethodResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(
-      result.summary,
-      result.structuredContent.status === "error" ? result.structuredContent.errors : undefined,
-    ),
+    content: toolResultContent(result.summary),
     isError: result.structuredContent.status === "error",
   };
 }

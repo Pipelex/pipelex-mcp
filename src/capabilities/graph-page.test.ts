@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { buildProblem } from "@pipelex/sdk";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -234,7 +235,13 @@ describe("writeGraphPage", () => {
     expect(outcome).toMatchObject({
       path: GRAPH_PAGE_FILENAME,
       written: false,
-      error: { class: "input_domain", location: "graph_page", retryable: false },
+      error: {
+        code: "client.target_exists",
+        domain: "input",
+        retry: "no",
+        params: { path: GRAPH_PAGE_FILENAME },
+        location: { field: "graph_page" },
+      },
     });
     expect(outcome.error?.message).toContain("generator mark");
     expect(await fs.readFile(path.join(root, GRAPH_PAGE_FILENAME), "utf8")).toBe("<p>mine</p>");
@@ -248,6 +255,7 @@ describe("writeGraphPage", () => {
     const outcome = await writeGraphPage(root, [{ path: "bundle.mthds", content: BUNDLE }]);
 
     expect(outcome.written).toBe(false);
+    expect(outcome.error?.code).toBe("client.target_exists");
     expect(outcome.error?.message).toContain("symlink");
     expect(await fs.readFile(path.join(root, "target.html"), "utf8")).toBe("target");
   });
@@ -260,6 +268,7 @@ describe("writeGraphPage", () => {
     const outcome = await writeGraphPage(root, [{ path: "bundle.mthds", content: BUNDLE }]);
 
     expect(outcome.written).toBe(false);
+    expect(outcome.error?.code).toBe("client.target_exists");
     expect(outcome.error?.message).toContain("not a regular file");
   });
 
@@ -284,7 +293,12 @@ describe("writeGraphPage", () => {
 
     expect(outcome).toMatchObject({
       written: false,
-      error: { class: "input_domain", location: "graph_page" },
+      error: {
+        code: "client.argument_invalid",
+        domain: "input",
+        params: { argument: "graph_page", reason: "outside_workspace" },
+        location: { field: "graph_page" },
+      },
     });
     await expect(fs.stat(path.join(outside, GRAPH_PAGE_FILENAME))).rejects.toThrow();
   });
@@ -302,14 +316,19 @@ describe("writeGraphPage", () => {
       expect(outcome).toMatchObject({
         path: path.join("locked", GRAPH_PAGE_FILENAME),
         written: false,
-        error: { class: "runtime", location: "graph_page", retryable: false },
+        error: {
+          code: "client.write_failed",
+          retry: "no",
+          params: { path: path.join("locked", GRAPH_PAGE_FILENAME), reason: "EACCES" },
+          location: { field: "graph_page" },
+        },
       });
     } finally {
       await fs.chmod(path.join(root, "locked"), 0o755);
     }
   });
 
-  it("reports a working directory that does not exist as the deployment's fault", async () => {
+  it("reports a working directory that does not exist as the server's own configuration", async () => {
     const root = await makeTempDir();
 
     const outcome = await writeGraphPage(path.join(root, "gone"), [
@@ -318,7 +337,7 @@ describe("writeGraphPage", () => {
 
     expect(outcome).toMatchObject({
       written: false,
-      error: { class: "config", location: "deployment" },
+      error: { code: "client.not_configured", params: { setting: "working_directory" } },
     });
   });
 });
@@ -348,18 +367,19 @@ describe("graphPageSection", () => {
   const refused: GraphPageOutcome = {
     path: "method-graph.html",
     written: false,
-    error: {
-      class: "input_domain",
-      location: "graph_page",
-      message: "It is\nsomebody else's.",
-      hint: "Move it.",
-      retryable: false,
-    },
+    error: buildProblem(
+      "client.target_exists",
+      { path: "method-graph.html" },
+      {
+        location: { field: "graph_page" },
+        extra: { message: "It is\nsomebody else's. Move it." },
+      },
+    ),
   };
 
-  it("says why a page was not written, and that the verdict stands", () => {
+  it("says why a page was not written, its code, and that the verdict stands", () => {
     expect(graphPageSection(refused, true)).toBe(
-      "## Method graph\n\nThe method's flowchart page was not written to `method-graph.html`; the verdict above stands. It is somebody else's.\n\n*Hint: Move it.*",
+      "## Method graph\n\nThe method's flowchart page was not written to `method-graph.html`; the verdict above stands. It is somebody else's. Move it. (`client.target_exists`)",
     );
   });
 

@@ -48,7 +48,7 @@ function request(root: string, overrides: Partial<CodegenWriteRequest> = {}): Co
 
 function expectOk(result: CodegenWriteResult) {
   if (!result.ok) {
-    throw new Error(`expected a successful write, got: ${result.error.message}`);
+    throw new Error(`expected a successful write, got: ${result.problem.detail}`);
   }
   return result;
 }
@@ -196,7 +196,12 @@ describe("writeCodegenTree — the containment boundary", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error).toMatchObject({ class: "input_domain", location: "output_dir" });
+    expect(result.problem).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      params: { argument: "output_dir", reason: "outside_workspace" },
+      location: { field: "output_dir" },
+    });
     await expect(fs.stat(sibling)).rejects.toMatchObject({ code: "ENOENT" });
     expect(await tree(root)).toEqual([]);
   });
@@ -209,7 +214,8 @@ describe("writeCodegenTree — the containment boundary", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error.location).toBe("output_dir");
+    expect(result.problem.location).toEqual({ field: "output_dir" });
+    expect(result.problem.params).toMatchObject({ reason: "outside_workspace" });
     expect(await fs.readdir(outside)).toEqual([]);
   });
 
@@ -222,7 +228,8 @@ describe("writeCodegenTree — the containment boundary", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error.location).toBe("output_dir");
+    expect(result.problem.location).toEqual({ field: "output_dir" });
+    expect(result.problem.params).toMatchObject({ reason: "outside_workspace" });
     expect(await fs.readdir(outside)).toEqual([]);
   });
 
@@ -256,7 +263,8 @@ describe("writeCodegenTree — the containment boundary", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     // The path came from the API, not from the caller — a runtime no-verdict.
-    expect(result.error.class).toBe("runtime");
+    expect(result.problem).toMatchObject({ code: "client.response_unreadable", domain: "runtime" });
+    expect(result.problem.message).toContain("../escaped.ts");
     expect(await tree(root)).toEqual(["generated"]);
   });
 
@@ -287,7 +295,7 @@ describe("writeCodegenTree — the containment boundary", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error.class).toBe("runtime");
+    expect(result.problem).toMatchObject({ code: "client.response_unreadable", domain: "runtime" });
     await expect(fs.stat(path.join(root, "codegen.lock"))).rejects.toMatchObject({
       code: "ENOENT",
     });
@@ -307,8 +315,13 @@ describe("writeCodegenTree — refusing foreign files", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error).toMatchObject({ class: "input_domain", location: "output_dir" });
-    expect(result.error.message).toContain(report.artifacts[0]!.path);
+    expect(result.problem).toMatchObject({
+      code: "client.target_exists",
+      domain: "input",
+      params: { path: path.join("generated", report.artifacts[0]!.path) },
+      location: { field: "output_dir" },
+    });
+    expect(result.problem.message).toContain(report.artifacts[0]!.path);
     // Nothing was written — not one of the OTHER artifacts either, which is
     // what "whole tree or nothing" means on the refusal path.
     expect(await tree(root)).toEqual(before);
@@ -328,8 +341,11 @@ describe("writeCodegenTree — refusing foreign files", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error.location).toBe("output_dir");
-    expect(result.error.message).toContain("symlink");
+    expect(result.problem).toMatchObject({
+      code: "client.target_exists",
+      location: { field: "output_dir" },
+    });
+    expect(result.problem.message).toContain("symlink");
     // `lstat`, not `stat`: the link target is what an overwrite would have hit.
     expect(await fs.readFile(decoy, "utf8")).toBe("// untouched\n");
   });
@@ -342,7 +358,8 @@ describe("writeCodegenTree — refusing foreign files", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error.message).toContain("not a regular file");
+    expect(result.problem.code).toBe("client.target_exists");
+    expect(result.problem.message).toContain("not a regular file");
   });
 
   it("refuses a user's TOML file that happens to be named codegen.lock", async () => {
@@ -355,12 +372,16 @@ describe("writeCodegenTree — refusing foreign files", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error).toMatchObject({ class: "input_domain", location: "output_dir" });
-    expect(result.error.message).toContain("codegen.lock");
+    expect(result.problem).toMatchObject({
+      code: "client.target_exists",
+      params: { path: path.join("generated", "codegen.lock") },
+      location: { field: "output_dir" },
+    });
+    expect(result.problem.message).toContain("codegen.lock");
     expect(await fs.readFile(path.join(dir, "codegen.lock"), "utf8")).toBe('mine = "yes"\n');
   });
 
-  it.skipIf(asRoot)("surfaces a non-ENOENT inspection failure as runtime", async () => {
+  it.skipIf(asRoot)("surfaces a non-ENOENT inspection failure as an unreadable file", async () => {
     const root = await makeTempDir();
     const dir = path.join(root, "generated");
     await fs.mkdir(dir, { recursive: true });
@@ -375,7 +396,11 @@ describe("writeCodegenTree — refusing foreign files", () => {
       if (result.ok) return;
       // Unreadable is not the same as foreign: the caller is not told their
       // directory holds someone else's file.
-      expect(result.error.class).toBe("runtime");
+      expect(result.problem).toMatchObject({
+        code: "client.file_unreadable",
+        params: { path: path.join("generated", report.artifacts[0]!.path) },
+      });
+      expect(result.problem.code).not.toBe("client.target_exists");
     } finally {
       await fs.chmod(target, 0o644);
     }
@@ -504,11 +529,14 @@ describe("writeCodegenTree — the post-write check", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     // `readFile(p, "utf8")` would have substituted U+FFFD and reported current.
-    expect(result.error.class).toBe("runtime");
-    expect(result.error.message).toContain("corrupt.py");
+    expect(result.problem).toMatchObject({
+      code: "client.file_unreadable",
+      params: { path: path.join("generated", "corrupt.py"), reason: "not_utf8" },
+    });
+    expect(result.problem.message).toContain("corrupt.py");
   });
 
-  it("surfaces a corrupt lock as a runtime no-verdict, with the files left on disk", async () => {
+  it("surfaces a corrupt lock as the SDK's problem, with the files left on disk", async () => {
     const root = await makeTempDir();
 
     const result = await writeCodegenTree(
@@ -517,11 +545,12 @@ describe("writeCodegenTree — the post-write check", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error.class).toBe("runtime");
-    expect(result.error.message).toContain("lock");
+    // `CodegenLockError`'s own problem: the lock cannot be read.
+    expect(result.problem.code).toBe("client.file_unreadable");
+    expect(result.problem.message).toContain("lock");
     // The write happened; only the verification failed, so the tree is on disk
     // and the message says to check it.
-    expect(result.error.hint).toContain("pipelex codegen check");
+    expect(result.problem.message).toContain("pipelex codegen check");
     expect(await fs.readFile(path.join(root, "generated", "codegen.lock"), "utf8")).toContain(
       "not toml",
     );
@@ -529,32 +558,42 @@ describe("writeCodegenTree — the post-write check", () => {
 });
 
 describe("writeCodegenTree — a failure mid-write", () => {
-  it.skipIf(asRoot)("reports runtime naming what landed, with the retry hint", async () => {
-    const root = await makeTempDir();
-    const dir = path.join(root, "generated");
-    await fs.mkdir(dir, { recursive: true });
-    // The second destination is a stamped file this tool owns — so inspection
-    // passes it — but it is read-only, so the write fails after the first
-    // artifact has already landed.
-    const second = path.join(dir, report.artifacts[1]!.path);
-    await fs.writeFile(second, report.artifacts[1]!.content, "utf8");
-    await fs.chmod(second, 0o444);
+  it.skipIf(asRoot)(
+    "reports the failed write naming what landed, and how to call again",
+    async () => {
+      const root = await makeTempDir();
+      const dir = path.join(root, "generated");
+      await fs.mkdir(dir, { recursive: true });
+      // The second destination is a stamped file this tool owns — so inspection
+      // passes it — but it is read-only, so the write fails after the first
+      // artifact has already landed.
+      const second = path.join(dir, report.artifacts[1]!.path);
+      await fs.writeFile(second, report.artifacts[1]!.content, "utf8");
+      await fs.chmod(second, 0o444);
 
-    try {
-      const result = await writeCodegenTree(request(root));
+      try {
+        const result = await writeCodegenTree(request(root));
 
-      expect(result.ok).toBe(false);
-      if (result.ok) return;
-      expect(result.error.class).toBe("runtime");
-      expect(result.error.message).toContain(report.artifacts[0]!.path);
-      expect(result.error.retryable).toBe(true);
-      // Regeneration overwrites its own files, so the retry finds the stamped
-      // file it left and proceeds.
-      expect(result.error.hint).toContain("same output_dir");
-    } finally {
-      await fs.chmod(second, 0o644);
-    }
-  });
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        // A file the writer cannot write is fixed before the call is made again,
+        // which is the registry's verdict on `client.write_failed`.
+        expect(result.problem).toMatchObject({
+          code: "client.write_failed",
+          retry: "no",
+          next_step: { kind: "fix_configuration" },
+          params: { path: path.join("generated", report.artifacts[1]!.path), reason: "EACCES" },
+          location: { field: "output_dir" },
+        });
+        expect(result.problem.message).toContain(report.artifacts[0]!.path);
+        // Regeneration overwrites its own files, so the retry finds the stamped
+        // file it left and proceeds.
+        expect(result.problem.message).toContain("same output_dir");
+      } finally {
+        await fs.chmod(second, 0o644);
+      }
+    },
+  );
 });
 
 describe("writeCodegenTree — sub-directory artifacts", () => {

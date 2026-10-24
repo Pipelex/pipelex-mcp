@@ -1,36 +1,16 @@
 import {
   ApiResponseError,
-  ApiUnreachableError,
-  ArtifactAuthenticationError,
-  ArtifactOperationError,
-  InputPreparationError,
-  InvalidInputValueError,
-  InvalidLocalSourceError,
-  MethodFileTransferError,
-  MethodLoadError,
-  MissingMainStuffError,
+  ArtifactFetchError,
   PIPELEX_STORAGE_SCHEME,
   PipelexApiClient,
-  PipelexRequestError,
-  PipelineRequestError,
-  RejectedAssetError,
   RequestArgumentError,
-  RunLifecycleUnavailableError,
-  ScopeUnavailableError,
-  TestFileRefusedError,
-  UnsupportedUploadCapabilityError,
-  UploadAuthenticationError,
-  UploadTransportError,
-  INLINE_TREE_MAX_BYTES,
+  buildProblem,
   collectArtifacts,
-  errorVerdictOf,
+  isProblemError,
+  renderProblemMarkdown,
+  reportedProblem,
 } from "@pipelex/sdk";
-import type {
-  ErrorDomain,
-  ErrorVerdict,
-  MethodTreeSource,
-  PipelexApiClientOptions,
-} from "@pipelex/sdk";
+import type { MethodTreeSource, PipelexApiClientOptions, Problem, ProblemItem } from "@pipelex/sdk";
 import {
   compareUtf8,
   isExcludedName,
@@ -169,12 +149,10 @@ export type SubmittedFileInput = SubmittedFile | SubmittedFilePath;
 /**
  * Outcome of resolving a text file from disk (`resolve`, which `inputs_path`
  * reads). Resolvers report failures as values (never throw): every failure is
- * an `input_domain` no-verdict at the argument's own field, so the resolver
- * supplies only the message and hint.
+ * a {@link Refusal} of the argument's own field, so the resolver supplies its
+ * words and why, and the capability builds the problem.
  */
-export type FileResolution =
-  | { ok: true; content: string }
-  | { ok: false; message: string; hint: string };
+export type FileResolution = { ok: true; content: string } | ({ ok: false } & Refusal);
 
 /**
  * What one `{ path }` item of a method's `files` is on disk
@@ -186,15 +164,13 @@ export type FileResolution =
  */
 export type MethodFileStat =
   | { ok: true; absolute: string; relative: string; size: number }
-  | { ok: false; message: string; hint: string };
+  | ({ ok: false } & Refusal);
 
 /**
  * Outcome of reading one `{ path }` item of a method's `files`
  * (`readMethodFile`): its bytes. Failures are values, at `files[i].path`.
  */
-export type MethodFileRead =
-  | { ok: true; bytes: Uint8Array }
-  | { ok: false; message: string; hint: string };
+export type MethodFileRead = { ok: true; bytes: Uint8Array } | ({ ok: false } & Refusal);
 
 /**
  * The seam the workshop fills with a filesystem-backed resolver
@@ -234,7 +210,7 @@ export interface LocatedMethodDir {
 
 export type MethodDirLocation =
   | ({ ok: true } & LocatedMethodDir)
-  | { ok: false; refusals: { message: string; hint: string }[] };
+  | { ok: false; refusals: Refusal[] };
 
 /**
  * A method folder's whole tree, every file read once: the listing, its digest,
@@ -249,7 +225,7 @@ export type MethodTreeRead =
       graphPage?: string;
       bytes: ReadonlyMap<string, Uint8Array>;
     }
-  | { ok: false; refusals: { message: string; hint: string }[] };
+  | { ok: false; refusals: Refusal[] };
 
 /** A file of a method's tree as a tool sends it. */
 export interface SentFile {
@@ -289,12 +265,13 @@ export interface MethodSourceInput extends MethodSelectors {
 /**
  * A method-taking request's source, resolved: the tree it sends when it names
  * its method by `method_dir` or `files`, or no tree when it names it by
- * `method_ref` or `method_id`. `tree` is meaningful only when `errors` is
- * empty.
+ * `method_ref` or `method_id`. `tree` is meaningful only when `faults` is
+ * empty; the faults, each a refusal's problem, make the call's one problem
+ * ({@link faultsProblem}).
  */
 export interface ResolvedMethodSource {
   tree?: MethodTreeToSend;
-  errors: ToolError[];
+  faults: Problem[];
 }
 
 /**
@@ -321,7 +298,7 @@ export async function resolveMethodSource(
     return resolveFolderTree(source, source.method_dir, resolver, rule, limits);
   }
   const files = source.files ?? [];
-  if (files.length === 0) return { errors: [] };
+  if (files.length === 0) return { faults: [] };
   return resolveFilesTree(files, resolver, limits);
 }
 
@@ -333,37 +310,37 @@ async function resolveFolderTree(
   rule: SelectorRule,
   limits: () => Promise<ListingLimits>,
 ): Promise<ResolvedMethodSource> {
-  const pairingErrors = methodDirPairingErrors(source, methodDir, rule);
-  if (pairingErrors.length > 0) return { errors: pairingErrors };
+  const pairingFaults = methodDirPairingFaults(source, methodDir, rule);
+  if (pairingFaults.length > 0) return { faults: pairingFaults };
 
   if (resolver?.locateMethodDir === undefined || resolver.readMethodTree === undefined) {
     return {
-      errors: [
-        {
-          class: "input_domain",
-          location: "method_dir",
-          message:
-            "This deployment cannot read a folder from disk; submit the method's files instead.",
-          hint: "Resubmit the method's .mthds files inline as files [{ content, uri? }], or use the local workshop server (npx @pipelex/mcp), which reads method_dir.",
-          retryable: false,
-        },
+      faults: [
+        argumentProblem(
+          "method_dir",
+          "not_readable_here",
+          "This deployment cannot read a folder from disk; submit the method's files instead.",
+          "Resubmit the method's .mthds files inline as files [{ content, uri? }], or use the local workshop server (npx @pipelex/mcp), which reads method_dir.",
+        ),
       ],
     };
   }
 
   const located = await resolver.locateMethodDir(methodDir);
-  if (!located.ok) return { errors: located.refusals.map(atMethodDirRefusal) };
+  if (!located.ok) return { faults: located.refusals.map(atMethodDirRefusal) };
   const read = await resolver.readMethodTree(located, { limits: await limits() });
-  if (!read.ok) return { errors: read.refusals.map(atMethodDirRefusal) };
+  if (!read.ok) return { faults: read.refusals.map(atMethodDirRefusal) };
 
   const tree = folderTreeToSend(located, read);
   const empty = tree.files.find(isEmptyBundle);
   if (empty !== undefined) {
     return {
-      errors: [
+      faults: [
         atMethodDirRefusal({
+          reason: "empty_bundle",
           message: emptyBundleMessage(empty.shown),
-          hint: "Write the bundle into the .mthds file, or keep it out of the method with a .gitignore inside the folder.",
+          remedy:
+            "Write the bundle into the .mthds file, or keep it out of the method with a .gitignore inside the folder.",
         }),
       ],
     };
@@ -373,17 +350,18 @@ async function resolveFolderTree(
   );
   if (findings.length > 0) {
     return {
-      errors: [
-        atMethodDirRefusal(
-          secretRefusalText(findings, (treePath) => shownIn(methodDir, treePath), {
+      faults: [
+        atMethodDirRefusal({
+          reason: SECRET_REASON,
+          ...secretRefusalText(findings, (treePath) => shownIn(methodDir, treePath), {
             arm: "folder",
             again: SEND_AGAIN,
           }),
-        ),
+        }),
       ],
     };
   }
-  return { errors: [], tree };
+  return { faults: [], tree };
 }
 
 /**
@@ -431,68 +409,64 @@ function emptyBundleMessage(shown: string): string {
   return `${shown} is empty.`;
 }
 
-/** What a caller does once a refused file is dealt with, closing the secret guard's hint. */
+/** What a caller does once a refused file is dealt with, closing the secret guard's remedy. */
 const SEND_AGAIN = "call the tool again";
 
-function atMethodDirRefusal(refusal: { message: string; hint: string }): ToolError {
-  return {
-    class: "input_domain",
-    location: "method_dir",
-    message: refusal.message,
-    hint: refusal.hint,
-    retryable: false,
-  };
+/** The reason a refusal of a file that looks like a secret names. */
+export const SECRET_REASON = "secret_suspected";
+
+function atMethodDirRefusal(refusal: Refusal): Problem {
+  return refusalProblem("method_dir", refusal);
 }
 
 /** `method_dir`'s own request-shape checks: not blank, and none of the pairings its rule refuses. */
-function methodDirPairingErrors(
+function methodDirPairingFaults(
   source: MethodSourceInput,
   methodDir: string,
   rule: SelectorRule,
-): ToolError[] {
+): Problem[] {
   if (methodDir.trim() === "") {
     return [
-      {
-        class: "input_domain",
-        location: "method_dir",
-        message: "method_dir must not be empty when supplied.",
-        hint: "Pass the folder holding the method's .mthds files, relative to the server's working directory (\".\" for that directory itself).",
-        retryable: false,
-      },
+      argumentProblem(
+        "method_dir",
+        "empty",
+        "method_dir must not be empty when supplied.",
+        "Pass the folder holding the method's .mthds files, relative to the server's working directory (\".\" for that directory itself).",
+      ),
     ];
   }
-  const errors: ToolError[] = [];
+  const faults: Problem[] = [];
   if ((source.files ?? []).length > 0) {
-    errors.push({
-      class: "input_domain",
-      location: "method_dir",
-      message:
+    faults.push(
+      argumentProblem(
+        "method_dir",
+        "mutually_exclusive",
         "method_dir and files are mutually exclusive — pass the method's folder or list its files, never both.",
-      hint: "method_dir sends the folder's whole tree by itself; drop files to send the folder, or drop method_dir to send exactly the files listed.",
-      retryable: false,
-    });
+        "method_dir sends the folder's whole tree by itself; drop files to send the folder, or drop method_dir to send exactly the files listed.",
+      ),
+    );
   }
   if (source.method_ref !== undefined && source.method_ref.trim() !== "") {
-    errors.push({
-      class: "input_domain",
-      location: "method_ref",
-      message:
+    faults.push(
+      argumentProblem(
+        "method_ref",
+        "mutually_exclusive",
         "method_dir and method_ref are mutually exclusive — submit the folder or the address, never both.",
-      hint: "An address is a complete method source resolved server-side; drop method_ref to operate on the folder, or drop method_dir to operate on the published package.",
-      retryable: false,
-    });
+        "An address is a complete method source resolved server-side; drop method_ref to operate on the folder, or drop method_dir to operate on the published package.",
+      ),
+    );
   }
   if (rule === "one_selector" && source.method_id !== undefined && source.method_id.trim() !== "") {
-    errors.push({
-      class: "input_domain",
-      location: "method_id",
-      message:
+    faults.push(
+      argumentProblem(
+        "method_id",
+        "mutually_exclusive",
         "method_dir and method_id are mutually exclusive on this tool — submit the folder or the catalog id, never both.",
-      hint: "This operation is stateless, so there is no run-history linkage for an extra id to feed; drop method_id to operate on the folder, or drop method_dir to operate on the registered method.",
-      retryable: false,
-    });
+        "This operation is stateless, so there is no run-history linkage for an extra id to feed; drop method_id to operate on the folder, or drop method_dir to operate on the registered method.",
+      ),
+    );
   }
-  return errors;
+  return faults;
 }
 
 /** One `files` item on its way into the tree, with the item it came from. */
@@ -557,18 +531,20 @@ async function resolveFilesTree(
   resolver: FileResolver | undefined,
   limits: () => Promise<ListingLimits>,
 ): Promise<ResolvedMethodSource> {
-  const errors: ToolError[] = [];
-  const refuse = (location: string, message: string, hint: string) =>
-    errors.push({ class: "input_domain", location, message, hint, retryable: false });
+  const errors: Problem[] = [];
+  const refuse = (location: string, refusal: Refusal) =>
+    errors.push(refusalProblem(location, refusal));
 
   // 0. A method, before anything of the list is stated, read or hashed.
   if (!items.some(namesBundle)) {
     return {
-      errors: [
-        itemRefusal("files", {
+      faults: [
+        refusalProblem("files", {
+          reason: "no_method_file",
           message:
             "The files hold no .mthds file, so they make no method; nothing was read or sent.",
-          hint: "List the method's .mthds files with the files they read, as { path } items or inline as { content }, or pass the method's folder as method_dir.",
+          remedy:
+            "List the method's .mthds files with the files they read, as { path } items or inline as { content }, or pass the method's folder as method_dir.",
         }),
       ],
     };
@@ -588,46 +564,47 @@ async function resolveFilesTree(
     // the content arm, and its path is ignored.
     if ("content" in item) {
       if (item.content.trim() === "") {
-        refuse(
-          `files[${index}].content`,
-          "File content must not be empty.",
-          "Submit the full .mthds file contents.",
-        );
+        refuse(`files[${index}].content`, {
+          reason: "empty",
+          message: "File content must not be empty.",
+          remedy: "Submit the full .mthds file contents.",
+        });
       }
       if (item.uri !== undefined && item.uri !== null && item.uri.trim() === "") {
-        refuse(
-          `files[${index}].uri`,
-          "File uri must not be empty when supplied.",
-          "Omit uri for inline content or provide a stable path or URI.",
-        );
+        refuse(`files[${index}].uri`, {
+          reason: "empty",
+          message: "File uri must not be empty when supplied.",
+          remedy: "Omit uri for inline content or provide a stable path or URI.",
+        });
       }
       inline.push({ index, item });
       continue;
     }
     if (item.path.trim() === "") {
-      refuse(
-        `files[${index}].path`,
-        "File path must not be empty.",
-        "Submit a file path, or inline the contents as { content, uri? }.",
-      );
+      refuse(`files[${index}].path`, {
+        reason: "empty",
+        message: "File path must not be empty.",
+        remedy: "Submit a file path, or inline the contents as { content, uri? }.",
+      });
       continue;
     }
     if (resolver?.statMethodFile === undefined || resolver.readMethodFile === undefined) {
-      refuse(
-        `files[${index}].path`,
-        "This deployment cannot read files from disk; submit the file contents instead.",
-        "Resubmit this item as { content, uri? } with the file contents inline, or use the local workshop server (npx @pipelex/mcp), which resolves paths.",
-      );
+      refuse(`files[${index}].path`, {
+        reason: "not_readable_here",
+        message: "This deployment cannot read files from disk; submit the file contents instead.",
+        remedy:
+          "Resubmit this item as { content, uri? } with the file contents inline, or use the local workshop server (npx @pipelex/mcp), which resolves paths.",
+      });
       continue;
     }
     const stat = await resolver.statMethodFile(item.path);
     if (!stat.ok) {
-      refuse(`files[${index}].path`, stat.message, stat.hint);
+      refuse(`files[${index}].path`, stat);
       continue;
     }
     stated.push({ index, submitted: item.path, ...stat });
   }
-  if (errors.length > 0) return { errors };
+  if (errors.length > 0) return { faults: errors };
 
   // 2. Each file's tree path: from the deepest directory holding every
   // { path } item, or from the working directory beside an inline item.
@@ -645,30 +622,32 @@ async function resolveFilesTree(
     const location = `files[${file.index}].path`;
     const violation = treePathViolation(treePath);
     if (violation !== null) {
-      refuse(
-        location,
-        `${file.submitted} cannot be sent under the name ${treePath}: ${violation}.`,
-        fromWorkingDirectory
+      refuse(location, {
+        reason: "invalid_tree_path",
+        message: `${file.submitted} cannot be sent under the name ${treePath}: ${violation}.`,
+        remedy: fromWorkingDirectory
           ? "Beside an inline item, a { path } item is sent under its path from the working directory. List a file inside the working directory, rename it so its name is one every machine keeps, or pass the method's folder as method_dir."
           : "Rename the file so its name is one every machine keeps, or pass the method's folder as method_dir.",
-      );
+      });
       continue;
     }
     if (isExcludedName(treePath)) {
-      refuse(
-        location,
-        `${file.submitted} would be sent as ${treePath}, a name no method's tree holds: a segment starting with a dot, a __pycache__ or node_modules directory, or a run's inputs file.`,
-        "Move or rename the file, or list it beside the files it belongs with so the tree is rooted where they sit.",
-      );
+      refuse(location, {
+        reason: "excluded_name",
+        message: `${file.submitted} would be sent as ${treePath}, a name no method's tree holds: a segment starting with a dot, a __pycache__ or node_modules directory, or a run's inputs file.`,
+        remedy:
+          "Move or rename the file, or list it beside the files it belongs with so the tree is rooted where they sit.",
+      });
       continue;
     }
     const other = byTreePath.get(treePath);
     if (other !== undefined) {
-      refuse(
-        location,
-        `${file.submitted} and ${other.shown} are two spellings of one name, ${treePath}, once Unicode-normalized, so they cannot both be sent.`,
-        "List the file once, under one spelling. Two files whose names differ only in their Unicode normalization cannot both belong to a method: every machine reads them as one name.",
-      );
+      refuse(location, {
+        reason: "normalization_collision",
+        message: `${file.submitted} and ${other.shown} are two spellings of one name, ${treePath}, once Unicode-normalized, so they cannot both be sent.`,
+        remedy:
+          "List the file once, under one spelling. Two files whose names differ only in their Unicode normalization cannot both belong to a method: every machine reads them as one name.",
+      });
       continue;
     }
     const entry: ItemFile = {
@@ -685,14 +664,15 @@ async function resolveFilesTree(
   const colliding = new Set(pathCollisions(files.map((file) => file.treePath)));
   for (const file of files) {
     if (colliding.has(file.treePath)) {
-      refuse(
-        file.location,
-        `${file.shown} collides with another file listed, by its name once case is ignored, or by naming one's directory: ${[...colliding].join(", ")}.`,
-        "A method's files must keep their names on every machine, case-insensitive file systems included: rename one of them.",
-      );
+      refuse(file.location, {
+        reason: "path_collision",
+        message: `${file.shown} collides with another file listed, by its name once case is ignored, or by naming one's directory: ${[...colliding].join(", ")}.`,
+        remedy:
+          "A method's files must keep their names on every machine, case-insensitive file systems included: rename one of them.",
+      });
     }
   }
-  if (errors.length > 0) return { errors };
+  if (errors.length > 0) return { faults: errors };
 
   // The inline items, each a .mthds file at the tree's top.
   const taken = files.map((file) => file.treePath);
@@ -715,31 +695,31 @@ async function resolveFilesTree(
   const maxFileSize = bounds.maxFileSize ?? Number.MAX_SAFE_INTEGER;
   for (const file of files) {
     if (file.size > maxFileSize) {
-      refuse(
-        file.location,
-        `${file.shown} is ${file.size} bytes, past ${limitWords(bounds, "maxFileSize", maxFileSize)} for one file of a method.`,
-        "Make the file smaller, or leave it off the list if the method does not need it.",
-      );
+      refuse(file.location, {
+        reason: "file_too_large",
+        message: `${file.shown} is ${file.size} bytes, past ${limitWords(bounds, "maxFileSize", maxFileSize)} for one file of a method.`,
+        remedy: "Make the file smaller, or leave it off the list if the method does not need it.",
+      });
     }
   }
-  if (errors.length > 0) return { errors };
+  if (errors.length > 0) return { faults: errors };
   const tooMany = treeTotalRefusal(bounds, { count: files.length });
-  if (tooMany !== undefined) return { errors: [tooMany] };
+  if (tooMany !== undefined) return { faults: [tooMany] };
   const tooLarge = treeTotalRefusal(bounds, {
     total: files.reduce((sum, file) => sum + file.size, 0),
   });
-  if (tooLarge !== undefined) return { errors: [tooLarge] };
+  if (tooLarge !== undefined) return { faults: [tooLarge] };
 
   // 4. The reads, one file at a time, the running total held to the limit.
   let total = files.reduce((sum, file) => sum + (file.bytes?.byteLength ?? 0), 0);
   for (const file of files) {
     if (file.submitted === undefined || resolver?.readMethodFile === undefined) continue;
     const outcome = await resolver.readMethodFile(file.submitted, { maxBytes: maxFileSize });
-    if (!outcome.ok) return { errors: [itemRefusal(file.location, outcome)] };
+    if (!outcome.ok) return { faults: [refusalProblem(file.location, outcome)] };
     file.bytes = outcome.bytes;
     total += outcome.bytes.byteLength;
     const over = treeTotalRefusal(bounds, { total });
-    if (over !== undefined) return { errors: [over] };
+    if (over !== undefined) return { faults: [over] };
   }
 
   const read = files.map((file) => ({ ...file, bytes: file.bytes ?? new Uint8Array() }));
@@ -747,14 +727,14 @@ async function resolveFilesTree(
   // refused in step 1.
   for (const file of read) {
     if (file.submitted !== undefined && isEmptyBundle(file)) {
-      refuse(
-        file.location,
-        emptyBundleMessage(file.submitted),
-        "Write the bundle into the .mthds file, or leave it off the list.",
-      );
+      refuse(file.location, {
+        reason: "empty_bundle",
+        message: emptyBundleMessage(file.submitted),
+        remedy: "Write the bundle into the .mthds file, or leave it off the list.",
+      });
     }
   }
-  if (errors.length > 0) return { errors };
+  if (errors.length > 0) return { faults: errors };
 
   // 5. The secret guard, over every byte about to be sent.
   for (const finding of secretFindings(
@@ -766,9 +746,9 @@ async function resolveFilesTree(
       arm: "files",
       again: SEND_AGAIN,
     });
-    refuse(file.location, text.message, text.hint);
+    refuse(file.location, { reason: SECRET_REASON, ...text });
   }
-  if (errors.length > 0) return { errors };
+  if (errors.length > 0) return { faults: errors };
 
   read.sort((left, right) => compareUtf8(left.treePath, right.treePath));
   const listing = read.map((file) => ({
@@ -777,7 +757,7 @@ async function resolveFilesTree(
     sha256: sha256Hex(file.bytes),
   }));
   return {
-    errors: [],
+    faults: [],
     tree: {
       source: treeSourceOf(
         listing,
@@ -795,16 +775,6 @@ async function resolveFilesTree(
   };
 }
 
-function itemRefusal(location: string, refusal: { message: string; hint: string }): ToolError {
-  return {
-    class: "input_domain",
-    location,
-    message: refusal.message,
-    hint: refusal.hint,
-    retryable: false,
-  };
-}
-
 /** A limit with its number, and whose it is: the deployment's, or the workshop's own when the deployment announced none. */
 function limitWords(bounds: ListingLimits, limit: TreeLimit, maximum: number): string {
   return bounds.workshopSet?.includes(limit) === true
@@ -816,18 +786,20 @@ function limitWords(bounds: ListingLimits, limit: TreeLimit, maximum: number): s
 function treeTotalRefusal(
   bounds: ListingLimits,
   measured: { count?: number; total?: number },
-): ToolError | undefined {
+): Problem | undefined {
   const { maxFileCount, maxTotalSize } = bounds;
   if (measured.count !== undefined && maxFileCount !== undefined && measured.count > maxFileCount) {
-    return itemRefusal("files", {
+    return refusalProblem("files", {
+      reason: "too_many_files",
       message: `The files make a tree of ${measured.count} files, past ${limitWords(bounds, "maxFileCount", maxFileCount)}.`,
-      hint: "Send only the method's own files, or pass the method's folder as method_dir.",
+      remedy: "Send only the method's own files, or pass the method's folder as method_dir.",
     });
   }
   if (measured.total !== undefined && maxTotalSize !== undefined && measured.total > maxTotalSize) {
-    return itemRefusal("files", {
+    return refusalProblem("files", {
+      reason: "tree_too_large",
       message: `The files hold more than ${maxTotalSize} bytes in all, past ${limitWords(bounds, "maxTotalSize", maxTotalSize)} for a method's tree; nothing was sent.`,
-      hint: "Send only the method's own files, or make them smaller.",
+      remedy: "Send only the method's own files, or make them smaller.",
     });
   }
   return undefined;
@@ -907,108 +879,25 @@ export function failedBeforeSending(err: unknown): boolean {
 }
 
 /**
- * What a method's tree had to do with a request refused as too large:
- * `tree`, it travelled inline at a weight that can have made it so; `not_tree`,
- * its bytes did not ride the request, since none was sent or it travelled by
- * hash; `unknown`, it rode inline at a weight that may or may not have, or
- * how it travelled cannot be told.
- */
-export type TreeShareOfTooLarge = "tree" | "not_tree" | "unknown";
-
-/**
- * What `tree` had to do with `err` when it is a `413`, or `undefined` for any
- * other error. A tree within the SDK's inline threshold
- * (`INLINE_TREE_MAX_BYTES`), weighed as the SDK weighs it ({@link
- * inlineTreeWeight}), travels inline everywhere, so it rode the request and
- * may have filled it to a limit lower than the threshold: `unknown`. A heavier
- * one travels by hash to a deployment keeping a blob store and inline only to
- * one keeping none, so the deployment is asked, through the client's
- * `version()` (`GET /v1/version`'s `blob_store`), only then; a client without
- * `version()`, or a handshake that fails, says nothing, which is `unknown` too.
- */
-export async function treeShareOfTooLarge(
-  err: unknown,
-  tree: MethodTreeToSend | undefined,
-  client: unknown,
-): Promise<TreeShareOfTooLarge | undefined> {
-  if (!(err instanceof ApiResponseError) || err.status !== 413) return undefined;
-  if (tree === undefined) return "not_tree";
-  if (inlineTreeWeight(tree) <= INLINE_TREE_MAX_BYTES) return "unknown";
-  if (typeof client !== "object" || client === null) return "unknown";
-  const version = (client as { version?: unknown }).version;
-  if (typeof version !== "function") return "unknown";
-  try {
-    const info: unknown = await (version as () => Promise<unknown>).call(client);
-    return asRecord(info)?.blob_store === true ? "not_tree" : "tree";
-  } catch {
-    return "unknown";
-  }
-}
-
-/**
- * Whether a request that sent `tree` and was refused as too large, a `413`,
- * carried the tree inline at a weight that can have made it so
- * ({@link treeShareOfTooLarge}); a tree that may not have is not blamed.
- */
-export async function treeSentInlineHeavy(
-  err: unknown,
-  tree: MethodTreeToSend | undefined,
-  client: unknown,
-): Promise<boolean> {
-  return (await treeShareOfTooLarge(err, tree, client)) === "tree";
-}
-
-const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-
-/**
- * The weight of a tree's inline `files` map as the SDK measures it against
- * its inline threshold: the map's JSON with no whitespace, in UTF-8 bytes,
- * each file as its text, or as `{ base64 }` when it is not UTF-8 text, so a
- * binary file weighs about four thirds of its bytes.
- */
-export function inlineTreeWeight(tree: MethodTreeToSend): number {
-  const files: Record<string, string | { base64: string }> = {};
-  for (const file of tree.files) {
-    let entry: string | { base64: string };
-    try {
-      entry = STRICT_UTF8.decode(file.bytes);
-    } catch {
-      entry = { base64: Buffer.from(file.bytes).toString("base64") };
-    }
-    Object.defineProperty(files, file.treePath, { value: entry, enumerable: true });
-  }
-  return Buffer.byteLength(JSON.stringify(files), "utf8");
-}
-
-/**
  * Put a tree's listing on a result produced once its request was sent, a
  * no-verdict error included, since its files left the machine either way. A
  * result {@link markUnsent} marked, whose request never left, gets no listing.
- * When the tree came from `method_dir`, each error located at `files` or at
- * one of its items is relocated to `method_dir`: the route's textures name
- * `files`, which this caller never passed. A request that sent no tree
- * (`tree` undefined) is returned as it was.
+ * A request that sent no tree (`tree` undefined) is returned as it was. A
+ * problem is never rewritten here: its location is the API's, which names the
+ * request's fields.
  */
-export function withFilesSent<
-  R extends { structuredContent: { errors?: ToolError[]; files_sent?: string[] } },
->(result: R, tree: MethodTreeToSend | undefined): R {
-  if (tree === undefined) return result;
-  const { errors } = result.structuredContent;
+export function withFilesSent<R extends { structuredContent: object }>(
+  result: R,
+  tree: MethodTreeToSend | undefined,
+): R {
+  if (tree === undefined || unsentResults.has(result)) return result;
   return {
     ...result,
     structuredContent: {
       ...result.structuredContent,
-      ...(unsentResults.has(result) ? {} : { files_sent: tree.files.map((file) => file.shown) }),
-      ...(errors === undefined || !tree.fromFolder ? {} : { errors: errors.map(atMethodDir) }),
+      files_sent: tree.files.map((file) => file.shown),
     },
   };
-}
-
-function atMethodDir(error: ToolError): ToolError {
-  const location = error.location;
-  return location === "files" || location?.startsWith("files[") === true
-    ? { ...error, location: "method_dir" }
-    : error;
 }
 
 /**
@@ -1041,7 +930,8 @@ export interface InputsSource {
 export interface ResolvedInputs {
   /** The inputs to send: the inline object, the loaded file, or absent when neither was supplied. */
   inputs?: Record<string, unknown>;
-  errors: ToolError[];
+  /** The refusals' problems, empty when the inputs settled. */
+  faults: Problem[];
 }
 
 /**
@@ -1059,48 +949,51 @@ export async function resolveInputsSource(
   resolver: FileResolver | undefined,
   options: { required: boolean },
 ): Promise<ResolvedInputs> {
-  const refuse = (location: string, message: string, hint: string): ResolvedInputs => ({
-    errors: [{ class: "input_domain", location, message, hint, retryable: false }],
+  const refuse = (location: string, refusal: Refusal): ResolvedInputs => ({
+    faults: [refusalProblem(location, refusal)],
   });
 
   if (source.inputs_path === undefined) {
     if (source.inputs === undefined && options.required) {
-      return refuse(
-        "inputs",
-        "Supply the filled inputs, as inputs or as inputs_path.",
-        "Pass the filled template as inputs, or the path of a .json file holding it as inputs_path. An empty object {} is accepted.",
-      );
+      return refuse("inputs", {
+        reason: "missing",
+        message: "Supply the filled inputs, as inputs or as inputs_path.",
+        remedy:
+          "Pass the filled template as inputs, or the path of a .json file holding it as inputs_path. An empty object {} is accepted.",
+      });
     }
-    return { ...(source.inputs === undefined ? {} : { inputs: source.inputs }), errors: [] };
+    return { ...(source.inputs === undefined ? {} : { inputs: source.inputs }), faults: [] };
   }
 
   if (source.inputs !== undefined) {
-    return refuse(
-      "inputs_path",
-      "Supply inputs or inputs_path, not both.",
-      "Drop inputs to read the inputs from the file, or drop inputs_path to send the inline object.",
-    );
+    return refuse("inputs_path", {
+      reason: "mutually_exclusive",
+      message: "Supply inputs or inputs_path, not both.",
+      remedy:
+        "Drop inputs to read the inputs from the file, or drop inputs_path to send the inline object.",
+    });
   }
 
   if (source.inputs_path.trim() === "") {
-    return refuse(
-      "inputs_path",
-      "inputs_path must not be empty when supplied.",
-      "Pass the path of a .json file, or pass the inputs inline as inputs.",
-    );
+    return refuse("inputs_path", {
+      reason: "empty",
+      message: "inputs_path must not be empty when supplied.",
+      remedy: "Pass the path of a .json file, or pass the inputs inline as inputs.",
+    });
   }
 
   if (resolver === undefined) {
-    return refuse(
-      "inputs_path",
-      "This deployment cannot read files from disk; pass the inputs inline.",
-      "Pass the inputs inline as inputs, or use the local workshop server (npx @pipelex/mcp), which reads inputs_path.",
-    );
+    return refuse("inputs_path", {
+      reason: "not_readable_here",
+      message: "This deployment cannot read files from disk; pass the inputs inline.",
+      remedy:
+        "Pass the inputs inline as inputs, or use the local workshop server (npx @pipelex/mcp), which reads inputs_path.",
+    });
   }
 
   const resolution = await resolver.resolve(source.inputs_path);
   if (!resolution.ok) {
-    return refuse("inputs_path", resolution.message, resolution.hint);
+    return refuse("inputs_path", resolution);
   }
 
   let parsed: unknown;
@@ -1108,111 +1001,330 @@ export async function resolveInputsSource(
     // Some Windows editors and PowerShell write UTF-8 with a byte-order mark, which JSON.parse refuses.
     parsed = JSON.parse(resolution.content.replace(/^\uFEFF/, ""));
   } catch (err) {
-    return refuse(
-      "inputs_path",
-      `File is not valid JSON: ${source.inputs_path} (${err instanceof Error ? err.message : String(err)}).`,
-      "Fix the file so it holds one JSON object, the filled inputs template, or pass the inputs inline as inputs.",
-    );
+    return refuse("inputs_path", {
+      reason: "not_json",
+      message: `File is not valid JSON: ${source.inputs_path} (${err instanceof Error ? err.message : String(err)}).`,
+      remedy:
+        "Fix the file so it holds one JSON object, the filled inputs template, or pass the inputs inline as inputs.",
+    });
   }
 
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     const found = parsed === null ? "null" : Array.isArray(parsed) ? "an array" : typeof parsed;
-    return refuse(
-      "inputs_path",
-      `File does not hold a JSON object: ${source.inputs_path} holds ${found}.`,
-      "The file must hold one JSON object mapping each input name to its value, as the filled inputs template does.",
-    );
+    return refuse("inputs_path", {
+      reason: "not_an_object",
+      message: `File does not hold a JSON object: ${source.inputs_path} holds ${found}.`,
+      remedy:
+        "The file must hold one JSON object mapping each input name to its value, as the filled inputs template does.",
+    });
   }
 
-  return { inputs: parsed as Record<string, unknown>, errors: [] };
+  return { inputs: parsed as Record<string, unknown>, faults: [] };
 }
 
-export const errorClassSchema = z.enum(["input_domain", "config", "runtime"]);
-
-export type ErrorClass = z.infer<typeof errorClassSchema>;
+// ── the problem: the one shape every failure takes ──────────────────
 
 /**
- * Refinement of {@link ErrorClass} for a condition whose class is settled but
- * whose *cause* the class cannot name. Both members are `config`, and the
- * class alone would have every headline blame connectivity for them:
- *
- * - `paywall`: a 402 is deliberately `config` (the deployment cannot make this
- *   call as credentialed), yet it is a billing limit.
- * - `auth`: a missing or refused key (a 401 or 403 outside the execution-locus
- *   gate, and the upload and artifact families' authentication errors) is
- *   `config`, since the key is the environment's, yet "the Pipelex API is
- *   unreachable or misconfigured" sends a user who has no key to debug the
- *   network.
- * - `role`: the platform's `403 role_not_permitted`, the role the key's owner
- *   holds in its organization refusing the action. It is `config` too, and
- *   reading it as `auth` would send a user whose key is fine to replace it or
- *   to log in again, which changes nothing.
- *
- * Adding a member here is how a new such cause gets a headline — never by
- * re-classifying it.
+ * Where a problem, or one of its items, happened: the MTHDS protocol's
+ * location, open to members it does not name. A refusal the workshop makes
+ * itself is located at the tool argument it refuses, by `field`, written as
+ * the argument's path (`files[2].path`).
  */
-export const errorKindSchema = z.enum(["paywall", "auth", "role"]);
+export const problemLocationSchema = z
+  .looseObject({
+    pipe: z.string().optional(),
+    path: z.array(z.string()).optional(),
+    input: z.string().optional(),
+    field: z.string().optional(),
+    item: z.number().optional(),
+    attempt: z.number().optional(),
+    file: z.string().optional(),
+    line: z.number().optional(),
+    column: z.number().optional(),
+  })
+  .describe("Where it happened; field names the tool argument of a refusal this server made.");
 
-export type ErrorKind = z.infer<typeof errorKindSchema>;
+/**
+ * One fault of a problem or of a verdict, as the MTHDS protocol states it:
+ * its code and detail, and where it happened. Open to members the protocol
+ * does not name.
+ */
+export const problemItemSchema = z
+  .looseObject({
+    code: z.string(),
+    detail: z.string(),
+    params: z.record(z.string(), z.unknown()).optional(),
+    location: problemLocationSchema.optional(),
+    suggestions: z.array(z.string()).optional(),
+    suggested_fix: z.looseObject({}).optional(),
+  })
+  .describe("One fault, as the MTHDS protocol states it.");
 
-export const toolErrorSchema = z.object({
-  class: errorClassSchema,
-  kind: errorKindSchema
-    .optional()
-    .describe(
-      "Refines `class` when the class alone cannot name the cause. `paywall`: the organization's plan does not cover the call. `auth`: the Pipelex API key is missing or was refused. `role`: the key was accepted, but the role its owner holds in the organization does not allow the action.",
-    ),
-  location: z.string().optional(),
-  message: z.string(),
-  hint: z.string().optional(),
-  retryable: z
-    .boolean()
-    .describe("True when retrying the same call may succeed; false for permanent conditions."),
-});
+/**
+ * The problem document, the caller's view: the MTHDS protocol's members, the
+ * Pipelex API's `request_id` and the `message` a refusal of this server's own
+ * carries, and never the operator's `diagnostics`. Open, so a member a newer
+ * API adds reaches the caller as it was sent. A program branches on `code`,
+ * `domain`, `retry` and `next_step.kind`, never on the wording.
+ */
+export const problemSchema = z
+  .looseObject({
+    type: z.string(),
+    title: z.string(),
+    status: z.number().optional(),
+    detail: z.string(),
+    code: z.string().describe("The registry code to branch on."),
+    domain: z.string().describe("Who must act: input, method, account, operator or runtime."),
+    retry: z
+      .string()
+      .describe("yes, no, or outcome_unknown: it may have taken effect, so read before resending."),
+    retry_after: z.number().optional(),
+    next_step: z.looseObject({ kind: z.string(), detail: z.string() }),
+    params: z.record(z.string(), z.unknown()).optional(),
+    location: problemLocationSchema.optional(),
+    errors: z.array(problemItemSchema).optional(),
+    pipeline_run_id: z.string().optional(),
+    request_id: z.string().optional(),
+    message: z.string().optional().describe("The client's own sentence, when it adds to detail."),
+    run_error: z.unknown().optional(),
+  })
+  .describe("The MTHDS problem document, as the caller sees it.");
 
-export interface ToolError {
-  class: ErrorClass;
-  /**
-   * Set where the concrete SDK error / HTTP status is still known
-   * ({@link classifyError}), for the same reason `retryable` is: `class` is
-   * the machine contract and must stay coarse, but a paywall, a missing key
-   * and an unreachable API are all `config` and read nothing alike to a human.
-   * A machine consumer still branches on `class`; `kind` is what lets it — and
-   * the summary headline — tell them apart without sniffing the message.
-   */
-  kind?: ErrorKind;
-  location?: string;
+export type { Problem, ProblemItem };
+
+/**
+ * A refusal a file resolver, a folder's listing or the secret guard words
+ * before anything is sent: what happened and what the caller can do, and the
+ * facts the problem it becomes is built from. `reason` says why in one
+ * identifier; `unreadable` names a local file that exists and cannot be read,
+ * which is `client.file_unreadable` rather than a refused argument; `busy`
+ * names one that changed while it was read, which is `client.workspace_busy`.
+ */
+export interface Refusal {
   message: string;
-  hint?: string;
-  /**
-   * Whether retrying the same call may succeed. For a failure the SDK raised it
-   * is the SDK's own verdict ({@link classifyError}): the `class`+`location`
-   * pair alone is too coarse — an unreachable API and a permanently missing run
-   * lifecycle both classify as `config` at `PIPELEX_BASE_URL`, yet only the
-   * former is worth retrying.
-   */
-  retryable: boolean;
+  remedy: string;
+  reason?: string;
+  unreadable?: string;
+  busy?: string;
+}
+
+/** The caller's view of a problem: everything but the operator's `diagnostics`. */
+export function callerView(problem: Problem): Problem {
+  if (!("diagnostics" in problem)) return problem;
+  const { diagnostics: _operatorOnly, ...view } = problem;
+  return view as Problem;
 }
 
 /**
- * A capability's no-verdict headlines: one per {@link ErrorClass}, plus one for
- * every {@link ErrorKind}. Declaring the kind headlines is **mandatory** — that
- * is the point of the type. A capability that forgot one would silently print
- * the connectivity headline for a billing refusal, a missing key or a role
- * refusal, which is the defect this shape exists to make unrepresentable: the
- * miss is a type error, not something a reviewer has to catch.
+ * The longest error sentence a problem carries as its `message`, in code
+ * points: an SDK error whose answer was unreadable quotes the body it read,
+ * which a misbehaving server can make arbitrarily long.
  */
-export type ErrorSummaries = Record<ErrorClass, string> & Record<ErrorKind, string>;
+const ERROR_SENTENCE_MAX_CODE_POINTS = 600;
+
+/** The error's own sentence, on one line and bounded, or `undefined` when it has none. */
+function errorSentence(err: unknown): string | undefined {
+  if (!(err instanceof Error)) return undefined;
+  const line = asOneLine(err.message);
+  if (line === "") return undefined;
+  const bounded = boundCodePoints(line, ERROR_SENTENCE_MAX_CODE_POINTS);
+  return bounded.truncated ? `${bounded.value}…` : bounded.value;
+}
 
 /**
- * Pick a capability's headline for one {@link ToolError}. `kind` is checked
- * ahead of `class` because it is the refinement: a 402 and a refused key are
- * `config` by contract, so consulting the class map first would print "the
- * Pipelex API is unreachable or misconfigured" for a plan limit or a missing
- * key and send the agent to debug the base URL.
+ * The problem a failure reports, in the caller's view. Every error
+ * `@pipelex/sdk` raises carries its problem, with the answer's request id
+ * (`reportedProblem`); anything else is `runtime.unexpected`, since nothing
+ * says more about it.
+ *
+ * The error's own sentence rides as the problem's `message` when the problem
+ * carries none and the sentence says more than its `detail`: a problem the SDK
+ * builds from a registry code is worded for the code, generic by design (an
+ * argument refused, a runtime that could not be reached), while the error's
+ * sentence says which argument and why, or which address answered what. A
+ * sentence that quotes the detail adds nothing and is left out. An answer the
+ * server gave is its own account (`ApiResponseError`, whose sentence is the
+ * route, the status and the detail again), except one the SDK could not read,
+ * whose next step asks for the body that sentence quotes. Nothing else of the
+ * problem changes: its code, domain, retry and next step are the SDK's.
  */
-export function summaryForToolError(error: ToolError, summaries: ErrorSummaries): string {
-  return error.kind === undefined ? summaries[error.class] : summaries[error.kind];
+export function problemOf(err: unknown): Problem {
+  const sentence = errorSentence(err);
+  if (isProblemError(err)) {
+    const problem = callerView(reportedProblem(err));
+    const said = problem.message;
+    if ((typeof said === "string" && said !== "") || sentence === undefined) return problem;
+    if (err instanceof ApiResponseError && problem.code !== "client.response_unreadable") {
+      return problem;
+    }
+    return sentence.includes(problem.detail) ? problem : { ...problem, message: sentence };
+  }
+  return buildProblem("runtime.unexpected", {}, { extra: { message: sentence } });
+}
+
+/**
+ * A sentence and its remedy as one `message`, the remedy closing it, on one line:
+ * a path the sentence quotes may hold a newline, which would otherwise open a
+ * heading or end a list in the Markdown it is rendered into.
+ */
+function messageWithRemedy(message: string, remedy: string | undefined): string {
+  return asOneLine(remedy === undefined || remedy === "" ? message : `${message} ${remedy}`);
+}
+
+/**
+ * The problem of a tool argument this server refuses before anything is sent:
+ * `client.argument_invalid`, naming the argument by its path and why in one
+ * identifier, located at the same path, with the server's own sentence and
+ * remedy as its `message`.
+ */
+export function argumentProblem(
+  field: string,
+  reason: string,
+  message: string,
+  remedy?: string,
+): Problem {
+  return buildProblem(
+    "client.argument_invalid",
+    { argument: field, reason },
+    { location: { field }, extra: { message: messageWithRemedy(message, remedy) } },
+  );
+}
+
+/** The problem of a {@link Refusal} of the argument at `field`. */
+export function refusalProblem(field: string, refusal: Refusal): Problem {
+  const options = {
+    location: { field },
+    extra: { message: messageWithRemedy(refusal.message, refusal.remedy) },
+  };
+  if (refusal.busy !== undefined) {
+    return buildProblem("client.workspace_busy", { path: refusal.busy }, options);
+  }
+  if (refusal.unreadable !== undefined) {
+    return buildProblem(
+      "client.file_unreadable",
+      { path: refusal.unreadable, reason: refusal.reason ?? "unreadable" },
+      options,
+    );
+  }
+  return argumentProblem(field, refusal.reason ?? "refused", refusal.message, refusal.remedy);
+}
+
+/**
+ * The one problem of a call refused before anything was sent, from every
+ * fault found: the fault itself when there is one, else one
+ * `client.argument_invalid` naming the first fault's argument, whose `errors`
+ * list every fault as an item, its own code, sentence and location kept.
+ */
+export function faultsProblem(faults: readonly Problem[]): Problem {
+  const [first] = faults;
+  if (first === undefined) {
+    throw new Error("faultsProblem needs at least one fault");
+  }
+  if (faults.length === 1) return first;
+  const argument =
+    typeof first.params?.argument === "string"
+      ? first.params.argument
+      : (first.location?.field ?? "arguments");
+  return buildProblem(
+    "client.argument_invalid",
+    { argument, reason: "several_faults" },
+    {
+      ...(first.location === undefined ? {} : { location: first.location }),
+      errors: faults.map(problemItemOf),
+      extra: {
+        message:
+          "Several arguments were refused before anything was sent; each fault is listed under errors.",
+      },
+    },
+  );
+}
+
+/** A problem as one item of another's `errors`: its code, its own sentence, its parameters and location. */
+function problemItemOf(problem: Problem): ProblemItem {
+  const message = problem.message;
+  return {
+    code: problem.code,
+    detail: typeof message === "string" && message !== "" ? message : problem.detail,
+    ...(problem.params === undefined ? {} : { params: problem.params }),
+    ...(problem.location === undefined ? {} : { location: problem.location }),
+  };
+}
+
+/**
+ * What this server says about the API a call used, beside the problem of a
+ * request that failed: where its key came from and how to change it, and
+ * where its base URL came from. The workshop sets both on every tool call
+ * from where it read them (`src/credentials.ts`); a context without them, as
+ * in a capability's own tests, names the environment variables.
+ */
+export interface ApiNotes {
+  apiKey?: string;
+  baseUrl?: string;
+}
+
+/** The API-key note of a context that carries none. */
+const DEFAULT_API_KEY_NOTE = "The API key is read from PIPELEX_API_KEY.";
+
+/** The base-URL note of a context that carries none. */
+const DEFAULT_BASE_URL_NOTE =
+  "The Pipelex API in use is the one PIPELEX_BASE_URL names, else the hosted Pipelex API.";
+
+/** The codes of a refused or missing credential, whose fix is the key the call sent. */
+const CREDENTIAL_CODES: ReadonlySet<string> = new Set([
+  "auth.missing_credential",
+  "auth.invalid_credential",
+  "auth.credential_expired",
+]);
+
+/**
+ * The codes whose fix may be the API the call reached: an API it could not
+ * reach, a route or a capability the deployment does not serve, an answer it
+ * could not read, and a refused credential, which a key minted for another
+ * deployment meets. A base URL the client could not use is
+ * `client.not_configured` naming `base_url`, read by {@link isBaseUrlProblem}
+ * beside these, since the same code names the working directory too.
+ */
+const BASE_URL_CODES: ReadonlySet<string> = new Set([
+  ...CREDENTIAL_CODES,
+  "client.unreachable",
+  "client.response_unreadable",
+  "request.not_found",
+  "runtime.unsupported",
+]);
+
+/** Whether the fix of `problem` may be the API the call reached, so its base URL's note belongs beside it. */
+function isBaseUrlProblem(problem: Problem): boolean {
+  if (BASE_URL_CODES.has(problem.code)) return true;
+  return problem.code === "client.not_configured" && problem.params?.setting === "base_url";
+}
+
+/**
+ * The Markdown summary of a call that produced no verdict: the problem as
+ * `renderProblemMarkdown` renders it, its title, detail, this server's
+ * message, next step, code, request id, run and location, then each fault of
+ * its `errors`; and, when the fix may be the API or the key the call used,
+ * the notes saying where they came from. Every tool's no-verdict summary is
+ * this one rendering, so every failure reads alike.
+ */
+export function problemSummary(problem: Problem, notes: ApiNotes = {}): string {
+  const parts = [renderProblemMarkdown(problem).trimEnd()];
+  if (CREDENTIAL_CODES.has(problem.code)) parts.push(notes.apiKey ?? DEFAULT_API_KEY_NOTE);
+  if (isBaseUrlProblem(problem)) parts.push(notes.baseUrl ?? DEFAULT_BASE_URL_NOTE);
+  return parts.join("\n\n");
+}
+
+/**
+ * One problem on one line, for a list of items a produced result reports
+ * apart from its verdict, such as a picture or a file that could not be
+ * fetched: what went wrong, this server's or the store's own sentence when
+ * there is one, the code, and what to do.
+ */
+export function problemLine(problem: Problem): string {
+  const message =
+    typeof problem.message === "string" && problem.message !== "" ? ` ${problem.message}` : "";
+  return asOneLine(
+    `${problem.detail}${message} (\`${problem.code}\`) Next step: ${problem.next_step.detail}`,
+  );
 }
 
 /** One MCP `content` item — the human/LLM-readable text stream. */
@@ -1239,33 +1351,13 @@ export type ContentImage = {
 };
 
 /**
- * Compose a tool result's `content` text stream. On success (no `errors`) the
- * summary is the whole stream. On a no-verdict error, each {@link ToolError}'s
- * locator, message, and hint are appended as a Markdown list under the summary
- * headline.
- *
- * Without this, the instructive detail every capability writes into
- * `errors[]` (e.g. an unreadable `{ path }` naming the file it could not open)
- * would live *only* in `structuredContent.errors` — the machine contract — and
- * never reach the agent, which reads `content`. The summary alone is a terse
- * headline ("… request input is invalid."), leaving the agent to guess the
- * cause. Surfacing message + hint here keeps the human/LLM-readable stream
- * actually actionable (the workspace "format follows consumer" rule), while
- * `structuredContent.errors` stays the untouched contract.
- *
- * `filesSent`, a tree's `files_sent`, closes the text with the list of what
- * the call sent ({@link filesSentSection}), after the error list, which
- * belongs right under the headline it details.
+ * Compose a tool result's `content` text stream: the summary, the produced
+ * verdict's or the problem's ({@link problemSummary}), then, when the call
+ * sent a method's tree, its `files_sent` as a list ({@link filesSentSection}),
+ * so the reader sees what left the machine.
  */
-export function toolResultContent(
-  summary: string,
-  errors?: ToolError[],
-  filesSent?: readonly string[],
-): [ContentText] {
+export function toolResultContent(summary: string, filesSent?: readonly string[]): [ContentText] {
   const parts = [summary];
-  if (errors !== undefined && errors.length > 0) {
-    parts.push(errors.map(formatToolError).join("\n"));
-  }
   if (filesSent !== undefined && filesSent.length > 0) {
     parts.push(filesSentSection(filesSent));
   }
@@ -1298,16 +1390,9 @@ function codeSpan(text: string): string {
   return `${fence}${pad}${text}${pad}${fence}`;
 }
 
-function formatToolError(error: ToolError): string {
-  const locator = error.location === undefined ? "" : `\`${error.location}\` — `;
-  const message = asOneLine(error.message);
-  const hint = error.hint === undefined ? "" : `\n  *Hint: ${asOneLine(error.hint)}*`;
-  return `- ${locator}${message}${hint}`;
-}
-
 /**
  * Collapse internal whitespace runs (including newlines) to single spaces so a
- * message/hint stays a single Markdown list bullet. An embedded blank line would
+ * message/remedy stays a single Markdown list bullet. An embedded blank line would
  * otherwise terminate the list item early — reachable via a crafted path (a
  * filename may legally contain newlines and still end in `.mthds`), SDK-thrown
  * error text, or a stored catalog name/description. The raw one-liners we
@@ -1382,31 +1467,29 @@ export function bareMethodIdOf(
 /**
  * The refusal of a method id that should name a method's files and does not
  * read as its bare id, located at `location`: a suffixed one names the bare id
- * to pass, any other one says it is no catalog id. `hint` closes either hint
+ * to pass, any other one says it is no catalog id. `remedy` closes either remedy
  * with the caller's own alternative.
  */
 export function bareMethodIdRefusal(
   value: string,
   check: { ok: false; suffixed: true; bare: string } | { ok: false; suffixed: false },
   location: string,
-  hint: string,
-): ToolError {
+  remedy: string,
+): Problem {
   if (check.suffixed) {
-    return {
-      class: "input_domain",
+    return argumentProblem(
       location,
-      message: `${location} ${JSON.stringify(value)} names a version of the method, and files belong to the method, not to one of its versions.`,
-      hint: `Pass ${location} ${JSON.stringify(check.bare)}, the method's bare id. ${hint}`,
-      retryable: false,
-    };
+      "version_suffix",
+      `${location} ${JSON.stringify(value)} names a version of the method, and files belong to the method, not to one of its versions.`,
+      `Pass ${location} ${JSON.stringify(check.bare)}, the method's bare id. ${remedy}`,
+    );
   }
-  return {
-    class: "input_domain",
+  return argumentProblem(
     location,
-    message: `${location} ${JSON.stringify(value)} is not a catalog id.`,
-    hint: `Pass a saved method's bare id as ${WORKSHOP_TOOL_NAMES.listMethods} returns it (mt_…). ${hint}`,
-    retryable: false,
-  };
+    "not_a_catalog_id",
+    `${location} ${JSON.stringify(value)} is not a catalog id.`,
+    `Pass a saved method's bare id as ${WORKSHOP_TOOL_NAMES.listMethods} returns it (mt_…). ${remedy}`,
+  );
 }
 
 /** The env-derived API coordinates every capability context starts from. */
@@ -1427,15 +1510,14 @@ export interface ApiConfig {
  * What the workshop may override on every capability context that talks to
  * the API. Its tool table applies it to the whole context set, since that
  * table is where the list of contexts lives. The workshop patches `appInfo`
- * once, when its server is built, and `baseUrl`, `apiKey`, `authError` and
- * `baseUrlSource` at the start of every tool call, from its host's environment
- * and the saved key in the home `.env` (`src/credentials.ts`).
+ * once, when its server is built, and `baseUrl`, `apiKey` and `apiNotes` at
+ * the start of every tool call, from its host's environment and the saved key
+ * in the home `.env` (`src/credentials.ts`).
  */
 export interface ApiContextPatch {
   baseUrl?: string;
   apiKey?: string;
-  authError?: AuthErrorTexture;
-  baseUrlSource?: BaseUrlSourceTexture;
+  apiNotes?: ApiNotes;
   appInfo?: AppInfoSource;
 }
 
@@ -1538,7 +1620,7 @@ export function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-/** The shared `<address>[@<tag>]` grammar sentence, reused by schema descriptions and hints. */
+/** The shared `<address>[@<tag>]` grammar sentence, reused by schema descriptions and remedies. */
 export const METHOD_REF_GRAMMAR =
   "github.com/<owner>/<repo>[/<selector>][@<tag>], e.g. github.com/Pipelex/methods/documents@v0.1.0";
 
@@ -1589,37 +1671,40 @@ export function validateMethodSelectorRequest(
   hasTree: boolean,
   selectors: MethodSelectors,
   options: { rule: SelectorRule },
-): ToolError[] {
-  const errors: ToolError[] = [];
+): Problem[] {
+  const errors: Problem[] = [];
 
   if (selectors.method_ref !== undefined && selectors.method_ref.trim() === "") {
-    errors.push({
-      class: "input_domain",
-      location: "method_ref",
-      message: "method_ref must not be empty when supplied.",
-      hint: `Pass a published method's address — ${METHOD_REF_GRAMMAR} — or submit files or a method_id instead.`,
-      retryable: false,
-    });
+    errors.push(
+      argumentProblem(
+        "method_ref",
+        "empty",
+        "method_ref must not be empty when supplied.",
+        `Pass a published method's address — ${METHOD_REF_GRAMMAR} — or submit files or a method_id instead.`,
+      ),
+    );
   }
 
   if (selectors.method_id !== undefined && selectors.method_id.trim() === "") {
-    errors.push({
-      class: "input_domain",
-      location: "method_id",
-      message: "method_id must not be empty when supplied.",
-      hint: "Pass the catalog id (mt_…) of a registered method, or submit files instead.",
-      retryable: false,
-    });
+    errors.push(
+      argumentProblem(
+        "method_id",
+        "empty",
+        "method_id must not be empty when supplied.",
+        "Pass the catalog id (mt_…) of a registered method, or submit files instead.",
+      ),
+    );
   }
 
   if (!hasTree && selectors.method_ref === undefined && selectors.method_id === undefined) {
-    errors.push({
-      class: "input_domain",
-      location: "files",
-      message: "Provide a method folder, MTHDS files, a method_ref address, or a method_id.",
-      hint: `Pass the method's folder as method_dir, submit files as [{ path }] or [{ content, uri? }], a published method's address (${METHOD_REF_GRAMMAR}) as method_ref, or the catalog id (mt_…) of a registered method as method_id.`,
-      retryable: false,
-    });
+    errors.push(
+      argumentProblem(
+        "files",
+        "missing",
+        "Provide a method folder, MTHDS files, a method_ref address, or a method_id.",
+        `Pass the method's folder as method_dir, submit files as [{ path }] or [{ content, uri? }], a published method's address (${METHOD_REF_GRAMMAR}) as method_ref, or the catalog id (mt_…) of a registered method as method_id.`,
+      ),
+    );
   }
 
   errors.push(...validateSelectorExclusivity(hasTree, selectors, options.rule));
@@ -1636,1179 +1721,83 @@ function validateSelectorExclusivity(
   hasFiles: boolean,
   selectors: MethodSelectors,
   rule: SelectorRule,
-): ToolError[] {
-  const errors: ToolError[] = [];
+): Problem[] {
+  const errors: Problem[] = [];
   const hasRef = selectors.method_ref !== undefined && selectors.method_ref.trim() !== "";
   const hasId = selectors.method_id !== undefined && selectors.method_id.trim() !== "";
 
   if (hasFiles && hasRef) {
-    errors.push({
-      class: "input_domain",
-      location: "method_ref",
-      message:
+    errors.push(
+      argumentProblem(
+        "method_ref",
+        "mutually_exclusive",
         "files and method_ref are mutually exclusive — submit the files or the address, never both.",
-      hint: "An address is a complete method source resolved server-side; drop method_ref to operate on the submitted files, or drop files to operate on the published package.",
-      retryable: false,
-    });
+        "An address is a complete method source resolved server-side; drop method_ref to operate on the submitted files, or drop files to operate on the published package.",
+      ),
+    );
   }
 
   if (hasRef && hasId) {
-    errors.push({
-      class: "input_domain",
-      location: "method_id",
-      message:
+    errors.push(
+      argumentProblem(
+        "method_id",
+        "mutually_exclusive",
         rule === "run_source"
           ? "method_ref and method_id are mutually exclusive — an address run carries its own provenance and takes no linkage id."
           : "method_ref and method_id are mutually exclusive — select the method by exactly one of them.",
-      hint: "Drop one of the two selectors.",
-      retryable: false,
-    });
+        "Drop one of the two selectors.",
+      ),
+    );
   }
 
   if (rule === "one_selector" && hasFiles && hasId) {
-    errors.push({
-      class: "input_domain",
-      location: "method_id",
-      message:
+    errors.push(
+      argumentProblem(
+        "method_id",
+        "mutually_exclusive",
         "files and method_id are mutually exclusive on this tool — submit the files or the catalog id, never both.",
-      hint: "This operation is stateless, so there is no run-history linkage for an extra id to feed; drop method_id to operate on the submitted files, or drop files to operate on the registered method.",
-      retryable: false,
-    });
+        "This operation is stateless, so there is no run-history linkage for an extra id to feed; drop method_id to operate on the submitted files, or drop files to operate on the registered method.",
+      ),
+    );
   }
 
   return errors;
 }
 
 /** Request-shape check on a run id (format stays server-owned). */
-export function validateRunIdRequest(runId: string): ToolError[] {
+export function validateRunIdRequest(runId: string): Problem[] {
   if (runId.trim() === "") {
     return [
-      {
-        class: "input_domain",
-        location: "run_id",
-        message: "run_id must not be empty.",
-        hint: `Pass the durable run id returned by ${WORKSHOP_TOOL_NAMES.run}.`,
-        retryable: false,
-      },
+      argumentProblem(
+        "run_id",
+        "empty",
+        "run_id must not be empty.",
+        `Pass the durable run id returned by ${WORKSHOP_TOOL_NAMES.run}.`,
+      ),
     ];
   }
   return [];
 }
 
 /**
- * Route-specific texture for {@link classifyError}. Who can fix a failure and
- * whether a retry can help are the SDK's verdict, which every error it throws
- * carries; what differs per capability is the texture: the locator and hint of
- * a 400/422 rejection, the route named in the 404 hint, and the few refusals a
- * route knows more about than its status says.
+ * The registry codes of the execution-locus gate's refusals: a method
+ * shipping Python (`.py`) on a deployment that is not sandbox-hosted, and a
+ * method declaring its structures as Python classes on one that imports none.
  */
-export interface ClassifyErrorOptions {
-  /** The API route the capability calls, named in the 404 hint. */
-  route?: string;
-  /** Locator + hint for a 400/422 no-verdict rejection. */
-  badRequest?: {
-    /**
-     * Overrides the SDK's class for the route's 400/422, which it reads as the
-     * caller's request (`input`). A route sets it when it knows its refusal is
-     * about something no tool argument changes: a request this server built
-     * itself, or a key that acts for no organization.
-     */
-    class?: ErrorClass;
-    location?: string;
-    hint: string;
-  };
-  /**
-   * Texture for a route's `422` kept apart from {@link badRequest}, for a
-   * route whose `400` means something no argument names, such as a key acting
-   * for no organization. A `422` says the request's values broke the route's
-   * own bounds, so it is located at the argument behind the first field the
-   * platform's `errors[]` names: `field` maps that field's first segment to
-   * the tool's argument, and a field it does not map, or an answer naming
-   * none, leaves the refusal at no location. The class and `retryable` stay
-   * the SDK's.
-   */
-  unprocessable?: {
-    field: (field: string) => string | undefined;
-    hint: string;
-  };
-  /**
-   * Per-route 404 texture, for a route keyed by something the caller named: a
-   * run id, a method id, an address. It applies to a 404 the SDK reads as the
-   * caller's (`input`), which is one that names what was not found — the
-   * runner's `MethodPackageNotFoundError`, the platform's `not_found` code. A
-   * bare 404, which is how a runner answers a route it does not serve, keeps
-   * the missing-route `config` arm, and so does every 404 on a route without
-   * this texture. The run routes see no bare 404 at all: the SDK throws
-   * `RunLifecycleUnavailableError` for it up front.
-   */
-  notFound?: {
-    location?: string;
-    hint: string;
-  };
-  /**
-   * Per-route texture for `409 method_update_conflict`: the method's draft
-   * moved since the token the call sent, so nothing was written or published.
-   * The locator is the field that carried the token, which differs per route
-   * (`expected_updated_at` on the save, `expected_draft_updated_at` on the
-   * publish). Unset, the arm locates at `expected_updated_at` with a generic
-   * hint.
-   */
-  conflict?: {
-    location?: string;
-    hint: string;
-  };
-  /**
-   * The request field that named the method on this route — `files`,
-   * `method_ref` or `method_id`, picked per request shape like
-   * {@link badRequest}'s locator.
-   *
-   * It exists for the **execution-locus gate**, the one refusal whose fault is
-   * the method the caller named rather than the credential they sent. The gate
-   * is the runner's, so which field named the method is the only thing the
-   * arm cannot know for itself, and hardcoding `method_ref` would be wrong on
-   * `/v1/start`, which applies the gate to a submitted bundle and to a stored
-   * method's injected source as well as to a fetched package.
-   *
-   * `/v1/codegen` leaves it unset: it resolves an address through
-   * `fetch_method_mthds_files`, which takes only the `.mthds` files and loads
-   * no Python, so no execution locus is ever decided there. An arm that fires
-   * with this unset reports no location rather than a wrong one. `/v1/pipe-io`
-   * fetches the same way, and its callers set it all the same, since a locator
-   * costs nothing to keep right.
-   *
-   * It IS set on every shape of a gated route, including `/v1/validate`'s
-   * tree shape, where a folder's tree may carry a `.py` file of its own.
-   */
-  methodLocation?: string;
-  /**
-   * Per-route 501 override. A 501 on a method-taking route is the reserved
-   * registry form of `method_ref` (any non-address reference) — the caller's
-   * own selector, not a server fault — so selector-shaped requests set this to
-   * classify it `input_domain` at `method_ref` with the address-grammar hint,
-   * overriding the SDK's `config`. Routes that never send a `method_ref` leave
-   * it unset and keep the SDK's verdict.
-   */
-  notImplemented?: {
-    location?: string;
-    hint: string;
-  };
-  /**
-   * Per-route 413 override. A route that refuses a declared size before any
-   * bytes move (`/v1/upload/grant` answers `413 payload_too_large` for a size
-   * over the upload cap) sets this so the refusal is `input_domain` at the
-   * size the caller declared, with the server's own message naming the limit.
-   * Routes that never declare a size leave it unset and keep the generic
-   * unexpected-status arm.
-   */
-  tooLarge?: {
-    location?: string;
-    hint: string;
-  };
-  /**
-   * Set by a capability when the request carried a method's tree, from
-   * `method_dir` or `files`. Only then are the refusals of a tree
-   * (`treeRefusalTexture`) read as about the files it sent, located at
-   * `files`, which a folder's result relocates to `method_dir`; a request that
-   * named its method by `method_ref` or `method_id` keeps the route's own
-   * handling, since the same refusal there is about files it never sent.
-   */
-  methodTree?: boolean;
-  /**
-   * Set when the request carried its tree inline at a weight that can have
-   * made it too large ({@link treeSentInlineHeavy}). Only then is a `413` read
-   * as about the method's files; otherwise it keeps the route's own
-   * {@link tooLarge} texture, or the unexpected-status arm, since what made the
-   * request too large was something else it carried, a run's inputs.
-   */
-  treeInline?: boolean;
-  /**
-   * Per-route 5xx hint override. Use it when a route is known to report
-   * request-caused failures as a generic server error (the hosted `/v1/start`
-   * answers 503 "Failed to start pipeline" for an invalid bundle), so the
-   * agent gets a recovery pointer instead of "inspect server logs".
-   */
-  serverError?: {
-    hint: string;
-  };
-  /**
-   * Per-call texture for auth failures (HTTP 401/403, and the upload and
-   * artifact families' authentication errors). Capabilities thread it from
-   * their context's `authError` field. The workshop sets it on every tool call
-   * from where that call's key came from (`src/credentials.ts`): no key at
-   * all, the host's key, or the key saved in the home `.env`, each with its
-   * own hint. Unset, as in a capability's own tests, the wording is the
-   * generic {@link DEFAULT_AUTH_HINT} at `PIPELEX_API_KEY`.
-   */
-  auth?: {
-    location?: string;
-    hint: string;
-  };
-  /**
-   * Per-call texture for every failure located at `PIPELEX_BASE_URL` (an
-   * unreachable API, a missing run lifecycle or upload route, a route the
-   * deployment does not serve or implement, and a `config` failure nothing
-   * else words, such as a base URL the SDK refused before sending): a
-   * sentence appended to that failure's hint, saying where the base URL came
-   * from. Capabilities thread it from their context's `baseUrlSource` field,
-   * beside `auth`. The workshop sets it only on a tool call whose base URL it
-   * read from the home `.env` beside the saved key (`src/credentials.ts`),
-   * since a hint naming `PIPELEX_BASE_URL` alone would send the user to an
-   * environment variable the host never set. Unset, every such hint names
-   * `PIPELEX_BASE_URL` alone.
-   */
-  baseUrlSource?: {
-    hint: string;
-  };
-  /**
-   * Per-route hint override for a 403 specifically. The generic 401/403 arm
-   * says "check your credential", which is right for a rejected key or an
-   * expired session and wrong for a route a deployment gates beyond
-   * authentication — the hosted `/v1/codegen` sits behind a feature flag as
-   * well as a plan, so a caller whose credential is perfectly valid can still
-   * be refused. A route that knows this composes the deployment's auth wording
-   * with the gate's; the locator stays the auth one. A 401 never reads it.
-   */
-  forbidden?: {
-    hint: string;
-  };
-  /**
-   * Per-route texture for the **input-preparation family's base error** — the
-   * SDK's `InputPreparationError` raised client-side when `pipe_ref` is
-   * unqualified or unknown, or the closure settles no single default pipe; a
-   * method that does not load (`MethodLoadError`) locates at
-   * {@link methodLocation} instead. Defaults to {@link badRequest}, but
-   * the two are not the same question and `mthds_prepare_inputs` separates them:
-   * its `badRequest` follows the request's SELECTOR shape, because a real 400/422
-   * from the route is about the selector the caller typed, while a client-side
-   * signature failure is always about the pipe, whatever named the method. Without
-   * this, a by-address request with a bad `pipe_ref` reported the address as the
-   * problem.
-   */
-  preparation?: {
-    location?: string;
-    hint: string;
-  };
-  /**
-   * Per-route texture for `POST /v1/pipe-io` refusing a pipe selection — the
-   * typed `422`s {@link isPipeSelectionRefusal} recognizes: a `pipe_ref` that
-   * names no pipe, a method with no entry pipe, or several. Each is a question
-   * about the pipe whatever named the method, so it takes its own locator
-   * rather than {@link badRequest}'s, which follows the selector. Set by a
-   * capability that forwards the caller's pipe selection to the route and
-   * lets the route refuse it (`mthds_inputs_template`); the SDK's input walk
-   * turns the same refusals into an `InputPreparationError` before they get
-   * here. Unset, the refusal keeps the generic 400/422 arm.
-   */
-  selection?: {
-    location?: string;
-    hint: string;
-  };
-  /**
-   * Per-route texture for a refused or unreadable asset on the upload leg.
-   * `location` covers both arms (`RejectedAssetError` /
-   * `InvalidLocalSourceError`) and defaults to `inputs` — right for
-   * `mthds_prepare_inputs`, whose assets are values inside the filled inputs.
-   * `hint` covers the size-refusal arm only, so a route can name the real
-   * upload ceiling; an unreadable local path keeps its own path-readability
-   * hint either way.
-   */
-  asset?: {
-    location?: string;
-    hint?: string;
-  };
-}
-
-/** The auth-failure texture a capability context can carry. */
-export type AuthErrorTexture = NonNullable<ClassifyErrorOptions["auth"]>;
-
-/** The base-URL-failure texture a capability context can carry. */
-export type BaseUrlSourceTexture = NonNullable<ClassifyErrorOptions["baseUrlSource"]>;
-
-/**
- * Where every failure the base URL can fix locates, and the one location
- * {@link ClassifyErrorOptions.baseUrlSource} annotates.
- */
-const BASE_URL_LOCATION = "PIPELEX_BASE_URL";
-
-const DEFAULT_BAD_REQUEST: NonNullable<ClassifyErrorOptions["badRequest"]> = {
-  location: "files",
-  hint: "Check the submitted file contents and provenance fields.",
-};
-
-/** The env-var auth wording a 401/403 carries when no deployment texture overrides it. */
-export const DEFAULT_AUTH_HINT = "Check PIPELEX_API_KEY for the configured API.";
-
-/**
- * The hint on the platform's `403 role_not_permitted`. It names no role on
- * purpose: the same code refuses a runner a method change or an unpublished
- * run, a member an admin action and a caller with no recognised role, and the
- * server's `detail`, which is the error's message, says which role the caller
- * holds and what the action needs. It never points at the key or a login,
- * since neither changes the role.
- */
-export const ROLE_REFUSAL_HINT =
-  "The API key was accepted: the role its owner holds in this organization does not allow this action, and only an admin of the organization can change that role.";
-
-/**
- * The `error_type`s of the `422`s `POST /v1/pipe-io` refuses a pipe selection
- * with, in the input domain: a `pipe_ref` that names no pipe, or no entry pipe
- * (`EntryPipeNotFoundError`), and a code matching several pipes, or several
- * entry pipes (`EntryPipeAmbiguousError`). Each is a question about the pipe,
- * where every other `422` of the route is about the request or the method.
- * `@pipelex/sdk`'s own input walk branches on the same pair.
- */
-const PIPE_SELECTION_ERROR_TYPES: ReadonlySet<string> = new Set([
-  "EntryPipeNotFoundError",
-  "EntryPipeAmbiguousError",
+const EXECUTION_LOCUS_CODES: ReadonlySet<string> = new Set([
+  "pipelex.deployment.custom_code_requires_sandbox",
+  "pipelex.deployment.python_structures_refused",
 ]);
-
-/** Whether `err` is the pipe I/O route refusing a pipe selection (see {@link PIPE_SELECTION_ERROR_TYPES}). */
-function isPipeSelectionRefusal(err: unknown): err is ApiResponseError {
-  return (
-    err instanceof ApiResponseError &&
-    err.status === 422 &&
-    err.errorType !== undefined &&
-    PIPE_SELECTION_ERROR_TYPES.has(err.errorType)
-  );
-}
-
-/**
- * This server's class for each error domain the SDK decides. The two say the
- * same thing — who can fix the failure — and differ only in the name of the
- * caller's own class, which this server's contract fixed first.
- */
-const CLASS_OF_DOMAIN: Readonly<Record<ErrorDomain, ErrorClass>> = {
-  input: "input_domain",
-  config: "config",
-  runtime: "runtime",
-};
-
-/** The half of a {@link ToolError} that says who can fix it and whether a retry can help. */
-type ToolVerdict = Pick<ToolError, "class" | "retryable">;
-
-/** The half a capability words: where, what, and what to do. */
-interface ToolTexture {
-  kind?: ErrorKind;
-  location?: string;
-  message: string;
-  hint?: string;
-}
-
-/** An SDK verdict in this server's terms. */
-function toolVerdictOf(verdict: ErrorVerdict): ToolVerdict {
-  return { class: CLASS_OF_DOMAIN[verdict.errorDomain], retryable: verdict.retryable };
-}
-
-/** A verdict and a texture, as one {@link ToolError}, keeping the shape's field order. */
-function toolError(verdict: ToolVerdict, texture: ToolTexture): ToolError {
-  return {
-    class: verdict.class,
-    ...(texture.kind === undefined ? {} : { kind: texture.kind }),
-    ...(texture.location === undefined ? {} : { location: texture.location }),
-    message: texture.message,
-    ...(texture.hint === undefined ? {} : { hint: texture.hint }),
-    retryable: verdict.retryable,
-  };
-}
-
-/**
- * Classify a failure as a {@link ToolError}.
- *
- * **The verdict is the SDK's.** Every error `@pipelex/sdk` throws carries
- * `errorDomain`, who can fix it, and `retryable`, whether asking again can
- * succeed, decided from the server's own members when it sent them and from
- * the SDK's reading of the status otherwise. This function maps the domain
- * onto this server's class and takes `retryable` as it comes. What it adds is
- * this server's own: the wording, the locator a tool's caller can act on, the
- * hint and the `kind`. A few arms override the SDK's class on purpose — a
- * rejected credential, the execution-locus gate's refusals, a route's 400 that
- * no argument fixes, the reserved registry form of `method_ref`, a 404 on a
- * route that names no resource — and each says why where it does. Callers
- * override `retryable` the same way for a write that may already have
- * happened: `classifyStartError` (`run.ts`) for a run's start and
- * `notRetryableCreate` (`catalog-write.ts`) for a method's create.
- *
- * A failure that is not the SDK's keeps this server's reading: a bare
- * `PipelineRequestError` from `mthds` is `config`, and a fault nothing names is
- * retryable `runtime`, since wrongly stopping a live follow is worse than one
- * more read.
- *
- * Whatever the arm, a failure located at `PIPELEX_BASE_URL` then takes the
- * call's {@link ClassifyErrorOptions.baseUrlSource} sentence, applied here
- * once rather than in each arm, so an arm added later cannot miss it. A
- * caller that replaces the hint afterwards drops it, and `classifyStartError`
- * does so on purpose: its may-have-run hint replaces whatever this function
- * wrote, since it must stay the exact marker the run's headline reads.
- */
-export function classifyError(err: unknown, options: ClassifyErrorOptions = {}): ToolError {
-  return withBaseUrlSource(classifyFailure(err, options), options.baseUrlSource);
-}
-
-/**
- * Append the base URL's source to a failure located at `PIPELEX_BASE_URL`;
- * every other failure, and every call without the texture, is left as it is.
- */
-function withBaseUrlSource(error: ToolError, source: BaseUrlSourceTexture | undefined): ToolError {
-  if (source === undefined || error.location !== BASE_URL_LOCATION) return error;
-  return toolError(error, {
-    kind: error.kind,
-    location: error.location,
-    message: error.message,
-    hint: error.hint === undefined ? source.hint : `${error.hint} ${source.hint}`,
-  });
-}
-
-/** {@link classifyError} without the base URL's source, which only the outermost call appends. */
-function classifyFailure(err: unknown, options: ClassifyErrorOptions): ToolError {
-  if (err instanceof ApiResponseError) return classifyApiResponseError(err, options);
-  if (err instanceof UploadTransportError) return classifyUploadTransportError(err, options);
-  if (err instanceof PipelexRequestError) {
-    return toolError(toolVerdictOf(err), sdkErrorTexture(err, options));
-  }
-
-  // An error carrying a verdict without being this copy's class: a consumer's
-  // own subclass, or `mthds`'s `ApiResponseError` when the runner sent both members.
-  const carried = errorVerdictOf(err);
-  if (carried !== undefined && err instanceof Error) {
-    const verdict = toolVerdictOf(carried);
-    return toolError(verdict, genericTexture(verdict, err.message));
-  }
-
-  if (err instanceof PipelineRequestError) {
-    const verdict: ToolVerdict = { class: "config", retryable: false };
-    return toolError(verdict, genericTexture(verdict, err.message));
-  }
-
-  return toolError(
-    { class: "runtime", retryable: true },
-    {
-      message: err instanceof Error ? err.message : "Unknown failure.",
-      hint: "Inspect the MCP server logs and local pipelex-api logs.",
-    },
-  );
-}
-
-/** What a caller can do about a file of a method's tree that did not move, by which way and why. */
-function methodFileTransferHint(err: MethodFileTransferError): string {
-  if (err.operation === "upload") {
-    return err.code === "refused"
-      ? "The platform's storage refused the upload, so the request was not sent and nothing was saved or run. Call again; if it is refused again, the platform's storage needs looking at."
-      : "The platform's storage did not take the file, so the request was not sent and nothing was saved or run. Call again in a moment: a file the organization already holds is never uploaded twice.";
-  }
-  if (err.code === "refused") {
-    return "Storage refused the download, most often because the file's link expired, and nothing was written. Pull again, which reads the method afresh with new links.";
-  }
-  if (err.code === "mismatch") {
-    return "The bytes storage served are not the file the method lists, so nothing was written. Pull again; if it happens again, the platform's storage needs looking at.";
-  }
-  return "Storage did not serve the file, so nothing was written. Pull again in a moment.";
-}
-
-/**
- * The texture of an SDK error other than a refused request or a wrapped upload
- * failure, by its class. Ordered most specific first: each family's subclasses
- * before its base.
- */
-function sdkErrorTexture(err: PipelexRequestError, options: ClassifyErrorOptions): ToolTexture {
-  const message = err.message;
-
-  if (err instanceof ApiUnreachableError) {
-    // The SDK's own request timeout reached an API that took the request and
-    // did not answer in time; the SDK reads it as `runtime`, and no base URL
-    // fixes it.
-    if (err.code === "ABORT_TIMEOUT") {
-      return {
-        message,
-        hint: "The Pipelex API took the request but did not answer in time; try again, and inspect the API if it persists.",
-      };
-    }
-    return {
-      location: BASE_URL_LOCATION,
-      message,
-      hint: "Start pipelex-api locally or set PIPELEX_BASE_URL to a reachable host-only API base URL.",
-    };
-  }
-
-  // A file of a method's tree that did not move between this machine and the
-  // platform's storage: an upload, located at the field that named the files
-  // it sent (`files` on a method-taking tool, which a folder's result relocates
-  // to `method_dir`, or a save's `method_dir`), or a download of a pull,
-  // located at where it was writing. Neither the message nor any field carries
-  // the file's signed link.
-  if (err instanceof MethodFileTransferError) {
-    return {
-      location:
-        err.operation === "download" ? "output_dir" : options.methodTree ? "files" : "method_dir",
-      message,
-      hint: methodFileTransferHint(err),
-    };
-  }
-
-  // The configured base URL serves the protocol routes but not the durable run
-  // lifecycle (a bare pipelex-api runner).
-  if (err instanceof RunLifecycleUnavailableError) {
-    return {
-      location: BASE_URL_LOCATION,
-      message,
-      hint: "Durable runs need the hosted Pipelex API; point PIPELEX_BASE_URL at a deployment serving /v1/runs/* (a bare pipelex-api runner does not).",
-    };
-  }
-
-  // A completed run that delivers no main output: the API answered, but its
-  // report is malformed.
-  if (err instanceof MissingMainStuffError) {
-    return {
-      message,
-      hint: "The API reported the run completed but delivered no main output; inspect the run on the platform.",
-    };
-  }
-
-  // ── Input-preparation family (mthds_prepare_inputs) ──
-
-  // A missing/unreadable local path or an asset the storage service refused
-  // (413): the caller's input value is the problem.
-  if (err instanceof InvalidLocalSourceError || err instanceof RejectedAssetError) {
-    return {
-      location: options.asset?.location ?? "inputs",
-      message,
-      hint:
-        err instanceof RejectedAssetError
-          ? (options.asset?.hint ??
-            "Pipelex storage refused the asset (too large). Shrink the file, or reference it by an http(s) URL instead.")
-          : "Check the file path is correct and readable, or reference the asset by an http(s) URL / pipelex-storage:// URI instead.",
-    };
-  }
-
-  // A value at a file input that cannot become a file to upload: a `data:` URL
-  // that does not decode, or a value of a type no file input takes. The inputs
-  // must change, so it locates where the asset arms do.
-  if (err instanceof InvalidInputValueError) {
-    return {
-      location: options.asset?.location ?? "inputs",
-      message,
-      hint: "Give each file input a readable path, an http(s) URL, a pipelex-storage:// URI or a data: URL that decodes.",
-    };
-  }
-
-  // The pipe I/O answer said the method does not load (`is_valid: false`), so
-  // no signature can be read: the method must change, not the pipe or the
-  // inputs, so it locates at the selector that named the method.
-  if (err instanceof MethodLoadError) {
-    return {
-      ...(options.methodLocation === undefined ? {} : { location: options.methodLocation }),
-      message,
-      hint: "The method does not load, so its inputs cannot be prepared. Validate it with mthds_validate, fix what the report names, then prepare the inputs again.",
-    };
-  }
-
-  // The configured deployment has no upload route (a bare pipelex-api runner).
-  if (err instanceof UnsupportedUploadCapabilityError) {
-    return {
-      location: BASE_URL_LOCATION,
-      message,
-      hint: "The configured Pipelex deployment has no /v1/upload route. Point PIPELEX_BASE_URL at the hosted Pipelex API, or pass assets as http(s) URLs / pipelex-storage:// references.",
-    };
-  }
-
-  if (err instanceof UploadAuthenticationError) {
-    return {
-      kind: "auth",
-      location: options.auth?.location ?? "PIPELEX_API_KEY",
-      message,
-      hint: options.auth?.hint ?? DEFAULT_AUTH_HINT,
-    };
-  }
-
-  // A test file the upload route refused for what it claims, never for its
-  // bytes. It subclasses the base error below, so it is caught first. Only
-  // `mthds_prepare_inputs` uploads a test file, and it takes the kind at
-  // `kind`, which is where a method the platform will not take one for is
-  // located. A refusal by role is the role arm every tool shares: no
-  // location, since no argument changes a role. Its verdict stays the SDK's.
-  if (err instanceof TestFileRefusedError) {
-    if (err.code === "role_not_permitted") {
-      return { kind: "role", message, hint: ROLE_REFUSAL_HINT };
-    }
-    return {
-      location: "kind",
-      message,
-      hint:
-        err.code === "method_being_deleted"
-          ? "The method is being deleted, so it takes no new test file. Name another saved method, or omit kind to upload the files as the organization's own."
-          : `The organization holds no saved method by that id: a method_dir's link may name a method deleted since, or one saved through another organization. Save the method again with ${WORKSHOP_TOOL_NAMES.saveMethod}, name another by method_id, or omit kind to upload the files as the organization's own.`,
-    };
-  }
-
-  // The base class: an unqualified or unknown pipe_ref or no single default
-  // pipe, raised CLIENT-SIDE — so they locate at `preparation`, which a route
-  // separates from `badRequest` when its 400/422 is about a different field.
-  // The one the SDK reads as anything but the caller's, an input walk whose
-  // answer it could not read, gets no such locator.
-  if (err instanceof InputPreparationError) {
-    if (err.errorDomain !== "input") {
-      return {
-        message,
-        hint: "The Pipelex API's answer to the input walk could not be read; inspect the API.",
-      };
-    }
-    const texture = options.preparation ?? options.badRequest ?? DEFAULT_BAD_REQUEST;
-    return {
-      ...(texture.location === undefined ? {} : { location: texture.location }),
-      message,
-      hint: texture.hint,
-    };
-  }
-
-  // ── Artifact family (mthds_download_artifacts) ──
-  // The SDK's artifact operations throw only when no verdict can be produced;
-  // per-reference failures are values on the verdict.
-
-  // The resolve route refused the credential (401/403) — the auth arm, like
-  // UploadAuthenticationError on the upload leg.
-  if (err instanceof ArtifactAuthenticationError) {
-    return {
-      kind: "auth",
-      location: options.auth?.location ?? "PIPELEX_API_KEY",
-      message,
-      hint: options.auth?.hint ?? DEFAULT_AUTH_HINT,
-    };
-  }
-
-  // The scope walked carries no artifact on a completed run: the API answered,
-  // but its report is malformed — the MissingMainStuffError reading.
-  if (err instanceof ScopeUnavailableError) {
-    return {
-      message,
-      hint: "The API reported the run completed but its results carry no output to walk for files; inspect the run on the platform.",
-    };
-  }
-
-  // The base class: a malformed bulk-resolve answer or a directory the download
-  // could not use after containment approved it. Neither is the caller's input.
-  if (err instanceof ArtifactOperationError) {
-    return {
-      message,
-      hint: "The download could not proceed; inspect the MCP server logs and the API.",
-    };
-  }
-
-  // The rest — an argument the SDK refused before sending anything, paging
-  // that never ends, a run still going or failed — read by their verdict.
-  return genericTexture(toolVerdictOf(err), message);
-}
-
-/** The texture of an error this server has no wording of its own for, by its class. */
-function genericTexture(verdict: ToolVerdict, message: string): ToolTexture {
-  switch (verdict.class) {
-    case "config":
-      return {
-        location: BASE_URL_LOCATION,
-        message,
-        hint: "Check PIPELEX_BASE_URL and the submitted request.",
-      };
-    case "input_domain":
-      return {
-        message,
-        hint: "The request was refused before it was sent; check the submitted arguments.",
-      };
-    case "runtime":
-      return { message, hint: "Inspect the MCP server logs and the Pipelex API." };
-  }
-}
-
-/**
- * An `UploadTransportError`: the SDK's `uploadFile` wraps what the client's
- * `upload()` throws when it is neither a credential nor a size refusal, and the
- * wrapper takes its cause's verdict. Where the cause is a fault this server
- * words, the cause is classified instead, so the texture says what happened:
- * the upload ceiling's local refusal (`upload-ceiling.ts`, thrown from inside
- * `upload()`), a plan limit, an unreachable API.
- */
-function classifyUploadTransportError(
-  err: UploadTransportError,
-  options: ClassifyErrorOptions,
-): ToolError {
-  const cause = err.cause;
-  if (
-    cause instanceof RejectedAssetError ||
-    cause instanceof ApiUnreachableError ||
-    (cause instanceof ApiResponseError && cause.status === 402)
-  ) {
-    return classifyFailure(cause, options);
-  }
-  const verdict = toolVerdictOf(err);
-  if (verdict.retryable) {
-    return toolError(verdict, {
-      message: err.message,
-      hint: "The upload could not reach Pipelex storage; retry, and inspect the API if it persists.",
-    });
-  }
-  return toolError(verdict, {
-    ...(verdict.class === "input_domain" ? { location: options.asset?.location ?? "inputs" } : {}),
-    message: err.message,
-    hint: "Pipelex storage refused the upload, and the same file meets the same answer; the message says why.",
-  });
-}
-
-/** The hint of the execution-locus gate's refusal of a method's own Python. */
-const CUSTOM_CODE_REFUSED_HINT =
-  "This deployment is not sandbox-hosted, so it refuses a method that ships custom Python (.py) — the credential is not the problem. Run the method on a sandbox-hosted deployment, or name one whose pipes are all MTHDS; a .py file the method does not need belongs outside its folder, or behind a .gitignore line inside it.";
-
-/** The runner's registry code for a method's own Python on a deployment that is not sandbox-hosted. */
-const CUSTOM_CODE_REQUIRES_SANDBOX_CODE = "pipelex.deployment.custom_code_requires_sandbox";
-
-/** The runner's registry code for a method declaring its structures as Python classes. */
-const PYTHON_STRUCTURES_REFUSED_CODE = "pipelex.deployment.python_structures_refused";
-
-type ExecutionLocusRefusal =
-  | "custom_code"
-  | "custom_code_by_code"
-  | "structures"
-  | "structures_by_code";
-
-/**
- * Which of the execution-locus gate's refusals `err` is, if any: the runner's
- * registry code (`custom_code_requires_sandbox`, a `501`, and
- * `python_structures_refused`, a `422`), or the `403` and `error_type` an
- * older runner sent.
- */
-function executionLocusRefusalOf(err: ApiResponseError): ExecutionLocusRefusal | undefined {
-  if (err.code === CUSTOM_CODE_REQUIRES_SANDBOX_CODE) return "custom_code_by_code";
-  if (err.code === PYTHON_STRUCTURES_REFUSED_CODE) return "structures_by_code";
-  if (err.status === 403 && err.errorType === "CustomCodeRequiresSandbox") return "custom_code";
-  if (err.status === 403 && err.errorType === "MethodStructuresRefusedError") return "structures";
-  return undefined;
-}
 
 /**
  * Whether `err` is the execution-locus gate refusing a method for the Python it
- * holds: the deployment will not load the method at all, so no verdict about
- * it can be had there, while nothing is wrong with the request. The save reads
- * it to store a draft unvalidated rather than refuse it.
+ * holds, by the problem's code: the deployment will not load the method at
+ * all, so no verdict about it can be had there, while nothing is wrong with
+ * the request. The save reads it to store a draft unvalidated rather than
+ * refuse it.
  */
 export function isExecutionLocusRefusal(err: unknown): boolean {
-  return err instanceof ApiResponseError && executionLocusRefusalOf(err) !== undefined;
-}
-
-function classifyApiResponseError(err: ApiResponseError, options: ClassifyErrorOptions): ToolError {
-  const message = err.serverMessage ?? err.message;
-  const verdict = toolVerdictOf(err);
-  const badRequest = options.badRequest ?? DEFAULT_BAD_REQUEST;
-  const route = options.route ?? "the Pipelex API";
-
-  // Ahead of the generic 400/422 arm, whose locator follows the selector: a
-  // refused pipe selection is about the pipe, and the route's `detail` names
-  // the candidates where there are some.
-  if (options.selection !== undefined && isPipeSelectionRefusal(err)) {
-    return toolError(verdict, {
-      location: options.selection.location,
-      message,
-      hint: options.selection.hint,
-    });
-  }
-
-  // The execution-locus gate as the runner states it now, by its registry
-  // code: a method shipping Python (`.py`) on a deployment that is not
-  // sandbox-hosted, a `501`, and on one that is, a method declaring its
-  // structures as Python classes, a `422`. Both are about the method and the
-  // deployment together, never the credential nor the deployment's routes, so
-  // both are the caller's, located at whatever named the method; they are
-  // read ahead of the tree's refusals and the 400/422 and 5xx arms, which
-  // would call the first a route the deployment does not implement.
-  const locus = executionLocusRefusalOf(err);
-  if (locus === "custom_code_by_code" || locus === "structures_by_code") {
-    return toolError(
-      { ...verdict, class: "input_domain", retryable: false },
-      {
-        location: options.methodLocation ?? (options.methodTree ? "files" : undefined),
-        message,
-        hint:
-          locus === "custom_code_by_code"
-            ? CUSTOM_CODE_REFUSED_HINT
-            : "This deployment imports no Python structure classes: the method declares its structures as Python classes. Declare them as concepts in the method instead, or run it on a self-hosted runner that imports them.",
-      },
-    );
-  }
-
-  // The refusals of a method's tree, by the platform's `code` or the runner's
-  // `error_type`, and read so only on a request that sent one: elsewhere the
-  // same refusal is about files this server never sent, and the route's own
-  // texture says more. Ahead of the generic 400/422 arm, whose locator follows
-  // the route's selector and whose hint says nothing about a tree.
-  const treeRefusal = options.methodTree
-    ? treeRefusalTexture(err, options.treeInline === true)
-    : undefined;
-  if (treeRefusal !== undefined) {
-    return toolError(
-      {
-        class: treeRefusal.class ?? verdict.class,
-        retryable: treeRefusal.retryable ?? verdict.retryable,
-      },
-      { location: "files", message, hint: treeRefusal.hint },
-    );
-  }
-
-  if (err.status === 422 && options.unprocessable !== undefined) {
-    // `<root>` is how the platform names a refusal of the request as a whole.
-    const entry = err.errors?.find(
-      (item) => typeof item.field === "string" && item.field !== "" && item.field !== "<root>",
-    );
-    const field = entry?.field ?? undefined;
-    const location =
-      field === undefined ? undefined : options.unprocessable.field(field.split(".")[0] ?? field);
-    return toolError(verdict, {
-      ...(location === undefined ? {} : { location }),
-      message:
-        field === undefined
-          ? message
-          : `The Pipelex API refused ${field}${typeof entry?.detail === "string" && entry.detail !== "" ? `: ${entry.detail}` : "."}`,
-      hint: options.unprocessable.hint,
-    });
-  }
-
-  if (err.status === 400 || err.status === 422) {
-    // A route whose 400/422 no tool argument fixes declares its class, which
-    // overrides the SDK's reading of a refused request as the caller's own.
-    return toolError(
-      { ...verdict, class: badRequest.class ?? verdict.class },
-      { location: badRequest.location, message, hint: badRequest.hint },
-    );
-  }
-
-  // The execution-locus gate's two refusals as a runner before the registry
-  // codes sent them, each a 403 whose `error_type` names the policy: a
-  // fetched package declaring in-process Python structure classes, and a
-  // method shipping custom Python (`.py`) on a deployment that is not
-  // sandbox-hosted. Both are about the method, not the credential, so both
-  // override the SDK's class to `input_domain`: that runner sent the second
-  // with `error_domain: input` but the first with no domain at all
-  // (L-261007-31dea6), and the SDK's own reading of a bare 403 is
-  // `config`. They must be caught ahead of the generic 401/403 arm, whose
-  // texture sends a caller whose credential is perfectly good to go and mint a
-  // new key. The second is a property of the PAIR — the method and the
-  // deployment — and the method is not malformed: the very same method runs on
-  // a sandbox-hosted deployment, which is where PipeFunc Python belongs.
-  if (locus === "structures") {
-    return toolError(
-      { ...verdict, class: "input_domain" },
-      {
-        location: "method_ref",
-        message,
-        hint: "Hosted execution accepts MTHDS concepts and sandboxed PipeFuncs, not in-process Python — the referenced package declares Python structure classes. Express its types as MTHDS concepts, or run it on a self-hosted OSS runner.",
-      },
-    );
-  }
-
-  if (locus === "custom_code") {
-    return toolError(
-      { ...verdict, class: "input_domain" },
-      {
-        location: options.methodLocation,
-        message,
-        hint: CUSTOM_CODE_REFUSED_HINT,
-      },
-    );
-  }
-
-  // The platform's refusal of a run whose inputs reference a file another
-  // organization stored (`CrossOrgStorageAccessError`, on `/v1/start` and
-  // `/v1/execute`): a 403 coded `forbidden` whose domain the platform sets to
-  // `input`, the one such `forbidden` that a route this server calls can
-  // answer. The platform's other one, `OrganizationMismatchError`, is on its
-  // organization routes, and the single `/v1/resolve-storage-url` route, which
-  // can raise this one too, is never called; the runner's own 401 and 403,
-  // tagged `input` too, carry no `code` at all. A login is how it usually
-  // happens: the new key acts for another organization than the one the
-  // inputs were uploaded under. It is caught ahead of the generic 401/403
-  // arm, which would send a caller whose key is fine to go and mint another;
-  // its class and `retryable` stay the SDK's, read from the platform's members.
-  if (err.status === 403 && err.code === "forbidden" && err.errorDomain === "input") {
-    return toolError(verdict, {
-      location: "inputs",
-      message,
-      hint: `The inputs reference a file stored by another organization than the one the API key acts for, as when the key changed since the inputs were prepared, after a login for instance. Prepare the inputs again with ${WORKSHOP_TOOL_NAMES.prepareInputs} under the current key, then run again.`,
-    });
-  }
-
-  // The platform's refusal by role (`RoleNotPermittedError`): the key was
-  // accepted, and the role its owner holds in the organization does not allow
-  // the action. It answers a runner changing a method or running anything but
-  // a published version, a member taking an admin action, and a caller with no
-  // recognised role, so nothing here names a role: the server's `detail`, the
-  // message, names the caller's and what the action needs. It is caught ahead
-  // of the generic 401/403 arm, whose texture would tell a caller whose key is
-  // fine to replace it or log in again, and ahead of a route's `forbidden`
-  // gate. Its verdict stays the SDK's, read from the platform's members.
-  if (err.status === 403 && err.code === "role_not_permitted") {
-    return toolError(verdict, { kind: "role", message, hint: ROLE_REFUSAL_HINT });
-  }
-
-  if (err.status === 401 || err.status === 403) {
-    // Overrides the SDK's class: a rejected credential is `config` here,
-    // whatever the server tagged it. The runner tags its own 401 and 403
-    // `input` (L-261007-8dffe5), the request carrying the credential, while
-    // this server's credential is its environment, which no tool argument
-    // changes, and the SDK's own reading of both statuses is `config`.
-    // `kind: "auth"` carries the cause into each capability's headline, so a
-    // missing key never reads as an unreachable API; a route's `forbidden`
-    // gate is a 403 too and keeps the kind, its headline naming both causes.
-    return toolError(
-      { ...verdict, class: "config" },
-      {
-        kind: "auth",
-        location: options.auth?.location ?? "PIPELEX_API_KEY",
-        message,
-        hint:
-          err.status === 403 && options.forbidden !== undefined
-            ? options.forbidden.hint
-            : (options.auth?.hint ?? DEFAULT_AUTH_HINT),
-      },
-    );
-  }
-
-  // A saved method's versions and draft, refused for a reason the platform
-  // names in its `code`. Each is about the method the caller named, and each
-  // would otherwise fall through to the generic arm as "HTTP 409", which says
-  // nothing a caller can act on. The class is pinned to `input_domain`, which
-  // is also the SDK's fallback for every one of them: the caller changes the
-  // selector, the token or the timing, never the environment.
-  if (err.status === 409) {
-    const arm = methodConflictTexture(err.code, options);
-    if (arm !== undefined) {
-      return toolError({ ...verdict, class: "input_domain" }, { ...arm, message });
-    }
-  }
-
-  // Paywall: the platform reports a plan limit as 402 SubscriptionRequiredError.
-  // Branch on the HTTP status only — its problem `code` is "forbidden" and must
-  // never be sniffed. The class stays the SDK's `config` (the call cannot be
-  // made as credentialed), and `kind` is what carries the cause into each
-  // capability's headline — see {@link summaryForToolError}.
-  if (err.status === 402) {
-    return toolError(verdict, {
-      kind: "paywall",
-      message,
-      hint: "The organization's plan does not cover this call. Review the plan and billing for the API key's organization on app.pipelex.com.",
-    });
-  }
-
-  if (err.status === 404) {
-    // `mt_…@<n>`, or a version read, naming a version the method never
-    // published. Ahead of the route's `notFound`, whose hint says the METHOD is
-    // unknown, which is the one thing this answer rules out.
-    if (err.code === "method_version_not_found") {
-      return toolError(
-        { ...verdict, class: "input_domain" },
-        {
-          location: "method_id",
-          message,
-          hint: `The method exists but has no published version with this number. ${WORKSHOP_TOOL_NAMES.getMethod} with its bare id reports its latest published version; address the draft as mt_…@draft.`,
-        },
-      );
-    }
-    if (options.notFound !== undefined && verdict.class === "input_domain") {
-      return toolError(verdict, {
-        location: options.notFound.location,
-        message,
-        hint: options.notFound.hint,
-      });
-    }
-    // Overrides the SDK's class where it differs: a bare 404, and any 404 on
-    // a route that names no resource, is the deployment not serving the route.
-    // The platform renders a path it does not serve with the code `not_found`,
-    // which the SDK reads as a named miss, so a route without a `notFound`
-    // texture would otherwise tell the caller to fix a request it cannot.
-    return toolError(
-      { ...verdict, class: "config" },
-      {
-        location: BASE_URL_LOCATION,
-        message,
-        hint: `Check that PIPELEX_BASE_URL points to a host serving ${route}.`,
-      },
-    );
-  }
-
-  // The reserved registry form of `method_ref`, classified only on routes that
-  // declared the texture (selector-shaped requests). The runner tags it
-  // `config`, a capability it does not serve; it is overridden to the caller's
-  // class because the caller's own argument chose that form, and an address
-  // works. Elsewhere a 501 keeps the SDK's verdict and the server-error arm.
-  if (err.status === 501 && options.notImplemented) {
-    return toolError(
-      { ...verdict, class: "input_domain" },
-      {
-        location: options.notImplemented.location,
-        message,
-        hint: options.notImplemented.hint,
-      },
-    );
-  }
-
-  // A route's own size texture; a route without one keeps the
-  // unexpected-status arm, since nothing it sent is known to be at fault.
-  const tooLarge = options.tooLarge;
-  if (err.status === 413 && tooLarge !== undefined) {
-    return toolError(verdict, {
-      location: tooLarge.location,
-      message,
-      hint: tooLarge.hint,
-    });
-  }
-
-  // A throttle or a request that timed out on its way in: refused for its
-  // timing, not its content, so the same call may pass a moment later.
-  if (err.status === 429 || err.status === 408) {
-    return toolError(verdict, {
-      message,
-      hint:
-        err.status === 429
-          ? "The Pipelex API is limiting requests; try again in a moment."
-          : "The request timed out before the Pipelex API received it; try again.",
-    });
-  }
-
-  if (err.status === 501) {
-    return toolError(verdict, {
-      location: BASE_URL_LOCATION,
-      message,
-      hint: `The deployment PIPELEX_BASE_URL points at does not implement ${route}.`,
-    });
-  }
-
-  if (err.status >= 500) {
-    return toolError(verdict, {
-      message,
-      hint:
-        options.serverError?.hint ??
-        "The Pipelex API returned a server error; inspect pipelex-api logs.",
-    });
-  }
-
-  return toolError(verdict, { message, hint: `The Pipelex API returned HTTP ${err.status}.` });
-}
-
-/**
- * The texture of a refusal of the method's tree a request sent, or `undefined`
- * for any other error. Each but the last is a `422`, which the SDK reads as
- * the caller's.
- *
- * - `invalid_method_files`, or the runner's `InvalidMethodFiles`: a path that
- *   is no tree path, or two that collide, which the problem names. The
- *   workshop refuses both before sending, so this is a rule the receiver holds
- *   that the workshop does not; the caller renames the file.
- * - `method_tree_too_large`, or the runner's `MethodTreeTooLarge`: past one of
- *   the deployment's limits, which the workshop holds a folder to when the
- *   deployment announces them; the SDK has sent the request once more on a
- *   fresh handshake already.
- * - `blob_mismatch`: a hash entry states another size than the blob the
- *   organization holds. The workshop states the sizes of the bytes it read, so
- *   no argument fixes it: the class is overridden to `runtime`.
- * - `missing_blobs`, or the MTHDS standard's `request.blobs_missing`: a blob
- *   went missing between its upload and the request. The SDK uploads the
- *   blobs a `request.blobs_missing` names and sends once more, then hands a
- *   second such answer back unchanged; the same call asks the blob route
- *   afresh and uploads what is missing, so it is overridden to `runtime` and
- *   retryable, where the SDK reads a `422` as the caller's and final. Either
- *   code is read, on the platform's `code` or the standard's reading of the
- *   answer (`problem.code`), so a runner speaking the standard is read alike.
- * - A `413`, only when `inline` says the tree travelled inline at a weight
- *   that can have made the request too large ({@link treeSentInlineHeavy}):
- *   the SDK sends a tree past its inline threshold by hash to a deployment
- *   that keeps a blob store, so this is a deployment taking every file
- *   inline, a bare runner; the caller sends a smaller tree. The class is the
- *   caller's, whatever the SDK reads. Any other `413` keeps the route's own
- *   handling: the tree went by hash or was small, and something else the
- *   request carried, a run's inputs, made it too large.
- */
-function treeRefusalTexture(
-  err: ApiResponseError,
-  inline: boolean,
-): { class?: ErrorClass; retryable?: boolean; hint: string } | undefined {
-  if (err.status === 413) {
-    if (!inline) return undefined;
-    return {
-      class: "input_domain",
-      retryable: false,
-      hint: "The request carrying the method's tree inline was larger than the Pipelex deployment takes in one request: a deployment without a blob store takes every file of a tree inline. Keep what is not part of the method out of its folder with a .gitignore inside it or METHODS.toml's [package] exclude, or send fewer or smaller files; a run's inputs ride the same request, so large ones belong in uploaded files.",
-    };
-  }
-  if (err.status !== 422) return undefined;
-  if (err.code === "invalid_method_files" || err.errorType === "InvalidMethodFiles") {
-    return {
-      hint: "The method's files break the MTHDS standard's rules for a tree, which the message names: a name that is not one every machine keeps, or two names that collide. Rename the file it names, or keep it out of the method.",
-    };
-  }
-  if (err.code === "method_tree_too_large" || err.errorType === "MethodTreeTooLarge") {
-    return {
-      hint: "The method's tree is larger than the Pipelex deployment takes, by the limit the message names. Keep what is not part of the method out of its folder with a .gitignore inside it or METHODS.toml's [package] exclude, or make its files smaller.",
-    };
-  }
-  if (err.code === "blob_mismatch") {
-    return {
-      class: "runtime",
-      hint: "A file of the tree is stored under its hash with another size than the one this call sent, so the request was refused. No argument fixes it: call again, and if it persists, the platform's storage needs looking at.",
-    };
-  }
-  if (isMissingBlobsRefusal(err)) {
-    return {
-      class: "runtime",
-      retryable: true,
-      hint: "A file of the tree went missing from the platform's storage after it was uploaded, so the request was refused. Call again, which uploads what is missing.",
-    };
-  }
-  return undefined;
-}
-
-/** The codes a blob gone missing is refused under: the Pipelex platform's own, and the MTHDS standard's. */
-const MISSING_BLOBS_CODES: ReadonlySet<string> = new Set([
-  "missing_blobs",
-  "request.blobs_missing",
-]);
-
-function isMissingBlobsRefusal(err: ApiResponseError): boolean {
-  return (
-    (err.code !== undefined && MISSING_BLOBS_CODES.has(err.code)) ||
-    MISSING_BLOBS_CODES.has(err.problem.code)
-  );
-}
-
-/**
- * The texture of a `409` about a saved method, by the platform's `code`, or
- * `undefined` for a `409` this server has no wording of its own for.
- *
- * - `method_not_published`: a bare id names the latest published version, and
- *   the method has none yet. The way forward is its draft, `mt_…@draft`, or a
- *   publish, which only the user asks for.
- * - `method_update_conflict`: the draft moved since the token the call sent,
- *   so nothing was written or published. The route says which field carried
- *   the token ({@link ClassifyErrorOptions.conflict}).
- * - `method_being_deleted`: the method's erasure has started.
- */
-function methodConflictTexture(
-  code: string | undefined,
-  options: ClassifyErrorOptions,
-): Omit<ToolTexture, "message"> | undefined {
-  switch (code) {
-    case "method_not_published":
-      return {
-        location: "method_id",
-        hint: `The method has a draft and no published version yet, and a bare id names the latest published version. Address its draft as mt_…@draft, or publish it with ${WORKSHOP_TOOL_NAMES.publishMethod} — only when the user asks for a publish.`,
-      };
-    case "method_update_conflict":
-      return {
-        location: options.conflict?.location ?? "expected_updated_at",
-        hint:
-          options.conflict?.hint ??
-          `The method's draft changed since the token this call sent — somebody saved it, and the webapp saves as it edits. Read it with ${WORKSHOP_TOOL_NAMES.getMethod}, then decide with the user what to keep.`,
-      };
-    case "method_being_deleted":
-      return {
-        location: "method_id",
-        hint: "The method is being deleted, so nothing was read or written. Its id stops resolving once the erasure finishes.",
-      };
-    default:
-      return undefined;
-  }
+  return isProblemError(err) && EXECUTION_LOCUS_CODES.has(err.problem.code);
 }
 
 // ── the artifact fetch boundary, shared by the two tools that cross it ──
@@ -2868,170 +1857,26 @@ export function allowsPlainHttp(context: ArtifactFetchConfig): boolean {
 }
 
 /**
- * Classify options for the bulk resolve route, the one request both fetching
- * capabilities make on the caller's behalf. Its whole-request refusals are
- * about the caller or the deployment, never about the caller's input: a 400 is
- * a key acting for no organization and a 422 a request this server built, a 404
- * a deployment without the route (the default `config` arm names it), a 5xx the
- * platform failing to sign. A 401/403 never reaches these options — the SDK
- * raises it as `ArtifactAuthenticationError`, which {@link classifyError} maps
- * to the auth arm. Per-reference refusals are values on the verdict's items,
- * classified by {@link itemToolError}.
+ * The problem of one reference a download or an image fetch could not read,
+ * from the SDK's `{ code, detail }` verdict item: the SDK's own reading of
+ * the fetch boundary's codes (`ArtifactFetchError`'s problem), with the
+ * item's detail as its `message`. The codes are the SDK's closed vocabulary,
+ * relayed from the bulk resolve route without validation, so a detail that is
+ * no string is left out rather than failing the result.
  */
-export const BULK_RESOLVE_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/resolve-storage-url/bulk",
-  badRequest: {
-    class: "config",
-    hint: "The API refused to resolve this run's stored files as a whole. If the message names an organization, the API key acts for none: use a key minted in the run's organization.",
-  },
-  serverError: {
-    hint: "The platform could not sign download links for this run's stored files; retrying this tool resolves them again.",
-  },
-};
-
-const RESOLVE_AGAIN_HINT =
-  "The download link is minted fresh on every call, so retrying this tool resolves a new one.";
-
-interface ItemErrorTexture {
-  class: ErrorClass;
-  hint: string;
-  retryable: boolean;
-  /** Replaces the SDK's `detail` where that sentence speaks to an SDK caller, not to the agent. */
-  message?: string;
-}
-
-/**
- * How each per-reference code the SDK carries reads as a `ToolError`. The codes
- * are the SDK's closed vocabulary, shared by the download verdict's
- * `ArtifactItemError.code` and by the thrown `ArtifactFetchError.code`: the
- * resolve route's per-reference refusals, the fetch boundary's, and the
- * download's own. A vanished or oversized object is a permanent `input_domain`
- * refusal; a store or network fault is a retryable `runtime` one, since every
- * call mints fresh links.
- *
- * It lives here rather than in `artifacts.ts` because both fetching
- * capabilities need it, and neither imports the other.
- */
-const ITEM_ERROR_TEXTURES: Record<string, ItemErrorTexture> = {
-  invalid_storage_uri: {
-    class: "input_domain",
-    hint: "The API rejected this storage reference as found in the run output.",
-    retryable: false,
-  },
-  forbidden: {
-    class: "input_domain",
-    hint: "The reference belongs to another organization than the API key's. Use a key minted in the run's organization.",
-    retryable: false,
-  },
-  unsupported_url: {
-    class: "runtime",
-    hint: "The configured deployment's storage resolved to a link this server does not fetch — not http(s), or carrying credentials. A deployment backed by local-filesystem storage hands out file:// links, which cannot be fetched here.",
-    retryable: false,
-  },
-  plain_http_refused: {
-    class: "config",
-    message:
-      "The platform resolved this reference to a plain http link, which this server refuses.",
-    hint: `A plain http link is accepted only when PIPELEX_BASE_URL is itself http (the local stack). Set ${ALLOW_HTTP_ENV}=true to accept one from this deployment anyway.`,
-    retryable: false,
-  },
-  redirect_refused: {
-    class: "runtime",
-    hint: "A presigned object link should answer directly. Inspect the configured deployment's storage.",
-    retryable: false,
-  },
-  store_refused: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
-  not_found: {
-    class: "input_domain",
-    hint: "The object behind this storage reference is gone; re-run the method to produce it again.",
-    retryable: false,
-  },
-  store_error: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
-  too_large: {
-    class: "input_domain",
-    hint: "The limit is an accident guard against filling the disk. Fetch the file another way — its presigned public_url in mthds_run_results works for about an hour.",
-    retryable: false,
-  },
-  timeout: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
-  network: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
-  resolve_failed: { class: "runtime", hint: RESOLVE_AGAIN_HINT, retryable: true },
-  total_limit_exceeded: {
-    class: "input_domain",
-    hint: "The call's total byte limit is an accident guard against filling the disk. The files listed as saved are on disk; fetch this one through its presigned public_url in mthds_run_results, which works for about an hour.",
-    retryable: false,
-  },
-  write_failed: {
-    class: "runtime",
-    hint: "Check that the target directory under the server's working directory is writable.",
-    retryable: false,
-  },
-  aborted: {
-    class: "runtime",
-    hint: "The download stopped before this file was saved; call the tool again.",
-    retryable: true,
-  },
-};
-
-/**
- * The wire's `detail`, when it really is one. It is typed by the SDK and, like
- * the code beside it, relayed verbatim from the bulk resolve route without
- * validation — and `message` is required on the tools' own error schemas, so a
- * missing one would fail the result and turn a single file's failure into a
- * failed call, which is the failure the code's own lookup was hardened against.
- */
-function wireDetail(detail: string): string | undefined {
-  const value: unknown = detail;
-  return typeof value === "string" && value.trim() !== "" ? value : undefined;
-}
-
-/** What a per-reference failure reads as when the route named no detail for it. */
-function unnamedItemFailure(code: string): string {
-  const named: unknown = code;
-  const suffix = typeof named === "string" && named.trim() !== "" ? ` (${named})` : "";
-  return `This file could not be read, and the API gave no reason${suffix}.`;
-}
-
-/** A code the SDK adds later reads as an unnamed fault, which stays retryable. */
-const UNKNOWN_ITEM_ERROR: ItemErrorTexture = {
-  class: "runtime",
-  hint: "Inspect the MCP server logs.",
-  retryable: true,
-};
-
-/**
- * Classify one per-reference error, located at the caller's own entry —
- * `artifacts[i].uri` on the download tool, `images[i].uri` on the image tool,
- * which is why the locator is a parameter rather than a constant here. The
- * `{ code, detail }` shape is the SDK's `ArtifactItemError`; a thrown
- * `ArtifactFetchError` is adapted to it by its caller, since the two carry the
- * same closed `code` vocabulary.
- *
- * A thrown `ArtifactFetchError` carries the SDK's own verdict, and this table
- * deliberately does not take it: the SDK's says whether fetching the same link
- * again can succeed, while a retry here is a new call of the tool, which mints
- * a fresh link. That is why a store's refusal, final for the link, reads as
- * retryable here.
- *
- * The code comes verbatim off the bulk resolve route's wire, so the table is
- * read by own key only: a code of `constructor` or `toString` would otherwise
- * find `Object.prototype`'s member instead of falling back, and produce a
- * `ToolError` with no `class` — failing the tool's own schema and turning one
- * file's failure into a failed call.
- */
-export function itemToolError(
-  error: { code: string; detail: string },
-  location: string,
-): ToolError {
-  const texture = Object.hasOwn(ITEM_ERROR_TEXTURES, error.code)
-    ? ITEM_ERROR_TEXTURES[error.code]
-    : UNKNOWN_ITEM_ERROR;
-  return {
-    class: texture.class,
-    location,
-    message: texture.message ?? wireDetail(error.detail) ?? unnamedItemFailure(error.code),
-    hint: texture.hint,
-    retryable: texture.retryable,
-  };
+export function fetchItemProblem(error: { code: string; detail: string }, uri: string): Problem {
+  const detail: unknown = error.detail;
+  const code: unknown = error.code;
+  const problem = callerView(
+    new ArtifactFetchError(
+      typeof detail === "string" ? detail : "",
+      uri,
+      typeof code === "string" ? code : "unknown",
+    ).problem,
+  );
+  return typeof detail === "string" && detail.trim() !== "" && detail !== problem.detail
+    ? { ...problem, message: detail }
+    : problem;
 }
 
 // ── the image-inlining boundary (mthds_show_images) ─────────────────

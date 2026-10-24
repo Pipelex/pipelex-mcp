@@ -12,6 +12,7 @@ import type {
   MethodPage,
   PipelexValidateSource,
   PipelexValidationReport,
+  Problem,
 } from "@pipelex/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -924,8 +925,13 @@ describe("the workshop's key, read on every call", () => {
 
     expect(seen.length).toBeGreaterThan(0);
     expect(seen.every((request) => request.authorization === null)).toBe(true);
-    const [error] = (result.structuredContent as { errors: { hint: string }[] }).errors;
-    expect(error?.hint).toContain(`\`${path.join(pinned, ".env")}\``);
+    // Where the key was looked for is the rendering's, never the problem's location.
+    expect(result.structuredContent).toMatchObject({
+      status: "error",
+      problem: { code: "auth.missing_credential" },
+    });
+    const [text] = result.content as { type: string; text: string }[];
+    expect(text?.text).toContain(`\`${path.join(pinned, ".env")}\``);
   });
 
   it("succeeds on the next call once a key is saved, with no restart", async () => {
@@ -946,7 +952,7 @@ describe("the workshop's key, read on every call", () => {
       expect(seen.map((request) => request.authorization)).toEqual([null]);
       expect(keyless.structuredContent).toMatchObject({
         status: "error",
-        errors: [{ class: "config", location: "PIPELEX_API_KEY" }],
+        problem: { code: "auth.missing_credential" },
       });
       const [text] = keyless.content as { type: string; text: string }[];
       expect(text?.text).toContain("`npx -y @pipelex/mcp@latest login`");
@@ -965,9 +971,11 @@ describe("the workshop's key, read on every call", () => {
     }
   });
 
-  it("headlines a keyless call as the missing key, with the login in its content", async () => {
-    // The 401 a keyless call meets is `config`, as an unreachable API is; the
-    // headline, which a host may show alone, must say which (L-260924-a58ae1).
+  it("reports a keyless call as the missing key, with the login in its content", async () => {
+    // The 401 a keyless call meets is the SDK's `auth.missing_credential`,
+    // relayed as is; the rendering says which key was looked for and how to
+    // save one, and never sends the caller to debug connectivity
+    // (L-260924-a58ae1).
     stubApi(emptyPage);
     const server = createLocalServer({
       env: { PIPELEX_HOME: await makeTempDir(), PIPELEX_BASE_URL: "https://api.pipelex.test" },
@@ -977,28 +985,22 @@ describe("the workshop's key, read on every call", () => {
 
     try {
       const calls = [
-        {
-          name: "mthds_list_methods",
-          arguments: {},
-          headline:
-            "Method catalog could not be listed: the Pipelex API key is missing or was refused.",
-        },
-        {
-          name: "mthds_run_status",
-          arguments: { run_id: "run_keyless" },
-          headline: "Run status could not be read: the Pipelex API key is missing or was refused.",
-        },
+        { name: "mthds_list_methods", arguments: {} },
+        { name: "mthds_run_status", arguments: { run_id: "run_keyless" } },
       ];
       for (const call of calls) {
         const result = await client.callTool({ name: call.name, arguments: call.arguments });
 
         expect(result.isError, call.name).toBe(true);
-        expect(result.structuredContent, call.name).toMatchObject({
+        const structured = result.structuredContent as { status: string; problem: Problem };
+        expect(structured, call.name).toMatchObject({
           status: "error",
-          errors: [{ class: "config", kind: "auth", location: "PIPELEX_API_KEY" }],
+          problem: { code: "auth.missing_credential", status: 401 },
         });
+        expect(structured.problem, call.name).not.toHaveProperty("location");
         const [text] = result.content as { type: string; text: string }[];
-        expect(text?.text.split("\n")[0], call.name).toBe(call.headline);
+        expect(text?.text.split("\n")[0], call.name).toBe(`## ${structured.problem.title}`);
+        expect(text?.text, call.name).toContain("auth.missing_credential");
         expect(text?.text, call.name).toContain("No Pipelex API key is set");
         expect(text?.text, call.name).toContain("`npx -y @pipelex/mcp@latest login`");
         expect(text?.text, call.name).not.toMatch(/unreachable|misconfigured/);
@@ -1095,7 +1097,7 @@ describe("the workshop's key, read on every call", () => {
     );
     const note = `The PIPELEX_BASE_URL in use, https://saved.pipelex.test, was read from \`${path.join(home, ".env")}\` beside the saved key`;
 
-    /** The first error of each call, by a server whose environment is `env`. */
+    /** The problem and the Markdown of each call, by a server whose environment is `env`. */
     async function errorsOf(env: Record<string, string>) {
       const server = createLocalServer({ env, rootDir: await makeTempDir() });
       const { client, close } = await connectClient(server);
@@ -1104,27 +1106,28 @@ describe("the workshop's key, read on every call", () => {
           client.callTool({ name: "mthds_list_methods", arguments: {} }),
           client.callTool({ name: "mthds_validate", arguments: { method_id: "mt_demo" } }),
         ];
-        return (await Promise.all(calls)).map(
-          (result) =>
-            (result.structuredContent as { errors: { location?: string; hint?: string }[] })
-              .errors[0],
-        );
+        return (await Promise.all(calls)).map((result) => ({
+          problem: (result.structuredContent as { problem: Problem }).problem,
+          text: (result.content as { type: string; text: string }[])[0]?.text ?? "",
+        }));
       } finally {
         await close();
       }
     }
 
-    for (const error of await errorsOf({ PIPELEX_HOME: home })) {
-      expect(error).toMatchObject({ location: "PIPELEX_BASE_URL" });
-      expect(error?.hint).toContain(note);
-      expect(error?.hint).not.toContain("plx_sk_saved");
+    for (const { problem, text } of await errorsOf({ PIPELEX_HOME: home })) {
+      expect(problem).toMatchObject({ code: "client.unreachable" });
+      expect(problem).not.toHaveProperty("location");
+      expect(text).toContain(note);
+      expect(text).not.toContain("plx_sk_saved");
     }
-    for (const error of await errorsOf({
+    for (const { problem, text } of await errorsOf({
       PIPELEX_HOME: home,
       PIPELEX_BASE_URL: "https://env.pipelex.test",
     })) {
-      expect(error).toMatchObject({ location: "PIPELEX_BASE_URL" });
-      expect(error?.hint).not.toContain(".env");
+      expect(problem).toMatchObject({ code: "client.unreachable" });
+      expect(text).not.toContain(".env");
+      expect(text).toContain("https://env.pipelex.test");
     }
   });
 });

@@ -121,23 +121,24 @@ describe("the files list and a test upload on the wire", () => {
     expect(uploads[0]?.body).not.toHaveProperty("method_id");
   });
 
-  it("locates the platform's 422 at the argument behind the field it names", async () => {
+  it("relays the platform's 422 with the wire field it names, translating none", async () => {
     stubDeployment({
       "/v1/files": () =>
         Response.json(
           {
-            type: "https://pipelex.com/errors/validation_failed",
-            title: "Validation failed",
+            type: "https://mthds.ai/errors/request.invalid",
+            title: "The request was refused",
             status: 422,
-            detail: "Request body failed validation. See `errors` for the per-field breakdown.",
-            code: "validation_failed",
-            error_domain: "input",
-            retryable: false,
+            detail: "The request does not match the route's schema.",
+            code: "request.invalid",
+            domain: "input",
+            retry: "no",
+            next_step: { kind: "change_input", detail: "Correct the request, then try again." },
             errors: [
               {
-                field: "q",
-                code: "string_too_long",
+                code: "request.invalid",
                 detail: "String should have at most 200 characters",
+                location: { field: "q" },
               },
             ],
           },
@@ -152,8 +153,14 @@ describe("the files list and a test upload on the wire", () => {
 
     expect(result.structuredContent).toMatchObject({
       status: "error",
-      errors: [{ class: "input_domain", location: "query", retryable: false }],
+      problem: {
+        code: "request.invalid",
+        domain: "input",
+        retry: "no",
+        errors: [{ location: { field: "q" } }],
+      },
     });
+    expect(result.summary).toContain("String should have at most 200 characters");
   });
 
   it("uploads nothing for a test preparation whose method is unknown", async () => {
@@ -171,9 +178,9 @@ describe("the files list and a test upload on the wire", () => {
       { baseUrl: "https://upload.example", apiKey: "plx_sk_test" },
     );
 
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "kind",
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      location: { field: "kind" },
     });
     expect(sent.filter((request) => request.url.pathname === "/v1/upload")).toHaveLength(0);
   });

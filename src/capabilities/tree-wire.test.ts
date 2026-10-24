@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { INLINE_TREE_MAX_BYTES } from "@pipelex/sdk";
+import { INLINE_TREE_MAX_BYTES, buildProblem } from "@pipelex/sdk";
 import type { PipeIOValidReport } from "@pipelex/sdk";
 import { sha256Hex } from "mthds";
 
@@ -214,15 +214,14 @@ describe("the tree on the wire of the crate routes", () => {
 });
 
 /**
- * A blob gone missing between its upload and the request, under either code
- * a receiver refuses it with: the Pipelex platform's `missing_blobs` and the
- * MTHDS standard's `request.blobs_missing`. The SDK sends once more on the
- * standard's code when it names the blobs, then hands a second such answer
- * back unchanged, so every tool that sends a tree reads both alike: a
- * retryable `runtime` error at `files`, never the route's own bad-request
- * texture.
+ * A blob gone missing between its upload and the request, refused under the
+ * MTHDS standard's `request.blobs_missing`. The SDK sends once more when the
+ * refusal names blobs of a tree it sent by hash, then hands a second such
+ * answer back unchanged, so every tool that sends a tree relays it alike: the
+ * receiver's problem as it came, with no location of the workshop's own and
+ * none of a route's own wording.
  */
-describe("a blob gone missing, under either code, on every route that sends a tree", () => {
+describe("a blob gone missing, on every route that sends a tree", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -257,37 +256,38 @@ describe("a blob gone missing, under either code, on every route that sends a tr
     },
   ] as const;
 
+  const REFUSAL = buildProblem("request.blobs_missing", { missing_blobs: ["a".repeat(64)] });
+
   for (const { tool, route, call } of ROUTES) {
-    for (const code of ["missing_blobs", "request.blobs_missing"]) {
-      it(`${tool} reads ${code} as a retryable runtime refusal of the tree, at files`, async () => {
-        const posted: string[] = [];
-        vi.stubGlobal("fetch", (input: string | URL | Request) => {
-          const url = new URL(input instanceof Request ? input.url : String(input));
-          if (url.pathname === "/v1/version") {
-            return Promise.resolve(Response.json({ version: "1.0.0", blob_store: false }));
-          }
-          posted.push(url.pathname);
-          return Promise.resolve(
-            new Response(
-              JSON.stringify({
-                status: 422,
-                code,
-                title: "Blobs missing",
-                detail: "Blobs missing",
-              }),
-              { status: 422, headers: { "content-type": "application/problem+json" } },
-            ),
-          );
-        });
-
-        const result = await call(`https://${code}.${tool}.example`);
-
-        expect(posted).toContain(route);
-        expect(result.structuredContent.status).toBe("error");
-        const error = result.structuredContent.errors?.[0];
-        expect(error).toMatchObject({ class: "runtime", location: "files", retryable: true });
-        expect(error?.hint).toContain("went missing from the platform's storage");
+    it(`${tool} relays request.blobs_missing as the receiver sent it`, async () => {
+      const posted: string[] = [];
+      vi.stubGlobal("fetch", (input: string | URL | Request) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (url.pathname === "/v1/version") {
+          return Promise.resolve(Response.json({ version: "1.0.0", blob_store: false }));
+        }
+        posted.push(url.pathname);
+        return Promise.resolve(
+          new Response(JSON.stringify({ ...REFUSAL, status: 422 }), {
+            status: 422,
+            headers: { "content-type": "application/problem+json" },
+          }),
+        );
       });
-    }
+
+      const result = await call(`https://blobs.${tool}.example`);
+
+      expect(posted).toContain(route);
+      expect(result.structuredContent.status).toBe("error");
+      const problem = result.structuredContent.problem;
+      expect(problem).toMatchObject({
+        code: "request.blobs_missing",
+        domain: "input",
+        retry: "no",
+        params: { missing_blobs: ["a".repeat(64)] },
+      });
+      expect(problem).not.toHaveProperty("location");
+      expect(result.summary).toContain(REFUSAL.next_step.detail);
+    });
   }
 });

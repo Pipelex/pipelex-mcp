@@ -12,7 +12,7 @@ import type { PrepareContext } from "./capabilities/prepare.js";
 import { buildRunContext, startMthdsRun } from "./capabilities/run.js";
 import type { RunContext } from "./capabilities/run.js";
 import { MAX_INPUTS_FILE_BYTES } from "./capabilities/shared.js";
-import type { ToolError } from "./capabilities/shared.js";
+import type { Problem } from "./capabilities/shared.js";
 import { buildLocalToolContexts } from "./tools.js";
 
 /**
@@ -79,9 +79,16 @@ describe("inputs_path on the workshop", () => {
     await fs.writeFile(path.join(rootDir, name), body);
   }
 
-  function onlyError(errors: ToolError[] | undefined): ToolError {
-    expect(errors).toHaveLength(1);
-    return (errors ?? [])[0];
+  /** The one problem of a refused call, which must be one fault rather than several. */
+  function onlyProblem(problem: Problem | undefined): Problem {
+    expect(problem).toBeDefined();
+    expect(problem).not.toHaveProperty("errors");
+    return problem as Problem;
+  }
+
+  /** The workshop's sentence opens a refusal's message, its remedy closing it. */
+  function expectOpensWith(message: unknown, sentence: string): void {
+    expect(String(message).slice(0, sentence.length)).toBe(sentence);
   }
 
   describe("mthds_run", () => {
@@ -178,8 +185,8 @@ describe("inputs_path on the workshop", () => {
         context,
       );
 
-      const error = onlyError(result.structuredContent.errors);
-      expect(error).toMatchObject({ class: "input_domain", location: "inputs_path" });
+      const error = onlyProblem(result.structuredContent.problem);
+      expect(error).toMatchObject({ domain: "input", location: { field: "inputs_path" } });
       expect(error.message).toContain("not both");
       expect(seen).toEqual([]);
     });
@@ -190,10 +197,10 @@ describe("inputs_path on the workshop", () => {
 
       const result = await startMthdsRun({ files: FILES, inputs_path: ".env" }, context);
 
-      const error = onlyError(result.structuredContent.errors);
-      expect(error).toMatchObject({ class: "input_domain", location: "inputs_path" });
-      expect(error.message).toBe("Path is not a .json file: .env");
-      expect(error.hint).toContain("pass the inputs inline as inputs");
+      const error = onlyProblem(result.structuredContent.problem);
+      expect(error).toMatchObject({ domain: "input", location: { field: "inputs_path" } });
+      expectOpensWith(error.message, "Path is not a .json file: .env");
+      expect(error.message).toContain("pass the inputs inline as inputs");
       expect(seen).toEqual([]);
     });
 
@@ -206,8 +213,8 @@ describe("inputs_path on the workshop", () => {
         context,
       );
 
-      const error = onlyError(result.structuredContent.errors);
-      expect(error).toMatchObject({ class: "input_domain", location: "inputs_path" });
+      const error = onlyProblem(result.structuredContent.problem);
+      expect(error).toMatchObject({ domain: "input", location: { field: "inputs_path" } });
       expect(error.message).toContain("outside the server's working directory");
     });
 
@@ -218,7 +225,7 @@ describe("inputs_path on the workshop", () => {
 
       const result = await startMthdsRun({ files: FILES, inputs_path: outside }, context);
 
-      expect(onlyError(result.structuredContent.errors).message).toContain(
+      expect(onlyProblem(result.structuredContent.problem).message).toContain(
         "outside the server's working directory",
       );
     });
@@ -231,7 +238,7 @@ describe("inputs_path on the workshop", () => {
 
       const result = await startMthdsRun({ files: FILES, inputs_path: "inputs.json" }, context);
 
-      expect(onlyError(result.structuredContent.errors).message).toContain(
+      expect(onlyProblem(result.structuredContent.problem).message).toContain(
         "outside the server's working directory",
       );
     });
@@ -242,7 +249,8 @@ describe("inputs_path on the workshop", () => {
 
       const result = await startMthdsRun({ files: FILES, inputs_path: "inputs.json" }, context);
 
-      expect(onlyError(result.structuredContent.errors).message).toBe(
+      expectOpensWith(
+        onlyProblem(result.structuredContent.problem).message,
         "Path is not a regular file: inputs.json",
       );
     });
@@ -252,10 +260,9 @@ describe("inputs_path on the workshop", () => {
 
       const result = await startMthdsRun({ files: FILES, inputs_path: "missing.json" }, context);
 
-      expect(onlyError(result.structuredContent.errors)).toMatchObject({
-        location: "inputs_path",
-        message: "File not found: missing.json",
-      });
+      const problem = onlyProblem(result.structuredContent.problem);
+      expect(problem).toMatchObject({ location: { field: "inputs_path" } });
+      expectOpensWith(problem.message, "File not found: missing.json");
     });
 
     it("refuses a file over the size cap", async () => {
@@ -264,8 +271,8 @@ describe("inputs_path on the workshop", () => {
 
       const result = await startMthdsRun({ files: FILES, inputs_path: "big.json" }, context);
 
-      const error = onlyError(result.structuredContent.errors);
-      expect(error).toMatchObject({ class: "input_domain", location: "inputs_path" });
+      const error = onlyProblem(result.structuredContent.problem);
+      expect(error).toMatchObject({ domain: "input", location: { field: "inputs_path" } });
       expect(error.message).toContain("too large");
       expect(seen).toEqual([]);
     });
@@ -276,8 +283,8 @@ describe("inputs_path on the workshop", () => {
 
       const result = await startMthdsRun({ files: FILES, inputs_path: "inputs.json" }, context);
 
-      const error = onlyError(result.structuredContent.errors);
-      expect(error).toMatchObject({ class: "input_domain", location: "inputs_path" });
+      const error = onlyProblem(result.structuredContent.problem);
+      expect(error).toMatchObject({ domain: "input", location: { field: "inputs_path" } });
       expect(error.message).toContain("not valid JSON");
       expect(seen).toEqual([]);
     });
@@ -293,8 +300,8 @@ describe("inputs_path on the workshop", () => {
 
       const result = await startMthdsRun({ files: FILES, inputs_path: "inputs.json" }, context);
 
-      const error = onlyError(result.structuredContent.errors);
-      expect(error).toMatchObject({ class: "input_domain", location: "inputs_path" });
+      const error = onlyProblem(result.structuredContent.problem);
+      expect(error).toMatchObject({ domain: "input", location: { field: "inputs_path" } });
       expect(error.message).toContain(`holds ${found}`);
     });
 
@@ -306,10 +313,14 @@ describe("inputs_path on the workshop", () => {
         context,
       );
 
-      expect(result.structuredContent.errors?.map((error) => error.location)).toEqual([
-        "files[0].path",
-        "inputs_path",
-      ]);
+      // One problem, listing each fault as an item at its own argument.
+      expect(result.structuredContent.problem).toMatchObject({
+        code: "client.argument_invalid",
+        params: { reason: "several_faults" },
+      });
+      expect(result.structuredContent.problem?.errors?.map((item) => item.location?.field)).toEqual(
+        ["files[0].path", "inputs_path"],
+      );
     });
   });
 
@@ -340,9 +351,9 @@ describe("inputs_path on the workshop", () => {
 
       const result = await prepareMthdsInputs({ files: FILES }, context);
 
-      expect(onlyError(result.structuredContent.errors)).toMatchObject({
-        class: "input_domain",
-        location: "inputs",
+      expect(onlyProblem(result.structuredContent.problem)).toMatchObject({
+        domain: "input",
+        location: { field: "inputs" },
       });
       expect(seen).toEqual([]);
     });
@@ -356,9 +367,9 @@ describe("inputs_path on the workshop", () => {
         context,
       );
 
-      expect(onlyError(result.structuredContent.errors)).toMatchObject({
-        class: "input_domain",
-        location: "inputs_path",
+      expect(onlyProblem(result.structuredContent.problem)).toMatchObject({
+        domain: "input",
+        location: { field: "inputs_path" },
       });
       expect(seen).toEqual([]);
     });
@@ -381,13 +392,14 @@ describe("inputs_path on the workshop", () => {
         context,
       );
 
-      expect(onlyError(wrongExtension.structuredContent.errors).message).toBe(
+      expectOpensWith(
+        onlyProblem(wrongExtension.structuredContent.problem).message,
         "Path is not a .json file: inputs.toml",
       );
-      expect(onlyError(escape.structuredContent.errors).message).toContain(
+      expect(onlyProblem(escape.structuredContent.problem).message).toContain(
         "outside the server's working directory",
       );
-      expect(onlyError(notObject.structuredContent.errors).message).toContain("holds an array");
+      expect(onlyProblem(notObject.structuredContent.problem).message).toContain("holds an array");
     });
   });
 
@@ -416,8 +428,8 @@ describe("inputs_path on the workshop", () => {
         context,
       );
 
-      const error = onlyError(result.structuredContent.errors);
-      expect(error).toMatchObject({ class: "input_domain", location: "inputs_path" });
+      const error = onlyProblem(result.structuredContent.problem);
+      expect(error).toMatchObject({ domain: "input", location: { field: "inputs_path" } });
       expect(error.message).toContain("cannot read files from disk");
       expect(seen).toEqual([]);
     });
@@ -435,9 +447,9 @@ describe("inputs_path on the workshop", () => {
         context,
       );
 
-      expect(onlyError(result.structuredContent.errors)).toMatchObject({
-        class: "input_domain",
-        location: "inputs_path",
+      expect(onlyProblem(result.structuredContent.problem)).toMatchObject({
+        domain: "input",
+        location: { field: "inputs_path" },
       });
     });
   });

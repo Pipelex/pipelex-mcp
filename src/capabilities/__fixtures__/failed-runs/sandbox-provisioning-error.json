@@ -7,17 +7,45 @@
     "degraded": false,
     "pipe_code": null,
     "error": {
-      "title": "Sandbox provisioning",
-      "message": "Could not provision a Daytona box for pipe: Failed to create sandbox: Snapshot pipelex-base-dev is building",
-      "error_type": "SandboxProvisioningError",
-      "type_uri": "https://docs.pipelex.com/latest/errors/sandbox-provisioning-error/"
+      "type": "https://docs.pipelex.com/errors/pipelex.sandbox.unavailable",
+      "title": "The Daytona sandbox could not be started",
+      "detail": "The Daytona sandbox that runs the method's code could not be started (backend: daytona), so the code never ran.",
+      "code": "pipelex.sandbox.unavailable",
+      "domain": "runtime",
+      "retry": "yes",
+      "next_step": {
+        "kind": "retry",
+        "detail": "Run the method again after a while."
+      },
+      "params": {
+        "backend": "daytona"
+      },
+      "pipeline_run_id": "run_a23eccb6-fc93-4c30-8ba5-e6d785e1c96f"
     }
   },
   "results_arm": {
     "state": "failed",
     "pipeline_run_id": "run_a23eccb6-fc93-4c30-8ba5-e6d785e1c96f",
     "status": "FAILED",
-    "message": "Run finished with status FAILED; no result available",
+    "message": "The run 'run_a23eccb6-fc93-4c30-8ba5-e6d785e1c96f' ended as 'FAILED', without success.",
+    "problem": {
+      "type": "https://mthds.ai/errors/run.failed",
+      "title": "The run did not succeed",
+      "status": 409,
+      "detail": "The run 'run_a23eccb6-fc93-4c30-8ba5-e6d785e1c96f' ended as 'FAILED', without success.",
+      "code": "run.failed",
+      "domain": "runtime",
+      "retry": "no",
+      "next_step": {
+        "kind": "read_run",
+        "detail": "Read the run's own problem in run_error to see why it did not succeed."
+      },
+      "params": {
+        "pipeline_run_id": "run_a23eccb6-fc93-4c30-8ba5-e6d785e1c96f",
+        "run_status": "FAILED"
+      },
+      "pipeline_run_id": "run_a23eccb6-fc93-4c30-8ba5-e6d785e1c96f"
+    },
     "error": null
   }
 }

@@ -7,6 +7,7 @@ import {
   ApiUnreachableError,
   ArtifactAuthenticationError,
   artifactFilename,
+  buildProblem,
   locateArtifacts,
 } from "@pipelex/sdk";
 import type {
@@ -21,6 +22,8 @@ import type {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  DOWNLOAD_MAX_FILE_BYTES,
+  DOWNLOAD_MAX_TOTAL_BYTES,
   GENERATED_DIRECTORY_GITIGNORE,
   MAX_FOUND_AT_PATHS,
   artifactsToolResult,
@@ -29,8 +32,8 @@ import {
 } from "./artifacts.js";
 import type { ArtifactClient, ArtifactsContext } from "./artifacts.js";
 import {
-  CALLER_FACING_TIMEOUT_REPORT,
   RECORDED_FAILED_RUNS,
+  TIMED_OUT_RUN_PROBLEM,
   relayingArmOf,
 } from "./failed-run-fixtures.js";
 import { DEFAULT_API_URL } from "./shared.js";
@@ -149,17 +152,17 @@ function fakeClient(
   return { client, requests, reads, selections };
 }
 
-function apiError(route: string, status: number, message: string): ApiResponseError {
+/**
+ * An answer of the API as the SDK reads it: a problem document as it came, or,
+ * when the body is none, by its status alone.
+ */
+function apiError(route: string, status: number, problem?: object): ApiResponseError {
   return new ApiResponseError(
     `HTTP ${status}`,
     `${DEFAULT_API_URL}${route}`,
     status,
     "Error",
-    "{}",
-    "error",
-    message,
-    undefined,
-    undefined,
+    problem === undefined ? "{}" : JSON.stringify(problem),
   );
 }
 
@@ -173,16 +176,27 @@ function contextIn(
 
 describe("validateArtifactsRequest", () => {
   it("rejects a blank run id", () => {
-    const errors = validateArtifactsRequest({ run_id: "  " });
+    const problems = validateArtifactsRequest({ run_id: "  " });
 
-    expect(errors).toHaveLength(1);
-    expect(errors[0]?.location).toBe("run_id");
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "run_id", reason: "empty" },
+      location: { field: "run_id" },
+    });
   });
 
   it("rejects a blank or absolute dir at dir, before touching the filesystem", () => {
-    expect(validateArtifactsRequest({ run_id: RUN_ID, dir: " " })[0]?.location).toBe("dir");
+    expect(validateArtifactsRequest({ run_id: RUN_ID, dir: " " })[0]).toMatchObject({
+      params: { argument: "dir", reason: "empty" },
+      location: { field: "dir" },
+    });
     const absolute = validateArtifactsRequest({ run_id: RUN_ID, dir: path.resolve("/tmp/x") });
-    expect(absolute[0]?.location).toBe("dir");
+    expect(absolute[0]).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "dir", reason: "absolute" },
+      location: { field: "dir" },
+    });
     expect(absolute[0]?.message).toContain("relative");
   });
 
@@ -190,7 +204,11 @@ describe("validateArtifactsRequest", () => {
     const climbing = validateArtifactsRequest({ run_id: RUN_ID, dir: "../elsewhere" });
 
     expect(climbing).toHaveLength(1);
-    expect(climbing[0]?.location).toBe("dir");
+    expect(climbing[0]).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "dir", reason: "outside_workspace" },
+      location: { field: "dir" },
+    });
     expect(climbing[0]?.message).toContain("outside the server's working directory");
     expect(validateArtifactsRequest({ run_id: RUN_ID, dir: "out/../assets" })).toEqual([]);
   });
@@ -220,12 +238,12 @@ describe("downloadMthdsArtifacts", () => {
 
     expect(calls).toBe(0);
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "config",
-      location: "deployment",
-      retryable: false,
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.not_configured",
+      retry: "no",
+      params: { setting: "working_directory" },
     });
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("npx @pipelex/mcp");
+    expect(result.structuredContent.problem?.message).toContain("npx @pipelex/mcp");
   });
 
   it("reports a running run as a produced verdict with the retry hint, creating nothing", async () => {
@@ -257,38 +275,36 @@ describe("downloadMthdsArtifacts", () => {
     const root = await makeTempDir();
     const { resultsArm, statusRead } = RECORDED_FAILED_RUNS.sandboxProvisioning;
     const { client, requests } = fakeClient(resultsArm, savingDownload, statusRead);
+    const runError = statusRead.error;
+    if (runError == null) throw new Error("the recording carries the run's problem");
 
     const result = await downloadMthdsArtifacts(
       { run_id: statusRead.pipeline_run_id },
       contextIn(root, client),
     );
 
+    // The arm nests no problem, so the run's own comes from the status read.
+    expect(resultsArm.error).toBeNull();
     expect(result.structuredContent).toEqual({
       status: "ok",
       run_id: statusRead.pipeline_run_id,
       state: "failed",
       run_status: "FAILED",
-      failure_message: "Run finished with status FAILED; no result available",
-      failure: {
-        run_id: statusRead.pipeline_run_id,
-        error_type: "SandboxProvisioningError",
-        title: "Sandbox provisioning",
-        finished_at: statusRead.finished_at,
-      },
+      run_error: runError,
     });
-    expect(result.summary).toContain("Why: Sandbox provisioning\n");
-    expect(result.summary).not.toContain("Could not provision");
-    expect(result.summary).toContain("What to do: the report names no next step.");
-    expect(result.summary).not.toMatch(/Retry:/);
+    expect(result.summary).toContain(`## ${runError.title}`);
+    expect(result.summary).toContain(runError.detail);
+    expect(result.summary).toContain(runError.next_step.detail);
+    expect(result.summary).toContain("`pipelex.sandbox.unavailable`");
     expect(result.summary).toContain(
-      `For support: Run ${statusRead.pipeline_run_id} · SandboxProvisioningError · ended ${statusRead.finished_at ?? ""}`,
+      `For support: Run ${statusRead.pipeline_run_id} · pipelex.sandbox.unavailable · ended ${statusRead.finished_at ?? ""}`,
     );
     expect(result.summary).toContain("produces no output and no files");
     expect(requests).toEqual([]);
     expect(await fs.readdir(root)).toEqual([]);
   });
 
-  it("carries the report a failed arm relays, retry advice included", async () => {
+  it("carries the problem a failed arm relays, its retry verdict included", async () => {
     const root = await makeTempDir();
     const { relayedArm, statusRead } = RECORDED_FAILED_RUNS.extractJobFailure;
     const { client } = fakeClient(relayedArm, savingDownload, { ...statusRead, error: null });
@@ -298,52 +314,44 @@ describe("downloadMthdsArtifacts", () => {
       contextIn(root, client),
     );
 
-    // The verbose report is not flagged caller-facing, so neither the failure
-    // nor the arm's account, which quotes the report's message, carries it.
-    expect(relayedArm.message).toContain(statusRead.error?.message ?? "");
+    // The status read carries none here, so the run's problem is the arm's.
     expect(result.structuredContent).toEqual({
       status: "ok",
       run_id: relayedArm.pipeline_run_id,
       state: "failed",
       run_status: "FAILED",
-      failure_message: "Run finished with status FAILED; no result available",
-      failure: {
-        run_id: relayedArm.pipeline_run_id,
-        error_type: "ExtractJobFailureError",
-        title: "Extract job failure",
-        error_domain: "runtime",
-        error_category: "transient",
-        retryable: true,
-        user_action: { kind: "wait_and_retry", detail: "Wait a moment, then run it again." },
-        finished_at: statusRead.finished_at,
-      },
+      run_error: relayedArm.error,
     });
-    expect(result.summary).toContain("Retry: Running it again can succeed.");
+    expect(result.structuredContent.run_error).toMatchObject({
+      code: "provider.failed",
+      retry: "yes",
+      next_step: { kind: "retry" },
+    });
+    expect(result.summary).toContain("retry yes");
   });
 
-  it("keeps the arm's account and the message of a report flagged caller-facing", async () => {
+  it("keeps the run problem's own message, and bounds a detail too long to relay whole", async () => {
     const root = await makeTempDir();
-    const arm = relayingArmOf(RUN_ID, CALLER_FACING_TIMEOUT_REPORT);
+    const longDetail = `The run was stopped at the one-hour limit. ${"Its last step was still waiting. ".repeat(100)}`;
+    const arm = relayingArmOf(RUN_ID, {
+      ...TIMED_OUT_RUN_PROBLEM,
+      detail: longDetail,
+      message: "The run took longer than this deployment allows.",
+    });
     const { client, requests } = fakeClient(arm);
 
     const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
 
-    expect(result.structuredContent).toEqual({
-      status: "ok",
-      run_id: RUN_ID,
-      state: "failed",
-      run_status: "FAILED",
-      failure_message: `Run finished with status FAILED: ${CALLER_FACING_TIMEOUT_REPORT.message ?? ""}`,
-      failure: {
-        run_id: RUN_ID,
-        error_type: "RunTimedOutError",
-        title: "Run timed out",
-        message: CALLER_FACING_TIMEOUT_REPORT.message,
-        error_domain: "runtime",
-        retryable: false,
-        user_action: { kind: "contact_support", detail: "Give support the run id run_x." },
-      },
+    const runError = result.structuredContent.run_error;
+    expect(runError).toMatchObject({
+      code: "run.timed_out",
+      domain: TIMED_OUT_RUN_PROBLEM.domain,
+      retry: TIMED_OUT_RUN_PROBLEM.retry,
+      message: "The run took longer than this deployment allows.",
     });
+    expect(runError?.detail.startsWith("The run was stopped at the one-hour limit.")).toBe(true);
+    expect(runError?.detail).toMatch(/more characters left out\]$/);
+    expect(result.summary).toContain("The run took longer than this deployment allows.");
     expect(requests).toEqual([]);
   });
 
@@ -408,6 +416,8 @@ describe("downloadMthdsArtifacts", () => {
         dir: path.join(await fs.realpath(root), RUN_DIR),
         scope: "main_stuff",
         allowHttp: false,
+        maxBytes: DOWNLOAD_MAX_FILE_BYTES,
+        maxTotalBytes: DOWNLOAD_MAX_TOTAL_BYTES,
       },
     ]);
     // Each file is named after the first field it fills; the report's key
@@ -511,7 +521,7 @@ describe("downloadMthdsArtifacts", () => {
     expect(overridden.requests[0]?.allowHttp).toBe(true);
   });
 
-  it("refuses a dir escaping the working directory as input_domain at dir, saving nothing", async () => {
+  it("refuses a dir escaping the working directory as a refused argument at dir, saving nothing", async () => {
     const root = await makeTempDir();
     const { client, requests } = fakeClient(completedState(PICTURE_ONLY));
 
@@ -521,10 +531,12 @@ describe("downloadMthdsArtifacts", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "dir",
-      retryable: false,
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      retry: "no",
+      params: { argument: "dir", reason: "outside_workspace" },
+      location: { field: "dir" },
     });
     expect(requests).toEqual([]);
   });
@@ -568,21 +580,92 @@ describe("downloadMthdsArtifacts", () => {
       OUTPUT_PATH,
       path.join(RUN_DIR, "a.png"),
     ]);
-    // A file that was not saved still says which field it would have filled.
-    expect(result.structuredContent.artifacts?.[1]).toEqual({
-      uri: REPORT_URI,
-      found_at: ["$.b.url"],
-      content_type: null,
-      error: {
-        class: "input_domain",
-        location: "artifacts[1].uri",
-        message: "The stored file is no longer available (HTTP 404).",
-        hint: "The object behind this storage reference is gone; re-run the method to produce it again.",
-        retryable: false,
-      },
+    // A file that was not saved still says which field it would have filled,
+    // and why, as the SDK reads the fetch boundary's code, its sentence kept.
+    const failed = result.structuredContent.artifacts?.[1];
+    expect(Object.keys(failed ?? {}).sort()).toEqual(["content_type", "error", "found_at", "uri"]);
+    expect(failed).toMatchObject({ uri: REPORT_URI, found_at: ["$.b.url"], content_type: null });
+    expect(failed?.error).toMatchObject({
+      code: "input.reference_not_found",
+      domain: "input",
+      retry: "no",
+      next_step: { kind: "change_input" },
+      params: { input: REPORT_URI },
+      message: "The stored file is no longer available (HTTP 404).",
     });
     expect(result.summary).toContain("its main output and 1 of 2 file(s)");
-    expect(result.summary).toContain(`- \`$.b.url\` (\`${REPORT_URI}\`) — failed`);
+    const line = result.summary
+      .split("\n")
+      .find((text) => text.startsWith(`- \`$.b.url\` (\`${REPORT_URI}\`) — failed: `));
+    expect(line).toContain("The stored file is no longer available (HTTP 404).");
+    expect(line).toContain("(`input.reference_not_found`)");
+    expect(line).toContain("Next step: Point the input");
+  });
+
+  it("reads the download's own per-file codes into the core codes they are", async () => {
+    const root = await makeTempDir();
+    const uris = ["a", "b", "c", "d", "e", "f"].map(
+      (name) => `pipelex-storage://runs/01JRUN/outputs/${name}.png`,
+    );
+    const failures: [string, string][] = [
+      ["too_large", "The file is larger than the per-file limit."],
+      ["total_limit_exceeded", "The download reached the call's total limit."],
+      [
+        "write_failed",
+        "The file could not be created: EACCES: permission denied, open '/x/a.png'.",
+      ],
+      ["aborted", "The download was stopped before this file."],
+      ["resolve_failed", "The bulk resolve route failed for this reference."],
+      ["redirect_refused", "The store answered with a redirect."],
+    ];
+    const { client } = fakeClient(
+      completedState(Object.fromEntries(uris.map((uri, index) => [`k${index}`, { url: uri }]))),
+      () =>
+        Promise.resolve(
+          verdictOf(
+            failures.map(([code, detail], index) => ({
+              uri: uris[index] ?? "",
+              found_at: [`$.k${index}.url`],
+              path: null,
+              content_type: null,
+              size: null,
+              error: { code, detail },
+            })),
+          ),
+        ),
+    );
+
+    const result = await downloadMthdsArtifacts(
+      { run_id: RUN_ID, dir: "out" },
+      contextIn(root, client),
+    );
+
+    expect(result.structuredContent.status).toBe("ok");
+    const errors = result.structuredContent.artifacts?.map((item) => item.error);
+    expect(errors?.[0]).toMatchObject({
+      code: "client.download_limit_exceeded",
+      params: { limit: DOWNLOAD_MAX_FILE_BYTES },
+      message: failures[0]?.[1],
+    });
+    expect(errors?.[1]).toMatchObject({
+      code: "client.download_limit_exceeded",
+      params: { limit: DOWNLOAD_MAX_TOTAL_BYTES },
+    });
+    expect(errors?.[2]).toMatchObject({
+      code: "client.write_failed",
+      params: { path: "out", reason: "EACCES" },
+      location: { field: "dir" },
+    });
+    expect(errors?.[3]).toMatchObject({ code: "client.aborted", retry: "yes" });
+    expect(errors?.[4]).toMatchObject({ code: "runtime.unavailable", retry: "yes" });
+    // A code of the fetch boundary stays the SDK's to read.
+    expect(errors?.[5]).toMatchObject({
+      code: "client.link_refused",
+      params: { reason: "redirect" },
+    });
+    for (const [index, error] of (errors ?? []).entries()) {
+      expect(error?.message).toBe(failures[index]?.[1]);
+    }
   });
 
   it("names the files saved before a credential refusal, on a no-verdict error", async () => {
@@ -620,11 +703,12 @@ describe("downloadMthdsArtifacts", () => {
     const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "config",
-      location: "PIPELEX_API_KEY",
-      retryable: false,
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "auth.invalid_credential",
+      domain: "account",
+      retry: "no",
     });
+    expect(result.summary).toContain("The API key is read from PIPELEX_API_KEY.");
     expect(result.summary).toContain("the run's main output and 1 file(s) were saved");
     expect(result.summary).toContain(`- \`${path.join(RUN_DIR, "a.png")}\``);
     // The files are on the caller's disk, so a machine consumer reads them
@@ -648,7 +732,10 @@ describe("downloadMthdsArtifacts", () => {
         uri: REPORT_URI,
         found_at: ["$.b.url"],
         content_type: null,
-        error: expect.objectContaining({ class: "runtime", location: "artifacts[1].uri" }),
+        error: expect.objectContaining({
+          code: "client.aborted",
+          message: "stopped on a credential failure",
+        }),
       },
     ]);
     // No verdict was produced, so nothing here may read as one.
@@ -679,17 +766,13 @@ describe("downloadMthdsArtifacts", () => {
 
     const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
 
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "config",
-      kind: "auth",
-      location: "PIPELEX_API_KEY",
-      retryable: false,
-    });
-    // The output was written, so the headline speaks of the files, and of
-    // the key rather than of an unreachable API.
-    expect(result.summary.split("\n")[0]).toBe(
-      "The run's files could not be saved: the Pipelex API key is missing or was refused.",
-    );
+    const problem = result.structuredContent.problem;
+    expect(problem).toMatchObject({ code: "auth.invalid_credential", retry: "no" });
+    // The summary opens on the refusal itself, the key's rather than an
+    // unreachable API's, and never claims the run was not saved: its output was.
+    expect(result.summary.split("\n")[0]).toBe(`## ${problem?.title ?? ""}`);
+    expect(result.summary).toContain("The API key is read from PIPELEX_API_KEY.");
+    expect(result.summary).not.toContain("could not be saved");
     // Every item would be an `aborted` error inviting a retry the refusal
     // itself rules out, so only what is on disk rides: the output.
     expect(result.structuredContent.artifacts).toBeUndefined();
@@ -755,12 +838,14 @@ describe("downloadMthdsArtifacts", () => {
       contextIn(root, answered("/../")),
     );
     expect(empty.structuredContent.status).toBe("error");
-    expect(empty.structuredContent.errors?.[0]).toMatchObject({
-      class: "runtime",
-      location: "run_id",
-      retryable: false,
+    // The answer is the API's, but the fix is the caller's: naming dir.
+    expect(empty.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      retry: "no",
+      params: { argument: "dir", reason: "required" },
+      location: { field: "dir" },
     });
-    expect(empty.structuredContent.errors?.[0]?.hint).toContain("dir");
+    expect(empty.structuredContent.problem?.message).toContain("Pass dir");
     // `runs/` was created by the first save, so it alone carries the mark.
     expect(await fs.readdir(path.join(root, "runs"))).toEqual([".gitignore", "runevil"]);
   });
@@ -877,13 +962,17 @@ describe("downloadMthdsArtifacts", () => {
         writeFile.mockRestore();
       }
 
-      for (const result of [failed, defaultFailed]) {
+      for (const [result, marked] of [
+        [failed, path.join("work", "assets", "run-1")],
+        [defaultFailed, "runs"],
+      ] as const) {
         expect(result.structuredContent.status).toBe("error");
-        expect(result.structuredContent.errors?.[0]).toMatchObject({
-          class: "input_domain",
-          location: "dir",
+        expect(result.structuredContent.problem).toMatchObject({
+          code: "client.write_failed",
+          params: { path: path.join(marked, ".gitignore"), reason: "ENOSPC" },
+          location: { field: "dir" },
         });
-        expect(result.structuredContent.errors?.[0]?.message).toContain("ENOSPC");
+        expect(result.structuredContent.problem?.message).toContain("ENOSPC");
       }
       expect(requests).toEqual([]);
       // Back to what it found: work/ stays, everything below it is gone.
@@ -944,13 +1033,16 @@ describe("downloadMthdsArtifacts", () => {
         );
 
         expect(result.structuredContent.status).toBe("error");
-        expect(result.structuredContent.errors?.[0]).toMatchObject({
-          class: "input_domain",
-          location: "dir",
-          retryable: false,
+        expect(result.structuredContent.problem).toMatchObject({
+          code: "client.write_failed",
+          retry: "no",
+          params: { path: path.join("locked", "main_stuff.json"), reason: "EACCES" },
+          location: { field: "dir" },
         });
-        expect(result.structuredContent.errors?.[0]?.message).toContain("main_stuff.json");
-        expect(result.summary).toContain("Nothing was saved");
+        expect(result.structuredContent.problem?.message).toContain("main_stuff.json");
+        expect(result.summary).toContain("Could not write main_stuff.json in locked");
+        // Nothing was saved, so nothing reads as saved.
+        expect(result.structuredContent.saved_paths).toBeUndefined();
         // A directory that cannot take the output will not take the files.
         expect(requests).toEqual([]);
         expect(await fs.readdir(locked)).toEqual([]);
@@ -970,9 +1062,10 @@ describe("downloadMthdsArtifacts", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "dir",
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "dir", reason: "outside_workspace" },
+      location: { field: "dir" },
     });
     // The refusal is on the request itself: the run is never even read, so a
     // check moved back inside the download path would fail this.
@@ -980,21 +1073,21 @@ describe("downloadMthdsArtifacts", () => {
     expect(requests).toEqual([]);
   });
 
-  it("classifies a deployment without the bulk resolve route as config at PIPELEX_BASE_URL", async () => {
+  it("reads a deployment without the bulk resolve route as a route it does not serve, naming the API in use", async () => {
     const root = await makeTempDir();
     const { client } = fakeClient(completedState(PICTURE_ONLY), () =>
-      Promise.reject(apiError("/v1/resolve-storage-url/bulk", 404, "Not Found")),
+      Promise.reject(apiError("/v1/resolve-storage-url/bulk", 404)),
     );
 
     const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
 
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "config",
-      location: "PIPELEX_BASE_URL",
-      retryable: false,
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "request.not_found",
+      retry: "no",
     });
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("/v1/resolve-storage-url/bulk");
-    expect(result.summary).toContain("unreachable or misconfigured");
+    expect(result.summary).toContain(
+      "The Pipelex API in use is the one PIPELEX_BASE_URL names, else the hosted Pipelex API.",
+    );
     // The output was written before the bulk route was asked, so the refusal
     // still says where it is, and nothing reads as a download verdict.
     expect(result.structuredContent.output?.path).toBe(OUTPUT_PATH);
@@ -1005,64 +1098,72 @@ describe("downloadMthdsArtifacts", () => {
     );
   });
 
-  it("classifies a whole-request 400 on the bulk route as config, not as the caller's input", async () => {
+  it("never reads a whole-request 400 on the bulk route as the caller's input", async () => {
     const root = await makeTempDir();
     const { client } = fakeClient(completedState(PICTURE_ONLY), () =>
-      Promise.reject(apiError("/v1/resolve-storage-url/bulk", 400, "No organization context.")),
+      Promise.reject(apiError("/v1/resolve-storage-url/bulk", 400)),
     );
 
     const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
 
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "config",
-      message: "No organization context.",
-      retryable: false,
+    // An answer that is no problem document, read by the SDK by its status.
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.response_unreadable",
+      domain: "runtime",
+      params: { status: 400 },
     });
-    expect(result.structuredContent.errors?.[0]?.location).toBeUndefined();
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("organization");
+    expect(result.structuredContent.problem?.location).toBeUndefined();
   });
 
-  it("classifies an unknown run id as input_domain at run_id (no verdict)", async () => {
+  it("relays the API's problem for an unknown run id unchanged (no verdict)", async () => {
     const root = await makeTempDir();
+    const notFound = buildProblem(
+      "run.not_found",
+      { pipeline_run_id: RUN_ID },
+      { status: 404, extra: { request_id: "req_results_404" } },
+    );
     const client: ArtifactClient = {
       getRunStatus: noStatusRead,
-      getRunResult: () => Promise.reject(apiError(`/v1/runs/${RUN_ID}/results`, 404, "Not found")),
+      getRunResult: () => Promise.reject(apiError(`/v1/runs/${RUN_ID}/results`, 404, notFound)),
       downloadArtifacts: () => Promise.reject(new Error("must not be called")),
     };
 
     const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "run_id",
-      retryable: false,
-    });
-    expect(result.summary).toContain("rejected the request");
+    expect(result.structuredContent.problem).toEqual(notFound);
+    expect(result.summary).toContain(notFound.detail);
+    expect(result.summary).toContain("`run.not_found`");
+    expect(result.summary).toContain("Request id: `req_results_404`");
   });
 
-  it("headlines a refused key on the results route as the key, before anything is saved", async () => {
+  it("says where the key came from when the results route refuses it, before anything is saved", async () => {
     const root = await makeTempDir();
     const client: ArtifactClient = {
       getRunStatus: noStatusRead,
-      getRunResult: () =>
-        Promise.reject(apiError(`/v1/runs/${RUN_ID}/results`, 401, "Missing API key")),
+      getRunResult: () => Promise.reject(apiError(`/v1/runs/${RUN_ID}/results`, 401)),
       downloadArtifacts: () => Promise.reject(new Error("must not be called")),
     };
 
-    const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
+    const bare = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
 
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "config",
-      kind: "auth",
-      location: "PIPELEX_API_KEY",
+    expect(bare.structuredContent.problem).toMatchObject({
+      code: "auth.missing_credential",
+      domain: "account",
     });
-    expect(result.summary).toBe(
-      "The run could not be saved: the Pipelex API key is missing or was refused.",
+    expect(bare.summary.split("\n")[0]).toBe(`## ${bare.structuredContent.problem?.title ?? ""}`);
+    expect(bare.summary).toContain("The API key is read from PIPELEX_API_KEY.");
+
+    const noted = await downloadMthdsArtifacts(
+      { run_id: RUN_ID },
+      contextIn(root, client, { apiNotes: { apiKey: "Sign in again with the login command." } }),
     );
+
+    expect(noted.summary).toContain("Sign in again with the login command.");
+    expect(await fs.readdir(root)).toEqual([]);
   });
 
-  it("classifies an unreachable API as retryable config", async () => {
+  it("reads an unreachable API as retryable, naming the API in use", async () => {
     const root = await makeTempDir();
     const client: ArtifactClient = {
       getRunStatus: noStatusRead,
@@ -1075,25 +1176,27 @@ describe("downloadMthdsArtifacts", () => {
 
     const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
 
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "config",
-      location: "PIPELEX_BASE_URL",
-      retryable: true,
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.unreachable",
+      retry: "yes",
+      params: { base_url: DEFAULT_API_URL },
     });
-    expect(result.summary).toContain("unreachable or misconfigured");
+    expect(result.summary).toContain("PIPELEX_BASE_URL");
   });
 
-  it("treats a completed report without main_stuff as a runtime contract error", async () => {
+  it("treats a completed report without main_stuff as an answer it could not read", async () => {
     const root = await makeTempDir();
     const { client, requests } = fakeClient(completedState(null));
 
     const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "runtime",
-      retryable: false,
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.response_unreadable",
+      domain: "runtime",
+      retry: "no",
     });
+    expect(result.structuredContent.problem?.message).toContain("main_stuff");
     expect(requests).toEqual([]);
   });
 });
@@ -1113,6 +1216,8 @@ describe("artifactsToolResult", () => {
     expect(ok.content[0]?.text).toContain(`\`${PICTURE_ONLY_FILE}\``);
     expect(ok).not.toHaveProperty("_meta");
     expect(bad.isError).toBe(true);
-    expect(bad.content[0]?.text).toContain("`run_id` — run_id must not be empty.");
+    expect(bad.content[0]?.text).toContain("run_id must not be empty.");
+    expect(bad.content[0]?.text).toContain("`client.argument_invalid`");
+    expect(bad.structuredContent.problem?.location).toEqual({ field: "run_id" });
   });
 });

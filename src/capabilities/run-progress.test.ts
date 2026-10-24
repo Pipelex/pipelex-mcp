@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { RunProgress } from "@pipelex/sdk";
+import type { ProgressInvocation, RunProgress } from "@pipelex/sdk";
 
 import { FAILURE_MESSAGE_MAX_CODE_POINTS } from "./run-failure.js";
 import {
@@ -16,9 +16,18 @@ import {
   MID_RUN_SNAPSHOT,
   MID_RUN_SUMMARY,
   PENDING_SNAPSHOT,
+  RETRIED_STEP_FAILURE,
   STUCK_ITEM_DEGRADATION,
   wideBatchSnapshot,
 } from "./run-progress-fixtures.js";
+
+/**
+ * A `last_failure` as the hosted contract serves it, cast to the type
+ * `@pipelex/sdk`'s stale `ProgressFailure` gives it (`{ message, at }`).
+ */
+function servedFailure(value: unknown): ProgressInvocation["last_failure"] {
+  return value as ProgressInvocation["last_failure"];
+}
 
 describe("runProgressOf", () => {
   it("relays the contract's worked example member for member", () => {
@@ -28,6 +37,35 @@ describe("runProgressOf", () => {
     expect(projected?.progress).toEqual(MID_RUN_SNAPSHOT);
     expect(projected?.progress.summary).toBe(MID_RUN_SUMMARY);
     expect(runProgressSchema.safeParse(projected?.progress).success).toBe(true);
+    // The retried step's latest failure is the contract's `{ problem, at }`.
+    const retried = projected?.progress.invocations.find(
+      (invocation) => invocation.attempts !== undefined,
+    );
+    expect(retried?.last_failure).toEqual(RETRIED_STEP_FAILURE);
+  });
+
+  it("reads a latest failure as the contract's problem, dropping one without a problem document", () => {
+    const withFailure = (lastFailure: unknown): RunProgress => ({
+      ...MID_RUN_SNAPSHOT,
+      invocations: [
+        { ...MID_RUN_SNAPSHOT.invocations[0]!, last_failure: servedFailure(lastFailure) },
+      ],
+    });
+    const lastFailureOf = (lastFailure: unknown) =>
+      runProgressOf(withFailure(lastFailure))?.progress.invocations[0]?.last_failure;
+
+    // The operator's diagnostics never ride a snapshot, whoever served them.
+    expect(
+      lastFailureOf({
+        problem: { ...RETRIED_STEP_FAILURE.problem, diagnostics: { text: "raw engine text" } },
+      }),
+    ).toEqual({ problem: RETRIED_STEP_FAILURE.problem });
+    // The shape @pipelex/sdk still types, which the platform no longer serves, and
+    // a problem that is no problem document, are read as no failure.
+    expect(
+      lastFailureOf({ message: "An internal error occurred.", at: "2026-10-12T09:30:52Z" }),
+    ).toBeUndefined();
+    expect(lastFailureOf({ problem: { code: "runtime.unexpected" } })).toBeUndefined();
   });
 
   it("relays a pending run's snapshot, which has no invocation", () => {
@@ -128,7 +166,9 @@ describe("runProgressOf", () => {
       invocations: [
         {
           ...MID_RUN_SNAPSHOT.invocations[0]!,
-          last_failure: { message: long },
+          last_failure: servedFailure({
+            problem: { ...RETRIED_STEP_FAILURE.problem, detail: long },
+          }),
         },
       ],
     };
@@ -137,7 +177,7 @@ describe("runProgressOf", () => {
 
     expect(progress?.summary).toBe(longSummary);
     expect(progress?.degradation?.message).toMatch(/… \[10 more characters left out\]$/);
-    expect(progress?.invocations[0]?.last_failure?.message).toMatch(
+    expect(progress?.invocations[0]?.last_failure?.problem.detail).toMatch(
       /… \[10 more characters left out\]$/,
     );
   });
@@ -154,9 +194,13 @@ describe("runProgressOf", () => {
 });
 
 describe("selectInvocations", () => {
-  /** A snapshot's invocations, which have every member the status tool relays with its type. */
+  /**
+   * A snapshot's invocations, which have every member the status tool relays
+   * with its type; cast, since `@pipelex/sdk` still types `last_failure` as the
+   * `{ message, at }` the platform no longer serves.
+   */
   function projectedOf(snapshot: RunProgress): ProgressInvocationProjection[] {
-    return snapshot.invocations;
+    return snapshot.invocations as unknown as ProgressInvocationProjection[];
   }
 
   it("keeps every invocation of a snapshot within the cap, in order", () => {
@@ -200,7 +244,7 @@ describe("selectInvocations", () => {
         ? {
             ...invocation,
             status: "failed",
-            last_failure: { message: "An internal error occurred." },
+            last_failure: { problem: RETRIED_STEP_FAILURE.problem },
           }
         : invocation,
     );

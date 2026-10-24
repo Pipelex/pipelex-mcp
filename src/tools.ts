@@ -238,8 +238,8 @@ export function buildLocalToolContexts(
  * Apply one patch to every workshop context, the nested validation context of
  * `catalogWrite` included. This is the single list of contexts a server-level
  * override has to reach: `createLocalServer` lifts its handshake's `appInfo`
- * through it once, and each tool call's key, base URL and failure textures
- * (`credentials.ts`) through it again. A context left out here would be one
+ * through it once, and each tool call's key, base URL and the notes its
+ * failed requests close with (`credentials.ts`) through it again. A context left out here would be one
  * whose calls go out without the workshop's identity or with another call's
  * key, which is why the list lives beside `LocalToolContexts` and covers every
  * member of it.

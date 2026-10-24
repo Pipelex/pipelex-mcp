@@ -120,28 +120,43 @@ async function check(input: MthdsModelsInput, answer: unknown) {
   return { result, structured: result.structuredContent as ModelReferenceCheck, recorded };
 }
 
-function firstError(result: ModelsResult) {
-  return result.structuredContent.status === "error"
-    ? result.structuredContent.errors[0]
-    : undefined;
+function firstProblem(result: ModelsResult) {
+  return result.structuredContent.status === "error" ? result.structuredContent.problem : undefined;
 }
 
-function apiError(
+/** An answer with no problem body, which the SDK reads by its status; its request id rides the header. */
+function apiError(status: number, route = "/v1/models"): ApiResponseError {
+  return new ApiResponseError(
+    `HTTP ${status}`,
+    `${DEFAULT_API_URL}${route}`,
+    status,
+    "Refused",
+    "{}",
+    { headers: { "x-request-id": `req_${status}` } },
+  );
+}
+
+/** A refusal carrying its problem document, as the runner and the platform answer every refusal. */
+function problemError(
   status: number,
-  message: string,
-  errorType: string = status === 402 ? "subscription_required" : "request_error",
+  problem: { code: string; title: string; detail: string; domain: string } & Record<
+    string,
+    unknown
+  >,
   route = "/v1/models",
 ): ApiResponseError {
   return new ApiResponseError(
     `HTTP ${status}`,
     `${DEFAULT_API_URL}${route}`,
     status,
-    message,
-    "{}",
-    errorType,
-    message,
-    undefined,
-    undefined,
+    "Refused",
+    JSON.stringify({
+      type: `https://mthds.ai/errors/${problem.code}`,
+      status,
+      retry: "no",
+      next_step: { kind: "change_input", detail: "Correct the request, then send it again." },
+      ...problem,
+    }),
   );
 }
 
@@ -307,8 +322,12 @@ describe("listing the deck", () => {
     const { result } = await listing({}, deck);
 
     expect(result.structuredContent.status).toBe("error");
-    expect(firstError(result)).toMatchObject({ class: "runtime", retryable: false });
-    expect(result.summary).toContain("malformed deck");
+    expect(firstProblem(result)).toMatchObject({
+      code: "client.response_unreadable",
+      domain: "runtime",
+      retry: "no",
+    });
+    expect(firstProblem(result)?.message).toBeTruthy();
   });
 });
 
@@ -690,10 +709,12 @@ describe("checking a reference", () => {
     const { result } = await check({ reference: "$a" }, answer);
 
     expect(result.structuredContent.status).toBe("error");
-    expect(firstError(result)).toMatchObject({ class: "runtime", retryable: false });
-    expect(result.summary).toBe(
-      "Model reference check produced no answer: the API returned a malformed verdict.",
-    );
+    expect(firstProblem(result)).toMatchObject({
+      code: "client.response_unreadable",
+      domain: "runtime",
+      retry: "no",
+    });
+    expect(firstProblem(result)?.message).toContain("The model reference verdict is malformed");
   });
 });
 
@@ -707,7 +728,11 @@ describe("failures", () => {
 
     expect(recorded.listings).toEqual([]);
     expect(recorded.checks).toEqual([]);
-    expect(firstError(result)).toMatchObject({ class: "input_domain", location: "category" });
+    expect(firstProblem(result)).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "category" },
+      location: { field: "category" },
+    });
   });
 
   it("refuses doc_gen without a reference before calling the API, since the deck lists none", async () => {
@@ -715,8 +740,12 @@ describe("failures", () => {
     const result = await readMthdsModels({ category: "doc_gen" }, recorded.context);
 
     expect(recorded.listings).toEqual([]);
-    expect(firstError(result)).toMatchObject({ class: "input_domain", location: "category" });
-    expect(firstError(result)?.hint).toContain("Pass reference to check a doc_gen reference");
+    expect(firstProblem(result)).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "category", reason: "not_listed" },
+      location: { field: "category" },
+    });
+    expect(firstProblem(result)?.message).toContain("Pass reference to check a doc_gen reference");
   });
 
   it("refuses a reference that is not text before calling the API", async () => {
@@ -724,84 +753,107 @@ describe("failures", () => {
     const result = await readMthdsModels({ reference: 3 as unknown as string }, recorded.context);
 
     expect(recorded.checks).toEqual([]);
-    expect(firstError(result)).toMatchObject({ class: "input_domain", location: "reference" });
+    expect(firstProblem(result)).toMatchObject({
+      code: "client.argument_invalid",
+      location: { field: "reference" },
+    });
   });
 
-  it("maps an unreachable API to a retryable config error", async () => {
+  it("relays an unreachable API as client.unreachable, which a retry can pass", async () => {
     const result = await readMthdsModels(
       {},
       contextFailing(new ApiUnreachableError("refused", DEFAULT_API_URL, "ECONNREFUSED")),
     );
 
-    expect(firstError(result)).toMatchObject({
-      class: "config",
-      location: "PIPELEX_BASE_URL",
-      retryable: true,
+    expect(firstProblem(result)).toMatchObject({
+      code: "client.unreachable",
+      retry: "yes",
+      params: { base_url: DEFAULT_API_URL },
     });
   });
 
-  it("maps an auth failure through the deployment's texture", async () => {
+  it("closes a refused key's summary with the call's key note, on the listing and the check", async () => {
     for (const input of [{}, { reference: "$vision" }]) {
-      for (const error of [apiError(401, "Unauthorized"), apiError(403, "no")]) {
+      for (const error of [apiError(401), apiError(403)]) {
         const result = await readMthdsModels(
           input,
-          contextFailing(error, { authError: { location: "api_key", hint: "Use your key." } }),
+          contextFailing(error, { apiNotes: { apiKey: "Use your key." } }),
         );
-        expect(firstError(result)).toMatchObject({
-          class: "config",
-          location: "api_key",
-          hint: "Use your key.",
-        });
+        expect(firstProblem(result)?.code).toMatch(/^auth\./);
+        expect(firstProblem(result)?.domain).toBe("account");
+        expect(result.summary).toContain("Use your key.");
       }
     }
   });
 
-  it("blames the category for the listing's 422, and the credential for the platform's 400", async () => {
+  it("relays the runner's refusal of a category, and the platform's of a key acting for no organization", async () => {
     const refusedCategory = await readMthdsModels(
       { category: "llm" },
-      contextFailing(apiError(422, "Invalid model category")),
+      contextFailing(
+        problemError(422, {
+          code: "request.invalid",
+          title: "A request field does not match the route",
+          detail: "The request's field 'type' does not match the route's schema.",
+          domain: "input",
+          params: { field: "type" },
+          location: { field: "type" },
+        }),
+      ),
     );
-    expect(firstError(refusedCategory)).toMatchObject({
-      class: "input_domain",
-      location: "category",
+    expect(firstProblem(refusedCategory)).toMatchObject({
+      code: "request.invalid",
+      domain: "input",
+      location: { field: "type" },
     });
-    // A runner older than the category refuses it: the hint says so, rather
-    // than offering the refused value back among the valid ones.
-    expect(firstError(refusedCategory)?.hint).toContain("older MTHDS protocol");
 
-    // A missing organization is the credential's fault, on the listing and on
-    // the check alike, whatever category was sent.
+    // A missing organization is the platform's own code, on the listing and
+    // on the check alike, whatever category was sent.
     for (const input of [
       { category: "llm" as const },
       { category: "llm" as const, reference: "$vision" },
     ]) {
       const orgless = await readMthdsModels(
         input,
-        contextFailing(apiError(400, "Organization context required")),
+        contextFailing(
+          problemError(400, {
+            code: "pipelex.org.required",
+            title: "An organization is required",
+            detail: "This operation acts on an organization, and the request acts for none.",
+            domain: "account",
+          }),
+        ),
       );
-      expect(firstError(orgless)).toMatchObject({ class: "config", location: "PIPELEX_API_KEY" });
-      expect(firstError(orgless)?.hint).toContain("active organization");
+      expect(firstProblem(orgless)).toMatchObject({ code: "pipelex.org.required" });
+      expect(orgless.summary).toContain("acts for none");
     }
   });
 
-  it("names the plan on a paywall, the route on a 404 and retries a server fault", async () => {
-    const paywall = await readMthdsModels({}, contextFailing(apiError(402, "Pay")));
-    expect(paywall.summary).toBe(
-      "Model deck could not be read: the organization's Pipelex plan does not cover this call.",
+  it("relays a plan limit, a refused key, a missing route and a server fault", async () => {
+    const paywall = await readMthdsModels(
+      {},
+      contextFailing(
+        problemError(402, {
+          code: "pipelex.billing.credit_exhausted",
+          title: "The organization has no credit left",
+          detail: "The organization has no credit left, so the operation was refused.",
+          domain: "account",
+        }),
+      ),
     );
+    expect(firstProblem(paywall)).toMatchObject({ code: "pipelex.billing.credit_exhausted" });
+    expect(paywall.summary).toContain("no credit left");
+    expect(paywall.summary).not.toContain("PIPELEX_BASE_URL");
 
-    const keyless = await readMthdsModels({}, contextFailing(apiError(401, "Missing API key")));
-    expect(firstError(keyless)).toMatchObject({ class: "config", kind: "auth" });
-    expect(keyless.summary).toBe(
-      "Model deck could not be read: the Pipelex API key is missing or was refused.",
-    );
+    const keyless = await readMthdsModels({}, contextFailing(apiError(401)));
+    expect(firstProblem(keyless)).toMatchObject({ code: "auth.missing_credential" });
+    expect(keyless.summary).toContain("PIPELEX_API_KEY");
 
-    const missing = await readMthdsModels({}, contextFailing(apiError(404, "Not Found")));
-    expect(firstError(missing)).toMatchObject({ class: "config", location: "PIPELEX_BASE_URL" });
-    expect(firstError(missing)?.hint).toContain("/v1/models");
+    const missing = await readMthdsModels({}, contextFailing(apiError(404)));
+    expect(firstProblem(missing)).toMatchObject({ code: "request.not_found" });
+    expect(missing.summary).toContain("PIPELEX_BASE_URL");
 
-    const fault = await readMthdsModels({}, contextFailing(apiError(500, "boom")));
-    expect(firstError(fault)).toMatchObject({ class: "runtime", retryable: true });
+    const fault = await readMthdsModels({}, contextFailing(apiError(503)));
+    expect(firstProblem(fault)).toMatchObject({ code: "runtime.unavailable", retry: "yes" });
   });
 });
 
@@ -809,95 +861,50 @@ describe("the check's refusals", () => {
   const refused = (error: ApiResponseError, input: MthdsModelsInput = { reference: "$" }) =>
     readMthdsModels(input, contextFailing(error));
 
-  it("points an unreadable reference at reference, with the runner's own reason", async () => {
+  it("relays the runner's refusal of an unreadable reference, its own reason kept", async () => {
     const result = await refused(
-      apiError(
+      problemError(
         422,
-        "The model reference '$' has no name after its sigil.",
-        "InvalidModelReference",
+        {
+          code: "request.invalid",
+          title: "A request field does not match the route",
+          detail: "The model reference '$' has no name after its sigil.",
+          domain: "input",
+          params: { field: "reference" },
+          location: { field: "reference" },
+        },
         "/v1/models/check",
       ),
     );
 
-    expect(result.summary).toBe(
-      "Model reference was not checked: the runner cannot read it as a reference.",
-    );
-    expect(firstError(result)).toMatchObject({
-      class: "input_domain",
-      location: "reference",
-      message: "The model reference '$' has no name after its sigil.",
-      retryable: false,
+    expect(firstProblem(result)).toMatchObject({
+      code: "request.invalid",
+      domain: "input",
+      retry: "no",
+      detail: "The model reference '$' has no name after its sigil.",
+      location: { field: "reference" },
     });
-    expect(firstError(result)?.hint).toContain("$preset, @alias, ~waterfall or a bare handle");
+    expect(result.summary).toContain("The model reference '$' has no name after its sigil.");
   });
 
-  it("points a category the runner does not know at category, as a runner older than it", async () => {
-    const result = await refused(
-      apiError(
-        422,
-        "Unknown model category 'judgment'.",
-        "InvalidModelCategory",
-        "/v1/models/check",
-      ),
-      { reference: "$judgment-strict", category: "judgment" },
-    );
+  it("names nothing but the runner's answer for a route it does not serve", async () => {
+    const result = await refused(apiError(404, "/v1/models/check"));
 
-    expect(result.summary).toBe(
-      "Model reference was not checked: the runner does not know the category.",
-    );
-    expect(firstError(result)).toMatchObject({ class: "input_domain", location: "category" });
-    expect(firstError(result)?.hint).toContain("older MTHDS protocol");
-  });
-
-  it("reads a request-shape refusal as the deployment's, since this tool built the request", async () => {
-    const result = await refused(
-      apiError(422, "Field required: reference", "ValidationError", "/v1/models/check"),
-    );
-
-    expect(result.summary).toBe(
-      "Model reference could not be checked: the Pipelex API or its access is misconfigured.",
-    );
-    expect(firstError(result)).toMatchObject({ class: "config" });
-    expect(firstError(result)).not.toHaveProperty("location");
-    expect(firstError(result)?.hint).toContain("/v1/models/check");
-  });
-
-  it("names the check route on a runner that does not serve it", async () => {
-    const result = await refused(apiError(404, "Not Found", "request_error", "/v1/models/check"));
-
-    expect(firstError(result)).toMatchObject({ class: "config", location: "PIPELEX_BASE_URL" });
-    expect(firstError(result)?.hint).toContain("/v1/models/check");
-  });
-
-  it("words a paywall, a refused key and a server fault as a check", async () => {
-    const paywall = await refused(apiError(402, "Pay"));
-    expect(paywall.summary).toBe(
-      "Model reference could not be checked: the organization's Pipelex plan does not cover this call.",
-    );
-
-    const keyless = await refused(apiError(403, "Forbidden"));
-    expect(firstError(keyless)).toMatchObject({ class: "config", kind: "auth" });
-    expect(keyless.summary).toBe(
-      "Model reference could not be checked: the Pipelex API key is missing or was refused.",
-    );
-
-    const fault = await refused(apiError(500, "boom"));
-    expect(fault.summary).toBe(
-      "Model reference could not be checked: the Pipelex API returned an error.",
-    );
-    expect(firstError(fault)).toMatchObject({ class: "runtime", retryable: true });
+    expect(firstProblem(result)).toMatchObject({ code: "request.not_found" });
+    expect(result.summary).toContain("PIPELEX_BASE_URL");
   });
 });
 
 describe("modelsToolResult", () => {
-  it("marks a failure as an error and carries its details into the text", async () => {
-    const result = modelsToolResult(
-      await readMthdsModels({}, contextFailing(apiError(500, "boom"))),
-    );
+  it("marks a failure as an error and renders the problem into the text", async () => {
+    const result = modelsToolResult(await readMthdsModels({}, contextFailing(apiError(503))));
 
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("Model deck could not be read");
-    expect(result.content[0].text).toContain("- boom");
+    const text = result.content[0].text;
+    expect(text).toContain("## ");
+    expect(text).toContain("**Next step**");
+    expect(text).toContain("`runtime.unavailable`");
+    expect(text).toContain("`req_503`");
   });
 
   it("returns a listing and a check as plain results", async () => {

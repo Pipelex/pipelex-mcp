@@ -4,14 +4,18 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { ApiResponseError, ApiUnreachableError, RequestArgumentError } from "@pipelex/sdk";
+import {
+  ApiResponseError,
+  ApiUnreachableError,
+  RequestArgumentError,
+  buildProblem,
+} from "@pipelex/sdk";
 import type { CodegenRequest, CodegenResponse, CodegenValidReport } from "@pipelex/sdk";
 
 import { resolveWorkshopCredentials } from "../credentials.js";
 import { recordedTsZodReport } from "./codegen-fixture.js";
 import {
   CODEGEN_CONTENT_CAP,
-  CODEGEN_TARGETS,
   boundArtifacts,
   codegenResult,
   codegenToolResult,
@@ -94,24 +98,17 @@ const validPyReport: CodegenValidReport = {
 const invalidReport: CodegenResponse = {
   is_valid: false,
   message: "The closure did not resolve.",
-  validation_errors: [
+  errors: [
     {
-      category: "blueprint_validation",
-      message: "Unknown pipe type",
-      source: "bundle.mthds",
+      code: "method.pipe_type_invalid",
+      detail: "Pipe 'summarize' has no usable type (reason: Unknown pipe type).",
+      params: { pipe: "summarize", reason: "Unknown pipe type" },
+      location: { pipe: "summarize", file: "bundle.mthds" },
     },
   ],
 };
 
 const bytesOf = (text: string): number => new TextEncoder().encode(text).length;
-
-/** Codegen's headline for a missing or refused key, which names the route's gate too. */
-const CODEGEN_AUTH_HEADLINE =
-  "Code generation could not start: the Pipelex API key is missing or was refused, or code generation is not enabled for its organization.";
-
-/** What codegen's 403 adds after the key's own hint, whichever one it is. */
-const CODEGEN_GATE_SENTENCE =
-  "Code generation can refuse even a key every other tool accepts, since the hosted Pipelex API enables /v1/codegen per organization, by its plan or feature flags: if other tools work with the key, ask for code generation to be enabled for its organization.";
 
 const tempDirs: string[] = [];
 
@@ -145,17 +142,25 @@ const codegenNotCalled = {
   },
 };
 
-function responseError(status: number, errorType = "error"): ApiResponseError {
+/** An answer whose body is no problem document: the SDK reads its status alone. */
+function responseError(status: number): ApiResponseError {
   return new ApiResponseError(
     `HTTP ${status}`,
     `${DEFAULT_API_URL}/v1/codegen`,
     status,
     "status text",
     "{}",
-    errorType,
-    `Server said ${status}`,
-    undefined,
-    undefined,
+  );
+}
+
+/** A refusal as the hosted API answers it: a problem document, read by the SDK as it came. */
+function problemAnswer(status: number, problem: Record<string, unknown>): ApiResponseError {
+  return new ApiResponseError(
+    `HTTP ${status}`,
+    `${DEFAULT_API_URL}/v1/codegen`,
+    status,
+    "status text",
+    JSON.stringify(problem),
   );
 }
 
@@ -211,20 +216,22 @@ describe("codegenResult", () => {
     expect(result.structuredContent.artifacts?.[0]?.bytes).toBe(5);
   });
 
-  it("projects invalid produced verdicts as ok with validation errors", () => {
+  it("projects invalid produced verdicts as ok with their problem items", () => {
     const result = codegenResult(invalidReport);
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(false);
-    expect(result.structuredContent.validation_errors).toEqual(
-      (invalidReport as { validation_errors: unknown[] }).validation_errors,
+    expect(result.structuredContent.errors).toEqual(
+      (invalidReport as { errors: unknown[] }).errors,
     );
+    expect(result.structuredContent).not.toHaveProperty("problem");
     expect(result.structuredContent).not.toHaveProperty("artifacts");
     expect(result.structuredContent).not.toHaveProperty("lock");
     expect(result.structuredContent).not.toHaveProperty("truncated");
     expect(result.summary).toContain("Code not generated");
+    expect(result.summary).toContain("method.pipe_type_invalid");
     expect(result.summary).toContain("Unknown pipe type");
-    expect(result.summary).toContain("bundle.mthds");
+    expect(result.summary).toContain("file 'bundle.mthds'");
   });
 
   it("throws when the valid arm is missing its artifacts", () => {
@@ -377,7 +384,11 @@ describe("codegenToolResult", () => {
 
   it("flags no-verdict results as errors", () => {
     const result = codegenToolResult({
-      structuredContent: { status: "error", is_valid: false, errors: [] },
+      structuredContent: {
+        status: "error",
+        is_valid: false,
+        problem: buildProblem("runtime.unexpected", {}),
+      },
       summary: "failed",
     });
 
@@ -497,8 +508,13 @@ describe("generateMthdsCode request mapping", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.map((error) => error.location)).toEqual(["files"]);
-    expect(result.summary).toContain("request input is invalid");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "files", reason: "missing" },
+      location: { field: "files" },
+    });
+    expect(result.summary).toContain("## An argument was refused before sending");
+    expect(result.summary).toContain("Provide a method folder");
   });
 
   it("rejects files beside method_id (one_selector) without calling the route", async () => {
@@ -508,7 +524,11 @@ describe("generateMthdsCode request mapping", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.map((error) => error.location)).toEqual(["method_id"]);
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "method_id", reason: "mutually_exclusive" },
+      location: { field: "method_id" },
+    });
   });
 
   it("rejects method_ref beside method_id without calling the route", async () => {
@@ -522,16 +542,25 @@ describe("generateMthdsCode request mapping", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.map((error) => error.location)).toEqual(["method_id"]);
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "method_id", reason: "mutually_exclusive" },
+      location: { field: "method_id" },
+    });
   });
 });
 
-describe("generateMthdsCode error classification", () => {
+describe("generateMthdsCode problems", () => {
   const files = [{ content: 'domain = "demo"' }];
 
-  async function classify(input: Parameters<typeof generateMthdsCode>[0], err: unknown) {
+  async function failWith(
+    input: Parameters<typeof generateMthdsCode>[0],
+    err: unknown,
+    extra: { apiNotes?: { apiKey?: string; baseUrl?: string } } = {},
+  ) {
     const result = await generateMthdsCode(input, {
       baseUrl: DEFAULT_API_URL,
+      ...extra,
       client: {
         async codegen() {
           throw err;
@@ -539,73 +568,110 @@ describe("generateMthdsCode error classification", () => {
       },
     });
     expect(result.structuredContent.status).toBe("error");
-    return { error: result.structuredContent.errors?.[0], summary: result.summary };
+    expect(result.structuredContent).not.toHaveProperty("errors");
+    return { problem: result.structuredContent.problem, summary: result.summary };
   }
 
-  it("locates a 422 on a files request at target, naming the targets", async () => {
-    const { error, summary } = await classify({ files, target: "ts-zod" }, responseError(422));
+  it("relays the API's problem for a refused request, and renders it whole", async () => {
+    const answered = {
+      type: "https://mthds.ai/errors/request.invalid",
+      title: "The request does not match the route's schema",
+      status: 422,
+      detail: "The request's field 'target' does not match the route's schema.",
+      code: "request.invalid",
+      domain: "input",
+      retry: "no",
+      next_step: { kind: "change_input", detail: "Correct the field 'target', then try again." },
+      params: { field: "target" },
+      location: { field: "target" },
+      request_id: "req_codegen_422",
+    };
 
-    expect(error?.class).toBe("input_domain");
-    expect(error?.location).toBe("target");
-    for (const target of CODEGEN_TARGETS) {
-      expect(error?.hint).toContain(target);
-    }
-    expect(error?.retryable).toBe(false);
-    expect(summary).toContain("the Pipelex API rejected the request");
+    const { problem, summary } = await failWith(
+      { files, target: "ts-zod" },
+      problemAnswer(422, answered),
+    );
+
+    // Whatever named the method, the API's problem is the caller's, as it came.
+    expect(problem).toEqual(answered);
+    expect(summary).toContain(`## ${answered.title}`);
+    expect(summary).toContain(answered.detail);
+    expect(summary).toContain(`**Next step** (\`change_input\`): ${answered.next_step.detail}`);
+    expect(summary).toContain("`request.invalid`");
+    expect(summary).toContain("Request id: `req_codegen_422`");
+    expect(summary).toContain("field 'target'");
   });
 
-  it("locates a 422, a 404 and a 501 on a by-ref request at method_ref", async () => {
+  it("relays a by-ref and a by-id refusal unchanged, whatever selector named the method", async () => {
     const ref = "github.com/Pipelex/methods/documents@v0.1.0";
+    const notFound = {
+      type: "https://mthds.ai/errors/method.not_found",
+      title: "No method is found",
+      status: 404,
+      detail: `No method is found at '${ref}'.`,
+      code: "method.not_found",
+      domain: "input",
+      retry: "no",
+      next_step: { kind: "change_input", detail: "Check the address." },
+      params: { method_ref: ref },
+    };
+    const byRef = await failWith(
+      { method_ref: ref, target: "ts-zod" },
+      problemAnswer(404, notFound),
+    );
+    expect(byRef.problem).toEqual(notFound);
 
-    const rejected = await classify({ method_ref: ref, target: "ts-zod" }, responseError(422));
-    expect(rejected.error?.class).toBe("input_domain");
-    expect(rejected.error?.location).toBe("method_ref");
-
-    const missing = await classify({ method_ref: ref, target: "ts-zod" }, responseError(404));
-    expect(missing.error?.class).toBe("input_domain");
-    expect(missing.error?.location).toBe("method_ref");
-    expect(missing.error?.hint).toContain("METHODS.toml");
-
-    const reserved = await classify({ method_ref: ref, target: "ts-zod" }, responseError(501));
-    expect(reserved.error?.class).toBe("input_domain");
-    expect(reserved.error?.location).toBe("method_ref");
-    expect(reserved.error?.hint).toContain("registry references are reserved");
+    const catalogMiss = {
+      type: "https://docs.pipelex.com/errors/pipelex.catalog.not_found",
+      title: "The method is not in the catalog",
+      status: 404,
+      detail:
+        "The organization's catalog holds no method matching the request for the method 'mt_123'.",
+      code: "pipelex.catalog.not_found",
+      domain: "input",
+      retry: "no",
+      next_step: { kind: "change_input", detail: "Pick a method listMethods lists." },
+      params: { resource: "method", method_id: "mt_123" },
+    };
+    const byId = await failWith(
+      { method_id: "mt_123", target: "ts-zod" },
+      problemAnswer(404, catalogMiss),
+    );
+    expect(byId.problem).toMatchObject(catalogMiss);
   });
 
-  it("locates a 422 and a 404 on a by-id request at method_id", async () => {
-    const rejected = await classify({ method_id: "mt_123", target: "ts-zod" }, responseError(422));
-    expect(rejected.error?.class).toBe("input_domain");
-    expect(rejected.error?.location).toBe("method_id");
-    expect(rejected.error?.hint).toContain("/v1/codegen");
+  it("reads a bare 404 as a route the deployment does not serve, naming the API in use", async () => {
+    const { problem, summary } = await failWith({ files, target: "ts-zod" }, responseError(404));
 
-    const missing = await classify({ method_id: "mt_123", target: "ts-zod" }, responseError(404));
-    expect(missing.error?.class).toBe("input_domain");
-    expect(missing.error?.location).toBe("method_id");
-    expect(missing.error?.hint).toContain("org-scoped");
+    expect(problem).toMatchObject({ code: "request.not_found", status: 404 });
+    expect(summary).toContain("PIPELEX_BASE_URL");
   });
 
-  it("keeps a 404 on a files request as config at PIPELEX_BASE_URL (the route is missing)", async () => {
-    const { error } = await classify({ files, target: "ts-zod" }, responseError(404));
+  it("relays the platform's refusal of the route's gate, with no note on the key", async () => {
+    const gate = {
+      type: "https://mthds.ai/errors/auth.forbidden",
+      title: "The identity lacks a requirement",
+      status: 403,
+      detail: "The request's identity lacks 'codegen', which this operation needs.",
+      code: "auth.forbidden",
+      domain: "account",
+      retry: "no",
+      next_step: { kind: "contact_owner", detail: "Ask the account's owner for 'codegen'." },
+      params: { requirement: "codegen" },
+    };
 
-    expect(error?.class).toBe("config");
-    expect(error?.location).toBe("PIPELEX_BASE_URL");
-    expect(error?.hint).toContain("/v1/codegen");
+    const { problem, summary } = await failWith(
+      { files, target: "ts-zod" },
+      problemAnswer(403, gate),
+    );
+
+    expect(problem).toEqual(gate);
+    expect(summary).toContain(gate.detail);
+    // A gate is no refused key: nothing sends the caller to replace it.
+    expect(summary).not.toContain("PIPELEX_API_KEY");
   });
 
-  it("tells a 403 caller about the feature-flag gate, on top of the deployment's auth wording", async () => {
-    const { error, summary } = await classify({ files, target: "ts-zod" }, responseError(403));
-
-    expect(error?.class).toBe("config");
-    expect(error?.kind).toBe("auth");
-    expect(error?.location).toBe("PIPELEX_API_KEY");
-    expect(error?.hint).toContain("Check PIPELEX_API_KEY");
-    expect(error?.hint).toContain("feature flags");
-    expect(error?.retryable).toBe(false);
-    // The headline names both causes of the route's 403, never connectivity.
-    expect(summary).toBe(CODEGEN_AUTH_HEADLINE);
-  });
-
-  it("follows each of the workshop's key hints with the gate, and reads well after each", async () => {
+  it("closes a refused key's summary with where each of the workshop's keys came from", async () => {
     const home = await makeTempDir();
     const noKey = await resolveWorkshopCredentials({ PIPELEX_HOME: home });
     const hostKey = await resolveWorkshopCredentials({ PIPELEX_API_KEY: "plx_sk_host" });
@@ -618,7 +684,7 @@ describe("generateMthdsCode error classification", () => {
         { files, target: "ts-zod" },
         {
           baseUrl: credentials.baseUrl,
-          authError: credentials.authError,
+          apiNotes: credentials.notes,
           client: {
             async codegen() {
               throw responseError(403);
@@ -627,86 +693,83 @@ describe("generateMthdsCode error classification", () => {
         },
       );
 
-      const error = result.structuredContent.errors?.[0];
-      expect(result.summary, credentials.source).toBe(CODEGEN_AUTH_HEADLINE);
-      expect(error, credentials.source).toMatchObject({ class: "config", kind: "auth" });
-      // The key's own hint leads, the login named exactly, and the gate's
-      // sentence follows it speaking of the route, never of a credential that
-      // may not exist ("If the credential is valid" after "No key is set").
-      expect(error?.hint, credentials.source).toBe(
-        `${credentials.authError.hint} ${CODEGEN_GATE_SENTENCE}`,
+      expect(result.structuredContent.problem?.code, credentials.source).toBe(
+        "auth.invalid_credential",
       );
-      expect(error?.hint, credentials.source).toContain("`npx -y @pipelex/mcp@latest login`");
+      expect(result.summary, credentials.source).toContain(credentials.notes.apiKey);
+      expect(result.summary, credentials.source).toContain(credentials.notes.baseUrl);
+      expect(result.summary, credentials.source).toContain("`npx -y @pipelex/mcp@latest login`");
     }
   });
 
-  it("composes the console's sign-in-again wording with the gate on a 403", async () => {
-    const result = await generateMthdsCode(
+  it("closes a refused key's summary with the context's own note on the key", async () => {
+    const { summary } = await failWith({ files, target: "ts-zod" }, responseError(401), {
+      apiNotes: { apiKey: "Reconnect and sign in again." },
+    });
+
+    expect(summary).toContain("Reconnect and sign in again.");
+  });
+
+  it("reads a bare 401 as a missing credential, naming the key's variable by default", async () => {
+    const { problem, summary } = await failWith({ files, target: "ts-zod" }, responseError(401));
+
+    expect(problem).toMatchObject({ code: "auth.missing_credential", domain: "account" });
+    expect(summary).toContain("PIPELEX_API_KEY");
+  });
+
+  it("relays a plan refusal as the platform states it, never as an unreachable API", async () => {
+    const plan = {
+      type: "https://docs.pipelex.com/errors/pipelex.billing.credit_exhausted",
+      title: "No credit left",
+      status: 402,
+      detail: "The organization has no credit left, so the operation was refused.",
+      code: "pipelex.billing.credit_exhausted",
+      domain: "account",
+      retry: "no",
+      next_step: { kind: "contact_owner", detail: "Ask the organization's owner to add credit." },
+    };
+
+    const { problem, summary } = await failWith(
       { files, target: "ts-zod" },
-      {
-        baseUrl: DEFAULT_API_URL,
-        authError: { location: "authorization", hint: "Reconnect and sign in again." },
-        client: {
-          async codegen() {
-            throw responseError(403);
-          },
-        },
-      },
+      problemAnswer(402, plan),
     );
 
-    const error = result.structuredContent.errors?.[0];
-    expect(error?.location).toBe("authorization");
-    expect(error?.hint).toContain("Reconnect and sign in again.");
-    expect(error?.hint).toContain("feature flags");
+    expect(problem).toEqual(plan);
+    expect(summary).toContain("no credit left");
+    expect(summary).not.toContain("PIPELEX_BASE_URL");
   });
 
-  it("keeps a 401 on the plain auth wording — a rejected credential is not a gate", async () => {
-    const { error, summary } = await classify({ files, target: "ts-zod" }, responseError(401));
-
-    expect(error?.class).toBe("config");
-    expect(error?.kind).toBe("auth");
-    expect(error?.location).toBe("PIPELEX_API_KEY");
-    expect(error?.hint).not.toContain("feature flags");
-    expect(summary).toBe(CODEGEN_AUTH_HEADLINE);
-  });
-
-  it("classifies a 402 as a paywall with its own headline", async () => {
-    const { error, summary } = await classify({ files, target: "ts-zod" }, responseError(402));
-
-    expect(error?.class).toBe("config");
-    expect(error?.kind).toBe("paywall");
-    expect(summary).toContain("plan does not cover this call");
-    expect(summary).not.toContain("unreachable");
-  });
-
-  it("classifies an unreachable API as retryable config", async () => {
-    const { error, summary } = await classify(
+  it("reads an unreachable API as retryable, naming the API in use", async () => {
+    const { problem, summary } = await failWith(
       { files, target: "ts-zod" },
       new ApiUnreachableError("connection refused", "http://localhost:8081", "ECONNREFUSED"),
     );
 
-    expect(error?.class).toBe("config");
-    expect(error?.location).toBe("PIPELEX_BASE_URL");
-    expect(error?.retryable).toBe(true);
-    expect(summary).toContain("unreachable or misconfigured");
+    expect(problem).toMatchObject({
+      code: "client.unreachable",
+      retry: "yes",
+      params: { base_url: "http://localhost:8081" },
+    });
+    expect(summary).toContain("PIPELEX_BASE_URL");
   });
 
-  it("classifies a 5xx as retryable runtime", async () => {
-    const { error, summary } = await classify({ files, target: "ts-zod" }, responseError(503));
+  it("reads a bare 503 as a retryable unavailable runtime", async () => {
+    const { problem } = await failWith({ files, target: "ts-zod" }, responseError(503));
 
-    expect(error?.class).toBe("runtime");
-    expect(error?.retryable).toBe(true);
-    expect(summary).toContain("returned an error");
+    expect(problem).toMatchObject({ code: "runtime.unavailable", retry: "yes" });
   });
 
-  it("classifies a malformed base URL as config instead of rejecting the handler", async () => {
+  it("turns a malformed base URL into a problem instead of rejecting the handler", async () => {
     const result = await generateMthdsCode({ files, target: "ts-zod" }, { baseUrl: "not a url" });
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.not_configured",
+      params: { setting: "base_url" },
+    });
   });
 
-  it("treats a reachable but malformed report as runtime, not unreachable", async () => {
+  it("reads a reachable but malformed report as an unreadable answer, not an unreachable API", async () => {
     const result = await generateMthdsCode(
       { files, target: "ts-zod" },
       {
@@ -720,11 +783,14 @@ describe("generateMthdsCode error classification", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    const error = result.structuredContent.errors?.[0];
-    expect(error?.class).toBe("runtime");
-    expect(error?.retryable).toBe(false);
-    expect(error?.message).toContain("lock content");
-    expect(result.summary).toContain("malformed report");
+    const problem = result.structuredContent.problem;
+    expect(problem).toMatchObject({
+      code: "client.response_unreadable",
+      domain: "runtime",
+      retry: "no",
+    });
+    expect(problem?.message).toContain("lock content");
+    expect(result.summary).toContain("did not hold together");
   });
 });
 
@@ -812,11 +878,12 @@ describe("generateMthdsCode path submissions", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "method_dir",
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "method_dir", reason: "secret_suspected" },
+      location: { field: "method_dir" },
     });
-    expect(result.structuredContent.errors?.[0]?.message).toContain("nothing was sent");
+    expect(result.structuredContent.problem?.message).toContain("nothing was sent");
     expect(result.structuredContent).not.toHaveProperty("files_sent");
     expect(JSON.stringify(result)).not.toContain(fakeKey);
   });
@@ -851,10 +918,12 @@ describe("generateMthdsCode path submissions", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    const error = result.structuredContent.errors?.[0];
-    expect(error?.class).toBe("input_domain");
-    expect(error?.location).toBe("files[0].path");
-    expect(error?.hint).toContain("npx @pipelex/mcp");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "files[0].path", reason: "not_readable_here" },
+      location: { field: "files[0].path" },
+    });
+    expect(result.structuredContent.problem?.message).toContain("npx @pipelex/mcp");
   });
 });
 
@@ -927,9 +996,10 @@ describe("generateMthdsCode write arm", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "output_dir",
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "output_dir", reason: "empty" },
+      location: { field: "output_dir" },
     });
   });
 
@@ -940,9 +1010,12 @@ describe("generateMthdsCode write arm", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    const error = result.structuredContent.errors?.[0];
-    expect(error?.location).toBe("output_dir");
-    expect(error?.hint).toContain("npx @pipelex/mcp");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "output_dir", reason: "not_writable_here" },
+      location: { field: "output_dir" },
+    });
+    expect(result.structuredContent.problem?.message).toContain("npx @pipelex/mcp");
   });
 
   it("refuses an absolute output_dir without calling the route", async () => {
@@ -951,7 +1024,11 @@ describe("generateMthdsCode write arm", () => {
       { baseUrl: DEFAULT_API_URL, saveRoot: "/tmp", client: codegenNotCalled },
     );
 
-    expect(result.structuredContent.errors?.[0]?.location).toBe("output_dir");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "output_dir", reason: "absolute" },
+      location: { field: "output_dir" },
+    });
   });
 
   it("returns a no-verdict error on a refused write, never a fallback to riding the content", async () => {
@@ -970,7 +1047,10 @@ describe("generateMthdsCode write arm", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("output_dir");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.target_exists",
+      location: { field: "output_dir" },
+    });
     // The caller asked for a write and none happened; inlining tens of
     // kilobytes they did not ask for would change the shape they expected.
     expect(result.structuredContent.artifacts).toBeUndefined();
@@ -1013,7 +1093,7 @@ describe("generateMthdsCode write arm", () => {
     // The preflight catches it first: a lock that disagrees with its artifacts
     // is a contract violation, and nothing reaches disk.
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
+    expect(result.structuredContent.problem?.code).toBe("client.response_unreadable");
     expect(await fs.readdir(root)).toEqual([]);
   });
 });
@@ -1082,8 +1162,8 @@ describe("generateMthdsCode report-shape rules", () => {
       );
 
       expect(result.structuredContent.status).toBe("error");
-      expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
-      expect(result.structuredContent.errors?.[0]?.message).toContain("codegen.lock");
+      expect(result.structuredContent.problem?.code).toBe("client.response_unreadable");
+      expect(result.structuredContent.problem?.message).toContain("codegen.lock");
     }
   });
 
@@ -1103,8 +1183,8 @@ describe("generateMthdsCode report-shape rules", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("codegen.lock");
+    expect(result.structuredContent.problem?.code).toBe("client.response_unreadable");
+    expect(result.structuredContent.problem?.message).toContain("codegen.lock");
     expect(await fs.readdir(root)).toEqual([]);
   });
 
@@ -1122,8 +1202,8 @@ describe("generateMthdsCode report-shape rules", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("python-pydantic");
+    expect(result.structuredContent.problem?.code).toBe("client.response_unreadable");
+    expect(result.structuredContent.problem?.message).toContain("python-pydantic");
     expect(await fs.readdir(root)).toEqual([]);
   });
 
@@ -1141,8 +1221,8 @@ describe("generateMthdsCode report-shape rules", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("kind");
+    expect(result.structuredContent.problem?.code).toBe("client.response_unreadable");
+    expect(result.structuredContent.problem?.message).toContain("kind");
   });
 
   it("refuses a response whose lock and artifacts disagree, before anything is written", async () => {
@@ -1160,8 +1240,8 @@ describe("generateMthdsCode report-shape rules", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("offline check");
+    expect(result.structuredContent.problem?.code).toBe("client.response_unreadable");
+    expect(result.structuredContent.problem?.message).toContain("offline check");
     expect(await fs.readdir(root)).toEqual([]);
   });
 
@@ -1182,7 +1262,7 @@ describe("generateMthdsCode report-shape rules", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.message).toContain("types.rb");
+    expect(result.structuredContent.problem?.message).toContain("types.rb");
   });
 });
 

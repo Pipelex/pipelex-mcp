@@ -17,7 +17,7 @@ import {
 } from "./inputs.js";
 import type { InputsContext } from "./inputs.js";
 import { comparableRequest, contentsOf, fakeMethodResolver } from "./method-tree-fixtures.js";
-import { DEFAULT_API_URL } from "./shared.js";
+import { DEFAULT_API_URL, problemOf, SECRET_REASON } from "./shared.js";
 import type { MethodTreeToSend } from "./shared.js";
 
 /** A tree in hand, for the request checks, which only ask whether one is there. */
@@ -69,11 +69,11 @@ const validReport = reportWith(demoInputForm);
 const invalidReport: CrateInvalidReport = {
   is_valid: false,
   message: "The closure did not validate.",
-  validation_errors: [
+  errors: [
     {
-      category: "blueprint_validation",
-      message: "Unknown pipe type",
-      source: "bundle.mthds",
+      code: "method.pipe_type_invalid",
+      detail: "Unknown pipe type",
+      location: { file: "bundle.mthds" },
     },
   ],
 };
@@ -110,31 +110,43 @@ function contextNeverCalled(): InputsContext {
 }
 
 /**
- * A non-2xx answer as the SDK throws it. A runner's problem carries an
- * `errorType`, the platform's a `code`, and a runner's answer for a route it
- * does not serve carries neither.
+ * A refusal as the runner and the platform answer every one: a problem
+ * document, which the SDK reads as it came, its request id riding the header.
  */
-function apiError(
+function refusal(
   status: number,
-  errorType: string | undefined,
-  serverMessage: string,
-  code?: string,
+  problem: { code: string; title: string; detail: string; domain: string } & Record<
+    string,
+    unknown
+  >,
 ): ApiResponseError {
   return new ApiResponseError(
     `HTTP ${status}`,
     `${DEFAULT_API_URL}/v1/pipe-io`,
     status,
-    "",
-    "{}",
-    errorType,
-    serverMessage,
-    undefined, // validationErrors
-    code,
+    "Refused",
+    JSON.stringify({
+      type: `https://mthds.ai/errors/${problem.code}`,
+      status,
+      retry: "no",
+      next_step: { kind: "change_input", detail: "Correct the request, then send it again." },
+      ...problem,
+    }),
+    { headers: { "x-request-id": `req_${status}` } },
   );
 }
 
+/** An answer with no problem body, which the SDK reads by its status. */
+function bareAnswer(status: number, body: string): ApiResponseError {
+  return new ApiResponseError(`HTTP ${status}`, `${DEFAULT_API_URL}/v1/pipe-io`, status, "", body);
+}
+
 /** A runner's answer for a route it does not serve: Starlette's bare `{"detail":"Not Found"}`. */
-const routeMissing = () => apiError(404, undefined, "Not Found");
+const routeMissing = () => bareAnswer(404, '{"detail":"Not Found"}');
+
+/** The base-URL note of a context that carries none. */
+const BASE_URL_NOTE =
+  "The Pipelex API in use is the one PIPELEX_BASE_URL names, else the hosted Pipelex API.";
 
 describe("inputsResult", () => {
   it("projects the explicit json template from the resolved pipe's descriptor", () => {
@@ -200,18 +212,19 @@ describe("inputsResult", () => {
     expect(Object.keys(result.structuredContent.inputs ?? {})).toEqual(["question"]);
   });
 
-  it("projects invalid produced verdicts as ok with validation errors", () => {
+  it("projects invalid produced verdicts as ok with their problem items", () => {
     const result = inputsResult(invalidReport, EXPLICIT_JSON);
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(false);
-    expect(result.structuredContent.validation_errors).toEqual(invalidReport.validation_errors);
+    expect(result.structuredContent.errors).toEqual(invalidReport.errors);
     expect(result.structuredContent).not.toHaveProperty("pipe_ref");
     expect(result.structuredContent).not.toHaveProperty("inputs");
     expect(result.summary).toContain("Inputs template not produced");
     expect(result.summary).toContain("The closure did not validate.");
     expect(result.summary).toContain("Unknown pipe type");
     expect(result.summary).toContain("bundle.mthds");
+    expect(result.summary).toContain("method.pipe_type_invalid");
   });
 
   it("throws when the valid arm resolved no pipe", () => {
@@ -244,7 +257,7 @@ describe("inputsToolResult", () => {
 
   it("flags no-verdict results as errors", () => {
     const result = inputsToolResult({
-      structuredContent: { status: "error", is_valid: false, errors: [] },
+      structuredContent: { status: "error", is_valid: false, problem: problemOf(new Error("x")) },
       summary: "failed",
     });
 
@@ -254,35 +267,40 @@ describe("inputsToolResult", () => {
 
 describe("validateInputsRequest", () => {
   it("inherits the shared selector checks", () => {
-    const errors = validateInputsRequest({});
+    const faults = validateInputsRequest({});
 
-    expect(errors.map((error) => error.location)).toEqual(["files"]);
+    expect(faults.map((fault) => fault.location?.field)).toEqual(["files"]);
   });
 
   it("rejects a blank pipe_ref", () => {
-    const errors = validateInputsRequest({ tree: A_TREE, pipe_ref: "  " });
+    const faults = validateInputsRequest({ tree: A_TREE, pipe_ref: "  " });
 
-    expect(errors).toHaveLength(1);
-    expect(errors[0]?.class).toBe("input_domain");
-    expect(errors[0]?.location).toBe("pipe_ref");
+    expect(faults).toHaveLength(1);
+    expect(faults[0]).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      params: { argument: "pipe_ref", reason: "empty" },
+      location: { field: "pipe_ref" },
+    });
+    expect(faults[0]?.message).toContain("pipe_ref must not be empty when supplied.");
   });
 
   it("accepts a qualified pipe_ref", () => {
-    const errors = validateInputsRequest({ tree: A_TREE, pipe_ref: "demo.main" });
+    const faults = validateInputsRequest({ tree: A_TREE, pipe_ref: "demo.main" });
 
-    expect(errors).toEqual([]);
+    expect(faults).toEqual([]);
   });
 
   it("accepts a method_id with no tree", () => {
-    const errors = validateInputsRequest({ method_id: "mt_123" });
+    const faults = validateInputsRequest({ method_id: "mt_123" });
 
-    expect(errors).toEqual([]);
+    expect(faults).toEqual([]);
   });
 
   it("rejects a blank method_id", () => {
-    const errors = validateInputsRequest({ method_id: "  " });
+    const faults = validateInputsRequest({ method_id: "  " });
 
-    expect(errors.map((error) => error.location)).toContain("method_id");
+    expect(faults.map((fault) => fault.location?.field)).toContain("method_id");
   });
 });
 
@@ -347,52 +365,80 @@ describe("buildMthdsInputs by files", () => {
 
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(false);
-    expect(result.structuredContent.validation_errors).toEqual(invalidReport.validation_errors);
+    expect(result.structuredContent.errors).toEqual(invalidReport.errors);
   });
 
   it("does not call the client when request validation fails", async () => {
     const result = await buildMthdsInputs({ files: [] }, contextNeverCalled());
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("files");
-    expect(result.summary).toBe("Inputs template was not run: request input is invalid.");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "files", reason: "missing" },
+      location: { field: "files" },
+    });
+    // The summary is the problem rendered: its title, the workshop's sentence and the code.
+    expect(result.summary).toContain("## An argument was refused before sending");
+    expect(result.summary).toContain("Provide a method folder");
+    expect(result.summary).toContain("`client.argument_invalid`");
   });
 
-  it("locates a request-shape 422 at files", async () => {
+  it("relays a request-shape 422 as the runner's problem, unchanged", async () => {
+    const err = refusal(422, {
+      code: "request.invalid",
+      title: "The request was refused",
+      detail: "Too many files.",
+      domain: "input",
+      location: { field: "tree" },
+    });
+
     const result = await buildMthdsInputs(
       { files: [{ content: 'domain = "demo"' }] },
-      contextWith(apiError(422, "ValidationError", "Too many files.")),
+      contextWith(err),
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("files");
-    expect(result.summary).toMatch(/rejected/i);
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "request.invalid",
+      domain: "input",
+      retry: "no",
+      location: { field: "tree" },
+      request_id: "req_422",
+    });
+    expect(result.summary).toContain("Too many files.");
+    expect(result.summary).toContain("req_422");
   });
 
-  it("surfaces an unreachable API as config", async () => {
+  it("relays an unreachable API as the SDK's client.unreachable, with the base URL note", async () => {
     const result = await buildMthdsInputs(
       { files: [{ content: 'domain = "demo"' }] },
       contextWith(new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED")),
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
-    expect(result.summary).toMatch(/unreachable|misconfigured/i);
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.unreachable",
+      retry: "yes",
+      params: { base_url: DEFAULT_API_URL },
+    });
+    expect(result.summary).toContain(BASE_URL_NOTE);
   });
 
-  it("names pipe-io in the hint of a missing-route 404", async () => {
+  it("relays a missing-route 404 as the SDK's request.not_found, with the base URL note", async () => {
+    const err = routeMissing();
+
     const result = await buildMthdsInputs(
       { files: [{ content: 'domain = "demo"' }] },
-      contextWith(routeMissing()),
+      contextWith(err),
     );
 
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("/v1/pipe-io");
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+    expect(result.structuredContent.problem?.code).toBe("request.not_found");
+    expect(result.summary).toContain(BASE_URL_NOTE);
   });
 
-  it("classifies a malformed base URL as config instead of rejecting the handler", async () => {
+  it("reports a malformed base URL as client.not_configured instead of rejecting the handler", async () => {
     // No injected client: the real SDK constructor must run — it throws
     // PipelineRequestError on a path-carrying base URL, and that throw has to
     // land in the caught path.
@@ -402,20 +448,26 @@ describe("buildMthdsInputs by files", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.not_configured",
+      params: { setting: "base_url" },
+    });
+    expect(result.summary).toContain(BASE_URL_NOTE);
   });
 
-  it("treats a reachable but malformed answer as runtime, not unreachable", async () => {
+  it("treats a reachable but malformed answer as an unreadable answer, not unreachable", async () => {
     const result = await buildMthdsInputs(
       { files: [{ content: 'domain = "demo"' }] },
       contextWith(reportWith({ "demo.main": { fields: "nope" } } as unknown as InputForm)),
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
-    expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
-    expect(result.summary).toMatch(/malformed/i);
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.response_unreadable",
+      retry: "no",
+      params: { status: 200 },
+    });
+    expect(result.structuredContent.problem?.message).toContain("The API answered");
     expect(result.summary).not.toMatch(/unreachable/i);
   });
 });
@@ -430,32 +482,45 @@ describe("buildMthdsInputs refused pipe selections", () => {
   for (const selector of selectors) {
     const shape = Object.keys(selector)[0];
 
-    it(`locates an unknown pipe_ref at pipe_ref with the route's reason (${shape})`, async () => {
+    it(`relays an unknown pipe_ref as the route's own problem at pipe_ref (${shape})`, async () => {
+      const err = refusal(422, {
+        code: "request.pipe_not_found",
+        title: "The selected pipe is not in the method",
+        detail: "No pipe 'demo.missing' in the closure.",
+        domain: "input",
+        location: { field: "pipe_ref" },
+      });
+
       const result = await buildMthdsInputs(
         { ...selector, pipe_ref: "demo.missing" },
-        contextWith(
-          apiError(422, "EntryPipeNotFoundError", "No pipe 'demo.missing' in the closure."),
-        ),
+        contextWith(err),
       );
 
       expect(result.structuredContent.status).toBe("error");
-      const error = result.structuredContent.errors?.[0];
-      expect(error?.class).toBe("input_domain");
-      expect(error?.location).toBe("pipe_ref");
-      expect(error?.message).toBe("No pipe 'demo.missing' in the closure.");
-      expect(error?.retryable).toBe(false);
+      expect(result.structuredContent.problem).toEqual(problemOf(err));
+      expect(result.structuredContent.problem).toMatchObject({
+        code: "request.pipe_not_found",
+        domain: "input",
+        retry: "no",
+        location: { field: "pipe_ref" },
+        detail: "No pipe 'demo.missing' in the closure.",
+      });
     });
 
-    it(`locates several entry pipes at pipe_ref (${shape})`, async () => {
-      const result = await buildMthdsInputs(
-        selector,
-        contextWith(
-          apiError(422, "EntryPipeAmbiguousError", "Several domains declare a main_pipe: a, b."),
-        ),
-      );
+    it(`relays several entry pipes as the route's own problem at pipe_ref (${shape})`, async () => {
+      const err = refusal(422, {
+        code: "request.pipe_ambiguous",
+        title: "The pipe selection matches several pipes",
+        detail: "Several domains declare a main_pipe: a, b.",
+        domain: "input",
+        location: { field: "pipe_ref" },
+      });
 
-      expect(result.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
-      expect(result.structuredContent.errors?.[0]?.message).toContain("Several domains");
+      const result = await buildMthdsInputs(selector, contextWith(err));
+
+      expect(result.structuredContent.problem).toEqual(problemOf(err));
+      expect(result.structuredContent.problem?.location?.field).toBe("pipe_ref");
+      expect(result.summary).toContain("Several domains");
     });
   }
 });
@@ -527,11 +592,12 @@ describe("buildMthdsInputs path submissions", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "method_dir",
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "method_dir", reason: SECRET_REASON },
+      location: { field: "method_dir" },
     });
-    expect(result.structuredContent.errors?.[0]?.message).toContain("nothing was sent");
+    expect(result.structuredContent.problem?.message).toContain("nothing was sent");
     expect(result.structuredContent).not.toHaveProperty("files_sent");
     expect(JSON.stringify(result)).not.toContain(fakeKey);
   });
@@ -543,6 +609,7 @@ describe("buildMthdsInputs path submissions", () => {
       { baseUrl: "invalid-no-scheme", resolver: methodFolderResolver() },
     );
     expect(unbuilt.structuredContent.status).toBe("error");
+    expect(unbuilt.structuredContent.problem?.code).toBe("client.not_configured");
     expect(unbuilt.structuredContent).not.toHaveProperty("files_sent");
     expect(inputsToolResult(unbuilt).content[0].text).not.toContain("Files sent");
 
@@ -553,6 +620,7 @@ describe("buildMthdsInputs path submissions", () => {
       client: { pipeIo: () => Promise.reject(new RequestArgumentError("refused before sending")) },
     } as InputsContext);
     expect(refused.structuredContent.status).toBe("error");
+    expect(refused.structuredContent.problem?.code).toBe("client.argument_invalid");
     expect(refused.structuredContent).not.toHaveProperty("files_sent");
   });
 
@@ -563,9 +631,13 @@ describe("buildMthdsInputs path submissions", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("files[0].path");
-    expect(result.summary).toBe("Inputs template was not run: request input is invalid.");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "files[0].path", reason: "not_readable_here" },
+      location: { field: "files[0].path" },
+    });
+    expect(result.summary).toContain("This deployment cannot read files from disk");
+    expect(result.summary).toContain("npx @pipelex/mcp");
   });
 });
 
@@ -584,27 +656,41 @@ describe("buildMthdsInputs by method_id (server pass-through)", () => {
     expect(result.structuredContent.pipe_ref).toBe("demo.main");
   });
 
-  it("locates an unknown method id (404) at method_id", async () => {
-    const result = await buildMthdsInputs(
-      { method_id: "mt_missing" },
-      contextWith(apiError(404, undefined, "The requested resource does not exist.", "not_found")),
-    );
+  it("relays an unknown method id (404) as the platform's problem, unchanged", async () => {
+    const err = refusal(404, {
+      code: "pipelex.catalog.not_found",
+      title: "Method not found",
+      detail: "No method mt_missing belongs to this organization.",
+      domain: "input",
+      location: { field: "method_id" },
+    });
+
+    const result = await buildMthdsInputs({ method_id: "mt_missing" }, contextWith(err));
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
-    expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "pipelex.catalog.not_found",
+      domain: "input",
+      retry: "no",
+      location: { field: "method_id" },
+    });
   });
 
-  it("locates a stored method with no source (422) at method_id", async () => {
-    const result = await buildMthdsInputs(
-      { method_id: "mt_123" },
-      contextWith(apiError(422, "ValidationError", "The stored method has no MTHDS source.")),
-    );
+  it("relays a stored method with no source (422) as the platform's problem, unchanged", async () => {
+    const err = refusal(422, {
+      code: "request.invalid",
+      title: "The request was refused",
+      detail: "The stored method has no MTHDS source.",
+      domain: "input",
+      location: { field: "method_id" },
+    });
 
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
-    expect(result.structuredContent.errors?.[0]?.hint).toMatch(/no MTHDS source/);
+    const result = await buildMthdsInputs({ method_id: "mt_123" }, contextWith(err));
+
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+    expect(result.structuredContent.problem?.location?.field).toBe("method_id");
+    expect(result.summary).toContain("The stored method has no MTHDS source.");
   });
 
   it("rejects files beside method_id without calling the client", async () => {
@@ -614,41 +700,50 @@ describe("buildMthdsInputs by method_id (server pass-through)", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "method_id", reason: "mutually_exclusive" },
+      location: { field: "method_id" },
+    });
   });
 
-  it("classifies a paywall (402) as config with the plan headline", async () => {
-    const result = await buildMthdsInputs(
-      { method_id: "mt_123" },
-      contextWith(apiError(402, "SubscriptionRequiredError", "Subscription required")),
-    );
+  it("relays a paywall (402) as the platform's plan problem, unchanged", async () => {
+    const err = refusal(402, {
+      code: "pipelex.billing.plan_limit",
+      title: "The organization's plan does not cover this call",
+      detail: "Reading a saved method's inputs needs a plan that includes the catalog.",
+      domain: "account",
+      next_step: {
+        kind: "contact_owner",
+        detail: "Ask the organization's owner to change its plan.",
+      },
+    });
+
+    const result = await buildMthdsInputs({ method_id: "mt_123" }, contextWith(err));
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
-    expect(result.structuredContent.errors?.[0]?.kind).toBe("paywall");
-    expect(result.structuredContent.errors?.[0]?.retryable).toBe(false);
-    // A headline-only host shows just this line, so it must name the plan
-    // rather than the connectivity headline every other `config` error gets.
-    expect(result.summary).toBe(
-      "Inputs template could not start: the organization's Pipelex plan does not cover this call.",
-    );
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+    expect(result.structuredContent.problem).toMatchObject({ domain: "account", retry: "no" });
+    // The plan, never the network.
+    expect(result.summary).toContain("## The organization's plan does not cover this call");
+    expect(result.summary).not.toMatch(/unreachable/);
   });
 
-  it("headlines a refused key (401) as the key, not as connectivity", async () => {
+  it("relays a refused key (401) as the key, with the key note, not as connectivity", async () => {
     const result = await buildMthdsInputs(
       { method_id: "mt_123" },
-      contextWith(apiError(401, "Unauthenticated", "Missing API key")),
+      {
+        ...contextWith(bareAnswer(401, "{}")),
+        apiNotes: { apiKey: "The API key came from the host's PIPELEX_API_KEY." },
+      },
     );
 
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "config",
-      kind: "auth",
-      location: "PIPELEX_API_KEY",
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "auth.missing_credential",
+      domain: "account",
     });
-    expect(result.summary).toBe(
-      "Inputs template could not start: the Pipelex API key is missing or was refused.",
-    );
+    expect(result.summary).toContain("The API key came from the host's PIPELEX_API_KEY.");
+    expect(result.summary).not.toMatch(/unreachable/);
   });
 });
 
@@ -675,8 +770,10 @@ describe("buildMthdsInputs by method_ref (server pass-through)", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+    expect(result.structuredContent.problem).toMatchObject({
+      params: { argument: "method_ref", reason: "mutually_exclusive" },
+      location: { field: "method_ref" },
+    });
   });
 
   it("rejects method_ref beside method_id without calling the client", async () => {
@@ -689,45 +786,65 @@ describe("buildMthdsInputs by method_ref (server pass-through)", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
+    expect(result.structuredContent.problem).toMatchObject({
+      params: { argument: "method_id", reason: "mutually_exclusive" },
+      location: { field: "method_id" },
+    });
   });
 
-  it("locates a no-matching-package 404, a bad ref 422 and the registry form 501 at method_ref", async () => {
-    for (const error of [
-      apiError(404, "MethodPackageNotFoundError", "No MTHDS package found"),
-      apiError(422, "MethodRefFetchError", "Could not fetch the repository"),
-      apiError(501, "MethodRefNotSupported", "Registry references are reserved"),
+  it("relays a no-matching-package 404, a fetch 422 and the registry form's refusal as the runner's problems, unchanged", async () => {
+    for (const err of [
+      refusal(404, {
+        code: "method.not_found",
+        title: "The method was not found",
+        detail: "No MTHDS package found.",
+        domain: "input",
+      }),
+      refusal(422, {
+        code: "method.fetch_failed",
+        title: "The method could not be fetched",
+        detail: "Could not fetch the repository.",
+        domain: "input",
+      }),
+      refusal(422, {
+        code: "request.unsupported",
+        title: "The request asks for something this runtime does not support",
+        detail: "A registry-form method_ref is reserved; no registry here resolves it.",
+        domain: "input",
+        params: { reason: "registry_form_method_ref" },
+        location: { field: "method_ref" },
+      }),
     ]) {
       const result = await buildMthdsInputs(
         { method_ref: "github.com/Pipelex/methods/missing@v0.1.0" },
-        contextWith(error),
+        contextWith(err),
       );
 
       expect(result.structuredContent.status).toBe("error");
-      expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-      expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+      expect(result.structuredContent.problem).toEqual(problemOf(err));
+      expect(result.structuredContent.problem).toMatchObject({ domain: "input", retry: "no" });
     }
   });
 });
 
 describe("buildMthdsInputs on a deployment without the route", () => {
-  // The by-address and by-id textures take a 404 only when it names what was
-  // not found; a runner too old to serve `/v1/pipe-io` answers a bare 404,
-  // which is the deployment and never the caller's selector.
+  // A runner too old to serve `/v1/pipe-io` answers a bare 404, which the SDK
+  // reads as the deployment's missing route and never as the caller's
+  // selector, whatever named the method.
   for (const selector of [
     { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
     { method_id: "mt_123" },
   ]) {
-    it(`reports a bare 404 as config at PIPELEX_BASE_URL (${Object.keys(selector)[0]})`, async () => {
-      const result = await buildMthdsInputs(selector, contextWith(routeMissing()));
+    it(`relays a bare 404 as request.not_found, with the base URL note (${Object.keys(selector)[0]})`, async () => {
+      const err = routeMissing();
+
+      const result = await buildMthdsInputs(selector, contextWith(err));
 
       expect(result.structuredContent.status).toBe("error");
-      const error = result.structuredContent.errors?.[0];
-      expect(error?.class).toBe("config");
-      expect(error?.location).toBe("PIPELEX_BASE_URL");
-      expect(error?.hint).toContain("/v1/pipe-io");
-      expect(result.summary).toMatch(/unreachable|misconfigured/i);
+      expect(result.structuredContent.problem).toEqual(problemOf(err));
+      expect(result.structuredContent.problem?.code).toBe("request.not_found");
+      expect(result.structuredContent.problem?.location).toBeUndefined();
+      expect(result.summary).toContain(BASE_URL_NOTE);
     });
   }
 });
@@ -737,7 +854,10 @@ describe("buildMthdsInputs request shape", () => {
     const result = await buildMthdsInputs({}, contextNeverCalled());
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("files");
+    expect(result.structuredContent.problem).toMatchObject({
+      params: { argument: "files", reason: "missing" },
+      location: { field: "files" },
+    });
   });
 });
 

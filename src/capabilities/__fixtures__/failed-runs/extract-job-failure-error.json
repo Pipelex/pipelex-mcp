@@ -7,33 +7,46 @@
     "degraded": false,
     "pipe_code": null,
     "error": {
-      "provider_metadata": {
-        "message": "Error code: 500 - Invalid response received from openrouter: {\"detail\":\"Internal server error\"}",
-        "provider": "gateway",
-        "status_code": "500",
-        "sdk_exception_type": "InternalServerError",
-        "request_id": "69d70c5b-bc59-4c85-9495-8b6aeb9d2f42"
+      "type": "https://mthds.ai/errors/provider.failed",
+      "title": "The provider failed",
+      "detail": "The provider 'pipelex_gateway' failed with the HTTP status 500.",
+      "code": "provider.failed",
+      "domain": "runtime",
+      "retry": "yes",
+      "next_step": {
+        "kind": "retry",
+        "detail": "Run the method again."
       },
-      "error_type": "ExtractJobFailureError",
-      "model": "azure-document-intelligence",
-      "error_domain": "runtime",
-      "retryable": true,
-      "error_category": "transient",
-      "provider": "pipelex_gateway",
-      "message": "gateway inference failed for model 'azure-document-intelligence → SDK\\[gateway_extract]•Backend\\[pipelex_gateway]•Model\\[adi/prebuilt-layout]' (HTTP 500): Error code: 500 - Invalid response received from openrouter: {\"detail\":\"Internal server error\"}",
-      "title": "Extract job failure",
-      "type_uri": "https://docs.pipelex.com/latest/errors/extract-job-failure-error/",
-      "user_action": {
-        "detail": "Transient provider error — the system will retry automatically.",
-        "kind": "wait_and_retry"
-      }
+      "params": {
+        "provider": "pipelex_gateway",
+        "status": 500
+      },
+      "pipeline_run_id": "run_01d36d12-a66e-4055-89ed-4f5661a87f16"
     }
   },
   "results_arm": {
     "state": "failed",
     "pipeline_run_id": "run_01d36d12-a66e-4055-89ed-4f5661a87f16",
     "status": "FAILED",
-    "message": "Run finished with status FAILED; no result available",
+    "message": "The run 'run_01d36d12-a66e-4055-89ed-4f5661a87f16' ended as 'FAILED', without success.",
+    "problem": {
+      "type": "https://mthds.ai/errors/run.failed",
+      "title": "The run did not succeed",
+      "status": 409,
+      "detail": "The run 'run_01d36d12-a66e-4055-89ed-4f5661a87f16' ended as 'FAILED', without success.",
+      "code": "run.failed",
+      "domain": "runtime",
+      "retry": "no",
+      "next_step": {
+        "kind": "read_run",
+        "detail": "Read the run's own problem in run_error to see why it did not succeed."
+      },
+      "params": {
+        "pipeline_run_id": "run_01d36d12-a66e-4055-89ed-4f5661a87f16",
+        "run_status": "FAILED"
+      },
+      "pipeline_run_id": "run_01d36d12-a66e-4055-89ed-4f5661a87f16"
+    },
     "error": null
   }
 }

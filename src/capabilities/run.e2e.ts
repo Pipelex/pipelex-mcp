@@ -50,33 +50,35 @@ const UNKNOWN_METHOD_ID = "mt_00000000-0000-4000-8000-000000000000";
 const RUN_ENABLED = process.env.PIPELEX_E2E_RUN === "1";
 
 describe("run lifecycle reads (live, free)", () => {
-  it("classifies an unknown run id as an input_domain no-verdict at run_id", async () => {
+  it("relays the platform's refusal of an unknown run id as a no-verdict", async () => {
     const result = await getMthdsRunStatus({ run_id: UNKNOWN_RUN_ID }, context);
 
     expect(result.structuredContent.status).toBe("error");
-    const error = result.structuredContent.errors?.[0];
-    // `config` here would mean the lifecycle route itself is missing — the SDK
-    // intercepts that as RunLifecycleUnavailableError, and it is a different
-    // fix from a bad id.
-    expect(error?.class).toBe("input_domain");
-    expect(error?.location).toBe("run_id");
-    expect(error?.retryable).toBe(false);
+    // `runtime.unsupported` here would mean the lifecycle route itself is
+    // missing — the SDK reads that as RunLifecycleUnavailableError, and it is a
+    // different fix from a bad id.
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "run.not_found",
+      domain: "input",
+      retry: "no",
+    });
   });
 
-  it("classifies an unknown run id the same way on the results route", async () => {
+  it("relays an unknown run id the same way on the results route", async () => {
     const result = await getMthdsRunResults({ run_id: UNKNOWN_RUN_ID }, context);
 
     expect(result.structuredContent.status).toBe("error");
-    const error = result.structuredContent.errors?.[0];
-    expect(error?.class).toBe("input_domain");
-    expect(error?.location).toBe("run_id");
+    expect(result.structuredContent.problem).toMatchObject({ code: "run.not_found" });
   });
 
   it("rejects a blank run id without calling the API", async () => {
     const result = await getMthdsRunStatus({ run_id: "   " }, context);
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      location: { field: "run_id" },
+    });
   });
 
   // The only free reach into `/v1/start`'s ARGUMENT PATH, and the reason it is
@@ -92,9 +94,10 @@ describe("run lifecycle reads (live, free)", () => {
     const result = await startMthdsRun({ method_id: UNKNOWN_METHOD_ID }, context);
 
     expect(result.structuredContent.status).toBe("error");
-    const error = result.structuredContent.errors?.[0];
-    expect(error?.class).toBe("input_domain");
-    expect(error?.location).toBe("method_id");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "pipelex.catalog.not_found",
+      domain: "input",
+    });
     expect(result.structuredContent.run_id).toBeUndefined();
   });
 
@@ -112,9 +115,7 @@ describe("run lifecycle reads (live, free)", () => {
       );
 
       expect(result.structuredContent.status).toBe("error");
-      const error = result.structuredContent.errors?.[0];
-      expect(error?.class).toBe("input_domain");
-      expect(error?.location).toBe("method_ref");
+      expect(result.structuredContent.problem).toMatchObject({ domain: "input", retry: "no" });
       expect(result.structuredContent.run_id).toBeUndefined();
     },
   );

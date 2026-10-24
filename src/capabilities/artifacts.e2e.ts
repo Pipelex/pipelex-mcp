@@ -57,15 +57,16 @@ async function savingContext(): Promise<ArtifactsContext> {
 }
 
 describe("mthds_download_artifacts (live, free)", () => {
-  it("refuses an unknown run id at run_id and writes nothing", async () => {
+  it("relays the platform's refusal of an unknown run id and writes nothing", async () => {
     const context = await savingContext();
 
     const result = await downloadMthdsArtifacts({ run_id: UNKNOWN_RUN_ID }, context);
 
     expect(result.structuredContent.status).toBe("error");
-    const error = result.structuredContent.errors?.[0];
-    expect(error?.class).toBe("input_domain");
-    expect(error?.location).toBe("run_id");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "run.not_found",
+      domain: "input",
+    });
     expect(await fs.readdir(context.saveRoot!)).toEqual([]);
   });
 });

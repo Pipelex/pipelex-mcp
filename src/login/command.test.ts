@@ -373,10 +373,6 @@ describe("the browser login", () => {
           status,
           "refused",
           "{}",
-          undefined,
-          undefined,
-          undefined,
-          undefined,
         ),
       }).createClient,
     });
@@ -404,14 +400,10 @@ describe("the browser login", () => {
       500,
       "error",
       "{}",
-      undefined,
-      undefined,
-      undefined,
-      undefined,
     );
     const cases: [{ profile?: unknown; error?: unknown }, string][] = [
       [{ error: unreachable }, `${DEFAULT_API_URL} could not be reached`],
-      [{ error: serverError }, `${DEFAULT_API_URL} answered HTTP 500`],
+      [{ error: serverError }, `${DEFAULT_API_URL} answered HTTP 500 (runtime.unexpected)`],
       [{ profile: { nothing: "here" } }, `${DEFAULT_API_URL} did not answer with an account`],
       [{ error: new TypeError("bad body") }, `${DEFAULT_API_URL} did not answer with an account`],
     ];
@@ -464,17 +456,7 @@ describe("the browser login", () => {
   it("lets the environment's base URL beat the file's, and names it when the key is refused", async () => {
     const home = await makeHome("PIPELEX_BASE_URL=https://api-dev.pipelex.com\n");
     const client = fakeClient({
-      error: new ApiResponseError(
-        "HTTP 401",
-        "http://127.0.0.1:8081/v1/me",
-        401,
-        "refused",
-        "{}",
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-      ),
+      error: new ApiResponseError("HTTP 401", "http://127.0.0.1:8081/v1/me", 401, "refused", "{}"),
     });
 
     const run = await login([], {
@@ -965,17 +947,7 @@ describe("the pasted login", () => {
       env: { PIPELEX_HOME: home },
       stdin: new FakeTerminal(true, [KEY, "\r"]),
       createClient: fakeClient({
-        error: new ApiResponseError(
-          "HTTP 401",
-          `${DEFAULT_API_URL}/v1/me`,
-          401,
-          "refused",
-          "{}",
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-        ),
+        error: new ApiResponseError("HTTP 401", `${DEFAULT_API_URL}/v1/me`, 401, "refused", "{}"),
       }).createClient,
     });
 

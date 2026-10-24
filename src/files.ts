@@ -12,6 +12,7 @@ import type {
   MethodFileRead,
   MethodFileStat,
   MethodTreeRead,
+  Refusal,
 } from "./capabilities/shared.js";
 import {
   errorMessage,
@@ -29,7 +30,7 @@ const METHOD_FILE_FALLBACK = "or pass the method's folder as method_dir.";
  */
 export interface LocalFileResolverOptions {
   /**
-   * The clause every hint ends on: what the caller can do instead of a path.
+   * The clause every remedy ends on: what the caller can do instead of a path.
    * A files item falls back to inline `{ content, uri? }`; `inputs_path` falls
    * back to inline `inputs`. Defaults to the files wording.
    */
@@ -53,7 +54,7 @@ export interface LocalFileResolverOptions {
  * paths (symlinks followed): the resolved target must live inside the
  * `rootDir` subtree. Escapes, missing files, non-regular files, and read
  * failures are reported as {@link FileResolution} failures, never thrown —
- * the seam turns them into `input_domain` errors at `files[i].path`.
+ * the seam turns them into `client.argument_invalid` problems at `files[i].path`.
  *
  * `extension` is the ONE thing a caller chooses, and it is chosen per argument
  * rather than per call: every bundle argument is `.mthds`. It is deliberately
@@ -84,6 +85,7 @@ export function localFileResolver(
         return failure(
           `Path is not a ${extension} file: ${submitted}`,
           `This argument reads ${reads}. Point at a ${extension} file, ${fallback}`,
+          { reason: "wrong_extension" },
         );
       }
       const root = await workingDirectory(rootDir);
@@ -164,6 +166,7 @@ async function readMethodFile(
     return failure(
       `${submitted} changed while it was read.`,
       `Send it again once nothing is writing to it, ${METHOD_FILE_FALLBACK}`,
+      { busy: submitted },
     );
   }
   return { ok: true, bytes };
@@ -184,6 +187,7 @@ async function methodFileTarget(
     return failure(
       `Path is not a .mthds file or a template file: ${submitted}`,
       `This argument reads .mthds files and the template files their PipeDocGen steps name (${METHOD_FILE_EXTENSIONS.slice(1).join(", ")}). Point at one, ${METHOD_FILE_FALLBACK}`,
+      { reason: "wrong_extension" },
     );
   }
   const root = await workingDirectory(rootDir);
@@ -222,16 +226,16 @@ async function readUpTo(real: string, size: number): Promise<Uint8Array> {
 
 /**
  * How a refusal of a method folder ends: what else the caller can do. The
- * method-taking tools also take `files`, so their hints offer it; the save
+ * method-taking tools also take `files`, so their remedies offer it; the save
  * takes a folder and nothing else, so offering `files` there would send the
  * caller to an argument the tool does not have.
  */
 interface FolderFallback {
-  /** Closes a hint's last clause: "Check the path, <clause>". */
+  /** Closes a remedy's last clause: "Check the path, <clause>". */
   readonly clause: string;
   /** A sentence of its own, or nothing. */
   readonly sentence: string;
-  /** The hint for a `method_dir` that is not a directory. */
+  /** The remedy for a `method_dir` that is not a directory. */
   readonly notADirectory: string;
 }
 
@@ -252,10 +256,14 @@ const SAVE_FALLBACK: FolderFallback = {
 /** Refusals of a method folder shown by name, the rest counted. */
 const MAX_LISTED_PATHS = 5;
 
-type Refusals = { message: string; hint: string }[];
+type Refusals = Refusal[];
 
-function refusedWith(message: string, hint: string): { ok: false; refusals: Refusals } {
-  return { ok: false, refusals: [{ message, hint }] };
+function refusedWith(
+  message: string,
+  remedy: string,
+  facts: Omit<Refusal, "message" | "remedy">,
+): { ok: false; refusals: Refusals } {
+  return { ok: false, refusals: [{ message, remedy, ...facts }] };
 }
 
 /**
@@ -269,7 +277,7 @@ async function locateMethodFolder(
   fallback: FolderFallback,
 ): Promise<MethodDirLocation> {
   const root = await workingDirectory(rootDir);
-  if (!root.ok) return refusedWith(root.message, root.hint);
+  if (!root.ok) return { ok: false, refusals: [root] };
 
   let folder: string;
   try {
@@ -279,26 +287,32 @@ async function locateMethodFolder(
       ? refusedWith(
           `Folder not found: ${methodDir}`,
           `method_dir is resolved against the MCP server's working directory (${rootDir}). Check the path, ${fallback.clause}`,
+          { reason: "not_found", unreadable: methodDir },
         )
       : refusedWith(
           `Could not read folder ${methodDir}: ${errorMessage(err)}`,
           `Check the folder and its permissions, ${fallback.clause}`,
+          { reason: systemReason(err), unreadable: methodDir },
         );
   }
   if (!isInsideRoot(root.real, folder)) {
     return refusedWith(
       `method_dir resolves outside the server's working directory: ${methodDir}`,
       `The local workshop only reads folders inside the directory it was started in (${rootDir}). Move the method into the workspace, ${fallback.clause}`,
+      { reason: "outside_workspace" },
     );
   }
   try {
     if (!(await fs.stat(folder)).isDirectory()) {
-      return refusedWith(`method_dir is not a directory: ${methodDir}`, fallback.notADirectory);
+      return refusedWith(`method_dir is not a directory: ${methodDir}`, fallback.notADirectory, {
+        reason: "not_a_directory",
+      });
     }
   } catch (err) {
     return refusedWith(
       `Could not read folder ${methodDir}: ${errorMessage(err)}`,
       `Check the folder and its permissions, ${fallback.clause}`,
+      { reason: systemReason(err), unreadable: methodDir },
     );
   }
   return { ok: true, folder, methodDir };
@@ -320,12 +334,12 @@ async function listMethodFolder(
     return refusedWith(
       `${methodDir} holds a pyvenv.cfg file, which makes it a Python virtual environment, and nothing in one is part of a method's folder.`,
       `Pass the folder holding the method's .mthds files, outside the virtual environment, ${fallback.clause}`,
+      { reason: "virtual_environment" },
     );
   }
   const listed = await listFolderTree(folder, limits);
   if (!listed.ok && listed.error.code !== "empty_tree") {
-    const text = describeTreeRefusal(listed.error, fallback.clause);
-    return refusedWith(text.message, text.hint);
+    return { ok: false, refusals: [describeTreeRefusal(listed.error, fallback.clause)] };
   }
   const shown = (treePath: string) => shownIn(methodDir, treePath);
   const mthds = listed.ok ? listed.tree.files.filter((file) => isMthdsPath(file.path)) : [];
@@ -334,6 +348,7 @@ async function listMethodFolder(
     return refusedWith(
       `${methodDir} holds no .mthds file at its top${deeper.length > 0 ? `; it holds ${listed_(deeper)} further down` : ""}.`,
       `Pass the folder whose top holds the method's .mthds file. Files whose names start with a dot, and what the folder's .gitignore files exclude, are not part of it; ${fallback.clause}`,
+      { reason: "no_method_file" },
     );
   }
   return { ok: true, tree: listed.tree };
@@ -367,9 +382,11 @@ async function readMethodFolderTree(
     try {
       bytes.set(file.path, await tree.readFile(file.path));
     } catch (err) {
-      return refusedWith(
-        ...memberReadFailure(shownIn(location.methodDir, file.path), errorMessage(err), fallback),
-      );
+      const shown = shownIn(location.methodDir, file.path);
+      return refusedWith(...memberReadFailure(shown, errorMessage(err), fallback), {
+        reason: systemReason(err),
+        unreadable: shown,
+      });
     }
   }
   return {
@@ -407,21 +424,20 @@ function isMthdsPath(treePath: string): boolean {
 /** The working directory's real path, resolved once per request. */
 async function workingDirectory(
   rootDir: string,
-): Promise<{ ok: true; real: string } | { ok: false; message: string; hint: string }> {
+): Promise<{ ok: true; real: string } | ({ ok: false } & Refusal)> {
   try {
     return { ok: true, real: await fs.realpath(rootDir) };
   } catch (err) {
     return failure(
       `Could not resolve the server's working directory: ${errorMessage(err)}`,
       `The local workshop resolves paths relative to its working directory (${rootDir}), which must exist.`,
+      { reason: systemReason(err), unreadable: rootDir },
     );
   }
 }
 
 /** A submitted path that passed the containment and file checks: its real path and its size on the stat. */
-type ContainedTarget =
-  | { ok: true; real: string; size: number }
-  | { ok: false; message: string; hint: string };
+type ContainedTarget = { ok: true; real: string; size: number } | ({ ok: false } & Refusal);
 
 /**
  * The checks every read makes after its extension gate: the target exists,
@@ -446,18 +462,17 @@ async function containedTarget(
       return failure(
         `File not found: ${submitted}`,
         `Paths are resolved relative to the MCP server's working directory (${rootDir}). Check the path, ${fallback}`,
+        { reason: "not_found", unreadable: submitted },
       );
     }
-    return failure(
-      `Could not read file ${submitted}: ${errorMessage(err)}`,
-      `Check the file and its permissions, ${fallback}`,
-    );
+    return readFailure(submitted, err, fallback);
   }
 
   if (!isInsideRoot(rootReal, real)) {
     return failure(
       `Path resolves outside the server's working directory: ${submitted}`,
       `The local workshop only reads files inside the directory it was started in (${rootDir}). Move the file into the workspace, ${fallback}`,
+      { reason: "outside_workspace" },
     );
   }
 
@@ -467,12 +482,17 @@ async function containedTarget(
       return failure(
         `Path is not a regular file: ${submitted}`,
         `Submit the path of ${kind}, ${fallback}`,
+        {
+          reason: "not_a_file",
+          unreadable: submitted,
+        },
       );
     }
     if (maxBytes !== undefined && stats.size > maxBytes) {
       return failure(
         `File is too large: ${submitted} is ${stats.size} bytes, over ${options.limit ?? `the ${maxBytes}-byte limit for this argument`}.`,
         `Shrink the file, ${fallback}`,
+        { reason: "file_too_large" },
       );
     }
     return { ok: true, real, size: stats.size };
@@ -481,17 +501,29 @@ async function containedTarget(
   }
 }
 
-function readFailure(
-  submitted: string,
-  err: unknown,
-  fallback: string,
-): { ok: false; message: string; hint: string } {
+function readFailure(submitted: string, err: unknown, fallback: string): { ok: false } & Refusal {
   return failure(
     `Could not read file ${submitted}: ${errorMessage(err)}`,
     `Check the file and its permissions, ${fallback}`,
+    { reason: systemReason(err), unreadable: submitted },
   );
 }
 
-function failure(message: string, hint: string): { ok: false; message: string; hint: string } {
-  return { ok: false, message, hint };
+/**
+ * A refused read: its words, and the facts its problem is built from — why,
+ * and the path of a file that exists and cannot be read, or that changed
+ * while it was read ({@link Refusal}).
+ */
+function failure(
+  message: string,
+  remedy: string,
+  facts: Omit<Refusal, "message" | "remedy">,
+): { ok: false } & Refusal {
+  return { ok: false, message, remedy, ...facts };
+}
+
+/** Why a read failed, as the system's error code (`EACCES`, `EISDIR`, …), or `unreadable`. */
+function systemReason(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return typeof code === "string" && code !== "" ? code : "unreadable";
 }

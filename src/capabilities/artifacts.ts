@@ -2,13 +2,21 @@ import { promises as fs } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 
-import { ArtifactAuthenticationError, collectArtifacts } from "@pipelex/sdk";
+import {
+  ArtifactAuthenticationError,
+  DEFAULT_ARTIFACT_MAX_BYTES,
+  DEFAULT_DOWNLOAD_MAX_TOTAL_BYTES,
+  buildProblem,
+  collectArtifacts,
+} from "@pipelex/sdk";
 import type {
+  ArtifactItemError,
   ArtifactScope,
   DownloadArtifactsRequest,
   DownloadArtifactsResult,
   DownloadedArtifact,
   GetRunResultOptions,
+  Problem,
   RunRead,
   RunResultArtifact,
   RunResultState,
@@ -16,36 +24,25 @@ import type {
 } from "@pipelex/sdk";
 import { z } from "zod";
 
-import type { RunFailure } from "./run-failure.js";
-import {
-  failedArmSummaryLines,
-  failureMessageOf,
-  failureOfFailedArm,
-  readFailedRun,
-  RUN_RESULTS_ERROR_OPTIONS,
-  runFailureSchema,
-  runStatusSchema,
-} from "./run.js";
+import { runErrorSchema } from "./run-failure.js";
+import { failedArmSummary, readFailedRun, runErrorOfFailedArm, runStatusSchema } from "./run.js";
 import type { FailedRunState } from "./run.js";
 import {
-  BULK_RESOLVE_ERROR_OPTIONS,
   allowsPlainHttp,
+  argumentProblem,
+  asOneLine,
   buildArtifactFetchConfig,
-  classifyError,
   createPipelexApiClient,
-  itemToolError,
-  summaryForToolError,
-  toolErrorSchema,
+  faultsProblem,
+  fetchItemProblem,
+  problemLine,
+  problemOf,
+  problemSchema,
+  problemSummary,
   toolResultContent,
   validateRunIdRequest,
 } from "./shared.js";
-import type {
-  ApiConfig,
-  AuthErrorTexture,
-  BaseUrlSourceTexture,
-  ErrorSummaries,
-  ToolError,
-} from "./shared.js";
+import type { ApiConfig, ApiNotes } from "./shared.js";
 import { errorMessage, resolveSaveDir } from "./workspace-boundary.js";
 
 /**
@@ -63,8 +60,8 @@ import { errorMessage, resolveSaveDir } from "./workspace-boundary.js";
  * `downloadArtifacts`, which resolves through `resolveArtifacts`), so this
  * capability owns only what is the workshop's: the tool envelope, the output
  * file, the `dir` default and its containment against the working directory,
- * the deployment gate, the plain-http policy, the classification of every
- * failure into `ToolError`s, and the prose summary. The output file is the one
+ * the deployment gate, the plain-http policy, the download limits, the
+ * problem each failure reports, and the prose summary. The output file is the one
  * thing it writes itself, under the same never-overwrite rule the SDK applies
  * to the files beside it. See SPEC.md → Artifact Download Scope for why this is
  * a companion tool and not an option on `mthds_run_results`.
@@ -116,6 +113,14 @@ const MAX_OUTPUT_NAME_ATTEMPTS = 10_000;
  */
 export const MAX_FOUND_AT_PATHS = 8;
 
+/**
+ * The most bytes one saved file may hold, and the most one call writes in
+ * all: the SDK's own defaults, passed explicitly so that the limit a refused
+ * file's problem names is the one this call applied.
+ */
+export const DOWNLOAD_MAX_FILE_BYTES = DEFAULT_ARTIFACT_MAX_BYTES;
+export const DOWNLOAD_MAX_TOTAL_BYTES = DEFAULT_DOWNLOAD_MAX_TOTAL_BYTES;
+
 export const mthdsDownloadArtifactsInputSchema = {
   run_id: z
     .string()
@@ -151,7 +156,9 @@ const savedArtifactSchema = z.object({
     .optional()
     .describe("The platform's content type for the stored object; null when it has none."),
   size: z.number().optional().describe("Bytes written."),
-  error: toolErrorSchema.optional().describe("Present when this file could not be saved."),
+  error: problemSchema
+    .optional()
+    .describe("Present when this file could not be saved: why, as a problem."),
 });
 
 const savedOutputSchema = z.object({
@@ -180,14 +187,10 @@ const artifactsStructuredContentSchema = z.object({
   run_status: runStatusSchema
     .optional()
     .describe('State "failed" only — the terminal lifecycle status.'),
-  failure_message: z
-    .string()
-    .optional()
-    .describe('State "failed" only — the platform\'s one-sentence account of the ending.'),
-  failure: runFailureSchema
+  run_error: runErrorSchema
     .optional()
     .describe(
-      'State "failed" only, when the run stored an error report — the same object mthds_run_results carries: why it failed, what to do next, whether running it again can help, and what to give support.',
+      'State "failed" only, when the run stored one — the run\'s own problem, as mthds_run_results carries it.',
     ),
   scope: z
     .enum(["main_stuff", "working_memory"])
@@ -218,7 +221,11 @@ const artifactsStructuredContentSchema = z.object({
     .describe(
       'State "completed" only — true when the output and every referenced file were saved.',
     ),
-  errors: z.array(toolErrorSchema).optional(),
+  problem: problemSchema
+    .optional()
+    .describe(
+      'status "error" only: why no verdict could be produced. A refusal of the file download comes with output and saved_paths, since the output was written first.',
+    ),
 });
 
 export const mthdsDownloadArtifactsOutputSchema = artifactsStructuredContentSchema;
@@ -237,7 +244,7 @@ export interface SavedArtifactEntry {
   path?: string;
   content_type?: string | null;
   size?: number;
-  error?: ToolError;
+  error?: Problem;
 }
 
 /** Where the output file landed, relative to the working directory, and its size. */
@@ -252,15 +259,15 @@ export interface ArtifactsStructuredContent {
   state?: "running" | "completed" | "failed";
   retry_after_seconds?: number | null;
   run_status?: RunStatus;
-  failure_message?: string;
-  /** State "failed" only, when the run stored an error report. */
-  failure?: RunFailure;
+  /** State "failed" only, when the run stored one: the run's own problem. */
+  run_error?: Problem;
   scope?: ArtifactScope;
   output?: SavedOutput;
   artifacts?: SavedArtifactEntry[];
   saved_paths?: string[];
   all_saved?: boolean;
-  errors?: ToolError[];
+  /** Status "error" only. */
+  problem?: Problem;
 }
 
 export interface ArtifactsResult {
@@ -271,7 +278,7 @@ export interface ArtifactsResult {
 /** The slice of `PipelexApiClient` this capability calls (test seam). */
 export interface ArtifactClient {
   getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
-  /** Read once after a failed results arm, for when the run ended and its report (`readFailedRun`). */
+  /** Read once after a failed results arm, for when the run ended and its problem (`readFailedRun`). */
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   downloadArtifacts(request: DownloadArtifactsRequest): Promise<DownloadArtifactsResult>;
 }
@@ -291,10 +298,8 @@ export interface ArtifactsContext extends ApiConfig {
    * scheme.
    */
   allowHttp?: boolean;
-  /** Deployment-specific auth-failure texture; default env-var wording when absent. */
-  authError?: AuthErrorTexture;
-  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
-  baseUrlSource?: BaseUrlSourceTexture;
+  /** Where the key and the base URL came from, said beside a problem they may be the fix of. */
+  apiNotes?: ApiNotes;
 }
 
 export function buildArtifactsContext(env = process.env): ArtifactsContext {
@@ -303,7 +308,7 @@ export function buildArtifactsContext(env = process.env): ArtifactsContext {
 
 // Constructed inside the caught block (mirroring the sibling capabilities): the
 // SDK constructor throws PipelineRequestError on a malformed base URL, and that
-// must classify to a config ToolError, not reject the MCP handler.
+// must become the problem it carries, not reject the MCP handler.
 function artifactClient(context: ArtifactsContext): ArtifactClient {
   return context.client ?? createPipelexApiClient(context);
 }
@@ -320,34 +325,37 @@ function escapesLexically(dir: string): boolean {
   return normalized === ".." || normalized.startsWith(`..${path.sep}`);
 }
 
-export function validateArtifactsRequest(input: MthdsDownloadArtifactsInput): ToolError[] {
+export function validateArtifactsRequest(input: MthdsDownloadArtifactsInput): Problem[] {
   const errors = validateRunIdRequest(input.run_id);
 
   if (input.dir !== undefined) {
     if (input.dir.trim() === "") {
-      errors.push({
-        class: "input_domain",
-        location: "dir",
-        message: "dir must not be empty when supplied.",
-        hint: 'Pass a directory relative to the server\'s working directory, "." for the working directory itself, or omit dir to save into runs/<run_id>.',
-        retryable: false,
-      });
+      errors.push(
+        argumentProblem(
+          "dir",
+          "empty",
+          "dir must not be empty when supplied.",
+          'Pass a directory relative to the server\'s working directory, "." for the working directory itself, or omit dir to save into runs/<run_id>.',
+        ),
+      );
     } else if (path.isAbsolute(input.dir)) {
-      errors.push({
-        class: "input_domain",
-        location: "dir",
-        message: "dir must be relative to the server's working directory, not absolute.",
-        hint: "Files are saved under the directory the host started this server in. Pass a relative directory such as `assets` or `out/run-1`.",
-        retryable: false,
-      });
+      errors.push(
+        argumentProblem(
+          "dir",
+          "absolute",
+          "dir must be relative to the server's working directory, not absolute.",
+          "Files are saved under the directory the host started this server in. Pass a relative directory such as `assets` or `out/run-1`.",
+        ),
+      );
     } else if (escapesLexically(input.dir)) {
-      errors.push({
-        class: "input_domain",
-        location: "dir",
-        message: `dir resolves outside the server's working directory: ${input.dir}`,
-        hint: "Files stay inside the directory the host started this server in. Pass a relative directory that stays inside it.",
-        retryable: false,
-      });
+      errors.push(
+        argumentProblem(
+          "dir",
+          "outside_workspace",
+          `dir resolves outside the server's working directory: ${input.dir}`,
+          "Files stay inside the directory the host started this server in. Pass a relative directory that stays inside it.",
+        ),
+      );
     }
   }
 
@@ -370,21 +378,25 @@ export async function downloadMthdsArtifacts(
   input: MthdsDownloadArtifactsInput,
   context: ArtifactsContext = buildArtifactsContext(),
 ): Promise<ArtifactsResult> {
-  const requestErrors = validateArtifactsRequest(input);
-  if (requestErrors.length > 0) {
-    return errorResult("Nothing was saved: request input is invalid.", requestErrors);
+  const faults = validateArtifactsRequest(input);
+  if (faults.length > 0) {
+    return errorResult(faultsProblem(faults), context.apiNotes);
   }
 
   if (context.saveRoot === undefined) {
-    return errorResult("Nothing was saved: this deployment cannot write files to disk.", [
-      {
-        class: "config",
-        location: "deployment",
-        message: "This deployment has no working directory to save files into.",
-        hint: "Use the local workshop server (npx @pipelex/mcp), which saves runs under the directory it was started in. On the hosted console, open the run on app.pipelex.com to download its files.",
-        retryable: false,
-      },
-    ]);
+    return errorResult(
+      buildProblem(
+        "client.not_configured",
+        { setting: "working_directory" },
+        {
+          extra: {
+            message:
+              "This deployment has no working directory to save files into, so nothing was saved. Use the local workshop server (npx @pipelex/mcp), which saves runs under the directory it was started in. On the hosted console, open the run on app.pipelex.com to download its files.",
+          },
+        },
+      ),
+      context.apiNotes,
+    );
   }
 
   // The run is read here rather than by the SDK's run_id arm, so a run that is
@@ -396,12 +408,7 @@ export async function downloadMthdsArtifacts(
     client = artifactClient(context);
     state = await client.getRunResult(input.run_id, { artifacts: DOWNLOAD_RESULT_ARTIFACTS });
   } catch (err) {
-    const error = classifyError(err, {
-      ...RUN_RESULTS_ERROR_OPTIONS,
-      auth: context.authError,
-      baseUrlSource: context.baseUrlSource,
-    });
-    return errorResult(summaryForToolError(error, ERROR_SUMMARIES), [error]);
+    return errorResult(problemOf(err), context.apiNotes);
   }
 
   switch (state.state) {
@@ -415,37 +422,44 @@ export async function downloadMthdsArtifacts(
 
   // The SDK guarantees a non-null main_stuff on a completed run (it throws
   // MissingMainStuffError otherwise); reaching here without one is a contract
-  // violation, surfaced as a runtime no-verdict like mthds_run_results does.
+  // violation, which the SDK itself reads as an answer it could not read.
   // Checked before anything is written, since there would be no output to save.
   const mainStuff = state.result.main_stuff;
   if (mainStuff == null) {
-    return errorResult("Nothing was saved: the Pipelex API returned a malformed report.", [
-      {
-        class: "runtime",
-        message: "Completed run results did not include main_stuff.",
-        hint: "The API responded but its report was missing required fields; inspect the run on the platform.",
-        retryable: false,
-      },
-    ]);
+    return errorResult(
+      buildProblem(
+        "client.response_unreadable",
+        { status: 200 },
+        {
+          extra: {
+            message:
+              "Completed run results did not include main_stuff, so nothing was saved; inspect the run on the platform.",
+          },
+        },
+      ),
+      context.apiNotes,
+    );
   }
 
+  // A run id that leaves nothing to name a folder after is the API's answer,
+  // but the fix is the caller's: naming the folder itself.
   const runId = state.pipeline_run_id;
   const dir = input.dir ?? defaultRunDir(runId);
   if (dir === undefined) {
-    return errorResult("Nothing was saved: the run id cannot name a directory.", [
-      {
-        class: "runtime",
-        location: "run_id",
-        message: `The Pipelex API answered a run id that cannot name a directory: ${runId}`,
-        hint: "Pass dir to choose where the run is saved.",
-        retryable: false,
-      },
-    ]);
+    return errorResult(
+      argumentProblem(
+        "dir",
+        "required",
+        `The Pipelex API answered a run id that cannot name a directory: ${runId}`,
+        "Pass dir to choose where the run is saved.",
+      ),
+      context.apiNotes,
+    );
   }
 
   const target = await resolveSaveDir(context.saveRoot, dir, "dir");
   if (!target.ok) {
-    return errorResult("Nothing was saved: the target directory is invalid.", [target.error]);
+    return errorResult(target.problem, context.apiNotes);
   }
 
   // A dir the caller names gets the mark on the directory the run lands in,
@@ -454,10 +468,10 @@ export async function downloadMthdsArtifacts(
   let marked: string | undefined;
   if (target.created !== undefined) {
     const markedDir = input.dir === undefined ? target.created : target.dir;
-    const failure = await markGenerated(markedDir, dir);
+    const failure = await markGenerated(markedDir, path.relative(target.root, markedDir));
     if (failure !== undefined) {
       await removeCreatedDirectories(target.dir, target.created);
-      return errorResult("Nothing was saved: the new directory could not be marked.", [failure]);
+      return errorResult(failure, context.apiNotes);
     }
     marked = path.relative(target.root, markedDir);
   }
@@ -468,9 +482,7 @@ export async function downloadMthdsArtifacts(
   // so a failure here stops the save before anything is fetched.
   const written = await writeOutputFile(target.dir, mainStuff, dir);
   if (!written.ok) {
-    return errorResult("Nothing was saved: the run's output could not be written.", [
-      written.error,
-    ]);
+    return errorResult(written.problem, context.apiNotes);
   }
   const output: SavedOutput = {
     path: path.relative(target.root, written.path),
@@ -488,14 +500,14 @@ export async function downloadMthdsArtifacts(
       dir: target.dir,
       scope: DOWNLOAD_SCOPE,
       allowHttp: allowsPlainHttp(context),
+      maxBytes: DOWNLOAD_MAX_FILE_BYTES,
+      maxTotalBytes: DOWNLOAD_MAX_TOTAL_BYTES,
     });
   } catch (err) {
-    const error = classifyError(err, {
-      ...BULK_RESOLVE_ERROR_OPTIONS,
-      auth: context.authError,
-      baseUrlSource: context.baseUrlSource,
-    });
-    return withMarkNote(refusedResult(error, err, output, target.root), marked);
+    return withMarkNote(
+      refusedResult(problemOf(err), err, output, target.root, dir, context.apiNotes),
+      marked,
+    );
   }
 
   return withMarkNote(
@@ -503,7 +515,7 @@ export async function downloadMthdsArtifacts(
       runId,
       verdict.scope,
       output,
-      verdict.artifacts.map((item, index) => projectItem(item, index, target.root)),
+      verdict.artifacts.map((item) => projectItem(item, target.root, dir)),
       target.root,
     ),
     marked,
@@ -526,11 +538,12 @@ export const GENERATED_DIRECTORY_GITIGNORE = "*\n";
  * directory the run lands in for a `dir` the caller names, the topmost one
  * created for the default location. An existing `.gitignore` is never
  * overwritten (`wx`), so a directory the user made stays theirs to mark.
- * Returns a refusal at `dir` when the file cannot be written, as the output
- * file's failure is, since a directory that cannot take two bytes will not
- * take the run either.
+ * Returns a `client.write_failed` at `dir` when the file cannot be written,
+ * as the output file's failure is, since a directory that cannot take two
+ * bytes will not take the run either. `shown` is `dir` relative to the
+ * working directory, which the problem names.
  */
-async function markGenerated(dir: string, requestedDir: string): Promise<ToolError | undefined> {
+async function markGenerated(dir: string, shown: string): Promise<Problem | undefined> {
   try {
     await fs.writeFile(path.join(dir, ".gitignore"), GENERATED_DIRECTORY_GITIGNORE, {
       flag: "wx",
@@ -538,14 +551,38 @@ async function markGenerated(dir: string, requestedDir: string): Promise<ToolErr
     return undefined;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "EEXIST") return undefined;
-    return {
-      class: "input_domain",
-      location: "dir",
-      message: `Could not write .gitignore in the directory created for ${requestedDir}: ${errorMessage(err)}`,
-      hint: "Check that the directory is writable and has room, or pass another dir.",
-      retryable: false,
-    };
+    return writeFailedProblem(
+      path.join(shown, ".gitignore"),
+      systemReason(err),
+      `Could not write .gitignore in ${shown}, the directory this call created: ${errorMessage(err)}`,
+    );
   }
+}
+
+/** Why a local write failed, in one identifier: its system code, when it has one. */
+function systemReason(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return typeof code === "string" ? code : "failed";
+}
+
+/**
+ * A file this tool writes itself that could not be written: `client.write_failed`
+ * at `dir`, naming the file relative to the working directory, with this
+ * server's sentence and what to do as its `message`.
+ */
+function writeFailedProblem(file: string, reason: string, message: string): Problem {
+  return buildProblem(
+    "client.write_failed",
+    { path: file, reason },
+    {
+      location: { field: "dir" },
+      extra: {
+        message: asOneLine(
+          `${message} Check that the directory is writable and has room, or pass another dir.`,
+        ),
+      },
+    },
+  );
 }
 
 /**
@@ -581,7 +618,7 @@ function withMarkNote(result: ArtifactsResult, marked: string | undefined): Arti
 
 // ── the output file ─────────────────────────────────────────────────
 
-type OutputWrite = { ok: true; path: string; size: number } | { ok: false; error: ToolError };
+type OutputWrite = { ok: true; path: string; size: number } | { ok: false; problem: Problem };
 
 /**
  * Write the run's main output into `dir` as `main_stuff.json`, formatted for a
@@ -594,8 +631,8 @@ type OutputWrite = { ok: true; path: string; size: number } | { ok: false; error
  * (`main_stuff-1.json`), exactly as the SDK treats the files saved beside it,
  * so saving the same run twice into one folder adds copies rather than
  * replacing anything. A write that fails removes the file it created. Never
- * throws: every failure is an `input_domain` refusal at `dir`, the texture
- * `resolveSaveDir` gives an unusable directory.
+ * throws: every failure is a `client.write_failed` at `dir`, the problem
+ * `resolveSaveDir` gives a directory that cannot be used.
  */
 async function writeOutputFile(
   dir: string,
@@ -613,7 +650,7 @@ async function writeOutputFile(
       handle = await fs.open(candidate, "wx");
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
-      return { ok: false, error: outputWriteError(requestedDir, err) };
+      return { ok: false, problem: outputWriteError(requestedDir, candidate, err) };
     }
     try {
       await handle.writeFile(bytes);
@@ -622,27 +659,27 @@ async function writeOutputFile(
     } catch (err) {
       await handle.close().catch(() => undefined);
       await fs.unlink(candidate).catch(() => undefined);
-      return { ok: false, error: outputWriteError(requestedDir, err) };
+      return { ok: false, problem: outputWriteError(requestedDir, candidate, err) };
     }
   }
 
   return {
     ok: false,
-    error: outputWriteError(
-      requestedDir,
-      new Error(`no free name for ${OUTPUT_FILENAME} after ${MAX_OUTPUT_NAME_ATTEMPTS} attempts`),
+    problem: writeFailedProblem(
+      path.join(requestedDir, OUTPUT_FILENAME),
+      "no_free_name",
+      `Could not write ${OUTPUT_FILENAME} in ${requestedDir}: no free name for it after ${MAX_OUTPUT_NAME_ATTEMPTS} attempts.`,
     ),
   };
 }
 
-function outputWriteError(dir: string, err: unknown): ToolError {
-  return {
-    class: "input_domain",
-    location: "dir",
-    message: `Could not write ${OUTPUT_FILENAME} in ${dir}: ${errorMessage(err)}`,
-    hint: "Check that the directory is writable and has room, or pass another dir.",
-    retryable: false,
-  };
+/** The output file at `candidate` could not be written: the problem names it under `dir`, the caller's own. */
+function outputWriteError(dir: string, candidate: string, err: unknown): Problem {
+  return writeFailedProblem(
+    path.join(dir, path.basename(candidate)),
+    systemReason(err),
+    `Could not write ${OUTPUT_FILENAME} in ${dir}: ${errorMessage(err)}`,
+  );
 }
 
 /**
@@ -653,22 +690,23 @@ function outputWriteError(dir: string, err: unknown): ToolError {
  * then does `artifacts` ride, carrying them. A credential refused before any
  * file was saved hands back a verdict of nothing but `aborted` items, whose
  * per-item "call the tool again" would contradict the refusal's own
- * not-retryable error, so it is left out. `state` and `all_saved` stay absent —
+ * not-retryable problem, so it is left out. `state` and `all_saved` stay absent —
  * no verdict was produced, and a consumer branching on `status` must not read
  * one here — but what is on disk rides the structured result as well as the
  * prose, so a consumer finds it without parsing the summary; calling again
  * would not overwrite those files, it would write suffixed copies beside them.
  */
 function refusedResult(
-  error: ToolError,
+  problem: Problem,
   err: unknown,
   output: SavedOutput,
   root: string,
+  dir: string,
+  notes: ApiNotes | undefined,
 ): ArtifactsResult {
-  const summary = summaryForToolError(error, FILES_ERROR_SUMMARIES);
   const refused =
     err instanceof ArtifactAuthenticationError
-      ? err.verdict.artifacts.map((item, index) => projectItem(item, index, root))
+      ? err.verdict.artifacts.map((item) => projectItem(item, root, dir))
       : [];
   const savedArtifacts = refused.flatMap((item) => (item.path === undefined ? [] : [item.path]));
   const savedPaths = [output.path, ...savedArtifacts];
@@ -680,19 +718,19 @@ function refusedResult(
   return {
     structuredContent: {
       status: "error",
-      errors: [error],
+      problem,
       output,
       ...(savedArtifacts.length === 0 ? {} : { artifacts: refused }),
       saved_paths: savedPaths,
     },
-    summary: `${summary}\n\n${saved}`,
+    summary: `${problemSummary(problem, notes)}\n\n${saved}`,
   };
 }
 
 // ── the verdict's items ─────────────────────────────────────────────
 
-/** One SDK verdict entry, with its path made relative and its error classified. */
-function projectItem(item: DownloadedArtifact, index: number, root: string): SavedArtifactEntry {
+/** One SDK verdict entry, with its path made relative and its error read as a problem. */
+function projectItem(item: DownloadedArtifact, root: string, dir: string): SavedArtifactEntry {
   if (item.error === null) {
     return {
       uri: item.uri,
@@ -706,8 +744,49 @@ function projectItem(item: DownloadedArtifact, index: number, root: string): Sav
     uri: item.uri,
     ...boundFoundAt(item.found_at),
     content_type: item.content_type,
-    error: itemToolError(item.error, `artifacts[${index}].uri`),
+    error: itemProblem(item.error, item.uri, dir),
   };
+}
+
+/**
+ * The problem of one file the download could not save. The fetch boundary's
+ * codes and the resolve route's are the SDK's to read (`fetchItemProblem`).
+ * The download's own codes the SDK reads as `runtime.unexpected`, so they are
+ * read here into the core codes they are: a file past a limit this call
+ * passed, a file that could not be written under `dir`, a download stopped
+ * before it, and a resolve that failed for the whole chunk. The item's
+ * sentence is the `message` either way.
+ */
+function itemProblem(error: ArtifactItemError, uri: string, dir: string): Problem {
+  const options = { extra: { message: error.detail } };
+  switch (error.code) {
+    case "too_large":
+      return buildProblem(
+        "client.download_limit_exceeded",
+        { limit: DOWNLOAD_MAX_FILE_BYTES },
+        options,
+      );
+    case "total_limit_exceeded":
+      return buildProblem(
+        "client.download_limit_exceeded",
+        { limit: DOWNLOAD_MAX_TOTAL_BYTES },
+        options,
+      );
+    case "write_failed":
+      // Node words a failed write after its system code (`EACCES: permission
+      // denied, open …`), and the SDK quotes that sentence as the detail.
+      return buildProblem(
+        "client.write_failed",
+        { path: dir, reason: /\b(E[A-Z]{2,})\b/.exec(error.detail)?.[1] ?? "failed" },
+        { ...options, location: { field: "dir" } },
+      );
+    case "aborted":
+      return buildProblem("client.aborted", {}, options);
+    case "resolve_failed":
+      return buildProblem("runtime.unavailable", {}, options);
+    default:
+      return fetchItemProblem(error, uri);
+  }
 }
 
 /** The first {@link MAX_FOUND_AT_PATHS} paths, and a count of the rest when there are any. */
@@ -738,21 +817,25 @@ function runningResult(runId: string, retryAfterSeconds: number | null): Artifac
   };
 }
 
+/**
+ * A run that ended without success: its own problem, from the failed arm or,
+ * when the arm carries none, from the status read that followed it, as
+ * `mthds_run_results` reads it.
+ */
 function failedResult(state: FailedRunState, failedRead: RunRead | undefined): ArtifactsResult {
   const runId = state.pipeline_run_id;
-  const failure = failureOfFailedArm(state, failedRead);
+  const runError = runErrorOfFailedArm(state, failedRead);
   return {
     structuredContent: {
       status: "ok",
       run_id: runId,
       state: "failed",
       run_status: state.status,
-      failure_message: failureMessageOf(state),
-      ...(failure === undefined ? {} : { failure }),
+      ...(runError === undefined ? {} : { run_error: runError }),
     },
     summary: [
       "# Nothing saved",
-      failedArmSummaryLines(state, failure, failedRead).join("\n"),
+      failedArmSummary(state, runError, failedRead),
       "A failed run produces no output and no files to save.",
     ].join("\n\n"),
   };
@@ -796,8 +879,7 @@ function completedResult(
 // The saved paths are deliberately repeated in the prose (the
 // mthds_inputs_template pattern): they are the small payload the agent must
 // report to the user, and some hosts read prose more reliably than structured
-// fields. Per-file failures ride here too — they are not in the top-level
-// errors[], so this is the only place the agent reads them.
+// fields. Per-file failures ride here too, each its problem on one line.
 function completedSummary(
   runId: string,
   output: SavedOutput,
@@ -832,8 +914,8 @@ function completedSummary(
       const detail = type === "" && size === "" ? "" : ` (${type}${size})`;
       return `- \`${item.path}\`${detail} ← ${fieldOf(item)}`;
     }
-    const hint = item.error?.hint === undefined ? "" : ` *Hint: ${item.error.hint}*`;
-    return `- ${fieldOf(item)} (\`${item.uri}\`) — failed: ${item.error?.message ?? "unknown failure"}${hint}`;
+    const failure = item.error === undefined ? "unknown failure" : problemLine(item.error);
+    return `- ${fieldOf(item)} (\`${item.uri}\`) — failed: ${failure}`;
   });
   parts.push([outputLine, ...lines].join("\n"));
   parts.push(readIt);
@@ -859,41 +941,17 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
-const ERROR_SUMMARIES: ErrorSummaries = {
-  config: "The run could not be saved: the Pipelex API is unreachable or misconfigured.",
-  input_domain: "The run was not saved: the Pipelex API rejected the request.",
-  runtime: "The run could not be saved: the Pipelex API returned an error.",
-  paywall: "The run could not be saved: the organization's Pipelex plan does not cover this call.",
-  auth: "The run could not be saved: the Pipelex API key is missing or was refused.",
-  role: "The run could not be saved: your role in this organization does not allow this.",
-};
-
-/**
- * The headlines of a download that failed after the output was written: the
- * run is partly on disk, so "the run could not be saved" would contradict the
- * list of saved paths that follows it.
- */
-const FILES_ERROR_SUMMARIES: ErrorSummaries = {
-  config: "The run's files could not be saved: the Pipelex API is unreachable or misconfigured.",
-  input_domain: "The run's files were not saved: the Pipelex API rejected the request.",
-  runtime: "The run's files could not be saved: the Pipelex API returned an error.",
-  paywall:
-    "The run's files could not be saved: the organization's Pipelex plan does not cover this call.",
-  auth: "The run's files could not be saved: the Pipelex API key is missing or was refused.",
-  role: "The run's files could not be saved: your role in this organization does not allow this.",
-};
-
-function errorResult(summary: string, errors: ToolError[]): ArtifactsResult {
+function errorResult(problem: Problem, notes: ApiNotes | undefined): ArtifactsResult {
   return {
-    structuredContent: { status: "error", errors },
-    summary,
+    structuredContent: { status: "error", problem },
+    summary: problemSummary(problem, notes),
   };
 }
 
 export function artifactsToolResult(result: ArtifactsResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(result.summary, result.structuredContent.errors),
+    content: toolResultContent(result.summary),
     isError: result.structuredContent.status === "error",
   };
 }

@@ -1,7 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import type { ToolError } from "./shared.js";
+import { buildProblem } from "@pipelex/sdk";
+import type { Problem } from "@pipelex/sdk";
 
 /**
  * The containment boundary every filesystem-touching capability shares.
@@ -139,7 +140,7 @@ export type SaveDirResolution =
        */
       created?: string;
     }
-  | { ok: false; error: ToolError };
+  | { ok: false; problem: Problem };
 
 /**
  * Turn an optional relative `dir` into an absolute, existing directory inside
@@ -152,8 +153,10 @@ export type SaveDirResolution =
  *
  * `location` is the caller's own input field (`dir` for the download tool,
  * `output_dir` for codegen), so a refusal locates at the value the caller
- * actually typed. Failures are `input_domain` there — except an unusable
- * `saveRoot`, which is the deployment's fault, not the caller's.
+ * actually typed: `client.argument_invalid` for a directory outside the
+ * working directory or that is no directory, `client.write_failed` for one
+ * that cannot be created or used — except an unusable `saveRoot`, which is
+ * the server's own configuration, `client.not_configured`.
  *
  * This is the one call that creates the target directory, and it creates
  * only the requested one; a destination's missing parents inside it are
@@ -174,13 +177,15 @@ export async function resolveSaveDir(
   } catch (err) {
     return {
       ok: false,
-      error: {
-        class: "config",
-        location: "deployment",
-        message: `Could not resolve the server's working directory: ${errorMessage(err)}`,
-        hint: `The local workshop works under its working directory (${saveRoot}), which must exist.`,
-        retryable: false,
-      },
+      problem: buildProblem(
+        "client.not_configured",
+        { setting: "working_directory" },
+        {
+          extra: {
+            message: `Could not resolve the server's working directory: ${errorMessage(err)} The local workshop works under its working directory (${saveRoot}), which must exist.`,
+          },
+        },
+      ),
     };
   }
 
@@ -190,14 +195,14 @@ export async function resolveSaveDir(
 
   const target = path.resolve(root, dir);
   if (!isInsideRoot(root, target)) {
-    return { ok: false, error: escapeError(dir, root, location) };
+    return { ok: false, problem: escapeError(dir, root, location) };
   }
 
   const ancestor = await checkDeepestExistingAncestor(root, target);
   if (!ancestor.ok) {
     return {
       ok: false,
-      error:
+      problem:
         ancestor.reason === "escape"
           ? escapeError(dir, root, location)
           : unusableDirError(dir, ancestor.err, location),
@@ -215,24 +220,27 @@ export async function resolveSaveDir(
     if (!(await fs.stat(real)).isDirectory()) {
       return {
         ok: false,
-        error: {
-          class: "input_domain",
-          location,
-          message: `${location} is not a directory: ${dir}`,
-          hint: "Pass a directory (existing or new) relative to the server's working directory.",
-          retryable: false,
-        },
+        problem: buildProblem(
+          "client.argument_invalid",
+          { argument: location, reason: "not_a_directory" },
+          {
+            location: { field: location },
+            extra: {
+              message: `${location} is not a directory: ${dir} Pass a directory (existing or new) relative to the server's working directory.`,
+            },
+          },
+        ),
       };
     }
   } catch (err) {
-    return { ok: false, error: unusableDirError(dir, err, location) };
+    return { ok: false, problem: unusableDirError(dir, err, location) };
   }
 
   if (
     !isInsideRoot(root, real) ||
     (created !== undefined && (created === root || !isInsideRoot(root, created)))
   ) {
-    return { ok: false, error: escapeError(dir, root, location) };
+    return { ok: false, problem: escapeError(dir, root, location) };
   }
 
   return created === undefined
@@ -259,7 +267,7 @@ export async function escapedDirectoryError(
   saveRoot: string,
   dir: string,
   location: string,
-): Promise<ToolError | undefined> {
+): Promise<Problem | undefined> {
   let root: string;
   try {
     root = await fs.realpath(saveRoot);
@@ -272,24 +280,33 @@ export async function escapedDirectoryError(
     : undefined;
 }
 
-export function escapeError(dir: string, root: string, location: string): ToolError {
-  return {
-    class: "input_domain",
-    location,
-    message: `${location} resolves outside the server's working directory: ${dir}`,
-    hint: `Files stay inside the directory the host started this server in (${root}). Pass a relative directory that stays inside it.`,
-    retryable: false,
-  };
+/** The refusal of a directory argument that leaves the working directory: `client.argument_invalid`. */
+export function escapeError(dir: string, root: string, location: string): Problem {
+  return buildProblem(
+    "client.argument_invalid",
+    { argument: location, reason: "outside_workspace" },
+    {
+      location: { field: location },
+      extra: {
+        message: `${location} resolves outside the server's working directory: ${dir} Files stay inside the directory the host started this server in (${root}). Pass a relative directory that stays inside it.`,
+      },
+    },
+  );
 }
 
-export function unusableDirError(dir: string, err: unknown, location: string): ToolError {
-  return {
-    class: "input_domain",
-    location,
-    message: `Could not use ${location} ${dir}: ${errorMessage(err)}`,
-    hint: "Check that the directory (or the path to create it) is writable and not a file.",
-    retryable: false,
-  };
+/** A directory argument that cannot be created or used: `client.write_failed`, naming why by its system code. */
+export function unusableDirError(dir: string, err: unknown, location: string): Problem {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return buildProblem(
+    "client.write_failed",
+    { path: dir, reason: typeof code === "string" ? code : "unusable" },
+    {
+      location: { field: location },
+      extra: {
+        message: `Could not use ${location} ${dir}: ${errorMessage(err)} Check that the directory (or the path to create it) is writable and not a file.`,
+      },
+    },
+  );
 }
 
 // ENOENT: the path (or a component) does not exist. ENOTDIR: a component that

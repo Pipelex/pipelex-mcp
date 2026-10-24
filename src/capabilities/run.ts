@@ -1,15 +1,11 @@
-import {
-  collectArtifacts,
-  isTerminalRunStatus,
-  runMayHaveStartedOf,
-  summarizeUsage,
-} from "@pipelex/sdk";
+import { buildProblem, collectArtifacts, isTerminalRunStatus, summarizeUsage } from "@pipelex/sdk";
 import type {
   GetRunResultOptions,
   MethodProvenance,
   PipelexRunResultStart,
   PipelexStartOptions,
   PipeUsageSummary,
+  Problem,
   RunProgress,
   RunRead,
   RunResultArtifact,
@@ -38,56 +34,37 @@ import type { MethodVersionsAware, RunContentReport, SelectorPlan } from "./meth
 import {
   MAX_IMAGE_CANDIDATE_ENTRIES,
   METHOD_REF_GRAMMAR,
+  argumentProblem,
   buildApiConfig,
-  classifyError,
   createPipelexApiClient,
+  faultsProblem,
   filesSentSchema,
   imageCandidatesOf,
   inputsPathSchema,
   methodDirInputSchema,
   methodFilesInputSchema,
+  problemOf,
+  problemSchema,
+  problemSummary,
   resolveInputsSource,
   resolveMethodSource,
-  summaryForToolError,
-  toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
   validateRunIdRequest,
   withFilesSent,
   failedBeforeSending,
-  inlineTreeWeight,
-  treeShareOfTooLarge,
   markUnsent,
 } from "./shared.js";
 import type {
   ApiConfig,
-  AuthErrorTexture,
-  BaseUrlSourceTexture,
-  ClassifyErrorOptions,
-  ErrorSummaries,
+  ApiNotes,
   FileResolver,
   MethodTreeToSend,
   SubmittedFileInput,
-  ToolError,
-  TreeShareOfTooLarge,
 } from "./shared.js";
 import { methodTreeLimitsOf } from "./tree-limits.js";
 import type { TreeLimitsAware } from "./tree-limits.js";
-import {
-  START_MAY_HAVE_RUN_HINT,
-  START_MAY_HAVE_RUN_SUMMARY,
-  startMayHaveRunError,
-} from "./start-outcome.js";
-import {
-  boundedFailureText,
-  FAILURE_MESSAGE_MAX_CODE_POINTS,
-  failureSummaryLines,
-  isCallerFacing,
-  quotesReportMessage,
-  runFailureOf,
-  statusOnlyFailureMessage,
-} from "./run-failure.js";
-import type { RunFailure } from "./run-failure.js";
+import { runErrorOf, runErrorSchema, runErrorSummary } from "./run-failure.js";
 import {
   progressParagraph,
   progressReportsStuck,
@@ -205,67 +182,15 @@ export const mthdsRunOutputSchema = z.object({
     .describe(
       'Renderable views available for this result. Contains "live_run_status" when a live-following status card is available; empty otherwise.',
     ),
-  errors: z.array(toolErrorSchema).optional(),
+  problem: problemSchema
+    .optional()
+    .describe(
+      "Present with status error: why the run was not started, and what to do. A retry of outcome_unknown means the start may have created a run: look for it before starting another, which would spend credit again.",
+    ),
 });
 
-/**
- * Why a run failed, from the error report the runner stored on it: the
- * `failure` member of every failed arm in the run family (the status tool on a
- * terminal status other than COMPLETED, and the results, image and download
- * tools' `failed` state). Present only when the run stored a report; its fields
- * are each present only when the report carried them, and `message` only when
- * the report flags it caller-facing (see `run-failure.ts`). The provider's
- * metadata is left out.
- */
-export const runFailureSchema = z.object({
-  run_id: z.string(),
-  error_type: z
-    .string()
-    .optional()
-    .describe("The runner's exception class name, for the support line; never match on it."),
-  title: z.string().optional().describe("The stable human label of the error class."),
-  message: z
-    .string()
-    .optional()
-    .describe(
-      "What went wrong, worded for the caller. Present only when the report wrote it as caller-facing copy; without it, tell the user the title and the next step, and give Pipelex support the run id.",
-    ),
-  error_domain: z
-    .string()
-    .optional()
-    .describe(
-      'Who can fix it: "input" (the caller\'s method or inputs), "config" (a configuration change), "runtime" (nobody beforehand).',
-    ),
-  error_category: z
-    .string()
-    .optional()
-    .describe("The finer class of an inference failure (transient, configuration, content, …)."),
-  retryable: z
-    .boolean()
-    .optional()
-    .describe(
-      "Whether running it again unchanged can succeed, as the report states it. Absent: the report does not say, which is not false.",
-    ),
-  user_action: z
-    .object({
-      kind: z
-        .string()
-        .describe(
-          "wait_and_retry, change_input, change_model, check_billing, check_credentials, contact_support or unknown.",
-        ),
-      detail: z
-        .string()
-        .describe(
-          "The advice in words. A wait_and_retry kind carries this server's own sentence, since the runner's is worded for a run still retrying.",
-        ),
-    })
-    .optional()
-    .describe("The next step the report advises."),
-  finished_at: z.string().optional().describe("When the run ended."),
-});
-
-const FAILURE_FIELD_DESCRIPTION =
-  "Present when the run stored an error report: why it failed, what to do next, whether running it again can help, and what to give support.";
+const RUN_ERROR_FIELD_DESCRIPTION =
+  "Present when the run stored the problem it ended with: why it did not succeed, who must act, whether running it again can succeed, and what to do next.";
 
 const runStatusStructuredContentSchema = z.object({
   status: z.enum(["ok", "error"]),
@@ -292,9 +217,9 @@ const runStatusStructuredContentSchema = z.object({
     .describe(
       'Runs of a saved method by its id: the version that ran, or "draft". Absent for a run of files or of an address, and on a platform that does not record it.',
     ),
-  failure: runFailureSchema
+  error: runErrorSchema
     .optional()
-    .describe(`Terminal statuses other than COMPLETED only. ${FAILURE_FIELD_DESCRIPTION}`),
+    .describe(`Terminal statuses other than COMPLETED only. ${RUN_ERROR_FIELD_DESCRIPTION}`),
   progress: runProgressSchema
     .optional()
     .describe(
@@ -305,7 +230,9 @@ const runStatusStructuredContentSchema = z.object({
     .int()
     .optional()
     .describe("How many of the snapshot's invocations progress.invocations leaves out."),
-  errors: z.array(toolErrorSchema).optional(),
+  problem: problemSchema
+    .optional()
+    .describe("Present with status error: why the status could not be read, and what to do."),
 });
 
 export const mthdsRunStatusOutputSchema = runStatusStructuredContentSchema;
@@ -364,13 +291,9 @@ export const mthdsRunResultsOutputSchema = z.object({
   run_status: runStatusSchema
     .optional()
     .describe('State "failed" only — the terminal lifecycle status.'),
-  failure_message: z
-    .string()
+  run_error: runErrorSchema
     .optional()
-    .describe('State "failed" only — the platform\'s one-sentence account of the ending.'),
-  failure: runFailureSchema
-    .optional()
-    .describe(`State "failed" only. ${FAILURE_FIELD_DESCRIPTION}`),
+    .describe(`State "failed" only. ${RUN_ERROR_FIELD_DESCRIPTION}`),
   main_stuff: z
     .unknown()
     .optional()
@@ -403,7 +326,9 @@ export const mthdsRunResultsOutputSchema = z.object({
     .describe(
       'Renderable views available for this result. Contains "run_graph" when the executed method graph is available to display; empty otherwise.',
     ),
-  errors: z.array(toolErrorSchema).optional(),
+  problem: problemSchema
+    .optional()
+    .describe("Present with status error: why the results could not be read, and what to do."),
 });
 
 export interface MthdsRunInput {
@@ -445,7 +370,8 @@ export interface RunStartStructuredContent {
   /** Runs of a method folder only: every file read from it and sent. */
   files_sent?: string[];
   available_view_specs: RunViewSpec[];
-  errors?: ToolError[];
+  /** Status "error" only: why the run was not started. */
+  problem?: Problem;
 }
 
 export interface RunStatusStructuredContent {
@@ -459,13 +385,14 @@ export interface RunStatusStructuredContent {
   finished_at?: string | null;
   /** Runs of a saved method by id: the version that ran, or `"draft"`, when the platform records it. */
   method_version?: number | "draft";
-  /** Terminal statuses other than COMPLETED, when the run stored an error report. */
-  failure?: RunFailure;
+  /** Terminal statuses other than COMPLETED, when the run stored the problem it ended with. */
+  error?: Problem;
   /** The run's progress snapshot, when the progress read that follows the status read answered. */
   progress?: RunProgressProjection;
   /** How many of the snapshot's invocations `progress.invocations` leaves out; absent when none. */
   progress_invocations_omitted?: number;
-  errors?: ToolError[];
+  /** Status "error" only: why the status could not be read. */
+  problem?: Problem;
 }
 
 /** One `_meta.usage_by_pipe` row — a projection of the SDK's `PipeUsageSummary`. */
@@ -492,16 +419,16 @@ export interface RunResultsStructuredContent {
   state?: "running" | "completed" | "failed";
   retry_after_seconds?: number | null;
   run_status?: RunStatus;
-  failure_message?: string;
-  /** State "failed" only, when the run stored an error report. */
-  failure?: RunFailure;
+  /** State "failed" only, when the run stored the problem it ended with. */
+  run_error?: Problem;
   main_stuff?: unknown;
   truncated?: boolean;
   image_candidates?: string[];
   image_candidates_omitted?: number;
   usage?: RunUsage;
   available_view_specs: ResultsViewSpec[];
-  errors?: ToolError[];
+  /** Status "error" only: why the results could not be read. */
+  problem?: Problem;
 }
 
 export interface RunStartResult {
@@ -549,7 +476,7 @@ interface RunClient {
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   getRunProgress(runId: string, options?: { signal?: AbortSignal }): Promise<RunProgress>;
   getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
-  /** `GET /v1/version`, read only to word the hint of a refused suffix — a selector is always sent as given; optional on a test seam. */
+  /** `GET /v1/version`, read only to word the refusal of a version suffix — a selector is always sent as given; optional on a test seam. */
   version?(): Promise<unknown>;
 }
 
@@ -559,194 +486,16 @@ export interface RunContext extends ApiConfig, MethodVersionsAware, TreeLimitsAw
   resolver?: FileResolver;
   /** Reads `inputs_path` from disk (local workshop, `.json` only); without one `inputs_path` is refused. */
   inputsResolver?: FileResolver;
-  /** Deployment-specific auth-failure texture; default env-var wording when absent. */
-  authError?: AuthErrorTexture;
-  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
-  baseUrlSource?: BaseUrlSourceTexture;
+  /** Where the API key and the base URL came from, said beside a problem whose fix may be one of them. */
+  apiNotes?: ApiNotes;
 }
 
 export function buildRunContext(env = process.env): RunContext {
   return buildApiConfig(env);
 }
 
-// Live-checked (2026-07-15): the hosted /v1/start reports start-time
-// rejections — including an invalid bundle — as a generic 503 "Failed to
-// start pipeline", indistinguishable from real server trouble. Point the
-// agent at the recoverable cause first.
-const START_SERVER_ERROR = {
-  hint: "The hosted API reports start-time rejections (e.g. an invalid bundle or bad inputs) as a generic server error. Validate the bundle with mthds_validate and check the inputs against mthds_inputs_template; if both pass, the platform itself may be having trouble.",
-};
-
-/**
- * A start refused as too large, a `413`, carrying inputs, when the method's
- * tree is shown not to be what made it so: none was sent, or it travelled by
- * hash ({@link treeShareOfTooLarge}), so the inputs riding the same body did.
- * {@link runTooLargeTexture} picks it; it is never a route's static texture.
- */
-const RUN_INPUTS_TOO_LARGE = {
-  location: "inputs",
-  hint: `The run's request is larger than the Pipelex API takes in one request, and the method's files are not what made it so: its inputs did. Upload large file inputs with ${WORKSHOP_TOOL_NAMES.prepareInputs}, which replaces them with pipelex-storage:// references, or pass them as URLs.`,
-};
-
-/**
- * A start refused as too large when which part of it made it so cannot be
- * shown: a tree rode the request inline at a weight that may or may not have,
- * how it travelled cannot be told, or the start carried no inputs. It names
- * both possible causes and their cures, located at no field.
- */
-const RUN_TOO_LARGE_HINT = `The run's request is larger than the Pipelex API takes in one request, and which part of it made it so cannot be told from here: the method's files, when they travel inline, or the run's inputs. Keep what is not part of the method out of its folder with a .gitignore inside it or METHODS.toml's [package] exclude, or send fewer or smaller files; upload large file inputs with ${WORKSHOP_TOOL_NAMES.prepareInputs}, which replaces them with pipelex-storage:// references, or pass them as URLs.`;
-
-const RUN_TOO_LARGE = { hint: RUN_TOO_LARGE_HINT };
-
-/**
- * The texture of a `413` on a start, from what can be shown of its cause. The
- * inputs are blamed only when the start carried some and the tree is shown not
- * to have ridden the request (`share` is `not_tree`); a tree shown to have
- * made it so is read ahead of this, as the tree's (`treeRefusalTexture`).
- * Otherwise the refusal names both causes, and says what was measured here:
- * the tree's weight as it travels inline, which the SDK compares with its
- * inline threshold, and the inputs' as JSON.
- */
-function runTooLargeTexture(
-  share: TreeShareOfTooLarge | undefined,
-  request: ResolvedRunRequest,
-): NonNullable<ClassifyErrorOptions["tooLarge"]> {
-  const inputs = request.inputs ?? {};
-  const carriesInputs = Object.keys(inputs).length > 0;
-  if (share === "not_tree" && carriesInputs) return RUN_INPUTS_TOO_LARGE;
-  const measured: string[] = [];
-  if (request.tree !== undefined && share !== "not_tree") {
-    measured.push(`the method's files weigh ${formatSize(inlineTreeWeight(request.tree))} inline`);
-  }
-  if (!carriesInputs) {
-    measured.push("the run carries no inputs");
-  } else {
-    const weight = jsonWeight(inputs);
-    if (weight !== undefined) measured.push(`its inputs weigh ${formatSize(weight)} as JSON`);
-  }
-  return { hint: `${RUN_TOO_LARGE_HINT} Measured here, ${measured.join(", and ")}.` };
-}
-
-/** A value's weight as a request carries it: its JSON, in UTF-8 bytes, or `undefined` when it has none. */
-function jsonWeight(value: unknown): number | undefined {
-  try {
-    return Buffer.byteLength(JSON.stringify(value), "utf8");
-  } catch {
-    return undefined;
-  }
-}
-
-/** A size in the unit that reads best: KiB below a mebibyte, MiB above. */
-function formatSize(bytes: number): string {
-  return bytes < 1024 * 1024
-    ? `${(bytes / 1024).toFixed(1)} KiB`
-    : `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-}
-
-export const RUN_START_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/start",
-  methodLocation: "files",
-  badRequest: {
-    location: "files",
-    hint: "Check files, pipe_code, and inputs; validate the bundle with mthds_validate and fill the template from mthds_inputs_template first.",
-  },
-  tooLarge: RUN_TOO_LARGE,
-  serverError: START_SERVER_ERROR,
-};
-
-/**
- * Classify options for an id-only `/v1/start` request — the stored method is
- * the executed source, so both 400/422 and 404 locate at `method_id`. The
- * `notFound` override is safe on this route: a bare-runner missing-route 404
- * is intercepted earlier by the SDK as `RunLifecycleUnavailableError`, so any
- * `ApiResponseError` 404 that reaches classification is the platform's
- * structured unknown-method envelope.
- */
-export const RUN_START_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/start",
-  methodLocation: "method_id",
-  badRequest: {
-    location: "method_id",
-    hint: "The stored method may have no MTHDS source yet. If the error mentions organization context, the API key's org binding is the issue — mint a key in the right organization.",
-  },
-  notFound: {
-    location: "method_id",
-    hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.",
-  },
-  tooLarge: RUN_TOO_LARGE,
-  serverError: START_SERVER_ERROR,
-};
-
-/**
- * Classify options for a mixed `/v1/start` request (files + `method_id`): the
- * files are the executed source and the id rides only as run-history linkage,
- * so a 400/422 keeps the files-only texture — but a 404 is still about the
- * linkage id, so the by-id unknown-method arm is retained.
- */
-export const RUN_START_MIXED_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/start",
-  // The files are the executed source, so the execution-locus gate is about
-  // them and not the linkage id — the same split `badRequest` makes.
-  methodLocation: "files",
-  badRequest: RUN_START_ERROR_OPTIONS.badRequest,
-  notFound: RUN_START_BY_ID_ERROR_OPTIONS.notFound,
-  tooLarge: RUN_TOO_LARGE,
-  serverError: START_SERVER_ERROR,
-};
-
-/**
- * Classify options for an address-shaped `/v1/start` request. The runner's
- * `method_ref` failures keep their class names as distinct error types: a ref
- * that does not parse or fetch, or an ambiguous one, is a 422; no package
- * matching the address is a 404 (safe to locate at `method_ref` — a bare
- * runner's missing-route 404 was already intercepted as
- * `RunLifecycleUnavailableError`); the reserved registry form is a 501. All
- * are refused before anything executes, so no inference credit was spent.
- */
-export const RUN_START_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/start",
-  methodLocation: "method_ref",
-  badRequest: {
-    location: "method_ref",
-    hint: `Check the address and tag — ${METHOD_REF_GRAMMAR}. The tag must be a git tag on the repository (branches do not pin). If the address resolved, check pipe_code and the inputs against mthds_inputs_template.`,
-  },
-  notFound: {
-    location: "method_ref",
-    hint: "The repository was fetched but holds no package matching this address by manifest identity. Check the package selector against the repository's METHODS.toml manifests.",
-  },
-  notImplemented: {
-    location: "method_ref",
-    hint: `Only address-form refs are supported (${METHOD_REF_GRAMMAR}); registry references are reserved until a method registry exists.`,
-  },
-  tooLarge: RUN_TOO_LARGE,
-  serverError: START_SERVER_ERROR,
-};
-
-/**
- * What an unknown run id means to the caller. The workshop's operator is its
- * user, so the deployment the key points at is theirs to check, and so is the
- * key: runs are org-scoped, so a run another organization started, which is
- * what a key changed since the start (a login in between) sees, reads exactly
- * like a miss, as an unknown method id does.
- */
-const UNKNOWN_RUN_HINT = `No run with this id is known to the configured API. Check the run_id returned by ${WORKSHOP_TOOL_NAMES.run}, that PIPELEX_BASE_URL points at the deployment that started it, and that the API key in use belongs to the organization that started it: runs are org-scoped, so another organization's run reads exactly like a miss, as it does when the key changed since the run started, after a login for instance.`;
-
-const MALFORMED_RUN_ID_HINT = `Pass the run_id exactly as returned by ${WORKSHOP_TOOL_NAMES.run}.`;
-
-export const RUN_STATUS_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/runs/{id}/status",
-  badRequest: { location: "run_id", hint: MALFORMED_RUN_ID_HINT },
-  notFound: { location: "run_id", hint: UNKNOWN_RUN_HINT },
-};
-
-export const RUN_RESULTS_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/runs/{id}/results",
-  badRequest: { location: "run_id", hint: MALFORMED_RUN_ID_HINT },
-  notFound: { location: "run_id", hint: UNKNOWN_RUN_HINT },
-};
-
 /** Request-shape checks on the mthds_run input, after `{ path }` resolution. */
-export function validateRunRequest(input: ResolvedRunRequest): ToolError[] {
+export function validateRunRequest(input: ResolvedRunRequest): Problem[] {
   // The run rule: files + method_id is a legal pair (linkage), while
   // method_ref pairs with nothing — see SPEC.md → Method Selectors.
   const errors = validateMethodSelectorRequest(input.tree !== undefined, input, {
@@ -754,13 +503,14 @@ export function validateRunRequest(input: ResolvedRunRequest): ToolError[] {
   });
 
   if (input.pipe_code !== undefined && input.pipe_code.trim() === "") {
-    errors.push({
-      class: "input_domain",
-      location: "pipe_code",
-      message: "pipe_code must not be empty when supplied.",
-      hint: "Pass the code of a pipe defined in the submitted bundle, or omit pipe_code to run the bundle's main pipe.",
-      retryable: false,
-    });
+    errors.push(
+      argumentProblem(
+        "pipe_code",
+        "empty",
+        "pipe_code must not be empty when supplied.",
+        "Pass the code of a pipe defined in the submitted bundle, or omit pipe_code to run the bundle's main pipe.",
+      ),
+    );
   }
 
   return errors;
@@ -1016,19 +766,17 @@ export function startResult(
  * Project a self-healing status read, with the progress snapshot read after it
  * when that read answered. A terminal non-COMPLETED status is a produced
  * verdict, and it carries why the run ended: the status read is where the
- * platform serves the run's stored error report (`RunRead.error`), so the
- * `failure` object and the summary's sentences come from it. A read whose report
- * is `null` or malformed carries the status alone, and the summary says so. The
- * snapshot, when there is one the projection can read, rides as `progress` and
- * its summary as a paragraph of its own right after the status (see
- * `run-progress.ts`).
+ * platform serves the run's own problem (`RunRead.error`), so the `error`
+ * member and the summary's account come from it (`run-failure.ts`). A read
+ * whose problem is `null` or no problem document carries the status alone, and
+ * the summary says so. The snapshot, when there is one the projection can
+ * read, rides as `progress` and its summary as a paragraph of its own right
+ * after the status (see `run-progress.ts`).
  */
 export function statusResult(read: RunRead, snapshot?: RunProgress): RunStatusResult {
   const isTerminal = isTerminalRunStatus(read.status);
   const ended = isTerminal && read.status !== "COMPLETED";
-  const failure = ended
-    ? runFailureOf(read.pipeline_run_id, read.error, read.finished_at)
-    : undefined;
+  const runError = ended ? runErrorOf(read.error) : undefined;
   const projected = snapshot === undefined ? undefined : runProgressOf(snapshot);
   const progress = projected?.progress;
   // A hosted extension, narrowed rather than trusted like the ack's.
@@ -1052,20 +800,20 @@ export function statusResult(read: RunRead, snapshot?: RunProgress): RunStatusRe
     created_at: read.created_at,
     ...(read.finished_at === undefined ? {} : { finished_at: read.finished_at }),
     ...(methodVersion === undefined ? {} : { method_version: methodVersion }),
-    ...(failure === undefined ? {} : { failure }),
+    ...(runError === undefined ? {} : { error: runError }),
     ...(progress === undefined ? {} : { progress }),
     ...(projected === undefined || projected.omitted === 0
       ? {}
       : { progress_invocations_omitted: projected.omitted }),
   };
 
-  return { structuredContent, summary: statusSummary(read, isTerminal, failure, progress) };
+  return { structuredContent, summary: statusSummary(read, isTerminal, runError, progress) };
 }
 
 function statusSummary(
   read: RunRead,
   isTerminal: boolean,
-  failure: RunFailure | undefined,
+  runError: Problem | undefined,
   progress: RunProgressProjection | undefined,
 ): string {
   const lines: string[] = [];
@@ -1074,9 +822,7 @@ function statusSummary(
     lines.push(
       read.status === "COMPLETED"
         ? `Run \`${read.pipeline_run_id}\` is COMPLETED. Fetch the output with \`${WORKSHOP_TOOL_NAMES.runResults}\`.`
-        : failureSummaryLines(read.pipeline_run_id, read.status, failure, read.finished_at).join(
-            "\n",
-          ),
+        : runErrorSummary(read.pipeline_run_id, read.status, runError, read.finished_at),
     );
   } else {
     const seconds = read.retry_after_seconds ?? DEFAULT_RETRY_SECONDS;
@@ -1295,20 +1041,19 @@ function saveNote(storedFiles: number, truncated: boolean): string | undefined {
 
 function failedResult(state: FailedRunState, failedRead: RunRead | undefined): RunResultsResult {
   const runId = state.pipeline_run_id;
-  const failure = failureOfFailedArm(state, failedRead);
+  const runError = runErrorOfFailedArm(state, failedRead);
   return {
     structuredContent: {
       status: "ok",
       run_id: runId,
       state: "failed",
       run_status: state.status,
-      failure_message: failureMessageOf(state),
-      ...(failure === undefined ? {} : { failure }),
+      ...(runError === undefined ? {} : { run_error: runError }),
       available_view_specs: [],
     },
     summary: [
       "# Run failed",
-      failedArmSummaryLines(state, failure, failedRead).join("\n"),
+      failedArmSummary(state, runError, failedRead),
       "No graph is available for failed runs.",
     ].join("\n\n"),
   };
@@ -1318,67 +1063,39 @@ function failedResult(state: FailedRunState, failedRead: RunRead | undefined): R
 export type FailedRunState = Extract<RunResultState, { state: "failed" }>;
 
 /**
- * The failed arm's `message`, the platform's account of the ending, as the model
- * may read it. Once the platform relays the report on the `409`, the account
- * quotes the served report's message after the status (`Run finished with
- * status FAILED: …`), so with a report it is kept, bounded like the report's own
- * message, only when that report is flagged caller-facing. Otherwise it is the
- * sentence the platform gives for a report with no message, since what it would
- * quote is the strict disclosure's placeholder or, on a verbose deployment, text
- * written for engineers.
- *
- * An arm with no report is decided by its wording. In the quoting form it takes
- * the status-only sentence too, since the report it quotes did not arrive with
- * it, dropped by the SDK's check or never sent, and nothing vouches for the
- * message. In any other it is kept: it
- * is the platform's own copy, the status-only sentence or the account the route
- * gives for a stored result it refuses to read, which the SDK reads as `FAILED`
- * though the run may have completed, so the status-only sentence would misstate
- * it.
+ * Why a run whose results read came back failed did not succeed: its own
+ * problem as the failed arm carries it, the `run_error` the `409`'s `run.failed`
+ * nests, or, when the arm carries none, the one the status read that followed
+ * it served. The status read has served the run's problem longer than the
+ * results route has nested it, so a failed arm with none is not yet evidence
+ * that the run has none. The `run.failed` problem itself is not carried: it
+ * says only that the run did not succeed, which `state` and `run_status`
+ * already say.
  */
-export function failureMessageOf(state: FailedRunState): string {
-  const quotesUnvouched =
-    state.error === null ? quotesReportMessage(state.message) : !isCallerFacing(state.error);
-  if (quotesUnvouched) return statusOnlyFailureMessage(state.status);
-  return boundedFailureText(state.message, FAILURE_MESSAGE_MAX_CODE_POINTS);
+export function runErrorOfFailedArm(
+  state: FailedRunState,
+  failedRead: RunRead | undefined,
+): Problem | undefined {
+  return runErrorOf(state.error) ?? runErrorOf(failedRead?.error);
 }
 
 /**
- * Why a run whose results read came back failed ended: the `failure` object
- * built from the report the failed arm carries, or, when it carries none, from
- * the one the status read that followed it served. The results route relays the
- * run's stored report only from the platform release that added it to its
- * `409`, while the status read has always served it, so a failed arm with no
- * report is not yet evidence that the run has none. The time the run ended comes
- * from the status read alone, since the failed arm does not carry it.
+ * The model's account of a failed results arm, from {@link runErrorOfFailedArm}'s
+ * problem, as Markdown. When there is none and the status read that should
+ * have followed failed, the problem is said to be unknown rather than missing,
+ * since the arm alone cannot tell a run that stored none from a platform that
+ * does not relay it. The time the run ended comes from the status read alone,
+ * since the failed arm does not carry it.
  */
-export function failureOfFailedArm(
+export function failedArmSummary(
   state: FailedRunState,
+  runError: Problem | undefined,
   failedRead: RunRead | undefined,
-): RunFailure | undefined {
-  const finishedAt = failedRead?.finished_at;
-  return (
-    runFailureOf(state.pipeline_run_id, state.error, finishedAt) ??
-    runFailureOf(state.pipeline_run_id, failedRead?.error, finishedAt)
-  );
-}
-
-/**
- * The model's account of a failed results arm, from {@link failureOfFailedArm}'s
- * `failure`. When there is none and the status read that should have followed
- * failed, the report is said to be unknown rather than missing, since the arm
- * alone cannot tell a run that stored no report from a platform that does not
- * relay it.
- */
-export function failedArmSummaryLines(
-  state: FailedRunState,
-  failure: RunFailure | undefined,
-  failedRead: RunRead | undefined,
-): string[] {
-  return failureSummaryLines(
+): string {
+  return runErrorSummary(
     state.pipeline_run_id,
     state.status,
-    failure,
+    runError,
     failedRead?.finished_at,
     failedRead !== undefined,
   );
@@ -1393,7 +1110,7 @@ export const FAILED_RUN_READ_TIMEOUT_MS = 5_000;
 
 /**
  * The one status read that follows a failed results arm, for the time the run
- * ended and for the report when the arm carried none. Best effort: a read that
+ * ended and for the run's problem when the arm carried none. Best effort: a read that
  * fails, or takes longer than `timeoutMs`, leaves the failure to what the arm
  * itself carried, since the arm is already a verdict and a second request must
  * never turn it into an error or hold it back. The deadline both aborts the
@@ -1476,9 +1193,9 @@ export async function startMthdsRun(
   const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
     required: false,
   });
-  const resolutionErrors = [...resolution.errors, ...inputsResolution.errors];
-  if (resolutionErrors.length > 0) {
-    return startErrorResult("Run was not started: request input is invalid.", resolutionErrors);
+  const resolutionFaults = [...resolution.faults, ...inputsResolution.faults];
+  if (resolutionFaults.length > 0) {
+    return startErrorResult(faultsProblem(resolutionFaults), context);
   }
 
   // `inputs_path` is settled into `inputs` here and goes no further: the start
@@ -1495,44 +1212,38 @@ export async function startMthdsRun(
     ...(resolution.tree === undefined ? {} : { tree: resolution.tree }),
     ...(inputsResolution.inputs === undefined ? {} : { inputs: inputsResolution.inputs }),
   };
-  const inputErrors = validateRunRequest(request);
-  if (inputErrors.length > 0) {
-    return startErrorResult("Run was not started: request input is invalid.", inputErrors);
+  const inputFaults = validateRunRequest(request);
+  if (inputFaults.length > 0) {
+    return startErrorResult(faultsProblem(inputFaults), context);
   }
-
-  // Options follow the executed source: an address gets the by-ref texture;
-  // id-only gets the full by-id texture; mixed (files + id) keeps the files
-  // 400/422 texture but retains the by-id unknown-method 404; files-only
-  // keeps today's options.
-  const classifyOptions =
-    request.method_ref !== undefined
-      ? RUN_START_BY_REF_ERROR_OPTIONS
-      : request.method_id === undefined
-        ? RUN_START_ERROR_OPTIONS
-        : request.tree === undefined
-          ? RUN_START_BY_ID_ERROR_OPTIONS
-          : RUN_START_MIXED_ERROR_OPTIONS;
 
   // Beside files, method_id is linkage only and must be bare; alone, it names
   // what runs, and its selector is planned against the platform's answer
   // (`method-versions.ts`).
   if (request.method_id !== undefined && request.tree !== undefined) {
-    const linkageError = linkageSuffixError(
+    const linkageFault = linkageSuffixError(
       request.method_id,
       input.method_dir === undefined ? "files" : "method_dir",
     );
-    if (linkageError !== undefined) {
-      return startErrorResult("Run was not started: request input is invalid.", [linkageError]);
+    if (linkageFault !== undefined) {
+      return startErrorResult(linkageFault, context);
     }
   }
 
-  return withFilesSent(await requestRunStart(request, classifyOptions, context), request.tree);
+  return withFilesSent(await requestRunStart(request, context), request.tree);
 }
 
-/** One `POST /v1/start` for a request that passed its checks, and its acknowledgement's projection. */
+/**
+ * One `POST /v1/start` for a request that passed its checks, and its
+ * acknowledgement's projection. A failed start is the SDK's problem, relayed
+ * with its code, domain and retry verdict: a start that may have created a run
+ * is `client.outcome_unknown`, whose `retry` is `outcome_unknown` and whose
+ * step is to read the run history, since this client sends no idempotency key
+ * and starting it again could start, and bill, a second run. The summary reads
+ * that `retry` ({@link startErrorResult}).
+ */
 async function requestRunStart(
   request: ResolvedRunRequest,
-  classifyOptions: ClassifyErrorOptions,
   context: RunContext,
 ): Promise<RunStartResult> {
   let plan: SelectorPlan | undefined;
@@ -1557,52 +1268,12 @@ async function requestRunStart(
     else if (content.disproved) forgetMethodVersionsSupported(methodVersionsOf(context));
     return startResult(ack, content);
   } catch (err) {
-    // What the tree had to do with a 413, asked once: a tree shown to have
-    // made the start too large is the tree's refusal, and only a tree shown
-    // not to have ridden it lets the inputs take the blame.
-    const share = await treeShareOfTooLarge(err, request.tree, client);
-    const classified = classifyStartError(err, {
-      ...classifyOptions,
-      ...(share === undefined ? {} : { tooLarge: runTooLargeTexture(share, request) }),
-      auth: context.authError,
-      baseUrlSource: context.baseUrlSource,
-      methodTree: request.tree !== undefined,
-      treeInline: share === "tree",
-    });
-    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
-    const failed = startErrorResult(startSummaryForError(error), [error]);
+    const problem = await selectorFailure(problemOf(err), plan, methodVersionsOf(context));
+    const failed = startErrorResult(problem, context);
     // A client that could not be built, or an argument refused before
     // sending, sent no file of the tree.
     return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
   }
-}
-
-/**
- * Classify a failed start, refusing a retry when the run may exist. A start
- * creates a durable run that spends inference credit, and this client sends no
- * idempotency key, so retrying after a lost acknowledgement would start a second
- * run.
- *
- * Whether the run may exist is the SDK's reading (`runMayHaveStartedOf`, the
- * `runMayHaveStarted` every error of a `start` carries since `@pipelex/sdk`
- * 0.39.0), not this server's: a transport failure that does not prove nothing
- * was sent, a `2xx` the SDK could not read (the acknowledgement of a start the
- * server accepted), a `408` a proxy may answer for a request it forwarded, and
- * every `5xx` but a `501` and the platform's `503` coded
- * `pipeline_start_unavailable`, a start it refused before reaching the runner.
- * The SDK already makes such an error not retryable; this arm puts the hint and
- * the headline on it, telling the caller to look for the run before starting
- * another, which the route's server-error texture would not.
- */
-export function classifyStartError(err: unknown, options: ClassifyErrorOptions): ToolError {
-  const error = classifyError(err, options);
-  if (!runMayHaveStartedOf(err)) return error;
-  // The hint is replaced whole, on purpose, dropping whatever `classifyError`
-  // wrote, the base URL's source sentence of an unreachable start included:
-  // `startMayHaveRunError` recognises this case by the hint's exact text, so
-  // nothing may be appended to it, and checking for a second run matters
-  // more here than where the base URL was set.
-  return { ...error, retryable: false, hint: START_MAY_HAVE_RUN_HINT };
 }
 
 /**
@@ -1615,9 +1286,9 @@ export async function getMthdsRunStatus(
   input: RunIdInput,
   context: RunContext = buildRunContext(),
 ): Promise<RunStatusResult> {
-  const inputErrors = validateRunIdRequest(input.run_id);
-  if (inputErrors.length > 0) {
-    return statusErrorResult("Run status was not read: request input is invalid.", inputErrors);
+  const inputFaults = validateRunIdRequest(input.run_id);
+  if (inputFaults.length > 0) {
+    return statusErrorResult(faultsProblem(inputFaults), context);
   }
 
   try {
@@ -1626,12 +1297,7 @@ export async function getMthdsRunStatus(
     const progress = await readRunProgress(client, read.pipeline_run_id);
     return statusResult(read, progress);
   } catch (err) {
-    const error = classifyError(err, {
-      ...RUN_STATUS_ERROR_OPTIONS,
-      auth: context.authError,
-      baseUrlSource: context.baseUrlSource,
-    });
-    return statusErrorResult(statusSummaryForError(error), [error]);
+    return statusErrorResult(problemOf(err), context);
   }
 }
 
@@ -1649,9 +1315,9 @@ export async function getMthdsRunResults(
   input: RunIdInput,
   context: RunContext = buildRunContext(),
 ): Promise<RunResultsResult> {
-  const inputErrors = validateRunIdRequest(input.run_id);
-  if (inputErrors.length > 0) {
-    return resultsErrorResult("Run results were not read: request input is invalid.", inputErrors);
+  const inputFaults = validateRunIdRequest(input.run_id);
+  if (inputFaults.length > 0) {
+    return resultsErrorResult(faultsProblem(inputFaults), context);
   }
 
   let state: RunResultState;
@@ -1660,12 +1326,7 @@ export async function getMthdsRunResults(
       artifacts: RUN_RESULTS_ARTIFACTS,
     });
   } catch (err) {
-    const error = classifyError(err, {
-      ...RUN_RESULTS_ERROR_OPTIONS,
-      auth: context.authError,
-      baseUrlSource: context.baseUrlSource,
-    });
-    return resultsErrorResult(resultsSummaryForError(error), [error]);
+    return resultsErrorResult(problemOf(err), context);
   }
   const failedRead =
     state.state === "failed"
@@ -1673,22 +1334,24 @@ export async function getMthdsRunResults(
       : undefined;
 
   // The API responded; projecting it must not be reported as an unreachable
-  // API. A malformed report (a completed result missing main_stuff) is a
-  // reachable contract violation, surfaced as a runtime no-verdict error.
+  // API. A completed result missing main_stuff is an answer the workshop
+  // cannot read, `client.response_unreadable` of the 200 it came on, naming
+  // the run.
   try {
     return resultsResult(state, failedRead);
   } catch (err) {
     return resultsErrorResult(
-      "Run results produced no verdict: the Pipelex API returned a malformed report.",
-      [
+      buildProblem(
+        "client.response_unreadable",
+        { status: 200 },
         {
-          class: "runtime",
-          message:
-            err instanceof Error ? err.message : "The Pipelex API returned a malformed run result.",
-          hint: "The API responded but its report was missing required fields; inspect the run on the platform.",
-          retryable: false,
+          pipeline_run_id: state.pipeline_run_id,
+          extra: {
+            message: err instanceof Error && err.message !== "" ? err.message : undefined,
+          },
         },
-      ],
+      ),
+      context,
     );
   }
 }
@@ -1717,69 +1380,36 @@ function toStartOptions(input: ResolvedRunRequest): PipelexStartOptions {
   };
 }
 
-const START_ERROR_SUMMARIES: ErrorSummaries = {
-  config: "Run could not start: the Pipelex API is unreachable or misconfigured.",
-  input_domain: "Run was not started: the Pipelex API rejected the request.",
-  runtime: "Run could not be started: the Pipelex API returned an error.",
-  paywall: "Run could not start: the organization's Pipelex plan does not cover this call.",
-  auth: "Run could not start: the Pipelex API key is missing or was refused.",
-  role: "Run could not start: your role in this organization does not allow this.",
-};
+/**
+ * The line a failed start's summary opens with when the start may have
+ * created a run, chosen by the problem's `retry` alone, `outcome_unknown`,
+ * never by its wording. The problem's own rendering follows it; this line says
+ * first what a repeat would cost, so that a host showing only the opening line
+ * does not invite a second paid run.
+ */
+const START_OUTCOME_UNKNOWN_LINE =
+  "Run may have started: the start failed after its request may have reached the Pipelex API, so look for the run before starting it again, which would spend credit a second time.";
 
-const STATUS_ERROR_SUMMARIES: ErrorSummaries = {
-  config: "Run status could not be read: the Pipelex API is unreachable or misconfigured.",
-  input_domain: "Run status was not read: the Pipelex API rejected the request.",
-  runtime: "Run status could not be read: the Pipelex API returned an error.",
-  paywall:
-    "Run status could not be read: the organization's Pipelex plan does not cover this call.",
-  auth: "Run status could not be read: the Pipelex API key is missing or was refused.",
-  role: "Run status could not be read: your role in this organization does not allow this.",
-};
-
-const RESULTS_ERROR_SUMMARIES: ErrorSummaries = {
-  config: "Run results could not be read: the Pipelex API is unreachable or misconfigured.",
-  input_domain: "Run results were not read: the Pipelex API rejected the request.",
-  runtime: "Run results could not be read: the Pipelex API returned an error.",
-  paywall:
-    "Run results could not be read: the organization's Pipelex plan does not cover this call.",
-  auth: "Run results could not be read: the Pipelex API key is missing or was refused.",
-  role: "Run results could not be read: your role in this organization does not allow this.",
-};
-
-function startSummaryForError(error: ToolError): string {
-  // A may-have-run start keeps its class for machine consumers, but its headline
-  // is the one line some hosts show the agent, and "could not be started" would
-  // invite the second paid run the hint warns against.
-  if (startMayHaveRunError(error)) return START_MAY_HAVE_RUN_SUMMARY;
-  return summaryForToolError(error, START_ERROR_SUMMARIES);
-}
-
-function statusSummaryForError(error: ToolError): string {
-  return summaryForToolError(error, STATUS_ERROR_SUMMARIES);
-}
-
-function resultsSummaryForError(error: ToolError): string {
-  return summaryForToolError(error, RESULTS_ERROR_SUMMARIES);
-}
-
-function startErrorResult(summary: string, errors: ToolError[]): RunStartResult {
+function startErrorResult(problem: Problem, context: RunContext): RunStartResult {
+  const summary = problemSummary(problem, context.apiNotes);
   return {
-    structuredContent: { status: "error", available_view_specs: [], errors },
-    summary,
+    structuredContent: { status: "error", available_view_specs: [], problem },
+    summary:
+      problem.retry === "outcome_unknown" ? `${START_OUTCOME_UNKNOWN_LINE}\n\n${summary}` : summary,
   };
 }
 
-function statusErrorResult(summary: string, errors: ToolError[]): RunStatusResult {
+function statusErrorResult(problem: Problem, context: RunContext): RunStatusResult {
   return {
-    structuredContent: { status: "error", errors },
-    summary,
+    structuredContent: { status: "error", problem },
+    summary: problemSummary(problem, context.apiNotes),
   };
 }
 
-function resultsErrorResult(summary: string, errors: ToolError[]): RunResultsResult {
+function resultsErrorResult(problem: Problem, context: RunContext): RunResultsResult {
   return {
-    structuredContent: { status: "error", available_view_specs: [], errors },
-    summary,
+    structuredContent: { status: "error", available_view_specs: [], problem },
+    summary: problemSummary(problem, context.apiNotes),
   };
 }
 
@@ -1788,11 +1418,7 @@ function resultsErrorResult(summary: string, errors: ToolError[]): RunResultsRes
 export function runToolResult(result: RunStartResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(
-      result.summary,
-      result.structuredContent.errors,
-      result.structuredContent.files_sent,
-    ),
+    content: toolResultContent(result.summary, result.structuredContent.files_sent),
     isError: result.structuredContent.status === "error",
   };
 }
@@ -1800,7 +1426,7 @@ export function runToolResult(result: RunStartResult) {
 export function runStatusToolResult(result: RunStatusResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(result.summary, result.structuredContent.errors),
+    content: toolResultContent(result.summary),
     isError: result.structuredContent.status === "error",
   };
 }
@@ -1808,7 +1434,7 @@ export function runStatusToolResult(result: RunStatusResult) {
 export function runResultsToolResult(result: RunResultsResult) {
   return {
     structuredContent: result.structuredContent,
-    content: toolResultContent(result.summary, result.structuredContent.errors),
+    content: toolResultContent(result.summary),
     isError: result.structuredContent.status === "error",
     // Response-metadata channel (the mthds_validate convention): the FULL
     // unbounded main output, the FULL per-call token-usage list, and the

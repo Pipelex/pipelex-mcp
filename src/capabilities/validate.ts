@@ -1,4 +1,4 @@
-import { FIELD_KINDS } from "@pipelex/sdk";
+import { FIELD_KINDS, buildProblem } from "@pipelex/sdk";
 import type {
   FieldKind,
   IOMultiplicity,
@@ -27,32 +27,31 @@ import {
   asRecord,
   blueprintMainPipeRefOf,
   buildApiConfig,
-  classifyError,
   createPipelexApiClient,
+  faultsProblem,
   filesSentSchema,
   methodDirInputSchema,
   methodFilesInputSchema,
+  problemItemSchema,
+  problemOf,
+  problemSchema,
+  problemSummary,
   resolveMethodSource,
-  summaryForToolError,
-  toolErrorSchema,
   toolResultContent,
   validateMethodSelectorRequest,
   withFilesSent,
   failedBeforeSending,
   isExecutionLocusRefusal,
-  treeSentInlineHeavy,
   markUnsent,
 } from "./shared.js";
 import type {
   ApiConfig,
-  AuthErrorTexture,
-  BaseUrlSourceTexture,
-  ClassifyErrorOptions,
-  ErrorSummaries,
+  ApiNotes,
   FileResolver,
   MethodTreeToSend,
+  Problem,
+  ProblemItem,
   SubmittedFileInput,
-  ToolError,
 } from "./shared.js";
 import { methodTreeLimitsOf } from "./tree-limits.js";
 import type { TreeLimitsAware } from "./tree-limits.js";
@@ -242,9 +241,9 @@ const validationStructuredContentSchema = z.object({
         .string()
         .describe("Where the page is, or would have been, relative to the working directory."),
       written: z.boolean().describe("Whether this call wrote the page."),
-      error: toolErrorSchema
+      error: problemSchema
         .optional()
-        .describe("Why the page was not written. It never changes the verdict."),
+        .describe("Why the page was not written, as a problem. It never changes the verdict."),
     })
     .optional()
     .describe(
@@ -253,13 +252,20 @@ const validationStructuredContentSchema = z.object({
   method_version: methodVersionReportSchema,
   files_sent: filesSentSchema,
   warnings: z
-    .array(z.unknown())
+    .array(problemItemSchema)
     .optional()
     .describe(
-      "A valid verdict's advisory findings, which never change is_valid; absent when there are none. A template_check_warning item is a finding of a PipeDocGen step's template check in the template file it was sent, such as a field that matches no input: it carries pipe_code, template_file (the file as the step names it) and template_location (the place in the file, in the engine's words), each null when unknown.",
+      "A valid verdict's advisory findings, one problem item each, which never change is_valid; absent when there are none. A finding of a PipeDocGen step's template check, such as a field that matches no input, is a pipelex.docgen.template_warning item naming the template and the finding, located at its pipe.",
     ),
-  validation_errors: z.array(z.unknown()).optional(),
-  errors: z.array(toolErrorSchema).optional(),
+  errors: z
+    .array(problemItemSchema)
+    .optional()
+    .describe(
+      "An invalid verdict's faults, one problem item each, with its own code, detail and location, and a suggested_fix when the API has one; absent on a valid verdict.",
+    ),
+  problem: problemSchema
+    .optional()
+    .describe("Why no verdict could be produced; present exactly when status is error."),
 });
 
 export const mthdsValidateOutputSchema = validationStructuredContentSchema;
@@ -328,17 +334,19 @@ export interface ValidationStructuredContent {
   method_version?: MethodVersionReport;
   /** Validations of a tree, from `method_dir` or `files`: every file sent. */
   files_sent?: string[];
-  /** A valid verdict's advisory findings, relayed as the API sent them; absent when empty. */
-  warnings?: unknown[];
-  validation_errors?: unknown[];
-  errors?: ToolError[];
+  /** A valid verdict's advisory findings, the API's problem items as it sent them; absent when empty. */
+  warnings?: ProblemItem[];
+  /** An invalid verdict's faults, the API's problem items as it sent them. */
+  errors?: ProblemItem[];
+  /** The one problem of a call that produced no verdict. */
+  problem?: Problem;
 }
 
 /** The model-facing half of a {@link GraphPageOutcome}: `created` shapes the prose only. */
 export interface GraphPageStructuredContent {
   path: string;
   written: boolean;
-  error?: ToolError;
+  error?: Problem;
 }
 
 export interface ValidationResult {
@@ -347,9 +355,9 @@ export interface ValidationResult {
   /**
    * What became of the method's graph page, when this validation wrote one or
    * tried to. Kept beside `summary` rather than folded into it because
-   * {@link toolResult} renders its section after the error list: a page can be
+   * {@link toolResult} renders its section after the summary: a page can be
    * written when the API refused to produce a verdict, and its note must not
-   * sit between the headline and the errors it summarizes.
+   * sit inside the problem it follows.
    */
   graphPage?: GraphPageOutcome;
   /**
@@ -392,10 +400,8 @@ export interface ValidationContext extends ApiConfig, MethodVersionsAware, TreeL
   client?: ValidationClient;
   /** Fills `{ path }` items from disk; the workshop always sets it, and without one every `{ path }` is refused. */
   resolver?: FileResolver;
-  /** Deployment-specific auth-failure texture; default env-var wording when absent. */
-  authError?: AuthErrorTexture;
-  /** Where the base URL came from, added to a failure at `PIPELEX_BASE_URL`; that variable alone when absent. */
-  baseUrlSource?: BaseUrlSourceTexture;
+  /** Where the call's key and base URL came from, for a failed request's summary; the variables' names when absent. */
+  apiNotes?: ApiNotes;
   /**
    * The working directory the method's graph page is written under — the same
    * name and meaning as `CodegenContext.saveRoot`. Set, a validation of files
@@ -411,63 +417,9 @@ export function buildValidationContext(env = process.env): ValidationContext {
   return buildApiConfig(env);
 }
 
-const VALIDATE_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/validate",
-  methodLocation: "files",
-};
-
-/**
- * Classify options for an address-shaped request. The runner's `method_ref`
- * failures keep their class names as distinct error types over the wire: a
- * ref that does not parse or fetch, or an ambiguous one, is a 422; no package
- * matching the address is a 404; the reserved registry form is a 501 — all the
- * caller's own selector, located at `method_ref`. (The execution-locus gate's
- * two 403s — the structures refusal and the sandbox refusal — are classified
- * route-independently in `classifyError`, off the runner's declared
- * `error_type`: the sandbox refusal at `methodLocation`, the structures
- * refusal at `method_ref`.)
- */
-export const VALIDATE_BY_REF_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/validate",
-  methodLocation: "method_ref",
-  badRequest: {
-    location: "method_ref",
-    hint: `Check the address and tag — ${METHOD_REF_GRAMMAR}. The tag must be a git tag on the repository (branches do not pin), and the ref must be resolvable by an anonymous clone.`,
-  },
-  notFound: {
-    location: "method_ref",
-    hint: "The repository was fetched but holds no package matching this address by manifest identity. Check the package selector against the repository's METHODS.toml manifests.",
-  },
-  notImplemented: {
-    location: "method_ref",
-    hint: `Only address-form refs are supported (${METHOD_REF_GRAMMAR}); registry references are reserved until a method registry exists.`,
-  },
-};
-
-/**
- * Classify options for an id-shaped request. The hosted platform resolves the
- * id and injects the stored source before the runner sees the request; an
- * unknown or foreign-org id is a 404 (indistinguishable by design), a stored
- * method with no MTHDS source is a 422, and a deployment with no catalog (a
- * bare pipelex-api runner, or a hosted plane that predates the tooling
- * selector) rejects the request-shape too — the 422 hint covers all three.
- */
-const VALIDATE_BY_ID_ERROR_OPTIONS: ClassifyErrorOptions = {
-  route: "/v1/validate",
-  methodLocation: "method_id",
-  badRequest: {
-    location: "method_id",
-    hint: "The stored method may have no MTHDS source yet, or this deployment may not resolve method_id on /v1/validate — the selector is hosted-only (a bare pipelex-api runner has no catalog). Submit files or a method_ref instead if it persists.",
-  },
-  notFound: {
-    location: "method_id",
-    hint: "No registered method with this id is visible to the API key's organization. Check the id as the catalog returned it — the catalog is org-scoped, so a method from another organization reads exactly like a miss.",
-  },
-};
-
 // Constructed inside each caught block (mirroring run.ts's runClient): the SDK
-// constructor throws PipelineRequestError on a malformed base URL, and that
-// must classify to a config ToolError, not reject the MCP handler.
+// constructor throws on a malformed base URL, and that must become the
+// result's problem, not reject the MCP handler.
 function validationClient(context: ValidationContext): ValidationClient {
   return context.client ?? createPipelexApiClient(context);
 }
@@ -479,8 +431,8 @@ export async function validateMthds(
   const resolution = await resolveMethodSource(input, context.resolver, "one_selector", () =>
     methodTreeLimitsOf(context, () => validationClient(context)),
   );
-  if (resolution.errors.length > 0) {
-    return errorResult("Validation was not run: request input is invalid.", resolution.errors);
+  if (resolution.faults.length > 0) {
+    return errorResult(faultsProblem(resolution.faults), context);
   }
 
   const request: ResolvedValidateRequest = {
@@ -488,11 +440,11 @@ export async function validateMthds(
     ...(input.method_ref === undefined ? {} : { method_ref: input.method_ref }),
     ...(input.method_id === undefined ? {} : { method_id: input.method_id }),
   };
-  const inputErrors = validateMethodSelectorRequest(request.tree !== undefined, request, {
+  const inputFaults = validateMethodSelectorRequest(request.tree !== undefined, request, {
     rule: "one_selector",
   });
-  if (inputErrors.length > 0) {
-    return errorResult("Validation was not run: request input is invalid.", inputErrors);
+  if (inputFaults.length > 0) {
+    return errorResult(faultsProblem(inputFaults), context);
   }
 
   const result = withFilesSent(await validateRequest(request, context), request.tree);
@@ -564,15 +516,6 @@ async function validateRequest(
   request: ResolvedValidateRequest,
   context: ValidationContext,
 ): Promise<ValidationResult> {
-  // Classify options follow the request's selector shape — each failure
-  // locates at the field that caused it.
-  const classifyOptions =
-    request.tree !== undefined
-      ? VALIDATE_ERROR_OPTIONS
-      : request.method_ref !== undefined
-        ? VALIDATE_BY_REF_ERROR_OPTIONS
-        : VALIDATE_BY_ID_ERROR_OPTIONS;
-
   let report: PipelexValidationResult;
   let plan: SelectorPlan | undefined;
   let client: ValidationClient | undefined;
@@ -607,16 +550,11 @@ async function validateRequest(
       throw new Error("No method selector survived request validation.");
     }
   } catch (err) {
-    const classified = classifyError(err, {
-      ...classifyOptions,
-      auth: context.authError,
-      baseUrlSource: context.baseUrlSource,
-      methodTree: request.tree !== undefined,
-      treeInline: await treeSentInlineHeavy(err, request.tree, client),
-    });
-    const error = await selectorFailure(err, classified, plan, methodVersionsOf(context));
+    // The SDK's problem, as it read the answer or the failure: its code, its
+    // domain and its retry verdict are relayed, never overridden.
+    const problem = await selectorFailure(problemOf(err), plan, methodVersionsOf(context));
     const failed: ValidationResult = {
-      ...errorResult(summaryForError(error), [error]),
+      ...errorResult(problem, context),
       ...(isExecutionLocusRefusal(err) ? { refusedForPython: true } : {}),
     };
     // A client that could not be built, or an argument refused before
@@ -625,48 +563,29 @@ async function validateRequest(
   }
 
   // The API responded; projecting it must not be reported as an unreachable
-  // API. A malformed report (e.g. missing rendered_markdown) is a reachable
-  // contract violation, surfaced as a runtime no-verdict error.
+  // API. A malformed report (e.g. missing rendered_markdown) is an answer the
+  // workshop cannot read, `client.response_unreadable` of the 200 it came on.
   try {
     const result = validationResult(report);
     return await withMethodContent(result, plan, "validated");
   } catch (err) {
     return errorResult(
-      "Validation produced no verdict: the Pipelex API returned a malformed report.",
-      [
+      buildProblem(
+        "client.response_unreadable",
+        { status: 200 },
         {
-          class: "runtime",
-          message:
-            err instanceof Error
-              ? err.message
-              : "The Pipelex API returned a malformed validation report.",
-          hint: "The API responded but its report was missing required fields; inspect pipelex-api logs.",
-          retryable: false,
+          extra: {
+            message: `${err instanceof Error ? err.message : "The Pipelex API returned a malformed validation report."} The API answered, but its report was missing required fields.`,
+          },
         },
-      ],
+      ),
+      context,
     );
   }
 }
 
-const ERROR_SUMMARIES: ErrorSummaries = {
-  config: "Validation could not start: the Pipelex API is unreachable or misconfigured.",
-  input_domain: "Validation was not run: the Pipelex API rejected the request.",
-  runtime: "Validation could not be completed: the Pipelex API returned an error.",
-  paywall: "Validation could not start: the organization's Pipelex plan does not cover this call.",
-  auth: "Validation could not start: the Pipelex API key is missing or was refused.",
-  role: "Validation could not start: your role in this organization does not allow this.",
-};
-
-function summaryForError(error: ToolError): string {
-  return summaryForToolError(error, ERROR_SUMMARIES);
-}
-
 export function toolResult(result: ValidationResult) {
-  const [text] = toolResultContent(
-    result.summary,
-    result.structuredContent.errors,
-    result.structuredContent.files_sent,
-  );
+  const [text] = toolResultContent(result.summary, result.structuredContent.files_sent);
   const content =
     result.graphPage === undefined
       ? [text]
@@ -709,12 +628,13 @@ function projectValidationReport(
   if (report.is_valid) {
     const validReport = report as PipelexValidationReport;
     // Advisory findings, the template check's among them, relayed as the API
-    // sent them: they are the verdict's, and a consumer such as a template
-    // authoring skill branches on their locators. The summary lists them too,
-    // under the rendered report's `## Warnings`.
+    // sent them, one problem item each: they are the verdict's, and a consumer
+    // such as a template authoring skill branches on their codes and
+    // locations. The summary lists them too, under the rendered report's
+    // `## Warnings`.
     const warnings: unknown = validReport.warnings;
     if (Array.isArray(warnings) && warnings.length > 0) {
-      structuredContent.warnings = warnings;
+      structuredContent.warnings = warnings as ProblemItem[];
     }
     // The signature needs the main pipe ref on EVERY valid verdict, so
     // `_meta.main_pipe_ref` rides a valid non-runnable verdict too.
@@ -726,8 +646,11 @@ function projectValidationReport(
       structuredContent.main_pipe = mainPipe;
     }
   } else {
+    // The faults, one problem item each, relayed as the API sent them: the
+    // rendered report lists them for the reader.
     const invalidReport = report as PipelexInvalidReport;
-    structuredContent.validation_errors = invalidReport.validation_errors;
+    const errors: unknown = invalidReport.errors;
+    structuredContent.errors = Array.isArray(errors) ? (errors as ProblemItem[]) : [];
   }
 
   return { structuredContent, mainPipeRef };
@@ -1134,7 +1057,8 @@ export function defaultPipeRefOf(report: PipelexValidationReport): string | unde
   return typeof stated === "string" && stated.length > 0 ? stated : undefined;
 }
 
-function errorResult(summary: string, errors: ToolError[]): ValidationResult {
+/** A call that produced no verdict: its one problem, and the problem's summary. */
+function errorResult(problem: Problem, context: { apiNotes?: ApiNotes }): ValidationResult {
   return {
     structuredContent: {
       status: "error",
@@ -1142,8 +1066,8 @@ function errorResult(summary: string, errors: ToolError[]): ValidationResult {
       is_runnable: false,
       pending_signatures: [],
       available_view_specs: [],
-      errors,
+      problem,
     },
-    summary,
+    summary: problemSummary(problem, context.apiNotes),
   };
 }

@@ -186,9 +186,14 @@ function findForbiddenKeys(
   return found;
 }
 
-/** Report a no-verdict result the way the agent would read it, then bail out of that check. */
+/**
+ * Report a no-verdict result the way the agent would read it, then bail out of
+ * that check: the problem's code on the failure line, then its Markdown.
+ */
 function reportToolFailure(label: string, result: ToolCallResult): void {
-  fail(label, "the tool returned an error result");
+  const problem = isRecord(result.structuredContent) ? result.structuredContent.problem : undefined;
+  const code = isRecord(problem) && typeof problem.code === "string" ? ` (${problem.code})` : "";
+  fail(label, `the tool returned an error result${code}`);
   const text = summaryText(result);
   if (text !== "") {
     for (const line of text.split("\n")) note(line);
@@ -390,7 +395,7 @@ async function checkValidate(client: Client): Promise<void> {
   expect(
     structured.is_valid === true,
     "is_valid",
-    `the canonical bundle did not validate: ${describe(structured.validation_errors)}`,
+    `the canonical bundle did not validate: ${describe(structured.errors)}`,
     "the canonical bundle validates",
   );
   expect(
@@ -521,7 +526,7 @@ async function checkInputsTemplate(client: Client): Promise<void> {
   expect(
     structured.is_valid === true,
     "is_valid",
-    `the canonical bundle produced no template: ${describe(structured.validation_errors)}`,
+    `the canonical bundle produced no template: ${describe(structured.errors)}`,
   );
   expect(
     structured.pipe_ref === "smoke_inputs.write_about_topic",
@@ -580,7 +585,7 @@ async function checkCodegen(client: Client): Promise<void> {
   expect(
     structured.is_valid === true,
     "is_valid",
-    `the canonical bundle produced no artifacts: ${describe(structured.validation_errors)}`,
+    `the canonical bundle produced no artifacts: ${describe(structured.errors)}`,
   );
   expect(
     structured.target === "ts-zod",

@@ -3,7 +3,7 @@
  *
  * The assertion that matters most here is not "the bundle validates": it is the
  * verdict-vs-no-verdict discipline. An INVALID bundle must come back as a
- * produced verdict (`status: "ok"`, `is_valid: false`, `validation_errors[]`),
+ * produced verdict (`status: "ok"`, `is_valid: false`, `errors[]`),
  * never as an error result. That contract lives half in this repo and half in
  * the API's response shape, so it is exactly what wire drift corrupts first and
  * exactly what a mocked suite cannot see.
@@ -49,8 +49,8 @@ describe("mthds_validate (live)", () => {
     expect(result.structuredContent.is_valid).toBe(true);
     expect(result.structuredContent.is_runnable).toBe(true);
     expect(result.structuredContent.pending_signatures).toEqual([]);
-    expect(result.structuredContent.validation_errors).toBeUndefined();
     expect(result.structuredContent.errors).toBeUndefined();
+    expect(result.structuredContent.problem).toBeUndefined();
 
     // The summary is the API's own `rendered_markdown`; the capability treats a
     // report without it as a hard error, so an empty one means the render
@@ -186,9 +186,9 @@ describe("mthds_validate (live)", () => {
     expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.is_valid).toBe(false);
     expect(result.structuredContent.is_runnable).toBe(false);
-    expect(result.structuredContent.errors).toBeUndefined();
+    expect(result.structuredContent.problem).toBeUndefined();
 
-    const validationErrors = result.structuredContent.validation_errors;
+    const validationErrors = result.structuredContent.errors;
     expect(Array.isArray(validationErrors)).toBe(true);
     expect(validationErrors?.length ?? 0).toBeGreaterThan(0);
 
@@ -203,7 +203,10 @@ describe("mthds_validate (live)", () => {
     const result = await validateMthds({}, context);
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { reason: "missing" },
+    });
   });
 });
 

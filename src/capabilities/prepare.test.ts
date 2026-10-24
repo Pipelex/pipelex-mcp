@@ -34,8 +34,9 @@ import {
   linkFileOf,
 } from "./catalog-link.js";
 import { listMthdsFiles } from "./org-files.js";
+import { MAX_UPLOAD_BYTES, SizeGuardedPipelexApiClient, formatMib } from "./upload-ceiling.js";
 import { comparableRequest, fakeMethodResolver } from "./method-tree-fixtures.js";
-import { DEFAULT_API_URL } from "./shared.js";
+import { DEFAULT_API_URL, createPipelexApiClient, problemOf, SECRET_REASON } from "./shared.js";
 import type { MethodTreeToSend } from "./shared.js";
 
 /** A tree in hand, for the request checks, which only ask whether one is there. */
@@ -58,6 +59,52 @@ function uploadWith(prepareInputs: (request: PrepareInputsRequest) => Promise<Pr
 
 const files = [{ content: 'domain = "demo"' }];
 const PUBLISHED_REF = "github.com/Pipelex/methods/documents@v0.1.0";
+
+/** The base-URL note of a context that carries none. */
+const BASE_URL_NOTE =
+  "The Pipelex API in use is the one PIPELEX_BASE_URL names, else the hosted Pipelex API.";
+
+/**
+ * A refusal as the runner and the platform answer every one: a problem
+ * document, which the SDK reads as it came, its request id riding the header.
+ */
+function refusal(
+  status: number,
+  problem: { code: string; title: string; detail: string; domain: string } & Record<
+    string,
+    unknown
+  >,
+): ApiResponseError {
+  return new ApiResponseError(
+    `HTTP ${status}`,
+    `${DEFAULT_API_URL}/v1/pipe-io`,
+    status,
+    "Refused",
+    JSON.stringify({
+      type: `https://mthds.ai/errors/${problem.code}`,
+      status,
+      retry: "no",
+      next_step: { kind: "change_input", detail: "Correct the request, then send it again." },
+      ...problem,
+    }),
+    { headers: { "x-request-id": `req_${status}` } },
+  );
+}
+
+/** The route's refusal of a pipe selection, as the SDK's `prepareInputs` rethrows it. */
+function selectionRefusal(code: string, detail: string): InputPreparationError {
+  const answer = refusal(422, {
+    code,
+    title: "The pipe selection was refused",
+    detail,
+    domain: "input",
+    location: { field: "pipe_ref" },
+  });
+  return new InputPreparationError(`Cannot prepare inputs: ${detail}`, {
+    cause: answer,
+    problem: answer.problem,
+  });
+}
 
 describe("prepareInputsResult", () => {
   it("projects prepared inputs with the uploaded uris and echoes a supplied pipe_ref", () => {
@@ -121,7 +168,11 @@ describe("prepareInputsToolResult", () => {
 
   it("flags no-verdict results as errors", () => {
     const toolResult = prepareInputsToolResult({
-      structuredContent: { status: "error", is_valid: false, errors: [] },
+      structuredContent: {
+        status: "error",
+        is_valid: false,
+        problem: problemOf(new Error("nope")),
+      },
       summary: "nope",
     });
 
@@ -135,28 +186,43 @@ describe("validatePrepareInputsRequest", () => {
   });
 
   it.each([
-    ["a bare pipe_code", "extract", 'got the bare "extract"'],
-    ["a dependency package's pipe", "alias->docs.extract", "names a dependency package's pipe"],
-  ])("refuses %s at pipe_ref, as the SDK would before sending", (_label, pipeRef, reason) => {
-    const errors = validatePrepareInputsRequest({ tree: A_TREE, pipe_ref: pipeRef, inputs: {} });
+    ["a bare pipe_code", "extract", "not_qualified", 'got the bare "extract"'],
+    [
+      "a dependency package's pipe",
+      "alias->docs.extract",
+      "dependency_pipe",
+      "names a dependency package's pipe",
+    ],
+  ])(
+    "refuses %s at pipe_ref, as the SDK would before sending",
+    (_label, pipeRef, why, sentence) => {
+      const faults = validatePrepareInputsRequest({ tree: A_TREE, pipe_ref: pipeRef, inputs: {} });
 
-    expect(errors).toEqual([
-      expect.objectContaining({ class: "input_domain", location: "pipe_ref", retryable: false }),
-    ]);
-    expect(errors[0]?.message).toContain(reason);
-    expect(
-      validatePrepareInputsRequest({ tree: A_TREE, pipe_ref: "docs.extract", inputs: {} }),
-    ).toEqual([]);
-  });
+      expect(faults).toEqual([
+        expect.objectContaining({
+          code: "client.argument_invalid",
+          domain: "input",
+          retry: "no",
+          params: { argument: "pipe_ref", reason: why },
+          location: { field: "pipe_ref" },
+        }),
+      ]);
+      expect(faults[0]?.message).toContain(sentence);
+      expect(
+        validatePrepareInputsRequest({ tree: A_TREE, pipe_ref: "docs.extract", inputs: {} }),
+      ).toEqual([]);
+    },
+  );
 
   it("rejects a blank pipe_ref", () => {
-    const errors = validatePrepareInputsRequest({ tree: A_TREE, pipe_ref: "  ", inputs: {} });
-    expect(errors.map((error) => error.location)).toEqual(["pipe_ref"]);
+    const faults = validatePrepareInputsRequest({ tree: A_TREE, pipe_ref: "  ", inputs: {} });
+    expect(faults.map((fault) => fault.location?.field)).toEqual(["pipe_ref"]);
+    expect(faults[0]?.params).toEqual({ argument: "pipe_ref", reason: "empty" });
   });
 
   it("rejects a blank method_id", () => {
-    const errors = validatePrepareInputsRequest({ method_id: " ", inputs: {} });
-    expect(errors.map((error) => error.location)).toEqual(["method_id"]);
+    const faults = validatePrepareInputsRequest({ method_id: " ", inputs: {} });
+    expect(faults.map((fault) => fault.location?.field)).toEqual(["method_id"]);
   });
 
   it("accepts each selector on its own", () => {
@@ -176,14 +242,14 @@ describe("validatePrepareInputsRequest", () => {
       method_ref: "github.com/Pipelex/methods/documents@v0.1.0",
       inputs: {},
     });
-    expect(beside.map((error) => error.location)).toEqual(["method_ref"]);
+    expect(beside.map((fault) => fault.location?.field)).toEqual(["method_ref"]);
 
     const both = validatePrepareInputsRequest({
       method_ref: "github.com/Pipelex/methods/documents@v0.1.0",
       method_id: "mt_123",
       inputs: {},
     });
-    expect(both.map((error) => error.location)).toEqual(["method_id"]);
+    expect(both.map((fault) => fault.location?.field)).toEqual(["method_id"]);
   });
 });
 
@@ -299,110 +365,134 @@ describe("prepareMthdsInputs — the SDK upload walk", () => {
     expect(drafted.summary).toContain("the draft of `mt_123`");
   });
 
-  it("maps a rejected asset (413) to input_domain at inputs, naming the real ceiling", async () => {
+  it("relays the upload ceiling's refusal at inputs, naming the real ceiling", async () => {
+    // The size-guarded client refuses an oversize file before the wire, as
+    // the SDK's walk meets it through `uploadFile`.
+    const guarded = createPipelexApiClient(
+      { baseUrl: DEFAULT_API_URL },
+      SizeGuardedPipelexApiClient,
+    );
     const result = await prepareMthdsInputs(
       { files, inputs: { photo: "/tmp/big.png" } },
       {
         baseUrl: DEFAULT_API_URL,
         client: uploadWith(async () => {
-          throw new RejectedAssetError("too big", "big.png", 413);
+          await guarded.uploadFile(new Uint8Array(9 * 1024 * 1024), { filename: "big.png" });
+          throw new Error("the guard must refuse the file");
         }),
       },
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("inputs");
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("MiB");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      retry: "no",
+      params: { argument: "inputs", reason: "upload_too_large" },
+      location: { field: "inputs" },
+    });
+    expect(result.structuredContent.problem?.message).toContain(
+      `over the ${formatMib(MAX_UPLOAD_BYTES)} Pipelex upload limit`,
+    );
+    expect(result.summary).toContain("Shrink the file");
   });
 
-  it("maps an invalid local source to input_domain at inputs", async () => {
+  it("relays a refused asset with no problem of its own as the SDK reads it, unchanged", async () => {
+    // A gateway's bare 413: the SDK's reading, never a texture of this server's.
+    const err = new RejectedAssetError("too big", "big.png", 413);
+
+    const result = await prepareMthdsInputs(
+      { files, inputs: { photo: "/tmp/big.png" } },
+      { baseUrl: DEFAULT_API_URL, client: uploadWith(() => Promise.reject(err)) },
+    );
+
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+  });
+
+  it("relays an invalid local source as the SDK's input.file_unreadable", async () => {
+    const err = new InvalidLocalSourceError("cannot read", "/nope.png");
+
     const result = await prepareMthdsInputs(
       { files, inputs: { photo: "/nope.png" } },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: uploadWith(async () => {
-          throw new InvalidLocalSourceError("cannot read", "/nope.png");
-        }),
-      },
+      { baseUrl: DEFAULT_API_URL, client: uploadWith(() => Promise.reject(err)) },
     );
 
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("inputs");
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "input.file_unreadable",
+      domain: "input",
+      params: { input: "/nope.png" },
+    });
   });
 
-  it("maps a missing upload capability (404) to config", async () => {
+  it("relays a missing upload capability as the SDK's runtime.unsupported, with the base URL note", async () => {
+    const err = new UnsupportedUploadCapabilityError("no upload route");
+
+    const result = await prepareMthdsInputs(
+      { files, inputs: { photo: "/tmp/a.png" } },
+      { baseUrl: DEFAULT_API_URL, client: uploadWith(() => Promise.reject(err)) },
+    );
+
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+    expect(result.structuredContent.problem?.code).toBe("runtime.unsupported");
+    expect(result.summary).toContain(BASE_URL_NOTE);
+  });
+
+  it("relays an upload auth failure as the key, with the key note, never as an unreachable API", async () => {
+    const err = new UploadAuthenticationError("rejected", 401, { credentialSent: true });
+
     const result = await prepareMthdsInputs(
       { files, inputs: { photo: "/tmp/a.png" } },
       {
         baseUrl: DEFAULT_API_URL,
-        client: uploadWith(async () => {
-          throw new UnsupportedUploadCapabilityError("no upload route");
-        }),
+        apiNotes: { apiKey: "The API key came from the connector's sign-in." },
+        client: uploadWith(() => Promise.reject(err)),
       },
     );
 
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "auth.invalid_credential",
+      domain: "account",
+    });
+    // The upload leg's refused key reads as the key, as the pipe I/O route's
+    // does, never as an unreachable API.
+    expect(result.summary).toContain("The API key came from the connector's sign-in.");
+    expect(result.summary).not.toMatch(/unreachable/i);
   });
 
-  it("maps an upload auth failure to config with the auth texture", async () => {
+  it("relays an upload transport fault as the SDK's retryable runtime.unavailable", async () => {
+    // Storage's 503, as the SDK's grant upload reports it.
+    const err = new UploadTransportError("upstream died", { reason: "server_error", status: 503 });
+
     const result = await prepareMthdsInputs(
       { files, inputs: { photo: "/tmp/a.png" } },
-      {
-        baseUrl: DEFAULT_API_URL,
-        authError: { location: "authorization", hint: "reconnect the connector" },
-        client: uploadWith(async () => {
-          throw new UploadAuthenticationError("rejected", 401);
-        }),
-      },
+      { baseUrl: DEFAULT_API_URL, client: uploadWith(() => Promise.reject(err)) },
     );
 
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
-    expect(result.structuredContent.errors?.[0]?.kind).toBe("auth");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("authorization");
-    expect(result.structuredContent.errors?.[0]?.hint).toBe("reconnect the connector");
-    // The upload leg's refused key headlines as the key, as the pipe I/O
-    // route's does, never as an unreachable API.
-    expect(result.summary).toBe(
-      "Inputs could not be prepared: the Pipelex API key is missing or was refused.",
-    );
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "runtime.unavailable",
+      retry: "yes",
+    });
   });
 
-  it("maps an upload transport fault to runtime (retryable)", async () => {
-    const result = await prepareMthdsInputs(
-      { files, inputs: { photo: "/tmp/a.png" } },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: uploadWith(async () => {
-          // Storage's 503, as the SDK's grant upload reports it.
-          throw new UploadTransportError("upstream died", { code: "server_error", status: 503 });
-        }),
-      },
+  it("relays a pipe refusal the SDK makes before sending as its own problem, at pipe_ref", async () => {
+    const err = selectionRefusal(
+      "request.pipe_not_found",
+      "No pipe 'demo.summarize' in the closure.",
     );
 
-    expect(result.structuredContent.errors?.[0]?.class).toBe("runtime");
-    expect(result.structuredContent.errors?.[0]?.retryable).toBe(true);
-  });
-
-  it("surfaces a pipe refusal thrown by the SDK as a no-verdict input_domain at pipe_ref", async () => {
     const result = await prepareMthdsInputs(
       { files, inputs: {} },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: uploadWith(async () => {
-          throw new InputPreparationError(
-            'Cannot prepare inputs: pipe_ref "summarize" is not qualified',
-          );
-        }),
-      },
+      { baseUrl: DEFAULT_API_URL, client: uploadWith(() => Promise.reject(err)) },
     );
 
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.is_valid).toBe(false);
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
-    expect(result.structuredContent).not.toHaveProperty("validation_errors");
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+    expect(result.structuredContent.problem?.location?.field).toBe("pipe_ref");
+    expect(result.structuredContent).not.toHaveProperty("errors");
   });
 
   it.each([
@@ -410,29 +500,37 @@ describe("prepareMthdsInputs — the SDK upload walk", () => {
     ["method_ref", { method_ref: PUBLISHED_REF }],
     ["method_id", { method_id: "mt_123" }],
   ] as const)(
-    "locates a method that does not load at %s, the selector that named it",
-    async (location, selector) => {
-      const result = await prepareMthdsInputs(
-        { ...selector, inputs: {} },
+    "relays a method that does not load as the SDK's method.invalid with its items, whatever named it (%s)",
+    async (_selector, selector) => {
+      const err = new MethodLoadError(
+        "Cannot prepare inputs: the method signature did not resolve — bad toml",
         {
-          baseUrl: DEFAULT_API_URL,
-          client: uploadWith(async () => {
-            throw new MethodLoadError(
-              "Cannot prepare inputs: the method signature did not resolve — boom",
-              { validationErrors: [], serverMessage: "boom" },
-            );
-          }),
+          errors: [
+            { code: "method.syntax", detail: "bad toml", location: { file: "bundle.mthds" } },
+          ],
+          serverMessage: "boom",
         },
       );
 
+      const result = await prepareMthdsInputs(
+        { ...selector, inputs: {} },
+        { baseUrl: DEFAULT_API_URL, client: uploadWith(() => Promise.reject(err)) },
+      );
+
       expect(result.structuredContent.status).toBe("error");
-      expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-      expect(result.structuredContent.errors?.[0]?.location).toBe(location);
-      expect(result.structuredContent.errors?.[0]?.hint).toContain("mthds_validate");
+      expect(result.structuredContent.problem).toEqual(problemOf(err));
+      expect(result.structuredContent.problem).toMatchObject({
+        code: "method.invalid",
+        domain: "method",
+        errors: [{ code: "method.syntax", detail: "bad toml" }],
+      });
+      // The method's faults reach the reader, each with where it happened.
+      expect(result.summary).toContain("bad toml");
+      expect(result.summary).toContain("bundle.mthds");
     },
   );
 
-  it("locates a file input value that cannot be read as a file at inputs", async () => {
+  it("relays a file input value that cannot be read as a file as the SDK's input.invalid", async () => {
     const result = await prepareMthdsInputs(
       { files, inputs: { document: "data:application/pdf;base64" } },
       {
@@ -447,180 +545,175 @@ describe("prepareMthdsInputs — the SDK upload walk", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("inputs");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "input.invalid",
+      domain: "input",
+      params: { input: "document" },
+    });
   });
 });
-describe("prepareMthdsInputs — selector-shaped classification", () => {
-  function apiError(status: number, code: string, errorDomain: string): ApiResponseError {
-    return new ApiResponseError(
-      `HTTP ${status}`,
-      `${DEFAULT_API_URL}/v1/pipe-io`,
-      status,
-      "Error",
-      "{}",
-      code,
-      "message",
-      undefined,
-      errorDomain,
-    );
-  }
+describe("prepareMthdsInputs — selector-shaped refusals", () => {
+  it("relays an address the runner refuses as its problem, unchanged", async () => {
+    const err = refusal(404, {
+      code: "method.not_found",
+      title: "The method was not found",
+      detail: "No MTHDS package in the repository matches the address.",
+      domain: "input",
+    });
 
-  it("locates an address the runner refuses at method_ref", async () => {
     const result = await prepareMthdsInputs(
       { method_ref: "github.com/Pipelex/methods/nope@v9", inputs: {} },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: uploadWith(async () => {
-          throw apiError(404, "not_found", "not_found");
-        }),
-      },
+      { baseUrl: DEFAULT_API_URL, client: uploadWith(() => Promise.reject(err)) },
     );
 
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "method.not_found",
+      domain: "input",
+      request_id: "req_404",
+    });
   });
 
-  it("locates a malformed address at method_ref with the grammar in the hint", async () => {
+  it("relays a malformed address as the runner's request.invalid at method_ref", async () => {
+    const err = refusal(422, {
+      code: "request.invalid",
+      title: "The request was refused",
+      detail: "method_ref is not an address: not-an-address.",
+      domain: "input",
+      location: { field: "method_ref" },
+    });
+
     const result = await prepareMthdsInputs(
       { method_ref: "not-an-address", inputs: {} },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: uploadWith(async () => {
-          throw apiError(422, "invalid_request", "input_domain");
-        }),
-      },
+      { baseUrl: DEFAULT_API_URL, client: uploadWith(() => Promise.reject(err)) },
     );
 
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_ref");
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("github.com/");
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+    expect(result.structuredContent.problem?.location?.field).toBe("method_ref");
   });
 
-  it("locates an unknown method id at method_id", async () => {
+  it("relays an unknown method id as the platform's problem, unchanged", async () => {
+    const err = refusal(404, {
+      code: "pipelex.catalog.not_found",
+      title: "Method not found",
+      detail: "No method mt_missing belongs to this organization.",
+      domain: "input",
+      location: { field: "method_id" },
+    });
+
     const result = await prepareMthdsInputs(
       { method_id: "mt_missing", inputs: {} },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: uploadWith(async () => {
-          throw apiError(404, "not_found", "not_found");
-        }),
-      },
+      { baseUrl: DEFAULT_API_URL, client: uploadWith(() => Promise.reject(err)) },
     );
 
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "pipelex.catalog.not_found",
+      location: { field: "method_id" },
+    });
   });
 
-  // A runner too old to serve `/v1/pipe-io` answers a bare 404, with neither an
-  // error type nor a code: that is the deployment, never the method named.
+  // A runner too old to serve `/v1/pipe-io` answers a bare 404, which the SDK
+  // reads as the deployment's missing route, never as the method named.
   for (const selector of [
     { method_ref: "github.com/Pipelex/methods/documents@v0.1.0" },
     { method_id: "mt_123" },
   ]) {
-    it(`reports a bare 404 as config at PIPELEX_BASE_URL (${Object.keys(selector)[0]})`, async () => {
-      const result = await prepareMthdsInputs(
-        { ...selector, inputs: {} },
-        {
-          baseUrl: DEFAULT_API_URL,
-          client: uploadWith(async () => {
-            throw new ApiResponseError(
-              "HTTP 404",
-              `${DEFAULT_API_URL}/v1/pipe-io`,
-              404,
-              "Not Found",
-              '{"detail":"Not Found"}',
-              undefined, // errorType
-              "Not Found",
-              undefined, // validationErrors
-              undefined, // code
-            );
-          }),
-        },
+    it(`relays a bare 404 as request.not_found, with the base URL note (${Object.keys(selector)[0]})`, async () => {
+      const err = new ApiResponseError(
+        "HTTP 404",
+        `${DEFAULT_API_URL}/v1/pipe-io`,
+        404,
+        "Not Found",
+        '{"detail":"Not Found"}',
       );
 
-      const error = result.structuredContent.errors?.[0];
-      expect(error?.class).toBe("config");
-      expect(error?.location).toBe("PIPELEX_BASE_URL");
-      expect(error?.hint).toContain("/v1/pipe-io");
+      const result = await prepareMthdsInputs(
+        { ...selector, inputs: {} },
+        { baseUrl: DEFAULT_API_URL, client: uploadWith(() => Promise.reject(err)) },
+      );
+
+      expect(result.structuredContent.problem).toEqual(problemOf(err));
+      expect(result.structuredContent.problem?.code).toBe("request.not_found");
+      expect(result.summary).toContain(BASE_URL_NOTE);
     });
   }
 
-  it("locates a source-less stored method at method_id (the route's 422)", async () => {
+  it("relays a source-less stored method as the route's 422, unchanged", async () => {
     // The fail-fast EmptyMethodSourceError went out with the client-side
     // expansion; a source-less method now surfaces from the route itself.
+    const err = refusal(422, {
+      code: "request.invalid",
+      title: "The request was refused",
+      detail: "The stored method has no MTHDS source.",
+      domain: "input",
+      location: { field: "method_id" },
+    });
+
     const result = await prepareMthdsInputs(
       { method_id: "mt_empty", inputs: {} },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: uploadWith(async () => {
-          throw apiError(422, "invalid_request", "input_domain");
-        }),
-      },
+      { baseUrl: DEFAULT_API_URL, client: uploadWith(() => Promise.reject(err)) },
     );
 
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("no MTHDS source");
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+    expect(result.summary).toContain("The stored method has no MTHDS source.");
   });
 
-  it("locates a client-side signature failure at pipe_ref even on a by-ref request", async () => {
-    // The SDK refuses an unknown pipe before any request, so the address is not
-    // the problem and must not be named as one — the distinction `preparation`
-    // draws against `badRequest`.
+  it("relays a pipe selection the route refuses at pipe_ref, even on a by-ref request", async () => {
+    // The address is not the problem and is not named as one: the route's own
+    // problem locates the refusal at pipe_ref.
+    const err = selectionRefusal("request.pipe_not_found", "No pipe 'demo.nope' in the closure.");
+
     const result = await prepareMthdsInputs(
       { method_ref: PUBLISHED_REF, pipe_ref: "demo.nope", inputs: {} },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: uploadWith(async () => {
-          throw new InputPreparationError('the method declares no pipe "demo.nope"');
-        }),
-      },
+      { baseUrl: DEFAULT_API_URL, client: uploadWith(() => Promise.reject(err)) },
     );
 
-    expect(result.structuredContent.errors?.[0]?.location).toBe("pipe_ref");
-    expect(result.structuredContent.errors?.[0]?.hint).toContain("domain.pipe_code");
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "request.pipe_not_found",
+      location: { field: "pipe_ref" },
+    });
   });
 
-  it("locates a pipe selection the route refuses at pipe_ref, even on a by-id request", async () => {
-    // The SDK turns the route's typed 422 into an InputPreparationError
-    // carrying the server's reason.
-    const result = await prepareMthdsInputs(
-      { method_id: "mt_123", pipe_ref: "demo.nope", inputs: {} },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: uploadWith(async () => {
-          throw new InputPreparationError(
-            "Cannot prepare inputs: Pipe 'demo.nope' not found in the submitted closure",
-          );
-        }),
-      },
+  it("relays a pipe selection the route refuses at pipe_ref, even on a by-id request", async () => {
+    const err = selectionRefusal(
+      "request.pipe_ambiguous",
+      "Several domains declare a main_pipe: demo, other.",
     );
 
-    const error = result.structuredContent.errors?.[0];
-    expect(error?.class).toBe("input_domain");
-    expect(error?.location).toBe("pipe_ref");
-    expect(error?.message).toContain("demo.nope");
-    expect(error?.hint).toContain("qualified domain.pipe_code the method declares");
-  });
-
-  it("headlines a paywall (402) as a plan limit, not as connectivity", async () => {
     const result = await prepareMthdsInputs(
       { method_id: "mt_123", inputs: {} },
-      {
-        baseUrl: DEFAULT_API_URL,
-        client: uploadWith(async () => {
-          throw apiError(402, "subscription_required", "forbidden");
-        }),
-      },
+      { baseUrl: DEFAULT_API_URL, client: uploadWith(() => Promise.reject(err)) },
     );
 
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
-    expect(result.structuredContent.errors?.[0]?.kind).toBe("paywall");
-    // A headline-only host shows just this line, so it must name the plan
-    // rather than the connectivity headline every other `config` error gets.
-    expect(result.summary).toBe(
-      "Inputs could not be prepared: the organization's Pipelex plan does not cover this call.",
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "request.pipe_ambiguous",
+      location: { field: "pipe_ref" },
+    });
+    expect(result.summary).toContain("Several domains declare a main_pipe");
+  });
+
+  it("relays a paywall (402) as the platform's plan problem, not as connectivity", async () => {
+    const err = refusal(402, {
+      code: "pipelex.billing.plan_limit",
+      title: "The organization's plan does not cover this call",
+      detail: "Preparing inputs for a saved method needs a plan that includes the catalog.",
+      domain: "account",
+      next_step: {
+        kind: "contact_owner",
+        detail: "Ask the organization's owner to change its plan.",
+      },
+    });
+
+    const result = await prepareMthdsInputs(
+      { method_id: "mt_123", inputs: {} },
+      { baseUrl: DEFAULT_API_URL, client: uploadWith(() => Promise.reject(err)) },
     );
+
+    expect(result.structuredContent.problem).toEqual(problemOf(err));
+    expect(result.summary).toContain("## The organization's plan does not cover this call");
     expect(result.summary).not.toMatch(/unreachable/);
   });
 });
@@ -634,9 +727,13 @@ describe("prepareMthdsInputs — request shape and transport", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("files");
-    // The teaching text now names all three, because the tool takes all three.
-    expect(result.structuredContent.errors?.[0]?.message).toContain("method_ref");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "files", reason: "missing" },
+      location: { field: "files" },
+    });
+    // The teaching text names every selector, because the tool takes them all.
+    expect(result.structuredContent.problem?.message).toContain("method_ref");
   });
 
   it("rejects files beside method_id without calling any client leg", async () => {
@@ -646,8 +743,10 @@ describe("prepareMthdsInputs — request shape and transport", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("input_domain");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("method_id");
+    expect(result.structuredContent.problem).toMatchObject({
+      params: { argument: "method_id", reason: "mutually_exclusive" },
+      location: { field: "method_id" },
+    });
   });
 
   it("rejects { path } items instructively without a resolver", async () => {
@@ -657,7 +756,11 @@ describe("prepareMthdsInputs — request shape and transport", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("files[0].path");
+    expect(result.structuredContent.problem).toMatchObject({
+      params: { argument: "files[0].path", reason: "not_readable_here" },
+      location: { field: "files[0].path" },
+    });
+    expect(result.summary).toContain("npx @pipelex/mcp");
   });
 
   it("reads { path } items through the resolver and sends them as one tree", async () => {
@@ -740,11 +843,12 @@ describe("prepareMthdsInputs — request shape and transport", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "method_dir",
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "method_dir", reason: SECRET_REASON },
+      location: { field: "method_dir" },
     });
-    expect(result.structuredContent.errors?.[0]?.message).toContain("nothing was sent");
+    expect(result.structuredContent.problem?.message).toContain("nothing was sent");
     expect(result.structuredContent).not.toHaveProperty("files_sent");
     expect(JSON.stringify(result)).not.toContain(fakeKey);
   });
@@ -755,6 +859,7 @@ describe("prepareMthdsInputs — request shape and transport", () => {
       { baseUrl: "invalid-no-scheme", resolver: methodFolderResolver() },
     );
     expect(unbuilt.structuredContent.status).toBe("error");
+    expect(unbuilt.structuredContent.problem?.code).toBe("client.not_configured");
     expect(unbuilt.structuredContent).not.toHaveProperty("files_sent");
     expect(prepareInputsToolResult(unbuilt).content[0].text).not.toContain("Files sent");
 
@@ -769,6 +874,7 @@ describe("prepareMthdsInputs — request shape and transport", () => {
       },
     );
     expect(refused.structuredContent.status).toBe("error");
+    expect(refused.structuredContent.problem?.code).toBe("client.argument_invalid");
     expect(refused.structuredContent).not.toHaveProperty("files_sent");
   });
 
@@ -785,16 +891,16 @@ describe("prepareMthdsInputs — request shape and transport", () => {
       );
 
       expect(result.structuredContent.status).toBe("error");
-      expect(result.structuredContent.errors?.[0]).toMatchObject({
-        class: "input_domain",
-        location: "pipe_ref",
+      expect(result.structuredContent.problem).toMatchObject({
+        code: "client.argument_invalid",
+        location: { field: "pipe_ref" },
       });
       expect(result.structuredContent).not.toHaveProperty("files_sent");
       expect(prepare).not.toHaveBeenCalled();
     },
   );
 
-  it("surfaces an unreachable API as config", async () => {
+  it("relays an unreachable API as the SDK's client.unreachable, with the base URL note", async () => {
     const result = await prepareMthdsInputs(
       { files, inputs: {} },
       {
@@ -805,10 +911,15 @@ describe("prepareMthdsInputs — request shape and transport", () => {
       },
     );
 
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.unreachable",
+      retry: "yes",
+      params: { base_url: DEFAULT_API_URL },
+    });
+    expect(result.summary).toContain(BASE_URL_NOTE);
   });
 
-  it("classifies a malformed base URL as config instead of rejecting the handler", async () => {
+  it("reports a malformed base URL as client.not_configured instead of rejecting the handler", async () => {
     // No injected client: the real SDK constructor must run and throw inside the
     // caught path (regression guard for the client hoist).
     const result = await prepareMthdsInputs(
@@ -817,8 +928,11 @@ describe("prepareMthdsInputs — request shape and transport", () => {
     );
 
     expect(result.structuredContent.status).toBe("error");
-    expect(result.structuredContent.errors?.[0]?.class).toBe("config");
-    expect(result.structuredContent.errors?.[0]?.location).toBe("PIPELEX_BASE_URL");
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.not_configured",
+      params: { setting: "base_url" },
+    });
+    expect(result.summary).toContain(BASE_URL_NOTE);
   });
 });
 describe("prepareMthdsInputs — what the uploads are recorded as", () => {
@@ -962,14 +1076,27 @@ describe("prepareMthdsInputs — what the uploads are recorded as", () => {
       },
     );
 
-    const error = result.structuredContent.errors?.[0];
-    expect(error).toMatchObject({ class: "input_domain", location: "method_id", retryable: false });
-    expect(error?.message).toContain("files belong to the method, not to one of its versions");
-    expect(error?.hint).toContain('"mt_123"');
-    expect(error?.hint).toContain("method_dir");
-    const listError =
-      listed.structuredContent.status === "error" ? listed.structuredContent.errors[0] : undefined;
-    expect(listError?.message).toBe(error?.message);
+    const problem = result.structuredContent.problem;
+    expect(problem).toMatchObject({
+      code: "client.argument_invalid",
+      retry: "no",
+      params: { argument: "method_id", reason: "version_suffix" },
+      location: { field: "method_id" },
+    });
+    expect(problem?.message).toContain("files belong to the method, not to one of its versions");
+    expect(problem?.message).toContain('"mt_123"');
+    expect(problem?.message).toContain("method_dir");
+    const listProblem =
+      listed.structuredContent.status === "error" ? listed.structuredContent.problem : undefined;
+    // The same refusal as the files list's, its remedy closed with this tool's own alternative.
+    expect(listProblem).toMatchObject({
+      code: problem?.code,
+      params: problem?.params,
+      location: problem?.location,
+    });
+    expect(String(listProblem?.message)).toContain(
+      "files belong to the method, not to one of its versions",
+    );
   });
 
   it("refuses a test upload for a method_id with no bare id, at method_id", async () => {
@@ -978,10 +1105,11 @@ describe("prepareMthdsInputs — what the uploads are recorded as", () => {
       { baseUrl: DEFAULT_API_URL, client: prepareInputsNotCalled },
     );
 
-    expect(result.structuredContent.errors?.[0]).toMatchObject({
-      class: "input_domain",
-      location: "method_id",
-      retryable: false,
+    expect(result.structuredContent.problem).toMatchObject({
+      code: "client.argument_invalid",
+      retry: "no",
+      params: { argument: "method_id", reason: "not_a_catalog_id" },
+      location: { field: "method_id" },
     });
   });
 
@@ -1034,10 +1162,15 @@ describe("prepareMthdsInputs — what the uploads are recorded as", () => {
       },
     );
 
-    const error = result.structuredContent.errors?.[0];
-    expect(error).toMatchObject({ class: "input_domain", location: "kind", retryable: false });
-    expect(error?.message).toContain(LEGACY_LINK_FILE_NAME);
-    expect(error?.hint).toContain(LEGACY_LINK_MOVE);
+    const problem = result.structuredContent.problem;
+    expect(problem).toMatchObject({
+      code: "client.argument_invalid",
+      retry: "no",
+      params: { argument: "kind", reason: "legacy_link" },
+      location: { field: "kind" },
+    });
+    expect(problem?.message).toContain(LEGACY_LINK_FILE_NAME);
+    expect(problem?.message).toContain(LEGACY_LINK_MOVE);
   });
 
   it.each([
@@ -1045,30 +1178,30 @@ describe("prepareMthdsInputs — what the uploads are recorded as", () => {
     [404, "method_not_found"],
     [409, "method_being_deleted"],
   ] as const)(
-    "classifies the platform's refusal of a test upload (%i %s)",
-    async (status, code) => {
-      const result = await prepareMthdsInputs(
-        { method_id: "mt_123", inputs: { invoice: "/tmp/a.pdf" }, kind: "test" },
-        {
-          baseUrl: DEFAULT_API_URL,
-          client: uploadWith(async () => {
-            // No wrapped answer, so the verdict is the one the SDK reads off the code.
-            throw new TestFileRefusedError(
-              `Upload of "a.pdf" as a test file was refused (${status})`,
-              { status, code, filename: "a.pdf", methodId: "mt_123" },
-            );
-          }),
-        },
+    "relays the platform's refusal of a test upload as the SDK reads it (%i %s)",
+    async (status, reason) => {
+      // No wrapped answer, so the problem is the one the SDK reads off the reason.
+      const err = new TestFileRefusedError(
+        `Upload of "a.pdf" as a test file was refused (${status})`,
+        { status, reason, filename: "a.pdf", methodId: "mt_123" },
       );
 
-      const error = result.structuredContent.errors?.[0];
-      if (code === "role_not_permitted") {
-        expect(error).toMatchObject({ class: "config", kind: "role", retryable: false });
-        expect(error).not.toHaveProperty("location");
-        expect(result.summary).toContain("your role in this organization does not allow this");
+      const result = await prepareMthdsInputs(
+        { method_id: "mt_123", inputs: { invoice: "/tmp/a.pdf" }, kind: "test" },
+        { baseUrl: DEFAULT_API_URL, client: uploadWith(() => Promise.reject(err)) },
+      );
+
+      const problem = result.structuredContent.problem;
+      expect(problem).toEqual(problemOf(err));
+      if (reason === "role_not_permitted") {
+        expect(problem).toMatchObject({ code: "auth.forbidden", domain: "account", retry: "no" });
+        expect(problem).not.toHaveProperty("location");
       } else {
-        expect(error).toMatchObject({ class: "input_domain", location: "kind", retryable: false });
-        expect(error?.hint).toContain("omit kind");
+        expect(problem).toMatchObject({
+          code: "client.argument_invalid",
+          retry: "no",
+          params: { argument: "method_id", reason },
+        });
       }
     },
   );
@@ -1131,10 +1264,21 @@ describe("prepareMthdsInputs — what the uploads are recorded as", () => {
 
       expect(captured[0]?.allowUploads).toBe(false);
       expect(captured[0]).not.toHaveProperty("upload");
-      const error = result.structuredContent.errors?.[0];
-      expect(error).toMatchObject({ class: "input_domain", location: "kind", retryable: false });
-      expect(error?.message).toContain(says);
-      expect(error?.message).toContain("The input invoice needs an upload");
+      const problem = result.structuredContent.problem;
+      expect(problem).toMatchObject({
+        code: "client.argument_invalid",
+        retry: "no",
+        params: { argument: "kind" },
+        location: { field: "kind" },
+      });
+      // The input that needed an upload, between the reason and its remedy.
+      const message = String(problem?.message);
+      const needed = message.indexOf(
+        "The input invoice needs an upload, so a test file would be recorded.",
+      );
+      expect(message.indexOf(says)).toBeGreaterThanOrEqual(0);
+      expect(needed).toBeGreaterThan(message.indexOf(says));
+      expect(message.endsWith("so a test file would be recorded.")).toBe(false);
     },
   );
 

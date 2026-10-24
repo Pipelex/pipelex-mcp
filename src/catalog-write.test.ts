@@ -32,7 +32,7 @@ import {
 } from "./capabilities/catalog-write.js";
 import type { CatalogWriteClient, CatalogWriteContext } from "./capabilities/catalog-write.js";
 import { DEFAULT_API_URL, createPipelexApiClient } from "./capabilities/shared.js";
-import type { ToolError } from "./capabilities/shared.js";
+import type { Problem } from "./capabilities/shared.js";
 import { GRAPH_PAGE_MARK } from "./capabilities/graph-page.js";
 import { localMethodFileResolver } from "./files.js";
 
@@ -56,8 +56,13 @@ const invalidReport = {
   is_runnable: false,
   pending_signatures: [],
   message: "invalid",
-  validation_errors: [
-    { category: "blueprint_validation", message: "Unknown pipe type", source: "bundle.mthds" },
+  errors: [
+    {
+      code: "method.pipe_type_invalid",
+      detail: "Pipe 'demo.main' has no usable type (reason: unknown_type).",
+      params: { pipe: "demo.main", reason: "unknown_type" },
+      location: { pipe: "demo.main", file: "bundle.mthds" },
+    },
   ],
   rendered_markdown: "# Invalid",
 } as unknown as PipelexValidationResult;
@@ -142,7 +147,7 @@ async function writeFromBlobs(
     if (bytes === undefined) {
       throw new MethodFileTransferError(`No stored bytes for ${file.path}.`, {
         operation: "download",
-        code: "storage_error",
+        reason: "storage_error",
         sha256: file.sha256,
         path: file.path,
       });
@@ -217,34 +222,58 @@ function storedVersion(overrides: Partial<MethodVersion> = {}): MethodVersion {
   };
 }
 
-/** The 409 the draft write answers for a stale token. */
-function draftConflict(): ApiResponseError {
+/**
+ * A platform refusal as the hosted API answers it: a problem document, which
+ * the SDK reads as it came, its request id on the header.
+ */
+function platformRefusal(
+  route: string,
+  status: number,
+  problem: { code: string; title: string; detail: string; domain: string } & Record<
+    string,
+    unknown
+  >,
+): ApiResponseError {
   return new ApiResponseError(
-    "conflict",
-    "https://api-dev.pipelex.com/v1/methods/mt_one/draft",
-    409,
-    "Conflict",
-    "{}",
-    undefined,
-    "The method's draft changed since expected_updated_at.",
-    undefined,
-    "method_update_conflict",
+    `HTTP ${status}`,
+    `https://api-dev.pipelex.com${route}`,
+    status,
+    "Refused",
+    JSON.stringify({
+      type: `https://docs.pipelex.com/errors/${problem.code}`,
+      status,
+      retry: "no",
+      next_step: { kind: "change_input", detail: "Change the request, then send it again." },
+      ...problem,
+    }),
+    { headers: { "x-request-id": `req_${status}` } },
   );
 }
 
-/** The 401 the platform answers a call that carries no key, or a key it does not know. */
+/** The 409 the draft write answers for a stale token. */
+function draftConflict(): ApiResponseError {
+  return platformRefusal("/v1/methods/mt_one/draft", 409, {
+    code: "pipelex.catalog.update_conflict",
+    title: "The method changed since your token",
+    detail: "The method's draft changed since expected_updated_at.",
+    domain: "input",
+    next_step: { kind: "reread", detail: "Read the method again, then decide what to send." },
+    location: { field: "expected_updated_at" },
+  });
+}
+
+/** The 401 the platform answers a call that carries no key. */
 function refusedKey(route: string): ApiResponseError {
-  return new ApiResponseError(
-    "unauthorized",
-    `https://api-dev.pipelex.com${route}`,
-    401,
-    "Unauthorized",
-    "{}",
-    undefined,
-    "Missing API key",
-    undefined,
-    "unauthorized",
-  );
+  return platformRefusal(route, 401, {
+    code: "auth.missing_credential",
+    title: "No credential was sent",
+    detail: "This route needs a credential, and the request carried none.",
+    domain: "account",
+    next_step: {
+      kind: "check_credentials",
+      detail: "Send the request with a credential this runtime accepts.",
+    },
+  });
 }
 
 /**
@@ -252,18 +281,17 @@ function refusedKey(route: string): ApiResponseError {
  * holds does not allow a method change, which is how a runner's save is met.
  */
 function roleRefusal(route: string, detail: string): ApiResponseError {
-  return new ApiResponseError(
-    "HTTP 403",
-    `https://api-dev.pipelex.com${route}`,
-    403,
-    "Forbidden",
-    "{}",
-    undefined,
+  return platformRefusal(route, 403, {
+    code: "auth.forbidden",
+    title: "The credential does not permit this",
     detail,
-    undefined,
-    "role_not_permitted",
-    { details: { title: "Forbidden", errorDomain: "config", retryable: false } },
-  );
+    domain: "account",
+    params: { requirement: "method_write" },
+    next_step: {
+      kind: "request_access",
+      detail: "Ask for 'method_write' on this account, then send the request again.",
+    },
+  });
 }
 
 const RUNNER_CHANGE_DETAIL =
@@ -355,8 +383,20 @@ async function writeLinkFile(file: string, content: string, encoding: BufferEnco
   await fs.writeFile(file, content, encoding);
 }
 
-function errorsOf(structured: { status: string; errors?: ToolError[] }): ToolError[] {
-  return structured.status === "error" ? (structured.errors ?? []) : [];
+/** The one problem of a call that produced no result; a test expecting one fails on anything else. */
+function problemOf(structured: { status: string; problem?: Problem }): Problem {
+  if (structured.status !== "error" || structured.problem === undefined) {
+    throw new Error(`expected a problem: ${JSON.stringify(structured)}`);
+  }
+  return structured.problem;
+}
+
+/** What every no-result summary renders of its problem: its title, detail, next step and code. */
+function expectProblemSummary(summary: string, problem: Problem): void {
+  expect(summary).toContain(`## ${problem.title}`);
+  expect(summary).toContain(problem.detail);
+  expect(summary).toContain(problem.next_step.detail);
+  expect(summary).toContain(`\`${problem.code}\``);
 }
 
 // ── mthds_save_method ───────────────────────────────────────────────
@@ -514,7 +554,17 @@ describe("saveMthdsMethod", () => {
       method_id: "mt_one",
       link_file: { written: true },
     });
-    expect(result.structuredContent).toHaveProperty("validation_errors");
+    // The verdict's faults, relayed as the API sent them, one problem item each.
+    expect(result.structuredContent).toMatchObject({
+      validation_errors: [
+        {
+          code: "method.pipe_type_invalid",
+          params: { pipe: "demo.main", reason: "unknown_type" },
+          location: { pipe: "demo.main", file: "bundle.mthds" },
+        },
+      ],
+    });
+    expect(result.structuredContent).not.toHaveProperty("validation_warnings");
     expect(result.summary).toContain("NOT valid");
     expect(result.summary).toContain("a publish refuses it");
   });
@@ -575,13 +625,12 @@ describe("saveMthdsMethod", () => {
       contextFor(clientNotCalled, unreachable),
     );
 
-    expect(result.structuredContent.status).toBe("error");
-    // The summary quotes why no verdict came, not only that none did.
-    const [first] = errorsOf(result.structuredContent);
-    expect(first).toBeDefined();
-    expect(result.summary).toBe(
-      `The method was not saved, because validating it produced no verdict: ${first?.message}`,
-    );
+    // The validation's own problem, as the SDK read it, and a summary that
+    // renders why no verdict came, not only that none did.
+    const problem = problemOf(result.structuredContent);
+    expect(problem).toMatchObject({ code: "client.unreachable", domain: "runtime", retry: "yes" });
+    expectProblemSummary(result.summary, problem);
+    expect(result.summary).toContain("validating it produced no verdict");
   });
 
   it("saves a method holding Python unvalidated when the deployment refuses to load it", async () => {
@@ -593,17 +642,16 @@ describe("saveMthdsMethod", () => {
       baseUrl: DEFAULT_API_URL,
       client: {
         async validate(): Promise<PipelexValidationResult> {
-          throw new ApiResponseError(
-            "HTTP 501",
-            `${DEFAULT_API_URL}/v1/validate`,
-            501,
-            "Not Implemented",
-            "{}",
-            undefined,
-            "This method ships custom Python (.py); it needs a sandbox-hosted deployment",
-            undefined,
-            "pipelex.deployment.custom_code_requires_sandbox",
-          );
+          throw platformRefusal("/v1/validate", 501, {
+            code: "pipelex.deployment.custom_code_requires_sandbox",
+            title: "Custom code needs a sandbox-hosted deployment",
+            detail: "This method ships custom Python (.py); it needs a sandbox-hosted deployment",
+            domain: "operator",
+            next_step: {
+              kind: "use_another_deployment",
+              detail: "Run it on a sandbox-hosted deployment.",
+            },
+          });
         },
       },
     } as unknown as CatalogWriteContext["validation"];
@@ -629,9 +677,11 @@ describe("saveMthdsMethod", () => {
       saved: "created",
       method_id: "mt_one",
       validation_refused: {
-        class: "input_domain",
-        message: "This method ships custom Python (.py); it needs a sandbox-hosted deployment",
-        retryable: false,
+        code: "pipelex.deployment.custom_code_requires_sandbox",
+        domain: "operator",
+        retry: "no",
+        detail: "This method ships custom Python (.py); it needs a sandbox-hosted deployment",
+        request_id: "req_501",
       },
       files_sent: [
         path.join("methods/demo", "bundle.mthds"),
@@ -646,6 +696,7 @@ describe("saveMthdsMethod", () => {
     ]);
     expect(result.summary).toContain("NOT validated");
     expect(result.summary).toContain("sandbox-hosted deployment.");
+    expect(result.summary).toContain("Run it on a sandbox-hosted deployment.");
     expect(result.summary).not.toContain("NOT valid.");
   });
 
@@ -657,10 +708,16 @@ describe("saveMthdsMethod", () => {
       contextFor(clientNotCalled, validationAnswering(validReport)),
     );
 
-    expect(errorsOf(result.structuredContent)[0]).toMatchObject({
-      class: "input_domain",
-      location: "name",
+    const problem = problemOf(result.structuredContent);
+    expect(problem).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      retry: "no",
+      params: { argument: "name", reason: "missing" },
+      location: { field: "name" },
     });
+    expect(problem.message).toContain("name is required to create a method.");
+    expectProblemSummary(result.summary, problem);
   });
 
   it("writes the draft through method_id, sending neither input_data nor the name", async () => {
@@ -764,10 +821,17 @@ describe("saveMthdsMethod", () => {
     // A save from a linked directory never replaces a draft somebody saved
     // since the directory synced: the link's token is the compare-and-swap.
     expect(sent?.expected_updated_at).toBe("2026-09-19T00:00:00Z");
-    const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ location: "expected_updated_at" });
+    const error = problemOf(result.structuredContent);
+    // The catalog's own problem, relayed, its message naming both tokens.
+    expect(error).toMatchObject({
+      code: "pipelex.catalog.update_conflict",
+      domain: "input",
+      retry: "no",
+      location: { field: "expected_updated_at" },
+      request_id: "req_409",
+    });
     expect(error.message).toContain(`as this folder's ${LINK_FILE_NAME} records`);
-    expect(error.hint).toContain("the draft's current updated_at");
+    expect(error.message).toContain("the draft's current updated_at");
     // Refused: the link is left as it was.
     const link = await readMethodLink(path.join(root, "methods/demo"));
     expect(link.kind === "link" && link.link.synced_updated_at).toBe("2026-09-19T00:00:00Z");
@@ -795,15 +859,18 @@ describe("saveMthdsMethod", () => {
     );
     // The link alone refuses it, so nothing is read or validated first.
     expect(validated.source).toBeUndefined();
-    const [error] = errorsOf(refused.structuredContent);
+    const error = problemOf(refused.structuredContent);
     expect(error).toMatchObject({
-      class: "input_domain",
-      location: "expected_updated_at",
-      retryable: false,
+      code: "client.argument_invalid",
+      domain: "input",
+      retry: "no",
+      params: { argument: "expected_updated_at", reason: "version_pulled" },
+      location: { field: "expected_updated_at" },
     });
     expect(error.message).toContain("holds version 2");
-    expect(error.hint).toContain('expected_updated_at "2026-09-20T12:00:00Z"');
-    expect(refused.summary).toContain("holds a published version");
+    expect(error.message).toContain('expected_updated_at "2026-09-20T12:00:00Z"');
+    expectProblemSummary(refused.summary, error);
+    expect(refused.summary).toContain("holds version 2");
 
     // With the token, after the user asked, the restore goes through.
     let sent: MethodDraftInput | undefined;
@@ -853,10 +920,15 @@ describe("saveMthdsMethod", () => {
         contextFor(clientNotCalled, validationAnswering(validReport)),
       );
 
-      const [error] = errorsOf(result.structuredContent);
-      expect(error).toMatchObject({ class: "input_domain", location: "method_dir" });
+      const error = problemOf(result.structuredContent);
+      expect(error).toMatchObject({
+        code: "client.argument_invalid",
+        domain: "input",
+        params: { argument: "method_dir", reason: "partial_pull" },
+        location: { field: "method_dir" },
+      });
       expect(error.message).toContain("was interrupted");
-      expect(error.hint).toContain("Pull the method into the folder again");
+      expect(error.message).toContain("Pull the method into the folder again");
     }
   });
 
@@ -872,10 +944,19 @@ describe("saveMthdsMethod", () => {
       { method_dir: "methods/demo", method_id: "mt_one" },
       contextFor(clientNotCalled, validationAnswering(validReport)),
     );
-    const [error] = errorsOf(refused.structuredContent);
-    expect(error).toMatchObject({ class: "input_domain", location: "method_dir" });
+    const error = problemOf(refused.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.file_unreadable",
+      domain: "input",
+      retry: "no",
+      params: {
+        path: path.join("methods/demo", LINK_FILE_NAME),
+        reason: "link_unreadable",
+      },
+      location: { field: "method_dir" },
+    });
     expect(error.message).toContain("cannot be read");
-    expect(error.hint).toContain("merge conflict");
+    expect(error.message).toContain("merge conflict");
 
     // An explicit token is its own guard; the broken link is still not touched.
     const saved = await saveMthdsMethod(
@@ -990,8 +1071,11 @@ describe("saveMthdsMethod", () => {
 
     // Both read the same token, and the platform takes only one write under
     // it: the older bytes are refused rather than replace the newer draft.
-    const [error] = errorsOf((await first).structuredContent);
-    expect(error).toMatchObject({ class: "input_domain", location: "expected_updated_at" });
+    const error = problemOf((await first).structuredContent);
+    expect(error).toMatchObject({
+      code: "pipelex.catalog.update_conflict",
+      location: { field: "expected_updated_at" },
+    });
     expect(state.content).toContain("newer");
     expect(state.writes).toBe(1);
     const link = await readMethodLink(path.join(root, "methods/demo"));
@@ -1037,8 +1121,10 @@ describe("saveMthdsMethod", () => {
       { method_dir: "work", method_id: "mt_one" },
       contextFor(client, validationAnswering(validReport)),
     );
-    expect(errorsOf(after.structuredContent)[0]).toMatchObject({
-      location: "expected_updated_at",
+    expect(problemOf(after.structuredContent)).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "expected_updated_at", reason: "version_pulled" },
+      location: { field: "expected_updated_at" },
     });
     expect(state.writes).toBe(1);
   });
@@ -1081,8 +1167,14 @@ describe("saveMthdsMethod", () => {
 
     const result = await saveMthdsMethod({ method_dir: "work", method_id: "mt_one" }, context);
 
-    const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "runtime", location: "method_dir", retryable: true });
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.workspace_busy",
+      domain: "runtime",
+      retry: "yes",
+      params: { path: path.join("work", LINK_FILE_NAME) },
+      location: { field: "method_dir" },
+    });
     expect(error.message).toContain("changed while this save read the files");
     expect(error.message).toContain("Nothing was sent");
   });
@@ -1182,9 +1274,14 @@ describe("saveMthdsMethod", () => {
       { method_dir: "methods/demo", method_id: "mt_one@3" },
       contextFor(clientNotCalled, validationAnswering(validReport)),
     );
-    const [error] = errorsOf(versioned.structuredContent);
-    expect(error).toMatchObject({ class: "input_domain", location: "method_id" });
-    expect(error.hint).toContain('"mt_one"');
+    const error = problemOf(versioned.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      params: { argument: "method_id", reason: "version_selector" },
+      location: { field: "method_id" },
+    });
+    expect(error.message).toContain('"mt_one"');
   });
 
   it("renames through its own call when the name changed, after the draft write", async () => {
@@ -1362,13 +1459,15 @@ describe("saveMthdsMethod", () => {
       ),
     );
 
+    // The rename's own problem, as the SDK read the failure, beside a saved draft.
     expect(failing.structuredContent).toMatchObject({
       status: "ok",
       saved: "updated",
       name: "Summarize PDF",
-      rename_error: { location: "PIPELEX_BASE_URL" },
+      rename_error: { code: "client.unreachable", domain: "runtime", retry: "yes" },
     });
     expect(failing.summary).toContain("rename to the requested name FAILED");
+    expect(failing.summary).toContain("(client.unreachable)");
   });
 
   it("refuses the save when the draft moved since expected_updated_at, naming both tokens", async () => {
@@ -1394,15 +1493,20 @@ describe("saveMthdsMethod", () => {
       ),
     );
 
-    const [error] = errorsOf(result.structuredContent);
+    const error = problemOf(result.structuredContent);
     expect(error).toMatchObject({
-      class: "input_domain",
-      location: "expected_updated_at",
-      retryable: false,
+      code: "pipelex.catalog.update_conflict",
+      domain: "input",
+      retry: "no",
+      detail: "The method's draft changed since expected_updated_at.",
+      location: { field: "expected_updated_at" },
+      request_id: "req_409",
     });
     expect(error.message).toContain("2026-09-20T12:00:00Z");
     expect(error.message).toContain("2026-09-19T00:00:00Z");
     expect(error.message).toContain("Nothing was written");
+    expectProblemSummary(result.summary, error);
+    expect(result.summary).toContain("`req_409`");
     await expect(fs.access(path.join(root, "methods/demo", LINK_FILE_NAME))).rejects.toThrow();
   });
 
@@ -1437,7 +1541,7 @@ describe("saveMthdsMethod", () => {
     expect(unsupported.summary).toContain("runs this draft from its next call, not version 2");
   });
 
-  it("classifies a create-side transport fault as NOT retryable", async () => {
+  it("relays a create-side transport fault unchanged, and cautions against a blind retry", async () => {
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
 
     const result = await saveMthdsMethod(
@@ -1457,14 +1561,17 @@ describe("saveMthdsMethod", () => {
       ),
     );
 
-    // The route honours an idempotency key the SDK cannot send, so a create
-    // whose response was lost would mint a SECOND method on retry.
-    const [error] = errorsOf(result.structuredContent);
-    expect(error.retryable).toBe(false);
-    expect(error.hint).toContain("mthds_list_methods");
+    // The SDK's problem, unchanged: asking again can succeed. The route honours
+    // an idempotency key the SDK cannot send, so a create whose response was
+    // lost would mint a SECOND method on retry, which the summary says.
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({ code: "client.unreachable", domain: "runtime", retry: "yes" });
+    expectProblemSummary(result.summary, error);
+    expect(result.summary).toContain("This was a CREATE, and it must not be retried blindly");
+    expect(result.summary).toContain("mthds_list_methods");
   });
 
-  it("headlines a refused key on the create as the key, not as connectivity", async () => {
+  it("relays a refused key on the create as the key, not as connectivity", async () => {
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
 
     const result = await saveMthdsMethod(
@@ -1480,17 +1587,21 @@ describe("saveMthdsMethod", () => {
       ),
     );
 
-    expect(errorsOf(result.structuredContent)[0]).toMatchObject({
-      class: "config",
-      kind: "auth",
-      location: "PIPELEX_API_KEY",
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "auth.missing_credential",
+      domain: "account",
+      retry: "no",
+      request_id: "req_401",
     });
-    expect(result.summary).toBe(
-      "The method was not saved: the Pipelex API key is missing or was refused.",
-    );
+    expectProblemSummary(result.summary, error);
+    // Where the key came from, beside a refused credential, and no create caution:
+    // a refusal is an answer, so nothing was minted.
+    expect(result.summary).toContain("PIPELEX_API_KEY");
+    expect(result.summary).not.toContain("CREATE");
   });
 
-  it("headlines a draft write refused by role as the role, with the server's sentence", async () => {
+  it("relays a draft write refused by role as the role, with the server's sentence", async () => {
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
 
     const result = await saveMthdsMethod(
@@ -1506,17 +1617,17 @@ describe("saveMthdsMethod", () => {
       ),
     );
 
-    const [error] = errorsOf(result.structuredContent);
+    const error = problemOf(result.structuredContent);
     expect(error).toMatchObject({
-      class: "config",
-      kind: "role",
-      message: RUNNER_CHANGE_DETAIL,
-      retryable: false,
+      code: "auth.forbidden",
+      domain: "account",
+      retry: "no",
+      detail: RUNNER_CHANGE_DETAIL,
+      params: { requirement: "method_write" },
+      next_step: { kind: "request_access" },
     });
     expect(error.location).toBeUndefined();
-    expect(result.summary).toBe(
-      "The method was not saved: your role in this organization does not allow this.",
-    );
+    expectProblemSummary(result.summary, error);
     const [content] = saveMethodToolResult(result).content;
     expect(content.text).toContain(RUNNER_CHANGE_DETAIL);
     expect(content.text).not.toMatch(/PIPELEX_API_KEY|log ?in/i);
@@ -1538,13 +1649,11 @@ describe("saveMthdsMethod", () => {
       ),
     );
 
-    const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "config", kind: "role", retryable: false });
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({ code: "auth.forbidden", domain: "account", retry: "no" });
+    expectProblemSummary(result.summary, error);
     // A refusal is an answer, so nothing was minted and no list-first warning is due.
-    expect(error.hint).not.toContain("CREATE");
-    expect(result.summary).toBe(
-      "The method was not saved: your role in this organization does not allow this.",
-    );
+    expect(result.summary).not.toContain("CREATE");
   });
 
   it("warns that the method may exist when the create's answer came back unreadable", async () => {
@@ -1562,15 +1671,22 @@ describe("saveMthdsMethod", () => {
         ),
       );
 
-      const [error] = errorsOf(result.structuredContent);
-      expect(error.retryable).toBe(false);
-      expect(error.hint).toContain("mthds_list_methods");
+      // The SDK's reading, unchanged: an answer it could not read is final.
+      // The caution is the summary's, since the method exists all the same.
+      const error = problemOf(result.structuredContent);
+      expect(error).toMatchObject({
+        code: "client.response_unreadable",
+        retry: "no",
+        params: { status: 201 },
+      });
+      expect(result.summary).toContain("This was a CREATE, and it must not be retried blindly");
+      expect(result.summary).toContain("mthds_list_methods");
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it("leaves a draft write's transport fault retryable, PUT being idempotent", async () => {
+  it("relays a draft write's transport fault as retryable, with no create caution, PUT being idempotent", async () => {
     await writeBundle("methods/demo", { "bundle.mthds": 'domain = "demo"' });
 
     const result = await saveMthdsMethod(
@@ -1590,7 +1706,9 @@ describe("saveMthdsMethod", () => {
       ),
     );
 
-    expect(errorsOf(result.structuredContent)[0]?.retryable).toBe(true);
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({ code: "client.unreachable", retry: "yes" });
+    expect(result.summary).not.toContain("CREATE");
   });
 
   it("answers a malformed base URL as an error rather than throwing", async () => {
@@ -1606,8 +1724,11 @@ describe("saveMthdsMethod", () => {
       context,
     );
 
-    expect(result.structuredContent.status).toBe("error");
-    expect(errorsOf(result.structuredContent)).toHaveLength(1);
+    // One problem, the SDK's reading of the base URL it could not use.
+    const error = problemOf(result.structuredContent);
+    expect(error.domain).toBeDefined();
+    expect(error.retry).toBe("no");
+    expectProblemSummary(result.summary, error);
   });
 
   it("rejects an empty method_dir", async () => {
@@ -1616,7 +1737,12 @@ describe("saveMthdsMethod", () => {
       contextFor(clientNotCalled, validationAnswering(validReport)),
     );
 
-    expect(errorsOf(result.structuredContent)[0]).toMatchObject({ location: "method_dir" });
+    expect(problemOf(result.structuredContent)).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      params: { argument: "method_dir" },
+      location: { field: "method_dir" },
+    });
   });
 
   it("refuses a folder with no .mthds file at its top, sending nothing", async () => {
@@ -1627,16 +1753,18 @@ describe("saveMthdsMethod", () => {
       contextFor(clientNotCalled, validationAnswering(validReport)),
     );
 
-    const [error] = errorsOf(result.structuredContent);
+    const error = problemOf(result.structuredContent);
     expect(error).toMatchObject({
-      class: "input_domain",
-      location: "method_dir",
-      retryable: false,
+      code: "client.argument_invalid",
+      domain: "input",
+      retry: "no",
+      params: { argument: "method_dir" },
+      location: { field: "method_dir" },
     });
     expect(error.message).toContain("no .mthds file at its top");
-    // The save takes a folder and nothing else: its hints never offer `files`.
-    expect(error.hint).not.toContain("in files");
-    expect(error.hint).toContain("then save the folder again");
+    // The save takes a folder and nothing else: its remedies never offer `files`.
+    expect(error.message).not.toContain("in files");
+    expect(error.message).toContain("then save the folder again");
   });
 
   it("refuses a folder holding a symbolic link, naming it, and offers no files argument", async () => {
@@ -1648,10 +1776,14 @@ describe("saveMthdsMethod", () => {
       contextFor(clientNotCalled, validationAnswering(validReport)),
     );
 
-    const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "input_domain", location: "method_dir" });
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      location: { field: "method_dir" },
+    });
     expect(error.message).toContain("alias.mthds");
-    expect(error.hint).not.toContain("in files");
+    expect(error.message).not.toContain("in files");
   });
 
   it("refuses a method_dir symlinked out of the working directory before reading its link", async () => {
@@ -1667,9 +1799,10 @@ describe("saveMthdsMethod", () => {
         contextFor(clientNotCalled, validationAnswering(validReport)),
       );
 
-      expect(errorsOf(result.structuredContent)[0]).toMatchObject({
-        class: "input_domain",
-        location: "method_dir",
+      expect(problemOf(result.structuredContent)).toMatchObject({
+        code: "client.argument_invalid",
+        domain: "input",
+        location: { field: "method_dir" },
       });
     } finally {
       await fs.rm(outside, { recursive: true, force: true });
@@ -1699,11 +1832,12 @@ describe("saveMthdsMethod", () => {
     );
 
     expect(handshakes).toBe(1);
-    const [error] = errorsOf(result.structuredContent);
+    const error = problemOf(result.structuredContent);
     expect(error).toMatchObject({
-      class: "input_domain",
-      location: "method_dir",
-      retryable: false,
+      code: "client.argument_invalid",
+      domain: "input",
+      retry: "no",
+      location: { field: "method_dir" },
     });
     expect(error.message).toContain("takes no method holding more than 2 files");
   });
@@ -1734,16 +1868,20 @@ describe("saveMthdsMethod", () => {
     expect(result.structuredContent).toMatchObject({ status: "ok", saved: "created" });
   });
 
-  it("refuses a deployment that cannot read a folder as a config fault", async () => {
+  it("refuses a deployment that cannot read a folder as one without a working directory", async () => {
     const result = await saveMthdsMethod(
       { method_dir: "methods/demo", name: "Demo" },
       { ...contextFor(clientNotCalled, validationAnswering(validReport)), saveRoot: undefined },
     );
 
-    expect(errorsOf(result.structuredContent)[0]).toMatchObject({
-      class: "config",
-      location: "deployment",
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.not_configured",
+      retry: "no",
+      params: { setting: "working_directory" },
     });
+    expect(error.location).toBeUndefined();
+    expect(error.message).toContain("npx @pipelex/mcp");
   });
 
   it("keeps an upload failure's own verdict, with no create retry warning", async () => {
@@ -1758,7 +1896,7 @@ describe("saveMthdsMethod", () => {
           async createMethod(): Promise<MethodData> {
             throw new MethodFileTransferError("The upload of bundle.mthds was refused.", {
               operation: "upload",
-              code: "unreachable",
+              reason: "unreachable",
               path: "bundle.mthds",
             });
           },
@@ -1767,9 +1905,11 @@ describe("saveMthdsMethod", () => {
       ),
     );
 
-    const [error] = errorsOf(result.structuredContent);
-    expect(error.location).toBe("method_dir");
-    expect(error.hint).not.toContain("CREATE");
+    // The SDK's problem for the transfer, unchanged: storage could not be
+    // reached, which a later attempt can pass; no create was sent, so no caution.
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({ code: "runtime.unavailable", domain: "runtime", retry: "yes" });
+    expect(result.summary).not.toContain("CREATE");
   });
 });
 
@@ -1830,11 +1970,13 @@ describe("the secret guard", () => {
     // Only the limits handshake, a metadata read that carries no file, went
     // out: no validation, no upload, no create.
     expect(calls).toEqual(["methodTreeLimits"]);
-    const [error] = errorsOf(result.structuredContent);
+    const error = problemOf(result.structuredContent);
     expect(error).toMatchObject({
-      class: "input_domain",
-      location: "method_dir",
-      retryable: false,
+      code: "client.argument_invalid",
+      domain: "input",
+      retry: "no",
+      params: { argument: "method_dir", reason: "secret_suspected" },
+      location: { field: "method_dir" },
     });
     expect(error.message).toContain(path.join("methods/demo", "funcs", "client.py"));
     expect(error.message).toContain("a Pipelex API key");
@@ -1859,10 +2001,14 @@ describe("the secret guard", () => {
     );
 
     expect(calls).toEqual(["methodTreeLimits"]);
-    const [error] = errorsOf(result.structuredContent);
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.argument_invalid",
+      params: { argument: "method_dir", reason: "secret_suspected" },
+    });
     expect(error.message).toContain(path.join("methods/demo", "certs", "server.key"));
     expect(error.message).toContain("named like a key file");
-    expect(error.hint).toContain(".gitignore");
+    expect(error.message).toContain(".gitignore");
   });
 
   it("lets a secret the membership rule already keeps out stay where it is", async () => {
@@ -1967,7 +2113,7 @@ describe("getMthdsMethod", () => {
           async writeMethodTree(): Promise<never> {
             throw new MethodFileTransferError("The download of bundle.mthds failed.", {
               operation: "download",
-              code: "mismatch",
+              reason: "mismatch",
               path: "bundle.mthds",
             });
           },
@@ -1988,7 +2134,15 @@ describe("getMthdsMethod", () => {
       contextFor(readingClient(storedMethod()), validationAnswering(validReport)),
     );
 
-    expect(errorsOf(result.structuredContent)[0]).toMatchObject({ location: "output_dir" });
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.target_exists",
+      domain: "input",
+      retry: "no",
+      params: { path: "theirs" },
+      location: { field: "output_dir" },
+    });
+    expectProblemSummary(result.summary, error);
     expect(await fs.readFile(path.join(root, "theirs/bundle.mthds"), "utf8")).toBe("theirs");
   });
 
@@ -2001,9 +2155,14 @@ describe("getMthdsMethod", () => {
       contextFor(readingClient(storedMethod()), validationAnswering(validReport)),
     );
 
-    const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "input_domain", location: "output_dir" });
-    expect(error.hint).toContain(
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      params: { argument: "output_dir", reason: "legacy_link_file" },
+      location: { field: "output_dir" },
+    });
+    expect(error.message).toContain(
       "mkdir -p .pipelex && git mv pipelex-method.json .pipelex/method.json",
     );
     expect(await fs.readdir(path.join(root, "old"))).toEqual(["pipelex-method.json"]);
@@ -2027,7 +2186,12 @@ describe("getMthdsMethod", () => {
       contextFor(readingClient(storedMethod()), validationAnswering(validReport)),
     );
 
-    const [error] = errorsOf(result.structuredContent);
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.target_exists",
+      params: { path: "other" },
+      location: { field: "output_dir" },
+    });
     expect(error.message).toContain("mt_other");
   });
 
@@ -2051,7 +2215,11 @@ describe("getMthdsMethod", () => {
       contextFor(readingClient(stored), validationAnswering(validReport)),
     );
 
-    const [error] = errorsOf(result.structuredContent);
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.target_exists",
+      location: { field: "output_dir" },
+    });
     expect(error.message).toContain("never saved");
     expect(await fs.readFile(path.join(root, "linked/bundle.mthds"), "utf8")).toBe(
       "edited locally",
@@ -2079,7 +2247,8 @@ describe("getMthdsMethod", () => {
       { method_id: "mt_one", output_dir: "both" },
       contextFor(readingClient(stored), validationAnswering(validReport)),
     );
-    expect(errorsOf(refused.structuredContent)[0]?.hint).toContain("overwrite: true");
+    expect(problemOf(refused.structuredContent)).toMatchObject({ code: "client.target_exists" });
+    expect(problemOf(refused.structuredContent).message).toContain("overwrite: true");
     expect(await fs.readFile(path.join(root, "both/bundle.mthds"), "utf8")).toBe("edited locally");
 
     const forced = await getMthdsMethod(
@@ -2197,7 +2366,7 @@ describe("getMthdsMethod", () => {
           async writeMethodTree(): Promise<never> {
             throw new MethodFileTransferError("The download of bundle.mthds failed.", {
               operation: "download",
-              code: "unreachable",
+              reason: "unreachable",
               path: "bundle.mthds",
             });
           },
@@ -2206,8 +2375,10 @@ describe("getMthdsMethod", () => {
       ),
     );
 
-    const [error] = errorsOf(result.structuredContent);
-    expect(result.structuredContent.status).toBe("error");
+    // The SDK's problem, unchanged: storage could not be reached, and this arm
+    // writes nowhere the caller named, so nothing locates it.
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({ code: "runtime.unavailable", domain: "runtime", retry: "yes" });
     expect(error.location).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain("blobs.example.test");
   });
@@ -2218,40 +2389,50 @@ describe("getMthdsMethod", () => {
       contextFor(readingClient(storedMethod({ files: [] })), validationAnswering(validReport)),
     );
 
-    const [error] = errorsOf(result.structuredContent);
-    // A different answer from "no such method", which is a 404 at this same field.
-    expect(error).toMatchObject({ class: "input_domain", location: "method_id" });
+    const error = problemOf(result.structuredContent);
+    // A different answer from "no such method", which is the catalog's
+    // pipelex.catalog.not_found: the method's package is empty.
+    expect(error).toMatchObject({
+      code: "method.package_invalid",
+      domain: "method",
+      retry: "no",
+      params: { reason: "empty_tree" },
+      location: { field: "method_id" },
+    });
     expect(error.message).toContain("holds no file yet");
   });
 
-  it("passes a 404 through as input_domain at method_id", async () => {
+  it("relays the catalog's 404 unchanged", async () => {
     const result = await getMthdsMethod(
       { method_id: "mt_missing" },
       contextFor(
         {
           ...clientNotCalled,
           async getMethod(): Promise<MethodDetail> {
-            throw new ApiResponseError(
-              "not found",
-              "https://api-dev.pipelex.com/v1/methods/mt_missing",
-              404,
-              "Not Found",
-              "{}",
-              undefined,
-              "Method not found",
-              undefined,
-              "not_found", // the platform names an unknown method by its code
-            );
+            throw platformRefusal("/v1/methods/mt_missing", 404, {
+              code: "pipelex.catalog.not_found",
+              title: "The method was not found",
+              detail: "Method not found",
+              domain: "input",
+            });
           },
         },
         validationAnswering(validReport),
       ),
     );
 
-    expect(errorsOf(result.structuredContent)[0]).toMatchObject({ location: "method_id" });
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "pipelex.catalog.not_found",
+      domain: "input",
+      retry: "no",
+      detail: "Method not found",
+      request_id: "req_404",
+    });
+    expectProblemSummary(result.summary, error);
   });
 
-  it("headlines a refused key as the key, not as connectivity", async () => {
+  it("relays a refused key as the key, not as connectivity", async () => {
     const result = await getMthdsMethod(
       { method_id: "mt_one" },
       contextFor(
@@ -2265,14 +2446,15 @@ describe("getMthdsMethod", () => {
       ),
     );
 
-    expect(errorsOf(result.structuredContent)[0]).toMatchObject({
-      class: "config",
-      kind: "auth",
-      location: "PIPELEX_API_KEY",
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "auth.missing_credential",
+      domain: "account",
+      retry: "no",
     });
-    expect(result.summary).toBe(
-      "The method was not fetched: the Pipelex API key is missing or was refused.",
-    );
+    expectProblemSummary(result.summary, error);
+    expect(result.summary).toContain("PIPELEX_API_KEY");
+    expect(result.summary).toContain("`req_401`");
   });
 });
 
@@ -2321,14 +2503,16 @@ describe("the link file", () => {
       contextFor(clientNotCalled, validationAnswering(validReport)),
     );
 
-    const [error] = errorsOf(result.structuredContent);
+    const error = problemOf(result.structuredContent);
     expect(error).toMatchObject({
-      class: "input_domain",
-      location: "method_dir",
-      retryable: false,
+      code: "client.argument_invalid",
+      domain: "input",
+      retry: "no",
+      params: { argument: "method_dir", reason: "legacy_link_file" },
+      location: { field: "method_dir" },
     });
     expect(error.message).toContain("pipelex-method.json");
-    expect(error.hint).toContain(
+    expect(error.message).toContain(
       "mkdir -p .pipelex && git mv pipelex-method.json .pipelex/method.json",
     );
     // No link was written beside it: the folder is exactly as it was.
@@ -2400,7 +2584,8 @@ describe("the pull writes only what it may", () => {
       contextFor(reading(stored), validationAnswering(validReport)),
     );
 
-    expect(errorsOf(result.structuredContent)[0]?.message).toContain("helpers.py");
+    expect(problemOf(result.structuredContent)).toMatchObject({ code: "client.target_exists" });
+    expect(problemOf(result.structuredContent).message).toContain("helpers.py");
     expect(await fs.readFile(path.join(root, "py", "helpers.py"), "utf8")).toBe(
       "# MY LOCAL EDIT\n",
     );
@@ -2417,7 +2602,11 @@ describe("the pull writes only what it may", () => {
       contextFor(reading(stored), validationAnswering(validReport)),
     );
 
-    expect(errorsOf(result.structuredContent)[0]?.message).toContain("helpers.py");
+    expect(problemOf(result.structuredContent)).toMatchObject({
+      code: "client.target_exists",
+      params: { path: "occupied" },
+    });
+    expect(problemOf(result.structuredContent).message).toContain("helpers.py");
     expect(await fs.readFile(path.join(root, "occupied", "helpers.py"), "utf8")).toBe(
       "# THE USER'S\n",
     );
@@ -2472,8 +2661,13 @@ describe("the pull writes only what it may", () => {
       contextFor(reading(stored), validationAnswering(validReport)),
     );
 
-    const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "input_domain", location: "output_dir" });
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.target_exists",
+      domain: "input",
+      params: { path: "assets/settings.json" },
+      location: { field: "output_dir" },
+    });
     expect(error.message).toContain("`assets`");
     expect(await fs.readdir(path.join(root, "linked", ".claude"))).toEqual([]);
     await expect(fs.access(path.join(root, "linked", "bundle.mthds"))).rejects.toThrow();
@@ -2500,7 +2694,12 @@ describe("the pull writes only what it may", () => {
       contextFor(reading(stored), validationAnswering(validReport)),
     );
 
-    expect(errorsOf(result.structuredContent)[0]?.message).toContain("symlink");
+    expect(problemOf(result.structuredContent)).toMatchObject({
+      code: "client.target_exists",
+      params: { path: "bundle.mthds" },
+      location: { field: "output_dir" },
+    });
+    expect(problemOf(result.structuredContent).message).toContain("symlink");
     // Still a symlink: nothing was written through it, and nothing replaced it.
     expect((await fs.lstat(path.join(root, "linkdest", "bundle.mthds"))).isSymbolicLink()).toBe(
       true,
@@ -2540,11 +2739,16 @@ describe("the pull writes only what it may", () => {
       contextFor(reading(storedMethod()), validationAnswering(validReport)),
     );
 
-    const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "input_domain", location: "output_dir" });
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.target_exists",
+      domain: "input",
+      params: { path: "." },
+      location: { field: "output_dir" },
+    });
     expect(error.message).toContain("`package.json`");
     expect(error.message).toContain("`src/index.ts`");
-    expect(error.hint).toContain("fresh folder");
+    expect(error.message).toContain("fresh folder");
     await expect(fs.access(path.join(root, "bundle.mthds"))).rejects.toThrow();
     await expect(fs.access(path.join(root, LINK_FILE_NAME))).rejects.toThrow();
   });
@@ -2569,8 +2773,12 @@ describe("the pull writes only what it may", () => {
       ),
     );
 
-    const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "input_domain", location: "output_dir" });
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.target_exists",
+      params: { path: "fresh" },
+      location: { field: "output_dir" },
+    });
     expect(error.message).toContain("`notes.md`");
     await expect(fs.access(path.join(root, "fresh", "bundle.mthds"))).rejects.toThrow();
     await expect(fs.access(path.join(root, "fresh", LINK_FILE_NAME))).rejects.toThrow();
@@ -2600,8 +2808,12 @@ describe("the pull writes only what it may", () => {
       contextFor(reading(storedMethod()), validationAnswering(validReport)),
     );
 
-    const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "input_domain", location: "output_dir" });
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.target_exists",
+      params: { path: "tangled" },
+      location: { field: "output_dir" },
+    });
     expect(error.message).toContain("could not be listed");
     await expect(fs.access(path.join(root, "tangled", "bundle.mthds"))).rejects.toThrow();
   });
@@ -2644,7 +2856,18 @@ describe("the pull writes only what it may", () => {
       contextFor(reading(stored), validationAnswering(validReport)),
     );
     expect(failed.structuredContent.status).toBe("error");
-    expect(errorsOf(failed.structuredContent)[0]?.retryable).toBe(true);
+    // Not a blind retry: the failure says what to fix, and that calling again
+    // with the same output_dir resumes the pull once it is fixed.
+    expect(problemOf(failed.structuredContent)).toMatchObject({
+      code: "client.write_failed",
+      domain: "input",
+      retry: "no",
+      params: { reason: "partly_written" },
+      location: { field: "output_dir" },
+    });
+    expect(problemOf(failed.structuredContent).message).toContain(
+      "calling again with the same output_dir resumes it once the cause is fixed",
+    );
 
     const link = await readMethodLink(path.join(root, "partial"));
     expect(link.kind === "link" && link.link.partial_pull).toBe(true);
@@ -2679,10 +2902,14 @@ describe("the pull writes only what it may", () => {
       contextFor(reading(stored), validationAnswering(validReport)),
     );
 
-    const [error] = errorsOf(result.structuredContent);
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.target_exists",
+      location: { field: "output_dir" },
+    });
     expect(error.message).not.toContain("both this directory and the stored method have changed");
     expect(error.message).toContain("differs from the stored one");
-    expect(error.hint).toContain("overwrite: true");
+    expect(error.message).toContain("overwrite: true");
   });
 });
 
@@ -2728,10 +2955,16 @@ describe("the save writes a link only where one belongs", () => {
     // Nothing is created: the link is read BEFORE the catalog call, because a
     // duplicate cannot be undone from here — delete is admin-only — and the old
     // ordering reported the refusal about a second method that already existed.
-    const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "input_domain", location: "method_id" });
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.target_exists",
+      domain: "input",
+      retry: "no",
+      params: { path: path.join("theirs", LINK_FILE_NAME) },
+      location: { field: "method_id" },
+    });
     expect(error.message).toContain("mt_teammate");
-    expect(error.hint).toContain('method_id: "mt_teammate"');
+    expect(error.message).toContain('method_id: "mt_teammate"');
     const link = await readMethodLink(path.join(root, "theirs"));
     expect(link.kind === "link" && link.link.method_id).toBe("mt_teammate");
   });
@@ -2786,13 +3019,17 @@ describe("the save writes a link only where one belongs", () => {
       contextFor(clientNotCalled, validationAnswering(validReport)),
     );
 
-    const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "input_domain", location: "method_id" });
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.target_exists",
+      params: { path: path.join("theirs", LINK_FILE_NAME) },
+      location: { field: "method_id" },
+    });
     expect(error.message).toContain("mt_teammate");
     expect(error.message).toContain("mt_mine");
-    // Copying the folder without its link is the deliberate fork, and the hint has to name it.
-    expect(error.hint).toContain('method_id: "mt_teammate"');
-    expect(error.hint).toContain(`copy the folder without its ${LINK_FILE_NAME}`);
+    // Copying the folder without its link is the deliberate fork, and the message has to name it.
+    expect(error.message).toContain('method_id: "mt_teammate"');
+    expect(error.message).toContain(`copy the folder without its ${LINK_FILE_NAME}`);
     const link = await readMethodLink(path.join(root, "theirs"));
     expect(link.kind === "link" && link.link.method_id).toBe("mt_teammate");
   });
@@ -2827,7 +3064,13 @@ describe("the pull writes a method's tree and nothing else", () => {
       ".",
     );
 
-    expect(errorsOf(result.structuredContent)[0].message).toContain("beginning with a dot");
+    expect(problemOf(result.structuredContent)).toMatchObject({
+      code: "method.package_invalid",
+      domain: "method",
+      params: { reason: "unsafe_file_path" },
+      location: { file: ".github/workflows/pwn.mthds" },
+    });
+    expect(problemOf(result.structuredContent).message).toContain("beginning with a dot");
     expect(await fs.readdir(root)).toEqual([]);
   });
 
@@ -2842,7 +3085,11 @@ describe("the pull writes a method's tree and nothing else", () => {
       ]),
     );
 
-    expect(errorsOf(result.structuredContent)[0].message).toContain(LINK_FILE_NAME);
+    expect(problemOf(result.structuredContent)).toMatchObject({
+      code: "method.package_invalid",
+      location: { file: LINK_FILE_NAME },
+    });
+    expect(problemOf(result.structuredContent).message).toContain(LINK_FILE_NAME);
     await expect(fs.readdir(path.join(root, "pulled"))).resolves.toEqual([]);
   });
 
@@ -2857,7 +3104,11 @@ describe("the pull writes a method's tree and nothing else", () => {
       ]),
     );
 
-    const [error] = errorsOf(result.structuredContent);
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "method.package_invalid",
+      location: { file: "bundle.mthds" },
+    });
     expect(error.message).toContain("lands on the same file");
     await expect(fs.readdir(path.join(root, "pulled"))).resolves.toEqual([]);
   });
@@ -2873,7 +3124,11 @@ describe("the pull writes a method's tree and nothing else", () => {
       "mixed",
     );
 
-    expect(errorsOf(result.structuredContent)[0].message).toContain("their_bundle.mthds");
+    expect(problemOf(result.structuredContent)).toMatchObject({
+      code: "client.target_exists",
+      params: { path: "mixed" },
+    });
+    expect(problemOf(result.structuredContent).message).toContain("their_bundle.mthds");
     expect(await fs.readdir(path.join(root, "mixed"))).toEqual(["their_bundle.mthds"]);
   });
 });
@@ -2923,7 +3178,8 @@ describe("the pull resumes and refreshes without destroying work", () => {
 
     const result = await pull("resumed");
 
-    expect(errorsOf(result.structuredContent)[0].message).toContain("second.mthds");
+    expect(problemOf(result.structuredContent)).toMatchObject({ code: "client.target_exists" });
+    expect(problemOf(result.structuredContent).message).toContain("second.mthds");
     expect(await fs.readFile(path.join(root, "resumed/second.mthds"), "utf8")).toBe(
       "MY PRECIOUS LOCAL EDIT",
     );
@@ -3028,8 +3284,14 @@ describe("a version pull whose link cannot be marked", () => {
       // Written under the old link, version 2's files would carry the draft's
       // current token and no version marker, and an ordinary save would then
       // replace the draft with them, with no explicit token.
-      const [error] = errorsOf(result.structuredContent);
-      expect(error).toMatchObject({ class: "runtime", location: "output_dir" });
+      const error = problemOf(result.structuredContent);
+      expect(error).toMatchObject({
+        code: "client.write_failed",
+        domain: "input",
+        retry: "no",
+        params: { path: path.join("work", LINK_FILE_NAME), reason: "link_unwritable" },
+        location: { field: "output_dir" },
+      });
       expect(error.message).toContain("holding version 2");
       expect(await fs.readFile(path.join(root, "work", "bundle.mthds"), "utf8")).toBe(
         'domain = "demo"',
@@ -3073,8 +3335,12 @@ describe("a draft pull over a link that records a version", () => {
         ),
       );
 
-      const [error] = errorsOf(result.structuredContent);
-      expect(error).toMatchObject({ class: "runtime", location: "output_dir" });
+      const error = problemOf(result.structuredContent);
+      expect(error).toMatchObject({
+        code: "client.write_failed",
+        params: { reason: "link_unwritable" },
+        location: { field: "output_dir" },
+      });
       expect(error.message).toContain("record of version 2 could not be cleared");
       expect(await fs.readFile(path.join(root, "work", "bundle.mthds"), "utf8")).toBe(
         'domain = "version_two"',
@@ -3146,8 +3412,14 @@ describe("a pull lands only on the link it planned against", () => {
       ),
     );
 
-    const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "runtime", location: "output_dir", retryable: true });
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.workspace_busy",
+      domain: "runtime",
+      retry: "yes",
+      params: { path: path.join("work", LINK_FILE_NAME) },
+      location: { field: "output_dir" },
+    });
     expect(error.message).toContain(
       "changed after this pull read it — another save or pull rewrote it",
     );
@@ -3197,11 +3469,11 @@ describe("round 1 of the convergence review", () => {
     expect(created).toBe(1);
     expect(winner?.structuredContent).toMatchObject({ status: "ok", saved: "created" });
     if (loser === undefined) throw new Error("expected one of the two creates to be refused");
-    expect(errorsOf(loser.structuredContent)[0]).toMatchObject({
-      class: "input_domain",
-      location: "method_id",
+    expect(problemOf(loser.structuredContent)).toMatchObject({
+      code: "client.target_exists",
+      location: { field: "method_id" },
     });
-    expect(errorsOf(loser.structuredContent)[0]?.message).toContain("mt_new1");
+    expect(problemOf(loser.structuredContent).message).toContain("mt_new1");
   });
 
   it("refuses a pull whose file was edited while it read a version, keeping the edit", async () => {
@@ -3234,8 +3506,14 @@ describe("round 1 of the convergence review", () => {
       ),
     );
 
-    const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "runtime", location: "output_dir", retryable: true });
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.workspace_busy",
+      domain: "runtime",
+      retry: "yes",
+      params: { path: "work" },
+      location: { field: "output_dir" },
+    });
     expect(error.message).toContain("`bundle.mthds` changed after this pull read it");
     expect(await fs.readFile(path.join(root, "work", "bundle.mthds"), "utf8")).toBe(
       'domain = "edited"',
@@ -3262,7 +3540,11 @@ describe("round 1 of the convergence review", () => {
       ),
     );
 
-    expect(errorsOf(result.structuredContent)[0]?.message).toContain(
+    expect(problemOf(result.structuredContent)).toMatchObject({
+      code: "client.workspace_busy",
+      retry: "yes",
+    });
+    expect(problemOf(result.structuredContent).message).toContain(
       "changed after this pull read it — another save or pull rewrote it",
     );
     expect(await fs.readFile(path.join(root, "work", LINK_FILE_NAME), "utf8")).toBe(refreshed);
@@ -3290,8 +3572,12 @@ describe("round 1 of the convergence review", () => {
       ),
     );
 
-    const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "runtime", location: "output_dir", retryable: true });
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.workspace_busy",
+      retry: "yes",
+      location: { field: "output_dir" },
+    });
     expect(error.message).toContain("changed after this pull read it — it became unreadable");
     expect(await fs.readFile(path.join(root, "work", LINK_FILE_NAME), "utf8")).toBe(conflicted);
     await expect(fs.access(path.join(root, "work", "bundle.mthds"))).rejects.toThrow();
@@ -3361,8 +3647,13 @@ describe("rounds 3 and 4 of the convergence review: the workshop's write lock", 
     );
 
     // Not busy: no retry takes a lock that cannot be opened, so it is not retryable.
-    const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "runtime", location: "output_dir", retryable: false });
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.write_failed",
+      retry: "no",
+      params: { path: "work", reason: "lock_unavailable" },
+      location: { field: "output_dir" },
+    });
     expect(error.message).toContain("write lock");
     expect(error.message).toContain("nothing was written");
     await expect(fs.access(path.join(root, "work", "bundle.mthds"))).rejects.toThrow();
@@ -3403,8 +3694,13 @@ describe("rounds 3 and 4 of the convergence review: the workshop's write lock", 
         contextFor(client, validationAnswering(validReport)),
       );
 
-      const [error] = errorsOf(result.structuredContent);
-      expect(error).toMatchObject({ class: "runtime", location: "method_dir", retryable: false });
+      const error = problemOf(result.structuredContent);
+      expect(error).toMatchObject({
+        code: "client.write_failed",
+        retry: "no",
+        params: { reason: "lock_unavailable" },
+        location: { field: "method_dir" },
+      });
       expect(error.message).toContain("write lock");
       expect(error.message).toContain("sent nothing");
     }
@@ -3653,17 +3949,12 @@ describe("the pull reads the draft by default, and a version on @n", () => {
       async getMethodVersion(id, version) {
         seen.versions.push([id, version]);
         if (version !== 2) {
-          throw new ApiResponseError(
-            "not found",
-            `https://api-dev.pipelex.com/v1/methods/${id}/versions/${version}`,
-            404,
-            "Not Found",
-            "{}",
-            undefined,
-            "No such version",
-            undefined,
-            "method_version_not_found",
-          );
+          throw platformRefusal(`/v1/methods/${id}/versions/${version}`, 404, {
+            code: "pipelex.catalog.not_found",
+            title: "The method was not found",
+            detail: "No such version",
+            domain: "input",
+          });
         }
         return storedVersion();
       },
@@ -3736,10 +4027,19 @@ describe("the pull reads the draft by default, and a version on @n", () => {
       contextFor(versionedClient(publishedMethod()), validationAnswering(validReport)),
     );
 
-    const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "input_domain", location: "method_id" });
+    // The catalog's problem, relayed, its message saying what the method has.
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "pipelex.catalog.not_found",
+      domain: "input",
+      retry: "no",
+      detail: "No such version",
+      request_id: "req_404",
+    });
     expect(error.message).toContain("no version 7");
     expect(error.message).toContain("latest published version is 2");
+    expect(error.message).toContain('"mt_one@<n>"');
+    expectProblemSummary(result.summary, error);
   });
 
   it("refuses a suffix it cannot read before anything is sent", async () => {
@@ -3748,9 +4048,11 @@ describe("the pull reads the draft by default, and a version on @n", () => {
       contextFor(clientNotCalled, validationAnswering(validReport)),
     );
 
-    expect(errorsOf(result.structuredContent)[0]).toMatchObject({
-      class: "input_domain",
-      location: "method_id",
+    expect(problemOf(result.structuredContent)).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      params: { argument: "method_id", reason: "not_a_selector" },
+      location: { field: "method_id" },
     });
   });
 
@@ -3845,8 +4147,12 @@ describe("the pull reads the draft by default, and a version on @n", () => {
       contextFor(versionedClient(stored), validationAnswering(validReport)),
     );
 
-    const [error] = errorsOf(result.structuredContent);
-    expect(error).toMatchObject({ class: "input_domain", location: "output_dir" });
+    const error = problemOf(result.structuredContent);
+    expect(error).toMatchObject({
+      code: "client.target_exists",
+      params: { path: "work" },
+      location: { field: "output_dir" },
+    });
     expect(error.message).toContain("never saved");
     expect(await fs.readFile(path.join(root, "work", "bundle.mthds"), "utf8")).toBe(
       'domain = "edited locally"',
