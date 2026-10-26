@@ -37,9 +37,11 @@ describe("the manifest", () => {
     expect(manifest.name).toBe("@pipelex/mcp");
     expect(manifest.private).toBeUndefined();
     expect(manifest.workspaces).toBeUndefined();
+    // Written in the form npm normalizes it to, so `npm publish` has nothing
+    // to rewrite and warns about nothing, and `npm pkg fix` leaves it alone.
     expect(manifest.repository).toEqual({
       type: "git",
-      url: "https://github.com/Pipelex/pipelex-mcp",
+      url: "git+https://github.com/Pipelex/pipelex-mcp.git",
     });
   });
 
