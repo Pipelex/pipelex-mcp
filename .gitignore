@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+.env*
+.DS_Store
+*.tsbuildinfo
+.gstack/
+
+# This repo is public. Internal working notes live in the private workspace
+# at Pipelex/docs/mcp/ — never here. See Pipelex/docs/mcp/_top_priorities.md.
+TODOS.md

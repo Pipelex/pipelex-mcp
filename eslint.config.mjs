@@ -1,0 +1,70 @@
+import js from "@eslint/js";
+import globals from "globals";
+import tseslint from "typescript-eslint";
+
+import pipelexApiBoundary from "./eslint-rules/pipelex-api-boundary.mjs";
+
+export default [
+  js.configs.recommended,
+  ...tseslint.configs.recommended,
+  {
+    ignores: ["**/dist/**", "coverage/**"],
+  },
+  {
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.node,
+        ...globals.es2022,
+        fetch: "readonly",
+        Headers: "readonly",
+        Request: "readonly",
+        Response: "readonly",
+        DOMException: "readonly",
+      },
+    },
+    rules: {
+      "@typescript-eslint/no-explicit-any": "off",
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        {
+          argsIgnorePattern: "^_",
+          destructuredArrayIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+        },
+      ],
+      "no-console": "error",
+    },
+  },
+  // Every call to the Pipelex API goes through `createPipelexApiClient`, which
+  // names this server in the User-Agent (docs/client-identification.md).
+  {
+    files: ["src/**/*.ts", "scripts/**/*.{ts,mjs}", "tests/**/*.ts"],
+    plugins: { pipelex: pipelexApiBoundary },
+    rules: {
+      "pipelex/sdk-client-factory": "error",
+      "pipelex/no-raw-fetch": "error",
+    },
+  },
+  // The factory itself.
+  {
+    files: ["src/capabilities/shared.ts"],
+    rules: { "pipelex/sdk-client-factory": "off" },
+  },
+  // The one sanctioned subclass, which the factory constructs.
+  {
+    files: ["src/capabilities/upload-ceiling.ts"],
+    rules: { "pipelex/sdk-client-factory": ["error", { allowExtends: true }] },
+  },
+  // The graph page's live check fetches the public CDN files the page pins,
+  // never the Pipelex API.
+  {
+    files: ["src/capabilities/graph-page.e2e.ts"],
+    rules: { "pipelex/no-raw-fetch": "off" },
+  },
+  // Unit tests build clients directly to test them, and stub the global fetch.
+  {
+    files: ["**/*.test.ts"],
+    rules: { "pipelex/sdk-client-factory": "off", "pipelex/no-raw-fetch": "off" },
+  },
+];

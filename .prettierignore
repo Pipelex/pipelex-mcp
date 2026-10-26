@@ -1,0 +1,7 @@
+node_modules/
+dist/
+coverage/
+*.tgz
+package-lock.json
+pnpm-lock.yaml
+tsconfig.tsbuildinfo

@@ -1,0 +1,52 @@
+{
+  "status_read": {
+    "pipeline_run_id": "run_01d36d12-a66e-4055-89ed-4f5661a87f16",
+    "status": "FAILED",
+    "created_at": "2026-09-24T02:05:13.891637Z",
+    "finished_at": "2026-09-24T02:05:29.339549+00:00",
+    "degraded": false,
+    "pipe_code": null,
+    "error": {
+      "type": "https://mthds.ai/errors/provider.failed",
+      "title": "The provider failed",
+      "detail": "The provider 'pipelex_gateway' failed with the HTTP status 500.",
+      "code": "provider.failed",
+      "domain": "runtime",
+      "retry": "yes",
+      "next_step": {
+        "kind": "retry",
+        "detail": "Run the method again."
+      },
+      "params": {
+        "provider": "pipelex_gateway",
+        "status": 500
+      },
+      "pipeline_run_id": "run_01d36d12-a66e-4055-89ed-4f5661a87f16"
+    }
+  },
+  "results_arm": {
+    "state": "failed",
+    "pipeline_run_id": "run_01d36d12-a66e-4055-89ed-4f5661a87f16",
+    "status": "FAILED",
+    "message": "The run 'run_01d36d12-a66e-4055-89ed-4f5661a87f16' ended as 'FAILED', without success.",
+    "problem": {
+      "type": "https://mthds.ai/errors/run.failed",
+      "title": "The run did not succeed",
+      "status": 409,
+      "detail": "The run 'run_01d36d12-a66e-4055-89ed-4f5661a87f16' ended as 'FAILED', without success.",
+      "code": "run.failed",
+      "domain": "runtime",
+      "retry": "no",
+      "next_step": {
+        "kind": "read_run",
+        "detail": "Read the run's own problem in run_error to see why it did not succeed."
+      },
+      "params": {
+        "pipeline_run_id": "run_01d36d12-a66e-4055-89ed-4f5661a87f16",
+        "run_status": "FAILED"
+      },
+      "pipeline_run_id": "run_01d36d12-a66e-4055-89ed-4f5661a87f16"
+    },
+    "error": null
+  }
+}

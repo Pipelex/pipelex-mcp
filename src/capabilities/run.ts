@@ -1,0 +1,1457 @@
+import { buildProblem, collectArtifacts, isTerminalRunStatus, summarizeUsage } from "@pipelex/sdk";
+import type {
+  GetRunResultOptions,
+  MethodProvenance,
+  PipelexRunResultStart,
+  PipelexStartOptions,
+  PipeUsageSummary,
+  Problem,
+  RunProgress,
+  RunRead,
+  RunResultArtifact,
+  RunResults,
+  RunResultState,
+  RunStatus,
+  TokensUsageRecord,
+  UsageSummary,
+  UsageSummaryState,
+  UsageTokenTotals,
+} from "@pipelex/sdk";
+import { z } from "zod";
+
+import {
+  RUN_METHOD_ID_SELECTOR_SENTENCE,
+  forgetMethodVersionsSupported,
+  linkageSuffixError,
+  methodVersionsOf,
+  noteMethodVersionsSupported,
+  planById,
+  runContentReport,
+  runMethodVersionSchema,
+  selectorFailure,
+} from "./method-versions.js";
+import type { MethodVersionsAware, RunContentReport, SelectorPlan } from "./method-versions.js";
+import {
+  MAX_IMAGE_CANDIDATE_ENTRIES,
+  METHOD_REF_GRAMMAR,
+  argumentProblem,
+  buildApiConfig,
+  createPipelexApiClient,
+  faultsProblem,
+  filesSentSchema,
+  imageCandidatesOf,
+  inputsPathSchema,
+  methodDirInputSchema,
+  methodFilesInputSchema,
+  problemOf,
+  problemSchema,
+  problemSummary,
+  resolveInputsSource,
+  resolveMethodSource,
+  toolResultContent,
+  validateMethodSelectorRequest,
+  validateRunIdRequest,
+  withFilesSent,
+  failedBeforeSending,
+  markUnsent,
+  withTooLargeNote,
+} from "./shared.js";
+import type {
+  ApiConfig,
+  ApiNotes,
+  FileResolver,
+  MethodTreeToSend,
+  SubmittedFileInput,
+} from "./shared.js";
+import { methodTreeLimitsOf } from "./tree-limits.js";
+import type { TreeLimitsAware } from "./tree-limits.js";
+import { runErrorOf, runErrorSchema, runErrorSummary } from "./run-failure.js";
+import {
+  progressParagraph,
+  progressReportsStuck,
+  runProgressOf,
+  runProgressSchema,
+} from "./run-progress.js";
+import type { RunProgressProjection } from "./run-progress.js";
+import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
+
+/**
+ * The hosted run lifecycle statuses. The `Record<RunStatus, true>` shape ties
+ * this list to the SDK's `RunStatus` in both directions at compile time — a
+ * status added or removed SDK-side fails the build here.
+ */
+const RUN_STATUS_SET: Record<RunStatus, true> = {
+  PENDING: true,
+  STARTED: true,
+  RUNNING: true,
+  COMPLETED: true,
+  FAILED: true,
+  CANCELLED: true,
+  TERMINATED: true,
+  TIMED_OUT: true,
+};
+
+export const runStatusSchema = z.enum(Object.keys(RUN_STATUS_SET) as [RunStatus, ...RunStatus[]]);
+
+export const mthdsRunInputSchema = {
+  method_dir: methodDirInputSchema("run_source"),
+  files: methodFilesInputSchema.optional(),
+  method_ref: z
+    .string()
+    .optional()
+    .describe(
+      `Published method address — ${METHOD_REF_GRAMMAR}. Resolved server-side: the repository is fetched at the tag and the resolved commit SHA comes back as provenance. A complete run source of its own — it pairs with NOTHING (not method_dir, not files, not method_id).`,
+    ),
+  method_id: z
+    .string()
+    .optional()
+    .describe(
+      `Catalog id (mt_…) of a registered method, resolved server-side and requiring an API key (the catalog is org-scoped). ${RUN_METHOD_ID_SELECTOR_SENTENCE} With method_dir or files also present, the folder or the files run and method_id, which must then be bare, only files the run under its method. Provide method_dir, files, method_ref, or method_id (method_dir or files + method_id together is also legal).`,
+    ),
+  pipe_code: z
+    .string()
+    .optional()
+    .describe(
+      "The pipe to run, as a qualified domain.pipe_code — the same value mthds_inputs_template and mthds_prepare_inputs take as pipe_ref (the name mirrors each route: the run routes say pipe_code, the build routes say pipe_ref). Omit to run the bundle's declared main pipe (for a method_ref, the manifest's main_pipe).",
+    ),
+  inputs: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe(
+      "Method inputs — fill the template returned by mthds_inputs_template. Binary inputs ride reachable https URLs. Supply at most ONE of inputs / inputs_path.",
+    ),
+  inputs_path: inputsPathSchema,
+};
+
+/** The input schema of the status and results tools alike, built afresh for each. */
+function runIdInputSchema() {
+  return {
+    run_id: z.string().describe(`The durable run id returned by ${WORKSHOP_TOOL_NAMES.run}.`),
+  };
+}
+
+export const mthdsRunStatusInputSchema = runIdInputSchema();
+
+export const mthdsRunResultsInputSchema = runIdInputSchema();
+
+/**
+ * Identifiers of the renderable views a start result can name (same convention
+ * as validate's view-spec list). The workshop renders no views, so a start
+ * result always lists none; the enum stays because it is part of the output
+ * schema `workshop.contract.json` pins.
+ */
+const runViewSpecSchema = z.enum(["live_run_status"]);
+
+/**
+ * Identifiers of the renderable views a results result can name. Always none
+ * on the workshop, kept for the pinned output schema like `runViewSpecSchema`.
+ */
+const resultsViewSpecSchema = z.enum(["run_graph"]);
+
+const methodProvenanceSchema = z.object({
+  address: z.string().describe("The package's resolved full address."),
+  tag: z
+    .string()
+    .nullable()
+    .describe("The requested tag; null for a bare address (default branch at HEAD)."),
+  commit_sha: z
+    .string()
+    .describe(
+      "The commit that was actually fetched — what keeps the run explainable when a tag moves.",
+    ),
+});
+
+export const mthdsRunOutputSchema = z.object({
+  status: z.enum(["ok", "error"]),
+  run_id: z
+    .string()
+    .optional()
+    .describe(
+      `The durable run id — the handle for ${WORKSHOP_TOOL_NAMES.runStatus} and ${WORKSHOP_TOOL_NAMES.runResults}.`,
+    ),
+  run_status: runStatusSchema
+    .optional()
+    .describe("Initial lifecycle state from the start ack, when the server includes one."),
+  created_at: z.string().optional(),
+  method_provenance: methodProvenanceSchema
+    .optional()
+    .describe("method_ref runs only — the address, tag, and resolved commit SHA that was fetched."),
+  method_version: runMethodVersionSchema,
+  files_sent: filesSentSchema,
+  available_view_specs: z
+    .array(runViewSpecSchema)
+    .describe(
+      'Renderable views available for this result. Contains "live_run_status" when a live-following status card is available; empty otherwise.',
+    ),
+  problem: problemSchema
+    .optional()
+    .describe(
+      "Present with status error: why the run was not started, and what to do. A retry of outcome_unknown means the start may have created a run: look for it before starting another, which would spend credit again.",
+    ),
+});
+
+const RUN_ERROR_FIELD_DESCRIPTION =
+  "Present when the run stored the problem it ended with: why it did not succeed, who must act, whether running it again can succeed, and what to do next.";
+
+const runStatusStructuredContentSchema = z.object({
+  status: z.enum(["ok", "error"]),
+  run_id: z.string().optional(),
+  run_status: runStatusSchema.optional().describe("The coarse lifecycle state."),
+  is_terminal: z
+    .boolean()
+    .optional()
+    .describe("True when the run is done and will not transition again."),
+  degraded: z
+    .boolean()
+    .optional()
+    .describe("True when the status is the last-known value, not a freshly derived one."),
+  retry_after_seconds: z
+    .number()
+    .nullable()
+    .optional()
+    .describe("Server backoff hint — check again after this many seconds."),
+  created_at: z.string().optional(),
+  finished_at: z.string().nullable().optional(),
+  method_version: z
+    .union([z.number().int(), z.literal("draft")])
+    .optional()
+    .describe(
+      'Runs of a saved method by its id: the version that ran, or "draft". Absent for a run of files or of an address, and on a platform that does not record it.',
+    ),
+  error: runErrorSchema
+    .optional()
+    .describe(`Terminal statuses other than COMPLETED only. ${RUN_ERROR_FIELD_DESCRIPTION}`),
+  progress: runProgressSchema
+    .optional()
+    .describe(
+      "The run's progress snapshot, when the platform serves one: which pipes have run, how far each batch has got, where the run is retrying or stuck, and a one-line summary.",
+    ),
+  progress_invocations_omitted: z
+    .number()
+    .int()
+    .optional()
+    .describe("How many of the snapshot's invocations progress.invocations leaves out."),
+  problem: problemSchema
+    .optional()
+    .describe("Present with status error: why the status could not be read, and what to do."),
+});
+
+export const mthdsRunStatusOutputSchema = runStatusStructuredContentSchema;
+
+// Run-level usage only — a projection of the SDK's `summarizeUsage`. The
+// per-pipe breakdown is deliberately NOT in this model-facing schema — it rides
+// the view-only `_meta.usage_by_pipe` for a future detailed-cost surface (see
+// completedResult).
+const runUsageSchema = z.object({
+  state: z
+    .enum(["records", "no_inference", "unavailable"])
+    .describe(
+      'Which reading the totals describe — read it first: "records" (inference calls were recorded), "no_inference" (the run made no inference, so the cost is 0), "unavailable" (the run reported no usage; the totals are null and assembly_error says whether that is because usage assembly broke).',
+    ),
+  cost_usd: z
+    .number()
+    .nullable()
+    .describe(
+      'Σ per-call USD cost across the run, null-aware: under state "records", null when NO call was priced (own-GPU / mock / dry run); 0 under "no_inference"; null under "unavailable", where nothing is known.',
+    ),
+  cost_partial: z
+    .boolean()
+    .optional()
+    .describe(
+      "True when some calls were priced and others were not — cost_usd is then a lower bound.",
+    ),
+  tokens: z
+    .number()
+    .nullable()
+    .describe(
+      "The run's input tokens plus its output tokens; null when no call reported either. Cached-input and reasoning subsets are excluded to avoid double-counting.",
+    ),
+  calls: z.number().describe("Number of inference calls recorded (0 → the run did no inference)."),
+  assembly_error: z
+    .string()
+    .nullable()
+    .describe(
+      "The runner's usage-assembly failure for this run (the SDK's usage_assembly_error); null when assembly did not fail.",
+    ),
+});
+
+export const mthdsRunResultsOutputSchema = z.object({
+  status: z.enum(["ok", "error"]),
+  run_id: z.string().optional(),
+  state: z
+    .enum(["running", "completed", "failed"])
+    .optional()
+    .describe(
+      'The result lookup outcome: "running" (no result yet), "completed" (main output below), "failed" (terminal non-COMPLETED).',
+    ),
+  retry_after_seconds: z
+    .number()
+    .nullable()
+    .optional()
+    .describe('State "running" only — check again after this many seconds.'),
+  run_status: runStatusSchema
+    .optional()
+    .describe('State "failed" only — the terminal lifecycle status.'),
+  run_error: runErrorSchema
+    .optional()
+    .describe(`State "failed" only. ${RUN_ERROR_FIELD_DESCRIPTION}`),
+  main_stuff: z
+    .unknown()
+    .optional()
+    .describe(
+      'State "completed" only — the resolved main output, bounded to a serialized cap (see truncated).',
+    ),
+  truncated: z
+    .boolean()
+    .optional()
+    .describe("True when main_stuff was bounded down; the full output rides the view-only _meta."),
+  image_candidates: z
+    .array(z.string())
+    .optional()
+    .describe(
+      `State "completed" only, and only when the output references stored files — the pipelex-storage:// references whose storage key looks like an image, as they appear in the output. A free in-memory prefilter over the FULL output, so a reference pruned out of main_stuff still appears here; nothing was fetched and nothing was read, so this is a shortlist, not a verdict. Bounded — see image_candidates_omitted. Pass one of these (or its index in this list) to ${WORKSHOP_TOOL_NAMES.showImages} to see the picture.`,
+    ),
+  image_candidates_omitted: z
+    .number()
+    .optional()
+    .describe(
+      `State "completed" only, and only when something was left out — how many image candidates past the listed ones this result does not enumerate. They are still on the run: ${WORKSHOP_TOOL_NAMES.showImages} walks the full set.`,
+    ),
+  usage: runUsageSchema
+    .optional()
+    .describe(
+      'State "completed" only — token and USD-cost aggregates for the run, always present: read its state first. The full per-call record list rides the view-only _meta.tokens_usages.',
+    ),
+  available_view_specs: z
+    .array(resultsViewSpecSchema)
+    .describe(
+      'Renderable views available for this result. Contains "run_graph" when the executed method graph is available to display; empty otherwise.',
+    ),
+  problem: problemSchema
+    .optional()
+    .describe("Present with status error: why the results could not be read, and what to do."),
+});
+
+export interface MthdsRunInput {
+  method_dir?: string;
+  files?: SubmittedFileInput[];
+  method_ref?: string;
+  method_id?: string;
+  pipe_code?: string;
+  inputs?: Record<string, unknown>;
+  inputs_path?: string;
+}
+
+/** The run request once its method and `inputs_path` are resolved — what the checks and the API call consume. */
+interface ResolvedRunRequest {
+  /** The method's tree, from `method_dir` or `files`. */
+  tree?: MethodTreeToSend;
+  method_ref?: string;
+  method_id?: string;
+  pipe_code?: string;
+  inputs?: Record<string, unknown>;
+}
+
+export interface RunIdInput {
+  run_id: string;
+}
+
+export type RunViewSpec = z.infer<typeof runViewSpecSchema>;
+export type ResultsViewSpec = z.infer<typeof resultsViewSpecSchema>;
+
+export interface RunStartStructuredContent {
+  status: "ok" | "error";
+  run_id?: string;
+  run_status?: RunStatus;
+  created_at?: string;
+  /** `method_ref` runs only — the address, tag, and resolved commit SHA that was fetched. */
+  method_provenance?: MethodProvenance;
+  /** Runs by `method_id` alone: the version that runs, or `"draft"`. */
+  method_version?: number | "draft";
+  /** Runs of a method folder only: every file read from it and sent. */
+  files_sent?: string[];
+  available_view_specs: RunViewSpec[];
+  /** Status "error" only: why the run was not started. */
+  problem?: Problem;
+}
+
+export interface RunStatusStructuredContent {
+  status: "ok" | "error";
+  run_id?: string;
+  run_status?: RunStatus;
+  is_terminal?: boolean;
+  degraded?: boolean;
+  retry_after_seconds?: number | null;
+  created_at?: string;
+  finished_at?: string | null;
+  /** Runs of a saved method by id: the version that ran, or `"draft"`, when the platform records it. */
+  method_version?: number | "draft";
+  /** Terminal statuses other than COMPLETED, when the run stored the problem it ended with. */
+  error?: Problem;
+  /** The run's progress snapshot, when the progress read that follows the status read answered. */
+  progress?: RunProgressProjection;
+  /** How many of the snapshot's invocations `progress.invocations` leaves out; absent when none. */
+  progress_invocations_omitted?: number;
+  /** Status "error" only: why the status could not be read. */
+  problem?: Problem;
+}
+
+/** One `_meta.usage_by_pipe` row — a projection of the SDK's `PipeUsageSummary`. */
+export interface PipeUsage {
+  pipe_code: string | null;
+  cost_usd: number | null;
+  tokens: number | null;
+  calls: number;
+}
+
+/** Run-level usage totals — the model-facing projection of the SDK's `UsageSummary`. */
+export interface RunUsage {
+  state: UsageSummaryState;
+  cost_usd: number | null;
+  cost_partial?: boolean;
+  tokens: number | null;
+  calls: number;
+  assembly_error: string | null;
+}
+
+export interface RunResultsStructuredContent {
+  status: "ok" | "error";
+  run_id?: string;
+  state?: "running" | "completed" | "failed";
+  retry_after_seconds?: number | null;
+  run_status?: RunStatus;
+  /** State "failed" only, when the run stored the problem it ended with. */
+  run_error?: Problem;
+  main_stuff?: unknown;
+  truncated?: boolean;
+  image_candidates?: string[];
+  image_candidates_omitted?: number;
+  usage?: RunUsage;
+  available_view_specs: ResultsViewSpec[];
+  /** Status "error" only: why the results could not be read. */
+  problem?: Problem;
+}
+
+export interface RunStartResult {
+  structuredContent: RunStartStructuredContent;
+  summary: string;
+}
+
+export interface RunStatusResult {
+  structuredContent: RunStatusStructuredContent;
+  summary: string;
+}
+
+export interface RunResultsResult {
+  structuredContent: RunResultsStructuredContent;
+  summary: string;
+  /**
+   * The full, unbounded main output on raw MCP response metadata (rides
+   * `_meta.main_stuff`). `structuredContent.main_stuff` is the bounded copy.
+   * The model never reads `_meta`, so a programmatic consumer keeps the full
+   * result without the model paying for it.
+   */
+  mainStuff?: unknown;
+  /**
+   * The full per-call token-usage record list on raw MCP response metadata
+   * (rides `_meta.tokens_usages`). `structuredContent.usage` is the compact
+   * run-level projection. Like `mainStuff`, it is carried so a programmatic
+   * consumer keeps the full detail; the model never sees it (it is not in
+   * `structuredContent`). Absent when the run reported no usage list.
+   */
+  tokensUsages?: TokensUsageRecord[];
+  /**
+   * The per-pipe usage rollup on raw MCP response metadata (rides
+   * `_meta.usage_by_pipe`), projected from the SDK summary's `by_pipe` in its
+   * order. Deliberately kept off the model-facing
+   * `structuredContent.usage` (which is run-level only) so a future
+   * detailed-cost surface can display per-pipe attribution without spending
+   * model tokens on it now. Absent when the run reported no usage list.
+   */
+  usageByPipe?: PipeUsage[];
+}
+
+/** The slice of `PipelexApiClient` the run capabilities call (test seam). */
+interface RunClient {
+  start(options: PipelexStartOptions): Promise<PipelexRunResultStart>;
+  getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
+  getRunProgress(runId: string, options?: { signal?: AbortSignal }): Promise<RunProgress>;
+  getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState>;
+  /** `GET /v1/version`, read only to word the refusal of a version suffix — a selector is always sent as given; optional on a test seam. */
+  version?(): Promise<unknown>;
+}
+
+export interface RunContext extends ApiConfig, MethodVersionsAware, TreeLimitsAware {
+  client?: RunClient;
+  /** Reads `{ path }` items and `method_dir` from disk; the workshop always sets it, and without one both are refused. */
+  resolver?: FileResolver;
+  /** Reads `inputs_path` from disk (local workshop, `.json` only); without one `inputs_path` is refused. */
+  inputsResolver?: FileResolver;
+  /** Where the API key and the base URL came from, said beside a problem whose fix may be one of them. */
+  apiNotes?: ApiNotes;
+}
+
+export function buildRunContext(env = process.env): RunContext {
+  return buildApiConfig(env);
+}
+
+/** Request-shape checks on the mthds_run input, after `{ path }` resolution. */
+export function validateRunRequest(input: ResolvedRunRequest): Problem[] {
+  // The run rule: files + method_id is a legal pair (linkage), while
+  // method_ref pairs with nothing — see SPEC.md → Method Selectors.
+  const errors = validateMethodSelectorRequest(input.tree !== undefined, input, {
+    rule: "run_source",
+  });
+
+  if (input.pipe_code !== undefined && input.pipe_code.trim() === "") {
+    errors.push(
+      argumentProblem(
+        "pipe_code",
+        "empty",
+        "pipe_code must not be empty when supplied.",
+        "Pass the code of a pipe defined in the submitted bundle, or omit pipe_code to run the bundle's main pipe.",
+      ),
+    );
+  }
+
+  return errors;
+}
+
+// ── main_stuff bounding ─────────────────────────────────────────────
+
+/**
+ * Serialized-size cap for the model-facing copy of `main_stuff` (the
+ * structured content and the fenced summary block). A tunable constant, not a
+ * contract. The full output always rides the view-only `_meta`.
+ */
+export const MAIN_STUFF_CAP = 32 * 1024;
+
+/** Marker spliced in wherever bounding removed content. */
+export const ELLIPSIS_MARKER = "…";
+
+interface PruneLimits {
+  maxDepth: number;
+  maxItems: number;
+  maxStringLength: number;
+}
+
+// Progressively harsher pruning rounds, each applied to the ORIGINAL value so
+// the outcome is deterministic and independent of prior rounds.
+const PRUNE_LADDER: PruneLimits[] = [
+  { maxDepth: 8, maxItems: 100, maxStringLength: 4096 },
+  { maxDepth: 5, maxItems: 40, maxStringLength: 2048 },
+  { maxDepth: 4, maxItems: 20, maxStringLength: 1024 },
+  { maxDepth: 3, maxItems: 10, maxStringLength: 512 },
+  { maxDepth: 2, maxItems: 5, maxStringLength: 256 },
+  { maxDepth: 1, maxItems: 3, maxStringLength: 128 },
+];
+
+export interface BoundedMainStuff {
+  value: unknown;
+  truncated: boolean;
+}
+
+/**
+ * Bound a polymorphic main output to roughly {@link MAIN_STUFF_CAP} serialized
+ * characters: plain text keeps head+tail; JSON trees are pruned from the
+ * deepest levels and longest collections first, with {@link ELLIPSIS_MARKER}
+ * standing in for removed content. Deterministic for a given input.
+ */
+export function boundMainStuff(value: unknown): BoundedMainStuff {
+  const serialized = JSON.stringify(value);
+  // JSON.stringify(undefined) === undefined — an absent output is the caller's
+  // contract violation to surface, not bounding's.
+  if (serialized === undefined || serialized.length <= MAIN_STUFF_CAP) {
+    return { value, truncated: false };
+  }
+
+  if (typeof value === "string") {
+    return { value: headTail(value, MAIN_STUFF_CAP), truncated: true };
+  }
+
+  for (const limits of PRUNE_LADDER) {
+    const pruned = prune(value, limits, 0);
+    if (JSON.stringify(pruned).length <= MAIN_STUFF_CAP) {
+      return { value: pruned, truncated: true };
+    }
+  }
+
+  // Pathological tree even the harshest ladder rung could not shrink: fall
+  // back to head+tail of the serialized form.
+  return { value: headTail(serialized, MAIN_STUFF_CAP), truncated: true };
+}
+
+function prune(value: unknown, limits: PruneLimits, depth: number): unknown {
+  if (typeof value === "string") {
+    return value.length <= limits.maxStringLength ? value : headTail(value, limits.maxStringLength);
+  }
+
+  if (Array.isArray(value)) {
+    if (depth >= limits.maxDepth) {
+      return ELLIPSIS_MARKER;
+    }
+    const kept: unknown[] = value
+      .slice(0, limits.maxItems)
+      .map((item) => prune(item, limits, depth + 1));
+    if (value.length > limits.maxItems) {
+      kept.push(ELLIPSIS_MARKER);
+    }
+    return kept;
+  }
+
+  if (typeof value === "object" && value !== null) {
+    if (depth >= limits.maxDepth) {
+      return ELLIPSIS_MARKER;
+    }
+    const entries = Object.entries(value);
+    const result: Record<string, unknown> = {};
+    for (const [key, entryValue] of entries.slice(0, limits.maxItems)) {
+      result[key] = prune(entryValue, limits, depth + 1);
+    }
+    if (entries.length > limits.maxItems) {
+      result[ELLIPSIS_MARKER] = ELLIPSIS_MARKER;
+    }
+    return result;
+  }
+
+  return value;
+}
+
+function headTail(text: string, cap: number): string {
+  const marker = `\n${ELLIPSIS_MARKER} [truncated] ${ELLIPSIS_MARKER}\n`;
+  const budget = Math.max(cap - marker.length, 2);
+  const headLength = Math.ceil(budget / 2);
+  const tailLength = Math.floor(budget / 2);
+  return text.slice(0, headLength) + marker + text.slice(text.length - tailLength);
+}
+
+// ── usage projection ────────────────────────────────────────────────
+
+/*
+ * The usage arithmetic is the SDK's `summarizeUsage` — null-aware cost, the
+ * `input` / `output` token totals, the three states told apart on
+ * `usage_assembly_error`, the per-pipe rollup and its order. What follows only
+ * reshapes its answer into this tool's established fields: the model-facing
+ * `structuredContent.usage` and the view-only `_meta.usage_by_pipe` rows.
+ */
+
+/**
+ * The model-facing token figure: the SDK's two additive totals added, `null`
+ * when neither was reported. The SDK keeps the pair apart; the model has always
+ * been given one number, and a category no call reported counts as none here.
+ */
+function tokenFigure(tokens: UsageTokenTotals): number | null {
+  if (tokens.input === null && tokens.output === null) return null;
+  return (tokens.input ?? 0) + (tokens.output ?? 0);
+}
+
+/**
+ * A blank assembly error is no error. The SDK relays the runner's
+ * `usage_assembly_error` verbatim, while this tool's schema and SPEC both
+ * define a non-null `assembly_error` as "usage assembly failed for this run" —
+ * so a runner reporting `""` would be read here as a failure that never
+ * happened. The MCP's own `summarizeUsage` narrowed it before this tool went
+ * thin over the SDK, and the narrowing stays on this side of the projection.
+ */
+function narrowAssemblyError(value: string | null): string | null {
+  return value === null || value.trim() === "" ? null : value;
+}
+
+/** Project the SDK's run-level `UsageSummary` onto `structuredContent.usage`. */
+export function projectRunUsage(summary: UsageSummary): RunUsage {
+  const usage: RunUsage = {
+    state: summary.state,
+    cost_usd: summary.total_cost_usd,
+    tokens: tokenFigure(summary.tokens),
+    calls: summary.calls,
+    assembly_error: narrowAssemblyError(summary.assembly_error),
+  };
+  if (summary.cost_partial) usage.cost_partial = true;
+  return usage;
+}
+
+/** Project the SDK's `by_pipe` rollup onto the `_meta.usage_by_pipe` rows, keeping its order. */
+export function projectUsageByPipe(rows: PipeUsageSummary[]): PipeUsage[] {
+  return rows.map((row) => ({
+    pipe_code: row.pipe_code,
+    cost_usd: row.total_cost_usd,
+    tokens: tokenFigure(row.tokens),
+    calls: row.calls,
+  }));
+}
+
+// ── projections ─────────────────────────────────────────────────────
+
+/**
+ * Default check-again suggestion (seconds) when the server sends no
+ * `Retry-After` hint. Mirrors the SDK's base poll interval.
+ */
+const DEFAULT_RETRY_SECONDS = 2;
+
+/** Narrow a start-ack extension field to a recognizable RunStatus. */
+function narrowRunStatus(value: unknown): RunStatus | undefined {
+  const parsed = runStatusSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+function narrowString(value: unknown): string | undefined {
+  return typeof value === "string" && value !== "" ? value : undefined;
+}
+
+/**
+ * Narrow the start ack's `method_provenance` extension field. Populated by the
+ * server for `method_ref` runs only; anything malformed is treated as absent
+ * rather than guessed at (the run itself is unaffected).
+ */
+function narrowMethodProvenance(value: unknown): MethodProvenance | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.address !== "string" ||
+    typeof record.commit_sha !== "string" ||
+    (record.tag !== null && typeof record.tag !== "string")
+  ) {
+    return undefined;
+  }
+  return { address: record.address, tag: record.tag, commit_sha: record.commit_sha };
+}
+
+/**
+ * Project a start ack. `state` and `created_at` are hosted extension fields on
+ * the protocol's `RunResultStart` (typed `unknown`), so they are narrowed
+ * defensively rather than trusted — as is `method_provenance`, the Pipelex-API
+ * extension a `method_ref` run carries (the resolved commit SHA is what keeps
+ * the run explainable when a tag moves, so it is surfaced to the model and
+ * echoed in the summary). The workshop renders no views, so it advertises none.
+ */
+export function startResult(
+  ack: PipelexRunResultStart,
+  content?: RunContentReport,
+): RunStartResult {
+  const runStatus = narrowRunStatus(ack.state);
+  const createdAt = narrowString(ack.created_at);
+  const provenance = narrowMethodProvenance(ack.method_provenance);
+
+  const structuredContent: RunStartStructuredContent = {
+    status: "ok",
+    run_id: ack.pipeline_run_id,
+    ...(runStatus === undefined ? {} : { run_status: runStatus }),
+    ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    ...(provenance === undefined ? {} : { method_provenance: provenance }),
+    ...(content?.ran === undefined ? {} : { method_version: content.ran }),
+    available_view_specs: [],
+  };
+
+  const summaryParts = [
+    "# Run started",
+    `The run was accepted; its durable id is \`${ack.pipeline_run_id}\`.`,
+  ];
+  if (content?.sentence !== undefined) {
+    summaryParts.push(content.sentence);
+  }
+  if (provenance !== undefined) {
+    summaryParts.push(
+      `Resolved \`${provenance.address}\`${provenance.tag === null ? "" : ` at tag \`${provenance.tag}\``} to commit \`${provenance.commit_sha}\` — the run executes exactly that snapshot.`,
+    );
+  }
+  summaryParts.push(
+    `Check on it with \`${WORKSHOP_TOOL_NAMES.runStatus}\` (one cheap read — honor its retry hint instead of polling in a tight loop), and fetch the outcome with \`${WORKSHOP_TOOL_NAMES.runResults}\` once it is terminal.`,
+  );
+
+  return { structuredContent, summary: summaryParts.join("\n\n") };
+}
+
+/**
+ * Project a self-healing status read, with the progress snapshot read after it
+ * when that read answered. A terminal non-COMPLETED status is a produced
+ * verdict, and it carries why the run ended: the status read is where the
+ * platform serves the run's own problem (`RunRead.error`), so the `error`
+ * member and the summary's account come from it (`run-failure.ts`). A read
+ * whose problem is `null` or no problem document carries the status alone, and
+ * the summary says so. The snapshot, when there is one the projection can
+ * read, rides as `progress` and its summary as a paragraph of its own right
+ * after the status (see `run-progress.ts`).
+ */
+export function statusResult(read: RunRead, snapshot?: RunProgress): RunStatusResult {
+  const isTerminal = isTerminalRunStatus(read.status);
+  const ended = isTerminal && read.status !== "COMPLETED";
+  const runError = ended ? runErrorOf(read.error) : undefined;
+  const projected = snapshot === undefined ? undefined : runProgressOf(snapshot);
+  const progress = projected?.progress;
+  // A hosted extension, narrowed rather than trusted like the ack's.
+  const methodVersion =
+    read.method_version === "draft" ||
+    (typeof read.method_version === "number" &&
+      Number.isSafeInteger(read.method_version) &&
+      read.method_version >= 1)
+      ? read.method_version
+      : undefined;
+
+  const structuredContent: RunStatusStructuredContent = {
+    status: "ok",
+    run_id: read.pipeline_run_id,
+    run_status: read.status,
+    is_terminal: isTerminal,
+    degraded: read.degraded,
+    ...(read.retry_after_seconds === undefined
+      ? {}
+      : { retry_after_seconds: read.retry_after_seconds }),
+    created_at: read.created_at,
+    ...(read.finished_at === undefined ? {} : { finished_at: read.finished_at }),
+    ...(methodVersion === undefined ? {} : { method_version: methodVersion }),
+    ...(runError === undefined ? {} : { error: runError }),
+    ...(progress === undefined ? {} : { progress }),
+    ...(projected === undefined || projected.omitted === 0
+      ? {}
+      : { progress_invocations_omitted: projected.omitted }),
+  };
+
+  return { structuredContent, summary: statusSummary(read, isTerminal, runError, progress) };
+}
+
+function statusSummary(
+  read: RunRead,
+  isTerminal: boolean,
+  runError: Problem | undefined,
+  progress: RunProgressProjection | undefined,
+): string {
+  const lines: string[] = [];
+
+  if (isTerminal) {
+    lines.push(
+      read.status === "COMPLETED"
+        ? `Run \`${read.pipeline_run_id}\` is COMPLETED. Fetch the output with \`${WORKSHOP_TOOL_NAMES.runResults}\`.`
+        : runErrorSummary(read.pipeline_run_id, read.status, runError, read.finished_at),
+    );
+  } else {
+    const seconds = read.retry_after_seconds ?? DEFAULT_RETRY_SECONDS;
+    lines.push(
+      `Run \`${read.pipeline_run_id}\` is ${read.status} — not terminal yet. Check again in ~${seconds}s.`,
+    );
+  }
+
+  if (progress !== undefined) lines.push(progressParagraph(progress));
+
+  if (reassuresDegradedRead(read, progress)) {
+    lines.push(
+      "Note: this status is the last-known value — the platform's live view was temporarily unreachable. The run itself is unaffected.",
+    );
+  }
+
+  return lines.join("\n\n");
+}
+
+/**
+ * Whether a degraded read gets the reassurance that its status is the last one
+ * recorded and that the run itself is unaffected. That holds only when the
+ * platform could not read the run (`status_unavailable`, or no degradation, which
+ * is how a platform older than it says the same), and never beside a progress
+ * snapshot that reports the run stuck, which a read made a moment later can do.
+ * A run whose workflow task keeps failing (`workflow_task_failing`), or degraded
+ * for a reason this server does not know, is not reassured, since the progress
+ * paragraph's own clause says it is not progressing: whatever this summary says
+ * of a degradation must agree with that clause.
+ */
+function reassuresDegradedRead(
+  read: RunRead,
+  progress: RunProgressProjection | undefined,
+): boolean {
+  if (!read.degraded) return false;
+  const reason = read.degradation?.reason ?? "status_unavailable";
+  return reason === "status_unavailable" && !progressReportsStuck(progress);
+}
+
+/**
+ * Project a one-shot result lookup. All three arms are produced verdicts
+ * (`status: "ok"`): "no result yet" and "it failed" are answers, not errors.
+ * A failed arm is projected with `failedRead`, the status read that follows it
+ * (see {@link readFailedRun}), when the caller made one.
+ */
+export function resultsResult(state: RunResultState, failedRead?: RunRead): RunResultsResult {
+  switch (state.state) {
+    case "running":
+      return runningResult(state.pipeline_run_id, state.retry_after_seconds);
+    case "completed":
+      return completedResult(state.pipeline_run_id, state.result);
+    case "failed":
+      return failedResult(state, failedRead);
+  }
+}
+
+function runningResult(runId: string, retryAfterSeconds: number | null): RunResultsResult {
+  const seconds = retryAfterSeconds ?? DEFAULT_RETRY_SECONDS;
+  return {
+    structuredContent: {
+      status: "ok",
+      run_id: runId,
+      state: "running",
+      retry_after_seconds: retryAfterSeconds,
+      available_view_specs: [],
+    },
+    summary: `Run \`${runId}\` has no result yet — it is still running. Check again in ~${seconds}s.`,
+  };
+}
+
+function completedResult(runId: string, result: RunResults): RunResultsResult {
+  // The SDK guarantees a non-null main_stuff on a completed run (it throws
+  // MissingMainStuffError otherwise); reaching here without one is a contract
+  // violation the caller surfaces as a runtime no-verdict. A falsy-but-present
+  // output (empty array, 0) is valid and passes.
+  if (result.main_stuff == null) {
+    throw new Error("Completed run results did not include main_stuff.");
+  }
+
+  const { value: bounded, truncated } = boundMainStuff(result.main_stuff);
+  const usage = summarizeUsage(result);
+
+  // Both walks read the FULL output, not the bounded copy: a reference pruned
+  // out of the model-facing copy is still a file the workshop can save and a
+  // picture mthds_show_images can fetch. Both are in-memory, so a completed
+  // result pays no network call for either.
+  const stored = collectArtifacts(result.main_stuff);
+  const candidates = imageCandidatesOf(result.main_stuff);
+  const listedCandidates = candidates.slice(0, MAX_IMAGE_CANDIDATE_ENTRIES);
+
+  const structuredContent: RunResultsStructuredContent = {
+    status: "ok",
+    run_id: runId,
+    state: "completed",
+    main_stuff: bounded,
+    truncated,
+    // Absent — not empty — when the output references no stored file at all,
+    // so a consumer can tell "nothing was produced" from "nothing looked like
+    // an image", and a run with no files costs no field.
+    //
+    // Bounded, and bare references rather than `{ uri, key }` pairs. The walk
+    // deliberately reads the FULL output, so an unbounded projection of it was
+    // model-facing content outside the `MAIN_STUFF_CAP` discipline `main_stuff`
+    // obeys two lines above — a method emitting a large `Image[]` could put
+    // more here than the whole output budget. The key was a fixed-prefix strip
+    // of the reference beside it, so it doubled the cost of the list and told
+    // nobody anything the reference did not.
+    ...(stored.length === 0
+      ? {}
+      : {
+          image_candidates: listedCandidates.map((candidate) => candidate.uri),
+          ...(candidates.length === listedCandidates.length
+            ? {}
+            : { image_candidates_omitted: candidates.length - listedCandidates.length }),
+        }),
+    usage: projectRunUsage(usage),
+    available_view_specs: [],
+  };
+
+  return {
+    structuredContent,
+    // Usage is deliberately kept OUT of the prose summary — the run-level totals
+    // ride structuredContent.usage; the per-pipe rollup rides _meta only.
+    summary: completedSummary(runId, bounded, truncated, stored.length, candidates.length),
+    mainStuff: result.main_stuff,
+    // Both ride `_meta` like mainStuff: the full per-call list, and the
+    // per-pipe rollup for a future detailed-cost surface. Kept off the
+    // model-facing channels so they cost no model tokens now. Absent when the
+    // run reported no usage list (state "unavailable").
+    ...(result.tokens_usages == null
+      ? {}
+      : {
+          tokensUsages: result.tokens_usages,
+          usageByPipe: projectUsageByPipe(usage.by_pipe),
+        }),
+  };
+}
+
+// The main output is deliberately duplicated into the summary (the
+// mthds_inputs_template pattern): it is the payload the model must read, and some hosts
+// read prose more reliably than structured fields. Text outputs get a plain
+// fence; everything else pretty-printed JSON.
+function completedSummary(
+  runId: string,
+  bounded: unknown,
+  truncated: boolean,
+  storedFiles: number,
+  imageCandidates: number,
+): string {
+  const fence =
+    typeof bounded === "string"
+      ? "```\n" + bounded + "\n```"
+      : "```json\n" + JSON.stringify(bounded, null, 2) + "\n```";
+
+  const parts = ["# Run results", `Run \`${runId}\` completed. Main output:`, fence];
+  if (truncated) {
+    parts.push(TRUNCATION_NOTE);
+  }
+  const stored = [
+    storedFilesNote(storedFiles, imageCandidates),
+    saveNote(storedFiles, truncated),
+  ].filter((sentence): sentence is string => sentence !== undefined);
+  if (stored.length > 0) parts.push(stored.join(" "));
+  return parts.join("\n\n");
+}
+
+/**
+ * What the model is told when the output was bounded. The rest is one call
+ * away — the download tool writes the whole output to disk, where the agent
+ * reads it with its own file tools — so the sentence says so rather than leave
+ * a cut output looking like the last word.
+ */
+const TRUNCATION_NOTE =
+  "The output shown above was truncated to fit the response. `mthds_download_artifacts` with this run id saves all of it to disk as `main_stuff.json`, verbatim; read it there in full.";
+
+/**
+ * The run's stored files: how many there are, how many look like images, and
+ * how to see one. This tool itself never fetches a byte and never puts a
+ * picture in the conversation, which is the whole point of naming
+ * `mthds_show_images` here instead. Nothing is said when the output references
+ * no stored file.
+ */
+function storedFilesNote(storedFiles: number, imageCandidates: number): string | undefined {
+  if (storedFiles === 0) return undefined;
+
+  const parts = [
+    imageCandidates === 0
+      ? `The output references ${storedFiles} stored file(s) (\`pipelex-storage://\` references); none of them looks like an image.`
+      : `The output references ${storedFiles} stored file(s) (\`pipelex-storage://\` references), ${imageCandidates} of which look like images (listed as \`image_candidates\`).`,
+  ];
+  if (imageCandidates > 0) {
+    parts.push(
+      `To see one, call \`${WORKSHOP_TOOL_NAMES.showImages}\` with this run id — it returns the picture itself, which then stays in this conversation for every turn that follows, so ask for it when someone wants to look at it rather than by reflex.`,
+    );
+  }
+  return parts.join(" ");
+}
+
+/**
+ * How to keep the run. The results land here and nowhere else, so this is the
+ * moment to say that the output can reach the disk without the model retyping
+ * it — which costs output tokens in proportion to the result and can alter it
+ * silently — and, when the output references stored files, that their
+ * presigned links expire within the hour. The summary is the channel that
+ * reaches the agent at the moment it matters, and a model that does not know
+ * the download tool retypes the output. A truncated result's own sentence
+ * already names the tool, so without files there is nothing left to add.
+ */
+function saveNote(storedFiles: number, truncated: boolean): string | undefined {
+  if (storedFiles > 0) {
+    return "To keep this run, call `mthds_download_artifacts` with this run id: it saves the output verbatim as `main_stuff.json` and the full files beside it, under `runs/<run_id>/` — the presigned `public_url` links in the output expire within the hour, where that tool resolves a fresh one every time.";
+  }
+  if (truncated) return undefined;
+  return "To keep this output on disk, call `mthds_download_artifacts` with this run id: it writes it verbatim as `main_stuff.json` under `runs/<run_id>/`. Never retype it into a file yourself.";
+}
+
+function failedResult(state: FailedRunState, failedRead: RunRead | undefined): RunResultsResult {
+  const runId = state.pipeline_run_id;
+  const runError = runErrorOfFailedArm(state, failedRead);
+  return {
+    structuredContent: {
+      status: "ok",
+      run_id: runId,
+      state: "failed",
+      run_status: state.status,
+      ...(runError === undefined ? {} : { run_error: runError }),
+      available_view_specs: [],
+    },
+    summary: [
+      "# Run failed",
+      failedArmSummary(state, runError, failedRead),
+      "No graph is available for failed runs.",
+    ].join("\n\n"),
+  };
+}
+
+/** The failed arm of the results read. */
+export type FailedRunState = Extract<RunResultState, { state: "failed" }>;
+
+/**
+ * Why a run whose results read came back failed did not succeed: its own
+ * problem as the failed arm carries it, the `run_error` the `409`'s `run.failed`
+ * nests, or, when the arm carries none, the one the status read that followed
+ * it served. The status read has served the run's problem longer than the
+ * results route has nested it, so a failed arm with none is not yet evidence
+ * that the run has none. The `run.failed` problem itself is not carried: it
+ * says only that the run did not succeed, which `state` and `run_status`
+ * already say.
+ */
+export function runErrorOfFailedArm(
+  state: FailedRunState,
+  failedRead: RunRead | undefined,
+): Problem | undefined {
+  return runErrorOf(state.error) ?? runErrorOf(failedRead?.error);
+}
+
+/**
+ * The model's account of a failed results arm, from {@link runErrorOfFailedArm}'s
+ * problem, as Markdown. When there is none and the status read that should
+ * have followed failed, the problem is said to be unknown rather than missing,
+ * since the arm alone cannot tell a run that stored none from a platform that
+ * does not relay it. The time the run ended comes from the status read alone,
+ * since the failed arm does not carry it.
+ */
+export function failedArmSummary(
+  state: FailedRunState,
+  runError: Problem | undefined,
+  failedRead: RunRead | undefined,
+): string {
+  return runErrorSummary(
+    state.pipeline_run_id,
+    state.status,
+    runError,
+    failedRead?.finished_at,
+    failedRead !== undefined,
+  );
+}
+
+/**
+ * How long the status read after a failed results arm may take before the
+ * result goes out without it. Far under the SDK's own 30 s poll timeout, since
+ * the read only adds to an answer already in hand.
+ */
+export const FAILED_RUN_READ_TIMEOUT_MS = 5_000;
+
+/**
+ * The one status read that follows a failed results arm, for the time the run
+ * ended and for the run's problem when the arm carried none. Best effort: a read that
+ * fails, or takes longer than `timeoutMs`, leaves the failure to what the arm
+ * itself carried, since the arm is already a verdict and a second request must
+ * never turn it into an error or hold it back. The deadline both aborts the
+ * request and stops waiting for it, so a client that ignores the signal cannot
+ * hold the result either.
+ */
+export async function readFailedRun(
+  client: { getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead> },
+  runId: string,
+  timeoutMs: number = FAILED_RUN_READ_TIMEOUT_MS,
+): Promise<RunRead | undefined> {
+  return readWithinDeadline((signal) => client.getRunStatus(runId, { signal }), timeoutMs);
+}
+
+/**
+ * How long the progress read after a status read may take before the status
+ * goes out without it. Far under the SDK's own 30 s poll timeout, since the
+ * progress only adds to a status already in hand.
+ */
+export const PROGRESS_READ_TIMEOUT_MS = 5_000;
+
+/**
+ * The one progress read that follows a status read, `GET /v1/runs/{id}/progress`.
+ * Best effort: a read that fails for any reason, a server older than the route
+ * (`RunLifecycleUnavailableError`) and an answer the SDK cannot read among them,
+ * or that takes longer than `timeoutMs`, gives no snapshot, and the status goes
+ * out without one, never as an error.
+ */
+export async function readRunProgress(
+  client: {
+    getRunProgress(runId: string, options?: { signal?: AbortSignal }): Promise<RunProgress>;
+  },
+  runId: string,
+  timeoutMs: number = PROGRESS_READ_TIMEOUT_MS,
+): Promise<RunProgress | undefined> {
+  return readWithinDeadline((signal) => client.getRunProgress(runId, { signal }), timeoutMs);
+}
+
+/**
+ * One read that adds to an answer already in hand: its value, or `undefined`
+ * when it fails or takes longer than `timeoutMs`. The deadline both aborts the
+ * request and stops waiting for it, so a client that ignores the signal cannot
+ * hold the answer either.
+ */
+async function readWithinDeadline<T>(
+  read: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+): Promise<T | undefined> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve(undefined);
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([read(controller.signal), deadline]);
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ── capabilities ────────────────────────────────────────────────────
+
+function runClient(context: RunContext): RunClient {
+  return context.client ?? createPipelexApiClient(context);
+}
+
+/** Start a durable run — fire-and-forget `POST /v1/start`, never blocking. */
+export async function startMthdsRun(
+  input: MthdsRunInput,
+  context: RunContext = buildRunContext(),
+): Promise<RunStartResult> {
+  const resolution = await resolveMethodSource(input, context.resolver, "run_source", () =>
+    methodTreeLimitsOf(context, () => runClient(context)),
+  );
+  const inputsResolution = await resolveInputsSource(input, context.inputsResolver, {
+    required: false,
+  });
+  const resolutionFaults = [...resolution.faults, ...inputsResolution.faults];
+  if (resolutionFaults.length > 0) {
+    return startErrorResult(faultsProblem(resolutionFaults), context);
+  }
+
+  // `inputs_path` is settled into `inputs` here and goes no further: the start
+  // request cannot tell a loaded file from an inline object.
+  const {
+    inputs_path: _inputsPath,
+    inputs: _inlineInputs,
+    method_dir: _methodDir,
+    files: _files,
+    ...selection
+  } = input;
+  const request: ResolvedRunRequest = {
+    ...selection,
+    ...(resolution.tree === undefined ? {} : { tree: resolution.tree }),
+    ...(inputsResolution.inputs === undefined ? {} : { inputs: inputsResolution.inputs }),
+  };
+  const inputFaults = validateRunRequest(request);
+  if (inputFaults.length > 0) {
+    return startErrorResult(faultsProblem(inputFaults), context);
+  }
+
+  // Beside files, method_id is linkage only and must be bare; alone, it names
+  // what runs, and its selector is planned against the platform's answer
+  // (`method-versions.ts`).
+  if (request.method_id !== undefined && request.tree !== undefined) {
+    const linkageFault = linkageSuffixError(
+      request.method_id,
+      input.method_dir === undefined ? "files" : "method_dir",
+    );
+    if (linkageFault !== undefined) {
+      return startErrorResult(linkageFault, context);
+    }
+  }
+
+  return withFilesSent(await requestRunStart(request, context), request.tree);
+}
+
+/**
+ * One `POST /v1/start` for a request that passed its checks, and its
+ * acknowledgement's projection. A failed start is the SDK's problem, relayed
+ * with its code, domain and retry verdict: a start that may have created a run
+ * is `client.outcome_unknown`, whose `retry` is `outcome_unknown` and whose
+ * step is to read the run history, since this client sends no idempotency key
+ * and starting it again could start, and bill, a second run. The summary reads
+ * that `retry` ({@link startErrorResult}).
+ */
+async function requestRunStart(
+  request: ResolvedRunRequest,
+  context: RunContext,
+): Promise<RunStartResult> {
+  let plan: SelectorPlan | undefined;
+  let client: RunClient | undefined;
+  try {
+    client = runClient(context);
+    let sent = request;
+    if (request.method_id !== undefined && request.tree === undefined) {
+      plan = planById(request.method_id, methodVersionsOf(context), client, {
+        needBareReport: false,
+      });
+      sent = { ...request, method_id: plan.send };
+    }
+    const ack = await client.start(toStartOptions(sent));
+    if (plan === undefined) return startResult(ack);
+    const content = runContentReport(plan, ack.method_version);
+    // An acknowledgement naming the version that runs is the platform's own
+    // word that it resolves selectors, worth more than any cached answer; one
+    // naming none for a bare id is its word that it does not, so a cached
+    // `supported` is dropped before another tool reads a bare id as `latest`.
+    if (content.proved) noteMethodVersionsSupported(methodVersionsOf(context));
+    else if (content.disproved) forgetMethodVersionsSupported(methodVersionsOf(context));
+    return startResult(ack, content);
+  } catch (err) {
+    // A start refused as too large says which part of it made it so, when
+    // that can be told: the tree sent inline, or the inputs.
+    const sized = await withTooLargeNote(problemOf(err), err, request.tree, client, {
+      inputs: request.inputs,
+    });
+    const problem = await selectorFailure(sized, plan, methodVersionsOf(context));
+    const failed = startErrorResult(problem, context);
+    // A client that could not be built, or an argument refused before
+    // sending, sent no file of the tree.
+    return client === undefined || failedBeforeSending(err) ? markUnsent(failed) : failed;
+  }
+}
+
+/**
+ * One cheap self-healing status read — `GET /v1/runs/{id}/status` — then one
+ * best-effort read of the run's progress, `GET /v1/runs/{id}/progress`, whatever
+ * the status: the progress only adds to the status, so its failure leaves the
+ * status to go out alone (`readRunProgress`).
+ */
+export async function getMthdsRunStatus(
+  input: RunIdInput,
+  context: RunContext = buildRunContext(),
+): Promise<RunStatusResult> {
+  const inputFaults = validateRunIdRequest(input.run_id);
+  if (inputFaults.length > 0) {
+    return statusErrorResult(faultsProblem(inputFaults), context);
+  }
+
+  try {
+    const client = runClient(context);
+    const read = await client.getRunStatus(input.run_id);
+    const progress = await readRunProgress(client, read.pipeline_run_id);
+    return statusResult(read, progress);
+  } catch (err) {
+    return statusErrorResult(problemOf(err), context);
+  }
+}
+
+/**
+ * The result artifacts a `run_results` read asks for — exactly what
+ * `completedResult` projects, so the platform reads and re-signs nothing the
+ * tool drops: the main output and the usage records (which bring
+ * `usage_assembly_error`). The graph, its data artifacts and the working
+ * memory are never read.
+ */
+export const RUN_RESULTS_ARTIFACTS: readonly RunResultArtifact[] = ["main_stuff", "tokens_usages"];
+
+/** One-shot result lookup — `GET /v1/runs/{id}/results`. */
+export async function getMthdsRunResults(
+  input: RunIdInput,
+  context: RunContext = buildRunContext(),
+): Promise<RunResultsResult> {
+  const inputFaults = validateRunIdRequest(input.run_id);
+  if (inputFaults.length > 0) {
+    return resultsErrorResult(faultsProblem(inputFaults), context);
+  }
+
+  let state: RunResultState;
+  try {
+    state = await runClient(context).getRunResult(input.run_id, {
+      artifacts: RUN_RESULTS_ARTIFACTS,
+    });
+  } catch (err) {
+    return resultsErrorResult(problemOf(err), context);
+  }
+  const failedRead =
+    state.state === "failed"
+      ? await readFailedRun(runClient(context), state.pipeline_run_id)
+      : undefined;
+
+  // The API responded; projecting it must not be reported as an unreachable
+  // API. A completed result missing main_stuff is an answer the workshop
+  // cannot read, `client.response_unreadable` of the 200 it came on, naming
+  // the run.
+  try {
+    return resultsResult(state, failedRead);
+  } catch (err) {
+    return resultsErrorResult(
+      buildProblem(
+        "client.response_unreadable",
+        { status: 200 },
+        {
+          pipeline_run_id: state.pipeline_run_id,
+          extra: {
+            message: err instanceof Error && err.message !== "" ? err.message : undefined,
+          },
+        },
+      ),
+      context,
+    );
+  }
+}
+
+// The method's tree travels whole, inline or by hash, the files the
+// organization's storage lacks uploaded first by the SDK. `method_id` is a
+// NAMED option (`PipelexStartOptions`), not an `extra` extension arg: since
+// @pipelex/sdk 0.14.0 the client names it itself and refuses it on `extra`,
+// which merges last into the body and would let one argument arrive by two
+// paths with different validation. That refusal is a runtime throw rather than
+// a type error, so the old `extra: { method_id }` shape compiled and failed
+// only against the live API. The meaning is unchanged: alone it resolves the
+// stored method server-side; beside a tree it becomes the run-history linkage
+// while the tree is what runs.
+function toStartOptions(input: ResolvedRunRequest): PipelexStartOptions {
+  return {
+    ...(input.tree === undefined ? {} : { tree: input.tree.source }),
+    ...(input.pipe_code === undefined ? {} : { pipe_code: input.pipe_code }),
+    ...(input.inputs === undefined ? {} : { inputs: input.inputs }),
+    // `method_ref` is the SDK's named Pipelex-API run-source extension
+    // (PipelexApiRunExtensions), resolved by the runner; the request-shape
+    // checks already rejected the illegal pairings, mirroring the SDK's own
+    // client-side guards.
+    ...(input.method_ref === undefined ? {} : { method_ref: input.method_ref }),
+    ...(input.method_id === undefined ? {} : { method_id: input.method_id }),
+  };
+}
+
+/**
+ * The line a failed start's summary opens with when the start may have
+ * created a run, chosen by the problem's `retry` alone, `outcome_unknown`,
+ * never by its wording. The problem's own rendering follows it; this line says
+ * first what a repeat would cost, so that a host showing only the opening line
+ * does not invite a second paid run.
+ */
+const START_OUTCOME_UNKNOWN_LINE =
+  "Run may have started: the start failed after its request may have reached the Pipelex API, so look for the run before starting it again, which would spend credit a second time.";
+
+function startErrorResult(problem: Problem, context: RunContext): RunStartResult {
+  const summary = problemSummary(problem, context.apiNotes);
+  return {
+    structuredContent: { status: "error", available_view_specs: [], problem },
+    summary:
+      problem.retry === "outcome_unknown" ? `${START_OUTCOME_UNKNOWN_LINE}\n\n${summary}` : summary,
+  };
+}
+
+function statusErrorResult(problem: Problem, context: RunContext): RunStatusResult {
+  return {
+    structuredContent: { status: "error", problem },
+    summary: problemSummary(problem, context.apiNotes),
+  };
+}
+
+function resultsErrorResult(problem: Problem, context: RunContext): RunResultsResult {
+  return {
+    structuredContent: { status: "error", available_view_specs: [], problem },
+    summary: problemSummary(problem, context.apiNotes),
+  };
+}
+
+// ── tool results ────────────────────────────────────────────────────
+
+export function runToolResult(result: RunStartResult) {
+  return {
+    structuredContent: result.structuredContent,
+    content: toolResultContent(result.summary, result.structuredContent.files_sent),
+    isError: result.structuredContent.status === "error",
+  };
+}
+
+export function runStatusToolResult(result: RunStatusResult) {
+  return {
+    structuredContent: result.structuredContent,
+    content: toolResultContent(result.summary),
+    isError: result.structuredContent.status === "error",
+  };
+}
+
+export function runResultsToolResult(result: RunResultsResult) {
+  return {
+    structuredContent: result.structuredContent,
+    content: toolResultContent(result.summary),
+    isError: result.structuredContent.status === "error",
+    // Response-metadata channel (the mthds_validate convention): the FULL
+    // unbounded main output, the FULL per-call token-usage list, and the
+    // per-pipe usage rollup ride `_meta`, never structuredContent, so the model
+    // never pays their tokens while a raw MCP consumer can still retain them.
+    // Keys mirror the API field names (usage_by_pipe is the SDK's per-pipe
+    // rollup, projected onto this tool's row shape).
+    _meta: {
+      main_stuff: result.mainStuff,
+      tokens_usages: result.tokensUsages,
+      usage_by_pipe: result.usageByPipe,
+    },
+  };
+}

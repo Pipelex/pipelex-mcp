@@ -1,0 +1,246 @@
+---
+name: bump-sdks
+description: Bump this repo's two @pipelex npm dependencies — @pipelex/sdk and @pipelex/mthds-ui — to their latest published versions (or to versions the user names). Reads each package's CHANGELOG for the versions in between, maps every breaking bullet onto the client seams and the method graph page this repo actually declares, applies the bump through the Makefile, runs the checks, offers a live run against the real API, and prepares a reviewable commit. Use this whenever the user says "bump the sdk", "bump the sdks", "bump @pipelex/sdk", "bump mthds-ui", "update the pipelex sdk", "upgrade the sdks", "is there a new sdk version", "are we behind on the sdk", or asks to pull in a newer @pipelex/sdk or @pipelex/mthds-ui release. Also use it when a tool fails at runtime against the live API while `make all` passes — that pattern usually means the installed SDK is behind the API.
+---
+
+# Bump the @pipelex SDKs
+
+This repo depends on two published `@pipelex` packages, and both are pre-1.0:
+
+| Package | What it gives this repo | Source repo |
+|---|---|---|
+| `@pipelex/sdk` | `PipelexApiClient` — every API call the capabilities make | `Pipelex/pipelex-sdk`, its `js/` directory |
+| `@pipelex/mthds-ui` | The standalone graph viewer the method graph page pins, and the `./static-graph` embed serializer that page inlines | `Pipelex/mthds-ui` |
+
+Because they are `0.x`, npm treats the leading zero as the major: a `^0.9.0` range auto-resolves patches only, so every minor bump (`0.9.0 → 0.10.0`) needs a deliberate edit. **Bump both by default.** Only narrow to one package, or to a specific version, if the user asked for that.
+
+**npm is the only authority on which versions exist.** `Pipelex/pipelex-sdk` is a monorepo that releases both SDKs, the starters and the method apps under one version and one tag, `vX.Y.Z`, and a release ships only the packages that changed since they last shipped. So `@pipelex/sdk`'s own sequence of versions has gaps, a release can hold it back, and a tag or even a heading in `js/CHANGELOG.md` can name a version npm never received: 0.29.0 is a tag and a changelog heading, but its npm publish failed, and 0.29.1, which carries the same code, is the first `@pipelex/sdk` published from that repository. The versions ending in `-sprint.g<sha>` sit on the `sprint` dist-tag for sprints that pin an unreleased commit, and are never a bump target.
+
+Work through the steps below, showing the user each file change and each install before moving on. The judgment in this skill is concentrated in Step 4 — reading the changelogs and deciding what this repo actually has to migrate — so spend your effort explaining there, not narrating the mechanical steps.
+
+## Why this repo needs more than `make all`
+
+Every capability here talks to the SDK through a **hand-written narrow interface** (`CatalogClient`, `RunClient`, `ShowClient`, …) that restates the SDK method signatures this repo uses. Tests inject fakes that satisfy those local interfaces. That design is good for testing and it creates one specific blind spot you must plan around:
+
+- A **type** change in the SDK is caught — each capability falls back to `new PipelexApiClient(...)` where the local interface is expected, so `tsc` structurally compares the two and fails.
+- A **behavior or wire-shape** change is *not* caught. The local interface still compiles, the fakes still return the shape they were written for, and `make all` goes green while the real client is broken against the live API.
+
+This is not hypothetical. On SDK `0.9.0` the whole suite passed while `mthds_list_methods` failed on every real call with `wire.map is not a function` — the platform had reshaped `GET /v1/methods` into a page object and `0.9.0` still called `.map()` on the response. Step 4 and Step 7 exist to catch exactly that class of failure, and Step 7 is now two real targets (`make test-e2e` and `make smoke`) rather than a probe you assemble by hand.
+
+## Step 1 — Gather state
+
+Show the user, for both packages, the declared range, what is actually installed, and what npm has:
+
+```bash
+for p in sdk mthds-ui; do
+  echo "@pipelex/$p"
+  echo "  range: $(node -p "const m=require('./package.json'); m.dependencies?.['@pipelex/$p'] ?? m.devDependencies?.['@pipelex/$p'] ?? ''")"
+  echo "  installed: $(node -p "require('./node_modules/@pipelex/$p/package.json').version" 2>/dev/null || echo 'not installed')"
+  echo "  npm latest: $(npm view @pipelex/$p version)"
+done
+git status --short
+```
+
+**The repository is one package, so each dependency has one entry, in `package.json`.** `@pipelex/sdk` sits in `dependencies`, since the capabilities import it and every install needs it. `@pipelex/mthds-ui` sits in `devDependencies`, since the capabilities import only the graph page's embed serializer from `./static-graph` and tsup inlines it into the bundle, so none of it reaches an `npx @pipelex/mcp` install. The Makefile's targets (`make use-npm-sdk`, `make use-npm-ui`) install each package, and npm keeps an entry in the block it already sits in. What reaches every workshop user is `dependencies` alone, so read that diff in Step 10 instead of trusting the suite to object.
+
+**If either range reads `file:` / `link:` / `portal:`**, the repo is mid local-SDK development (`make use-local-sdk` / `make use-local-ui`). A bump targets the *published* package, so this must be undone first — and `make check` will refuse to run until it is, via the `check-no-local-deps` guard. Tell the user and offer to run `make use-npm-sdk` / `make use-npm-ui` to get back to a clean baseline before bumping.
+
+A dirty working tree is not a blocker — this repo's checks don't need a clean tree. But if `package.json`, `package-lock.json` or `CHANGELOG.md` is *already* dirty, say so and ask how to proceed: your edits will land on top of unrelated in-flight work in the same files, and Step 9 has to keep them apart.
+
+## Step 2 — Decide the targets
+
+Default to latest for both. `npm view @pipelex/<p> version` reads the `latest` dist-tag, which never names a sprint prerelease, and `make use-npm-sdk` without `VERSION` installs the same. If a package is already at latest, say so and drop it from this run rather than reinstalling it.
+
+If the user named a version or a single package, honour that exactly, once npm confirms the version exists: `npm view @pipelex/sdk@X.Y.Z version` fails with `E404` for a version npm never received, 0.29.0 included, and `npm view @pipelex/sdk versions --json` lists every one, sprint prereleases included, which you skip. Otherwise, when there is a real choice to make (a large jump, or one package moving several minors), use `AskUserQuestion` to confirm — offering latest as the recommended default and letting them type a specific version.
+
+**This skill only moves to published versions.** If what the user wants is not released yet, say so and stop: the fix is a release of `../pipelex-sdk` with that repository's root `/release` skill, which ships `@pipelex/sdk` when `js/` has changed since it last shipped. Never point a manifest at a local path, a git ref or a sprint prerelease to route around it.
+
+Record targets without a `v` prefix (`0.12.0`). Flag any downgrade and confirm it is intended.
+
+## Step 3 — Read what changed
+
+You need each package's `CHANGELOG.md` entries strictly after its current version through its target. Their headings carry a `v` (`## [v0.12.0] - YYYY-MM-DD`) — **this repo's two changelogs do not** (see Step 9), so don't let the two formats bleed into each other.
+
+| Package | Changelog | Sibling checkout |
+|---|---|---|
+| `@pipelex/sdk` | `js/CHANGELOG.md` in `Pipelex/pipelex-sdk`, the package's own history, which goes back past its move into that repository | `../pipelex-sdk` |
+| `@pipelex/mthds-ui` | `CHANGELOG.md` in `Pipelex/mthds-ui` | `../mthds-ui` |
+
+Read each one from `origin/main`, the branch releases merge into, after a fetch, never from the checkout's working tree — that is the trap here, not a formality. A workspace checkout sits on `dev`, often a few commits behind `origin`, and simply will not contain the newest release entry, so you would silently review an incomplete set of breaking changes:
+
+```bash
+git -C ../pipelex-sdk fetch origin --quiet
+git -C ../pipelex-sdk show origin/main:js/CHANGELOG.md | sed -n "/^## \[v${TARGET}\]/,/^## \[v${CURRENT}\]/p"
+git -C ../mthds-ui fetch origin --quiet
+git -C ../mthds-ui show origin/main:CHANGELOG.md | sed -n "/^## \[v${TARGET}\]/,/^## \[v${CURRENT}\]/p"
+```
+
+Each changelog is newest-first, so the target's heading comes before the current one. If a range comes back empty, the target's heading is not on `main`: stop and say so rather than reading a partial range. Without a sibling checkout, read the same files from GitHub:
+
+- `https://raw.githubusercontent.com/Pipelex/pipelex-sdk/main/js/CHANGELOG.md`, or `gh api repos/Pipelex/pipelex-sdk/contents/js/CHANGELOG.md --jq .content | base64 -d`
+- `https://raw.githubusercontent.com/Pipelex/mthds-ui/main/CHANGELOG.md`
+
+Neither published npm tarball ships a `CHANGELOG.md`, so there is nothing to read in `node_modules`. Never assume the sibling checkouts exist at all.
+
+**Read every heading in the range, including a version npm never received.** Its entry still describes code the next published version carries: 0.29.1's entry says only that it published 0.29.0's code, and what changed is under 0.29.0.
+
+For `@pipelex/sdk`, the release is a second view, not a substitute. A version released from `pipelex-sdk` was built from that repository's tag `vX.Y.Z`, so `git -C ../pipelex-sdk show vX.Y.Z:js/<path>` reads the source it was built from, and `gh release view vX.Y.Z --repo Pipelex/pipelex-sdk` shows its `@pipelex/sdk` entry beside those of the other packages that release shipped. A release that held `@pipelex/sdk` back has no section for it, a tag has no GitHub Release when its run stopped before creating one (`v0.29.0` is one), and the versions released before the SDK moved there have no tag in it at all; their entries are in the changelog all the same.
+
+Present the entries to the user grouped by package, then by version, newest first. **Call out every bullet marked "Breaking"** — those are the ones that can reach this repo. Mention the rest briefly; internal refactors, CI changes and additive APIs are FYI.
+
+## Step 4 — Map the breaking changes onto this repo's real surface
+
+This is the step that matters. For each breaking bullet, answer one question: *does this repo touch that surface?* Work from what the repo declares, not from memory.
+
+### 4a — The SDK client seams
+
+Every place the SDK's shape is restated locally is a place a breaking change has to be re-reconciled by hand. Find them all:
+
+```bash
+grep -rn "interface .*Client" src/ --include="*.ts" | grep -v test
+grep -rn "PipelexApiClient" src/ --include="*.ts" | grep -v test
+```
+
+They live in `src/capabilities/` — the catalog client, the shared method-fetch client, and the validation, inputs, prepare, attachment-upload and run clients, plus the `SizeGuardedPipelexApiClient` subclass in `upload-ceiling.ts` that overrides the `upload` wire call. For each seam whose methods appear in a breaking bullet:
+
+1. Read the local interface's declared signature.
+2. Read the new SDK's actual signature (`node_modules/@pipelex/sdk/dist/**/*.d.ts` after Step 5, or, before it, the source a version released from `pipelex-sdk` was built from: `git -C ../pipelex-sdk show "v${TARGET}:js/src/<file>"`).
+3. Update the local interface to match, then follow the call site through — a return-shape change usually means the projection function downstream needs reworking too, not just the type. A method that now returns a page object rather than an array is the canonical example: the interface, the call site, *and* the projection all move.
+
+`SizeGuardedPipelexApiClient` deserves its own look on any SDK bump: it overrides `upload` specifically because that is the one seam both upload paths funnel through. If the SDK reorganises where the wire call happens, that override can go silently dead — it would still compile.
+
+### 4b — The test fakes
+
+```bash
+grep -rln "client:" src/ --include="*.test.ts"
+```
+
+A fake written against the old shape keeps the suite green through a breaking change. Every fake for a seam you touched in 4a needs the same reshaping, and its assertions need re-reading — otherwise the tests now assert the old contract.
+
+### 4c — The method graph page
+
+`mthds_validate`'s method graph page loads `@pipelex/mthds-ui`'s standalone viewer from jsDelivr and hands it the method's sources through the embed contract, so nothing `tsc` checks stands between a viewer change and a page that draws nothing. On any `@pipelex/mthds-ui` bump, read its changelog for the standalone viewer, the `./static-graph` entry point and the `mthds-sources` embed contract, and treat a change to any of them as needing the visual check in Step 7.
+
+The page also pins the package itself: `GRAPH_VIEWER_VERSION` and the viewer's two hashes in `src/capabilities/graph-page.ts` must equal the installed version, and `graph-page.test.ts` fails until they do. Take the hashes from the installed files (`openssl dgst -sha384 -binary node_modules/@pipelex/mthds-ui/dist/standalone/graph-viewer.js | openssl base64 -A`, and the same for the `.css`), re-read the `mthds-sources` embed contract in mthds-ui's `docs/static-graph.md` for the new version, and run `npx vitest run --config vitest.e2e.config.ts src/capabilities/graph-page.e2e.ts`, which checks the hashes against jsDelivr and calls no Pipelex API.
+
+### 4d — Everything mechanical
+
+Some bullets are a plain rename — an option, an export, an env var written as `` `oldName` `` → `` `newName` ``. For those, grep the **whole repo**, not just `src/`: env var names in particular leak into `README.md`, `docs/`, `SPEC.md`, `.claude/rules/` and `.env.example`. Apply the rename everywhere and show the diff — this workspace keeps no backward-compatibility shims, so there is nothing to preserve. The one place to leave untouched is the changelogs' **already-dated release headings**: those record what was true at that release. Step 9 is where the changelogs get their new entries.
+
+Run `make format` after any edit, not just renames. Prettier re-flows on line length, so reworking a function body or a Markdown table will fail `format:check` on whitespace alone — a confusing way to fail Step 6 if you have forgotten that your own edit caused it.
+
+### 4e — What you cannot fix mechanically
+
+Behavior changes, removed methods, changed error shapes and new defaults need human judgment. **Never guess at these.** Collect them into a short "needs your call" list, explain how each one reaches this repo, and let the user decide before you continue. If any of them will break `make all`, say so now rather than letting Step 6 surface it as a mystery.
+
+## Step 5 — Apply the bump
+
+Use the Makefile targets rather than editing `package.json` by hand — they install and re-lock in one step, and they keep the caret style:
+
+```bash
+make use-npm-sdk VERSION=0.12.0
+make use-npm-ui  VERSION=0.17.0
+```
+
+Omitting `VERSION` installs `latest`. Confirm each landed:
+
+```bash
+node -p "require('./node_modules/@pipelex/sdk/package.json').version"
+node -p "require('./node_modules/@pipelex/mthds-ui/package.json').version"
+```
+
+Then show the user the resulting diff of `package.json`: each entry should have moved in place, in the block it already sat in.
+
+## Step 6 — Run the checks
+
+```bash
+make all
+```
+
+That is clean + check + test: lint, format check, the text budgets, the tsup workshop bundle, typecheck, and Vitest.
+
+**On failure**, show the errors and connect them back to Step 4 rather than dumping output. A failed contract snapshot (`workshop.contract.json`) with identical tool names usually means the install re-resolved a shared dependency — the mthds-ui 0.26.0 bump pulled `zod` from 4.4 to 4.6, which emits a nullable field as `type: [T, "null"]` rather than an `anyOf` — so compare the schemas semantically before updating the snapshot, and say in the changelog whether any schema moved. A typecheck error naming a client seam is the SDK telling you exactly which seam moved — that is the system working, not a surprise. If the failure traces to one of the 4e items, say so and ask how to proceed instead of guessing a fix.
+
+Remember what green means here: the suite ran against fakes. It has not touched the API.
+
+## Step 7 — Check it against the real API
+
+An SDK bump always moves the API call path, so this is the step that exercises the real `PipelexApiClient` against the live platform — the only thing Step 6 cannot do. Offer it every time.
+
+There are two live targets. **Prefer `make test-e2e`**: it is the thorough one.
+
+```bash
+make test-e2e   # the thorough option: every capability, through the real client
+make smoke      # the quick one: the read-only tools, through the workshop shell
+```
+
+`make test-e2e` runs one `*.e2e.ts` per capability with **no client seam injected**, so the real client reaches the real API at exactly the layer an SDK bump moves. It covers the catalog, validation, the inputs template by every selector, both arms of input preparation, and the run lifecycle's free reads. It needs the durable fixture method in the key's organization — if a suite fails saying so, run `make seed-e2e-fixture` once and re-run. It stays free: the paid run family only fires under `make test-e2e-run`, which you should not offer as part of a bump unless the changelog span actually touched the run lifecycle.
+
+`make smoke` is the faster, shallower check: it spawns the workshop stdio server the way a host does, completes the MCP handshake, then calls `mthds_list_methods`, `mthds_validate` and `mthds_inputs_template` and asserts on their `structuredContent` (`scripts/smoke.ts` holds the assertions). It is the right call when you want a verdict in seconds, or when the failure you are chasing is about the shell rather than a capability.
+
+Neither spends inference credit, but only `make smoke` is read-only: `make test-e2e` has one write, `prepare.e2e.ts`'s workshop arm, which uploads a 1x1 PNG to the user's organization storage on every run to prove the upload path still rewrites a local path to a `pipelex-storage://` reference. The SDK exposes no delete, so that object persists. Say so when you ask — they do hit the live API with the user's key. Both resolve their own `PIPELEX_E2E_BASE_URL` and `PIPELEX_E2E_API_KEY` (make command line, then a gitignored `.env`, then the shell; the URL defaults to api-dev) and never the `PIPELEX_BASE_URL` / `PIPELEX_API_KEY` other tools use, print where each came from, preflight `/v1/version`, and refuse to start without a key — so read the `-> target:` line before reading any failure; against a keyless local OSS runner, calling the npm script directly skips those guards.
+
+Read the result as a whole rather than the exit code alone:
+
+- **`SMOKE PASSED`, or a green `make test-e2e`** — the shipped client and the live API agree on every checked shape. Note what a green e2e run reports as *skipped*: the paid run family is expected to skip, and that is the design, not a gap.
+- **A failed check or a failed test** — the real client disagreeing with the real API, which is precisely what Step 6 cannot see. Both surfaces name the tool, the field, and what they got. If the API moved, the fix belongs in `../pipelex-sdk/js` (plus its own e2e), then a bump here — never a local patch that papers over it. If a live result contradicts a unit-test fake in this repo, fix the fake in the same change: a fake that has drifted from the wire is how the mocked suite goes green over a broken client.
+- **`catalog is EMPTY`** on a pass — a note, not a failure, and worth repeating to the user: the org holds no methods, so row projection was not exercised by that run. A pass under an empty catalog is a weaker result than it looks.
+
+Worth running **before** the bump too when the user reports a live failure: a check that fails on the old version and passes on the new one turns "we upgraded" into "we fixed it", and gives Step 9 something concrete to write.
+
+If Step 4c flagged a viewer change, the method graph page needs eyes on it as well: validate a method given as `{ path }` files (through `make inspect-local`, or any host running the local build), open the `method-graph.html` it writes in a browser, and check that the graph draws. Offer it, but do not treat it as blocking.
+
+## Step 8 — Sync the docs to any contract you changed
+
+If Step 4 changed a **tool's input or output contract**, this repo requires the prose to move in the same change — its `CLAUDE.md` names the rule: keep `SPEC.md`'s declared shapes, the Zod schemas in `capabilities/`, and `docs/tools.md` in sync, and the `README.md` tool table when a tool is added, removed or renamed. Grep for every field you added, renamed or removed:
+
+```bash
+grep -rn "old_field_name\|new_field_name" README.md docs/ SPEC.md .claude/rules/
+```
+
+These documents carry different weight, so read what each one is for rather than pattern-matching the same edit into all of them:
+
+- **`SPEC.md`** is the source of truth for the contract. Update the declared input/output blocks *and* the prose that explains them — a stale sentence about how paging or filtering works is worse than a stale type, because the type is checked and the sentence is not.
+- **`docs/tools.md`** is the tool-by-tool reference a user of the npm package reads. Keep it to the shape and the behavior, not the reasoning.
+- **`README.md`** is the npm front page and names each tool in one line, so it moves only when a tool is added, removed or renamed.
+- **`docs/architecture.md`** is what the next person to change the module reads before they touch it. Record *why* the contract moved in the entry for the capability it moved in, not just that it did — a removed field whose absence looks like an oversight will get helpfully re-added by someone six months from now. A rule under `.claude/rules/` moves only when what must hold while its files are open has changed.
+- **`CLAUDE.md`** is a map, not a record, and `make check` holds it to a ceiling: never record the reason for a bump there. It moves only when an invariant it names changed.
+
+A removed field deserves a sentence explaining why it cannot come back cheaply. That is the note that stops the next person reintroducing it.
+
+## Step 9 — Update the changelog
+
+The changelog, `CHANGELOG.md`, takes the entry: an `@pipelex/sdk` bump reaches the workshop through the capabilities, and an `@pipelex/mthds-ui` bump through the method graph page. Entries accumulate under `## [Unreleased]` — **create that heading above the newest version heading if it is not there**, since releases consume it. Use this repo's format: `## [x.y.z]`, **no `v` prefix** (the `v` belongs to branch names and git tags only).
+
+Add a `### Changed` bullet naming both packages and the versions they moved from and to. Then write for *this repo's* reader, not the SDK's — restate what changed in terms of what pipelex-mcp does:
+
+- If the bump fixes a live failure, say what was broken and what now works. That is the most useful sentence in the entry.
+- If Step 4 migrated a seam, name the tool or capability affected, not just the SDK method.
+- If anything is user-visible (a renamed env var, a changed tool contract), add it under `### Breaking Changes` in this repo's own terms.
+
+Never copy the SDK's changelog wording verbatim.
+
+## Step 10 — Review and commit
+
+Summarise: each package's `old → new`, every file touched, and any unresolved 4e items. Then ask for confirmation.
+
+On approval:
+
+1. Stage **only** the files this bump touched — `package.json`, `package-lock.json`, the changelog, plus anything Steps 4 and 8 migrated. Never `git add .` or `git add -A`. If Step 1 flagged pre-existing changes in one of these files, stage hunks carefully or ask the user how to separate them.
+2. If the current branch is `dev` or `main`, create a work branch first — `chore/Bump-sdks` (this repo's guard workflow requires one of `fix/ feature/ refactor/ chore/ docs/ ci-cd/ changelog/ codex/`).
+3. Commit as `chore: bump @pipelex/sdk to X.Y.Z and @pipelex/mthds-ui to A.B.C`, with a short body naming any migration applied and any live failure fixed.
+4. Show the result.
+
+Then *offer* — do not run — pushing and opening a PR. PRs target **`dev`**, never `main`; only a release branch (`release/vX.Y.Z`) may target `main` here. Wait for explicit approval.
+
+## Rules
+
+- Bump both packages unless the user narrowed the scope.
+- Never `git add .` or `git add -A` — stage only what this bump touched.
+- Never push or open a PR without explicit approval.
+- Never guess a fix for a behavior change — flag it and let the user decide.
+- Never read a changelog from a sibling checkout's working tree: read it from `origin/main` after a fetch, and confirm the range contains the target version's heading.
+- Only move to a version npm serves: never to a `-sprint.g<sha>` prerelease, and never to a version that exists only as a tag or a changelog heading.
+- Never treat a green `make all` as proof the bump works — the suite runs on fakes.
+- Don't assume `../pipelex-sdk` or `../mthds-ui` exist; keep the GitHub path ready.
+- If any step fails or the user aborts, stop immediately.

@@ -1,0 +1,160 @@
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
+
+import {
+  deepestCommonDirectory,
+  escapedDirectoryError,
+  isInsideRoot,
+  resolveSaveDir,
+} from "./workspace-boundary.js";
+
+const tempDirs: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+});
+
+async function makeTempDir(prefix = "pipelex-boundary-"): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+describe("isInsideRoot", () => {
+  const root = path.join(path.sep, "workspace", "project");
+
+  it("accepts the root itself and anything under it", () => {
+    expect(isInsideRoot(root, root)).toBe(true);
+    expect(isInsideRoot(root, path.join(root, "src"))).toBe(true);
+    expect(isInsideRoot(root, path.join(root, "src", "generated", "types.ts"))).toBe(true);
+  });
+
+  it("refuses a sibling whose name merely starts with the root's", () => {
+    // The separator in the prefix test is what makes this a refusal rather
+    // than a match — `project-evil` is not inside `project`.
+    expect(isInsideRoot(root, `${root}-evil`)).toBe(false);
+    expect(isInsideRoot(root, path.join(path.sep, "workspace", "other"))).toBe(false);
+    expect(isInsideRoot(root, path.join(path.sep, "workspace"))).toBe(false);
+  });
+});
+
+// The containment routine these cases cover was folded out of
+// `capabilities/artifacts.ts`; they moved here unchanged but for the
+// `location` argument the fold added.
+describe("resolveSaveDir", () => {
+  it("defaults to the root itself and creates a nested relative dir inside it", async () => {
+    const root = await makeTempDir();
+
+    const bare = await resolveSaveDir(root, undefined, "dir");
+    const nested = await resolveSaveDir(root, "out/run-1", "dir");
+
+    expect(bare).toMatchObject({ ok: true });
+    if (!bare.ok) return;
+    expect(bare.dir).toBe(await fs.realpath(root));
+    expect(nested.ok).toBe(true);
+    if (!nested.ok) return;
+    expect(nested.dir).toBe(path.join(await fs.realpath(root), "out", "run-1"));
+    expect((await fs.stat(nested.dir)).isDirectory()).toBe(true);
+  });
+
+  it("refuses a lexical escape without creating anything", async () => {
+    const root = await makeTempDir();
+    const sibling = path.join(path.dirname(root), path.basename(root) + "-escaped");
+
+    const result = await resolveSaveDir(root, `../${path.basename(sibling)}`, "dir");
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problem).toMatchObject({
+      code: "client.argument_invalid",
+      domain: "input",
+      params: { argument: "dir", reason: "outside_workspace" },
+      location: { field: "dir" },
+    });
+    await expect(fs.stat(sibling)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("refuses a symlink inside the workspace that points outside it — before mkdir", async () => {
+    const root = await makeTempDir();
+    const outside = await makeTempDir("pipelex-boundary-outside-");
+    await fs.symlink(outside, path.join(root, "link"));
+
+    const result = await resolveSaveDir(root, "link/sub", "dir");
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problem.location).toEqual({ field: "dir" });
+    expect(result.problem.params).toEqual({ argument: "dir", reason: "outside_workspace" });
+    expect(result.problem.message).toContain("outside");
+    // The escape was caught on the deepest existing ancestor: nothing was
+    // created at the link's target.
+    expect(await fs.readdir(outside)).toEqual([]);
+  });
+
+  it("refuses a dir that is an existing regular file", async () => {
+    const root = await makeTempDir();
+    await fs.writeFile(path.join(root, "notes.txt"), "x", "utf8");
+
+    const result = await resolveSaveDir(root, "notes.txt", "dir");
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problem.location).toEqual({ field: "dir" });
+    // `mkdir -p` refuses a path a file holds, so the directory cannot be used.
+    expect(result.problem).toMatchObject({
+      code: "client.write_failed",
+      params: { path: "notes.txt", reason: "EEXIST" },
+    });
+  });
+
+  it("locates its refusals at the caller's own field name", async () => {
+    const root = await makeTempDir();
+
+    const result = await resolveSaveDir(root, "../escaped", "output_dir");
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problem.location).toEqual({ field: "output_dir" });
+    expect(result.problem.params).toMatchObject({ argument: "output_dir" });
+    expect(result.problem.message).toContain("output_dir");
+  });
+});
+
+describe("escapedDirectoryError", () => {
+  it("passes a directory that really stays inside, existing or not, and creates nothing", async () => {
+    const root = await makeTempDir();
+    await fs.mkdir(path.join(root, "work"));
+
+    expect(await escapedDirectoryError(root, "work", "link_dir")).toBeUndefined();
+    expect(await escapedDirectoryError(root, ".", "link_dir")).toBeUndefined();
+    expect(await escapedDirectoryError(root, "work/new/deeper", "link_dir")).toBeUndefined();
+    await expect(fs.access(path.join(root, "work", "new"))).rejects.toThrow();
+  });
+
+  it("refuses a directory whose real path, or that of its deepest existing ancestor, leaves the root", async () => {
+    const root = await makeTempDir();
+    const outside = await makeTempDir("pipelex-boundary-outside-");
+    await fs.symlink(outside, path.join(root, "linked"));
+
+    for (const dir of ["linked", "linked/not-yet", "../elsewhere"]) {
+      expect(await escapedDirectoryError(root, dir, "link_dir")).toMatchObject({
+        code: "client.argument_invalid",
+        params: { argument: "link_dir", reason: "outside_workspace" },
+        location: { field: "link_dir" },
+      });
+    }
+    await expect(fs.access(path.join(outside, "not-yet"))).rejects.toThrow();
+  });
+});
+
+describe("deepestCommonDirectory", () => {
+  it("is the directory itself when there is one, and the shared ancestor otherwise", () => {
+    const base = path.join(path.sep, "work", "methods");
+    expect(deepestCommonDirectory([base, base])).toBe(base);
+    expect(deepestCommonDirectory([base, path.join(base, "sub")])).toBe(base);
+    expect(deepestCommonDirectory([path.join(base, "a"), path.join(base, "ab")])).toBe(base);
+  });
+});

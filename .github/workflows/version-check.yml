@@ -1,0 +1,71 @@
+# Verifies a release branch's version against the workshop's, and that a
+# release into main is a real bump. Runs on PRs into main (release branch →
+# main) and on PRs into a release branch (dev/work → release branch) — the two
+# places the version matters.
+#
+# The workshop's version lives in the root package.json and is read through
+# `.github/scripts/track-version.sh`. Branch refs are read into env: and never
+# interpolated into the shell, matching guard-branches.yml's injection-safe
+# style. The version string has NO prefix in package.json (`v` lives on the
+# branch name and the git tag only).
+name: Version check
+
+on:
+  pull_request:
+    branches:
+      - main
+      - 'release/v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
+
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify version consistency
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+          HEAD: ${{ github.event.pull_request.head.ref }}
+        run: |
+          echo "Base: $BASE   Head: $HEAD"
+          fail=0
+          PR_VERSION=$(bash .github/scripts/track-version.sh HEAD)
+
+          # If the head OR the base is a release branch, the workshop must
+          # carry the branch's version.
+          IS_RELEASE=0
+          for ref in "$HEAD" "$BASE"; do
+            [[ "$ref" =~ ^release/v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || continue
+            IS_RELEASE=1
+            REL_VERSION="${BASH_REMATCH[1]}"
+            if [[ "$PR_VERSION" != "$REL_VERSION" ]]; then
+              echo "::error::The workshop's version ($PR_VERSION) does not match release branch version ($REL_VERSION) from '$ref'."
+              fail=1
+            else
+              echo "The workshop's version matches release branch '$ref'."
+            fi
+          done
+
+          # Targeting main: the version must be strictly greater than main's.
+          if [[ "$BASE" == "main" ]]; then
+            if [[ "$IS_RELEASE" == 0 ]]; then
+              echo "::error::Only a release/vX.Y.Z branch may target main."
+              exit 1
+            fi
+            MAIN_VERSION=$(bash .github/scripts/track-version.sh origin/main)
+            GREATER=$(printf '%s\n%s\n' "$MAIN_VERSION" "$PR_VERSION" | sort -V | tail -n1)
+            if [[ "$PR_VERSION" == "$MAIN_VERSION" || "$GREATER" != "$PR_VERSION" ]]; then
+              echo "::error::The workshop's version ($PR_VERSION) must be strictly greater than main's ($MAIN_VERSION). Bump it."
+              fail=1
+            else
+              echo "The workshop is properly bumped from $MAIN_VERSION to $PR_VERSION."
+            fi
+          fi
+
+          exit $fail
