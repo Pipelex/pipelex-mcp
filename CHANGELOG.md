@@ -2,7 +2,16 @@
 
 This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the Pipelex plugin runs.
 
-## [Unreleased]
+## [0.27.2] - 2026-10-26
+
+### Changed
+
+- **The README opens on the workshop's get-started**: the README was titled "Pipelex MCP" and opened by calling this repository the Pipelex MCP that connects your chatbot to your Pipelex account, which is the hosted Pipelex connector, a separate product. It is now titled `pipelex-mcp` and opens with a get-started for coding agents: it says the repository holds the Pipelex tools the Pipelex plugin brings, walks through signing up, installing the plugin in Claude Code or Codex and asking the agent for a first method, and sends chatbots to the connector by its address in one line.
+- **A tool call without arguments**: a `tools/call` request that omits `arguments` is now validated as empty arguments, so a tool whose fields are all optional runs instead of refusing it, and a tool with a required field still refuses it.
+
+### Security
+
+- **Minimum `@modelcontextprotocol/sdk` and `zod` versions**: the workshop now requires `@modelcontextprotocol/sdk` 1.32.0 or later and `zod` 4.6.6 or later, the first releases that fix their published security advisories, so installing it always brings the fixed releases. The `zod` fix is the one that reaches the workshop: a tool call whose arguments carry a very large array that fails validation could exhaust the server's memory. The `@modelcontextprotocol/sdk` advisories concern its HTTP transports, its OAuth client, bearer authentication and experimental tasks, none of which the workshop's stdio server uses.
 
 ## [0.27.1] - 2026-10-26
 

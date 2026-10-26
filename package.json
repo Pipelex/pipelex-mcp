@@ -1,6 +1,6 @@
 {
   "name": "@pipelex/mcp",
-  "version": "0.27.1",
+  "version": "0.27.2",
   "description": "The MCP server inside the Pipelex plugin: validate, prepare and run AI methods on Pipelex from a coding agent.",
   "keywords": [
     "mcp",
@@ -18,7 +18,7 @@
   "license": "Elastic-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Pipelex/pipelex-mcp"
+    "url": "git+https://github.com/Pipelex/pipelex-mcp.git"
   },
   "type": "module",
   "bin": {
@@ -55,10 +55,10 @@
     "prepublishOnly": "npm run check:publishable"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "@pipelex/sdk": "^0.53.0",
     "mthds": "^0.33.0",
-    "zod": "^4.3.6"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
