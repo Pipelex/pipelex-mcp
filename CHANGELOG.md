@@ -4,6 +4,10 @@ This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the
 
 ## [Unreleased]
 
+### Security
+
+- **Minimum `@modelcontextprotocol/sdk` and `zod` versions**: the workshop now requires `@modelcontextprotocol/sdk` 1.32.0 or later and `zod` 4.6.6 or later, the first releases that fix their published security advisories, so installing it always brings the fixed releases. The `zod` fix is the one that reaches the workshop: a tool call whose arguments carry a very large array that fails validation could exhaust the server's memory. The `@modelcontextprotocol/sdk` advisories concern its HTTP transports, its OAuth client, bearer authentication and experimental tasks, none of which the workshop's stdio server uses.
+
 ## [0.27.1] - 2026-10-26
 
 ### Highlights

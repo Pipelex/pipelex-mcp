@@ -55,10 +55,10 @@
     "prepublishOnly": "npm run check:publishable"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "@pipelex/sdk": "^0.53.0",
     "mthds": "^0.33.0",
-    "zod": "^4.3.6"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
