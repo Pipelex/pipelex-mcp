@@ -31,6 +31,10 @@
  * all the same, and the bare id keeps naming the draft, which this script
  * writes first, so both platforms run the bytes in {@link FIXTURE_BUNDLE}.
  *
+ * Before it writes anything it checks the key's account against what the
+ * registry of test accounts expects (`e2e-account.ts`), so a key of another
+ * organization never seeds a fixture there: the rows could not be deleted.
+ *
  * Running it twice is safe. It looks each fixture up by name, writes the
  * bundle as its draft under the token it just read, and publishes under the
  * token the write returned; an unchanged bundle publishes nothing new, since
@@ -40,6 +44,7 @@
  * the inline ones.
  */
 
+import { requireLiveAccount } from "../src/capabilities/e2e-account.js";
 import {
   CATALOG_WRITE_BUNDLE,
   CATALOG_WRITE_FIXTURE_NAME,
@@ -121,17 +126,21 @@ async function seed(name: string, bundle: string): Promise<void> {
 
 async function main(): Promise<void> {
   const config = liveApiConfig();
+  // Before any write: the seed writes durable methods into whichever
+  // organization the key acts for, so it confirms that organization first.
+  const account = await requireLiveAccount();
   write("pipelex-mcp — seeding the live e2e fixture methods");
-  write(`  target: ${config.baseUrl}`);
-  write(`  names:  ${FIXTURE_METHOD_NAME}, ${CATALOG_WRITE_FIXTURE_NAME}`);
+  write(`  target:  ${config.baseUrl}`);
+  write(`  account: ${account}`);
+  write(`  names:   ${FIXTURE_METHOD_NAME}, ${CATALOG_WRITE_FIXTURE_NAME}`);
   write("");
 
   await seed(FIXTURE_METHOD_NAME, FIXTURE_BUNDLE);
   await seed(CATALOG_WRITE_FIXTURE_NAME, CATALOG_WRITE_BUNDLE);
 
   write(
-    "The suites resolve these ids by name at run time, so nothing needs recording — but the key you " +
-      "run `make test-e2e` with must belong to the same organization, since the catalog is org-scoped.",
+    "The suites resolve these ids by name at run time, so nothing needs recording — the key " +
+      "`make test-e2e` runs with acts for the same organization, which its account check confirms.",
   );
 }
 
