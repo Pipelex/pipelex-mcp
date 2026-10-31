@@ -1188,6 +1188,25 @@ describe("the pasted login", () => {
     expectNoKeyIn(run, KEY);
   });
 
+  it("saves a pasted key it could not check, and names the paste to run again", async () => {
+    const home = await makeHome();
+
+    const run = await login(["--paste"], {
+      env: { PIPELEX_HOME: home },
+      stdin: new FakeTerminal(true, [KEY, "\r"]),
+      createClient: fakeClient({
+        error: new ApiUnreachableError("down", DEFAULT_API_URL, "ECONNREFUSED"),
+      }).createClient,
+    });
+
+    expect(run.code).toBe(EXIT_SAVED);
+    expect(run.stderr).toContain(
+      `Could not check the key: ${DEFAULT_API_URL} could not be reached. It is saved anyway, in \`${path.join(home, ".env")}\` as PIPELEX_API_KEY: run \`${PASTE_COMMAND}\` again if a tool call refuses it.`,
+    );
+    expect(await savedFile(home)).toBe(`PIPELEX_API_KEY=${KEY}\n`);
+    expectNoKeyIn(run, KEY);
+  });
+
   it("saves nothing when the prompt is interrupted or left empty", async () => {
     const home = await makeHome();
 

@@ -12,6 +12,10 @@ This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the
 
 - **The login says what the page waits for**: the browser login now prints that the page creates nothing until you click "Create the key", or "Replace the key" when a labelled login replaces one, and the message for a key that never arrived says it may have been created once you confirmed it.
 
+### Fixed
+
+- **The pasted login's warning for a key it could not check**: when `login --paste` saves a key the API could not check, the warning now says to run `login --paste` again if a tool call refuses it, instead of the browser login, which is what a machine that needs `--paste` cannot use.
+
 ## [0.27.2] - 2026-10-26
 
 ### Changed

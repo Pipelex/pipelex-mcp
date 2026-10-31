@@ -590,7 +590,7 @@ async function checkAndSave(
     );
   } else {
     context.err(
-      `Could not check the key: ${check.reason}. It is saved anyway, in \`${file}\` ${savedAs}: ${runAgainClause(context, "browser")} if a tool call refuses it.`,
+      `Could not check the key: ${check.reason}. It is saved anyway, in \`${file}\` ${savedAs}: ${runAgainClause(context, source)} if a tool call refuses it.`,
     );
   }
   if (saved.baseUrl !== undefined) {
