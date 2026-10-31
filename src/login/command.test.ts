@@ -9,6 +9,7 @@ import path from "node:path";
 import { ApiResponseError, ApiUnreachableError } from "@pipelex/sdk";
 import type { UserProfile } from "@pipelex/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 
 import type { ApiConfig } from "../capabilities/shared.js";
 import { DEFAULT_API_URL } from "../capabilities/shared.js";
@@ -28,6 +29,7 @@ import {
   browserOpenerCommand,
   checkApiKey,
   cliAuthUrl,
+  parseKeyLabel,
   parseLoginArgs,
   platformBrowserOpener,
   resolveAppOrigin,
@@ -174,6 +176,137 @@ describe("parseLoginArgs", () => {
     expect(parsed.kind).toBe("usage_error");
     expect(JSON.stringify(parsed)).not.toContain(KEY);
   });
+
+  it("takes a key label after --label or with =, trimmed", () => {
+    expect(parseLoginArgs(["--label", "my-laptop"])).toEqual({
+      kind: "run",
+      paste: false,
+      label: "my-laptop",
+    });
+    expect(parseLoginArgs(["--label=  proof lab: vibe  "])).toEqual({
+      kind: "run",
+      paste: false,
+      label: "proof lab: vibe",
+    });
+    expect(parseLoginArgs(["--label=-dashed"])).toEqual({
+      kind: "run",
+      paste: false,
+      label: "-dashed",
+    });
+    expect(parseLoginArgs(["--label", "ci", "--help"])).toEqual({ kind: "help" });
+  });
+
+  it("refuses --label with no label after it, given twice, or beside --paste", () => {
+    const missing =
+      "--label needs a key label after it, such as --label my-laptop; write --label=<name> for one that starts with -.";
+    expect(parseLoginArgs(["--label"])).toEqual({ kind: "usage_error", message: missing });
+    expect(parseLoginArgs(["--label", "--paste"])).toEqual({
+      kind: "usage_error",
+      message: missing,
+    });
+    expect(parseLoginArgs(["--label", "a", "--label=b"])).toEqual({
+      kind: "usage_error",
+      message: "--label is given more than once: give one.",
+    });
+    expect(parseLoginArgs(["--paste", "--label", "ci"])).toEqual({
+      kind: "usage_error",
+      message:
+        "--paste takes no --label: a label names the key a browser login creates or replaces, and a pasted key already exists.",
+    });
+    // An unknown option that only starts like --label is still unknown.
+    expect(parseLoginArgs(["--labels", "ci"])).toEqual({
+      kind: "usage_error",
+      message: "Unknown option for login: --labels.",
+    });
+    expect(parseLoginArgs(["--label", "ci", "extra"])).toEqual({
+      kind: "usage_error",
+      message: "Unexpected argument for login: it takes only --label <name>, --paste or --help.",
+    });
+  });
+
+  it("lets --help win over a label it would refuse", () => {
+    expect(parseLoginArgs(["--help", "--label="])).toEqual({ kind: "help" });
+  });
+});
+
+describe("parseKeyLabel", () => {
+  it.each([
+    ["", "The key label is empty once trimmed: a label is 1 to 64 characters."],
+    ["   ", "The key label is empty once trimmed: a label is 1 to 64 characters."],
+    ["a".repeat(65), "The key label is longer than 64 characters: a label is 1 to 64 characters."],
+    // Characters outside the Basic Multilingual Plane count once, as the app counts them.
+    ["🔑".repeat(65), "The key label is longer than 64 characters: a label is 1 to 64 characters."],
+    [
+      "a\tb",
+      "The key label holds a control character, such as a tab or a line break, which a key label cannot hold.",
+    ],
+    [
+      "a\nb",
+      "The key label holds a control character, such as a tab or a line break, which a key label cannot hold.",
+    ],
+    [
+      "bell\u0007",
+      "The key label holds a control character, such as a tab or a line break, which a key label cannot hold.",
+    ],
+    [
+      "del\u007f",
+      "The key label holds a control character, such as a tab or a line break, which a key label cannot hold.",
+    ],
+    [
+      "c1\u009b31m",
+      "The key label holds a control character, such as a tab or a line break, which a key label cannot hold.",
+    ],
+    // The platform trims a trailing NEL that the app keeps, so the key would carry another label.
+    [
+      "ci\u0085",
+      "The key label holds a control character, such as a tab or a line break, which a key label cannot hold.",
+    ],
+    [
+      KEY,
+      "The key label starts with plx_sk_, as a Pipelex API key does: give --label a name for the key, never the key itself.",
+    ],
+  ])("refuses %j, without quoting it", (raw, message) => {
+    const check = parseKeyLabel(raw);
+
+    expect(check).toEqual({ ok: false, message });
+    if (raw.trim() !== "") expect(message).not.toContain(raw.trim());
+  });
+
+  it.each([
+    ["ci", "ci"],
+    ["  Proof lab vibe  ", "Proof lab vibe"],
+    ["a".repeat(64), "a".repeat(64)],
+    [` ${"a".repeat(64)}\n`, "a".repeat(64)],
+    ["🔑".repeat(64), "🔑".repeat(64)],
+    ["Clé de l'équipe / CI #2", "Clé de l'équipe / CI #2"],
+  ])("takes %j as %j", (raw, label) => {
+    expect(parseKeyLabel(raw)).toEqual({ ok: true, label });
+  });
+
+  it("takes exactly the labels the app takes, short of a control character or a key's prefix", () => {
+    // The app's rule, `cliKeyLabelSchema` in pipelex-app/src/lib/cli-login.ts.
+    const appSchema = z.string().trim().min(1).max(64);
+    const samples = [
+      "",
+      " ",
+      "x",
+      " x ",
+      "a".repeat(64),
+      "a".repeat(65),
+      ` ${"a".repeat(64)} `,
+      "🔑".repeat(64),
+      "🔑".repeat(65),
+      " nbsp ",
+      "﻿bom",
+      "Pipelex CLI",
+    ];
+    for (const raw of samples) {
+      const app = appSchema.safeParse(raw);
+      const cli = parseKeyLabel(raw);
+      expect(cli.ok, JSON.stringify(raw)).toBe(app.success);
+      if (cli.ok && app.success) expect(cli.label).toBe(app.data);
+    }
+  });
 });
 
 describe("runLoginCommand's arguments", () => {
@@ -194,6 +327,28 @@ describe("runLoginCommand's arguments", () => {
     expect(run.stdout).toBe("");
     expect(run.stderr).toBe(`Unknown option for login: --paset.\n\n${LOGIN_USAGE}`);
     expect(openListener).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["an empty", ["--label", "  "]],
+    ["a too long", ["--label", "a".repeat(65)]],
+    ["a control character's", ["--label=a\tb"]],
+    ["a key-shaped", ["--label", KEY]],
+  ])("refuses %s label with the usage before listening or opening a browser", async (_, args) => {
+    const home = await makeHome();
+    const openListener = vi.fn(openLoopbackListener);
+    const openBrowser = vi.fn(async () => true);
+
+    const run = await login(args, { env: { PIPELEX_HOME: home }, openListener, openBrowser });
+
+    expect(run.code).toBe(EXIT_USAGE);
+    expect(run.stdout).toBe("");
+    expect(run.stderr).toMatch(/^The key label .*\n\n/);
+    expect(run.stderr.endsWith(LOGIN_USAGE)).toBe(true);
+    expect(openListener).not.toHaveBeenCalled();
+    expect(openBrowser).not.toHaveBeenCalled();
+    expect(await savedFile(home)).toBeUndefined();
+    expectNoKeyIn(run, KEY);
   });
 });
 
@@ -240,7 +395,69 @@ describe("the browser login", () => {
       name: "pipelex-mcp",
       details: ["workshop"],
     });
+    expect(run.stdout).toContain(
+      'Once signed in, click "Create the key" on the page to hand this login a new key.',
+    );
     expectNoKeyIn(run, KEY);
+  });
+
+  it("passes the page its key label, trimmed, and says the page replaces that key", async () => {
+    const home = await makeHome();
+    const browser = browserSending(KEY);
+
+    const run = await login(["--label", "  proof-lab vibe/topic-1  "], {
+      env: { PIPELEX_HOME: home },
+      openBrowser: browser,
+      createClient: fakeClient().createClient,
+    });
+
+    const link = new URL(browser.urls[0]);
+    expect(`${link.origin}${link.pathname}`).toBe(`${DEFAULT_APP_URL}/auth/cli`);
+    expect([...link.searchParams.keys()]).toEqual(["callback_port", "state", "label"]);
+    expect(link.searchParams.get("label")).toBe("proof-lab vibe/topic-1");
+    expect(run.stdout).toContain(
+      'Once signed in, click "Replace the key" on the page to replace your key labelled "proof-lab vibe/topic-1" in the organization it names, which then stops working, or "Create the key" when you hold none.',
+    );
+    expect(run.code).toBe(EXIT_SAVED);
+    expect(run.stderr).toBe("");
+    expect(await savedFile(home)).toBe(`PIPELEX_API_KEY=${KEY}\n`);
+    expectNoKeyIn(run, KEY);
+  });
+
+  it("tells a labelled login whose key went unused that the next login under the label replaces it", async () => {
+    const timedOut = await login(["--label=ci"], {
+      env: { PIPELEX_HOME: await makeHome() },
+      openBrowser: async () => true,
+      createClient: fakeClient().createClient,
+      timeoutMs: 30,
+    });
+
+    expect(timedOut.code).toBe(EXIT_NOT_SAVED);
+    expect(timedOut.stderr).toContain(
+      `If you signed in and confirmed the key, the page may have created or replaced one that never reached this login: the next login with the same \`--label\` replaces it, or revoke it on the Developer page of the Pipelex app (${DEFAULT_APP_URL}).`,
+    );
+    expect(timedOut.stderr).toContain(
+      `Run \`${LOGIN_COMMAND}\` again with the same \`--label\`, or create a key on the Developer page of the Pipelex app (${DEFAULT_APP_URL}) and run \`${PASTE_COMMAND}\`.`,
+    );
+
+    const refusedHome = await makeHome();
+    const refused = await login(["--label=ci"], {
+      env: { PIPELEX_HOME: refusedHome },
+      openBrowser: browserSending(KEY),
+      createClient: fakeClient({
+        error: new ApiResponseError("HTTP 401", `${DEFAULT_API_URL}/v1/me`, 401, "refused", "{}"),
+      }).createClient,
+    });
+
+    expect(refused.code).toBe(EXIT_NOT_SAVED);
+    expect(refused.stderr).toContain(
+      `The key this login received went unused: the next login with the same \`--label\` replaces it, or revoke it on the Developer page of the Pipelex app (${DEFAULT_APP_URL}).`,
+    );
+    expect(refused.stderr).toContain(
+      `then run \`${LOGIN_COMMAND}\` again with the same \`--label\`.`,
+    );
+    expect(await savedFile(refusedHome)).toBeUndefined();
+    expectNoKeyIn(refused, KEY);
   });
 
   it("says when a sign-in from another page is refused, and goes on waiting", async () => {
@@ -337,7 +554,7 @@ describe("the browser login", () => {
     expect(run.stderr).toContain("No key arrived within 1 seconds. Nothing was saved.");
     // The page may have minted a key whose redirect never reached the listener.
     expect(run.stderr).toContain(
-      `If you signed in, the page may have created a key that never reached this login: it went unused, so revoke it on the Developer page of the Pipelex app (${DEFAULT_APP_URL}).`,
+      `If you signed in and confirmed the key, the page may have created one that never reached this login: it went unused, so revoke it on the Developer page of the Pipelex app (${DEFAULT_APP_URL}).`,
     );
     expect(run.stderr).toContain(`\`${PASTE_COMMAND}\``);
     expect(await savedFile(home)).toBeUndefined();
@@ -691,7 +908,7 @@ describe("the browser login", () => {
         `The key could not be saved in \`${path.join(home, ".env")}\`: permission denied. Nothing was saved.`,
       );
       expect(run.stderr).toContain(
-        `The key this login received went unused: revoke it on the Developer page of the Pipelex app (${DEFAULT_APP_URL}), fix that file, then run \`${LOGIN_COMMAND}\` again.`,
+        `The key this login received went unused: revoke it on the Developer page of the Pipelex app (${DEFAULT_APP_URL}). Fix that file, then run \`${LOGIN_COMMAND}\` again.`,
       );
       expect(run.stdout).not.toContain("Logged in");
       expect(await savedFile(home)).toBeUndefined();
@@ -835,6 +1052,16 @@ describe("the app's origin", () => {
     expect(cliAuthUrl("https://app.pipelex.com", 54321, "abc-_.~")).toBe(
       "https://app.pipelex.com/auth/cli?callback_port=54321&state=abc-_.%7E",
     );
+  });
+
+  it("adds the key label when the login names one, encoded so the page reads it back whole", () => {
+    const label = "Proof lab: vibe/1 & co #2 ?é";
+    const url = cliAuthUrl("https://app.pipelex.com", 54321, "abc", label);
+
+    expect(url).toBe(
+      "https://app.pipelex.com/auth/cli?callback_port=54321&state=abc&label=Proof+lab%3A+vibe%2F1+%26+co+%232+%3F%C3%A9",
+    );
+    expect(new URL(url).searchParams.get("label")).toBe(label);
   });
 });
 
