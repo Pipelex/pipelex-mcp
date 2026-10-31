@@ -135,18 +135,27 @@ agent-test:
 # They read their OWN pair, `PIPELEX_E2E_BASE_URL` and `PIPELEX_E2E_API_KEY`,
 # and never `PIPELEX_BASE_URL` / `PIPELEX_API_KEY`. Those two names belong to
 # every other tool and to the server itself: a shell profile exporting the
-# production pair for other tools aimed `make test-e2e` at production, and with
-# the shell clear it followed `.env`, which named whatever the local server was
-# pointed at. Neither is the deployment the durable fixture is seeded in, so
-# every by-id leg failed with a fixture miss that read like drift. `PIPELEX_E2E_BASE_URL` is
-# also the name the live suite of @pipelex/sdk, in pipelex-sdk/js, uses.
+# production pair for other tools once aimed `make test-e2e` at production,
+# where no fixture is seeded, and every by-id leg failed with a fixture miss
+# that read like drift. `PIPELEX_E2E_BASE_URL` is also the name the live suite
+# of @pipelex/sdk, in pipelex-sdk/js, uses.
+#
+# The key belongs to a registered test account, and comes with what the
+# registry of test accounts expects of it: PIPELEX_E2E_API_KEY_EXPECTED_ORG_ID,
+# _EXPECTED_ROLE and _EXPECTED_EMAIL. On a laptop the workspace's
+# `test-account run pipelex-mcp -- make <target>` hands over all of them; a CI
+# job sets them from the registry. Before the first live call, each live entry
+# point asks `/v1/me` who the key is and stops on any difference
+# (`src/capabilities/e2e-account.ts`); this preflight refuses a run with no key
+# or no expectations before any request at all.
 #
 # The pair is resolved ONCE here and exported, so the URL these targets
 # preflight is the URL the suites call (`src/capabilities/e2e-support.ts` reads
-# the same two names). Precedence is the make command line, then `.env`, then the
-# shell, then the default, because `.env` is this checkout's own configuration
-# and the shell is ambient. Each value is taken
-# whole from the first source that sets it, and the preflight prints which one.
+# the same two names). Precedence is the make command line, then the
+# environment, then the default, and the preflight prints which one. `.env` is
+# never read: it used to win over the shell, which would let a key parked there
+# replace the one `test-account run` hands over, and a test credential never
+# belongs in a repository's env file anyway.
 #
 # The default is DEV, not production, and that is a statement about what these
 # targets are for. The by-selector legs gate on what the deployment advertises,
@@ -156,26 +165,23 @@ agent-test:
 # LIVE TARGETS' default only: the server's own `PIPELEX_BASE_URL` default (in
 # `buildApiConfig`) is still production, which is what a workshop user gets.
 # `LIVE_DEFAULT_BASE_URL` in `e2e-support.ts` repeats it for a bare `npm run`.
-DOTENV = set -a; [ -f .env ] && . ./.env; set +a;
 LIVE_TARGETS = smoke test-e2e test-e2e-run seed-e2e-fixture live-preflight
 LIVE_DEFAULT_BASE_URL = https://api-dev.pipelex.com
+LIVE_EXPECTATIONS = PIPELEX_E2E_API_KEY_EXPECTED_ORG_ID PIPELEX_E2E_API_KEY_EXPECTED_ROLE PIPELEX_E2E_API_KEY_EXPECTED_EMAIL
+LIVE_RUN_COMMAND = test-account run pipelex-mcp -- make $(firstword $(filter smoke test-e2e test-e2e-run seed-e2e-fixture test-all,$(MAKECMDGOALS)) <target>)
 
-# The shell's own values, read while parsing, before the target-specific
+# The environment's own values, read while parsing, before the target-specific
 # assignments below exist. (A command-line value lands here too, harmlessly:
 # a command-line variable overrides those assignments, so nothing reads these.)
-LIVE_SHELL_BASE_URL := $(PIPELEX_E2E_BASE_URL)
-LIVE_SHELL_API_KEY := $(PIPELEX_E2E_API_KEY)
+LIVE_ENV_BASE_URL := $(PIPELEX_E2E_BASE_URL)
+LIVE_ENV_API_KEY := $(PIPELEX_E2E_API_KEY)
 
-# What `.env` alone sets a variable to, empty when it sets nothing: `env -u`
-# hides the inherited value from the shell that sources the file.
-dotenv_value = $(shell env -u $(1) sh -c '$(DOTENV) printf "%s" "$${$(1)}"')
+# Where a live variable's value comes from: $(1) the name, $(2) the environment's
+# value, $(3) what to say when nothing sets it.
+live_source = $(if $(filter command line,$(origin $(1))),the make command line,$(if $(2),the environment,$(3)))
 
-# Where a live variable's value comes from: $(1) the name, $(2) the shell's value,
-# $(3) what to say when nothing sets it.
-live_source = $(if $(filter command line,$(origin $(1))),the make command line,$(if $(call dotenv_value,$(1)),.env,$(if $(2),the shell,$(3))))
-
-$(LIVE_TARGETS): export PIPELEX_E2E_BASE_URL = $(or $(call dotenv_value,PIPELEX_E2E_BASE_URL),$(LIVE_SHELL_BASE_URL),$(LIVE_DEFAULT_BASE_URL))
-$(LIVE_TARGETS): export PIPELEX_E2E_API_KEY = $(or $(call dotenv_value,PIPELEX_E2E_API_KEY),$(LIVE_SHELL_API_KEY))
+$(LIVE_TARGETS): export PIPELEX_E2E_BASE_URL = $(or $(LIVE_ENV_BASE_URL),$(LIVE_DEFAULT_BASE_URL))
+$(LIVE_TARGETS): export PIPELEX_E2E_API_KEY = $(LIVE_ENV_API_KEY)
 
 # Trailing slashes are stripped the way the SDK normalizes `baseUrl`, so a value
 # ending in `/` cannot make the probe `//v1/version` — which a runner does not
@@ -185,43 +191,53 @@ LIVE_API = $$(printf '%s' "$(PIPELEX_E2E_BASE_URL)" | sed 's:/*$$::')
 # Shared gate for every live target. It is a prerequisite rather than copied
 # recipe lines because target-specific variables are inherited by prerequisites,
 # so the URL checked here is exactly the one the suite is about to call.
-# `/v1/version` is the one route BOTH a bare runner and the hosted origin serve,
-# and it needs no auth. The target line comes first, so a refusal below is read
-# next to the deployment it is about.
+# The refusals that need no request come first: the other tools' names on the
+# command line, a missing key, missing expectations. Then `/v1/version`, the one
+# route BOTH a bare runner and the hosted origin serve, which needs no auth.
+# The target line comes first of all, so a refusal is read next to the
+# deployment it is about.
 #
 # `PIPELEX_BASE_URL=…` on the command line is refused rather than ignored: it
 # was how these targets were aimed, and ignoring it would send that habit to
-# api-dev without a word. The same names from the shell ARE ignored — that is
-# the ambient configuration this block exists to keep out — with a note, so
-# someone who exported them on purpose sees why nothing changed.
+# api-dev without a word. The same names from the environment ARE ignored —
+# `test-account run` sets `PIPELEX_BASE_URL` for every tool it starts, and a
+# shell profile may export them — with a note, so someone who exported them on
+# purpose sees why nothing changed.
 live-preflight:
 	@if [ "$(origin PIPELEX_BASE_URL)" = "command line" ] || [ "$(origin PIPELEX_API_KEY)" = "command line" ]; then \
 		echo "ERROR: the live targets read PIPELEX_E2E_BASE_URL and PIPELEX_E2E_API_KEY, never PIPELEX_BASE_URL / PIPELEX_API_KEY."; \
 		echo "  Rename the variable: make $(firstword $(MAKECMDGOALS) live-preflight) PIPELEX_E2E_BASE_URL=..."; \
 		exit 1; \
 	fi
-	@echo "-> target: $(LIVE_API) (PIPELEX_E2E_BASE_URL from $(call live_source,PIPELEX_E2E_BASE_URL,$(LIVE_SHELL_BASE_URL),the default)); key: PIPELEX_E2E_API_KEY from $(call live_source,PIPELEX_E2E_API_KEY,$(LIVE_SHELL_API_KEY),nowhere)"
+	@echo "-> target: $(LIVE_API) (PIPELEX_E2E_BASE_URL from $(call live_source,PIPELEX_E2E_BASE_URL,$(LIVE_ENV_BASE_URL),the default)); key: PIPELEX_E2E_API_KEY from $(call live_source,PIPELEX_E2E_API_KEY,$(LIVE_ENV_API_KEY),nowhere)"
 	@if [ -n "$$PIPELEX_BASE_URL$$PIPELEX_API_KEY" ]; then \
 		echo "   (PIPELEX_BASE_URL / PIPELEX_API_KEY in the environment are ignored here: they belong to other tools)"; \
 	fi
-	@target="$(LIVE_API)"; curl -fs --max-time 5 -o /dev/null "$$target/v1/version" || { \
-		echo "ERROR: no Pipelex API reachable at $$target"; \
-		echo "  Set PIPELEX_E2E_BASE_URL (in .env, or on the command line) to a running instance, or start the OSS runner with 'make -C api run' in a checkout of Pipelex/pipelex, which serves http://localhost:8081"; \
-		exit 1; \
-	}
 	@if [ -z "$$PIPELEX_E2E_API_KEY" ]; then \
-		echo "ERROR: PIPELEX_E2E_API_KEY is not set — every org-scoped call would fail as a config error."; \
-		echo "  Put the key for that deployment's organization in .env as PIPELEX_E2E_API_KEY. Against a keyless local runner, skip this guard by calling the npm script directly (e.g. 'npm run smoke')."; \
+		echo "ERROR: PIPELEX_E2E_API_KEY is not set, so no request was sent."; \
+		echo "  Run the live targets through the workspace's '$(LIVE_RUN_COMMAND)', which hands over the key of the test account they act for beside what the registry expects of it. They never read .env. Against a keyless local runner, call the npm script directly (e.g. 'npm run smoke')."; \
 		exit 1; \
 	fi
+	@missing=""; for variable in $(LIVE_EXPECTATIONS); do \
+		[ -n "$$(printenv "$$variable")" ] || missing="$$missing $$variable"; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "ERROR: not set:$$missing — nothing says which account PIPELEX_E2E_API_KEY must act for, so no request was sent."; \
+		echo "  Run the live targets through the workspace's '$(LIVE_RUN_COMMAND)', which hands over the key beside what the registry of test accounts expects of it; a CI job sets the same variables from the registry (docs/testing.md)."; \
+		exit 1; \
+	fi
+	@target="$(LIVE_API)"; curl -fs --max-time 5 -o /dev/null "$$target/v1/version" || { \
+		echo "ERROR: no Pipelex API reachable at $$target"; \
+		echo "  Set PIPELEX_E2E_BASE_URL (in the environment, or on the command line) to a running instance, or start the OSS runner with 'make -C api run' in a checkout of Pipelex/pipelex, which serves http://localhost:8081"; \
+		exit 1; \
+	}
 
 smoke: live-preflight
 	npm run smoke
 
 # The gate has to be closed here, not merely left unset: `run.e2e.ts` reads
-# PIPELEX_E2E_RUN from the environment, and `vitest.e2e.config.ts` loads the
-# whole `.env` — so an ambient `PIPELEX_E2E_RUN=1` (left in a shell, or parked in
-# `.env`) would make this target print "skipped" and then spend inference credit.
+# PIPELEX_E2E_RUN from the environment, so an ambient `PIPELEX_E2E_RUN=1` left
+# in a shell would make this target print "skipped" and then spend inference credit.
 # Setting it empty makes the guarantee the echo claims a property of the target
 # rather than of whatever the caller's environment happened to hold.
 test-e2e: export PIPELEX_E2E_RUN =
