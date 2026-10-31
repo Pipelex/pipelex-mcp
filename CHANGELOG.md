@@ -2,6 +2,20 @@
 
 This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the Pipelex plugin runs.
 
+## [Unreleased]
+
+### Added
+
+- **`login --label <name>`**: `npx -y @pipelex/mcp@latest login --label <name>` passes the Pipelex app a key label, and the app then replaces your key of that label in the active organization, which stops working, or creates one with that label when you hold none, so repeated logins under one label keep one live key instead of adding one each time. The label is trimmed and must be 1 to 64 characters, with no control characters and not starting with `plx_sk_`, and the command refuses any other before it opens the browser; `--paste` takes no label. A login without a label still creates a new key each time.
+
+### Changed
+
+- **The login says what the page waits for**: the browser login now prints that the page creates nothing until you click "Create the key", or "Replace the key" when a labelled login replaces one, and the message for a key that never arrived says it may have been created once you confirmed it.
+
+### Fixed
+
+- **The pasted login's warning for a key it could not check**: when `login --paste` saves a key the API could not check, the warning now says to run `login --paste` again if a tool call refuses it, instead of the browser login, which is what a machine that needs `--paste` cannot use.
+
 ## [0.27.2] - 2026-10-26
 
 ### Changed
