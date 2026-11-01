@@ -56,7 +56,7 @@ A single test: `npx vitest run <file>` or `npx vitest run -t "<name>"`; add `--c
 - **No image content block carries `annotations`**: Codex refuses an annotated image block outright.
 - **Every Pipelex API client comes from `createPipelexApiClient`**, never `new`, and nothing calls `fetch` bare outside the lint-exempted files. Lint enforces both. `no-console` is an error.
 - **`package.json`'s `dependencies` are exactly what the bundle reaches at run time**, `@pipelex/mthds-form` is never declared, and a sprint pin is never published: the publish guard refuses it.
-- **The live targets read `PIPELEX_E2E_BASE_URL` / `PIPELEX_E2E_API_KEY`, never `PIPELEX_BASE_URL` / `PIPELEX_API_KEY`**, and stay outside `make all` and `make check`. A live failure is fixed in `../pipelex-sdk/js`, then bumped here, never patched over.
+- **The live targets read `PIPELEX_E2E_BASE_URL` / `PIPELEX_E2E_API_KEY`, never `PIPELEX_BASE_URL` / `PIPELEX_API_KEY` or `.env`**, check the key's account before their first live call, and stay outside `make all` and `make check`. A live failure is fixed in `../pipelex-sdk/js`, then bumped here, never patched over.
 - **A tool contract moves everywhere at once**: `SPEC.md`, the Zod schemas in `capabilities/`, `docs/tools.md`, and the tool table in `README.md` when a tool is added, removed or renamed. The README is the npm front page, so its links are absolute.
 - **MTHDS-standard concepts keep neutral names** inside the Pipelex envelope (`bundle_blueprint`, `graph_spec`, `pipe_io_contracts`, `input_form`).
 - **No backward compatibility**: change shapes directly and record a breaking change in the changelog.

@@ -6,9 +6,12 @@
  * serves both: the workshop stays pure Node, since its users have no Python.
  *
  * The browser flow opens the app's `/auth/cli` page with the port of a
- * one-shot loopback listener (`loopback.ts`) and a fresh `state`; the page
- * mints a key for the signed-in account and sends the browser back to the
- * listener with the key and the same `state`. `--paste` takes a key created in
+ * one-shot loopback listener (`loopback.ts`) and a fresh `state`; once the
+ * signed-in user confirms it, the page mints a key and sends the browser back
+ * to the listener with the key and the same `state`. `--label <name>` passes
+ * the page a key label, and the page then replaces the user's key of that
+ * label in the active organization rather than adding one, so repeated logins
+ * under one label keep one live key. `--paste` takes a key created in
  * the app instead (`paste.ts`), for a machine whose browser cannot reach the
  * listener. Either way the key must start with `plx_sk_`, is checked with
  * `GET /v1/me` against the base URL the workshop pairs with a saved key, and is
@@ -68,6 +71,15 @@ export const CLI_AUTH_PATH = "/auth/cli";
 /** The command for a machine whose browser cannot reach the listener. */
 export const PASTE_COMMAND = `${LOGIN_COMMAND} --paste`;
 
+/**
+ * The most a key label holds once trimmed: the app's `/auth/cli` takes the
+ * label as the platform's key routes and its own Developer page do,
+ * `cliKeyLabelSchema` in `pipelex-app/src/lib/cli-login.ts`, counted in
+ * Unicode code points, as zod and the platform's Python count it, so a
+ * character outside the Basic Multilingual Plane counts once.
+ */
+export const KEY_LABEL_MAX = 64;
+
 /** The exit codes: saved, nothing saved, the arguments refused, and an interrupted prompt. */
 export const EXIT_SAVED = 0;
 export const EXIT_NOT_SAVED = 1;
@@ -75,16 +87,22 @@ export const EXIT_USAGE = 2;
 export const EXIT_INTERRUPTED = 130;
 
 export const LOGIN_USAGE = [
-  `Usage: ${LOGIN_COMMAND} [--paste]`,
+  `Usage: ${LOGIN_COMMAND} [--label <name> | --paste]`,
   "",
   "Get a Pipelex API key and save it as PIPELEX_API_KEY in ~/.pipelex/.env, or in the .env",
   "of PIPELEX_HOME when that is set, where the workshop reads it whenever its host passes",
   "no key, and where the pipelex CLI reads it too.",
   "",
-  "  (no option)  Sign in through the browser, which hands the key back to this command.",
-  "  --paste      Paste a key created in the Pipelex app instead, for a machine whose",
-  "               browser cannot reach this one (over SSH, in a container).",
-  "  --help       Show this help.",
+  "  (no option)     Sign in through the browser and confirm the key on the page, which",
+  "                  creates a new key and hands it back to this command.",
+  "  --label <name>  Sign in through the browser for the key of that label: the page",
+  "                  replaces your key of that label in the active organization, which",
+  "                  stops working, or creates one when you hold none, so repeated logins",
+  `                  keep one key. Trimmed, 1 to ${KEY_LABEL_MAX} characters, no control characters;`,
+  "                  write --label=<name> for one that starts with -.",
+  "  --paste         Paste a key created in the Pipelex app instead, for a machine whose",
+  "                  browser cannot reach this one (over SSH, in a container).",
+  "  --help          Show this help.",
   "",
   "The key is checked against PIPELEX_BASE_URL, else the one saved in the same file, else",
   `${DEFAULT_API_URL}. A PIPELEX_BASE_URL set here that the file does not already give is`,
@@ -131,29 +149,114 @@ export interface LoginDependencies {
 
 /** What the arguments after `login` ask for. */
 export type LoginArgs =
-  | { kind: "run"; paste: boolean }
+  | { kind: "run"; paste: boolean; label?: string }
   | { kind: "help" }
   | { kind: "usage_error"; message: string };
 
+const LABEL_OPTION = "--label";
+
 /**
- * Read the arguments after `login`: `--paste` and `--help`, nothing else. An
- * unknown argument is never echoed unless it is shaped like an option, since a
- * user may have pasted the key itself on the command line.
+ * Read the arguments after `login`: `--label <name>` (or `--label=<name>`),
+ * `--paste` and `--help`, nothing else. An unknown argument is never echoed
+ * unless it is shaped like an option, and a label never is, since a user may
+ * have pasted the key itself on the command line. `--help` wins over a label
+ * {@link parseKeyLabel} refuses; a pasted key takes no label, since it exists
+ * already and nothing can replace it.
  */
 export function parseLoginArgs(args: readonly string[]): LoginArgs {
   let paste = false;
   let help = false;
-  for (const arg of args) {
+  let rawLabel: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
     if (arg === "--paste") paste = true;
     else if (arg === "--help") help = true;
-    else {
+    else if (arg === LABEL_OPTION || arg.startsWith(`${LABEL_OPTION}=`)) {
+      if (rawLabel !== undefined) {
+        return { kind: "usage_error", message: "--label is given more than once: give one." };
+      }
+      if (arg === LABEL_OPTION) {
+        // The next argument is the label, unless there is none or it reads
+        // as an option, which is far likelier a forgotten label than a label.
+        const next = args[index + 1];
+        if (next === undefined || next.startsWith("-")) {
+          return {
+            kind: "usage_error",
+            message:
+              "--label needs a key label after it, such as --label my-laptop; write --label=<name> for one that starts with -.",
+          };
+        }
+        rawLabel = next;
+        index += 1;
+      } else rawLabel = arg.slice(LABEL_OPTION.length + 1);
+    } else {
       const message = /^--?[a-z][a-z-]*$/.test(arg)
         ? `Unknown option for login: ${arg}.`
-        : "Unexpected argument for login: it takes only --paste or --help.";
+        : "Unexpected argument for login: it takes only --label <name>, --paste or --help.";
       return { kind: "usage_error", message };
     }
   }
-  return help ? { kind: "help" } : { kind: "run", paste };
+  if (help) return { kind: "help" };
+  if (rawLabel === undefined) return { kind: "run", paste };
+  if (paste) {
+    return {
+      kind: "usage_error",
+      message:
+        "--paste takes no --label: a label names the key a browser login creates or replaces, and a pasted key already exists.",
+    };
+  }
+  const label = parseKeyLabel(rawLabel);
+  return label.ok
+    ? { kind: "run", paste, label: label.label }
+    : { kind: "usage_error", message: label.message };
+}
+
+/** A key label as the login sends it, or why the app would refuse it. */
+export type KeyLabelCheck = { ok: true; label: string } | { ok: false; message: string };
+
+/**
+ * Hold a key label to the app's rule before the browser opens: trimmed as
+ * JavaScript trims, then 1 to {@link KEY_LABEL_MAX} characters, since a link
+ * whose label the app refuses mints nothing and only the page would say why.
+ * Two refusals go further than the app and the platform, each for the reason
+ * stated beside it. No message quotes the label.
+ */
+export function parseKeyLabel(raw: string): KeyLabelCheck {
+  const label = raw.trim();
+  if (label === "") {
+    return {
+      ok: false,
+      message: `The key label is empty once trimmed: a label is 1 to ${KEY_LABEL_MAX} characters.`,
+    };
+  }
+  if ([...label].length > KEY_LABEL_MAX) {
+    return {
+      ok: false,
+      message: `The key label is longer than ${KEY_LABEL_MAX} characters: a label is 1 to ${KEY_LABEL_MAX} characters.`,
+    };
+  }
+  // Stricter than the app: the platform trims U+0085, a control character
+  // the app's trim keeps, so a label ending in one would be stored as
+  // another label than the one this login names, and the next login under
+  // it could not find the key to replace it; and the terminal line naming
+  // the label would hand any other, such as an escape, to the terminal.
+  if (/\p{Cc}/u.test(label)) {
+    return {
+      ok: false,
+      message:
+        "The key label holds a control character, such as a tab or a line break, which a key label cannot hold.",
+    };
+  }
+  // Stricter than the app: a pasted key is not a label, and as one it would
+  // travel in plain text in the printed link and the browser's history and
+  // stay on show in the app's key list.
+  if (label.startsWith(PIPELEX_API_KEY_PREFIX)) {
+    return {
+      ok: false,
+      message: `The key label starts with ${PIPELEX_API_KEY_PREFIX}, as a Pipelex API key does: give --label a name for the key, never the key itself.`,
+    };
+  }
+  return { ok: true, label };
 }
 
 /** The `login` subcommand, from its arguments to its exit code. */
@@ -172,7 +275,7 @@ export async function runLoginCommand(
     stdout(LOGIN_USAGE);
     return EXIT_SAVED;
   }
-  return runLogin({ paste: parsed.paste }, deps, stdout, stderr);
+  return runLogin({ paste: parsed.paste, label: parsed.label }, deps, stdout, stderr);
 }
 
 /** How the key reached the login, which decides what a failed save tells the user to do with it. */
@@ -181,6 +284,8 @@ type KeySourceKind = "browser" | "paste";
 interface LoginContext {
   env: LoginEnv;
   homedir: () => string;
+  /** The key label a browser login passes the page, trimmed; never set with `--paste`. */
+  label: string | undefined;
   out: (line: string) => void;
   err: (line: string) => void;
   write: (text: string) => void;
@@ -191,7 +296,7 @@ interface LoginContext {
  * its one caller resolved. Resolves the exit code.
  */
 async function runLogin(
-  options: { paste: boolean },
+  options: { paste: boolean; label: string | undefined },
   deps: LoginDependencies,
   stdout: (text: string) => void,
   stderr: (text: string) => void,
@@ -199,6 +304,7 @@ async function runLogin(
   const context: LoginContext = {
     env: deps.env ?? process.env,
     homedir: deps.homedir ?? os.homedir,
+    label: options.label,
     out: (line) => stdout(`${line}\n`),
     err: (line) => stderr(`${line}\n`),
     write: stdout,
@@ -208,7 +314,7 @@ async function runLogin(
   // written would be left unused in the user's organization.
   const writable = await checkHomeEnvWritable(context.env, { homedir: context.homedir });
   if (writable.status !== "writable") {
-    reportUnwritable(context, writable, options.paste ? PASTE_COMMAND : LOGIN_COMMAND);
+    reportUnwritable(context, writable, options.paste ? "paste" : "browser");
     return EXIT_NOT_SAVED;
   }
   const homeFile = displayPath(writable.file, context.homedir);
@@ -247,7 +353,7 @@ async function browserKey(
 
   let key: string | undefined;
   try {
-    const url = cliAuthUrl(appOrigin, listener.port, listener.state);
+    const url = cliAuthUrl(appOrigin, listener.port, listener.state, context.label);
     // The wait starts before the browser is opened, so a callback refused
     // while the opener is still running is reported rather than lost.
     const waiting = listener.waitForApiKey({
@@ -258,6 +364,13 @@ async function browserKey(
     // The link comes first, so a machine where nothing opens still has a way through.
     context.out(
       `If it does not open, visit: ${url} (over SSH or in a container, run \`${PASTE_COMMAND}\` instead)`,
+    );
+    // The page mints nothing until the user clicks, so a login that seems
+    // stuck on the page says what it waits for.
+    context.out(
+      context.label === undefined
+        ? 'Once signed in, click "Create the key" on the page to hand this login a new key.'
+        : `Once signed in, click "Replace the key" on the page to replace your key labelled "${context.label}" in the organization it names, which then stops working, or "Create the key" when you hold none.`,
     );
     let opened: boolean;
     try {
@@ -282,10 +395,12 @@ async function browserKey(
     // The page mints the key before its redirect, which may never reach this
     // listener, over SSH for instance.
     context.err(
-      `If you signed in, the page may have created a key that never reached this login: it went unused, so revoke it on the Developer page of the Pipelex app (${appOrigin}).`,
+      context.label === undefined
+        ? `If you signed in and confirmed the key, the page may have created one that never reached this login: it went unused, so revoke it on the Developer page of the Pipelex app (${appOrigin}).`
+        : `If you signed in and confirmed the key, the page may have created or replaced one that never reached this login: the next login with the same \`--label\` replaces it, or revoke it on the Developer page of the Pipelex app (${appOrigin}).`,
     );
     context.err(
-      `Run \`${LOGIN_COMMAND}\` again, or create a key on the Developer page of the Pipelex app (${appOrigin}) and run \`${PASTE_COMMAND}\`.`,
+      `${capitalized(runAgainClause(context, "browser"))}, or create a key on the Developer page of the Pipelex app (${appOrigin}) and run \`${PASTE_COMMAND}\`.`,
     );
     return { status: "none", exitCode: EXIT_NOT_SAVED };
   }
@@ -445,9 +560,9 @@ async function checkAndSave(
   if (check.verdict === "refused") {
     context.err(`${api} refused the key (HTTP ${check.status}). Nothing was saved.`);
     // A browser login has already minted the key in the user's organization.
-    if (source === "browser") context.err(`${unusedKeySentence(appOrigin)}.`);
+    if (source === "browser") context.err(`${unusedKeySentence(context, appOrigin)}.`);
     context.err(
-      `Check that the key is current and belongs to ${expectedApi(context.env, fileValues, homeFile)}, then run \`${source === "paste" ? PASTE_COMMAND : LOGIN_COMMAND}\` again.`,
+      `Check that the key is current and belongs to ${expectedApi(context.env, fileValues, homeFile)}, then ${runAgainClause(context, source)}.`,
     );
     return EXIT_NOT_SAVED;
   }
@@ -475,7 +590,7 @@ async function checkAndSave(
     );
   } else {
     context.err(
-      `Could not check the key: ${check.reason}. It is saved anyway, in \`${file}\` ${savedAs}: run \`${LOGIN_COMMAND}\` again if a tool call refuses it.`,
+      `Could not check the key: ${check.reason}. It is saved anyway, in \`${file}\` ${savedAs}: ${runAgainClause(context, source)} if a tool call refuses it.`,
     );
   }
   if (saved.baseUrl !== undefined) {
@@ -566,18 +681,44 @@ function fixOf(refusal: HomeEnvRefusal): string {
 }
 
 /** The pre-flight's refusal, before any key exists. */
-function reportUnwritable(context: LoginContext, refusal: HomeEnvRefusal, command: string): void {
+function reportUnwritable(
+  context: LoginContext,
+  refusal: HomeEnvRefusal,
+  source: KeySourceKind,
+): void {
   context.err(`${refusalOf(context, refusal, "before")} Nothing was saved.`);
   // The relative home's sentence already says what to do.
   if (refusal.status !== "relative_home") {
-    const fix = fixOf(refusal);
-    context.err(`${fix[0].toUpperCase()}${fix.slice(1)}, then run \`${command}\` again.`);
+    context.err(`${capitalized(fixOf(refusal))}, then ${runAgainClause(context, source)}.`);
   }
 }
 
-/** The sentence a browser login gives a key it received and did not save, since the page already minted it. */
-function unusedKeySentence(appOrigin: string): string {
-  return `The key this login received went unused: revoke it on the Developer page of the Pipelex app (${appOrigin})`;
+/**
+ * "run … again" as a clause, naming the command that gets a key the same
+ * way: a browser login that named a label keeps it, so the next login
+ * replaces the key this one may have left, without quoting the label, which
+ * no one shell could take unquoted.
+ */
+function runAgainClause(context: LoginContext, source: KeySourceKind): string {
+  if (source === "paste") return `run \`${PASTE_COMMAND}\` again`;
+  return context.label === undefined
+    ? `run \`${LOGIN_COMMAND}\` again`
+    : `run \`${LOGIN_COMMAND}\` again with the same \`--label\``;
+}
+
+function capitalized(clause: string): string {
+  return `${clause[0].toUpperCase()}${clause.slice(1)}`;
+}
+
+/**
+ * The sentence a browser login gives a key it received and did not save,
+ * since the page already minted it: a labelled one is replaced by the next
+ * login under its label, so it need not be revoked by hand.
+ */
+function unusedKeySentence(context: LoginContext, appOrigin: string): string {
+  return context.label === undefined
+    ? `The key this login received went unused: revoke it on the Developer page of the Pipelex app (${appOrigin})`
+    : `The key this login received went unused: the next login with the same \`--label\` replaces it, or revoke it on the Developer page of the Pipelex app (${appOrigin})`;
 }
 
 /** A save that failed after the key arrived, which the pre-flight could not foresee. */
@@ -592,14 +733,19 @@ function reportFailedSave(
   // A browser login has already minted the key in the user's organization.
   context.err(
     source === "browser"
-      ? `${unusedKeySentence(appOrigin)}, ${fix}, then run \`${LOGIN_COMMAND}\` again.`
-      : `The key you pasted was not saved: ${fix}, then run \`${PASTE_COMMAND}\` again.`,
+      ? `${unusedKeySentence(context, appOrigin)}. ${capitalized(fix)}, then ${runAgainClause(context, source)}.`
+      : `The key you pasted was not saved: ${fix}, then ${runAgainClause(context, source)}.`,
   );
 }
 
-/** The app page that mints a key and sends it back to the listener on `port` with `state`. */
-export function cliAuthUrl(appOrigin: string, port: number, state: string): string {
+/**
+ * The app page that mints a key and sends it back to the listener on `port`
+ * with `state`, carrying the key `label` when the login names one, which the
+ * page then replaces instead of adding a key.
+ */
+export function cliAuthUrl(appOrigin: string, port: number, state: string, label?: string): string {
   const query = new URLSearchParams({ callback_port: String(port), state });
+  if (label !== undefined) query.set("label", label);
   return `${appOrigin}${CLI_AUTH_PATH}?${query.toString()}`;
 }
 

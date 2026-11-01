@@ -1,16 +1,19 @@
 /**
  * A hermetic test of how the live targets (`make smoke`, `make test-e2e`, …)
- * pick the API they call.
+ * pick the API they call, and what they refuse before any request.
  *
  * They read their own pair, `PIPELEX_E2E_BASE_URL` and `PIPELEX_E2E_API_KEY`,
  * never the `PIPELEX_BASE_URL` / `PIPELEX_API_KEY` that other tools and the
  * server itself read: a shell exporting the production pair for other tools used to
- * aim `make test-e2e` at production, where no fixture is seeded. The Makefile
- * resolves the pair and `e2e-support.ts` reads it, so both halves are pinned
- * here. The Makefile half runs `make -f` from a temp directory holding its own
- * `.env`, which is how nothing here reads the repo's `.env` or the developer's
- * shell; `make -n` prints the preflight's target line without running it, and
- * the two real runs below stop before any network call.
+ * aim `make test-e2e` at production, where no fixture is seeded. They take the
+ * pair from the make command line or the environment, which the workspace's
+ * `test-account run` fills with a registered key and what the registry expects
+ * of it, and never from `.env`, which used to win over the environment. The
+ * Makefile resolves the pair and `e2e-support.ts` reads it, so both halves are
+ * pinned here. The Makefile half runs `make -f` from a temp directory holding
+ * its own `.env`, which is how nothing here reads the repo's `.env` or the
+ * developer's shell; `make -n` prints the preflight's target line without
+ * running it, and the real runs below stop before any network call.
  */
 import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
@@ -35,6 +38,16 @@ const BASE_ENV: NodeJS.ProcessEnv = {
 const PROD = "https://api.pipelex.com";
 const STAGING = "https://api-staging.pipelex.com";
 const LOCAL = "http://localhost:8081";
+// Port 1 on loopback refuses a connection at once, so a real run that reached
+// the reachability check stops there without leaving the machine.
+const UNREACHABLE = "http://127.0.0.1:1";
+
+// What `test-account run` sets beside the key; not secrets, so a test may print them.
+const EXPECTATIONS = {
+  PIPELEX_E2E_API_KEY_EXPECTED_ORG_ID: "org_00000000-0000-4000-8000-000000000000",
+  PIPELEX_E2E_API_KEY_EXPECTED_ROLE: "member",
+  PIPELEX_E2E_API_KEY_EXPECTED_EMAIL: "qa+builder@example.com",
+};
 
 describe("liveApiTarget", () => {
   it("ignores the pair other tools use, defaulting to dev", () => {
@@ -97,8 +110,13 @@ describe("the live targets' preflight", () => {
     return { url: match?.[1], urlFrom: match?.[2], keyFrom: match?.[3], output };
   }
 
-  it("goes to dev when nothing names its pair, whatever the shell and .env say about the other tools' pair", async () => {
-    await writeDotenv(["PIPELEX_BASE_URL=http://localhost:8080", "PIPELEX_API_KEY=plx_sk_console"]);
+  it("goes to dev when nothing names its pair, whatever the environment and .env say", async () => {
+    await writeDotenv([
+      "PIPELEX_BASE_URL=http://localhost:8080",
+      "PIPELEX_API_KEY=plx_sk_console",
+      `PIPELEX_E2E_BASE_URL=${LOCAL}`,
+      "PIPELEX_E2E_API_KEY=plx_sk_dotenv",
+    ]);
 
     expect(plan({ PIPELEX_BASE_URL: PROD, PIPELEX_API_KEY: "plx_sk_prod" })).toMatchObject({
       url: "https://api-dev.pipelex.com",
@@ -113,36 +131,41 @@ describe("the live targets' preflight", () => {
     expect(plan().url).toBe(LIVE_DEFAULT_BASE_URL);
   });
 
-  it("takes the pair from the shell when .env does not set it", async () => {
+  it("takes the pair from the environment, as test-account run hands it over", async () => {
     await writeDotenv(["PIPELEX_BASE_URL=http://localhost:8080"]);
 
     expect(
-      plan({ PIPELEX_E2E_BASE_URL: STAGING, PIPELEX_E2E_API_KEY: "plx_sk_shell" }),
-    ).toMatchObject({ url: STAGING, urlFrom: "the shell", keyFrom: "the shell" });
+      plan({ PIPELEX_E2E_BASE_URL: STAGING, PIPELEX_E2E_API_KEY: "plx_sk_env" }),
+    ).toMatchObject({ url: STAGING, urlFrom: "the environment", keyFrom: "the environment" });
   });
 
-  it("prefers .env to the shell, and each value is taken from its own first source", async () => {
-    await writeDotenv([`PIPELEX_E2E_BASE_URL=${LOCAL}`]);
-
-    expect(
-      plan({ PIPELEX_E2E_BASE_URL: STAGING, PIPELEX_E2E_API_KEY: "plx_sk_shell" }),
-    ).toMatchObject({ url: LOCAL, urlFrom: ".env", keyFrom: "the shell" });
-  });
-
-  it("prefers the make command line to .env", async () => {
+  it("never lets .env replace the pair the environment hands over", async () => {
     await writeDotenv([`PIPELEX_E2E_BASE_URL=${LOCAL}`, "PIPELEX_E2E_API_KEY=plx_sk_dotenv"]);
 
-    expect(plan({}, `PIPELEX_E2E_BASE_URL=${STAGING}`)).toMatchObject({
+    expect(
+      plan({ PIPELEX_E2E_BASE_URL: STAGING, PIPELEX_E2E_API_KEY: "plx_sk_env" }),
+    ).toMatchObject({ url: STAGING, urlFrom: "the environment", keyFrom: "the environment" });
+  });
+
+  it("prefers the make command line to the environment", async () => {
+    await writeDotenv([]);
+
+    expect(
+      plan(
+        { PIPELEX_E2E_BASE_URL: LOCAL, PIPELEX_E2E_API_KEY: "plx_sk_env" },
+        `PIPELEX_E2E_BASE_URL=${STAGING}`,
+      ),
+    ).toMatchObject({
       url: STAGING,
       urlFrom: "the make command line",
-      keyFrom: ".env",
+      keyFrom: "the environment",
     });
   });
 
   it("never prints the key itself", async () => {
     await writeDotenv(["PIPELEX_E2E_API_KEY=plx_sk_secret_from_dotenv"]);
 
-    expect(plan({ PIPELEX_E2E_API_KEY: "plx_sk_secret_from_shell" }).output).not.toContain(
+    expect(plan({ PIPELEX_E2E_API_KEY: "plx_sk_secret_from_env" }).output).not.toContain(
       "plx_sk_secret",
     );
   });
@@ -157,19 +180,60 @@ describe("the live targets' preflight", () => {
     expect(output).not.toContain("-> target:");
   });
 
-  it("says the shell's PIPELEX_BASE_URL is ignored, and names the target it could not reach", async () => {
-    // Port 1 on loopback refuses the connection at once, so this real run stops
-    // at the reachability check without leaving the machine.
-    await writeDotenv(["PIPELEX_E2E_BASE_URL=http://127.0.0.1:1/"]);
+  // The two refusals below aim at port 1 on loopback, so a request, had one
+  // been sent, would fail at once without leaving the machine; that none is
+  // sent shows as the reachability error's absence.
+  it("refuses a run with no key before any request, naming test-account run, even with one in .env", async () => {
+    await writeDotenv(["PIPELEX_E2E_API_KEY=plx_sk_dotenv"]);
 
-    const { status, output } = make(["live-preflight"], { PIPELEX_BASE_URL: PROD });
+    const { status, output } = make(["test-e2e"], {
+      PIPELEX_E2E_BASE_URL: UNREACHABLE,
+      ...EXPECTATIONS,
+    });
 
     expect(status).not.toBe(0);
-    expect(output).toContain("-> target: http://127.0.0.1:1 (PIPELEX_E2E_BASE_URL from .env)");
+    expect(output).toContain("ERROR: PIPELEX_E2E_API_KEY is not set, so no request was sent.");
+    expect(output).toContain("'test-account run pipelex-mcp -- make test-e2e'");
+    expect(output).toContain("They never read .env.");
+    expect(output).not.toContain("no Pipelex API reachable");
+  });
+
+  it("refuses a key without its expectations before any request, naming each one missing", async () => {
+    await writeDotenv([]);
+
+    const { status, output } = make(["seed-e2e-fixture"], {
+      PIPELEX_E2E_BASE_URL: UNREACHABLE,
+      PIPELEX_E2E_API_KEY: "plx_sk_env",
+      PIPELEX_E2E_API_KEY_EXPECTED_ORG_ID: EXPECTATIONS.PIPELEX_E2E_API_KEY_EXPECTED_ORG_ID,
+    });
+
+    expect(status).not.toBe(0);
+    expect(output).toContain(
+      "ERROR: not set: PIPELEX_E2E_API_KEY_EXPECTED_ROLE PIPELEX_E2E_API_KEY_EXPECTED_EMAIL — nothing says which account PIPELEX_E2E_API_KEY must act for, so no request was sent.",
+    );
+    expect(output).toContain("'test-account run pipelex-mcp -- make seed-e2e-fixture'");
+    expect(output).not.toContain("no Pipelex API reachable");
+    expect(output).not.toContain("plx_sk_env");
+  });
+
+  it("says the environment's PIPELEX_BASE_URL is ignored, and names the target it could not reach", async () => {
+    await writeDotenv([]);
+
+    const { status, output } = make(["live-preflight"], {
+      PIPELEX_BASE_URL: PROD,
+      PIPELEX_E2E_BASE_URL: `${UNREACHABLE}/`,
+      PIPELEX_E2E_API_KEY: "plx_sk_env",
+      ...EXPECTATIONS,
+    });
+
+    expect(status).not.toBe(0);
+    expect(output).toContain(
+      `-> target: ${UNREACHABLE} (PIPELEX_E2E_BASE_URL from the environment)`,
+    );
     expect(output).toContain(
       "PIPELEX_BASE_URL / PIPELEX_API_KEY in the environment are ignored here",
     );
-    expect(output).toContain("ERROR: no Pipelex API reachable at http://127.0.0.1:1");
+    expect(output).toContain(`ERROR: no Pipelex API reachable at ${UNREACHABLE}`);
     expect(output).toContain(
       "start the OSS runner with 'make -C api run' in a checkout of Pipelex/pipelex",
     );

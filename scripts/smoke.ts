@@ -16,10 +16,11 @@
  * `structuredContent`. Nothing here executes a method, so a run spends no
  * inference credit and is safe to run unattended (a scheduled canary reuses it).
  *
- * Run it through `make smoke`, which resolves the env from `.env`, preflights
- * `/v1/version`, and refuses to start without a key. `npm run smoke` runs the
- * same script without those guards, which is what a keyless local OSS runner
- * needs.
+ * Run it through `make smoke`, which resolves the live pair from the
+ * environment, preflights `/v1/version`, and refuses to start without a key and
+ * its expectations. `npm run smoke` runs the same script without those guards,
+ * which is what a keyless local OSS runner needs; a run that carries a key
+ * still checks its account first (`src/capabilities/e2e-account.ts`).
  */
 
 import { existsSync } from "node:fs";
@@ -29,6 +30,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+import { checkLiveAccount } from "../src/capabilities/e2e-account.js";
 import { LIVE_API_KEY_ENV, liveApiTarget } from "../src/capabilities/e2e-support.js";
 import { emptySmokeHome, smokeChildEnv } from "./smoke-env.js";
 
@@ -652,10 +654,23 @@ async function main(): Promise<void> {
   const config = liveApiTarget();
 
   write("pipelex-mcp smoke — the workshop stdio server against a live Pipelex API");
-  write(`  target: ${config.baseUrl}`);
-  write(`  key:    ${config.apiKey === undefined ? "NOT SET" : "set"}`);
+  write(`  target:  ${config.baseUrl}`);
+  write(`  key:     ${config.apiKey === undefined ? "NOT SET" : "set"}`);
   if (config.apiKey === undefined) {
+    // Keyless is the bare local runner's case (`npm run smoke`): no key, no
+    // account to check, and every org-scoped call fails as a config error.
     note(`Without ${LIVE_API_KEY_ENV} every org-scoped call will fail as a config error.`);
+  } else {
+    // A key always acts for a registered test account, checked before the
+    // server starts, so a key of another organization stops here with its cause.
+    const verdict = await checkLiveAccount();
+    if (verdict.status === "refused") {
+      write("");
+      write(verdict.message);
+      process.exitCode = 1;
+      return;
+    }
+    write(`  account: ${verdict.account}`);
   }
 
   if (!existsSync(TSX_BIN)) {

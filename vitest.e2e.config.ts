@@ -11,22 +11,18 @@
  *
  * Run it with `make test-e2e`, which resolves the API target and key the same
  * way `make smoke` does and refuses to start without them.
+ *
+ * The pair and the key's expectations come from the environment alone, which
+ * the workspace's `test-account run` fills; `.env` is never read, since a key
+ * there would replace the one the registry hands over. The global setup checks
+ * the key's account before the first case (`src/capabilities/e2e-account.ts`).
  */
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { defineConfig } from "vitest/config";
-
-// Parity with `npm run smoke`, which reaches `.env` through Node's
-// `--env-file-if-exists`: a bare `npm run test:e2e` gets the same convenience,
-// while `make test-e2e` keeps deciding the target. `loadEnvFile` shares
-// `--env-file`'s precedence — it never overrides an inherited variable — so the
-// Make target's resolved values still win, and the test workers inherit them.
-if (existsSync(".env")) {
-  process.loadEnvFile(".env");
-}
 
 // The live suite runs on its own pair, `PIPELEX_E2E_BASE_URL` and
 // `PIPELEX_E2E_API_KEY`, never on the key the developer saved in the home
@@ -38,6 +34,7 @@ process.on("exit", () => rmSync(testHome, { recursive: true, force: true }));
 export default defineConfig({
   test: {
     include: ["src/**/*.e2e.ts"],
+    globalSetup: ["src/capabilities/e2e-global-setup.ts"],
     environment: "node",
     env: { PIPELEX_HOME: testHome },
     // A cold hosted API answers in seconds, not milliseconds, and the run suite

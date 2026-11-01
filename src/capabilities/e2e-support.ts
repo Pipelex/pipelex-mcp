@@ -29,10 +29,18 @@ import type { ApiConfig } from "./shared.js";
  * production pair for other tools aimed the suite at an organization holding no
  * seeded fixture, and every by-id leg failed with a miss that read like drift.
  * The Makefile resolves these two names for the live targets; the comment above
- * its `LIVE_TARGETS` says in what order.
+ * its `LIVE_TARGETS` says in what order. The key comes with what the registry of
+ * test accounts expects of it, which `e2e-account.ts` checks before any live call.
  */
 export const LIVE_BASE_URL_ENV = "PIPELEX_E2E_BASE_URL";
 export const LIVE_API_KEY_ENV = "PIPELEX_E2E_API_KEY";
+
+/**
+ * How a developer runs a live target: through the workspace's `test-account
+ * run`, under the registry's consumer entry for this repository, which hands
+ * over the live pair and the key's expectations. Every refusal names it.
+ */
+export const LIVE_RUN_COMMAND = "test-account run pipelex-mcp -- make <target>";
 
 /**
  * Dev, not production: the Makefile's `LIVE_DEFAULT_BASE_URL`, repeated for a
@@ -68,8 +76,8 @@ export function liveApiConfig(): ApiConfig {
   if (apiKey === undefined) {
     throw new Error(
       `${LIVE_API_KEY_ENV} is not set — every org-scoped call would fail as a config error and this suite would ` +
-        `be testing the error path only. Put the key for ${baseUrl}'s organization in .env as ${LIVE_API_KEY_ENV}, ` +
-        "then run `make test-e2e`.",
+        `be testing the error path only. Run it through the workspace's \`${LIVE_RUN_COMMAND}\`, which hands ` +
+        `over the key for ${baseUrl}.`,
     );
   }
   return { baseUrl, apiKey };
@@ -77,14 +85,16 @@ export function liveApiConfig(): ApiConfig {
 
 /**
  * The last sentence of every fixture-miss message: which deployment was
- * searched. A key aimed at the wrong deployment reads exactly like an unseeded
- * organization, so naming the URL is what tells the two apart.
+ * searched. The account check has already confirmed which organization the
+ * key acts for, so a miss there means that organization is not seeded, and
+ * naming the URL rules out the one other cause, a key aimed at another
+ * deployment.
  */
 export function searchedAtHint(baseUrl: string): string {
   return (
-    `The lookup searched ${baseUrl}; if that is not the deployment holding the fixture, set ` +
-    `${LIVE_BASE_URL_ENV} and ${LIVE_API_KEY_ENV} in .env (the live targets never read PIPELEX_BASE_URL or ` +
-    "PIPELEX_API_KEY)."
+    `The lookup searched ${baseUrl}, in the organization the account check confirmed before the ` +
+    `first case; ${LIVE_BASE_URL_ENV} names the deployment (the live targets never read ` +
+    "PIPELEX_BASE_URL or PIPELEX_API_KEY)."
   );
 }
 
@@ -473,8 +483,7 @@ export const TINY_PNG_BASE64 =
 const MISSING_FIXTURE_HINT =
   `No registered method named "${FIXTURE_METHOD_NAME}" is visible to this API key. The by-id legs need ` +
   "one durable fixture method per organization (the SDK has no delete, so the suites cannot create one per run). " +
-  "Seed it with `make seed-e2e-fixture`, then re-run. If the key is right but the org is not, mint a key in the " +
-  "organization that holds the fixture — the catalog is org-scoped, so another org's method reads exactly like a miss.";
+  "Seed it once with `make seed-e2e-fixture`, run as the live targets run, then re-run.";
 
 let cachedFixtureId: Promise<string> | undefined;
 
@@ -484,8 +493,9 @@ let cachedFixtureId: Promise<string> | undefined;
  * Resolving rather than hardcoding is deliberate: a `mt_…` id belongs to one
  * organization, this repo is public, and a scheduled canary would run under a
  * different key from a developer's. A name lookup makes the suites portable
- * across every org that has been seeded, and turns "wrong org" into the same
- * instructive failure as "not seeded".
+ * across every org that has been seeded; "wrong org" never reaches it, since
+ * the account check (`e2e-account.ts`) stops a key of another organization
+ * before the first case.
  */
 export function fixtureMethodId(): Promise<string> {
   cachedFixtureId ??= lookupFixtureMethodId();
@@ -504,9 +514,7 @@ const MISSING_WRITE_FIXTURE_HINT =
   `No registered method named "${CATALOG_WRITE_FIXTURE_NAME}" is visible to this API key. The write ` +
   "suite writes one durable row per organization and deliberately never creates it: a create is " +
   "check-then-act with nothing unique to collide on, so two first runs would mint a duplicate the platform " +
-  "cannot delete. Seed it with `make seed-e2e-fixture`, then re-run. If the key is right but the org " +
-  "is not, mint a key in the organization that holds the fixture — the catalog is org-scoped, so " +
-  "another org's method reads exactly like a miss.";
+  "cannot delete. Seed it once with `make seed-e2e-fixture`, run as the live targets run, then re-run.";
 
 let cachedWriteFixtureId: Promise<string> | undefined;
 

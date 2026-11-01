@@ -5,6 +5,8 @@ paths:
   - "scripts/smoke.ts"
   - "scripts/seed-e2e-fixture.ts"
   - "src/capabilities/e2e-support.ts"
+  - "src/capabilities/e2e-account.ts"
+  - "src/capabilities/e2e-global-setup.ts"
   - "src/**/*.e2e.ts"
   - "tests/make-*.test.ts"
 ---
@@ -13,7 +15,8 @@ paths:
 
 The hermetic suite fakes every API client, so a wire-shape change on the API side fails nothing in it; the live targets (`smoke`, `test-e2e`, `test-e2e-run`, `seed-e2e-fixture`, `test-all`) are the only detector, and the only targets that touch the network. `docs/testing.md` is the full account, "Detecting API drift" above all.
 
-- **The live targets read their own pair, `PIPELEX_E2E_BASE_URL` / `PIPELEX_E2E_API_KEY`, and never `PIPELEX_BASE_URL` / `PIPELEX_API_KEY`**, which they refuse on the make command line. A shell profile exporting the production pair for other tools once sent `make test-e2e` to production. Resolution is make command line, then `.env`, then the shell, then the default, `https://api-dev.pipelex.com`; `tests/make-live-recipe.test.ts` pins it.
+- **The live targets read their own pair, `PIPELEX_E2E_BASE_URL` / `PIPELEX_E2E_API_KEY`, and never `PIPELEX_BASE_URL` / `PIPELEX_API_KEY`**, which they refuse on the make command line. A shell profile exporting the production pair for other tools once sent `make test-e2e` to production. Resolution is make command line, then the environment, then the default, `https://api-dev.pipelex.com`, and **never `.env`**, which would replace the key `test-account run` hands over; `tests/make-live-recipe.test.ts` pins it.
+- **The key is a registered test account's, and its account is checked before the first live call.** `test-account run pipelex-mcp -- make <target>` hands it over with `PIPELEX_E2E_API_KEY_EXPECTED_ORG_ID`, `_EXPECTED_ROLE` and `_EXPECTED_EMAIL`; `e2e-account.ts` compares them with `GET /v1/me`, from the suite's global setup, the seed and a keyed smoke run, and `live-preflight` refuses a missing key or expectation before any request. A new live entry point calls the same check before its first call; a platform answering without `organization` stops the run, never passes it. `docs/testing.md` → "The live targets' account".
 - **Keep them out of `make all` and `make check`**, which stay hermetic. `make test-e2e` writes (storage uploads, the seeded write fixture's draft and its publish) but never creates a catalog row and never starts a run; the run family executes only under `PIPELEX_E2E_RUN=1` (`make test-e2e-run`).
 - **Gate a by-selector leg on the live API, never on a date or a hardcoded skip.** `apiAdvertisesExtension` asks `/v1/version`, and the probe asserts its own inputs: on a hosted deployment an absent or malformed `extensions` throws, so a skip always means the deployment does not serve the surface, never that the wire drifted.
 - **Resolve a fixture's catalog id by name at run time, following the cursor.** `catalogRowNamed` in `e2e-support.ts` is the one helper; a one-page read reports a seeded fixture as missing once its organization grows, and that message sends the operator to seed a duplicate the platform only lets an admin delete.
