@@ -2,7 +2,7 @@
 
 This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the Pipelex plugin runs.
 
-## [Unreleased]
+## [0.28.0] - 2026-11-01
 
 ### Added
 
