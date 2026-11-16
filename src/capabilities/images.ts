@@ -24,6 +24,7 @@ import {
   buildArtifactFetchConfig,
   createPipelexApiClient,
   faultsProblem,
+  formatBytes,
   imageCandidatesOf,
   problemLine,
   problemOf,
@@ -238,7 +239,10 @@ export interface ShowImagesResult {
 /**
  * The result artifacts this tool's results read asks for: the main output
  * alone, the only artifact its picture walk reads. The graph, the I/O
- * artifacts, the working memory and the usage records are never fetched.
+ * artifacts, the working memory, the forms and the usage records are never
+ * fetched: the candidates are read from the output alone, a stored text left
+ * out by the shape of its reference (`imageCandidatesOf`), so no concept read
+ * is needed, and none can fail this call.
  */
 export const SHOW_IMAGES_RESULT_ARTIFACTS: readonly RunResultArtifact[] = ["main_stuff"];
 
@@ -325,7 +329,12 @@ export async function showMthdsRunImages(
   let state: RunResultState;
   try {
     client = imagesClient(context);
-    state = await client.getRunResult(input.run_id, { artifacts: SHOW_IMAGES_RESULT_ARTIFACTS });
+    // A stored text is never loaded: the walk wants the pictures' references,
+    // and loading would read and fetch every stored text the output holds.
+    state = await client.getRunResult(input.run_id, {
+      artifacts: SHOW_IMAGES_RESULT_ARTIFACTS,
+      loadStoredTexts: false,
+    });
   } catch (err) {
     return errorResult(problemOf(err), context.apiNotes);
   }
@@ -359,6 +368,8 @@ export async function showMthdsRunImages(
   }
 
   const runId = state.pipeline_run_id;
+  // The candidates are read from the output alone, a stored text left out by
+  // the shape of its reference, exactly as mthds_run_results lists them.
   const candidates = imageCandidatesOf(state.result.main_stuff);
   const selection = selectCandidates(candidates, input);
   if (!selection.ok) {
@@ -904,12 +915,6 @@ function completedSummary(runId: string, walk: Walk): string {
   }
 
   return parts.join("\n\n");
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function errorResult(problem: Problem, notes: ApiNotes | undefined): ShowImagesResult {

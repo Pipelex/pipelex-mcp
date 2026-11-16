@@ -2,6 +2,21 @@
 
 This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the Pipelex plugin runs.
 
+## [Unreleased]
+
+### Added
+
+- **Stored texts in `mthds_run_results`**: a large `Text`, `Markdown`, `Html` or `JSON` value the run kept in storage, which the output carries as its reference (`url`, `size`, `mime_type`, `preview`), is shown as that reference and never loaded into the result; the new `stored_texts` member lists each one by the path of its `url` (`field`, absent should no path be recorded), with its size and MIME type, the summary names them, and they are no longer counted as stored files.
+- **Stored texts in `mthds_download_artifacts`**: each stored text of the output is saved beside `main_stuff.json`, in the same download as the files, as a text file named after its field with the extension of its MIME type (`.txt`, `.md`, `.html` or `.json`), and listed in the new `texts` member, apart from the files in `artifacts`.
+
+### Changed
+
+- **Results reads ask for the concept facts when the output may hold a stored text**: `mthds_run_results` and `mthds_download_artifacts` read the run's `working_memory`, `output_form` and `input_form` by a second read when `main_stuff` holds something shaped like a stored text's reference, to tell a stored text from a stored file by the concept the output names at each position; an output that holds none costs one read, as before. That second read never fails the call: when it fails, or the results name no concept, a reference shaped like a stored text's (a `url` with a `size` or a `preview` and no value) is taken for a stored text, every other one for a file, and the summary says so.
+- **A stored text is never an image candidate**, whatever its storage key: `mthds_run_results` and `mthds_show_images` read the candidates from the output alone, leaving out every reference shaped like a stored text's, so an index names the same picture in both tools whatever a concept read did, and `mthds_show_images` makes no concept read.
+- **`@pipelex/sdk` 0.69.0 and `mthds` 0.34.0**: the workshop moves from `@pipelex/sdk` 0.53.0 and `mthds` 0.33.0, so a stored text is told from a stored file by the SDK's own walk, and the problems built for the codes a run can raise carry the standard's new titles and next steps, such as "A step's result does not have the structure the method declares" for `pipe.output_invalid`; the results, image and download tools read a run with its stored texts left as references, never loaded.
+- **`mthds_publish_method` relays every refusal reason (Breaking)**: `reason` on a `refused` verdict is any string the platform names, no longer only `invalid` or `not_runnable`, so a public method's thumbnail or storage-reference refusal arrives as a verdict whose `message` says what to change; the summary of a reason the workshop does not know relays that message alone, prescribing no draft save.
+- **`mthds_get_method` refuses another organization's public method**: such a method has no draft, and only its owner can write it, so the pull answers `client.argument_invalid` at `method_id`, writing nothing, and says to run it by its id instead. A method read counts as the caller's own only when it carries a string draft token (`updated_at`).
+
 ## [0.28.0] - 2026-11-01
 
 ### Added

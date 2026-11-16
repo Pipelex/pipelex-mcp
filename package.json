@@ -56,8 +56,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.0",
-    "@pipelex/sdk": "^0.53.0",
-    "mthds": "^0.33.0",
+    "@pipelex/sdk": "^0.69.0",
+    "mthds": "^0.34.0",
     "zod": "^4.6.6"
   },
   "devDependencies": {

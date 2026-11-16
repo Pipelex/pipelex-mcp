@@ -8,6 +8,7 @@ import type {
   CoreErrorCode,
   MethodData,
   MethodDetail,
+  PublicMethodDetail,
   MethodDraftInput,
   MethodPublishInput,
   MethodPublishResult,
@@ -431,7 +432,8 @@ export interface GetMethodResult {
  * workshop's own limits.
  */
 export interface CatalogWriteClient {
-  getMethod(methodId: string): Promise<MethodDetail>;
+  /** Another organization's public method reads as a `PublicMethodDetail`, which carries no draft. */
+  getMethod(methodId: string): Promise<MethodDetail | PublicMethodDetail>;
   createMethod(input: MethodWriteInput): Promise<MethodData>;
   writeDraft(methodId: string, input: MethodDraftInput): Promise<MethodData>;
   renameMethod(methodId: string, input: MethodRenameInput): Promise<MethodData>;
@@ -1264,12 +1266,13 @@ async function draftConflictProblem(
   methodId: string,
   sent: { token: string; fromLink: boolean },
 ): Promise<Problem> {
-  let current: MethodData;
+  let current: MethodDetail | PublicMethodDetail;
   try {
     current = await client.getMethod(methodId);
   } catch {
     return problem;
   }
+  if (!isOwnMethod(current)) return problem;
   const source = sent.fromLink
     ? ` as this folder's ${LINK_FILE_NAME} records (synced_updated_at)`
     : "";
@@ -1570,8 +1573,8 @@ export async function getMthdsMethod(
 
   let client: CatalogWriteClient;
   let support: Promise<MethodVersionsSupport>;
-  let stored: MethodDetail;
-  let version: MethodVersion | undefined;
+  let read: MethodDetail | PublicMethodDetail;
+  let versionRead: { wanted: number; settled: PromiseSettledResult<MethodVersion> } | undefined;
   try {
     client = catalogWriteClient(context);
     // Asked beside the read rather than after it: it never rejects, and only
@@ -1582,22 +1585,28 @@ export async function getMthdsMethod(
         ? catalogVersionsSupport(context, client)
         : Promise.resolve<MethodVersionsSupport>("unknown");
     if (wanted === "draft") {
-      stored = await client.getMethod(methodId);
+      read = await client.getMethod(methodId);
     } else {
-      const [method, read] = await Promise.allSettled([
+      const [method, settled] = await Promise.allSettled([
         client.getMethod(methodId),
         client.getMethodVersion(methodId, wanted),
       ]);
       if (method.status === "rejected") throw method.reason;
-      stored = method.value;
-      if (read.status === "rejected") {
-        return versionReadError(read.reason, stored, wanted, context);
-      }
-      version = read.value;
+      read = method.value;
+      versionRead = { wanted, settled };
     }
   } catch (err) {
     return getError(context, problemOf(err));
   }
+  // Another organization's public method is refused before its version read
+  // is looked at: a folder pulled from it could never be saved back, whatever
+  // that read answered.
+  if (!isOwnMethod(read)) return getError(context, publicMethodProblem(methodId));
+  const stored: MethodDetail = read;
+  if (versionRead?.settled.status === "rejected") {
+    return versionReadError(versionRead.settled.reason, stored, versionRead.wanted, context);
+  }
+  const version = versionRead?.settled.value;
 
   const content: PulledContent = {
     version: version === undefined ? "draft" : version.version,
@@ -2911,6 +2920,31 @@ function emptyTreeError(context: CatalogWriteContext, version: number | "draft")
         remedy: `The method exists but is empty — a different answer from an unknown id, which the catalog reports as pipelex.catalog.not_found. Open it in the Pipelex webapp and save into it, or save a folder into it from here with ${WORKSHOP_TOOL_NAMES.saveMethod} and this method_id.`,
       },
     ),
+  );
+}
+
+/**
+ * Whether a method read is the caller's organization's own, with its draft. Another
+ * organization's public method reads as a `PublicMethodDetail`, which carries no draft
+ * token. The token's value decides, not the key's presence: only a string is a token the
+ * workshop can record in a link file or echo on a write, so a read whose `updated_at` is
+ * absent, `null` or anything else is never taken for the caller's own method.
+ */
+export function isOwnMethod(method: MethodDetail | PublicMethodDetail): method is MethodDetail {
+  const token = (method as { updated_at?: unknown }).updated_at;
+  return typeof token === "string" && token !== "";
+}
+
+/**
+ * Another organization's public method, which the pull refuses: a folder pulled from it
+ * could never be saved back, since every write of it is its owner's, and it has no draft.
+ */
+function publicMethodProblem(methodId: string): Problem {
+  return argumentProblem(
+    "method_id",
+    "another_organization",
+    `\`${methodId}\` is another organization's public method. The workshop pulls only your own organization's methods, whose drafts it can save back; nothing was written.`,
+    `Run it by its id with ${WORKSHOP_TOOL_NAMES.run}.`,
   );
 }
 

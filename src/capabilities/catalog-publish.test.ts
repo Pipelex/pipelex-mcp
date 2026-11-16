@@ -372,6 +372,35 @@ describe("publishMthdsMethod", () => {
     expect(result.summary).toContain("`demo.summarize`");
   });
 
+  it("relays a refusal that is not about validation with the platform's own reason and message", async () => {
+    const result = await publishMthdsMethod(
+      { method_id: "mt_one", expected_draft_updated_at: TOKEN },
+      contextFor(
+        publishing(async () => ({
+          outcome: "refused",
+          reason: "thumbnail_missing",
+          message: "A public method needs a thumbnail at thumbnails/cover.png.",
+          validation: { is_valid: true, is_runnable: true } as never,
+          method: method(),
+        })),
+      ),
+    );
+
+    expect(success(result)).toMatchObject({
+      outcome: "refused",
+      reason: "thumbnail_missing",
+      message: "A public method needs a thumbnail at thumbnails/cover.png.",
+      is_valid: true,
+    });
+    expect(result.summary).toContain("A public method needs a thumbnail at thumbnails/cover.png.");
+    expect(result.summary).not.toContain("does not validate");
+    expect(result.summary).toContain("It stays a draft.");
+    // The platform's message alone: a draft save may not touch the cause, so
+    // no step is prescribed that would loop on the same refusal.
+    expect(result.summary).not.toContain("mthds_save_method");
+    expect(result.summary).not.toContain("publish again");
+  });
+
   it("refuses a stale token, naming the draft's current one", async () => {
     const result = await publishMthdsMethod(
       { method_id: "mt_one", expected_draft_updated_at: "2026-09-19T00:00:00Z" },

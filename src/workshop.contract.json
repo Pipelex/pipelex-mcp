@@ -4752,6 +4752,47 @@
             "description": "State \"completed\" only, and only when something was left out — how many image candidates past the listed ones this result does not enumerate. They are still on the run: mthds_show_images walks the full set.",
             "type": "number"
           },
+          "stored_texts": {
+            "description": "State \"completed\" only, and only when the output holds one — each large text, HTML or JSON value the run stored and main_stuff carries as its reference (url, size, mime_type, preview) instead of its value. Never loaded here: mthds_download_artifacts saves each as a text file. Bounded — see stored_texts_omitted.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "description": "The $-rooted path of the text's url in the output, its first occurrence; absent when no path was recorded.",
+                  "type": "string"
+                },
+                "uri": {
+                  "type": "string",
+                  "description": "The pipelex-storage:// reference of the stored text."
+                },
+                "size": {
+                  "description": "Its length in bytes.",
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "mime_type": {
+                  "description": "Its MIME type.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "uri",
+                "size",
+                "mime_type"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "stored_texts_omitted": {
+            "description": "State \"completed\" only, and only when something was left out — how many stored texts past the listed ones this result does not enumerate.",
+            "type": "number"
+          },
           "usage": {
             "description": "State \"completed\" only — token and USD-cost aggregates for the run, always present: read its state first. The full per-call record list rides the view-only _meta.tokens_usages.",
             "type": "object",
@@ -6021,6 +6062,240 @@
             ],
             "additionalProperties": false
           },
+          "texts": {
+            "description": "One entry per stored text of the main output — a large text, HTML or JSON value the run kept in storage, whose reference main_stuff.json carries — saved as a text file; present when the output holds one.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "uri": {
+                  "type": "string",
+                  "description": "The pipelex-storage:// reference of the stored text."
+                },
+                "found_at": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Every path in main_stuff.json at which the text's reference sits, $-rooted and in walk order ($.url, $.pages[0].url) — the first one named the file. Bounded — see found_at_omitted."
+                },
+                "found_at_omitted": {
+                  "description": "Present when the reference sits at more paths than found_at lists: how many were left out.",
+                  "type": "number"
+                },
+                "path": {
+                  "description": "Where the text was saved, relative to the server's working directory, with the extension of its MIME type — on success.",
+                  "type": "string"
+                },
+                "mime_type": {
+                  "description": "The text's MIME type, as its reference states it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "size": {
+                  "description": "Bytes written.",
+                  "type": "number"
+                },
+                "error": {
+                  "description": "Present when this text could not be saved: why, as a problem.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number"
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string",
+                      "description": "The registry code to branch on."
+                    },
+                    "domain": {
+                      "type": "string",
+                      "description": "Who must act: input, method, account, operator or runtime."
+                    },
+                    "retry": {
+                      "type": "string",
+                      "description": "yes, no, or outcome_unknown: it may have taken effect, so read before resending."
+                    },
+                    "retry_after": {
+                      "type": "number"
+                    },
+                    "next_step": {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string"
+                        },
+                        "detail": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "detail"
+                      ],
+                      "additionalProperties": {}
+                    },
+                    "params": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {}
+                    },
+                    "location": {
+                      "type": "object",
+                      "properties": {
+                        "pipe": {
+                          "type": "string"
+                        },
+                        "path": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "input": {
+                          "type": "string"
+                        },
+                        "field": {
+                          "type": "string"
+                        },
+                        "item": {
+                          "type": "number"
+                        },
+                        "attempt": {
+                          "type": "number"
+                        },
+                        "file": {
+                          "type": "string"
+                        },
+                        "line": {
+                          "type": "number"
+                        },
+                        "column": {
+                          "type": "number"
+                        }
+                      },
+                      "additionalProperties": {},
+                      "description": "Where it happened; field names the tool argument of a refusal this server made."
+                    },
+                    "errors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string"
+                          },
+                          "detail": {
+                            "type": "string"
+                          },
+                          "params": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          },
+                          "location": {
+                            "type": "object",
+                            "properties": {
+                              "pipe": {
+                                "type": "string"
+                              },
+                              "path": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "input": {
+                                "type": "string"
+                              },
+                              "field": {
+                                "type": "string"
+                              },
+                              "item": {
+                                "type": "number"
+                              },
+                              "attempt": {
+                                "type": "number"
+                              },
+                              "file": {
+                                "type": "string"
+                              },
+                              "line": {
+                                "type": "number"
+                              },
+                              "column": {
+                                "type": "number"
+                              }
+                            },
+                            "additionalProperties": {},
+                            "description": "Where it happened; field names the tool argument of a refusal this server made."
+                          },
+                          "suggestions": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "suggested_fix": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": {}
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "detail"
+                        ],
+                        "additionalProperties": {},
+                        "description": "One fault, as the MTHDS protocol states it."
+                      }
+                    },
+                    "pipeline_run_id": {
+                      "type": "string"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "description": "The client's own sentence, when it adds to detail.",
+                      "type": "string"
+                    },
+                    "run_error": {}
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "detail",
+                    "code",
+                    "domain",
+                    "retry",
+                    "next_step"
+                  ],
+                  "additionalProperties": {}
+                }
+              },
+              "required": [
+                "uri",
+                "found_at",
+                "mime_type"
+              ],
+              "additionalProperties": false
+            }
+          },
           "artifacts": {
             "description": "One entry per stored file the main output references, in discovery order — on state \"completed\", and on a credential refused after some files were saved, where it carries them.",
             "type": "array",
@@ -6255,14 +6530,14 @@
             }
           },
           "saved_paths": {
-            "description": "Every file that was saved, relative to the server's working directory: main_stuff.json first, then the saved artifacts — present wherever output is.",
+            "description": "Every file that was saved, relative to the server's working directory: main_stuff.json first, then the saved texts, then the saved artifacts — present wherever output is.",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
           "all_saved": {
-            "description": "State \"completed\" only — true when the output and every referenced file were saved.",
+            "description": "State \"completed\" only — true when the output, every stored text and every referenced file were saved.",
             "type": "boolean"
           },
           "problem": {
@@ -7752,12 +8027,8 @@
             ]
           },
           "reason": {
-            "description": "refused only: the draft does not validate, or validates with pending signatures and does not run yet.",
-            "type": "string",
-            "enum": [
-              "invalid",
-              "not_runnable"
-            ]
+            "description": "refused only: invalid (the draft does not validate), not_runnable (it validates with pending signatures), or another reason the platform names, which message explains.",
+            "type": "string"
           },
           "message": {
             "type": "string"

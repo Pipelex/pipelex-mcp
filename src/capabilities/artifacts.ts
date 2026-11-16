@@ -7,7 +7,7 @@ import {
   DEFAULT_ARTIFACT_MAX_BYTES,
   DEFAULT_DOWNLOAD_MAX_TOTAL_BYTES,
   buildProblem,
-  collectArtifacts,
+  mainStuffNode,
 } from "@pipelex/sdk";
 import type {
   ArtifactItemError,
@@ -32,17 +32,21 @@ import {
   argumentProblem,
   asOneLine,
   buildArtifactFetchConfig,
+  conceptsUnreadNote,
   createPipelexApiClient,
   faultsProblem,
   fetchItemProblem,
+  formatBytes,
   problemLine,
   problemOf,
   problemSchema,
   problemSummary,
   toolResultContent,
+  storedTextsByShape,
   validateRunIdRequest,
+  withStoredTextConcepts,
 } from "./shared.js";
-import type { ApiConfig, ApiNotes } from "./shared.js";
+import type { ApiConfig, ApiNotes, StoredTextShape } from "./shared.js";
 import { errorMessage, resolveSaveDir } from "./workspace-boundary.js";
 
 /**
@@ -63,8 +67,15 @@ import { errorMessage, resolveSaveDir } from "./workspace-boundary.js";
  * the deployment gate, the plain-http policy, the download limits, the
  * problem each failure reports, and the prose summary. The output file is the one
  * thing it writes itself, under the same never-overwrite rule the SDK applies
- * to the files beside it. See SPEC.md → Artifact Download Scope for why this is
- * a companion tool and not an option on `mthds_run_results`.
+ * to the files beside it. A stored text of the output, a large text, HTML or
+ * JSON value the run kept in storage, is the SDK's too: its download tells one
+ * from a stored file by the concept at its position, read from the working
+ * memory and the forms this tool reads beside the output when it may hold a
+ * stored text (`withStoredTextConcepts`), saves it as a text file
+ * named by its MIME type, and marks its verdict entry `kind: "text"`, which is
+ * how this tool lists it under `texts` rather than `artifacts`. See SPEC.md →
+ * Artifact Download Scope for why this is a companion tool and not an option
+ * on `mthds_run_results`.
  */
 
 /**
@@ -78,8 +89,10 @@ export const DOWNLOAD_SCOPE: ArtifactScope = "main_stuff";
  * The result artifacts this tool's results read asks for, and nothing else:
  * `main_stuff`, which it writes as the output file, and the artifact the
  * download walks, which is `DOWNLOAD_SCOPE`. Both are `main_stuff` today, so
- * the read carries the main output alone, never the graph, the I/O artifacts,
- * the working memory or the usage records.
+ * the read carries the main output alone, never the graph, the I/O artifacts
+ * or the usage records. The concept facts that tell a stored text from a
+ * stored file, the working memory and the forms, are read by a second read
+ * only when the output may hold a stored text (`withStoredTextConcepts`).
  */
 export const DOWNLOAD_RESULT_ARTIFACTS: readonly RunResultArtifact[] = [
   ...new Set<RunResultArtifact>(["main_stuff", DOWNLOAD_SCOPE]),
@@ -161,6 +174,32 @@ const savedArtifactSchema = z.object({
     .describe("Present when this file could not be saved: why, as a problem."),
 });
 
+const savedTextSchema = z.object({
+  uri: z.string().describe("The pipelex-storage:// reference of the stored text."),
+  found_at: z
+    .array(z.string())
+    .describe(
+      "Every path in main_stuff.json at which the text's reference sits, $-rooted and in walk order ($.url, $.pages[0].url) — the first one named the file. Bounded — see found_at_omitted.",
+    ),
+  found_at_omitted: z
+    .number()
+    .optional()
+    .describe(
+      "Present when the reference sits at more paths than found_at lists: how many were left out.",
+    ),
+  path: z
+    .string()
+    .optional()
+    .describe(
+      "Where the text was saved, relative to the server's working directory, with the extension of its MIME type — on success.",
+    ),
+  mime_type: z.string().nullable().describe("The text's MIME type, as its reference states it."),
+  size: z.number().optional().describe("Bytes written."),
+  error: problemSchema
+    .optional()
+    .describe("Present when this text could not be saved: why, as a problem."),
+});
+
 const savedOutputSchema = z.object({
   path: z
     .string()
@@ -203,6 +242,12 @@ const artifactsStructuredContentSchema = z.object({
     .describe(
       'The run\'s main output, saved as main_stuff.json — on state "completed", and on any refusal of the file download, since it is written first.',
     ),
+  texts: z
+    .array(savedTextSchema)
+    .optional()
+    .describe(
+      "One entry per stored text of the main output — a large text, HTML or JSON value the run kept in storage, whose reference main_stuff.json carries — saved as a text file; present when the output holds one.",
+    ),
   artifacts: z
     .array(savedArtifactSchema)
     .optional()
@@ -213,13 +258,13 @@ const artifactsStructuredContentSchema = z.object({
     .array(z.string())
     .optional()
     .describe(
-      "Every file that was saved, relative to the server's working directory: main_stuff.json first, then the saved artifacts — present wherever output is.",
+      "Every file that was saved, relative to the server's working directory: main_stuff.json first, then the saved texts, then the saved artifacts — present wherever output is.",
     ),
   all_saved: z
     .boolean()
     .optional()
     .describe(
-      'State "completed" only — true when the output and every referenced file were saved.',
+      'State "completed" only — true when the output, every stored text and every referenced file were saved.',
     ),
   problem: problemSchema
     .optional()
@@ -247,6 +292,18 @@ export interface SavedArtifactEntry {
   error?: Problem;
 }
 
+export interface SavedTextEntry {
+  uri: string;
+  /** Every `$`-rooted path in the main output where the text's reference sits; the first named the file. */
+  found_at: string[];
+  /** How many further paths `found_at` leaves out; absent when it lists them all. */
+  found_at_omitted?: number;
+  path?: string;
+  mime_type: string | null;
+  size?: number;
+  error?: Problem;
+}
+
 /** Where the output file landed, relative to the working directory, and its size. */
 export interface SavedOutput {
   path: string;
@@ -263,6 +320,7 @@ export interface ArtifactsStructuredContent {
   run_error?: Problem;
   scope?: ArtifactScope;
   output?: SavedOutput;
+  texts?: SavedTextEntry[];
   artifacts?: SavedArtifactEntry[];
   saved_paths?: string[];
   all_saved?: boolean;
@@ -404,9 +462,19 @@ export async function downloadMthdsArtifacts(
   // only once there is a completed output to save in it.
   let client: ArtifactClient;
   let state: RunResultState;
+  let conceptsProblem: Problem | undefined;
   try {
     client = artifactClient(context);
-    state = await client.getRunResult(input.run_id, { artifacts: DOWNLOAD_RESULT_ARTIFACTS });
+    // The stored texts stay references, as main_stuff.json records them: the
+    // download saves each one as its own file instead. A concept read that
+    // fails never fails the download: its stored texts are told by shape.
+    ({ state, conceptsProblem } = await withStoredTextConcepts(
+      client,
+      await client.getRunResult(input.run_id, {
+        artifacts: DOWNLOAD_RESULT_ARTIFACTS,
+        loadStoredTexts: false,
+      }),
+    ));
   } catch (err) {
     return errorResult(problemOf(err), context.apiNotes);
   }
@@ -489,10 +557,15 @@ export async function downloadMthdsArtifacts(
     size: written.size,
   };
 
-  if (collectArtifacts(mainStuff).length === 0) {
-    return withMarkNote(completedResult(runId, DOWNLOAD_SCOPE, output, [], target.root), marked);
-  }
-
+  // The SDK saves the stored files and the stored texts in one download, told
+  // apart by the concept at each position, which it reads from the results
+  // handed over, the concept facts among them when the output may hold a
+  // stored text. Its walk is the only one: an output holding neither is saved
+  // whole already, and the SDK answers it an empty verdict without a request.
+  // Without the concepts, the SDK saves every reference as a file; one shaped
+  // like a stored text's is then listed as the stored text it is, its bytes
+  // the same either way, and the summary says how it was told.
+  const byShape = storedTextsByShape(mainStuff, mainStuffNode(state.result));
   let verdict: DownloadArtifactsResult;
   try {
     verdict = await client.downloadArtifacts({
@@ -505,18 +578,21 @@ export async function downloadMthdsArtifacts(
     });
   } catch (err) {
     return withMarkNote(
-      refusedResult(problemOf(err), err, output, target.root, dir, context.apiNotes),
+      refusedResult(problemOf(err), err, output, target.root, dir, byShape, context.apiNotes),
       marked,
     );
   }
 
+  const { texts, artifacts } = projectVerdict(verdict.artifacts, target.root, dir, byShape);
   return withMarkNote(
     completedResult(
       runId,
       verdict.scope,
       output,
-      verdict.artifacts.map((item) => projectItem(item, target.root, dir)),
+      texts.length === 0 ? undefined : texts,
+      artifacts,
       target.root,
+      byShape.size === 0 ? undefined : conceptsUnreadNote(conceptsProblem),
     ),
     marked,
   );
@@ -702,25 +778,38 @@ function refusedResult(
   output: SavedOutput,
   root: string,
   dir: string,
+  byShape: ReadonlyMap<string, StoredTextShape>,
   notes: ApiNotes | undefined,
 ): ArtifactsResult {
-  const refused =
+  const { texts, artifacts: refused } =
     err instanceof ArtifactAuthenticationError
-      ? err.verdict.artifacts.map((item) => projectItem(item, root, dir))
-      : [];
+      ? projectVerdict(err.verdict.artifacts, root, dir, byShape)
+      : { texts: [], artifacts: [] };
   const savedArtifacts = refused.flatMap((item) => (item.path === undefined ? [] : [item.path]));
-  const savedPaths = [output.path, ...savedArtifacts];
+  const savedTexts = texts.flatMap((item) => (item.path === undefined ? [] : [item.path]));
+  const savedPaths = [output.path, ...savedTexts, ...savedArtifacts];
 
+  const besides = [
+    savedTexts.length === 0 ? undefined : `${savedTexts.length} stored text(s)`,
+    savedArtifacts.length === 0 ? undefined : `${savedArtifacts.length} file(s)`,
+  ].filter((part): part is string => part !== undefined);
   const saved =
-    savedArtifacts.length === 0
+    besides.length === 0
       ? `Before the failure, the run's main output was saved as \`${output.path}\`.`
-      : `Before the failure, the run's main output and ${savedArtifacts.length} file(s) were saved under \`${root}\`:\n${savedPaths.map((entry) => `- \`${entry}\``).join("\n")}`;
+      : `Before the failure, the run's main output and ${besides.join(" and ")} were saved under \`${root}\`:\n${savedPaths.map((entry) => `- \`${entry}\``).join("\n")}`;
+  // Once anything beside the output landed, the verdict so far rides whole,
+  // texts and files alike, the failed entries with the saved ones, so a
+  // consumer learns which did not land. Before anything landed, every entry
+  // would be an `aborted` error inviting a retry the refusal itself rules
+  // out, so only the output rides.
+  const landed = besides.length > 0;
   return {
     structuredContent: {
       status: "error",
       problem,
       output,
-      ...(savedArtifacts.length === 0 ? {} : { artifacts: refused }),
+      ...(landed && texts.length > 0 ? { texts } : {}),
+      ...(landed && refused.length > 0 ? { artifacts: refused } : {}),
       saved_paths: savedPaths,
     },
     summary: `${problemSummary(problem, notes)}\n\n${saved}`,
@@ -728,6 +817,57 @@ function refusedResult(
 }
 
 // ── the verdict's items ─────────────────────────────────────────────
+
+/**
+ * The SDK's verdict entries, told apart by their `kind`: each stored text as a
+ * `texts` entry, its MIME type the one its reference states, and each stored
+ * file as an `artifacts` entry, both in discovery order. `byShape` holds the
+ * references taken for stored texts by their shape when the concepts were
+ * unavailable (`storedTextsByShape`): the SDK saved those as files, and they
+ * are listed as the texts they are, with the MIME type their reference states.
+ */
+function projectVerdict(
+  items: readonly DownloadedArtifact[],
+  root: string,
+  dir: string,
+  byShape: ReadonlyMap<string, StoredTextShape>,
+): { texts: SavedTextEntry[]; artifacts: SavedArtifactEntry[] } {
+  const texts: SavedTextEntry[] = [];
+  const artifacts: SavedArtifactEntry[] = [];
+  for (const item of items) {
+    const shape = byShape.get(item.uri);
+    if (item.kind === "text" || shape !== undefined) {
+      texts.push(projectText(item, root, dir, shape?.mime_type ?? item.content_type));
+    } else {
+      artifacts.push(projectItem(item, root, dir));
+    }
+  }
+  return { texts, artifacts };
+}
+
+/** One stored text's verdict entry, with its path made relative and its error read as a problem. */
+function projectText(
+  item: DownloadedArtifact,
+  root: string,
+  dir: string,
+  mimeType: string | null,
+): SavedTextEntry {
+  if (item.error === null) {
+    return {
+      uri: item.uri,
+      ...boundFoundAt(item.found_at),
+      path: path.relative(root, item.path),
+      mime_type: mimeType,
+      size: item.size,
+    };
+  }
+  return {
+    uri: item.uri,
+    ...boundFoundAt(item.found_at),
+    mime_type: mimeType,
+    error: itemProblem(item.error, item.uri, dir),
+  };
+}
 
 /** One SDK verdict entry, with its path made relative and its error read as a problem. */
 function projectItem(item: DownloadedArtifact, root: string, dir: string): SavedArtifactEntry {
@@ -854,10 +994,15 @@ function completedResult(
   runId: string,
   scope: ArtifactScope,
   output: SavedOutput,
+  texts: SavedTextEntry[] | undefined,
   artifacts: SavedArtifactEntry[],
   root: string,
+  shapeNote?: string,
 ): ArtifactsResult {
   const savedArtifacts = artifacts
+    .map((item) => item.path)
+    .filter((item): item is string => item !== undefined);
+  const savedTexts = (texts ?? [])
     .map((item) => item.path)
     .filter((item): item is string => item !== undefined);
 
@@ -868,11 +1013,13 @@ function completedResult(
       state: "completed",
       scope,
       output,
+      ...(texts === undefined ? {} : { texts }),
       artifacts,
-      saved_paths: [output.path, ...savedArtifacts],
-      all_saved: savedArtifacts.length === artifacts.length,
+      saved_paths: [output.path, ...savedTexts, ...savedArtifacts],
+      all_saved:
+        savedArtifacts.length === artifacts.length && savedTexts.length === (texts ?? []).length,
     },
-    summary: completedSummary(runId, output, artifacts, savedArtifacts.length, root),
+    summary: completedSummary(runId, output, texts ?? [], artifacts, root, shapeNote),
   };
 }
 
@@ -883,15 +1030,18 @@ function completedResult(
 function completedSummary(
   runId: string,
   output: SavedOutput,
+  texts: SavedTextEntry[],
   artifacts: SavedArtifactEntry[],
-  saved: number,
   root: string,
+  shapeNote: string | undefined,
 ): string {
   const outputLine = `- \`${output.path}\` (the main output, ${formatBytes(output.size)})`;
   const readIt =
-    "It holds the output exactly as the API returned it: read it from the file rather than retyping it.";
+    texts.length === 0
+      ? "It holds the output exactly as the API returned it: read it from the file rather than retyping it."
+      : "It holds the output exactly as the API returned it, each stored text as its reference: read the texts from their own files, and never retype any of them.";
 
-  if (artifacts.length === 0) {
+  if (artifacts.length === 0 && texts.length === 0) {
     return [
       "# Run saved",
       `Saved the main output of run \`${runId}\` under \`${root}\`. It references no stored files (no \`pipelex-storage://\` reference), so that is the whole run.`,
@@ -900,12 +1050,42 @@ function completedSummary(
     ].join("\n\n");
   }
 
+  const savedTexts = texts.filter((item) => item.path !== undefined).length;
+  const savedFiles = artifacts.filter((item) => item.path !== undefined).length;
+  const counted = (saved: number, total: number, noun: string): string =>
+    saved === total ? `${saved} ${noun}` : `${saved} of ${total} ${noun}`;
+  const contents = [
+    texts.length === 0 ? undefined : counted(savedTexts, texts.length, "stored text(s)"),
+    artifacts.length === 0 ? undefined : counted(savedFiles, artifacts.length, "file(s)"),
+  ].filter((part): part is string => part !== undefined);
+  const contentsPhrase =
+    contents.length === 1
+      ? `its main output and ${contents[0]}`
+      : `its main output, ${contents.join(" and ")}`;
+  const allSaved = savedTexts === texts.length && savedFiles === artifacts.length;
+
   const parts = ["# Run saved"];
   parts.push(
-    saved === artifacts.length
-      ? `Saved run \`${runId}\` under \`${root}\`: its main output and ${saved} file(s). Existing files are never overwritten — a name collision gets a numeric suffix.`
-      : `Saved run \`${runId}\` under \`${root}\`: its main output and ${saved} of ${artifacts.length} file(s). The saved ones are listed with their paths; the failures follow.`,
+    allSaved
+      ? `Saved run \`${runId}\` under \`${root}\`: ${contentsPhrase}. Existing files are never overwritten — a name collision gets a numeric suffix.`
+      : `Saved run \`${runId}\` under \`${root}\`: ${contentsPhrase}. The saved ones are listed with their paths; the failures follow.`,
   );
+  if (shapeNote !== undefined) parts.push(shapeNote);
+
+  const textLines = texts.map((item) => {
+    if (item.path !== undefined) {
+      const detail = [
+        "stored text",
+        item.mime_type,
+        item.size === undefined ? undefined : formatBytes(item.size),
+      ]
+        .filter((part): part is string => part !== undefined && part !== null)
+        .join(", ");
+      return `- \`${item.path}\` (${detail}) ← ${fieldOf(item)}`;
+    }
+    const failure = item.error === undefined ? "unknown failure" : problemLine(item.error);
+    return `- ${fieldOf(item)} (stored text \`${item.uri}\`) — failed: ${failure}`;
+  });
 
   const lines = artifacts.map((item) => {
     if (item.path !== undefined) {
@@ -917,7 +1097,7 @@ function completedSummary(
     const failure = item.error === undefined ? "unknown failure" : problemLine(item.error);
     return `- ${fieldOf(item)} (\`${item.uri}\`) — failed: ${failure}`;
   });
-  parts.push([outputLine, ...lines].join("\n"));
+  parts.push([outputLine, ...textLines, ...lines].join("\n"));
   parts.push(readIt);
 
   return parts.join("\n\n");
@@ -928,17 +1108,11 @@ function completedSummary(
  * the one its name came from, and a count of any others — the output can
  * repeat one reference, and the file on disk is one copy either way.
  */
-function fieldOf(item: SavedArtifactEntry): string {
+function fieldOf(item: Pick<SavedArtifactEntry, "uri" | "found_at" | "found_at_omitted">): string {
   const [first, ...others] = item.found_at;
   if (first === undefined) return `\`${item.uri}\``;
   const more = others.length + (item.found_at_omitted ?? 0);
   return more === 0 ? `\`${first}\`` : `\`${first}\` (and ${more} more)`;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function errorResult(problem: Problem, notes: ApiNotes | undefined): ArtifactsResult {

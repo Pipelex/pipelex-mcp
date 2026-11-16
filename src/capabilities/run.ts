@@ -1,4 +1,10 @@
-import { buildProblem, collectArtifacts, isTerminalRunStatus, summarizeUsage } from "@pipelex/sdk";
+import {
+  buildProblem,
+  isTerminalRunStatus,
+  locateStoredReferences,
+  mainStuffNode,
+  summarizeUsage,
+} from "@pipelex/sdk";
 import type {
   GetRunResultOptions,
   MethodProvenance,
@@ -12,6 +18,7 @@ import type {
   RunResults,
   RunResultState,
   RunStatus,
+  StoredTextLocation,
   TokensUsageRecord,
   UsageSummary,
   UsageSummaryState,
@@ -39,6 +46,8 @@ import {
   createPipelexApiClient,
   faultsProblem,
   filesSentSchema,
+  formatBytes,
+  conceptsUnreadNote,
   imageCandidatesOf,
   inputsPathSchema,
   methodDirInputSchema,
@@ -52,6 +61,8 @@ import {
   validateMethodSelectorRequest,
   validateRunIdRequest,
   withFilesSent,
+  storedTextsByShape,
+  withStoredTextConcepts,
   failedBeforeSending,
   markUnsent,
   withTooLargeNote,
@@ -317,6 +328,30 @@ export const mthdsRunResultsOutputSchema = z.object({
     .describe(
       `State "completed" only, and only when something was left out — how many image candidates past the listed ones this result does not enumerate. They are still on the run: ${WORKSHOP_TOOL_NAMES.showImages} walks the full set.`,
     ),
+  stored_texts: z
+    .array(
+      z.object({
+        field: z
+          .string()
+          .optional()
+          .describe(
+            "The $-rooted path of the text's url in the output, its first occurrence; absent when no path was recorded.",
+          ),
+        uri: z.string().describe("The pipelex-storage:// reference of the stored text."),
+        size: z.number().nullable().describe("Its length in bytes."),
+        mime_type: z.string().nullable().describe("Its MIME type."),
+      }),
+    )
+    .optional()
+    .describe(
+      `State "completed" only, and only when the output holds one — each large text, HTML or JSON value the run stored and main_stuff carries as its reference (url, size, mime_type, preview) instead of its value. Never loaded here: ${WORKSHOP_TOOL_NAMES.downloadArtifacts} saves each as a text file. Bounded — see stored_texts_omitted.`,
+    ),
+  stored_texts_omitted: z
+    .number()
+    .optional()
+    .describe(
+      'State "completed" only, and only when something was left out — how many stored texts past the listed ones this result does not enumerate.',
+    ),
   usage: runUsageSchema
     .optional()
     .describe(
@@ -426,11 +461,36 @@ export interface RunResultsStructuredContent {
   truncated?: boolean;
   image_candidates?: string[];
   image_candidates_omitted?: number;
+  stored_texts?: StoredTextEntry[];
+  stored_texts_omitted?: number;
   usage?: RunUsage;
   available_view_specs: ResultsViewSpec[];
   /** Status "error" only: why the results could not be read. */
   problem?: Problem;
 }
+
+/** One stored text of a completed output, as `stored_texts` lists it. */
+export interface StoredTextEntry {
+  /**
+   * The `$`-rooted path of the text's `url` in the output, its first
+   * occurrence; absent when the walk recorded no path, never another kind of value.
+   */
+  field?: string;
+  uri: string;
+  size: number | null;
+  mime_type: string | null;
+}
+
+/**
+ * How many stored texts a completed result lists, the rest counted in
+ * `stored_texts_omitted`: the walk reads the full output, so an unbounded list
+ * would be model-facing content outside the `MAIN_STUFF_CAP` discipline, as
+ * the image candidates are bounded for the same reason.
+ */
+export const MAX_STORED_TEXT_ENTRIES = 32;
+
+/** How many stored texts the summary names one by one. */
+const MAX_STORED_TEXT_LINES = 8;
 
 export interface RunStartResult {
   structuredContent: RunStartStructuredContent;
@@ -869,12 +929,16 @@ function reassuresDegradedRead(
  * A failed arm is projected with `failedRead`, the status read that follows it
  * (see {@link readFailedRun}), when the caller made one.
  */
-export function resultsResult(state: RunResultState, failedRead?: RunRead): RunResultsResult {
+export function resultsResult(
+  state: RunResultState,
+  failedRead?: RunRead,
+  conceptsProblem?: Problem,
+): RunResultsResult {
   switch (state.state) {
     case "running":
       return runningResult(state.pipeline_run_id, state.retry_after_seconds);
     case "completed":
-      return completedResult(state.pipeline_run_id, state.result);
+      return completedResult(state.pipeline_run_id, state.result, conceptsProblem);
     case "failed":
       return failedResult(state, failedRead);
   }
@@ -894,7 +958,16 @@ function runningResult(runId: string, retryAfterSeconds: number | null): RunResu
   };
 }
 
-function completedResult(runId: string, result: RunResults): RunResultsResult {
+/**
+ * A completed result. `conceptsProblem` is the problem of a concept read that
+ * failed (`withStoredTextConcepts`), named in the summary when the stored
+ * texts had to be told by shape.
+ */
+function completedResult(
+  runId: string,
+  result: RunResults,
+  conceptsProblem?: Problem,
+): RunResultsResult {
   // The SDK guarantees a non-null main_stuff on a completed run (it throws
   // MissingMainStuffError otherwise); reaching here without one is a contract
   // violation the caller surfaces as a runtime no-verdict. A falsy-but-present
@@ -906,12 +979,33 @@ function completedResult(runId: string, result: RunResults): RunResultsResult {
   const { value: bounded, truncated } = boundMainStuff(result.main_stuff);
   const usage = summarizeUsage(result);
 
-  // Both walks read the FULL output, not the bounded copy: a reference pruned
+  // Every walk reads the FULL output, not the bounded copy: a reference pruned
   // out of the model-facing copy is still a file the workshop can save and a
-  // picture mthds_show_images can fetch. Both are in-memory, so a completed
-  // result pays no network call for either.
-  const stored = collectArtifacts(result.main_stuff);
+  // picture mthds_show_images can fetch. All are in-memory, so a completed
+  // result pays no network call for any. A stored text is told from a stored
+  // file by the concept the output names at its position, which the SDK reads
+  // from the run's working memory and forms (`mainStuffNode`), and it is
+  // shown as the reference the output already carries, never loaded: the read
+  // asked for it with `loadStoredTexts: false`. Without that node, because
+  // the concept read failed or the results name no concept, a reference shaped
+  // like a stored text's is taken for one (`storedTextsByShape`), and the
+  // summary says so. The image candidates are read from the output alone,
+  // exactly as mthds_show_images reads them, so an index means the same thing
+  // in both tools whatever the concept read did, and a stored text is never a
+  // candidate, whatever its key.
+  const node = mainStuffNode(result);
+  const located = locateStoredReferences(result.main_stuff, node);
+  const byShape = storedTextsByShape(result.main_stuff, node);
+  const stored = located.files.filter((file) => !byShape.has(file.uri));
+  const texts: ListedStoredText[] = [
+    ...located.texts,
+    ...located.files.flatMap((file) => {
+      const shape = byShape.get(file.uri);
+      return shape === undefined ? [] : [{ uri: file.uri, found_at: file.found_at, ...shape }];
+    }),
+  ];
   const candidates = imageCandidatesOf(result.main_stuff);
+  const listedTexts = texts.slice(0, MAX_STORED_TEXT_ENTRIES);
   const listedCandidates = candidates.slice(0, MAX_IMAGE_CANDIDATE_ENTRIES);
 
   const structuredContent: RunResultsStructuredContent = {
@@ -922,7 +1016,9 @@ function completedResult(runId: string, result: RunResults): RunResultsResult {
     truncated,
     // Absent — not empty — when the output references no stored file at all,
     // so a consumer can tell "nothing was produced" from "nothing looked like
-    // an image", and a run with no files costs no field.
+    // an image", and a run with no files costs no field. A stored text is no
+    // stored file and never a candidate, so an output holding only stored
+    // texts has no member, and the candidates never outnumber the files.
     //
     // Bounded, and bare references rather than `{ uri, key }` pairs. The walk
     // deliberately reads the FULL output, so an unbounded projection of it was
@@ -939,6 +1035,15 @@ function completedResult(runId: string, result: RunResults): RunResultsResult {
             ? {}
             : { image_candidates_omitted: candidates.length - listedCandidates.length }),
         }),
+    // Absent when the output holds no stored text, like the candidates above.
+    ...(texts.length === 0
+      ? {}
+      : {
+          stored_texts: listedTexts.map(storedTextEntry),
+          ...(texts.length === listedTexts.length
+            ? {}
+            : { stored_texts_omitted: texts.length - listedTexts.length }),
+        }),
     usage: projectRunUsage(usage),
     available_view_specs: [],
   };
@@ -947,7 +1052,15 @@ function completedResult(runId: string, result: RunResults): RunResultsResult {
     structuredContent,
     // Usage is deliberately kept OUT of the prose summary — the run-level totals
     // ride structuredContent.usage; the per-pipe rollup rides _meta only.
-    summary: completedSummary(runId, bounded, truncated, stored.length, candidates.length),
+    summary: completedSummary(
+      runId,
+      bounded,
+      truncated,
+      stored.length,
+      candidates.length,
+      texts,
+      byShape.size === 0 ? undefined : conceptsUnreadNote(conceptsProblem),
+    ),
     mainStuff: result.main_stuff,
     // Both ride `_meta` like mainStuff: the full per-call list, and the
     // per-pipe rollup for a future detailed-cost surface. Kept off the
@@ -972,6 +1085,8 @@ function completedSummary(
   truncated: boolean,
   storedFiles: number,
   imageCandidates: number,
+  texts: readonly ListedStoredText[],
+  shapeNote: string | undefined,
 ): string {
   const fence =
     typeof bounded === "string"
@@ -982,12 +1097,53 @@ function completedSummary(
   if (truncated) {
     parts.push(TRUNCATION_NOTE);
   }
+  if (shapeNote !== undefined) parts.push(shapeNote);
+  const textsNote = storedTextsNote(texts);
+  if (textsNote !== undefined) parts.push(textsNote);
   const stored = [
     storedFilesNote(storedFiles, imageCandidates),
-    saveNote(storedFiles, truncated),
+    saveNote(storedFiles, texts.length, truncated),
   ].filter((sentence): sentence is string => sentence !== undefined);
   if (stored.length > 0) parts.push(stored.join(" "));
   return parts.join("\n\n");
+}
+
+/**
+ * A stored text of the output as this tool lists it: by concept, the SDK's
+ * `StoredTextLocation`, or by the shape of its reference.
+ */
+export type ListedStoredText = Pick<StoredTextLocation, "uri" | "found_at" | "size" | "mime_type">;
+
+/** One stored text as `stored_texts` lists it, its `field` the first path of its `url`, absent when there is none. */
+export function storedTextEntry(text: ListedStoredText): StoredTextEntry {
+  const field = text.found_at[0];
+  return {
+    ...(field === undefined ? {} : { field }),
+    uri: text.uri,
+    size: text.size,
+    mime_type: text.mime_type,
+  };
+}
+
+/**
+ * The output's stored texts: how many, that each is shown as its reference
+ * with its size and preview and was not loaded, and the first few by field.
+ * The preview itself is in the output shown above, where the reference sits,
+ * so it is not repeated. Nothing is said when the output holds none.
+ */
+function storedTextsNote(texts: readonly ListedStoredText[]): string | undefined {
+  if (texts.length === 0) return undefined;
+  const lines = texts.slice(0, MAX_STORED_TEXT_LINES).map((text) => {
+    const detail = [text.mime_type, text.size === null ? undefined : formatBytes(text.size)]
+      .filter((part): part is string => part !== undefined && part !== null)
+      .join(", ");
+    return `- \`${text.found_at[0] ?? text.uri}\`${detail === "" ? "" : ` (${detail})`}`;
+  });
+  if (texts.length > lines.length) lines.push(`- and ${texts.length - lines.length} more`);
+  return [
+    `The output holds ${texts.length} stored text(s): a text, HTML or JSON value too large to travel inline is kept in the run's storage, and the output shows its reference, its \`size\` in bytes and a \`preview\` of its start in place of its value. They were not loaded into this result:`,
+    lines.join("\n"),
+  ].join("\n");
 }
 
 /**
@@ -1032,9 +1188,19 @@ function storedFilesNote(storedFiles: number, imageCandidates: number): string |
  * the download tool retypes the output. A truncated result's own sentence
  * already names the tool, so without files there is nothing left to add.
  */
-function saveNote(storedFiles: number, truncated: boolean): string | undefined {
+function saveNote(
+  storedFiles: number,
+  storedTexts: number,
+  truncated: boolean,
+): string | undefined {
+  const texts = storedTexts > 0 ? " and each stored text as a text file" : "";
   if (storedFiles > 0) {
-    return "To keep this run, call `mthds_download_artifacts` with this run id: it saves the output verbatim as `main_stuff.json` and the full files beside it, under `runs/<run_id>/` — the presigned `public_url` links in the output expire within the hour, where that tool resolves a fresh one every time.";
+    return `To keep this run, call \`mthds_download_artifacts\` with this run id: it saves the output verbatim as \`main_stuff.json\`, the full files${texts} beside it, under \`runs/<run_id>/\` — the presigned \`public_url\` links in the output expire within the hour, where that tool resolves a fresh one every time.`;
+  }
+  // A stored text is read in full only from disk, so the sentence is said
+  // even beside the truncation note, which speaks of main_stuff.json alone.
+  if (storedTexts > 0) {
+    return "To read a stored text in full, or to keep this run, call `mthds_download_artifacts` with this run id: it saves the output verbatim as `main_stuff.json` and each stored text as a text file beside it, under `runs/<run_id>/`. Never retype the output into a file yourself.";
   }
   if (truncated) return undefined;
   return "To keep this output on disk, call `mthds_download_artifacts` with this run id: it writes it verbatim as `main_stuff.json` under `runs/<run_id>/`. Never retype it into a file yourself.";
@@ -1311,8 +1477,11 @@ export async function getMthdsRunStatus(
  * The result artifacts a `run_results` read asks for — exactly what
  * `completedResult` projects, so the platform reads and re-signs nothing the
  * tool drops: the main output and the usage records (which bring
- * `usage_assembly_error`). The graph, its data artifacts and the working
- * memory are never read.
+ * `usage_assembly_error`). The concept facts that tell a stored text from a
+ * stored file, the working memory and the forms, are read by a second read
+ * only when the output may hold a stored text (`withStoredTextConcepts`): the
+ * working memory carries every intermediate result of the run. The graph and
+ * its contracts are never read.
  */
 export const RUN_RESULTS_ARTIFACTS: readonly RunResultArtifact[] = ["main_stuff", "tokens_usages"];
 
@@ -1327,10 +1496,20 @@ export async function getMthdsRunResults(
   }
 
   let state: RunResultState;
+  let conceptsProblem: Problem | undefined;
   try {
-    state = await runClient(context).getRunResult(input.run_id, {
-      artifacts: RUN_RESULTS_ARTIFACTS,
-    });
+    // The stored texts stay references: the SDK would load each one into the
+    // output by default, putting back into a model's context what the runtime
+    // kept out of it. A concept read that fails never fails the call: the
+    // output is in hand, and its stored texts are told by shape.
+    const client = runClient(context);
+    ({ state, conceptsProblem } = await withStoredTextConcepts(
+      client,
+      await client.getRunResult(input.run_id, {
+        artifacts: RUN_RESULTS_ARTIFACTS,
+        loadStoredTexts: false,
+      }),
+    ));
   } catch (err) {
     return resultsErrorResult(problemOf(err), context);
   }
@@ -1344,7 +1523,7 @@ export async function getMthdsRunResults(
   // cannot read, `client.response_unreadable` of the 200 it came on, naming
   // the run.
   try {
-    return resultsResult(state, failedRead);
+    return resultsResult(state, failedRead, conceptsProblem);
   } catch (err) {
     return resultsErrorResult(
       buildProblem(
