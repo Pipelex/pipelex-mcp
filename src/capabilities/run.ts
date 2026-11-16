@@ -1,4 +1,4 @@
-import { buildProblem, collectArtifacts, isTerminalRunStatus, summarizeUsage } from "@pipelex/sdk";
+import { buildProblem, isTerminalRunStatus, summarizeUsage } from "@pipelex/sdk";
 import type {
   GetRunResultOptions,
   MethodProvenance,
@@ -39,6 +39,7 @@ import {
   createPipelexApiClient,
   faultsProblem,
   filesSentSchema,
+  formatBytes,
   imageCandidatesOf,
   inputsPathSchema,
   methodDirInputSchema,
@@ -73,6 +74,8 @@ import {
   runProgressSchema,
 } from "./run-progress.js";
 import type { RunProgressProjection } from "./run-progress.js";
+import { storedFilesOf, storedTextsOf } from "./stored-texts.js";
+import type { StoredText } from "./stored-texts.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 
 /**
@@ -317,6 +320,25 @@ export const mthdsRunResultsOutputSchema = z.object({
     .describe(
       `State "completed" only, and only when something was left out — how many image candidates past the listed ones this result does not enumerate. They are still on the run: ${WORKSHOP_TOOL_NAMES.showImages} walks the full set.`,
     ),
+  stored_texts: z
+    .array(
+      z.object({
+        field: z.string().describe("The $-rooted path of the text's url in the output."),
+        uri: z.string().describe("The pipelex-storage:// reference of the stored text."),
+        size: z.number().nullable().describe("Its length in bytes."),
+        mime_type: z.string().nullable().describe("Its MIME type."),
+      }),
+    )
+    .optional()
+    .describe(
+      `State "completed" only, and only when the output holds one — each large text, HTML or JSON value the run stored and main_stuff carries as its reference (url, size, mime_type, preview) instead of its value. Never loaded here: ${WORKSHOP_TOOL_NAMES.downloadArtifacts} saves each as a text file. Bounded — see stored_texts_omitted.`,
+    ),
+  stored_texts_omitted: z
+    .number()
+    .optional()
+    .describe(
+      'State "completed" only, and only when something was left out — how many stored texts past the listed ones this result does not enumerate.',
+    ),
   usage: runUsageSchema
     .optional()
     .describe(
@@ -426,11 +448,33 @@ export interface RunResultsStructuredContent {
   truncated?: boolean;
   image_candidates?: string[];
   image_candidates_omitted?: number;
+  stored_texts?: StoredTextEntry[];
+  stored_texts_omitted?: number;
   usage?: RunUsage;
   available_view_specs: ResultsViewSpec[];
   /** Status "error" only: why the results could not be read. */
   problem?: Problem;
 }
+
+/** One stored text of a completed output, as `stored_texts` lists it. */
+export interface StoredTextEntry {
+  /** The `$`-rooted path of the text's `url` in the output, its first occurrence. */
+  field: string;
+  uri: string;
+  size: number | null;
+  mime_type: string | null;
+}
+
+/**
+ * How many stored texts a completed result lists, the rest counted in
+ * `stored_texts_omitted`: the walk reads the full output, so an unbounded list
+ * would be model-facing content outside the `MAIN_STUFF_CAP` discipline, as
+ * the image candidates are bounded for the same reason.
+ */
+export const MAX_STORED_TEXT_ENTRIES = 32;
+
+/** How many stored texts the summary names one by one. */
+const MAX_STORED_TEXT_LINES = 8;
 
 export interface RunStartResult {
   structuredContent: RunStartStructuredContent;
@@ -906,12 +950,19 @@ function completedResult(runId: string, result: RunResults): RunResultsResult {
   const { value: bounded, truncated } = boundMainStuff(result.main_stuff);
   const usage = summarizeUsage(result);
 
-  // Both walks read the FULL output, not the bounded copy: a reference pruned
+  // Every walk reads the FULL output, not the bounded copy: a reference pruned
   // out of the model-facing copy is still a file the workshop can save and a
-  // picture mthds_show_images can fetch. Both are in-memory, so a completed
-  // result pays no network call for either.
-  const stored = collectArtifacts(result.main_stuff);
+  // picture mthds_show_images can fetch. All are in-memory, so a completed
+  // result pays no network call for any. A stored text is told from a stored
+  // file by the concept the output names at its position (`stored-texts.ts`),
+  // and it is shown as the reference the output already carries, never loaded.
+  // The image candidates stay a walk of the whole output, the one
+  // mthds_show_images makes, so an index means the same thing in both tools;
+  // a stored text's key carries a text extension, which the prefilter skips.
+  const texts = storedTextsOf(result);
+  const stored = storedFilesOf(result.main_stuff, texts);
   const candidates = imageCandidatesOf(result.main_stuff);
+  const listedTexts = texts.slice(0, MAX_STORED_TEXT_ENTRIES);
   const listedCandidates = candidates.slice(0, MAX_IMAGE_CANDIDATE_ENTRIES);
 
   const structuredContent: RunResultsStructuredContent = {
@@ -939,6 +990,15 @@ function completedResult(runId: string, result: RunResults): RunResultsResult {
             ? {}
             : { image_candidates_omitted: candidates.length - listedCandidates.length }),
         }),
+    // Absent when the output holds no stored text, like the candidates above.
+    ...(texts.length === 0
+      ? {}
+      : {
+          stored_texts: listedTexts.map(storedTextEntry),
+          ...(texts.length === listedTexts.length
+            ? {}
+            : { stored_texts_omitted: texts.length - listedTexts.length }),
+        }),
     usage: projectRunUsage(usage),
     available_view_specs: [],
   };
@@ -947,7 +1007,7 @@ function completedResult(runId: string, result: RunResults): RunResultsResult {
     structuredContent,
     // Usage is deliberately kept OUT of the prose summary — the run-level totals
     // ride structuredContent.usage; the per-pipe rollup rides _meta only.
-    summary: completedSummary(runId, bounded, truncated, stored.length, candidates.length),
+    summary: completedSummary(runId, bounded, truncated, stored.length, candidates.length, texts),
     mainStuff: result.main_stuff,
     // Both ride `_meta` like mainStuff: the full per-call list, and the
     // per-pipe rollup for a future detailed-cost surface. Kept off the
@@ -972,6 +1032,7 @@ function completedSummary(
   truncated: boolean,
   storedFiles: number,
   imageCandidates: number,
+  texts: readonly StoredText[],
 ): string {
   const fence =
     typeof bounded === "string"
@@ -982,12 +1043,45 @@ function completedSummary(
   if (truncated) {
     parts.push(TRUNCATION_NOTE);
   }
+  const textsNote = storedTextsNote(texts);
+  if (textsNote !== undefined) parts.push(textsNote);
   const stored = [
     storedFilesNote(storedFiles, imageCandidates),
-    saveNote(storedFiles, truncated),
+    saveNote(storedFiles, texts.length, truncated),
   ].filter((sentence): sentence is string => sentence !== undefined);
   if (stored.length > 0) parts.push(stored.join(" "));
   return parts.join("\n\n");
+}
+
+/** One stored text as `stored_texts` lists it. */
+function storedTextEntry(text: StoredText): StoredTextEntry {
+  return {
+    field: text.found_at[0] ?? "$",
+    uri: text.uri,
+    size: text.size,
+    mime_type: text.mime_type,
+  };
+}
+
+/**
+ * The output's stored texts: how many, that each is shown as its reference
+ * with its size and preview and was not loaded, and the first few by field.
+ * The preview itself is in the output shown above, where the reference sits,
+ * so it is not repeated. Nothing is said when the output holds none.
+ */
+function storedTextsNote(texts: readonly StoredText[]): string | undefined {
+  if (texts.length === 0) return undefined;
+  const lines = texts.slice(0, MAX_STORED_TEXT_LINES).map((text) => {
+    const detail = [text.mime_type, text.size === null ? undefined : formatBytes(text.size)]
+      .filter((part): part is string => part !== undefined && part !== null)
+      .join(", ");
+    return `- \`${text.found_at[0] ?? "$"}\`${detail === "" ? "" : ` (${detail})`}`;
+  });
+  if (texts.length > lines.length) lines.push(`- and ${texts.length - lines.length} more`);
+  return [
+    `The output holds ${texts.length} stored text(s): a text, HTML or JSON value too large to travel inline is kept in the run's storage, and the output shows its reference, its \`size\` in bytes and a \`preview\` of its start in place of its value. They were not loaded into this result:`,
+    lines.join("\n"),
+  ].join("\n");
 }
 
 /**
@@ -1032,9 +1126,19 @@ function storedFilesNote(storedFiles: number, imageCandidates: number): string |
  * the download tool retypes the output. A truncated result's own sentence
  * already names the tool, so without files there is nothing left to add.
  */
-function saveNote(storedFiles: number, truncated: boolean): string | undefined {
+function saveNote(
+  storedFiles: number,
+  storedTexts: number,
+  truncated: boolean,
+): string | undefined {
+  const texts = storedTexts > 0 ? " and each stored text as a text file" : "";
   if (storedFiles > 0) {
-    return "To keep this run, call `mthds_download_artifacts` with this run id: it saves the output verbatim as `main_stuff.json` and the full files beside it, under `runs/<run_id>/` — the presigned `public_url` links in the output expire within the hour, where that tool resolves a fresh one every time.";
+    return `To keep this run, call \`mthds_download_artifacts\` with this run id: it saves the output verbatim as \`main_stuff.json\`, the full files${texts} beside it, under \`runs/<run_id>/\` — the presigned \`public_url\` links in the output expire within the hour, where that tool resolves a fresh one every time.`;
+  }
+  // A stored text is read in full only from disk, so the sentence is said
+  // even beside the truncation note, which speaks of main_stuff.json alone.
+  if (storedTexts > 0) {
+    return "To read a stored text in full, or to keep this run, call `mthds_download_artifacts` with this run id: it saves the output verbatim as `main_stuff.json` and each stored text as a text file beside it, under `runs/<run_id>/`. Never retype the output into a file yourself.";
   }
   if (truncated) return undefined;
   return "To keep this output on disk, call `mthds_download_artifacts` with this run id: it writes it verbatim as `main_stuff.json` under `runs/<run_id>/`. Never retype it into a file yourself.";
@@ -1310,11 +1414,18 @@ export async function getMthdsRunStatus(
 /**
  * The result artifacts a `run_results` read asks for — exactly what
  * `completedResult` projects, so the platform reads and re-signs nothing the
- * tool drops: the main output and the usage records (which bring
- * `usage_assembly_error`). The graph, its data artifacts and the working
- * memory are never read.
+ * tool drops: the main output, the usage records (which bring
+ * `usage_assembly_error`), and the two facts that tell a stored text from a
+ * stored file by concept, the working memory (the main output's concept) and
+ * the output-form descriptors (its structure). The graph, the contracts and the
+ * input forms are never read.
  */
-export const RUN_RESULTS_ARTIFACTS: readonly RunResultArtifact[] = ["main_stuff", "tokens_usages"];
+export const RUN_RESULTS_ARTIFACTS: readonly RunResultArtifact[] = [
+  "main_stuff",
+  "tokens_usages",
+  "working_memory",
+  "output_form",
+];
 
 /** One-shot result lookup — `GET /v1/runs/{id}/results`. */
 export async function getMthdsRunResults(

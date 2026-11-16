@@ -4,8 +4,10 @@ import path from "node:path";
 
 import {
   ArtifactAuthenticationError,
+  ArtifactFetchError,
   DEFAULT_ARTIFACT_MAX_BYTES,
   DEFAULT_DOWNLOAD_MAX_TOTAL_BYTES,
+  artifactFilename,
   buildProblem,
   collectArtifacts,
 } from "@pipelex/sdk";
@@ -15,6 +17,7 @@ import type {
   DownloadArtifactsRequest,
   DownloadArtifactsResult,
   DownloadedArtifact,
+  FetchArtifactOptions,
   GetRunResultOptions,
   Problem,
   RunRead,
@@ -35,6 +38,7 @@ import {
   createPipelexApiClient,
   faultsProblem,
   fetchItemProblem,
+  formatBytes,
   problemLine,
   problemOf,
   problemSchema,
@@ -43,6 +47,8 @@ import {
   validateRunIdRequest,
 } from "./shared.js";
 import type { ApiConfig, ApiNotes } from "./shared.js";
+import { storedTextsOf, withoutStoredTexts } from "./stored-texts.js";
+import type { StoredText } from "./stored-texts.js";
 import { errorMessage, resolveSaveDir } from "./workspace-boundary.js";
 
 /**
@@ -61,10 +67,16 @@ import { errorMessage, resolveSaveDir } from "./workspace-boundary.js";
  * capability owns only what is the workshop's: the tool envelope, the output
  * file, the `dir` default and its containment against the working directory,
  * the deployment gate, the plain-http policy, the download limits, the
- * problem each failure reports, and the prose summary. The output file is the one
- * thing it writes itself, under the same never-overwrite rule the SDK applies
- * to the files beside it. See SPEC.md → Artifact Download Scope for why this is
- * a companion tool and not an option on `mthds_run_results`.
+ * problem each failure reports, and the prose summary. It writes two kinds of
+ * file itself, under the same never-overwrite rule the SDK applies to the files
+ * beside them: the output file, and each stored text of the output, a large
+ * text, HTML or JSON value the run kept in storage, which the SDK's file walk
+ * cannot tell from a file (`stored-texts.ts` tells them apart by concept). A
+ * stored text is fetched through the SDK's own bounded `fetchArtifact`, with a
+ * fresh link, and saved under the name the SDK's `artifactFilename` gives its
+ * field, with the extension of its MIME type. See SPEC.md → Artifact Download
+ * Scope for why this is a companion tool and not an option on
+ * `mthds_run_results`.
  */
 
 /**
@@ -76,13 +88,15 @@ export const DOWNLOAD_SCOPE: ArtifactScope = "main_stuff";
 
 /**
  * The result artifacts this tool's results read asks for, and nothing else:
- * `main_stuff`, which it writes as the output file, and the artifact the
- * download walks, which is `DOWNLOAD_SCOPE`. Both are `main_stuff` today, so
- * the read carries the main output alone, never the graph, the I/O artifacts,
- * the working memory or the usage records.
+ * `main_stuff`, which it writes as the output file, the artifact the download
+ * walks, which is `DOWNLOAD_SCOPE` (`main_stuff` too), and the two facts that
+ * tell a stored text from a stored file by concept: the working memory, which
+ * names the main output's concept, and the output-form descriptors, which state
+ * its structure. The graph, the contracts, the input forms and the usage
+ * records are never read.
  */
 export const DOWNLOAD_RESULT_ARTIFACTS: readonly RunResultArtifact[] = [
-  ...new Set<RunResultArtifact>(["main_stuff", DOWNLOAD_SCOPE]),
+  ...new Set<RunResultArtifact>(["main_stuff", DOWNLOAD_SCOPE, "working_memory", "output_form"]),
 ];
 
 /**
@@ -161,6 +175,32 @@ const savedArtifactSchema = z.object({
     .describe("Present when this file could not be saved: why, as a problem."),
 });
 
+const savedTextSchema = z.object({
+  uri: z.string().describe("The pipelex-storage:// reference of the stored text."),
+  found_at: z
+    .array(z.string())
+    .describe(
+      "Every path in main_stuff.json at which the text's reference sits, $-rooted and in walk order ($.url, $.pages[0].url) — the first one named the file. Bounded — see found_at_omitted.",
+    ),
+  found_at_omitted: z
+    .number()
+    .optional()
+    .describe(
+      "Present when the reference sits at more paths than found_at lists: how many were left out.",
+    ),
+  path: z
+    .string()
+    .optional()
+    .describe(
+      "Where the text was saved, relative to the server's working directory, with the extension of its MIME type — on success.",
+    ),
+  mime_type: z.string().nullable().describe("The text's MIME type, as its reference states it."),
+  size: z.number().optional().describe("Bytes written."),
+  error: problemSchema
+    .optional()
+    .describe("Present when this text could not be saved: why, as a problem."),
+});
+
 const savedOutputSchema = z.object({
   path: z
     .string()
@@ -203,6 +243,12 @@ const artifactsStructuredContentSchema = z.object({
     .describe(
       'The run\'s main output, saved as main_stuff.json — on state "completed", and on any refusal of the file download, since it is written first.',
     ),
+  texts: z
+    .array(savedTextSchema)
+    .optional()
+    .describe(
+      "One entry per stored text of the main output — a large text, HTML or JSON value the run kept in storage, whose reference main_stuff.json carries — saved as a text file; present when the output holds one.",
+    ),
   artifacts: z
     .array(savedArtifactSchema)
     .optional()
@@ -213,13 +259,13 @@ const artifactsStructuredContentSchema = z.object({
     .array(z.string())
     .optional()
     .describe(
-      "Every file that was saved, relative to the server's working directory: main_stuff.json first, then the saved artifacts — present wherever output is.",
+      "Every file that was saved, relative to the server's working directory: main_stuff.json first, then the saved texts, then the saved artifacts — present wherever output is.",
     ),
   all_saved: z
     .boolean()
     .optional()
     .describe(
-      'State "completed" only — true when the output and every referenced file were saved.',
+      'State "completed" only — true when the output, every stored text and every referenced file were saved.',
     ),
   problem: problemSchema
     .optional()
@@ -247,6 +293,18 @@ export interface SavedArtifactEntry {
   error?: Problem;
 }
 
+export interface SavedTextEntry {
+  uri: string;
+  /** Every `$`-rooted path in the main output where the text's reference sits; the first named the file. */
+  found_at: string[];
+  /** How many further paths `found_at` leaves out; absent when it lists them all. */
+  found_at_omitted?: number;
+  path?: string;
+  mime_type: string | null;
+  size?: number;
+  error?: Problem;
+}
+
 /** Where the output file landed, relative to the working directory, and its size. */
 export interface SavedOutput {
   path: string;
@@ -263,6 +321,7 @@ export interface ArtifactsStructuredContent {
   run_error?: Problem;
   scope?: ArtifactScope;
   output?: SavedOutput;
+  texts?: SavedTextEntry[];
   artifacts?: SavedArtifactEntry[];
   saved_paths?: string[];
   all_saved?: boolean;
@@ -281,6 +340,8 @@ export interface ArtifactClient {
   /** Read once after a failed results arm, for when the run ended and its problem (`readFailedRun`). */
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   downloadArtifacts(request: DownloadArtifactsRequest): Promise<DownloadArtifactsResult>;
+  /** One stored text's bytes: the SDK's bounded fetch through a fresh link. */
+  fetchArtifact(uri: string, options?: FetchArtifactOptions): Promise<Response>;
 }
 
 export interface ArtifactsContext extends ApiConfig {
@@ -489,23 +550,56 @@ export async function downloadMthdsArtifacts(
     size: written.size,
   };
 
-  if (collectArtifacts(mainStuff).length === 0) {
-    return withMarkNote(completedResult(runId, DOWNLOAD_SCOPE, output, [], target.root), marked);
+  // Stored texts are saved first, by this tool, and the SDK walks an output
+  // from which their references were taken out, so it downloads the files
+  // alone and each keeps the path it has in the full output.
+  const allowHttp = allowsPlainHttp(context);
+  const storedTexts = storedTextsOf(state.result);
+  const saving = await saveStoredTexts(
+    client,
+    storedTexts,
+    target.dir,
+    target.root,
+    dir,
+    allowHttp,
+  );
+  if (saving.refusal !== undefined) {
+    return withMarkNote(
+      refusedResult(
+        problemOf(saving.refusal),
+        undefined,
+        output,
+        target.root,
+        dir,
+        context.apiNotes,
+        saving.texts,
+      ),
+      marked,
+    );
+  }
+  const texts = storedTexts.length === 0 ? undefined : saving.texts;
+
+  const filesOnly = withoutStoredTexts(mainStuff, storedTexts);
+  if (collectArtifacts(filesOnly).length === 0) {
+    return withMarkNote(
+      completedResult(runId, DOWNLOAD_SCOPE, output, texts, [], target.root),
+      marked,
+    );
   }
 
   let verdict: DownloadArtifactsResult;
   try {
     verdict = await client.downloadArtifacts({
-      results: state.result,
+      results: storedTexts.length === 0 ? state.result : { ...state.result, main_stuff: filesOnly },
       dir: target.dir,
       scope: DOWNLOAD_SCOPE,
-      allowHttp: allowsPlainHttp(context),
+      allowHttp,
       maxBytes: DOWNLOAD_MAX_FILE_BYTES,
-      maxTotalBytes: DOWNLOAD_MAX_TOTAL_BYTES,
+      maxTotalBytes: DOWNLOAD_MAX_TOTAL_BYTES - saving.bytes,
     });
   } catch (err) {
     return withMarkNote(
-      refusedResult(problemOf(err), err, output, target.root, dir, context.apiNotes),
+      refusedResult(problemOf(err), err, output, target.root, dir, context.apiNotes, texts),
       marked,
     );
   }
@@ -515,11 +609,114 @@ export async function downloadMthdsArtifacts(
       runId,
       verdict.scope,
       output,
+      texts,
       verdict.artifacts.map((item) => projectItem(item, target.root, dir)),
       target.root,
     ),
     marked,
   );
+}
+
+// ── stored texts ────────────────────────────────────────────────────
+
+/** What saving the stored texts left: one entry per text, the bytes written, and a refusal that stops the call. */
+interface StoredTextsSaving {
+  texts: SavedTextEntry[];
+  bytes: number;
+  /** A failure about the call rather than one text: a refused credential, a resolve route that refused the request, an unreachable API. */
+  refusal?: unknown;
+}
+
+/**
+ * The extension each storable MIME type is saved under. The SDK's
+ * `artifactFilename` supplies the same table for a content type, which is the
+ * one it is asked with; this list says which types it is trusted for.
+ */
+const TEXT_MIME_TYPES = new Set(["text/plain", "text/markdown", "text/html", "application/json"]);
+
+/** A reference with no extension, so the content type alone decides a name's extension. */
+const EXTENSIONLESS_REFERENCE = "pipelex-storage://stored-text";
+
+/**
+ * The bare filename a stored text is saved under: named after the field it
+ * fills, its first path, exactly as the SDK names a file (`artifactFilename`),
+ * with the extension of its MIME type rather than of its storage key, since a
+ * text a caller sent as a URL keeps whatever key it was sent with. A MIME type
+ * outside the four the runtime writes falls back to the key's extension, and a
+ * key with none to `.txt`.
+ */
+export function storedTextFilename(
+  text: Pick<StoredText, "uri" | "found_at" | "mime_type">,
+): string {
+  const found_at = text.found_at.slice(0, 1);
+  const mimeType = text.mime_type?.split(";")[0]?.trim().toLowerCase();
+  if (mimeType !== undefined && TEXT_MIME_TYPES.has(mimeType)) {
+    return artifactFilename({ uri: EXTENSIONLESS_REFERENCE, found_at }, mimeType, DOWNLOAD_SCOPE);
+  }
+  const named = artifactFilename({ uri: text.uri, found_at }, null, DOWNLOAD_SCOPE);
+  return path.extname(named) === "" ? `${named}.txt` : named;
+}
+
+/**
+ * Fetch and save each stored text, one at a time, under the never-overwrite
+ * rule. A text that cannot be fetched or written is that text's error, and the
+ * rest still save. A failure that is not about one text, such as a refused
+ * credential or an unreachable API, stops the walk and is handed back as the
+ * call's refusal, with the texts saved before it, as the SDK hands back the
+ * files saved before a refused credential.
+ */
+async function saveStoredTexts(
+  client: ArtifactClient,
+  texts: readonly StoredText[],
+  dir: string,
+  root: string,
+  requestedDir: string,
+  allowHttp: boolean,
+): Promise<StoredTextsSaving> {
+  const saved: SavedTextEntry[] = [];
+  let bytes = 0;
+  for (const text of texts) {
+    const entry = { uri: text.uri, ...boundFoundAt(text.found_at), mime_type: text.mime_type };
+    let response: Response;
+    try {
+      response = await client.fetchArtifact(text.uri, {
+        maxBytes: DOWNLOAD_MAX_FILE_BYTES,
+        allowHttp,
+      });
+    } catch (err) {
+      if (err instanceof ArtifactFetchError) {
+        saved.push({ ...entry, error: problemOf(err) });
+        continue;
+      }
+      // Not about this text: the resolve route refused the request, or the
+      // API is unreachable. Nothing after it can succeed either.
+      return { texts: saved.filter((item) => item.path !== undefined), bytes, refusal: err };
+    }
+    let body: Buffer;
+    try {
+      // The SDK enforces the byte cap per chunk too, so a body past it, or a
+      // connection lost mid-body, errors here: about this text alone.
+      body = Buffer.from(await response.arrayBuffer());
+    } catch (err) {
+      saved.push({ ...entry, error: problemOf(err) });
+      continue;
+    }
+    const written = await writeUniqueFile(dir, storedTextFilename(text), body);
+    if (!written.ok) {
+      saved.push({
+        ...entry,
+        error: writeFailedProblem(
+          path.join(requestedDir, written.name),
+          systemReason(written.error),
+          `Could not write ${written.name} in ${requestedDir}: ${errorMessage(written.error)}`,
+        ),
+      });
+      continue;
+    }
+    bytes += written.size;
+    saved.push({ ...entry, path: path.relative(root, written.path), size: written.size });
+  }
+  return { texts: saved, bytes };
 }
 
 // ── the generated-directory mark ────────────────────────────────────
@@ -640,17 +837,52 @@ async function writeOutputFile(
   requestedDir: string,
 ): Promise<OutputWrite> {
   const bytes = Buffer.from(`${JSON.stringify(mainStuff, null, 2)}\n`, "utf8");
-  const ext = path.extname(OUTPUT_FILENAME);
-  const stem = path.basename(OUTPUT_FILENAME, ext);
+  const written = await writeUniqueFile(dir, OUTPUT_FILENAME, bytes);
+  if (written.ok) return written;
+  if (written.error === undefined) {
+    return {
+      ok: false,
+      problem: writeFailedProblem(
+        path.join(requestedDir, OUTPUT_FILENAME),
+        "no_free_name",
+        `Could not write ${OUTPUT_FILENAME} in ${requestedDir}: no free name for it after ${MAX_OUTPUT_NAME_ATTEMPTS} attempts.`,
+      ),
+    };
+  }
+  return {
+    ok: false,
+    problem: writeFailedProblem(
+      path.join(requestedDir, written.name),
+      systemReason(written.error),
+      `Could not write ${OUTPUT_FILENAME} in ${requestedDir}: ${errorMessage(written.error)}`,
+    ),
+  };
+}
+
+type UniqueWrite =
+  | { ok: true; path: string; size: number }
+  /** `name` is the candidate that failed; `error` is absent when every name was taken. */
+  | { ok: false; name: string; error?: unknown };
+
+/**
+ * Write `bytes` into `dir` under `filename`, never overwriting: the file is
+ * created exclusively (`wx`) and a taken name gets a numeric suffix before its
+ * extension (`name-1.ext`), as the SDK treats the files it saves. A write that
+ * fails removes the file it created. Never throws.
+ */
+async function writeUniqueFile(dir: string, filename: string, bytes: Buffer): Promise<UniqueWrite> {
+  const ext = path.extname(filename);
+  const stem = path.basename(filename, ext);
 
   for (let attempt = 0; attempt < MAX_OUTPUT_NAME_ATTEMPTS; attempt += 1) {
-    const candidate = path.join(dir, attempt === 0 ? OUTPUT_FILENAME : `${stem}-${attempt}${ext}`);
+    const name = attempt === 0 ? filename : `${stem}-${attempt}${ext}`;
+    const candidate = path.join(dir, name);
     let handle: FileHandle;
     try {
       handle = await fs.open(candidate, "wx");
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
-      return { ok: false, problem: outputWriteError(requestedDir, candidate, err) };
+      return { ok: false, name, error: err };
     }
     try {
       await handle.writeFile(bytes);
@@ -659,27 +891,11 @@ async function writeOutputFile(
     } catch (err) {
       await handle.close().catch(() => undefined);
       await fs.unlink(candidate).catch(() => undefined);
-      return { ok: false, problem: outputWriteError(requestedDir, candidate, err) };
+      return { ok: false, name, error: err };
     }
   }
 
-  return {
-    ok: false,
-    problem: writeFailedProblem(
-      path.join(requestedDir, OUTPUT_FILENAME),
-      "no_free_name",
-      `Could not write ${OUTPUT_FILENAME} in ${requestedDir}: no free name for it after ${MAX_OUTPUT_NAME_ATTEMPTS} attempts.`,
-    ),
-  };
-}
-
-/** The output file at `candidate` could not be written: the problem names it under `dir`, the caller's own. */
-function outputWriteError(dir: string, candidate: string, err: unknown): Problem {
-  return writeFailedProblem(
-    path.join(dir, path.basename(candidate)),
-    systemReason(err),
-    `Could not write ${OUTPUT_FILENAME} in ${dir}: ${errorMessage(err)}`,
-  );
+  return { ok: false, name: filename };
 }
 
 /**
@@ -703,23 +919,32 @@ function refusedResult(
   root: string,
   dir: string,
   notes: ApiNotes | undefined,
+  texts: readonly SavedTextEntry[] = [],
 ): ArtifactsResult {
   const refused =
     err instanceof ArtifactAuthenticationError
       ? err.verdict.artifacts.map((item) => projectItem(item, root, dir))
       : [];
   const savedArtifacts = refused.flatMap((item) => (item.path === undefined ? [] : [item.path]));
-  const savedPaths = [output.path, ...savedArtifacts];
+  const savedTexts = texts.flatMap((item) => (item.path === undefined ? [] : [item.path]));
+  const savedPaths = [output.path, ...savedTexts, ...savedArtifacts];
 
+  const besides = [
+    savedTexts.length === 0 ? undefined : `${savedTexts.length} stored text(s)`,
+    savedArtifacts.length === 0 ? undefined : `${savedArtifacts.length} file(s)`,
+  ].filter((part): part is string => part !== undefined);
   const saved =
-    savedArtifacts.length === 0
+    besides.length === 0
       ? `Before the failure, the run's main output was saved as \`${output.path}\`.`
-      : `Before the failure, the run's main output and ${savedArtifacts.length} file(s) were saved under \`${root}\`:\n${savedPaths.map((entry) => `- \`${entry}\``).join("\n")}`;
+      : `Before the failure, the run's main output and ${besides.join(" and ")} were saved under \`${root}\`:\n${savedPaths.map((entry) => `- \`${entry}\``).join("\n")}`;
   return {
     structuredContent: {
       status: "error",
       problem,
       output,
+      ...(savedTexts.length === 0
+        ? {}
+        : { texts: texts.filter((item) => item.path !== undefined) }),
       ...(savedArtifacts.length === 0 ? {} : { artifacts: refused }),
       saved_paths: savedPaths,
     },
@@ -854,10 +1079,14 @@ function completedResult(
   runId: string,
   scope: ArtifactScope,
   output: SavedOutput,
+  texts: SavedTextEntry[] | undefined,
   artifacts: SavedArtifactEntry[],
   root: string,
 ): ArtifactsResult {
   const savedArtifacts = artifacts
+    .map((item) => item.path)
+    .filter((item): item is string => item !== undefined);
+  const savedTexts = (texts ?? [])
     .map((item) => item.path)
     .filter((item): item is string => item !== undefined);
 
@@ -868,11 +1097,13 @@ function completedResult(
       state: "completed",
       scope,
       output,
+      ...(texts === undefined ? {} : { texts }),
       artifacts,
-      saved_paths: [output.path, ...savedArtifacts],
-      all_saved: savedArtifacts.length === artifacts.length,
+      saved_paths: [output.path, ...savedTexts, ...savedArtifacts],
+      all_saved:
+        savedArtifacts.length === artifacts.length && savedTexts.length === (texts ?? []).length,
     },
-    summary: completedSummary(runId, output, artifacts, savedArtifacts.length, root),
+    summary: completedSummary(runId, output, texts ?? [], artifacts, root),
   };
 }
 
@@ -883,15 +1114,17 @@ function completedResult(
 function completedSummary(
   runId: string,
   output: SavedOutput,
+  texts: SavedTextEntry[],
   artifacts: SavedArtifactEntry[],
-  saved: number,
   root: string,
 ): string {
   const outputLine = `- \`${output.path}\` (the main output, ${formatBytes(output.size)})`;
   const readIt =
-    "It holds the output exactly as the API returned it: read it from the file rather than retyping it.";
+    texts.length === 0
+      ? "It holds the output exactly as the API returned it: read it from the file rather than retyping it."
+      : "It holds the output exactly as the API returned it, each stored text as its reference: read the texts from their own files, and never retype any of them.";
 
-  if (artifacts.length === 0) {
+  if (artifacts.length === 0 && texts.length === 0) {
     return [
       "# Run saved",
       `Saved the main output of run \`${runId}\` under \`${root}\`. It references no stored files (no \`pipelex-storage://\` reference), so that is the whole run.`,
@@ -900,12 +1133,41 @@ function completedSummary(
     ].join("\n\n");
   }
 
+  const savedTexts = texts.filter((item) => item.path !== undefined).length;
+  const savedFiles = artifacts.filter((item) => item.path !== undefined).length;
+  const counted = (saved: number, total: number, noun: string): string =>
+    saved === total ? `${saved} ${noun}` : `${saved} of ${total} ${noun}`;
+  const contents = [
+    texts.length === 0 ? undefined : counted(savedTexts, texts.length, "stored text(s)"),
+    artifacts.length === 0 ? undefined : counted(savedFiles, artifacts.length, "file(s)"),
+  ].filter((part): part is string => part !== undefined);
+  const contentsPhrase =
+    contents.length === 1
+      ? `its main output and ${contents[0]}`
+      : `its main output, ${contents.join(" and ")}`;
+  const allSaved = savedTexts === texts.length && savedFiles === artifacts.length;
+
   const parts = ["# Run saved"];
   parts.push(
-    saved === artifacts.length
-      ? `Saved run \`${runId}\` under \`${root}\`: its main output and ${saved} file(s). Existing files are never overwritten — a name collision gets a numeric suffix.`
-      : `Saved run \`${runId}\` under \`${root}\`: its main output and ${saved} of ${artifacts.length} file(s). The saved ones are listed with their paths; the failures follow.`,
+    allSaved
+      ? `Saved run \`${runId}\` under \`${root}\`: ${contentsPhrase}. Existing files are never overwritten — a name collision gets a numeric suffix.`
+      : `Saved run \`${runId}\` under \`${root}\`: ${contentsPhrase}. The saved ones are listed with their paths; the failures follow.`,
   );
+
+  const textLines = texts.map((item) => {
+    if (item.path !== undefined) {
+      const detail = [
+        "stored text",
+        item.mime_type,
+        item.size === undefined ? undefined : formatBytes(item.size),
+      ]
+        .filter((part): part is string => part !== undefined && part !== null)
+        .join(", ");
+      return `- \`${item.path}\` (${detail}) ← ${fieldOf(item)}`;
+    }
+    const failure = item.error === undefined ? "unknown failure" : problemLine(item.error);
+    return `- ${fieldOf(item)} (stored text \`${item.uri}\`) — failed: ${failure}`;
+  });
 
   const lines = artifacts.map((item) => {
     if (item.path !== undefined) {
@@ -917,7 +1179,7 @@ function completedSummary(
     const failure = item.error === undefined ? "unknown failure" : problemLine(item.error);
     return `- ${fieldOf(item)} (\`${item.uri}\`) — failed: ${failure}`;
   });
-  parts.push([outputLine, ...lines].join("\n"));
+  parts.push([outputLine, ...textLines, ...lines].join("\n"));
   parts.push(readIt);
 
   return parts.join("\n\n");
@@ -928,17 +1190,11 @@ function completedSummary(
  * the one its name came from, and a count of any others — the output can
  * repeat one reference, and the file on disk is one copy either way.
  */
-function fieldOf(item: SavedArtifactEntry): string {
+function fieldOf(item: Pick<SavedArtifactEntry, "uri" | "found_at" | "found_at_omitted">): string {
   const [first, ...others] = item.found_at;
   if (first === undefined) return `\`${item.uri}\``;
   const more = others.length + (item.found_at_omitted ?? 0);
   return more === 0 ? `\`${first}\`` : `\`${first}\` (and ${more} more)`;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function errorResult(problem: Problem, notes: ApiNotes | undefined): ArtifactsResult {

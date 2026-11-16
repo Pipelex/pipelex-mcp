@@ -39,6 +39,7 @@ import {
   getMthdsRunResults,
   getMthdsRunStatus,
   MAIN_STUFF_CAP,
+  MAX_STORED_TEXT_ENTRIES,
   mthdsRunOutputSchema,
   mthdsRunResultsOutputSchema,
   mthdsRunStatusOutputSchema,
@@ -58,6 +59,15 @@ import {
   validateRunRequest,
 } from "./run.js";
 import type { FailedRunState, RunContext } from "./run.js";
+import {
+  PICTURE_URI,
+  REPORT_TEXT_URI,
+  STORED_PAGE,
+  STORED_REPORT,
+  dossierResults,
+  storedReportResults,
+  workingMemoryFor,
+} from "./stored-text-fixtures.js";
 import { localMethodFileResolver } from "../files.js";
 import {
   OPERATOR_VIEW_LLM_COMPLETION_PROBLEM,
@@ -828,6 +838,110 @@ describe("resultsResult", () => {
     expect(outputOnly).toContain("main_stuff.json");
     expect(outputOnly).toContain("Never retype it");
     expect(outputOnly).not.toContain("stored file(s)");
+  });
+
+  it("shows a stored text as its reference, size and preview, and counts no file for it", () => {
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: storedReportResults(),
+    });
+
+    // Never loaded: the output is the reference exactly as the API returned it.
+    expect(result.structuredContent.main_stuff).toEqual(STORED_REPORT);
+    expect(result.structuredContent.stored_texts).toEqual([
+      { field: "$.url", uri: REPORT_TEXT_URI, size: 48213, mime_type: "text/markdown" },
+    ]);
+    expect(result.structuredContent).not.toHaveProperty("stored_texts_omitted");
+    // A stored text is no stored file, so the file inventory says nothing.
+    expect(result.structuredContent).not.toHaveProperty("image_candidates");
+    expect(result.summary).not.toContain("stored file(s)");
+
+    expect(result.summary).toContain("1 stored text(s)");
+    expect(result.summary).toContain("`$.url` (text/markdown, 47.1 KiB)");
+    expect(result.summary).toContain(STORED_REPORT.preview.split("\n")[0]);
+    expect(result.summary).toContain("not loaded");
+    expect(result.summary).toContain("mthds_download_artifacts");
+    expect(result.summary).toContain("text file");
+  });
+
+  it("counts only the stored files of an output that holds stored texts too", () => {
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: dossierResults(),
+    });
+
+    expect(result.structuredContent.stored_texts?.map((text) => text.field)).toEqual([
+      "$.report.url",
+      "$.pages[0].url",
+    ]);
+    expect(result.structuredContent.image_candidates).toEqual([PICTURE_URI]);
+    expect(result.summary).toContain("2 stored file(s)");
+    expect(result.summary).toContain("2 stored text(s)");
+    expect(result.summary).toContain("each stored text as a text file");
+  });
+
+  it("names the download tool for a stored text even when the output was truncated", () => {
+    const base = storedReportResults();
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        ...base,
+        main_stuff: { filler: "x".repeat(MAIN_STUFF_CAP * 2) },
+        working_memory: workingMemoryFor("dossier.Dossier", {}),
+      },
+    });
+    expect(result.structuredContent.truncated).toBe(true);
+    expect(result.structuredContent).not.toHaveProperty("stored_texts");
+
+    const pages = { items: [STORED_PAGE, { text: "x".repeat(MAIN_STUFF_CAP * 2) }] };
+    const truncated = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        ...base,
+        main_stuff: pages,
+        working_memory: workingMemoryFor("native.Text", pages),
+      },
+    });
+    expect(truncated.structuredContent.truncated).toBe(true);
+    expect(truncated.structuredContent.stored_texts).toHaveLength(1);
+    expect(truncated.summary).toContain("each stored text as a text file");
+  });
+
+  it("bounds the stored-text inventory and counts what it left out", () => {
+    const pages = {
+      items: Array.from({ length: MAX_STORED_TEXT_ENTRIES + 4 }, (_unused, index) => ({
+        ...STORED_PAGE,
+        url: `pipelex-storage://org/runs/01JRUN/generated/${index}/value.txt`,
+      })),
+    };
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: pages,
+        working_memory: workingMemoryFor("native.Text", pages),
+      },
+    });
+
+    expect(result.structuredContent.stored_texts).toHaveLength(MAX_STORED_TEXT_ENTRIES);
+    expect(result.structuredContent.stored_texts_omitted).toBe(4);
+    expect(result.summary).toContain(`${MAX_STORED_TEXT_ENTRIES + 4} stored text(s)`);
+  });
+
+  it("reads every reference as a file when the results carry no concept facts", () => {
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: { pipeline_run_id: RUN_ID, main_stuff: STORED_REPORT },
+    });
+
+    expect(result.structuredContent).not.toHaveProperty("stored_texts");
+    expect(result.summary).toContain("1 stored file(s)");
   });
 
   it("lists the image candidates, for free, from the FULL output", () => {
@@ -2665,23 +2779,25 @@ describe("getMthdsRunResults artifact selection", () => {
     };
   }
 
-  it("asks for the output and the usage alone", async () => {
+  it("asks for the output, the usage and the facts that tell a stored text from a file, alone", async () => {
     const selections: (readonly RunResultArtifact[] | undefined)[] = [];
     const context = contextWith({ getRunResult: narrowedRead(selections) });
 
     const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
 
-    expect(selections).toEqual([["main_stuff", "tokens_usages"]]);
+    expect(selections).toEqual([["main_stuff", "tokens_usages", "working_memory", "output_form"]]);
     expect(toolResult.structuredContent.main_stuff).toEqual({ answer: 42 });
     expect(toolResult.structuredContent.usage?.calls).toBe(1);
     expect(toolResult._meta.tokens_usages).toEqual(TOKENS_USAGES);
   });
 
-  it("names only artifacts the SDK knows, and never the working memory", () => {
+  it("names only artifacts the SDK knows, and never the graph or its contracts", () => {
     const artifacts = RUN_RESULTS_ARTIFACTS;
     expect(artifacts.length).toBeGreaterThan(0);
     expect(artifacts).toContain("main_stuff");
-    expect(artifacts).not.toContain("working_memory");
+    expect(artifacts).not.toContain("graph_spec");
+    expect(artifacts).not.toContain("pipe_io_contracts");
+    expect(artifacts).not.toContain("input_form");
   });
 });
 

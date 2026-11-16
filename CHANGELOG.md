@@ -2,6 +2,17 @@
 
 This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the Pipelex plugin runs.
 
+## [Unreleased]
+
+### Added
+
+- **Stored texts in `mthds_run_results`**: a large `Text`, `Markdown`, `Html` or `JSON` value the run kept in storage, which the output carries as its reference (`url`, `size`, `mime_type`, `preview`), is shown as that reference and never loaded into the result; the new `stored_texts` member lists each one by the path of its `url`, with its size and MIME type, the summary names them, and they are no longer counted as stored files.
+- **Stored texts in `mthds_download_artifacts`**: each stored text of the output is fetched through a fresh link and saved beside `main_stuff.json` as a text file named after its field, with the extension of its MIME type (`.txt`, `.md`, `.html` or `.json`), and listed in the new `texts` member, apart from the files in `artifacts`.
+
+### Changed
+
+- **Results reads ask for the working memory and the output form**: `mthds_run_results` and `mthds_download_artifacts` now read the run's `working_memory` and `output_form` beside `main_stuff`, to tell a stored text from a stored file by the concept the output names at each position; a run whose results carry neither reports every reference as a stored file, as before.
+
 ## [0.28.0] - 2026-11-01
 
 ### Added

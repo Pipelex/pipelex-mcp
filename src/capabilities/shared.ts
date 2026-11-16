@@ -2181,3 +2181,10 @@ export function imageCandidatesOf(mainStuff: unknown): ImageCandidate[] {
     .map((uri) => ({ uri, key: storageKeyOf(uri) }))
     .filter((candidate) => looksLikeImageKey(candidate.key));
 }
+
+/** A byte count as a person reads it: bytes below a KiB, then KiB, then MiB, to one decimal. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}

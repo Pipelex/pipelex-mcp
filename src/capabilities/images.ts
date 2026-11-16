@@ -24,6 +24,7 @@ import {
   buildArtifactFetchConfig,
   createPipelexApiClient,
   faultsProblem,
+  formatBytes,
   imageCandidatesOf,
   problemLine,
   problemOf,
@@ -904,12 +905,6 @@ function completedSummary(runId: string, walk: Walk): string {
   }
 
   return parts.join("\n\n");
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function errorResult(problem: Problem, notes: ApiNotes | undefined): ShowImagesResult {
