@@ -1,4 +1,10 @@
-import { buildProblem, isTerminalRunStatus, summarizeUsage } from "@pipelex/sdk";
+import {
+  buildProblem,
+  isTerminalRunStatus,
+  locateStoredReferences,
+  mainStuffNode,
+  summarizeUsage,
+} from "@pipelex/sdk";
 import type {
   GetRunResultOptions,
   MethodProvenance,
@@ -12,6 +18,7 @@ import type {
   RunResults,
   RunResultState,
   RunStatus,
+  StoredTextLocation,
   TokensUsageRecord,
   UsageSummary,
   UsageSummaryState,
@@ -74,8 +81,6 @@ import {
   runProgressSchema,
 } from "./run-progress.js";
 import type { RunProgressProjection } from "./run-progress.js";
-import { storedFilesOf, storedTextsOf } from "./stored-texts.js";
-import type { StoredText } from "./stored-texts.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 
 /**
@@ -954,13 +959,14 @@ function completedResult(runId: string, result: RunResults): RunResultsResult {
   // out of the model-facing copy is still a file the workshop can save and a
   // picture mthds_show_images can fetch. All are in-memory, so a completed
   // result pays no network call for any. A stored text is told from a stored
-  // file by the concept the output names at its position (`stored-texts.ts`),
-  // and it is shown as the reference the output already carries, never loaded.
-  // The image candidates stay a walk of the whole output, the one
-  // mthds_show_images makes, so an index means the same thing in both tools;
-  // a stored text's key carries a text extension, which the prefilter skips.
-  const texts = storedTextsOf(result);
-  const stored = storedFilesOf(result.main_stuff, texts);
+  // file by the concept the output names at its position, which the SDK reads
+  // from the run's working memory and output form (`mainStuffNode`), and it is
+  // shown as the reference the output already carries, never loaded: the read
+  // asked for it with `loadStoredTexts: false`. The image candidates stay a
+  // walk of the whole output, the one mthds_show_images makes, so an index
+  // means the same thing in both tools; a stored text's key carries a text
+  // extension, which the prefilter skips.
+  const { files: stored, texts } = locateStoredReferences(result.main_stuff, mainStuffNode(result));
   const candidates = imageCandidatesOf(result.main_stuff);
   const listedTexts = texts.slice(0, MAX_STORED_TEXT_ENTRIES);
   const listedCandidates = candidates.slice(0, MAX_IMAGE_CANDIDATE_ENTRIES);
@@ -1032,7 +1038,7 @@ function completedSummary(
   truncated: boolean,
   storedFiles: number,
   imageCandidates: number,
-  texts: readonly StoredText[],
+  texts: readonly StoredTextLocation[],
 ): string {
   const fence =
     typeof bounded === "string"
@@ -1054,7 +1060,7 @@ function completedSummary(
 }
 
 /** One stored text as `stored_texts` lists it. */
-function storedTextEntry(text: StoredText): StoredTextEntry {
+function storedTextEntry(text: StoredTextLocation): StoredTextEntry {
   return {
     field: text.found_at[0] ?? "$",
     uri: text.uri,
@@ -1069,7 +1075,7 @@ function storedTextEntry(text: StoredText): StoredTextEntry {
  * The preview itself is in the output shown above, where the reference sits,
  * so it is not repeated. Nothing is said when the output holds none.
  */
-function storedTextsNote(texts: readonly StoredText[]): string | undefined {
+function storedTextsNote(texts: readonly StoredTextLocation[]): string | undefined {
   if (texts.length === 0) return undefined;
   const lines = texts.slice(0, MAX_STORED_TEXT_LINES).map((text) => {
     const detail = [text.mime_type, text.size === null ? undefined : formatBytes(text.size)]
@@ -1439,8 +1445,12 @@ export async function getMthdsRunResults(
 
   let state: RunResultState;
   try {
+    // The stored texts stay references: the SDK would load each one into the
+    // output by default, putting back into a model's context what the runtime
+    // kept out of it.
     state = await runClient(context).getRunResult(input.run_id, {
       artifacts: RUN_RESULTS_ARTIFACTS,
+      loadStoredTexts: false,
     });
   } catch (err) {
     return resultsErrorResult(problemOf(err), context);

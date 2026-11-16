@@ -6,16 +6,15 @@ import {
   ApiResponseError,
   ApiUnreachableError,
   ArtifactAuthenticationError,
-  ArtifactFetchError,
   artifactFilename,
   buildProblem,
-  locateArtifacts,
+  locateStoredReferences,
+  mainStuffNode,
 } from "@pipelex/sdk";
 import type {
   DownloadArtifactsRequest,
   DownloadArtifactsResult,
   DownloadedArtifact,
-  FetchArtifactOptions,
   RunRead,
   RunResultArtifact,
   RunResults,
@@ -40,7 +39,6 @@ import {
 } from "./failed-run-fixtures.js";
 import { DEFAULT_API_URL } from "./shared.js";
 import {
-  DOSSIER,
   PAGE_TEXT_URI,
   PICTURE_URI as DOSSIER_PICTURE_URI,
   DOCUMENT_URI,
@@ -91,26 +89,67 @@ const CONTENT_TYPES: Record<string, string> = {
   [REPORT_URI]: "application/pdf",
 };
 
+/** The stored bytes of each stored text, as the store answers them; any other text is gone. */
+const TEXT_BODIES: Record<string, string> = {
+  [REPORT_TEXT_URI]: "# Quarterly report\n\nThe whole of it, never loaded into a result.\n",
+  [PAGE_TEXT_URI]: "Page one begins here, and goes on.\n",
+};
+
 /**
  * The SDK's `downloadArtifacts`, faked over the SDK's own pure half: the walk
- * is its `locateArtifacts` and each name its `artifactFilename`, so neither
- * `found_at` nor a filename can drift from what the released SDK answers. Only
- * the network is faked — each file is written into the directory the
- * capability handed over, which must really exist, as `resolveSaveDir`
- * guarantees — and the verdict carries absolute paths, as the SDK's does.
+ * is its `locateStoredReferences` guided by `mainStuffNode`, as the download
+ * walks the results it is handed, and each name its `artifactFilename`, so
+ * neither `found_at`, a file's kind nor a filename can drift from what the
+ * released SDK answers. Only the network is faked — each file is written into
+ * the directory the capability handed over, which must really exist, as
+ * `resolveSaveDir` guarantees — and the verdict carries absolute paths, as the
+ * SDK's does. A stored text the store does not hold is the item error the
+ * SDK's fetch gives a 404.
  */
 async function savingDownload(request: DownloadArtifactsRequest): Promise<DownloadArtifactsResult> {
+  const results = request.results;
+  const { files, texts } = locateStoredReferences(
+    results?.main_stuff,
+    results === undefined ? null : mainStuffNode(results),
+  );
   const artifacts: DownloadedArtifact[] = [];
-  for (const location of locateArtifacts(request.results?.main_stuff)) {
+  for (const location of files) {
     const contentType = CONTENT_TYPES[location.uri] ?? null;
     const target = path.join(request.dir, artifactFilename(location, contentType, "main_stuff"));
     await fs.writeFile(target, PNG_BYTES, { flag: "wx" });
     artifacts.push({
       uri: location.uri,
+      kind: "file",
       found_at: location.found_at,
       path: target,
       content_type: contentType,
       size: PNG_BYTES.byteLength,
+      error: null,
+    });
+  }
+  for (const location of texts) {
+    const body = TEXT_BODIES[location.uri];
+    if (body === undefined) {
+      artifacts.push({
+        uri: location.uri,
+        kind: "text",
+        found_at: location.found_at,
+        path: null,
+        content_type: location.mime_type,
+        size: null,
+        error: { code: "not_found", detail: "The stored file is no longer available (HTTP 404)." },
+      });
+      continue;
+    }
+    const target = path.join(request.dir, artifactFilename(location, null, "main_stuff"));
+    await fs.writeFile(target, body, { flag: "wx" });
+    artifacts.push({
+      uri: location.uri,
+      kind: "text",
+      found_at: location.found_at,
+      path: target,
+      content_type: location.mime_type,
+      size: Buffer.byteLength(body),
       error: null,
     });
   }
@@ -147,21 +186,16 @@ function fakeClient(
     request: DownloadArtifactsRequest,
   ) => Promise<DownloadArtifactsResult> = savingDownload,
   statusRead?: RunRead,
-  fetchText: (uri: string, options?: FetchArtifactOptions) => Promise<Response> = () =>
-    Promise.reject(new Error("fetchArtifact must not be called")),
 ) {
   const requests: DownloadArtifactsRequest[] = [];
   const reads: string[] = [];
   const selections: (readonly RunResultArtifact[] | undefined)[] = [];
-  const fetches: { uri: string; options?: FetchArtifactOptions }[] = [];
+  const loads: (boolean | undefined)[] = [];
   const client: ArtifactClient = {
-    fetchArtifact(uri, options) {
-      fetches.push({ uri, ...(options === undefined ? {} : { options }) });
-      return fetchText(uri, options);
-    },
     getRunResult(runId, options) {
       reads.push(runId);
       selections.push(options?.artifacts);
+      loads.push(options?.loadStoredTexts);
       return Promise.resolve(state);
     },
     getRunStatus: statusRead === undefined ? noStatusRead : () => Promise.resolve(statusRead),
@@ -170,26 +204,7 @@ function fakeClient(
       return download(request);
     },
   };
-  return { client, requests, reads, selections, fetches };
-}
-
-/** The stored bytes of each stored text, as the store answers them. */
-const TEXT_BODIES: Record<string, string> = {
-  [REPORT_TEXT_URI]: "# Quarterly report\n\nThe whole of it, never loaded into a result.\n",
-  [PAGE_TEXT_URI]: "Page one begins here, and goes on.\n",
-};
-
-/** A store answering each stored text's bytes, and a 404 for anything else. */
-function storedTextFetch(uri: string): Promise<Response> {
-  const body = TEXT_BODIES[uri];
-  if (body === undefined) {
-    return Promise.reject(
-      new ArtifactFetchError(`The store has no object for ${uri}.`, uri, "not_found", 404),
-    );
-  }
-  return Promise.resolve(
-    new Response(body, { headers: { "content-type": "application/octet-stream" } }),
-  );
+  return { client, requests, reads, selections, loads };
 }
 
 /**
@@ -269,7 +284,6 @@ describe("downloadMthdsArtifacts", () => {
         return Promise.resolve(completedState({}));
       },
       downloadArtifacts: () => Promise.reject(new Error("unreachable")),
-      fetchArtifact: () => Promise.reject(new Error("must not be called")),
     };
 
     const result = await downloadMthdsArtifacts(
@@ -435,7 +449,7 @@ describe("downloadMthdsArtifacts", () => {
         nested: [{ url: PICTURE_URI }, { document: { url: REPORT_URI } }],
       },
     };
-    const { client, requests, selections } = fakeClient({
+    const { client, requests, selections, loads } = fakeClient({
       state: "completed",
       pipeline_run_id: RUN_ID,
       result: results,
@@ -446,8 +460,10 @@ describe("downloadMthdsArtifacts", () => {
     // The one results read asks for the main output, which is both the file
     // written first and the scope the download walks, and the two facts that
     // tell a stored text from a stored file: the graph, the contracts, the
-    // input forms and the usage records are never fetched.
+    // input forms and the usage records are never fetched. Its stored texts
+    // stay references, which the download saves as files of their own.
     expect(selections).toEqual([["main_stuff", "working_memory", "output_form"]]);
+    expect(loads).toEqual([false]);
 
     // The run is read once, here, and handed over: no second read by id, the
     // default scope named, plain http refused against an https API, and the
@@ -504,26 +520,23 @@ describe("downloadMthdsArtifacts", () => {
     expect(result.summary).toContain(await fs.realpath(root));
   });
 
-  it("saves a stored text as a text file, fetched fresh, with the extension of its MIME type", async () => {
+  it("saves a stored text through the SDK's download and lists it under texts, never as a file", async () => {
     const root = await makeTempDir();
-    const { client, requests, fetches } = fakeClient(
-      { state: "completed", pipeline_run_id: RUN_ID, result: storedReportResults() },
-      savingDownload,
-      undefined,
-      storedTextFetch,
-    );
+    const { client, requests } = fakeClient({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: storedReportResults(),
+    });
 
     const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
 
-    // A stored text is no stored file: the SDK's file download is never called.
-    expect(requests).toEqual([]);
-    expect(fetches).toEqual([
-      {
-        uri: REPORT_TEXT_URI,
-        options: { maxBytes: DOWNLOAD_MAX_FILE_BYTES, allowHttp: false },
-      },
-    ]);
+    // The results are handed over as read, with the facts that tell a stored
+    // text from a file by concept, and the SDK saves the text itself.
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.results).toEqual(storedReportResults());
+    expect(requests[0]?.maxTotalBytes).toBe(DOWNLOAD_MAX_TOTAL_BYTES);
     const text = path.join(RUN_DIR, "main_stuff.md");
+    const size = Buffer.byteLength(TEXT_BODIES[REPORT_TEXT_URI]!);
     expect(result.structuredContent).toEqual({
       status: "ok",
       run_id: RUN_ID,
@@ -536,54 +549,41 @@ describe("downloadMthdsArtifacts", () => {
           found_at: ["$.url"],
           path: text,
           mime_type: "text/markdown",
-          size: Buffer.byteLength(TEXT_BODIES[REPORT_TEXT_URI]!),
+          size,
         },
       ],
       artifacts: [],
       saved_paths: [OUTPUT_PATH, text],
       all_saved: true,
     });
-    // The bytes as stored, and main_stuff.json still the output as returned: the reference.
-    expect(await fs.readFile(path.join(root, text), "utf8")).toBe(TEXT_BODIES[REPORT_TEXT_URI]);
+    // main_stuff.json is still the output as returned: the reference.
     expect(await fs.readFile(path.join(root, OUTPUT_PATH), "utf8")).toBe(
       outputBytes(STORED_REPORT),
     );
     expect(result.summary).toContain(
-      `- \`${text}\` (stored text, text/markdown, ${Buffer.byteLength(TEXT_BODIES[REPORT_TEXT_URI]!)} B) ← \`$.url\``,
+      `- \`${text}\` (stored text, text/markdown, ${size} B) ← \`$.url\``,
     );
     expect(result.summary).toContain("1 stored text(s)");
     expect(result.summary).not.toContain("references no stored files");
   });
 
-  it("downloads the files alone through the SDK and the texts beside them, told apart by concept", async () => {
+  it("splits the SDK's verdict into the stored texts and the files, told apart by concept", async () => {
     const root = await makeTempDir();
-    const { client, requests } = fakeClient(
-      { state: "completed", pipeline_run_id: RUN_ID, result: dossierResults() },
-      savingDownload,
-      undefined,
-      storedTextFetch,
-    );
+    const { client, requests } = fakeClient({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: dossierResults(),
+    });
 
     const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
 
-    // The SDK walks an output whose stored texts have lost their reference, so
-    // the text/plain document is still a file and keeps its own path.
     expect(requests).toHaveLength(1);
-    const handed = requests[0]?.results?.main_stuff as typeof DOSSIER;
-    expect(handed.report).not.toHaveProperty("url");
-    expect(handed.pages[0]).not.toHaveProperty("url");
-    expect(handed.notes.url).toBe(DOCUMENT_URI);
-    expect(requests[0]?.maxTotalBytes).toBe(
-      DOWNLOAD_MAX_TOTAL_BYTES -
-        Buffer.byteLength(TEXT_BODIES[REPORT_TEXT_URI]!) -
-        Buffer.byteLength(TEXT_BODIES[PAGE_TEXT_URI]!),
-    );
-
     const { texts, artifacts, saved_paths, all_saved } = result.structuredContent;
-    expect(texts?.map((item) => [item.found_at, item.path])).toEqual([
-      [["$.report.url"], path.join(RUN_DIR, "report.md")],
-      [["$.pages[0].url"], path.join(RUN_DIR, "pages-0.txt")],
+    expect(texts?.map((item) => [item.found_at, item.path, item.mime_type])).toEqual([
+      [["$.report.url"], path.join(RUN_DIR, "report.md"), "text/markdown"],
+      [["$.pages[0].url"], path.join(RUN_DIR, "pages-0.txt"), "text/plain"],
     ]);
+    // The document is text/plain too, and stays a file: its concept is native.Document.
     expect(artifacts?.map((item) => item.uri)).toEqual([DOCUMENT_URI, DOSSIER_PICTURE_URI]);
     expect(saved_paths).toEqual([
       OUTPUT_PATH,
@@ -596,73 +596,22 @@ describe("downloadMthdsArtifacts", () => {
     expect(result.summary).toContain("its main output, 2 stored text(s) and 2 file(s)");
   });
 
-  it("takes a stored text's extension from its MIME type, not from its storage key", async () => {
-    const root = await makeTempDir();
-    const uri = "pipelex-storage://org/inputs/caller-page.dat";
-    const page = { url: uri, size: 12, mime_type: "text/html", preview: "<p>Hi</p>" };
-    const json = { url: REPORT_TEXT_URI, size: 2, mime_type: "application/json", preview: "{}" };
-    const pages = { items: [page, json] };
-    const { client } = fakeClient(
-      {
-        state: "completed",
-        pipeline_run_id: RUN_ID,
-        result: {
-          pipeline_run_id: RUN_ID,
-          main_stuff: pages,
-          working_memory: workingMemoryFor("native.Html", pages),
-        },
-      },
-      savingDownload,
-      undefined,
-      (fetched) => Promise.resolve(new Response(fetched === uri ? "<p>Hi there</p>" : "{}")),
-    );
-
-    const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
-
-    expect(result.structuredContent.texts?.map((item) => item.path)).toEqual([
-      path.join(RUN_DIR, "items-0.html"),
-      path.join(RUN_DIR, "items-1.json"),
-    ]);
-  });
-
-  it("never overwrites a file a stored text would take — it gets a suffix", async () => {
-    const root = await makeTempDir();
-    await fs.mkdir(path.join(root, RUN_DIR), { recursive: true });
-    await fs.writeFile(path.join(root, RUN_DIR, "main_stuff.md"), "mine");
-    const { client } = fakeClient(
-      { state: "completed", pipeline_run_id: RUN_ID, result: storedReportResults() },
-      savingDownload,
-      undefined,
-      storedTextFetch,
-    );
-
-    const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
-
-    expect(result.structuredContent.texts?.[0]?.path).toBe(path.join(RUN_DIR, "main_stuff-1.md"));
-    expect(await fs.readFile(path.join(root, RUN_DIR, "main_stuff.md"), "utf8")).toBe("mine");
-  });
-
-  it("keeps a stored text that could not be fetched as an item error, beside what was saved", async () => {
+  it("keeps a stored text that could not be saved as its own error, beside what was saved", async () => {
     const root = await makeTempDir();
     const missing = {
       ...STORED_PAGE,
       url: "pipelex-storage://org/runs/01JRUN/generated/gone/value.txt",
     };
     const pages = { items: [STORED_PAGE, missing] };
-    const { client } = fakeClient(
-      {
-        state: "completed",
+    const { client } = fakeClient({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
         pipeline_run_id: RUN_ID,
-        result: {
-          pipeline_run_id: RUN_ID,
-          main_stuff: pages,
-          working_memory: workingMemoryFor("native.Text", pages),
-        },
+        main_stuff: pages,
+        working_memory: workingMemoryFor("native.Text", pages),
       },
-      savingDownload,
-      undefined,
-      storedTextFetch,
-    );
+    });
 
     const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
 
@@ -671,6 +620,7 @@ describe("downloadMthdsArtifacts", () => {
     const [saved, failed] = result.structuredContent.texts ?? [];
     expect(saved?.path).toBe(path.join(RUN_DIR, "items-0.txt"));
     expect(failed?.path).toBeUndefined();
+    expect(failed?.mime_type).toBe("text/plain");
     expect(failed?.error?.code).toBe("input.reference_not_found");
     expect(result.structuredContent.saved_paths).toEqual([
       OUTPUT_PATH,
@@ -680,64 +630,46 @@ describe("downloadMthdsArtifacts", () => {
     expect(result.summary).toContain("failed");
   });
 
-  it("keeps a stored text whose body failed mid-read as its own error, and saves the next", async () => {
+  it("names the stored texts saved before a credential was refused part-way through", async () => {
     const root = await makeTempDir();
-    const pages = { items: [STORED_REPORT, STORED_PAGE] };
-    const broken = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.error(new TypeError("terminated"));
-      },
-    });
     const { client } = fakeClient(
-      {
-        state: "completed",
-        pipeline_run_id: RUN_ID,
-        result: {
-          pipeline_run_id: RUN_ID,
-          main_stuff: pages,
-          working_memory: workingMemoryFor("native.Text", pages),
-        },
-      },
-      savingDownload,
-      undefined,
-      (uri) =>
-        uri === REPORT_TEXT_URI ? Promise.resolve(new Response(broken)) : storedTextFetch(uri),
-    );
-
-    const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
-
-    expect(result.structuredContent.status).toBe("ok");
-    const [failed, saved] = result.structuredContent.texts ?? [];
-    expect(failed?.error).toBeDefined();
-    expect(failed?.path).toBeUndefined();
-    expect(saved?.path).toBe(path.join(RUN_DIR, "items-1.txt"));
-    expect(result.structuredContent.all_saved).toBe(false);
-  });
-
-  it("refuses the save on a credential refused while fetching a stored text, naming what was saved", async () => {
-    const root = await makeTempDir();
-    const { client, requests } = fakeClient(
       { state: "completed", pipeline_run_id: RUN_ID, result: dossierResults() },
-      savingDownload,
-      undefined,
-      (uri) =>
-        uri === REPORT_TEXT_URI
-          ? storedTextFetch(uri)
-          : Promise.reject(
-              new ArtifactAuthenticationError(
-                "The resolve route refused the credential (401).",
-                401,
-                verdictOf([]),
-              ),
-            ),
+      async (request) => {
+        const saved = path.join(request.dir, "report.md");
+        await fs.writeFile(saved, TEXT_BODIES[REPORT_TEXT_URI]!);
+        throw new ArtifactAuthenticationError(
+          "The resolve route refused the credential (401) part-way through the download.",
+          401,
+          verdictOf([
+            {
+              uri: REPORT_TEXT_URI,
+              kind: "text",
+              found_at: ["$.report.url"],
+              path: saved,
+              content_type: "text/markdown",
+              size: 4,
+              error: null,
+            },
+            {
+              uri: PAGE_TEXT_URI,
+              kind: "text",
+              found_at: ["$.pages[0].url"],
+              path: null,
+              content_type: "text/plain",
+              size: null,
+              error: { code: "aborted", detail: "stopped on a credential failure" },
+            },
+          ]),
+        );
+      },
     );
 
     const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
 
-    expect(requests).toEqual([]);
     expect(result.structuredContent.status).toBe("error");
     expect(result.structuredContent.problem?.code).toBe("auth.invalid_credential");
     expect(result.structuredContent).not.toHaveProperty("state");
+    expect(result.structuredContent).not.toHaveProperty("artifacts");
     expect(result.structuredContent.saved_paths).toEqual([
       OUTPUT_PATH,
       path.join(RUN_DIR, "report.md"),
@@ -745,6 +677,7 @@ describe("downloadMthdsArtifacts", () => {
     expect(result.structuredContent.texts?.map((item) => item.path)).toEqual([
       path.join(RUN_DIR, "report.md"),
     ]);
+    expect(result.summary).toContain("1 stored text(s)");
   });
 
   it("bounds the paths an entry lists, counting the rest, when the output repeats one reference", async () => {
@@ -836,6 +769,7 @@ describe("downloadMthdsArtifacts", () => {
         return verdictOf([
           {
             uri: PICTURE_URI,
+            kind: "file",
             found_at: ["$.a.url"],
             path: saved,
             content_type: "image/png",
@@ -844,6 +778,7 @@ describe("downloadMthdsArtifacts", () => {
           },
           {
             uri: REPORT_URI,
+            kind: "file",
             found_at: ["$.b.url"],
             path: null,
             content_type: null,
@@ -910,6 +845,7 @@ describe("downloadMthdsArtifacts", () => {
           verdictOf(
             failures.map(([code, detail], index) => ({
               uri: uris[index] ?? "",
+              kind: "file",
               found_at: [`$.k${index}.url`],
               path: null,
               content_type: null,
@@ -966,6 +902,7 @@ describe("downloadMthdsArtifacts", () => {
           verdictOf([
             {
               uri: PICTURE_URI,
+              kind: "file",
               found_at: ["$.a.url"],
               path: saved,
               content_type: "image/png",
@@ -974,6 +911,7 @@ describe("downloadMthdsArtifacts", () => {
             },
             {
               uri: REPORT_URI,
+              kind: "file",
               found_at: ["$.b.url"],
               path: null,
               content_type: null,
@@ -1038,6 +976,7 @@ describe("downloadMthdsArtifacts", () => {
           verdictOf([
             {
               uri: PICTURE_URI,
+              kind: "file",
               found_at: ["$.url"],
               path: null,
               content_type: null,
@@ -1411,7 +1350,6 @@ describe("downloadMthdsArtifacts", () => {
       getRunStatus: noStatusRead,
       getRunResult: () => Promise.reject(apiError(`/v1/runs/${RUN_ID}/results`, 404, notFound)),
       downloadArtifacts: () => Promise.reject(new Error("must not be called")),
-      fetchArtifact: () => Promise.reject(new Error("must not be called")),
     };
 
     const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
@@ -1429,7 +1367,6 @@ describe("downloadMthdsArtifacts", () => {
       getRunStatus: noStatusRead,
       getRunResult: () => Promise.reject(apiError(`/v1/runs/${RUN_ID}/results`, 401)),
       downloadArtifacts: () => Promise.reject(new Error("must not be called")),
-      fetchArtifact: () => Promise.reject(new Error("must not be called")),
     };
 
     const bare = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
@@ -1459,7 +1396,6 @@ describe("downloadMthdsArtifacts", () => {
           new ApiUnreachableError("connection refused", DEFAULT_API_URL, "ECONNREFUSED"),
         ),
       downloadArtifacts: () => Promise.reject(new Error("must not be called")),
-      fetchArtifact: () => Promise.reject(new Error("must not be called")),
     };
 
     const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));

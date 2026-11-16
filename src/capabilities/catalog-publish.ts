@@ -1,11 +1,16 @@
 import { formatItem } from "@pipelex/sdk";
-import type { MethodData, MethodPublishResult, PipelexValidationResult } from "@pipelex/sdk";
+import type {
+  MethodPublishRefused,
+  MethodPublishResult,
+  PipelexValidationResult,
+} from "@pipelex/sdk";
 import { z } from "zod";
 
 import { apiHostOf } from "./catalog-link.js";
 import {
   catalogVersionsSupport,
   catalogWriteClient,
+  isOwnMethod,
   latestVersionOf,
   methodRouteId,
   publishStateOf,
@@ -88,10 +93,10 @@ export const mthdsPublishMethodOutputSchema = z.object({
       "The version's crate fingerprint, what generated client code is checked against; null when the runner could not compute one.",
     ),
   reason: z
-    .enum(["invalid", "not_runnable"])
+    .string()
     .optional()
     .describe(
-      "refused only: the draft does not validate, or validates with pending signatures and does not run yet.",
+      "refused only: invalid (the draft does not validate), not_runnable (it validates with pending signatures), or another reason the platform names, which message explains.",
     ),
   message: z.string().optional(),
   is_valid: z.boolean().optional(),
@@ -123,7 +128,8 @@ export interface PublishMethodSuccess {
   version?: number;
   published_at?: string;
   crate_fingerprint?: string | null;
-  reason?: "invalid" | "not_runnable";
+  /** The platform's reason, read open: a later platform may name one this workshop does not know. */
+  reason?: MethodPublishRefused["reason"];
   message?: string;
   is_valid?: boolean;
   is_runnable?: boolean;
@@ -223,12 +229,13 @@ async function staleTokenProblem(
   methodId: string,
   expected: string,
 ): Promise<Problem> {
-  let current: MethodData;
+  let current: Awaited<ReturnType<CatalogWriteClient["getMethod"]>>;
   try {
     current = await client.getMethod(methodId);
   } catch {
     return problem;
   }
+  if (!isOwnMethod(current)) return problem;
   return {
     ...problem,
     message: `The method's draft was last saved at ${current.updated_at}, not ${expected}, so nothing was published. Read it with ${WORKSHOP_TOOL_NAMES.getMethod} and tell the user what it now holds; publish it under its new updated_at only if they still want to.`,
@@ -330,7 +337,7 @@ function publishSummary(result: PublishMethodSuccess, support: MethodVersionsSup
         ? "The draft validates but does not run yet, so it stays a draft until it does."
         : `The draft validates but does not run yet — these signatures are still pending: ${pending.map((ref) => `\`${ref}\``).join(", ")}. It stays a draft until they resolve.`,
     );
-  } else {
+  } else if (result.reason === "invalid") {
     const errors = result.validation_errors ?? [];
     lines.push(
       `The draft does not validate. Fix the bundle, save the draft with ${WORKSHOP_TOOL_NAMES.saveMethod}, and publish again when the user asks.`,
@@ -344,6 +351,12 @@ function publishSummary(result: PublishMethodSuccess, support: MethodVersionsSup
         `…and ${errors.length - LISTED_VALIDATION_ERRORS} more in validation_errors. ${WORKSHOP_TOOL_NAMES.validate} on the bundle's files gives the full verdict.`,
       );
     }
+  } else {
+    // A refusal that is not about validation, such as a public method's missing
+    // thumbnail: the platform's message says what to change.
+    lines.push(
+      `It stays a draft. Change what the message names, save the draft with ${WORKSHOP_TOOL_NAMES.saveMethod}, and publish again when the user asks.`,
+    );
   }
   return lines.join("\n");
 }

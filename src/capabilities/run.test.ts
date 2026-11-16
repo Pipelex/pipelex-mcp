@@ -60,6 +60,7 @@ import {
 } from "./run.js";
 import type { FailedRunState, RunContext } from "./run.js";
 import {
+  OUTPUT_FORM as STORED_TEXT_OUTPUT_FORM,
   PICTURE_URI,
   REPORT_TEXT_URI,
   STORED_PAGE,
@@ -931,6 +932,40 @@ describe("resultsResult", () => {
     expect(result.structuredContent.stored_texts).toHaveLength(MAX_STORED_TEXT_ENTRIES);
     expect(result.structuredContent.stored_texts_omitted).toBe(4);
     expect(result.summary).toContain(`${MAX_STORED_TEXT_ENTRIES + 4} stored text(s)`);
+  });
+
+  it("reads a concept refining a stored-text native, or a description-only one, as a stored text", () => {
+    const memo = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: STORED_PAGE,
+        working_memory: workingMemoryFor("dossier.Memo", STORED_PAGE),
+        output_form: STORED_TEXT_OUTPUT_FORM,
+      },
+    });
+    expect(memo.structuredContent.stored_texts?.map((text) => text.field)).toEqual(["$.url"]);
+
+    const summaryForm = {
+      "dossier.summarize": {
+        field: { kind: "prose", name: "output", concept_ref: "dossier.Summary", required: true },
+      },
+    } as unknown as RunResults["output_form"];
+    const summary = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: {
+        pipeline_run_id: RUN_ID,
+        main_stuff: STORED_PAGE,
+        working_memory: workingMemoryFor("dossier.Summary", STORED_PAGE),
+        output_form: summaryForm,
+      },
+    });
+    expect(summary.structuredContent.stored_texts?.map((text) => text.uri)).toEqual([
+      STORED_PAGE.url,
+    ]);
+    expect(summary.summary).not.toContain("stored file(s)");
   });
 
   it("reads every reference as a file when the results carry no concept facts", () => {
@@ -2764,9 +2799,13 @@ describe("getMthdsRunResults artifact selection", () => {
    * `usage_assembly_error` with it. A projection reading an artifact it did
    * not ask for then finds nothing, which the assertions below would see.
    */
-  function narrowedRead(selections: (readonly RunResultArtifact[] | undefined)[]) {
+  function narrowedRead(
+    selections: (readonly RunResultArtifact[] | undefined)[],
+    loads: (boolean | undefined)[] = [],
+  ) {
     return (_runId: string, options?: GetRunResultOptions): Promise<RunResultState> => {
       selections.push(options?.artifacts);
+      loads.push(options?.loadStoredTexts);
       const selected = new Set<string>(options?.artifacts ?? []);
       if (selected.has("tokens_usages")) selected.add("usage_assembly_error");
       const result = Object.fromEntries(
@@ -2781,9 +2820,13 @@ describe("getMthdsRunResults artifact selection", () => {
 
   it("asks for the output, the usage and the facts that tell a stored text from a file, alone", async () => {
     const selections: (readonly RunResultArtifact[] | undefined)[] = [];
-    const context = contextWith({ getRunResult: narrowedRead(selections) });
+    const loads: (boolean | undefined)[] = [];
+    const context = contextWith({ getRunResult: narrowedRead(selections, loads) });
 
     const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
+
+    // A stored text stays its reference: the SDK would load it by default.
+    expect(loads).toEqual([false]);
 
     expect(selections).toEqual([["main_stuff", "tokens_usages", "working_memory", "output_form"]]);
     expect(toolResult.structuredContent.main_stuff).toEqual({ answer: 42 });

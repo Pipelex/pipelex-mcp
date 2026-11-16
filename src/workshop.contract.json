@@ -8028,12 +8028,8 @@
             ]
           },
           "reason": {
-            "description": "refused only: the draft does not validate, or validates with pending signatures and does not run yet.",
-            "type": "string",
-            "enum": [
-              "invalid",
-              "not_runnable"
-            ]
+            "description": "refused only: invalid (the draft does not validate), not_runnable (it validates with pending signatures), or another reason the platform names, which message explains.",
+            "type": "string"
           },
           "message": {
             "type": "string"

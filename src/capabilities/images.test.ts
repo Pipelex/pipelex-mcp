@@ -299,12 +299,14 @@ describe("showMthdsRunImages", () => {
     expect(result.imageBlocks[0]._meta).toEqual({ uri: COVER });
   });
 
-  it("asks the results read for the main output alone, the only artifact its walk reads", async () => {
+  it("asks the results read for the main output alone, the only artifact its walk reads, never loading a stored text", async () => {
     const selections: (readonly RunResultArtifact[] | undefined)[] = [];
+    const loads: (boolean | undefined)[] = [];
     const client: ImagesClient = {
       getRunStatus: noStatusRead,
       getRunResult: (_runId, options) => {
         selections.push(options?.artifacts);
+        loads.push(options?.loadStoredTexts);
         return Promise.resolve(completedRun());
       },
       fetchArtifact: () => Promise.resolve(imageResponse(TINY_PNG)),
@@ -313,6 +315,7 @@ describe("showMthdsRunImages", () => {
     const result = await showMthdsRunImages({ run_id: RUN_ID, images: [COVER] }, context(client));
 
     expect(selections).toEqual([["main_stuff"]]);
+    expect(loads).toEqual([false]);
     expect(result.structuredContent.status).toBe("ok");
     expect(result.imageBlocks).toHaveLength(1);
   });

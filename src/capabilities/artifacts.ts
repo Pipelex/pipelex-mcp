@@ -4,12 +4,11 @@ import path from "node:path";
 
 import {
   ArtifactAuthenticationError,
-  ArtifactFetchError,
   DEFAULT_ARTIFACT_MAX_BYTES,
   DEFAULT_DOWNLOAD_MAX_TOTAL_BYTES,
-  artifactFilename,
   buildProblem,
-  collectArtifacts,
+  locateStoredReferences,
+  mainStuffNode,
 } from "@pipelex/sdk";
 import type {
   ArtifactItemError,
@@ -17,7 +16,6 @@ import type {
   DownloadArtifactsRequest,
   DownloadArtifactsResult,
   DownloadedArtifact,
-  FetchArtifactOptions,
   GetRunResultOptions,
   Problem,
   RunRead,
@@ -47,8 +45,6 @@ import {
   validateRunIdRequest,
 } from "./shared.js";
 import type { ApiConfig, ApiNotes } from "./shared.js";
-import { storedTextsOf, withoutStoredTexts } from "./stored-texts.js";
-import type { StoredText } from "./stored-texts.js";
 import { errorMessage, resolveSaveDir } from "./workspace-boundary.js";
 
 /**
@@ -67,16 +63,16 @@ import { errorMessage, resolveSaveDir } from "./workspace-boundary.js";
  * capability owns only what is the workshop's: the tool envelope, the output
  * file, the `dir` default and its containment against the working directory,
  * the deployment gate, the plain-http policy, the download limits, the
- * problem each failure reports, and the prose summary. It writes two kinds of
- * file itself, under the same never-overwrite rule the SDK applies to the files
- * beside them: the output file, and each stored text of the output, a large
- * text, HTML or JSON value the run kept in storage, which the SDK's file walk
- * cannot tell from a file (`stored-texts.ts` tells them apart by concept). A
- * stored text is fetched through the SDK's own bounded `fetchArtifact`, with a
- * fresh link, and saved under the name the SDK's `artifactFilename` gives its
- * field, with the extension of its MIME type. See SPEC.md → Artifact Download
- * Scope for why this is a companion tool and not an option on
- * `mthds_run_results`.
+ * problem each failure reports, and the prose summary. The output file is the one
+ * thing it writes itself, under the same never-overwrite rule the SDK applies
+ * to the files beside it. A stored text of the output, a large text, HTML or
+ * JSON value the run kept in storage, is the SDK's too: its download tells one
+ * from a stored file by the concept at its position, read from the working
+ * memory and output form this tool's read carries, saves it as a text file
+ * named by its MIME type, and marks its verdict entry `kind: "text"`, which is
+ * how this tool lists it under `texts` rather than `artifacts`. See SPEC.md →
+ * Artifact Download Scope for why this is a companion tool and not an option
+ * on `mthds_run_results`.
  */
 
 /**
@@ -340,8 +336,6 @@ export interface ArtifactClient {
   /** Read once after a failed results arm, for when the run ended and its problem (`readFailedRun`). */
   getRunStatus(runId: string, options?: { signal?: AbortSignal }): Promise<RunRead>;
   downloadArtifacts(request: DownloadArtifactsRequest): Promise<DownloadArtifactsResult>;
-  /** One stored text's bytes: the SDK's bounded fetch through a fresh link. */
-  fetchArtifact(uri: string, options?: FetchArtifactOptions): Promise<Response>;
 }
 
 export interface ArtifactsContext extends ApiConfig {
@@ -467,7 +461,12 @@ export async function downloadMthdsArtifacts(
   let state: RunResultState;
   try {
     client = artifactClient(context);
-    state = await client.getRunResult(input.run_id, { artifacts: DOWNLOAD_RESULT_ARTIFACTS });
+    // The stored texts stay references, as main_stuff.json records them: the
+    // download saves each one as its own file instead.
+    state = await client.getRunResult(input.run_id, {
+      artifacts: DOWNLOAD_RESULT_ARTIFACTS,
+      loadStoredTexts: false,
+    });
   } catch (err) {
     return errorResult(problemOf(err), context.apiNotes);
   }
@@ -550,39 +549,14 @@ export async function downloadMthdsArtifacts(
     size: written.size,
   };
 
-  // Stored texts are saved first, by this tool, and the SDK walks an output
-  // from which their references were taken out, so it downloads the files
-  // alone and each keeps the path it has in the full output.
-  const allowHttp = allowsPlainHttp(context);
-  const storedTexts = storedTextsOf(state.result);
-  const saving = await saveStoredTexts(
-    client,
-    storedTexts,
-    target.dir,
-    target.root,
-    dir,
-    allowHttp,
-  );
-  if (saving.refusal !== undefined) {
+  // The SDK saves the stored files and the stored texts in one download, told
+  // apart by the concept at each position, which it reads from the results
+  // handed over: their read carried the working memory and the output form.
+  // An output holding neither is saved whole already, and makes no request.
+  const references = locateStoredReferences(mainStuff, mainStuffNode(state.result));
+  if (references.files.length === 0 && references.texts.length === 0) {
     return withMarkNote(
-      refusedResult(
-        problemOf(saving.refusal),
-        undefined,
-        output,
-        target.root,
-        dir,
-        context.apiNotes,
-        saving.texts,
-      ),
-      marked,
-    );
-  }
-  const texts = storedTexts.length === 0 ? undefined : saving.texts;
-
-  const filesOnly = withoutStoredTexts(mainStuff, storedTexts);
-  if (collectArtifacts(filesOnly).length === 0) {
-    return withMarkNote(
-      completedResult(runId, DOWNLOAD_SCOPE, output, texts, [], target.root),
+      completedResult(runId, DOWNLOAD_SCOPE, output, undefined, [], target.root),
       marked,
     );
   }
@@ -590,133 +564,32 @@ export async function downloadMthdsArtifacts(
   let verdict: DownloadArtifactsResult;
   try {
     verdict = await client.downloadArtifacts({
-      results: storedTexts.length === 0 ? state.result : { ...state.result, main_stuff: filesOnly },
+      results: state.result,
       dir: target.dir,
       scope: DOWNLOAD_SCOPE,
-      allowHttp,
+      allowHttp: allowsPlainHttp(context),
       maxBytes: DOWNLOAD_MAX_FILE_BYTES,
-      maxTotalBytes: DOWNLOAD_MAX_TOTAL_BYTES - saving.bytes,
+      maxTotalBytes: DOWNLOAD_MAX_TOTAL_BYTES,
     });
   } catch (err) {
     return withMarkNote(
-      refusedResult(problemOf(err), err, output, target.root, dir, context.apiNotes, texts),
+      refusedResult(problemOf(err), err, output, target.root, dir, context.apiNotes),
       marked,
     );
   }
 
+  const { texts, artifacts } = projectVerdict(verdict.artifacts, target.root, dir);
   return withMarkNote(
     completedResult(
       runId,
       verdict.scope,
       output,
-      texts,
-      verdict.artifacts.map((item) => projectItem(item, target.root, dir)),
+      texts.length === 0 ? undefined : texts,
+      artifacts,
       target.root,
     ),
     marked,
   );
-}
-
-// ── stored texts ────────────────────────────────────────────────────
-
-/** What saving the stored texts left: one entry per text, the bytes written, and a refusal that stops the call. */
-interface StoredTextsSaving {
-  texts: SavedTextEntry[];
-  bytes: number;
-  /** A failure about the call rather than one text: a refused credential, a resolve route that refused the request, an unreachable API. */
-  refusal?: unknown;
-}
-
-/**
- * The extension each storable MIME type is saved under. The SDK's
- * `artifactFilename` supplies the same table for a content type, which is the
- * one it is asked with; this list says which types it is trusted for.
- */
-const TEXT_MIME_TYPES = new Set(["text/plain", "text/markdown", "text/html", "application/json"]);
-
-/** A reference with no extension, so the content type alone decides a name's extension. */
-const EXTENSIONLESS_REFERENCE = "pipelex-storage://stored-text";
-
-/**
- * The bare filename a stored text is saved under: named after the field it
- * fills, its first path, exactly as the SDK names a file (`artifactFilename`),
- * with the extension of its MIME type rather than of its storage key, since a
- * text a caller sent as a URL keeps whatever key it was sent with. A MIME type
- * outside the four the runtime writes falls back to the key's extension, and a
- * key with none to `.txt`.
- */
-export function storedTextFilename(
-  text: Pick<StoredText, "uri" | "found_at" | "mime_type">,
-): string {
-  const found_at = text.found_at.slice(0, 1);
-  const mimeType = text.mime_type?.split(";")[0]?.trim().toLowerCase();
-  if (mimeType !== undefined && TEXT_MIME_TYPES.has(mimeType)) {
-    return artifactFilename({ uri: EXTENSIONLESS_REFERENCE, found_at }, mimeType, DOWNLOAD_SCOPE);
-  }
-  const named = artifactFilename({ uri: text.uri, found_at }, null, DOWNLOAD_SCOPE);
-  return path.extname(named) === "" ? `${named}.txt` : named;
-}
-
-/**
- * Fetch and save each stored text, one at a time, under the never-overwrite
- * rule. A text that cannot be fetched or written is that text's error, and the
- * rest still save. A failure that is not about one text, such as a refused
- * credential or an unreachable API, stops the walk and is handed back as the
- * call's refusal, with the texts saved before it, as the SDK hands back the
- * files saved before a refused credential.
- */
-async function saveStoredTexts(
-  client: ArtifactClient,
-  texts: readonly StoredText[],
-  dir: string,
-  root: string,
-  requestedDir: string,
-  allowHttp: boolean,
-): Promise<StoredTextsSaving> {
-  const saved: SavedTextEntry[] = [];
-  let bytes = 0;
-  for (const text of texts) {
-    const entry = { uri: text.uri, ...boundFoundAt(text.found_at), mime_type: text.mime_type };
-    let response: Response;
-    try {
-      response = await client.fetchArtifact(text.uri, {
-        maxBytes: DOWNLOAD_MAX_FILE_BYTES,
-        allowHttp,
-      });
-    } catch (err) {
-      if (err instanceof ArtifactFetchError) {
-        saved.push({ ...entry, error: problemOf(err) });
-        continue;
-      }
-      // Not about this text: the resolve route refused the request, or the
-      // API is unreachable. Nothing after it can succeed either.
-      return { texts: saved.filter((item) => item.path !== undefined), bytes, refusal: err };
-    }
-    let body: Buffer;
-    try {
-      // The SDK enforces the byte cap per chunk too, so a body past it, or a
-      // connection lost mid-body, errors here: about this text alone.
-      body = Buffer.from(await response.arrayBuffer());
-    } catch (err) {
-      saved.push({ ...entry, error: problemOf(err) });
-      continue;
-    }
-    const written = await writeUniqueFile(dir, storedTextFilename(text), body);
-    if (!written.ok) {
-      saved.push({
-        ...entry,
-        error: writeFailedProblem(
-          path.join(requestedDir, written.name),
-          systemReason(written.error),
-          `Could not write ${written.name} in ${requestedDir}: ${errorMessage(written.error)}`,
-        ),
-      });
-      continue;
-    }
-    bytes += written.size;
-    saved.push({ ...entry, path: path.relative(root, written.path), size: written.size });
-  }
-  return { texts: saved, bytes };
 }
 
 // ── the generated-directory mark ────────────────────────────────────
@@ -837,52 +710,17 @@ async function writeOutputFile(
   requestedDir: string,
 ): Promise<OutputWrite> {
   const bytes = Buffer.from(`${JSON.stringify(mainStuff, null, 2)}\n`, "utf8");
-  const written = await writeUniqueFile(dir, OUTPUT_FILENAME, bytes);
-  if (written.ok) return written;
-  if (written.error === undefined) {
-    return {
-      ok: false,
-      problem: writeFailedProblem(
-        path.join(requestedDir, OUTPUT_FILENAME),
-        "no_free_name",
-        `Could not write ${OUTPUT_FILENAME} in ${requestedDir}: no free name for it after ${MAX_OUTPUT_NAME_ATTEMPTS} attempts.`,
-      ),
-    };
-  }
-  return {
-    ok: false,
-    problem: writeFailedProblem(
-      path.join(requestedDir, written.name),
-      systemReason(written.error),
-      `Could not write ${OUTPUT_FILENAME} in ${requestedDir}: ${errorMessage(written.error)}`,
-    ),
-  };
-}
-
-type UniqueWrite =
-  | { ok: true; path: string; size: number }
-  /** `name` is the candidate that failed; `error` is absent when every name was taken. */
-  | { ok: false; name: string; error?: unknown };
-
-/**
- * Write `bytes` into `dir` under `filename`, never overwriting: the file is
- * created exclusively (`wx`) and a taken name gets a numeric suffix before its
- * extension (`name-1.ext`), as the SDK treats the files it saves. A write that
- * fails removes the file it created. Never throws.
- */
-async function writeUniqueFile(dir: string, filename: string, bytes: Buffer): Promise<UniqueWrite> {
-  const ext = path.extname(filename);
-  const stem = path.basename(filename, ext);
+  const ext = path.extname(OUTPUT_FILENAME);
+  const stem = path.basename(OUTPUT_FILENAME, ext);
 
   for (let attempt = 0; attempt < MAX_OUTPUT_NAME_ATTEMPTS; attempt += 1) {
-    const name = attempt === 0 ? filename : `${stem}-${attempt}${ext}`;
-    const candidate = path.join(dir, name);
+    const candidate = path.join(dir, attempt === 0 ? OUTPUT_FILENAME : `${stem}-${attempt}${ext}`);
     let handle: FileHandle;
     try {
       handle = await fs.open(candidate, "wx");
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
-      return { ok: false, name, error: err };
+      return { ok: false, problem: outputWriteError(requestedDir, candidate, err) };
     }
     try {
       await handle.writeFile(bytes);
@@ -891,11 +729,27 @@ async function writeUniqueFile(dir: string, filename: string, bytes: Buffer): Pr
     } catch (err) {
       await handle.close().catch(() => undefined);
       await fs.unlink(candidate).catch(() => undefined);
-      return { ok: false, name, error: err };
+      return { ok: false, problem: outputWriteError(requestedDir, candidate, err) };
     }
   }
 
-  return { ok: false, name: filename };
+  return {
+    ok: false,
+    problem: writeFailedProblem(
+      path.join(requestedDir, OUTPUT_FILENAME),
+      "no_free_name",
+      `Could not write ${OUTPUT_FILENAME} in ${requestedDir}: no free name for it after ${MAX_OUTPUT_NAME_ATTEMPTS} attempts.`,
+    ),
+  };
+}
+
+/** The output file at `candidate` could not be written: the problem names it under `dir`, the caller's own. */
+function outputWriteError(dir: string, candidate: string, err: unknown): Problem {
+  return writeFailedProblem(
+    path.join(dir, path.basename(candidate)),
+    systemReason(err),
+    `Could not write ${OUTPUT_FILENAME} in ${dir}: ${errorMessage(err)}`,
+  );
 }
 
 /**
@@ -919,12 +773,11 @@ function refusedResult(
   root: string,
   dir: string,
   notes: ApiNotes | undefined,
-  texts: readonly SavedTextEntry[] = [],
 ): ArtifactsResult {
-  const refused =
+  const { texts, artifacts: refused } =
     err instanceof ArtifactAuthenticationError
-      ? err.verdict.artifacts.map((item) => projectItem(item, root, dir))
-      : [];
+      ? projectVerdict(err.verdict.artifacts, root, dir)
+      : { texts: [], artifacts: [] };
   const savedArtifacts = refused.flatMap((item) => (item.path === undefined ? [] : [item.path]));
   const savedTexts = texts.flatMap((item) => (item.path === undefined ? [] : [item.path]));
   const savedPaths = [output.path, ...savedTexts, ...savedArtifacts];
@@ -953,6 +806,44 @@ function refusedResult(
 }
 
 // ── the verdict's items ─────────────────────────────────────────────
+
+/**
+ * The SDK's verdict entries, told apart by their `kind`: each stored text as a
+ * `texts` entry, its MIME type the one its reference states, and each stored
+ * file as an `artifacts` entry, both in discovery order.
+ */
+function projectVerdict(
+  items: readonly DownloadedArtifact[],
+  root: string,
+  dir: string,
+): { texts: SavedTextEntry[]; artifacts: SavedArtifactEntry[] } {
+  const texts: SavedTextEntry[] = [];
+  const artifacts: SavedArtifactEntry[] = [];
+  for (const item of items) {
+    if (item.kind === "text") texts.push(projectText(item, root, dir));
+    else artifacts.push(projectItem(item, root, dir));
+  }
+  return { texts, artifacts };
+}
+
+/** One stored text's verdict entry, with its path made relative and its error read as a problem. */
+function projectText(item: DownloadedArtifact, root: string, dir: string): SavedTextEntry {
+  if (item.error === null) {
+    return {
+      uri: item.uri,
+      ...boundFoundAt(item.found_at),
+      path: path.relative(root, item.path),
+      mime_type: item.content_type,
+      size: item.size,
+    };
+  }
+  return {
+    uri: item.uri,
+    ...boundFoundAt(item.found_at),
+    mime_type: item.content_type,
+    error: itemProblem(item.error, item.uri, dir),
+  };
+}
 
 /** One SDK verdict entry, with its path made relative and its error read as a problem. */
 function projectItem(item: DownloadedArtifact, root: string, dir: string): SavedArtifactEntry {

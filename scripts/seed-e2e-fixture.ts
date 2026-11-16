@@ -87,6 +87,18 @@ function write(text: string): void {
  * compare-and-swap on the token just read, so a concurrent edit is refused
  * rather than overwritten.
  */
+/** The draft token of a method of the key's own organization, the only kind its catalog lists. */
+async function draftTokenOf(
+  client: ReturnType<typeof liveClient>,
+  methodId: string,
+): Promise<string> {
+  const method = await client.getMethod(methodId);
+  if (!("updated_at" in method)) {
+    throw new Error(`${methodId} reads as another organization's public method, with no draft.`);
+  }
+  return method.updated_at;
+}
+
 async function seed(name: string, bundle: string): Promise<void> {
   const client = liveClient();
   const existing = await catalogRowNamed(name);
@@ -97,7 +109,7 @@ async function seed(name: string, bundle: string): Promise<void> {
       ? await client.createMethod({ name, contents })
       : await client.writeDraft(existing, {
           contents,
-          expected_updated_at: (await client.getMethod(existing)).updated_at,
+          expected_updated_at: await draftTokenOf(client, existing),
         });
 
   write(

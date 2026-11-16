@@ -12,6 +12,7 @@ import {
 import type {
   MethodData,
   MethodDetail,
+  PublicMethodDetail,
   MethodDraftInput,
   MethodTreeSource,
   MethodVersion,
@@ -2306,6 +2307,54 @@ describe("getMthdsMethod", () => {
       "pipes",
       "templates",
     ]);
+  });
+
+  it("refuses another organization's public method, which has no draft, writing nothing", async () => {
+    const stored = storedMethod();
+    const publicMethod: PublicMethodDetail = {
+      method_id: stored.method_id,
+      org_id: "org_other",
+      name: stored.name,
+      description: null,
+      categories: [],
+      created_at: stored.created_at,
+      latest_version: 1,
+      latest_published: { version: 1 } as PublicMethodDetail["latest_published"],
+      visibility: "public",
+      files: stored.files,
+    };
+    const writes: string[] = [];
+    const client: CatalogWriteClient = {
+      ...clientNotCalled,
+      async getMethod() {
+        return publicMethod;
+      },
+      async getMethodVersion() {
+        return { version: 1, files: stored.files } as Awaited<
+          ReturnType<CatalogWriteClient["getMethodVersion"]>
+        >;
+      },
+      async writeMethodTree(_files, options) {
+        writes.push(options.destination);
+      },
+    };
+
+    for (const method_id of ["mt_one", "mt_one@1"]) {
+      const result = await getMthdsMethod(
+        { method_id, output_dir: "pulled" },
+        contextFor(client, validationAnswering(validReport)),
+      );
+
+      expect(problemOf(result.structuredContent)).toMatchObject({
+        code: "client.argument_invalid",
+        params: { argument: "method_id", reason: "another_organization" },
+        location: { field: "method_id" },
+      });
+      expect(result.summary).toContain("another organization's public method");
+      expect(result.summary).toContain("mthds_run");
+    }
+    expect(writes).toEqual([]);
+    expect(await fs.readdir(path.join(root, "pulled")).catch(() => [])).toEqual([]);
   });
 
   it("writes nothing, and no link, when the download fails", async () => {

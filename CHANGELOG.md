@@ -7,11 +7,14 @@ This is the changelog of the workshop, `@pipelex/mcp` on npm: the MCP server the
 ### Added
 
 - **Stored texts in `mthds_run_results`**: a large `Text`, `Markdown`, `Html` or `JSON` value the run kept in storage, which the output carries as its reference (`url`, `size`, `mime_type`, `preview`), is shown as that reference and never loaded into the result; the new `stored_texts` member lists each one by the path of its `url`, with its size and MIME type, the summary names them, and they are no longer counted as stored files.
-- **Stored texts in `mthds_download_artifacts`**: each stored text of the output is fetched through a fresh link and saved beside `main_stuff.json` as a text file named after its field, with the extension of its MIME type (`.txt`, `.md`, `.html` or `.json`), and listed in the new `texts` member, apart from the files in `artifacts`.
+- **Stored texts in `mthds_download_artifacts`**: each stored text of the output is saved beside `main_stuff.json`, in the same download as the files, as a text file named after its field with the extension of its MIME type (`.txt`, `.md`, `.html` or `.json`), and listed in the new `texts` member, apart from the files in `artifacts`.
 
 ### Changed
 
-- **Results reads ask for the working memory and the output form**: `mthds_run_results` and `mthds_download_artifacts` now read the run's `working_memory` and `output_form` beside `main_stuff`, to tell a stored text from a stored file by the concept the output names at each position; a run whose results carry neither reports every reference as a stored file, as before.
+- **Results reads ask for the working memory and the output form**: `mthds_run_results` and `mthds_download_artifacts` now read the run's `working_memory` and `output_form` beside `main_stuff`, to tell a stored text from a stored file by the concept the output names at each position; a run whose results carry no working memory reports every reference as a stored file, as before.
+- **`@pipelex/sdk` 0.69.0 and `mthds` 0.34.0**: the workshop moves from `@pipelex/sdk` 0.53.0 and `mthds` 0.33.0, so a stored text is told from a stored file by the SDK's own walk, and the problems built for the codes a run can raise carry the standard's new titles and next steps, such as "A step's result does not have the structure the method declares" for `pipe.output_invalid`; the results, image and download tools read a run with its stored texts left as references, never loaded.
+- **`mthds_publish_method` relays every refusal reason (Breaking)**: `reason` on a `refused` verdict is any string the platform names, no longer only `invalid` or `not_runnable`, so a public method's thumbnail or storage-reference refusal arrives as a verdict whose `message` says what to change.
+- **`mthds_get_method` refuses another organization's public method**: such a method has no draft, and only its owner can write it, so the pull answers `client.argument_invalid` at `method_id`, writing nothing, and says to run it by its id instead.
 
 ## [0.28.0] - 2026-11-01
 

@@ -8,6 +8,7 @@ import type {
   CoreErrorCode,
   MethodData,
   MethodDetail,
+  PublicMethodDetail,
   MethodDraftInput,
   MethodPublishInput,
   MethodPublishResult,
@@ -431,7 +432,8 @@ export interface GetMethodResult {
  * workshop's own limits.
  */
 export interface CatalogWriteClient {
-  getMethod(methodId: string): Promise<MethodDetail>;
+  /** Another organization's public method reads as a `PublicMethodDetail`, which carries no draft. */
+  getMethod(methodId: string): Promise<MethodDetail | PublicMethodDetail>;
   createMethod(input: MethodWriteInput): Promise<MethodData>;
   writeDraft(methodId: string, input: MethodDraftInput): Promise<MethodData>;
   renameMethod(methodId: string, input: MethodRenameInput): Promise<MethodData>;
@@ -1264,12 +1266,13 @@ async function draftConflictProblem(
   methodId: string,
   sent: { token: string; fromLink: boolean },
 ): Promise<Problem> {
-  let current: MethodData;
+  let current: MethodDetail | PublicMethodDetail;
   try {
     current = await client.getMethod(methodId);
   } catch {
     return problem;
   }
+  if (!isOwnMethod(current)) return problem;
   const source = sent.fromLink
     ? ` as this folder's ${LINK_FILE_NAME} records (synced_updated_at)`
     : "";
@@ -1570,7 +1573,7 @@ export async function getMthdsMethod(
 
   let client: CatalogWriteClient;
   let support: Promise<MethodVersionsSupport>;
-  let stored: MethodDetail;
+  let read: MethodDetail | PublicMethodDetail;
   let version: MethodVersion | undefined;
   try {
     client = catalogWriteClient(context);
@@ -1582,22 +1585,25 @@ export async function getMthdsMethod(
         ? catalogVersionsSupport(context, client)
         : Promise.resolve<MethodVersionsSupport>("unknown");
     if (wanted === "draft") {
-      stored = await client.getMethod(methodId);
+      read = await client.getMethod(methodId);
     } else {
-      const [method, read] = await Promise.allSettled([
+      const [method, versionRead] = await Promise.allSettled([
         client.getMethod(methodId),
         client.getMethodVersion(methodId, wanted),
       ]);
       if (method.status === "rejected") throw method.reason;
-      stored = method.value;
-      if (read.status === "rejected") {
-        return versionReadError(read.reason, stored, wanted, context);
+      read = method.value;
+      if (!isOwnMethod(read)) return getError(context, publicMethodProblem(methodId));
+      if (versionRead.status === "rejected") {
+        return versionReadError(versionRead.reason, read, wanted, context);
       }
-      version = read.value;
+      version = versionRead.value;
     }
   } catch (err) {
     return getError(context, problemOf(err));
   }
+  if (!isOwnMethod(read)) return getError(context, publicMethodProblem(methodId));
+  const stored: MethodDetail = read;
 
   const content: PulledContent = {
     version: version === undefined ? "draft" : version.version,
@@ -2915,6 +2921,27 @@ function emptyTreeError(context: CatalogWriteContext, version: number | "draft")
 }
 
 /** A pull that produced no result: its one problem, and the problem's summary. */
+/**
+ * Whether a method read is the caller's organization's own, with its draft. Another
+ * organization's public method reads as a `PublicMethodDetail`, which has no `updated_at`.
+ */
+export function isOwnMethod(method: MethodDetail | PublicMethodDetail): method is MethodDetail {
+  return "updated_at" in method;
+}
+
+/**
+ * Another organization's public method, which the pull refuses: a folder pulled from it
+ * could never be saved back, since every write of it is its owner's, and it has no draft.
+ */
+function publicMethodProblem(methodId: string): Problem {
+  return argumentProblem(
+    "method_id",
+    "another_organization",
+    `\`${methodId}\` is another organization's public method. The workshop pulls only your own organization's methods, whose drafts it can save back; nothing was written.`,
+    `Run it by its id with ${WORKSHOP_TOOL_NAMES.run}.`,
+  );
+}
+
 function getError(context: { apiNotes?: ApiNotes }, problem: Problem): GetMethodResult {
   return {
     structuredContent: { status: "error", problem },

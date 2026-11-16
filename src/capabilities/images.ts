@@ -326,7 +326,12 @@ export async function showMthdsRunImages(
   let state: RunResultState;
   try {
     client = imagesClient(context);
-    state = await client.getRunResult(input.run_id, { artifacts: SHOW_IMAGES_RESULT_ARTIFACTS });
+    // A stored text is never loaded: the walk wants the pictures' references,
+    // and loading would read and fetch every stored text the output holds.
+    state = await client.getRunResult(input.run_id, {
+      artifacts: SHOW_IMAGES_RESULT_ARTIFACTS,
+      loadStoredTexts: false,
+    });
   } catch (err) {
     return errorResult(problemOf(err), context.apiNotes);
   }

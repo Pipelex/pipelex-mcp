@@ -1,7 +1,7 @@
 import type { RunResults } from "@pipelex/sdk";
 
 /**
- * Run results carrying stored texts, for the tests of `stored-texts.ts`,
+ * Run results carrying stored texts, for the tests of
  * `mthds_run_results` and `mthds_download_artifacts`. Only tests import this
  * file. The shapes are the runtime's: a stored `Text`, `Markdown`, `Html` or
  * `JSON` value is `{ url, size, mime_type, preview }` with no value field, the
