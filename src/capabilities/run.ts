@@ -60,6 +60,7 @@ import {
   validateMethodSelectorRequest,
   validateRunIdRequest,
   withFilesSent,
+  withStoredTextConcepts,
   failedBeforeSending,
   markUnsent,
   withTooLargeNote,
@@ -960,14 +961,15 @@ function completedResult(runId: string, result: RunResults): RunResultsResult {
   // picture mthds_show_images can fetch. All are in-memory, so a completed
   // result pays no network call for any. A stored text is told from a stored
   // file by the concept the output names at its position, which the SDK reads
-  // from the run's working memory and output form (`mainStuffNode`), and it is
+  // from the run's working memory and forms (`mainStuffNode`), and it is
   // shown as the reference the output already carries, never loaded: the read
-  // asked for it with `loadStoredTexts: false`. The image candidates stay a
-  // walk of the whole output, the one mthds_show_images makes, so an index
-  // means the same thing in both tools; a stored text's key carries a text
-  // extension, which the prefilter skips.
-  const { files: stored, texts } = locateStoredReferences(result.main_stuff, mainStuffNode(result));
-  const candidates = imageCandidatesOf(result.main_stuff);
+  // asked for it with `loadStoredTexts: false`. The image candidates are the
+  // stored files' shortlist, walked with the same node mthds_show_images walks
+  // with, so an index means the same thing in both tools and a stored text is
+  // never a candidate, whatever its key.
+  const node = mainStuffNode(result);
+  const { files: stored, texts } = locateStoredReferences(result.main_stuff, node);
+  const candidates = imageCandidatesOf(result.main_stuff, node);
   const listedTexts = texts.slice(0, MAX_STORED_TEXT_ENTRIES);
   const listedCandidates = candidates.slice(0, MAX_IMAGE_CANDIDATE_ENTRIES);
 
@@ -979,7 +981,9 @@ function completedResult(runId: string, result: RunResults): RunResultsResult {
     truncated,
     // Absent — not empty — when the output references no stored file at all,
     // so a consumer can tell "nothing was produced" from "nothing looked like
-    // an image", and a run with no files costs no field.
+    // an image", and a run with no files costs no field. A stored text is no
+    // stored file and never a candidate, so an output holding only stored
+    // texts has no member, and the candidates never outnumber the files.
     //
     // Bounded, and bare references rather than `{ uri, key }` pairs. The walk
     // deliberately reads the FULL output, so an unbounded projection of it was
@@ -1059,10 +1063,20 @@ function completedSummary(
   return parts.join("\n\n");
 }
 
+/**
+ * Where a stored text sits: the first path of its `url`. The SDK records a
+ * text at the path it was found, so the list is never empty; should it be,
+ * the reference itself names the text, never `$`, which would claim the whole
+ * output is the text.
+ */
+function storedTextField(text: StoredTextLocation): string {
+  return text.found_at[0] ?? text.uri;
+}
+
 /** One stored text as `stored_texts` lists it. */
 function storedTextEntry(text: StoredTextLocation): StoredTextEntry {
   return {
-    field: text.found_at[0] ?? "$",
+    field: storedTextField(text),
     uri: text.uri,
     size: text.size,
     mime_type: text.mime_type,
@@ -1081,7 +1095,7 @@ function storedTextsNote(texts: readonly StoredTextLocation[]): string | undefin
     const detail = [text.mime_type, text.size === null ? undefined : formatBytes(text.size)]
       .filter((part): part is string => part !== undefined && part !== null)
       .join(", ");
-    return `- \`${text.found_at[0] ?? "$"}\`${detail === "" ? "" : ` (${detail})`}`;
+    return `- \`${storedTextField(text)}\`${detail === "" ? "" : ` (${detail})`}`;
   });
   if (texts.length > lines.length) lines.push(`- and ${texts.length - lines.length} more`);
   return [
@@ -1420,18 +1434,14 @@ export async function getMthdsRunStatus(
 /**
  * The result artifacts a `run_results` read asks for — exactly what
  * `completedResult` projects, so the platform reads and re-signs nothing the
- * tool drops: the main output, the usage records (which bring
- * `usage_assembly_error`), and the two facts that tell a stored text from a
- * stored file by concept, the working memory (the main output's concept) and
- * the output-form descriptors (its structure). The graph, the contracts and the
- * input forms are never read.
+ * tool drops: the main output and the usage records (which bring
+ * `usage_assembly_error`). The concept facts that tell a stored text from a
+ * stored file, the working memory and the forms, are read by a second read
+ * only when the output may hold a stored text (`withStoredTextConcepts`): the
+ * working memory carries every intermediate result of the run. The graph and
+ * its contracts are never read.
  */
-export const RUN_RESULTS_ARTIFACTS: readonly RunResultArtifact[] = [
-  "main_stuff",
-  "tokens_usages",
-  "working_memory",
-  "output_form",
-];
+export const RUN_RESULTS_ARTIFACTS: readonly RunResultArtifact[] = ["main_stuff", "tokens_usages"];
 
 /** One-shot result lookup — `GET /v1/runs/{id}/results`. */
 export async function getMthdsRunResults(
@@ -1448,10 +1458,14 @@ export async function getMthdsRunResults(
     // The stored texts stay references: the SDK would load each one into the
     // output by default, putting back into a model's context what the runtime
     // kept out of it.
-    state = await runClient(context).getRunResult(input.run_id, {
-      artifacts: RUN_RESULTS_ARTIFACTS,
-      loadStoredTexts: false,
-    });
+    const client = runClient(context);
+    state = await withStoredTextConcepts(
+      client,
+      await client.getRunResult(input.run_id, {
+        artifacts: RUN_RESULTS_ARTIFACTS,
+        loadStoredTexts: false,
+      }),
+    );
   } catch (err) {
     return resultsErrorResult(problemOf(err), context);
   }

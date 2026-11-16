@@ -7,8 +7,6 @@ import {
   DEFAULT_ARTIFACT_MAX_BYTES,
   DEFAULT_DOWNLOAD_MAX_TOTAL_BYTES,
   buildProblem,
-  locateStoredReferences,
-  mainStuffNode,
 } from "@pipelex/sdk";
 import type {
   ArtifactItemError,
@@ -43,6 +41,7 @@ import {
   problemSummary,
   toolResultContent,
   validateRunIdRequest,
+  withStoredTextConcepts,
 } from "./shared.js";
 import type { ApiConfig, ApiNotes } from "./shared.js";
 import { errorMessage, resolveSaveDir } from "./workspace-boundary.js";
@@ -68,7 +67,8 @@ import { errorMessage, resolveSaveDir } from "./workspace-boundary.js";
  * to the files beside it. A stored text of the output, a large text, HTML or
  * JSON value the run kept in storage, is the SDK's too: its download tells one
  * from a stored file by the concept at its position, read from the working
- * memory and output form this tool's read carries, saves it as a text file
+ * memory and the forms this tool reads beside the output when it may hold a
+ * stored text (`withStoredTextConcepts`), saves it as a text file
  * named by its MIME type, and marks its verdict entry `kind: "text"`, which is
  * how this tool lists it under `texts` rather than `artifacts`. See SPEC.md →
  * Artifact Download Scope for why this is a companion tool and not an option
@@ -84,15 +84,15 @@ export const DOWNLOAD_SCOPE: ArtifactScope = "main_stuff";
 
 /**
  * The result artifacts this tool's results read asks for, and nothing else:
- * `main_stuff`, which it writes as the output file, the artifact the download
- * walks, which is `DOWNLOAD_SCOPE` (`main_stuff` too), and the two facts that
- * tell a stored text from a stored file by concept: the working memory, which
- * names the main output's concept, and the output-form descriptors, which state
- * its structure. The graph, the contracts, the input forms and the usage
- * records are never read.
+ * `main_stuff`, which it writes as the output file, and the artifact the
+ * download walks, which is `DOWNLOAD_SCOPE`. Both are `main_stuff` today, so
+ * the read carries the main output alone, never the graph, the I/O artifacts
+ * or the usage records. The concept facts that tell a stored text from a
+ * stored file, the working memory and the forms, are read by a second read
+ * only when the output may hold a stored text (`withStoredTextConcepts`).
  */
 export const DOWNLOAD_RESULT_ARTIFACTS: readonly RunResultArtifact[] = [
-  ...new Set<RunResultArtifact>(["main_stuff", DOWNLOAD_SCOPE, "working_memory", "output_form"]),
+  ...new Set<RunResultArtifact>(["main_stuff", DOWNLOAD_SCOPE]),
 ];
 
 /**
@@ -463,10 +463,13 @@ export async function downloadMthdsArtifacts(
     client = artifactClient(context);
     // The stored texts stay references, as main_stuff.json records them: the
     // download saves each one as its own file instead.
-    state = await client.getRunResult(input.run_id, {
-      artifacts: DOWNLOAD_RESULT_ARTIFACTS,
-      loadStoredTexts: false,
-    });
+    state = await withStoredTextConcepts(
+      client,
+      await client.getRunResult(input.run_id, {
+        artifacts: DOWNLOAD_RESULT_ARTIFACTS,
+        loadStoredTexts: false,
+      }),
+    );
   } catch (err) {
     return errorResult(problemOf(err), context.apiNotes);
   }
@@ -551,16 +554,9 @@ export async function downloadMthdsArtifacts(
 
   // The SDK saves the stored files and the stored texts in one download, told
   // apart by the concept at each position, which it reads from the results
-  // handed over: their read carried the working memory and the output form.
-  // An output holding neither is saved whole already, and makes no request.
-  const references = locateStoredReferences(mainStuff, mainStuffNode(state.result));
-  if (references.files.length === 0 && references.texts.length === 0) {
-    return withMarkNote(
-      completedResult(runId, DOWNLOAD_SCOPE, output, undefined, [], target.root),
-      marked,
-    );
-  }
-
+  // handed over, the concept facts among them when the output may hold a
+  // stored text. Its walk is the only one: an output holding neither is saved
+  // whole already, and the SDK answers it an empty verdict without a request.
   let verdict: DownloadArtifactsResult;
   try {
     verdict = await client.downloadArtifacts({
@@ -790,15 +786,19 @@ function refusedResult(
     besides.length === 0
       ? `Before the failure, the run's main output was saved as \`${output.path}\`.`
       : `Before the failure, the run's main output and ${besides.join(" and ")} were saved under \`${root}\`:\n${savedPaths.map((entry) => `- \`${entry}\``).join("\n")}`;
+  // Once anything beside the output landed, the verdict so far rides whole,
+  // texts and files alike, the failed entries with the saved ones, so a
+  // consumer learns which did not land. Before anything landed, every entry
+  // would be an `aborted` error inviting a retry the refusal itself rules
+  // out, so only the output rides.
+  const landed = besides.length > 0;
   return {
     structuredContent: {
       status: "error",
       problem,
       output,
-      ...(savedTexts.length === 0
-        ? {}
-        : { texts: texts.filter((item) => item.path !== undefined) }),
-      ...(savedArtifacts.length === 0 ? {} : { artifacts: refused }),
+      ...(landed && texts.length > 0 ? { texts } : {}),
+      ...(landed && refused.length > 0 ? { artifacts: refused } : {}),
       saved_paths: savedPaths,
     },
     summary: `${problemSummary(problem, notes)}\n\n${saved}`,

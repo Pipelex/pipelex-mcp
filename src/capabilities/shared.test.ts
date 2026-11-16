@@ -8,6 +8,7 @@ import {
   INLINE_TREE_MAX_BYTES,
   RequestArgumentError,
   RunLifecycleUnavailableError,
+  mainStuffNode,
 } from "@pipelex/sdk";
 
 import { sha256Hex, treeDigest } from "mthds";
@@ -27,6 +28,7 @@ import {
   imageCandidatesOf,
   isExecutionLocusRefusal,
   looksLikeImageKey,
+  mayHoldStoredTexts,
   methodFilesInputSchema,
   parseAllowHttpOverride,
   problemOf,
@@ -43,6 +45,14 @@ import {
   markUnsent,
 } from "./shared.js";
 import type { FileResolver, MethodSourceInput, Problem, ResolvedMethodSource } from "./shared.js";
+import {
+  EXTENSIONLESS_TEXT_URI,
+  NOTES_DOCUMENT,
+  PICTURE_URI as STORED_TEXT_PICTURE_URI,
+  STORED_PAGE,
+  STORED_REPORT,
+  extensionlessTextResults,
+} from "./stored-text-fixtures.js";
 
 describe("buildApiConfig", () => {
   it("defaults to the hosted API with no key", () => {
@@ -1665,14 +1675,40 @@ describe("the image-candidate prefilter", () => {
       attachments: [{ url: REPORT }, { url: UNTYPED }],
     };
 
-    expect(imageCandidatesOf(mainStuff)).toEqual([
+    expect(imageCandidatesOf(mainStuff, null)).toEqual([
       { uri: PICTURE, key: "runs/01JRUN/outputs/illustration.png" },
       { uri: UNTYPED, key: "runs/01JRUN/outputs/blob" },
     ]);
   });
 
   it("answers nothing for an output that references no stored file", () => {
-    expect(imageCandidatesOf({ text: "no files here" })).toEqual([]);
+    expect(imageCandidatesOf({ text: "no files here" }, null)).toEqual([]);
+  });
+
+  it("leaves out a stored text its descriptor node names, whatever its key", () => {
+    const results = extensionlessTextResults();
+    expect(imageCandidatesOf(results.main_stuff, null).map((item) => item.uri)).toEqual([
+      EXTENSIONLESS_TEXT_URI,
+      STORED_TEXT_PICTURE_URI,
+    ]);
+    expect(
+      imageCandidatesOf(results.main_stuff, mainStuffNode(results)).map((item) => item.uri),
+    ).toEqual([STORED_TEXT_PICTURE_URI]);
+  });
+});
+
+describe("mayHoldStoredTexts", () => {
+  it("answers true for anything shaped like a stored text's reference, at any depth", () => {
+    expect(mayHoldStoredTexts(STORED_REPORT)).toBe(true);
+    expect(mayHoldStoredTexts({ pages: [{ text: "inline" }, STORED_PAGE] })).toBe(true);
+    expect(mayHoldStoredTexts({ url: "pipelex-storage://k", preview: "…" })).toBe(true);
+  });
+
+  it("answers false for files, loaded texts and plain values", () => {
+    expect(mayHoldStoredTexts({ answer: 42 })).toBe(false);
+    expect(mayHoldStoredTexts(NOTES_DOCUMENT)).toBe(false);
+    expect(mayHoldStoredTexts({ url: "pipelex-storage://k", size: 3, text: "abc" })).toBe(false);
+    expect(mayHoldStoredTexts([{ url: "pipelex-storage://k" }, "x", null])).toBe(false);
   });
 });
 

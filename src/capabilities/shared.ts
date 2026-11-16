@@ -11,7 +11,15 @@ import {
   renderProblemMarkdown,
   reportedProblem,
 } from "@pipelex/sdk";
-import type { MethodTreeSource, PipelexApiClientOptions, Problem, ProblemItem } from "@pipelex/sdk";
+import type {
+  GetRunResultOptions,
+  MethodTreeSource,
+  PipelexApiClientOptions,
+  Problem,
+  ProblemItem,
+  RunResultArtifact,
+  RunResultState,
+} from "@pipelex/sdk";
 import {
   compareUtf8,
   isExcludedName,
@@ -2161,13 +2169,20 @@ export function looksLikeImageKey(key: string): boolean {
 }
 
 /**
- * Every stored reference in a run's main output that passes the key prefilter,
- * in the SDK's discovery order. Pure — `collectArtifacts` is an in-memory walk,
- * so this costs no network call and is safe on every completed result.
+ * Every stored file in a run's main output that passes the key prefilter, in
+ * the SDK's discovery order. `node` is the output's descriptor node
+ * (`mainStuffNode`), which tells a stored text from a stored file by concept:
+ * a stored text is a value, never a picture, whatever its key, so the
+ * candidates are always a subset of the stored files. Pure — `collectArtifacts`
+ * is an in-memory walk, so this costs no network call and is safe on every
+ * completed result.
  */
-export function imageCandidatesOf(mainStuff: unknown): ImageCandidate[] {
+export function imageCandidatesOf(
+  mainStuff: unknown,
+  node: Parameters<typeof collectArtifacts>[1],
+): ImageCandidate[] {
   const seen = new Set<string>();
-  return collectArtifacts(mainStuff)
+  return collectArtifacts(mainStuff, node)
     .filter((uri) => {
       // One reference is one picture, however many times the output names it.
       // An output that carries the same stored file in two places would
@@ -2187,4 +2202,73 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+// ── the concept facts of a stored text ───────────────────────────────
+
+/**
+ * The result artifacts the concept at each position of a run's output is read
+ * from: the working memory, which names the main output's concept, and the two
+ * forms, whose descriptor nodes state its structure. `mainStuffNode` reads a
+ * concept's node from `output_form` first, then from `input_form`.
+ */
+export const STORED_TEXT_CONCEPT_ARTIFACTS: readonly RunResultArtifact[] = [
+  "working_memory",
+  "output_form",
+  "input_form",
+];
+
+/** The value field a loaded stored text carries, one per kind: a reference carries none. */
+const STORED_TEXT_VALUE_FIELDS = ["text", "inner_html", "json_obj"] as const;
+
+/**
+ * Whether a value holds anything shaped like a stored text's reference: an
+ * object carrying a string `url`, no value field, and a `size` or a `preview`,
+ * which the runtime sets on every reference it stores and an image or a
+ * document never carries. `@pipelex/sdk` applies the same rule before reading
+ * the concept artifacts again, and does not export it. A `true` says only that
+ * the concepts are worth reading; a `false` says no stored text can be there.
+ */
+export function mayHoldStoredTexts(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(mayHoldStoredTexts);
+  if (typeof value !== "object" || value === null) return false;
+  const fields = value as Record<string, unknown>;
+  if (
+    typeof fields["url"] === "string" &&
+    STORED_TEXT_VALUE_FIELDS.every((field) => fields[field] == null) &&
+    ("size" in fields || "preview" in fields)
+  ) {
+    return true;
+  }
+  return Object.values(fields).some(mayHoldStoredTexts);
+}
+
+/**
+ * A completed results read with the concept facts beside its output, read by a
+ * second, narrowed read only when the output may hold a stored text. The
+ * working memory holds every intermediate result of the run, so a read that
+ * always carried it would pay for all of them on every call, for the one
+ * concept it names. Any other state, an output that cannot hold a stored text,
+ * and a second read that finds no completed run are returned as they are;
+ * a second read that throws throws, as the first one would have.
+ */
+export async function withStoredTextConcepts(
+  client: { getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState> },
+  state: RunResultState,
+): Promise<RunResultState> {
+  if (state.state !== "completed" || !mayHoldStoredTexts(state.result.main_stuff)) return state;
+  const concepts = await client.getRunResult(state.pipeline_run_id, {
+    artifacts: STORED_TEXT_CONCEPT_ARTIFACTS,
+    loadStoredTexts: false,
+  });
+  if (concepts.state !== "completed") return state;
+  return {
+    ...state,
+    result: {
+      ...state.result,
+      working_memory: concepts.result.working_memory,
+      output_form: concepts.result.output_form,
+      input_form: concepts.result.input_form,
+    },
+  };
 }

@@ -44,6 +44,7 @@
  * the inline ones.
  */
 
+import { isOwnMethod } from "../src/capabilities/catalog-write.js";
 import { requireLiveAccount } from "../src/capabilities/e2e-account.js";
 import {
   CATALOG_WRITE_BUNDLE,
@@ -68,6 +69,18 @@ function write(text: string): void {
   process.stdout.write(`${text}\n`);
 }
 
+/** The draft token of a method of the key's own organization, the only kind its catalog lists. */
+async function draftTokenOf(
+  client: ReturnType<typeof liveClient>,
+  methodId: string,
+): Promise<string> {
+  const method = await client.getMethod(methodId);
+  if (!isOwnMethod(method)) {
+    throw new Error(`${methodId} reads as another organization's public method, with no draft.`);
+  }
+  return method.updated_at;
+}
+
 /**
  * Create-or-write one fixture row by name, publish it, and report both.
  *
@@ -87,18 +100,6 @@ function write(text: string): void {
  * compare-and-swap on the token just read, so a concurrent edit is refused
  * rather than overwritten.
  */
-/** The draft token of a method of the key's own organization, the only kind its catalog lists. */
-async function draftTokenOf(
-  client: ReturnType<typeof liveClient>,
-  methodId: string,
-): Promise<string> {
-  const method = await client.getMethod(methodId);
-  if (!("updated_at" in method)) {
-    throw new Error(`${methodId} reads as another organization's public method, with no draft.`);
-  }
-  return method.updated_at;
-}
-
 async function seed(name: string, bundle: string): Promise<void> {
   const client = liveClient();
   const existing = await catalogRowNamed(name);

@@ -1574,7 +1574,7 @@ export async function getMthdsMethod(
   let client: CatalogWriteClient;
   let support: Promise<MethodVersionsSupport>;
   let read: MethodDetail | PublicMethodDetail;
-  let version: MethodVersion | undefined;
+  let versionRead: { wanted: number; settled: PromiseSettledResult<MethodVersion> } | undefined;
   try {
     client = catalogWriteClient(context);
     // Asked beside the read rather than after it: it never rejects, and only
@@ -1587,23 +1587,26 @@ export async function getMthdsMethod(
     if (wanted === "draft") {
       read = await client.getMethod(methodId);
     } else {
-      const [method, versionRead] = await Promise.allSettled([
+      const [method, settled] = await Promise.allSettled([
         client.getMethod(methodId),
         client.getMethodVersion(methodId, wanted),
       ]);
       if (method.status === "rejected") throw method.reason;
       read = method.value;
-      if (!isOwnMethod(read)) return getError(context, publicMethodProblem(methodId));
-      if (versionRead.status === "rejected") {
-        return versionReadError(versionRead.reason, read, wanted, context);
-      }
-      version = versionRead.value;
+      versionRead = { wanted, settled };
     }
   } catch (err) {
     return getError(context, problemOf(err));
   }
+  // Another organization's public method is refused before its version read
+  // is looked at: a folder pulled from it could never be saved back, whatever
+  // that read answered.
   if (!isOwnMethod(read)) return getError(context, publicMethodProblem(methodId));
   const stored: MethodDetail = read;
+  if (versionRead?.settled.status === "rejected") {
+    return versionReadError(versionRead.settled.reason, stored, versionRead.wanted, context);
+  }
+  const version = versionRead?.settled.value;
 
   const content: PulledContent = {
     version: version === undefined ? "draft" : version.version,
@@ -2920,7 +2923,6 @@ function emptyTreeError(context: CatalogWriteContext, version: number | "draft")
   );
 }
 
-/** A pull that produced no result: its one problem, and the problem's summary. */
 /**
  * Whether a method read is the caller's organization's own, with its draft. Another
  * organization's public method reads as a `PublicMethodDetail`, which has no `updated_at`.
@@ -2942,6 +2944,7 @@ function publicMethodProblem(methodId: string): Problem {
   );
 }
 
+/** A pull that produced no result: its one problem, and the problem's summary. */
 function getError(context: { apiNotes?: ApiNotes }, problem: Problem): GetMethodResult {
   return {
     structuredContent: { status: "error", problem },

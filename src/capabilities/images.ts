@@ -1,4 +1,4 @@
-import { ArtifactFetchError, buildProblem } from "@pipelex/sdk";
+import { ArtifactFetchError, buildProblem, mainStuffNode } from "@pipelex/sdk";
 import type {
   FetchArtifactOptions,
   GetRunResultOptions,
@@ -32,6 +32,7 @@ import {
   problemSummary,
   toolResultContent,
   validateRunIdRequest,
+  withStoredTextConcepts,
 } from "./shared.js";
 import { WORKSHOP_TOOL_NAMES } from "./tool-names.js";
 import type {
@@ -239,7 +240,9 @@ export interface ShowImagesResult {
 /**
  * The result artifacts this tool's results read asks for: the main output
  * alone, the only artifact its picture walk reads. The graph, the I/O
- * artifacts, the working memory and the usage records are never fetched.
+ * artifacts and the usage records are never fetched; the working memory and
+ * the forms only by a second read, when the output may hold a stored text
+ * (`withStoredTextConcepts`).
  */
 export const SHOW_IMAGES_RESULT_ARTIFACTS: readonly RunResultArtifact[] = ["main_stuff"];
 
@@ -328,10 +331,15 @@ export async function showMthdsRunImages(
     client = imagesClient(context);
     // A stored text is never loaded: the walk wants the pictures' references,
     // and loading would read and fetch every stored text the output holds.
-    state = await client.getRunResult(input.run_id, {
-      artifacts: SHOW_IMAGES_RESULT_ARTIFACTS,
-      loadStoredTexts: false,
-    });
+    // Its concept facts are read only when the output may hold one, so the
+    // walk can leave it out whatever its key.
+    state = await withStoredTextConcepts(
+      client,
+      await client.getRunResult(input.run_id, {
+        artifacts: SHOW_IMAGES_RESULT_ARTIFACTS,
+        loadStoredTexts: false,
+      }),
+    );
   } catch (err) {
     return errorResult(problemOf(err), context.apiNotes);
   }
@@ -365,7 +373,9 @@ export async function showMthdsRunImages(
   }
 
   const runId = state.pipeline_run_id;
-  const candidates = imageCandidatesOf(state.result.main_stuff);
+  // The candidates are the stored files', told from the stored texts by the
+  // concept at each position, as mthds_run_results lists them.
+  const candidates = imageCandidatesOf(state.result.main_stuff, mainStuffNode(state.result));
   const selection = selectCandidates(candidates, input);
   if (!selection.ok) {
     return errorResult(selection.problem, context.apiNotes);

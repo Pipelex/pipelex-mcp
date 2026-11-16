@@ -133,3 +133,56 @@ export function storedReportResults(): RunResults {
     output_form: OUTPUT_FORM,
   };
 }
+
+/**
+ * The input-form descriptors of a pipe taking a `Brief`, a structured concept
+ * no output form describes: only this form says that its `body` is Markdown,
+ * so only a walk that reads the input form too tells it is a stored text.
+ */
+export const BRIEF_INPUT_FORM = {
+  "dossier.review": {
+    fields: [
+      {
+        kind: "object",
+        name: "brief",
+        concept_ref: "dossier.Brief",
+        required: true,
+        fields: [
+          { kind: "text", name: "title", required: true },
+          { kind: "prose", name: "body", concept_ref: "native.Markdown", required: true },
+        ],
+      },
+    ],
+  },
+} as unknown as RunResults["input_form"];
+
+/** A `Brief` whose Markdown body was stored. */
+export const BRIEF = { title: "Q3", body: STORED_REPORT };
+
+/** Results of a run whose output is the brief above: its structure is in the input form alone. */
+export function briefResults(): RunResults {
+  return {
+    pipeline_run_id: RUN_ID,
+    main_stuff: BRIEF,
+    working_memory: workingMemoryFor("dossier.Brief", BRIEF),
+    output_form: OUTPUT_FORM,
+    input_form: BRIEF_INPUT_FORM,
+  };
+}
+
+/** A stored text under an extensionless key, which the image prefilter alone would let through. */
+export const EXTENSIONLESS_TEXT_URI = "pipelex-storage://org/runs/01JRUN/generated/5d1e0c";
+
+/** A list of pages of text: one stored under an extensionless key, beside a picture. */
+export function extensionlessTextResults(): RunResults {
+  const content = {
+    pages: [{ ...STORED_PAGE, url: EXTENSIONLESS_TEXT_URI }],
+    cover: { url: PICTURE_URI },
+  };
+  return {
+    pipeline_run_id: RUN_ID,
+    main_stuff: content,
+    working_memory: workingMemoryFor("dossier.Dossier", content),
+    output_form: OUTPUT_FORM,
+  };
+}

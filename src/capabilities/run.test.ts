@@ -65,7 +65,9 @@ import {
   REPORT_TEXT_URI,
   STORED_PAGE,
   STORED_REPORT,
+  briefResults,
   dossierResults,
+  extensionlessTextResults,
   storedReportResults,
   workingMemoryFor,
 } from "./stored-text-fixtures.js";
@@ -966,6 +968,24 @@ describe("resultsResult", () => {
       STORED_PAGE.url,
     ]);
     expect(summary.summary).not.toContain("stored file(s)");
+  });
+
+  it("never offers a stored text as an image candidate, whatever its key", () => {
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: extensionlessTextResults(),
+    });
+
+    // The extensionless key passes the image prefilter, but its concept makes
+    // it a text: the shortlist is the stored files', so it never counts more
+    // pictures than files.
+    expect(result.structuredContent.stored_texts?.map((text) => text.field)).toEqual([
+      "$.pages[0].url",
+    ]);
+    expect(result.structuredContent.image_candidates).toEqual([PICTURE_URI]);
+    expect(result.summary).toContain("1 stored file(s)");
+    expect(result.summary).toContain("1 of which look like images");
   });
 
   it("reads every reference as a file when the results carry no concept facts", () => {
@@ -2802,6 +2822,7 @@ describe("getMthdsRunResults artifact selection", () => {
   function narrowedRead(
     selections: (readonly RunResultArtifact[] | undefined)[],
     loads: (boolean | undefined)[] = [],
+    full: RunResults = FULL,
   ) {
     return (_runId: string, options?: GetRunResultOptions): Promise<RunResultState> => {
       selections.push(options?.artifacts);
@@ -2809,7 +2830,7 @@ describe("getMthdsRunResults artifact selection", () => {
       const selected = new Set<string>(options?.artifacts ?? []);
       if (selected.has("tokens_usages")) selected.add("usage_assembly_error");
       const result = Object.fromEntries(
-        Object.entries(FULL).filter(
+        Object.entries(full).filter(
           ([key]) =>
             key === "pipeline_run_id" || options?.artifacts === undefined || selected.has(key),
         ),
@@ -2818,7 +2839,7 @@ describe("getMthdsRunResults artifact selection", () => {
     };
   }
 
-  it("asks for the output, the usage and the facts that tell a stored text from a file, alone", async () => {
+  it("asks for the output and the usage alone when the output can hold no stored text", async () => {
     const selections: (readonly RunResultArtifact[] | undefined)[] = [];
     const loads: (boolean | undefined)[] = [];
     const context = contextWith({ getRunResult: narrowedRead(selections, loads) });
@@ -2828,19 +2849,56 @@ describe("getMthdsRunResults artifact selection", () => {
     // A stored text stays its reference: the SDK would load it by default.
     expect(loads).toEqual([false]);
 
-    expect(selections).toEqual([["main_stuff", "tokens_usages", "working_memory", "output_form"]]);
+    // Nothing in the output is shaped like a stored text, so the working
+    // memory and the forms, which can be far larger than it, are never read.
+    expect(selections).toEqual([["main_stuff", "tokens_usages"]]);
     expect(toolResult.structuredContent.main_stuff).toEqual({ answer: 42 });
     expect(toolResult.structuredContent.usage?.calls).toBe(1);
     expect(toolResult._meta.tokens_usages).toEqual(TOKENS_USAGES);
   });
 
-  it("names only artifacts the SDK knows, and never the graph or its contracts", () => {
+  it("reads the concept facts beside the output only when it may hold a stored text", async () => {
+    const selections: (readonly RunResultArtifact[] | undefined)[] = [];
+    const loads: (boolean | undefined)[] = [];
+    const full: RunResults = { ...dossierResults(), tokens_usages: TOKENS_USAGES };
+    const context = contextWith({ getRunResult: narrowedRead(selections, loads, full) });
+
+    const toolResult = runResultsToolResult(await getMthdsRunResults({ run_id: RUN_ID }, context));
+
+    expect(selections).toEqual([
+      ["main_stuff", "tokens_usages"],
+      ["working_memory", "output_form", "input_form"],
+    ]);
+    expect(loads).toEqual([false, false]);
+    expect(toolResult.structuredContent.stored_texts?.map((text) => text.field)).toEqual([
+      "$.report.url",
+      "$.pages[0].url",
+    ]);
+    expect(toolResult.structuredContent.usage?.calls).toBe(1);
+  });
+
+  it("tells a stored text by a concept only the input form describes", async () => {
+    const selections: (readonly RunResultArtifact[] | undefined)[] = [];
+    const context = contextWith({
+      getRunResult: narrowedRead(selections, [], briefResults()),
+    });
+
+    const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.stored_texts).toEqual([
+      { field: "$.body.url", uri: REPORT_TEXT_URI, size: 48213, mime_type: "text/markdown" },
+    ]);
+    expect(result.structuredContent).not.toHaveProperty("image_candidates");
+    expect(result.summary).not.toContain("stored file(s)");
+  });
+
+  it("names only artifacts the SDK knows, and never the graph, its contracts or the working memory", () => {
     const artifacts = RUN_RESULTS_ARTIFACTS;
     expect(artifacts.length).toBeGreaterThan(0);
     expect(artifacts).toContain("main_stuff");
     expect(artifacts).not.toContain("graph_spec");
     expect(artifacts).not.toContain("pipe_io_contracts");
-    expect(artifacts).not.toContain("input_form");
+    expect(artifacts).not.toContain("working_memory");
   });
 });
 

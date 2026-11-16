@@ -4,6 +4,7 @@ import type {
   RunRead,
   RunResultArtifact,
   RunResultState,
+  RunResults,
 } from "@pipelex/sdk";
 import { describe, expect, it, vi } from "vitest";
 
@@ -31,6 +32,11 @@ import {
   MAX_INLINE_IMAGES,
   MAX_INLINE_IMAGE_BYTES,
 } from "./shared.js";
+import {
+  EXTENSIONLESS_TEXT_URI,
+  PICTURE_URI as STORED_TEXT_PICTURE_URI,
+  extensionlessTextResults,
+} from "./stored-text-fixtures.js";
 
 const RUN_ID = "01JRUN0000000000000000TEST";
 
@@ -318,6 +324,44 @@ describe("showMthdsRunImages", () => {
     expect(loads).toEqual([false]);
     expect(result.structuredContent.status).toBe("ok");
     expect(result.imageBlocks).toHaveLength(1);
+  });
+
+  it("reads the concept facts when the output may hold a stored text, and never offers one as a picture", async () => {
+    const full = extensionlessTextResults();
+    const selections: (readonly RunResultArtifact[] | undefined)[] = [];
+    const loads: (boolean | undefined)[] = [];
+    const fetched: string[] = [];
+    const client: ImagesClient = {
+      getRunStatus: noStatusRead,
+      // A narrowed read, as the SDK answers one: what the selection left out is absent.
+      getRunResult: (_runId, options) => {
+        selections.push(options?.artifacts);
+        loads.push(options?.loadStoredTexts);
+        const selected = new Set<string>(options?.artifacts ?? []);
+        const result = Object.fromEntries(
+          Object.entries(full).filter(([key]) => key === "pipeline_run_id" || selected.has(key)),
+        ) as unknown as RunResults;
+        return Promise.resolve({ state: "completed", pipeline_run_id: RUN_ID, result });
+      },
+      fetchArtifact: (uri) => {
+        fetched.push(uri);
+        return Promise.resolve(imageResponse(TINY_PNG));
+      },
+    };
+
+    const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
+
+    expect(selections).toEqual([["main_stuff"], ["working_memory", "output_form", "input_form"]]);
+    expect(loads).toEqual([false, false]);
+    // The stored text's extensionless key passes the prefilter; its concept
+    // keeps it out, so the picture is the one candidate and the one fetch.
+    expect(fetched).toEqual([STORED_TEXT_PICTURE_URI]);
+    expect(result.structuredContent.images?.map((image) => image.uri)).toEqual([
+      STORED_TEXT_PICTURE_URI,
+    ]);
+    expect(result.structuredContent.images).not.toContainEqual(
+      expect.objectContaining({ uri: EXTENSIONLESS_TEXT_URI }),
+    );
   });
 
   /**
