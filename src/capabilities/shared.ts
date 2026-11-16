@@ -11,7 +11,15 @@ import {
   renderProblemMarkdown,
   reportedProblem,
 } from "@pipelex/sdk";
-import type { MethodTreeSource, PipelexApiClientOptions, Problem, ProblemItem } from "@pipelex/sdk";
+import type {
+  GetRunResultOptions,
+  MethodTreeSource,
+  PipelexApiClientOptions,
+  Problem,
+  ProblemItem,
+  RunResultArtifact,
+  RunResultState,
+} from "@pipelex/sdk";
 import {
   compareUtf8,
   isExcludedName,
@@ -2161,23 +2169,201 @@ export function looksLikeImageKey(key: string): boolean {
 }
 
 /**
- * Every stored reference in a run's main output that passes the key prefilter,
- * in the SDK's discovery order. Pure — `collectArtifacts` is an in-memory walk,
- * so this costs no network call and is safe on every completed result.
+ * Every stored file in a run's main output that passes the key prefilter, in
+ * the SDK's discovery order. A reference shaped like a stored text's
+ * (`storedTextShapedReferences`) is never a candidate, whatever its key: a
+ * stored text is a value, never a picture. The shortlist is read from the
+ * output alone, never from the concept facts a second read may or may not
+ * bring, so `mthds_run_results` and `mthds_show_images` answer the same list
+ * for one run whatever that read did, and an index means the same picture in
+ * both. Pure — `collectArtifacts` is an in-memory walk, so this costs no
+ * network call and is safe on every completed result.
  */
 export function imageCandidatesOf(mainStuff: unknown): ImageCandidate[] {
+  const texts = storedTextShapedReferences(mainStuff);
   const seen = new Set<string>();
   return collectArtifacts(mainStuff)
     .filter((uri) => {
       // One reference is one picture, however many times the output names it.
       // An output that carries the same stored file in two places would
-      // otherwise be fetched twice, billed twice, and shown twice — and, since
-      // `indices` are positions in this list, would give the same picture two
-      // positions.
-      if (seen.has(uri)) return false;
+      // otherwise list it twice and spend the image budget on a copy.
+      if (seen.has(uri) || texts.has(uri)) return false;
       seen.add(uri);
       return true;
     })
     .map((uri) => ({ uri, key: storageKeyOf(uri) }))
     .filter((candidate) => looksLikeImageKey(candidate.key));
+}
+
+/** A byte count as a person reads it: bytes below a KiB, then KiB, then MiB, to one decimal. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+// ── the concept facts of a stored text ───────────────────────────────
+
+/**
+ * The result artifacts the concept at each position of a run's output is read
+ * from: the working memory, which names the main output's concept, and the two
+ * forms, whose descriptor nodes state its structure. `mainStuffNode` reads a
+ * concept's node from `output_form` first, then from `input_form`.
+ */
+export const STORED_TEXT_CONCEPT_ARTIFACTS: readonly RunResultArtifact[] = [
+  "working_memory",
+  "output_form",
+  "input_form",
+];
+
+/** The value field a loaded stored text carries, one per kind: a reference carries none. */
+const STORED_TEXT_VALUE_FIELDS = ["text", "inner_html", "json_obj"] as const;
+
+/**
+ * Whether an object is shaped like a stored text's reference: a string `url`,
+ * no value field, and a `size` or a `preview`, which the runtime sets on every
+ * reference it stores and an image or a document never carries.
+ */
+function isStoredTextShaped(fields: Record<string, unknown>): boolean {
+  return (
+    typeof fields["url"] === "string" &&
+    STORED_TEXT_VALUE_FIELDS.every((field) => fields[field] == null) &&
+    ("size" in fields || "preview" in fields)
+  );
+}
+
+/**
+ * Whether a value holds anything shaped like a stored text's reference
+ * (`isStoredTextShaped`). `@pipelex/sdk` applies the same rule before reading
+ * the concept artifacts again, and does not export it. A `true` says only that
+ * the concepts are worth reading; a `false` says no stored text can be there.
+ */
+export function mayHoldStoredTexts(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(mayHoldStoredTexts);
+  if (typeof value !== "object" || value === null) return false;
+  const fields = value as Record<string, unknown>;
+  if (isStoredTextShaped(fields)) return true;
+  return Object.values(fields).some(mayHoldStoredTexts);
+}
+
+/** What a reference shaped like a stored text's states of the text. */
+export interface StoredTextShape {
+  size: number | null;
+  mime_type: string | null;
+}
+
+/**
+ * Every `pipelex-storage://` reference that is the `url` of an object shaped
+ * like a stored text's reference (`isStoredTextShaped`), with the size and MIME
+ * type that object states, in discovery order. This is how a stored text is
+ * told from a stored file by its reference alone: the image shortlist always
+ * leaves these out, and the results and download tools take them for stored
+ * texts when the concept facts that would decide are unavailable
+ * (`withStoredTextConcepts`). Pure — no network.
+ */
+export function storedTextShapedReferences(value: unknown): Map<string, StoredTextShape> {
+  const found = new Map<string, StoredTextShape>();
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (typeof node !== "object" || node === null) return;
+    const fields = node as Record<string, unknown>;
+    if (isStoredTextShaped(fields)) {
+      const url = fields["url"] as string;
+      if (url.startsWith(PIPELEX_STORAGE_SCHEME) && url.length > PIPELEX_STORAGE_SCHEME.length) {
+        if (!found.has(url)) {
+          const { size, mime_type: mimeType } = fields;
+          found.set(url, {
+            size: typeof size === "number" ? size : null,
+            mime_type: typeof mimeType === "string" ? mimeType : null,
+          });
+        }
+      }
+      return;
+    }
+    Object.values(fields).forEach(visit);
+  };
+  visit(value);
+  return found;
+}
+
+/** A results read, and why its concept facts could not be read when the second read failed. */
+export interface StoredTextConceptsRead {
+  state: RunResultState;
+  /**
+   * The problem of a concept read that threw. The first read's state is
+   * returned as it was, so the caller degrades rather than fails.
+   */
+  conceptsProblem?: Problem;
+}
+
+/**
+ * A completed results read with the concept facts beside its output, read by a
+ * second, narrowed read only when the output may hold a stored text. The
+ * working memory holds every intermediate result of the run, so a read that
+ * always carried it would pay for all of them on every call, for the one
+ * concept it names. Any other state, an output that cannot hold a stored text,
+ * and a second read that finds no completed run are returned as they are.
+ *
+ * The second read never takes the first one down: the output is already in
+ * hand, so a second read that throws (a timeout, a `422`, the network) returns
+ * the first state with that read's problem. Without concepts, the caller tells
+ * a stored text by the shape of its reference (`storedTextShapedReferences`)
+ * and says so (`conceptsUnreadNote`).
+ */
+export async function withStoredTextConcepts(
+  client: { getRunResult(runId: string, options?: GetRunResultOptions): Promise<RunResultState> },
+  state: RunResultState,
+): Promise<StoredTextConceptsRead> {
+  if (state.state !== "completed" || !mayHoldStoredTexts(state.result.main_stuff)) {
+    return { state };
+  }
+  let concepts: RunResultState;
+  try {
+    concepts = await client.getRunResult(state.pipeline_run_id, {
+      artifacts: STORED_TEXT_CONCEPT_ARTIFACTS,
+      loadStoredTexts: false,
+    });
+  } catch (err) {
+    return { state, conceptsProblem: problemOf(err) };
+  }
+  if (concepts.state !== "completed") return { state };
+  return {
+    state: {
+      ...state,
+      result: {
+        ...state.result,
+        working_memory: concepts.result.working_memory,
+        output_form: concepts.result.output_form,
+        input_form: concepts.result.input_form,
+      },
+    },
+  };
+}
+
+/**
+ * The stored texts an output is taken to hold by the shape of their references,
+ * when `node`, its descriptor node (`mainStuffNode`), is unknown: the concept
+ * read failed, or the results name no concept for the output. Empty when the
+ * node is known, since the concept then decides.
+ */
+export function storedTextsByShape(
+  mainStuff: unknown,
+  node: unknown,
+): Map<string, StoredTextShape> {
+  return node === null ? storedTextShapedReferences(mainStuff) : new Map();
+}
+
+/**
+ * The sentence a summary carries when its stored texts were told by shape
+ * (`storedTextsByShape`): why the concepts are missing, and what was done.
+ */
+export function conceptsUnreadNote(problem: Problem | undefined): string {
+  const why =
+    problem === undefined
+      ? "its results name no concept for the output"
+      : `the read failed: ${problemLine(problem)}`;
+  return `The concept facts that tell a stored text from a stored file could not be read (${why}), so each reference shaped like a stored text's — a \`url\` with a \`size\` or a \`preview\` and no value — is taken for a stored text, and every other reference for a file.${problem === undefined ? "" : " Calling again may read them."}`;
 }

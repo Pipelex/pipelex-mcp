@@ -44,6 +44,7 @@
  * the inline ones.
  */
 
+import { isOwnMethod } from "../src/capabilities/catalog-write.js";
 import { requireLiveAccount } from "../src/capabilities/e2e-account.js";
 import {
   CATALOG_WRITE_BUNDLE,
@@ -66,6 +67,18 @@ const FIXTURE_TREE_PATH = "main.mthds";
 
 function write(text: string): void {
   process.stdout.write(`${text}\n`);
+}
+
+/** The draft token of a method of the key's own organization, the only kind its catalog lists. */
+async function draftTokenOf(
+  client: ReturnType<typeof liveClient>,
+  methodId: string,
+): Promise<string> {
+  const method = await client.getMethod(methodId);
+  if (!isOwnMethod(method)) {
+    throw new Error(`${methodId} reads as another organization's public method, with no draft.`);
+  }
+  return method.updated_at;
 }
 
 /**
@@ -97,7 +110,7 @@ async function seed(name: string, bundle: string): Promise<void> {
       ? await client.createMethod({ name, contents })
       : await client.writeDraft(existing, {
           contents,
-          expected_updated_at: (await client.getMethod(existing)).updated_at,
+          expected_updated_at: await draftTokenOf(client, existing),
         });
 
   write(

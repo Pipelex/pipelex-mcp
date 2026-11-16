@@ -4,6 +4,7 @@ import type {
   RunRead,
   RunResultArtifact,
   RunResultState,
+  RunResults,
 } from "@pipelex/sdk";
 import { describe, expect, it, vi } from "vitest";
 
@@ -31,6 +32,12 @@ import {
   MAX_INLINE_IMAGES,
   MAX_INLINE_IMAGE_BYTES,
 } from "./shared.js";
+import {
+  EXTENSIONLESS_TEXT_URI,
+  PICTURE_URI as STORED_TEXT_PICTURE_URI,
+  extensionlessTextResults,
+} from "./stored-text-fixtures.js";
+import { resultsResult } from "./run.js";
 
 const RUN_ID = "01JRUN0000000000000000TEST";
 
@@ -299,12 +306,14 @@ describe("showMthdsRunImages", () => {
     expect(result.imageBlocks[0]._meta).toEqual({ uri: COVER });
   });
 
-  it("asks the results read for the main output alone, the only artifact its walk reads", async () => {
+  it("asks the results read for the main output alone, the only artifact its walk reads, never loading a stored text", async () => {
     const selections: (readonly RunResultArtifact[] | undefined)[] = [];
+    const loads: (boolean | undefined)[] = [];
     const client: ImagesClient = {
       getRunStatus: noStatusRead,
       getRunResult: (_runId, options) => {
         selections.push(options?.artifacts);
+        loads.push(options?.loadStoredTexts);
         return Promise.resolve(completedRun());
       },
       fetchArtifact: () => Promise.resolve(imageResponse(TINY_PNG)),
@@ -313,8 +322,64 @@ describe("showMthdsRunImages", () => {
     const result = await showMthdsRunImages({ run_id: RUN_ID, images: [COVER] }, context(client));
 
     expect(selections).toEqual([["main_stuff"]]);
+    expect(loads).toEqual([false]);
     expect(result.structuredContent.status).toBe("ok");
     expect(result.imageBlocks).toHaveLength(1);
+  });
+
+  it("never reads the concept facts, and never offers a stored text as a picture, whatever its key", async () => {
+    const full = extensionlessTextResults();
+    const selections: (readonly RunResultArtifact[] | undefined)[] = [];
+    const loads: (boolean | undefined)[] = [];
+    const fetched: string[] = [];
+    const client: ImagesClient = {
+      getRunStatus: noStatusRead,
+      // A narrowed read, as the SDK answers one; a concept read would fail,
+      // which must not matter, since none is made.
+      getRunResult: (_runId, options) => {
+        selections.push(options?.artifacts);
+        loads.push(options?.loadStoredTexts);
+        if (options?.artifacts?.includes("working_memory")) {
+          return Promise.reject(new Error("socket hang up"));
+        }
+        const selected = new Set<string>(options?.artifacts ?? []);
+        const result = Object.fromEntries(
+          Object.entries(full).filter(([key]) => key === "pipeline_run_id" || selected.has(key)),
+        ) as unknown as RunResults;
+        return Promise.resolve({ state: "completed", pipeline_run_id: RUN_ID, result });
+      },
+      fetchArtifact: (uri) => {
+        fetched.push(uri);
+        return Promise.resolve(imageResponse(TINY_PNG));
+      },
+    };
+
+    const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
+
+    // One read, the output alone: the candidates come from it, so their
+    // indexes are the ones mthds_run_results lists, whatever a concept read
+    // there did.
+    expect(selections).toEqual([["main_stuff"]]);
+    expect(loads).toEqual([false]);
+    // The stored text's extensionless key passes the prefilter; the shape of
+    // its reference keeps it out, so the picture is the one candidate and the
+    // one fetch.
+    expect(fetched).toEqual([STORED_TEXT_PICTURE_URI]);
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.images?.map((image) => image.uri)).toEqual([
+      STORED_TEXT_PICTURE_URI,
+    ]);
+    expect(result.structuredContent.images).not.toContainEqual(
+      expect.objectContaining({ uri: EXTENSIONLESS_TEXT_URI }),
+    );
+
+    // Index 0 names the same picture here as in mthds_run_results.
+    const listed = resultsResult({ state: "completed", pipeline_run_id: RUN_ID, result: full });
+    const byIndex = await showMthdsRunImages({ run_id: RUN_ID, indices: [0] }, context(client));
+    expect(listed.structuredContent.image_candidates?.[0]).toBe(STORED_TEXT_PICTURE_URI);
+    expect(byIndex.structuredContent.images?.map((image) => image.uri)).toEqual([
+      STORED_TEXT_PICTURE_URI,
+    ]);
   });
 
   /**

@@ -9,6 +9,7 @@ import {
   RequestArgumentError,
   RunLifecycleUnavailableError,
 } from "@pipelex/sdk";
+import type { RunResultState, RunResults } from "@pipelex/sdk";
 
 import { sha256Hex, treeDigest } from "mthds";
 
@@ -27,6 +28,8 @@ import {
   imageCandidatesOf,
   isExecutionLocusRefusal,
   looksLikeImageKey,
+  conceptsUnreadNote,
+  mayHoldStoredTexts,
   methodFilesInputSchema,
   parseAllowHttpOverride,
   problemOf,
@@ -41,8 +44,17 @@ import {
   withFilesSent,
   failedBeforeSending,
   markUnsent,
+  storedTextShapedReferences,
+  withStoredTextConcepts,
 } from "./shared.js";
 import type { FileResolver, MethodSourceInput, Problem, ResolvedMethodSource } from "./shared.js";
+import {
+  NOTES_DOCUMENT,
+  PICTURE_URI as STORED_TEXT_PICTURE_URI,
+  STORED_PAGE,
+  STORED_REPORT,
+  extensionlessTextResults,
+} from "./stored-text-fixtures.js";
 
 describe("buildApiConfig", () => {
   it("defaults to the hosted API with no key", () => {
@@ -1673,6 +1685,102 @@ describe("the image-candidate prefilter", () => {
 
   it("answers nothing for an output that references no stored file", () => {
     expect(imageCandidatesOf({ text: "no files here" })).toEqual([]);
+  });
+
+  it("leaves out a stored text by the shape of its reference, whatever its key, with no concept facts", () => {
+    // The extensionless key passes the prefilter; the reference's size and
+    // preview keep it out, from the output alone, so the list cannot depend on
+    // whether a concept read succeeded.
+    const results = extensionlessTextResults();
+    expect(imageCandidatesOf(results.main_stuff).map((item) => item.uri)).toEqual([
+      STORED_TEXT_PICTURE_URI,
+    ]);
+  });
+});
+
+describe("storedTextShapedReferences", () => {
+  it("finds each storage reference shaped like a stored text's, with what it states, in discovery order", () => {
+    const found = storedTextShapedReferences({
+      report: STORED_REPORT,
+      pages: [STORED_PAGE, { text: "inline" }, STORED_PAGE],
+      notes: NOTES_DOCUMENT,
+      cover: { url: STORED_TEXT_PICTURE_URI },
+    });
+    expect([...found.entries()]).toEqual([
+      [STORED_REPORT.url, { size: 48213, mime_type: "text/markdown" }],
+      [STORED_PAGE.url, { size: 9120, mime_type: "text/plain" }],
+    ]);
+  });
+
+  it("ignores a shaped reference that is not a pipelex-storage:// one, and loaded texts", () => {
+    expect(
+      storedTextShapedReferences({
+        inline: { url: "data:text/plain;base64,aGk=", size: 2, preview: "hi" },
+        loaded: { url: "pipelex-storage://k", size: 3, text: "abc" },
+        bare: { url: "pipelex-storage://", preview: "x" },
+      }).size,
+    ).toBe(0);
+  });
+});
+
+describe("withStoredTextConcepts", () => {
+  const completed = (main_stuff: unknown): RunResultState => ({
+    state: "completed",
+    pipeline_run_id: "01JRUN",
+    result: { pipeline_run_id: "01JRUN", main_stuff } as RunResults,
+  });
+
+  it("returns the first read and the concept read's problem when the concept read throws", async () => {
+    const first = completed(STORED_REPORT);
+    const read = await withStoredTextConcepts(
+      {
+        getRunResult: () =>
+          Promise.reject(
+            new ApiResponseError(
+              "HTTP 504",
+              `${DEFAULT_API_URL}/v1/runs/01JRUN/results`,
+              504,
+              "Gateway Timeout",
+              "{}",
+            ),
+          ),
+      },
+      first,
+    );
+    expect(read.state).toBe(first);
+    expect(read.conceptsProblem?.status).toBe(504);
+    expect(conceptsUnreadNote(read.conceptsProblem)).toContain("the read failed");
+    expect(conceptsUnreadNote(read.conceptsProblem)).toContain("Calling again may read them.");
+  });
+
+  it("makes no second read for an output holding nothing shaped like a stored text", async () => {
+    const first = completed({ cover: { url: STORED_TEXT_PICTURE_URI } });
+    const read = await withStoredTextConcepts(
+      { getRunResult: () => Promise.reject(new Error("never called")) },
+      first,
+    );
+    expect(read).toEqual({ state: first });
+  });
+
+  it("says the results name no concept when there was no failure to name", () => {
+    const note = conceptsUnreadNote(undefined);
+    expect(note).toContain("its results name no concept for the output");
+    expect(note).not.toContain("Calling again");
+  });
+});
+
+describe("mayHoldStoredTexts", () => {
+  it("answers true for anything shaped like a stored text's reference, at any depth", () => {
+    expect(mayHoldStoredTexts(STORED_REPORT)).toBe(true);
+    expect(mayHoldStoredTexts({ pages: [{ text: "inline" }, STORED_PAGE] })).toBe(true);
+    expect(mayHoldStoredTexts({ url: "pipelex-storage://k", preview: "…" })).toBe(true);
+  });
+
+  it("answers false for files, loaded texts and plain values", () => {
+    expect(mayHoldStoredTexts({ answer: 42 })).toBe(false);
+    expect(mayHoldStoredTexts(NOTES_DOCUMENT)).toBe(false);
+    expect(mayHoldStoredTexts({ url: "pipelex-storage://k", size: 3, text: "abc" })).toBe(false);
+    expect(mayHoldStoredTexts([{ url: "pipelex-storage://k" }, "x", null])).toBe(false);
   });
 });
 
