@@ -37,6 +37,7 @@ import {
   PICTURE_URI as STORED_TEXT_PICTURE_URI,
   extensionlessTextResults,
 } from "./stored-text-fixtures.js";
+import { resultsResult } from "./run.js";
 
 const RUN_ID = "01JRUN0000000000000000TEST";
 
@@ -326,17 +327,21 @@ describe("showMthdsRunImages", () => {
     expect(result.imageBlocks).toHaveLength(1);
   });
 
-  it("reads the concept facts when the output may hold a stored text, and never offers one as a picture", async () => {
+  it("never reads the concept facts, and never offers a stored text as a picture, whatever its key", async () => {
     const full = extensionlessTextResults();
     const selections: (readonly RunResultArtifact[] | undefined)[] = [];
     const loads: (boolean | undefined)[] = [];
     const fetched: string[] = [];
     const client: ImagesClient = {
       getRunStatus: noStatusRead,
-      // A narrowed read, as the SDK answers one: what the selection left out is absent.
+      // A narrowed read, as the SDK answers one; a concept read would fail,
+      // which must not matter, since none is made.
       getRunResult: (_runId, options) => {
         selections.push(options?.artifacts);
         loads.push(options?.loadStoredTexts);
+        if (options?.artifacts?.includes("working_memory")) {
+          return Promise.reject(new Error("socket hang up"));
+        }
         const selected = new Set<string>(options?.artifacts ?? []);
         const result = Object.fromEntries(
           Object.entries(full).filter(([key]) => key === "pipeline_run_id" || selected.has(key)),
@@ -351,17 +356,30 @@ describe("showMthdsRunImages", () => {
 
     const result = await showMthdsRunImages({ run_id: RUN_ID }, context(client));
 
-    expect(selections).toEqual([["main_stuff"], ["working_memory", "output_form", "input_form"]]);
-    expect(loads).toEqual([false, false]);
-    // The stored text's extensionless key passes the prefilter; its concept
-    // keeps it out, so the picture is the one candidate and the one fetch.
+    // One read, the output alone: the candidates come from it, so their
+    // indexes are the ones mthds_run_results lists, whatever a concept read
+    // there did.
+    expect(selections).toEqual([["main_stuff"]]);
+    expect(loads).toEqual([false]);
+    // The stored text's extensionless key passes the prefilter; the shape of
+    // its reference keeps it out, so the picture is the one candidate and the
+    // one fetch.
     expect(fetched).toEqual([STORED_TEXT_PICTURE_URI]);
+    expect(result.structuredContent.status).toBe("ok");
     expect(result.structuredContent.images?.map((image) => image.uri)).toEqual([
       STORED_TEXT_PICTURE_URI,
     ]);
     expect(result.structuredContent.images).not.toContainEqual(
       expect.objectContaining({ uri: EXTENSIONLESS_TEXT_URI }),
     );
+
+    // Index 0 names the same picture here as in mthds_run_results.
+    const listed = resultsResult({ state: "completed", pipeline_run_id: RUN_ID, result: full });
+    const byIndex = await showMthdsRunImages({ run_id: RUN_ID, indices: [0] }, context(client));
+    expect(listed.structuredContent.image_candidates?.[0]).toBe(STORED_TEXT_PICTURE_URI);
+    expect(byIndex.structuredContent.images?.map((image) => image.uri)).toEqual([
+      STORED_TEXT_PICTURE_URI,
+    ]);
   });
 
   /**

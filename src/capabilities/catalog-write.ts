@@ -2925,10 +2925,14 @@ function emptyTreeError(context: CatalogWriteContext, version: number | "draft")
 
 /**
  * Whether a method read is the caller's organization's own, with its draft. Another
- * organization's public method reads as a `PublicMethodDetail`, which has no `updated_at`.
+ * organization's public method reads as a `PublicMethodDetail`, which carries no draft
+ * token. The token's value decides, not the key's presence: only a string is a token the
+ * workshop can record in a link file or echo on a write, so a read whose `updated_at` is
+ * absent, `null` or anything else is never taken for the caller's own method.
  */
 export function isOwnMethod(method: MethodDetail | PublicMethodDetail): method is MethodDetail {
-  return "updated_at" in method;
+  const token = (method as { updated_at?: unknown }).updated_at;
+  return typeof token === "string" && token !== "";
 }
 
 /**

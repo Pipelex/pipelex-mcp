@@ -395,6 +395,10 @@ describe("publishMthdsMethod", () => {
     expect(result.summary).toContain("A public method needs a thumbnail at thumbnails/cover.png.");
     expect(result.summary).not.toContain("does not validate");
     expect(result.summary).toContain("It stays a draft.");
+    // The platform's message alone: a draft save may not touch the cause, so
+    // no step is prescribed that would loop on the same refusal.
+    expect(result.summary).not.toContain("mthds_save_method");
+    expect(result.summary).not.toContain("publish again");
   });
 
   it("refuses a stale token, naming the draft's current one", async () => {

@@ -2357,6 +2357,36 @@ describe("getMthdsMethod", () => {
     expect(await fs.readdir(path.join(root, "pulled")).catch(() => [])).toEqual([]);
   });
 
+  it("never takes a read whose updated_at is not a string for the caller's own method", async () => {
+    const stored = storedMethod();
+    const writes: string[] = [];
+    for (const updated_at of [null, undefined, ""]) {
+      const client: CatalogWriteClient = {
+        ...clientNotCalled,
+        async getMethod() {
+          // A public read that carries the key without a token: the key alone
+          // must not make it the caller's own, with its draft.
+          return { ...stored, updated_at } as unknown as MethodDetail;
+        },
+        async writeMethodTree(_files, options) {
+          writes.push(options.destination);
+        },
+      };
+
+      const result = await getMthdsMethod(
+        { method_id: "mt_one", output_dir: "pulled" },
+        contextFor(client, validationAnswering(validReport)),
+      );
+
+      expect(problemOf(result.structuredContent)).toMatchObject({
+        code: "client.argument_invalid",
+        params: { argument: "method_id", reason: "another_organization" },
+      });
+    }
+    expect(writes).toEqual([]);
+    expect(await fs.readdir(path.join(root, "pulled")).catch(() => [])).toEqual([]);
+  });
+
   it("writes nothing, and no link, when the download fails", async () => {
     const result = await getMthdsMethod(
       { method_id: "mt_one", output_dir: "pulled" },

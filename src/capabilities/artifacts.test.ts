@@ -590,6 +590,63 @@ describe("downloadMthdsArtifacts", () => {
     expect(result.summary).not.toContain("references no stored files");
   });
 
+  it("saves the output and every reference when the concept read fails, listing the stored texts by shape", async () => {
+    const root = await makeTempDir();
+    const fake = fakeClient({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: dossierResults(),
+    });
+    const firstRead = fake.client.getRunResult.bind(fake.client);
+    const client: ArtifactClient = {
+      ...fake.client,
+      getRunResult: (runId, options) =>
+        options?.artifacts?.includes("working_memory")
+          ? Promise.reject(apiError(`/v1/runs/${RUN_ID}/results`, 504))
+          : firstRead(runId, options),
+    };
+
+    const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
+
+    // The download goes on with the output it read: main_stuff.json first,
+    // then every reference through the SDK, which, given no concepts, saves
+    // each one as a file; the ones shaped like a stored text's are listed as
+    // texts, with the MIME type their reference states, never as files.
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.output?.path).toBe(OUTPUT_PATH);
+    expect(fake.requests).toHaveLength(1);
+    const { texts, artifacts, all_saved } = result.structuredContent;
+    expect(texts?.map((item) => [item.uri, item.found_at, item.mime_type])).toEqual([
+      [REPORT_TEXT_URI, ["$.report.url"], "text/markdown"],
+      [PAGE_TEXT_URI, ["$.pages[0].url"], "text/plain"],
+    ]);
+    expect(texts?.every((item) => item.path !== undefined)).toBe(true);
+    expect(artifacts?.map((item) => item.uri)).toEqual([DOCUMENT_URI, DOSSIER_PICTURE_URI]);
+    expect(all_saved).toBe(true);
+    expect(result.summary).toContain("its main output, 2 stored text(s) and 2 file(s)");
+    expect(result.summary).toContain("the read failed");
+    expect(result.summary).toContain("shaped like a stored text's");
+  });
+
+  it("lists a stored text by shape when the results name no concept, and says why", async () => {
+    const root = await makeTempDir();
+    const { client } = fakeClient({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: { pipeline_run_id: RUN_ID, main_stuff: STORED_REPORT },
+    });
+
+    const result = await downloadMthdsArtifacts({ run_id: RUN_ID }, contextIn(root, client));
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.texts?.map((item) => [item.uri, item.mime_type])).toEqual([
+      [REPORT_TEXT_URI, "text/markdown"],
+    ]);
+    expect(result.structuredContent.artifacts).toEqual([]);
+    expect(result.summary).toContain("its results name no concept for the output");
+    expect(result.summary).not.toContain("Calling again");
+  });
+
   it("splits the SDK's verdict into the stored texts and the files, told apart by concept", async () => {
     const root = await makeTempDir();
     const { client, requests } = fakeClient({

@@ -49,6 +49,7 @@ import {
   readFailedRun,
   readRunProgress,
   resultsResult,
+  storedTextEntry,
   RUN_RESULTS_ARTIFACTS,
   runResultsToolResult,
   runStatusToolResult,
@@ -988,15 +989,54 @@ describe("resultsResult", () => {
     expect(result.summary).toContain("1 of which look like images");
   });
 
-  it("reads every reference as a file when the results carry no concept facts", () => {
+  it("tells a stored text by the shape of its reference when the results carry no concept facts, and says so", () => {
     const result = resultsResult({
       state: "completed",
       pipeline_run_id: RUN_ID,
       result: { pipeline_run_id: RUN_ID, main_stuff: STORED_REPORT },
     });
 
+    expect(result.structuredContent.stored_texts).toEqual([
+      { field: "$.url", uri: REPORT_TEXT_URI, size: 48213, mime_type: "text/markdown" },
+    ]);
+    expect(result.structuredContent).not.toHaveProperty("image_candidates");
+    expect(result.summary).not.toContain("stored file(s)");
+    expect(result.summary).toContain("its results name no concept for the output");
+    expect(result.summary).toContain("shaped like a stored text's");
+  });
+
+  it("omits a stored text's field when no path was recorded, never putting the reference there", () => {
+    const entry = storedTextEntry({
+      uri: REPORT_TEXT_URI,
+      found_at: [],
+      size: 48213,
+      mime_type: "text/markdown",
+    });
+    expect(entry).toEqual({ uri: REPORT_TEXT_URI, size: 48213, mime_type: "text/markdown" });
+    expect(entry).not.toHaveProperty("field");
+    expect(
+      mthdsRunResultsOutputSchema.safeParse({
+        status: "ok",
+        run_id: RUN_ID,
+        state: "completed",
+        main_stuff: STORED_REPORT,
+        truncated: false,
+        stored_texts: [entry],
+        available_view_specs: [],
+      }).success,
+    ).toBe(true);
+  });
+
+  it("leaves a file a file when the results carry no concept facts and nothing is shaped like a stored text", () => {
+    const result = resultsResult({
+      state: "completed",
+      pipeline_run_id: RUN_ID,
+      result: { pipeline_run_id: RUN_ID, main_stuff: { cover: { url: PICTURE_URI } } },
+    });
+
     expect(result.structuredContent).not.toHaveProperty("stored_texts");
-    expect(result.summary).toContain("1 stored file(s)");
+    expect(result.structuredContent.image_candidates).toEqual([PICTURE_URI]);
+    expect(result.summary).not.toContain("concept facts");
   });
 
   it("lists the image candidates, for free, from the FULL output", () => {
@@ -2875,6 +2915,65 @@ describe("getMthdsRunResults artifact selection", () => {
       "$.pages[0].url",
     ]);
     expect(toolResult.structuredContent.usage?.calls).toBe(1);
+  });
+
+  it("answers the output it read when the concept read fails, its stored texts told by shape", async () => {
+    const selections: (readonly RunResultArtifact[] | undefined)[] = [];
+    const full: RunResults = { ...dossierResults(), tokens_usages: TOKENS_USAGES };
+    const read = narrowedRead(selections, [], full);
+    const context = contextWith({
+      getRunResult: (runId, options) =>
+        options?.artifacts?.includes("working_memory")
+          ? Promise.reject(
+              new ApiResponseError(
+                "HTTP 504",
+                `${DEFAULT_API_URL}/v1/runs/${RUN_ID}/results`,
+                504,
+                "Gateway Timeout",
+                "{}",
+              ),
+            )
+          : read(runId, options),
+    });
+
+    const result = await getMthdsRunResults({ run_id: RUN_ID }, context);
+
+    expect(result.structuredContent.status).toBe("ok");
+    expect(result.structuredContent.state).toBe("completed");
+    expect(result.structuredContent.main_stuff).toEqual(full.main_stuff);
+    // By shape, the two stored texts are texts, and the document and the
+    // picture are files, as the concepts would have told them.
+    expect(result.structuredContent.stored_texts?.map((text) => text.field)).toEqual([
+      "$.report.url",
+      "$.pages[0].url",
+    ]);
+    expect(result.structuredContent.image_candidates).toEqual([PICTURE_URI]);
+    expect(result.summary).toContain("2 stored file(s)");
+    expect(result.summary).toContain("the read failed");
+    expect(result.summary).toContain("Calling again may read them.");
+  });
+
+  it("offers the same image candidates whatever the concept read did", async () => {
+    const results = extensionlessTextResults();
+    const succeeding = await getMthdsRunResults(
+      { run_id: RUN_ID },
+      contextWith({ getRunResult: narrowedRead([], [], results) }),
+    );
+    const failing = await getMthdsRunResults(
+      { run_id: RUN_ID },
+      contextWith({
+        getRunResult: (runId, options) =>
+          options?.artifacts?.includes("working_memory")
+            ? Promise.reject(new Error("socket hang up"))
+            : narrowedRead([], [], results)(runId, options),
+      }),
+    );
+
+    expect(succeeding.structuredContent.image_candidates).toEqual([PICTURE_URI]);
+    expect(failing.structuredContent.image_candidates).toEqual([PICTURE_URI]);
+    expect(failing.structuredContent.stored_texts).toEqual(
+      succeeding.structuredContent.stored_texts,
+    );
   });
 
   it("tells a stored text by a concept only the input form describes", async () => {

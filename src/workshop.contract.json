@@ -4759,8 +4759,8 @@
               "type": "object",
               "properties": {
                 "field": {
-                  "type": "string",
-                  "description": "The $-rooted path of the text's url in the output."
+                  "description": "The $-rooted path of the text's url in the output, its first occurrence; absent when no path was recorded.",
+                  "type": "string"
                 },
                 "uri": {
                   "type": "string",
@@ -4782,7 +4782,6 @@
                 }
               },
               "required": [
-                "field",
                 "uri",
                 "size",
                 "mime_type"

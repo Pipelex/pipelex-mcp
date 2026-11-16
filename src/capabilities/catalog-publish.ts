@@ -352,11 +352,11 @@ function publishSummary(result: PublishMethodSuccess, support: MethodVersionsSup
       );
     }
   } else {
-    // A refusal that is not about validation, such as a public method's missing
-    // thumbnail: the platform's message says what to change.
-    lines.push(
-      `It stays a draft. Change what the message names, save the draft with ${WORKSHOP_TOOL_NAMES.saveMethod}, and publish again when the user asks.`,
-    );
+    // A refusal this workshop does not know, such as a public method's missing
+    // thumbnail: the platform's message, quoted above, is the whole guidance.
+    // No step is prescribed, since a draft save may not touch the cause, and
+    // a model told to save and publish again would loop on the same refusal.
+    lines.push("It stays a draft.");
   }
   return lines.join("\n");
 }
