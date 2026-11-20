@@ -16,8 +16,7 @@ process.on("exit", () => rmSync(testHome, { recursive: true, force: true }));
 // `PIPELEX_TEST_WORKERS`. Unset, as on CI or outside the workspace, Vitest
 // keeps its own default of about one worker per core (docs/testing.md).
 const gateWorkers = Number(process.env.PIPELEX_TEST_WORKERS);
-const maxWorkers =
-  Number.isInteger(gateWorkers) && gateWorkers > 0 ? gateWorkers : undefined;
+const maxWorkers = Number.isInteger(gateWorkers) && gateWorkers > 0 ? gateWorkers : undefined;
 
 // One hermetic suite for the whole repository: the colocated tests under
 // `src/`, the repository's own scripts, and the tests under `tests/` (the
